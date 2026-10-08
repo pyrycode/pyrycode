@@ -6,19 +6,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/sessions/pool.go:947-1002` — `buildSession(id, label)`, the **single spawn seam**. Line 957 sets `supervisor.Config{ WorkDir: tpl.WorkDir }` for every session. This is the only place that needs the conditional `spawnDir → WorkDir` logic.
-- `internal/sessions/pool.go:900-937` — `Pool.Create(ctx, label)`. Its body (mint id → build → persist → supervise → activate) moves into `CreateIn`; `Create` becomes a one-line delegator.
-- `internal/sessions/get_or_create.go:44-104` — `Pool.GetOrCreate(ctx, id, label)`. Same treatment: body moves into `GetOrCreateIn`; `GetOrCreate` delegates with `""`. Note the take-path label-drop at `:62` — `spawnDir` is dropped on the take path the same way.
-- `internal/supervisor/supervisor.go:85-87` + `:635-640` and `internal/supervisor/spawn.go:22` + `:40-41` — `Config.WorkDir` is read as `cmd.Dir` on **every** (re)spawn. This is why a per-session workdir survives child respawns with **no new `Session` field** — the supervisor already retains it. `WorkDir == ""` means inherit (today's bootstrap behaviour is unaffected).
-- `internal/sessions/pool_create_test.go:18-81` — `helperPoolCreate` + `runPoolInBackground`. Reuse the harness shape. The fake-claude pattern (`/bin/sh -c "exec sleep 3600" --`, tolerates the appended `--session-id <uuid>`) and `ChildPID > 0` spawn-polling are the building blocks for the new test (see Testing strategy for the cwd-recorder variant).
-- `cmd/pyry/main.go:666-669` — `sessionMinter.Create` calls `m.p.Create(ctx, label)`. Must compile unchanged (it will — the delegator preserves the signature). This is the AC-3 regression anchor.
-- `internal/e2e/harness.go:201` — `StartIn(t, home, ...)`, the existing **`XxxIn` naming precedent** ("the same operation, but in a given directory") that `CreateIn`/`GetOrCreateIn` mirror.
-- `internal/e2e/workdir_trust_test.go` — context only (#670 prior art for spawning in a trusted dir at the e2e level). This ticket is unit-level; do not extend the e2e suite.
-
----
-
 ## Context
 
 Every session the pool spawns today runs in the single shared `tpl.WorkDir` (the daemon's trusted bootstrap workdir). `buildSession` hard-wires `supervisor.Config{ WorkDir: tpl.WorkDir }` (pool.go:957) and neither `Pool.Create` nor `Pool.GetOrCreate` accepts a per-session workdir.

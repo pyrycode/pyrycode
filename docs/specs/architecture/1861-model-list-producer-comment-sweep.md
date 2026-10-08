@@ -2,22 +2,6 @@
 
 **Size:** `s` (2 production source files, comments only, no behaviour and no assertion changes)
 
-## Files to read first
-
-Read these before editing. The first three are the evidence for every claim this spec makes about what shipped; the rest are the sites themselves.
-
-- `internal/turnbridge/outbound.go` → `MapEvent`, its `turnevent.ModelList` arm — **the only site that fills the payload's fields.** Extract: it builds a fresh outer `[]protocol.ModelOption`, carries `DroppedModels` verbatim from `e.DroppedModels`, and supplies `ConversationID` from `tc.ConversationID`. This is #1848.
-- `cmd/pyry/interactive_turn_v2.go` → `interactiveTurnEmitterV2.Handle`, its `turnevent.ModelList` arm — **the emission.** Extract: it flushes the pending delta and calls `emitMapped` (so the wire type comes from `MapEvent`'s return, not from a `protocol.TypeModelList` literal in `cmd/pyry`), with no turn-lifecycle mutation. This is #1849.
-- `cmd/pyry/session_model_list.go` → `resolveBoundModelList` — **the second production path that hands a caller the type.** Extract: it resolves a conversation's bound session, reads the retained `turnevent.ModelList`, and routes it **through `turnbridge.MapEvent`**; every non-zero return comes from that same arm. This is #1857. Read the body before writing the word "constructor" — see § Design, "One filler, two production paths".
-- `internal/protocol/codes.go` → the `TypeModelList` const block's doc comment, plus the `TypeSlashCommandList` and `TypeAttachmentChunk` blocks' closing precedent sentences — 4 of the 15 sites.
-- `internal/protocol/interactive.go` → `ModelListPayload` (type doc, incl. the `DroppedModels` paragraph), `ModelOption.MarshalJSON` (doc), `SlashCommandListPayload` (type doc) — 5 sites.
-- `internal/protocol/interactive_test.go` → `TestModelListPayload_NilModelsNormalises` (doc), `TestModelListPayload_RoundTrip` (doc + the inline comment above its `DroppedModels` assertion) — 4 sites.
-- `cmd/pyry/relay_guard_test.go` → the `excludedTypes` `"TypeModelList"` entry's comment — 2 sites.
-- `docs/knowledge/features/protocol-package.md` § "Model-list payload" and its `TypeModelList` entry — **read-only, do not edit.** Extract: the corrected producer story already written out (#1848 maps, #1849 emits, `len(Models) + DroppedModels` **is** the menu's true size on the wire), and the settled push wording the overview already uses: *"if a future ticket picks request/reply it declares the verb with its handler and this constant's `excludedTypes` classification moves from `push` to `reply`"*. That sentence is the model for AC 3.
-- `CODING-STYLE.md` § "Comments — Citing Other Code" — no new line citations in any rewritten comment. `make cite-guard` is diff-scoped and will fail on one you add.
-
-**Precedent commit, worth reading in full:** `d27ec837` (#1639) did this exact sweep for `model_announced` after #1638 shipped that producer. Its `internal/protocol` hunks show the target register — *"The declaring ticket (#1616) **was** wire vocabulary only; #1638 added … so this frame now reaches an interactive v2 mobile client"* — and it left the `#1405→#1410` style arrow lists intact in shape, changing only the numbers that were wrong.
-
 ## Context
 
 `internal/protocol` declares the `model_list` wire vocabulary and payload. Its comments were written when the frame had no producer, and 15 `#1693` references across four files still describe that world. `#1693` was split and no longer exists as work; three separate slices shipped what it was going to do, and three of the sites are not attributions at all but statements about the present that are now false.

@@ -3,16 +3,6 @@
 **Size:** XS (architect downgrade from S — see *Sizing* below).
 **Security-sensitive:** No. Mechanical keystroke actuator carrying no trust decision; loosens no control, accepts no untrusted input directly. The gate lives in the consumer (#717).
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:237-259` — `WriteUserTurn`: the **exact** capture-then-release discipline to mirror (lock `sessMu` → copy `s.sess` → unlock → act on the captured pointer; nil → `ErrNoLiveSession`; wrap with a stable `supervisor: …:` prefix preserving the underlying error for `errors.Is`).
-- `internal/supervisor/supervisor.go:172-181` — the `deliverFn` struct field: the production-vs-test **injection seam** this ticket copies one-for-one (`keystrokeFn`).
-- `internal/supervisor/supervisor.go:46-57` — `ErrNoLiveSession` / `ErrTurnNotCommitted` sentinels. Reuse `ErrNoLiveSession`; do **not** add a new sentinel.
-- `internal/supervisor/supervisor.go:522-549` — `New`: where `s.deliverFn = s.deliverViaSession` is wired. Add `s.keystrokeFn = sendModalKeystroke` immediately after.
-- `internal/supervisor/supervisor.go:448-498` — `Session()` / `setSession()`: the `sessMu`/`sess` ownership and the documented teardown-race contract (a captured pointer racing `setSession(nil)+Close` lands in tui-driver's PTY-error path, never a panic).
-- `pkg/tuidriver/keys.go:40-60` (module `github.com/pyrycode/tui-driver@v1.3.0`) — `Session.AcceptTrust()` (`"1\r"`), `Session.Answer(choice)` (`choice + "\r"`), `Session.SendEsc()` (`0x1b`). These are the three calls to delegate to. All funnel through the unexported `writeRaw` → `pty.Write`; on a closed PTY they return a non-nil error, **no panic** (see `keys.go:77-94` `AttachInput` doc).
-- `internal/supervisor/supervisor_test.go:748-815` — the `deliverFn`-seam test template: `New(helperConfig("exit0"))` → `sup.setSession(&tuidriver.Session{})` → override the fn field → call the method → assert. The modal tests follow this shape exactly. Note `setSession(&tuidriver.Session{})` registers a **zero-value** Session (nil PTY) — calling a real tui-driver keystroke method on it would nil-deref, which is *why* the injection seam exists.
-
 ## Context
 
 Phase 3 (epic #597) foundation primitive for the daemon-side modal bridge. tui-driver v1.3.0 (vendored via #619) ships the safe-answer keystroke primitives, but no pyrycode code calls them. This ticket adds the supervisor-side wrapper that captures the live `Session` and drives those keystrokes, so higher layers can resolve a modal without importing tui-driver or reaching into the child PTY.

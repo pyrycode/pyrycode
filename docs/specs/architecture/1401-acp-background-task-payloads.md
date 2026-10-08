@@ -2,28 +2,6 @@
 
 **Ticket:** [#1401](https://github.com/pyrycode/pyrycode/issues/1401) · **Size:** S (PO's `size:s` confirmed, not overridden) · **Labels:** `security-sensitive`
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/acpbridge/outbound.go:1-21` | Package doc: the purity contract ("no transport, no I/O, no goroutine, no clock read, no state") and the **two-import discipline** (`encoding/json` + `internal/turnevent` only). Both are load-bearing for this ticket's design and its security posture. |
-| `internal/acpbridge/outbound.go:29-108` | The four discriminant constants and the six existing payload/shape structs. **This is the style you match — note every JSON tag is camelCase (`toolCallId`, `rawInput`, `oldText`, `terminalId`), and `omitempty` is used for genuinely optional fields (`locations`, `status`, `content`).** |
-| `internal/acpbridge/outbound.go:110-182` | `MapUpdate`. Read it to confirm you add **no arm here** — the three variants keep falling to `default:` (#1402 owns the arms). |
-| `internal/acpbridge/outbound_test.go:1-13` | Package + import block, and `TestMapUpdate`'s doc. You add **no rows to `TestMapUpdate`** (see § Out of scope). |
-| `internal/acpbridge/outbound_test.go:170-258` | `TestMapUpdate_WireShape` — the `{name, ev, want}` table and the marshal-and-compare idiom at `:242-256`. Your new test copies the idiom but marshals the **payload value directly** (there is no mapper to drive). Note there is no `testdata` dir here; goldens are inline strings. |
-| `internal/turnevent/event.go:106-128` | `BackgroundTaskStarted` — the source field list and the `Description` handling constraint (literal command line for `local_bash`). |
-| `internal/turnevent/event.go:161-199` | `BackgroundTaskUpdated` — `Patch`'s handling constraint: unparsed blob, plain `string` not `json.RawMessage` because a truncated object no longer parses. |
-| `internal/turnevent/event.go:201-289` | `BackgroundTask` (entry type) and `BackgroundTaskRoster`. Key facts: the entry's `Description` repeats the command-line warning; the roster's `Tasks` is **nil for an empty roster and nil when claude omits the key, never an empty non-nil slice**; the roster has **no** top-level `TruncatedFields` — `DroppedTasks` is its only truncation report. |
-| `internal/protocol/interactive.go:149-280` | The mobile lane's four types plus `BackgroundTaskRosterPayload.MarshalJSON` (`:274-280`) — the nil-normalisation device to mirror, and the `SECURITY:`-paragraph house style. **Do not copy its snake_case tags and do not copy `ConversationID`.** |
-| `internal/turnbridge/outbound.go:159-188` | The mobile roster mapping — the "forward nil, let the type normalise, do not pre-allocate" argument at `:163-169`. Same argument applies to #1402. |
-| `internal/protocol/testdata/background_task_*.json` | Realistic distinct field values, especially the deliberately-truncated patch `{"is_backgrounded":tr`. **Values only** — the shape is snake_case and wrong for ACP. |
-| `docs/knowledge/decisions/027-acp-mapping.md:33-47` | § "Outbound — daemon → ACP client": the three-column table (`Neutral event \| ACP mapping \| Repo status (verified)`) you add three rows to. |
-| `docs/knowledge/decisions/027-acp-mapping.md:61-77` | The six divergences. Append **7** after line 77. The numbering is load-bearing (ADR 026 cites "divergence 6" by number, and `:63` says so) — renumber nothing. |
-| `docs/knowledge/decisions/027-acp-mapping.md:79-91` | § "ACP taxonomy reference". Read it to confirm you **do not edit it**: `:81` states its source and capture date, so it is a port of the external spec. A pyry-invented string listed there would read as spec truth. |
-| `cmd/pyry/acp_conformance_test.go:614-639` | `TestACPConformance_DialectLock` — the literal-string table you add three rows to, and the comment at `:624-626` you correct. |
-| `cmd/pyry/acp_turn_stream.go:11-19` | `sessionUpdateParams` — why no session id belongs in the payload (`SessionID` is the consumer's wrapper field). |
-| `internal/streamsup/parser.go:38-177` | The five producer caps (`maxTaskFieldID=256`, `maxTaskDescription=4096`, `maxTaskPatch=4096`, `maxTaskRosterEntries=8`, `maxTaskRosterDescription=512`). `acpbridge` re-caps nothing; these are cited in § Security review as the bound that already exists. |
-
 ## Context
 
 `internal/acpbridge` is the pure adapter from the neutral `turnevent` model out to ACP `session/update` payloads. claude's background-task lifecycle already reaches a **mobile** client (`turnbridge/outbound.go:129-188`, `protocol/interactive.go:149-280`, #1393/#1394) but has **no ACP shape at all** — no payload type, no discriminant. Without one a desktop client cannot separate a turn that ended with work still running from a genuine finish, which is #1240's symptom.

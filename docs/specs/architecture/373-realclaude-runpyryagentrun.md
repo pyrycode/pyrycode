@@ -5,18 +5,6 @@
 Ticket: [#373](https://github.com/pyrycode/pyrycode/issues/373)
 Size: S (one production-file extension ~95 LoC + one test-file extension)
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go` (entire file, ~70 lines) — the file this ticket extends. Same build tag (`//go:build e2e_realclaude`), same package (`realclaude`). Note the existing imports (`errors`, `fmt`, `io`, `os`, `path/filepath`, `testing`, plus `agentrun` and `agentrun/jsonl`); merge new imports rather than re-declaring an import block.
-- `internal/e2e/realclaude/fixtures_test.go` (entire file, ~135 lines) — file the new tests extend. Reuse the `testSessionID` const and the `writeFixtureLines` test helper style; do not duplicate either.
-- `cmd/pyry/agent_run.go:24-152` — `agentRunArgs` field set and `parseAgentRunArgs` invariants. `RunOpts` mirrors this flag surface 1:1. Key invariants the helper must respect: `--effort` ∈ {`low`,`medium`,`high`,`xhigh`,`max`}; `--max-turns` > 0; `--output-format` is always `stream-json`; `--workdir` must exist (the helper relies on the caller's `WithWorktree` for that); `--prompt-file` and `--system-prompt-file` must be regular files (the helper writes them before exec).
-- `cmd/pyry/agent_run.go:189-233` — `runAgentRun` stdout contract. Claude's stdout (the canonical stream-json event stream including `system init` and `result` events) is forwarded byte-for-byte to pyry's stdout. The helper's `parseInitSessionID` reads this stream verbatim.
-- `cmd/pyry/agent_run.go:208-213` — `PYRY_CLAUDE_BIN` env knob. Tests inject a fake claude through `RunOpts.ExtraEnv`; the helper does not own that wiring.
-- `cmd/pyry/agent_run.go:255-267` — `buildClaudeArgs`. The argv `pyry` lowers to claude. Helper does NOT assert on the lowered argv (that surface belongs to `pyry agent-run`); helper only owns its own pyry argv.
-- `internal/e2e/harness.go:106-141` — `binOnce` / `binPath` / `binErr` + `ensurePyryBuilt(t)`. The exact pattern to clone. Disjoint build tags (`e2e` vs. `e2e_realclaude`) prevent direct import; duplicate intentionally per `docs/PROJECT-MEMORY.md` "Resist over-DRY on duplicated registry primitives" precedent.
-- `internal/agentrun/streamjson/testdata/captured_run.jsonl` (line 1) — canonical shape of the `{"type":"system","subtype":"init", ..., "session_id":"…"}` envelope. The parser only needs `Type`, `Subtype`, `SessionID`; nothing else.
-- `CODING-STYLE.md` § "Testing" — `TestHelperProcess` re-exec pattern. The fake-pyry tests gate on `GO_TEST_HELPER_PROCESS=1` and select a behaviour via a second env var (e.g. `PYRY_E2E_FAKE_MODE`).
-
 ## Context
 
 The `internal/e2e/realclaude/` suite (scaffold from #361, file-system helpers from #372) is missing one primitive: a synchronous subprocess invoker that builds `pyry` once per test process, writes the prompt + system-prompt files into the test workdir, invokes `pyry agent-run` with the eight required flags, captures all three streams plus exit code, and returns the resolved session_id parsed out of claude's stream-json output.

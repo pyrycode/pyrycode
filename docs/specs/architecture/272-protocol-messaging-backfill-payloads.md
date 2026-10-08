@@ -1,18 +1,5 @@
 # 272 — `net`: v1 messaging + backfill payload structs
 
-## Files to read first
-
-- `docs/protocol-mobile.md:289-329` — § `send_message` and § `message`. Pins field names (`conversation_id`, `message_id`, `text`, `role`) and the role-value table (`user` / `assistant` / `system`). The two JSON examples in this range are the golden fixtures' authoritative source.
-- `docs/protocol-mobile.md:439-454` — § `backfill_since`. The example shows `conversation_id: null` literally, which forces `*string` + `omitempty` to round-trip as JSON `null`-or-absent rather than the empty string. `since_ts` is RFC3339Nano (see § Message envelope for the format rule that applies to every timestamp on the wire); `max_messages` is an `int` advisory cap.
-- `docs/protocol-mobile.md:456-478` — § `message_chunk` and § `backfill_done`. The chunk-payload key is `messages` (plural, slice), shape "same as `message.payload`, multiple"; the done-payload key is `delivered` (`int`).
-- `docs/protocol-mobile.md:177-201` — § Message envelope. RFC3339Nano timestamp rule (`time.Time` on the wire, monotonic clock stripped on marshal); applies to `BackfillSincePayload.SinceTS`. Restated so the fixture format matches without re-checking.
-- `internal/protocol/envelope.go:23-30` — `Envelope` struct. The payload structs in this ticket slot into `Envelope.Payload (json.RawMessage)` via a second-pass `json.Unmarshal`; the round-trip tests embed each payload inside an `Envelope` fixture to prove that path.
-- `internal/protocol/envelope_test.go:11-27` — `canonical` and `readFixture` test helpers. This ticket's test file reuses both (same package, no re-import). DO NOT redefine.
-- `internal/protocol/envelope_test.go:29-94` — `TestEnvelope_RoundTrip_*` shape. The new round-trip tests follow this exact pattern: read fixture → unmarshal → spot-assert fields → re-marshal → canonicalise → `bytes.Equal`. Same idiom, one test function per payload type.
-- `internal/protocol/codes.go:44-58` — `TypeSendMessage`, `TypeMessage`, `TypeBackfillSince`, `TypeMessageChunk`, `TypeBackfillDone`. The five constants already exist; the test fixtures use them as the `type` field value via `Envelope.Type`. No new constants needed in this ticket.
-- `docs/specs/architecture/255-protocol-envelope-routing-errors-compat.md` — sibling spec (#255). Establishes the `internal/protocol` package's "pure data, zero runtime dependencies" stance and the `time.Time`-on-the-wire / `Equal`-not-`==` convention; both apply here verbatim.
-- `CODING-STYLE.md` — `gofmt`, stdlib-only, table-driven tests. Inherited unchanged; not restated below.
-
 ## Context
 
 Phase 3 Track C — the messaging-and-backfill slice of the v1 payload catalog. The framing primitives (`Envelope`, `RoutingEnvelope`, error-code consts, type-name consts, `IsV1Compatible`) landed in #255 and now live in `internal/protocol/envelope.go` + `codes.go`. The 16-type wire catalog is being split into per-category slices (#256 parent → handshake/control #271, messaging/backfill #272, conversations TBD, push #275) so each slice stays ≤5 exported types and ≤~50 production LOC.

@@ -2,22 +2,6 @@
 
 Slice off #297. Plugs the `list_conversations` verb into the per-conn dispatcher (#307). One handler, one registration call in `cmd/pyry`, one test file. Read-only; no registry mutation.
 
-## Files to read first
-
-- `internal/dispatch/dispatch.go:53-110` — `Handler` contract + `Conn.Reply` semantics (this handler emits exclusively via `Conn.Reply`; does NOT stamp `id` / `ts` / `in_reply_to` itself).
-- `internal/dispatch/dispatch.go:236-249` — `Dispatcher.Register` contract (must be called before `Run`; duplicate registration panics).
-- `internal/dispatch/dispatch_test.go:199-231` — `TestReply_InReplyToMatchesRequest`: this is the exact test seam shape this slice's tests reuse (push frame on `in`, read from `d.Outbound()`, decode and assert).
-- `internal/conversations/registry.go:140-167` — `ListFilter` + `Registry.List` — the only registry method this handler calls. `List` returns a copy, takes the registry mutex internally.
-- `internal/conversations/registry.go:72-83` — `Registry.Save`'s sort key (`LastUsedAt` asc, ties broken by `ID` asc). The handler MUST mirror this exact ordering before reply so byte-deterministic output matches the registry's serialized order.
-- `internal/conversations/conversation.go:29-72` — `Conversation` struct. Note: there is no `LastMessageTS` field on `Conversation` today; the projection collapses it onto `LastUsedAt` (see "LastMessageTS source" below).
-- `internal/protocol/conversations_read.go` — `ListConversationsPayload` (empty by spec), `ConversationsPayload`, `ConversationSummary` (declaration order is the wire order).
-- `internal/protocol/codes.go:48-49` — `TypeListConversations` / `TypeConversations`.
-- `cmd/pyry/relay.go:81-179` — `startRelay`: where `dispatch.New` is called. The new `d.Register(protocol.TypeListConversations, …)` site goes here, after `dispatch.New` and before the `go d.Run(ctx)` goroutine launches.
-- `cmd/pyry/main.go:408-460` — `runSupervisor` already loads `convReg` (line 420) before calling `startRelay` (line 456). No load reorder needed — only thread the existing variable into `startRelay`.
-- `internal/relay/handlers/register_push_token.go` — package layout reference (doc-comment style, `package handlers`). **DO NOT mirror the function signature** — it predates `dispatch.Handler`. The ticket body is explicit about this.
-- `docs/PROJECT-MEMORY.md` § "Refusal-to-wire-code mapping is the consumer's job" — primitives return Go values; wire-code mapping happens at the dispatcher call site. The registry's `List` cannot fail, so no error envelope is wired in this slice.
-- `docs/protocol-mobile.md:338-376` — wire example for `list_conversations` / `conversations`.
-
 ## Context
 
 `internal/conversations/registry.go` is the on-disk truth for conversations. `internal/dispatch` (#307) is the per-conn handler-table demultiplexer. `internal/protocol/conversations_read.go` defines the wire payload shapes. All three exist; this ticket is the small load-bearing wire between them — decode the request, read the registry, project to wire types, reply.

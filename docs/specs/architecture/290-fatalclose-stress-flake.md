@@ -6,18 +6,6 @@ size: S
 
 # #290 — `internal/relay`: harden the FatalCloseCodes path against in-flight Read cancellation
 
-## Files to read first
-
-- `internal/transport/wssclient.go:174-248` — `Connect` loop. The post-serve `FatalCloseCodes` check at lines 226-232 is the contract under stress. **The Dial-path check at lines 191-203 is a sibling; treat both as the surface area.**
-- `internal/transport/wssclient.go:372-411` — `serve`. The close-status preference loop (405-410) was added by #288. The line that's load-bearing for #290 is the **`cancel()` at line 396**, between the first and second `<-errCh` reads. This is the timing window the bug lives in.
-- `internal/transport/wssclient_test.go:707-779` — `racingCloseRelay` helper added by #288. Reuse this; do NOT add a parallel relay shape unless investigation proves the existing one can't reproduce.
-- `internal/transport/wssclient_test.go:781-868` — `TestFatalCloseCodes_HaltsReconnect_RacingSendError`. Its design notes call out the `ctx.Err()` override issue and document it as an "open question" — this ticket converts that open question into a production fix.
-- `internal/relay/connection.go:183-212` — `run()` loop. Observe that `Connected()` and `transportErrCh` are siblings in the same select; understand how `ConnCount > 1` propagates from a missed FatalCloseCodes match in `transport.Connect`.
-- `internal/relay/connection_test.go:42-233` — `testRelay` + `behaviorCloseImmediately4409` (line 152-155). The handler closes with 4409 then returns; the deferred `conn.Close(StatusNormalClosure)` (line 149) follows. Read closely — the deferred-after-explicit-close pattern is one of the variables to rule in or out during investigation.
-- `internal/relay/connection_test.go:410-434` — `TestServerIDConflict_FatalNoReconnect`. The failing assertion is `ConnCount = N, want 1`; `Wait()`'s ErrServerIDConflict assertion has been observed passing, so the failure is on the reconnect-count side, not the terminal-classification side.
-- `docs/specs/architecture/288-close-frame-race-regression-test.md` § "Constraint 3 is critical and non-obvious" — already names the root cause in passing: `coder/websocket`'s `prepareRead.done()` deferred override replaces `closeReceivedErr` with `ctx.Err()` when ctx fires mid-Read. #290 acts on that knowledge.
-- *(reference, do NOT read in full)* `coder/websocket@v1.8.13` `read.go:226-255` (`prepareRead` / `done`) — the library-internal source of the `ctx.Err()` override.
-
 ## Context
 
 PR #289 (salvage of #248) shipped `internal/relay.Connection` with `FatalCloseCodes: [4409]` so a `statusServerIDConflict` close from the relay halts the reconnect loop with `ErrServerIDConflict`. CI's `-count=1` invocation passes; `go test -race -count=10 -timeout 120s ./internal/relay/` fails repeatedly on `TestServerIDConflict_FatalNoReconnect` with `ConnCount = 3/5/9/10, want 1`. The varying `ConnCount` rules out a flat counting bug — the transport IS reconnecting some fraction of the time, then eventually one reconnect's close *is* classified as 4409 and the test sees `ErrServerIDConflict` (which is why `Wait()`'s classification assertion still passes).

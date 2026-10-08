@@ -10,22 +10,6 @@ the reconcile-on-connect mechanism (#829). Umbrella: #829.
 sequencing integrity is the security surface. The `## Security review` section at
 the end of this spec is the mandatory gate artifact.
 
-## Files to read first
-
-- `internal/relay/v2session.go:2935-3012` — `drainOnce`: the one-per-pass push pump. The pre-seal transport probe + early-return "hold" lands at the very top; the existing replay-gate snapshot, pop-under-`pushMu`, and `more` re-signal are otherwise unchanged.
-- `internal/relay/v2session.go:3109-3143` — `forwardEnvelope`: the *single* seal-and-forward path. `s.send.Encrypt` (the nonce-burning seal) is here; its session-level error returns (`ErrConnNotFound`, `ErrSessionNotOpen`, marshal/seal failure) are the "still drop" set (AC2). **Do not** add the transport probe here — the probe gates the *pop*, upstream in `drainOnce`.
-- `internal/relay/v2session.go:2782-2796` — `send`: swallows the post-send `Outbound` transport error at debug. This is why a post-send error is too late (the seal already ran); the fix is a *pre-seal* probe, not a reaction to this error.
-- `internal/relay/v2session.go:144-153` — `queuedEnv` doc: envelopes are held **unsealed** because the Noise send nonce is strictly sequential. This spec extends "held unsealed" from the enqueue side to the drain side.
-- `internal/relay/v2session.go:555-565` — `V2SessionConfig` + the `Outbound` field: the only transport seam today. The new `Connected func() bool` field is additive, same nil-optional idiom as the other seams in this struct.
-- `internal/relay/v2session.go:719-806` — `V2SessionManager` struct + concurrency doc: `drainOnce` runs on the single Run goroutine; `pushMu` is a leaf never held across an external call. The probe is called off-lock, before `pushMu`.
-- `internal/relay/connection.go:183-196` — `Connection.Send` (the production `Outbound`); wire a sibling `Connection.Connected() bool` passthrough next to it.
-- `internal/transport/wssclient.go:282-341` — `Client.Send` (`live := c.conn != nil` under `c.mu`, returns `ErrNotConnected`) and `Client.Connected() <-chan struct{}` (edge-triggered channel — NOT a level poll). Add `Client.IsConnected() bool` as the level poll that agrees with `Send`'s own predicate.
-- `internal/transport/wssclient.go:362-382` — `Close` / `setConn`: `Close` does **not** nil `c.conn`; it does close `c.closeCh`. `IsConnected` must gate on `closeCh` too so a closed client reads down.
-- `cmd/pyry/relay.go:445-465` — the `V2SessionConfig` literal; add `Connected: conn.Connected` beside `Outbound: conn.Send`.
-- `internal/relay/v2session_test.go:37-63,700-755` — `v2Recorder` + `driveToOpen`/`openSession` (gives `initRecv`, the phone-side decrypt used as the nonce-contiguity oracle). New tests extend the recorder into a toggleable gate.
-- `internal/relay/v2session_test.go:3021-3121` — `TestV2Session_Push_ConcurrentWithReplies_NoNonceCorruption`: the pattern for "all outbound frames decrypt in capture order under `initRecv`" — a burned/gapped nonce MAC-fails. The new AC4 assertion reuses this oracle.
-- `internal/relay/v2session_test.go:3243-3282` — `TestV2Session_forwardEnvelope_NotOpen_GateRefuses`: white-box drive of a single drain-side path without starting Run; the model for the AC2 "session-level failure still drops" assertions.
-
 ## Context
 
 ADR 025 § Backpressure promises control messages are never dropped

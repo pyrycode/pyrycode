@@ -26,30 +26,6 @@ The broadcast fires from inside `dispatchAppFrame`, which runs on the manager's 
 
 ---
 
-## Files to read first
-
-| File / lines | What to extract |
-|---|---|
-| `internal/relay/v2session.go:1200-1250` | `dispatchAppFrame` — the interception switch (`rekey_request` / `request_snapshot` arms) + reply-drain loop. The two modal arms slot into this switch. |
-| `internal/relay/v2session.go:1301-1418` | `handleRequestSnapshot` + `snapshotReplyError` — the precedent for a control handler that consumes a consumer-declared seam and forwards/pushes. Mirror its structure (incl. `ID: 1` non-load-bearing envelope id, never-log-payload discipline). |
-| `internal/relay/v2session.go:357-364` | `ScreenSnapshotter` interface — the consumer-declared-seam precedent. `ModalResolver` is declared the same way, right beside it. |
-| `internal/relay/v2session.go:404-432` | `V2SessionConfig.Handlers` / `Snapshotter` / `KnownConversation` — the **optional, nil-safe** config-field doc pattern. `ModalResolver` mirrors the nil contract (nil ⇒ modal control frames are inert no-ops). |
-| `internal/relay/v2session.go:2061-2082` | `handleActiveConns` — the read-`m.sessions`-on-the-`Run`-goroutine precedent + the `s.state == V2StateOpen && s.interactive` filter. `broadcastModalDismissed` mirrors the enumeration but `Push`es instead of returning a slice. |
-| `internal/relay/v2session.go:1810-1869` | `Push` — bounded non-blocking primitive; the broadcast's per-conn send. Note: safe from the `Run` goroutine; returns `ErrConnNotFound` for a torn-down conn. |
-| `internal/relay/v2session.go:1995-2034` | `ActiveConns` + `m.snapshot` funnel — **why** calling it from the `Run` goroutine deadlocks (the constraint that forces the internal helper). Do **not** call this from the interception. |
-| `internal/relay/v2session.go:238-260` | `V2Session.device` (`*devices.Device`, set pre-`V2StateOpen`) + `interactive` (negotiated capability) — what the resolver receives and what the broadcast filters on. |
-| `cmd/pyry/interactive_modal_v2.go:60-130` | `interactiveModalEmitterV2.Handle` — the producer-side fan-out + capability gate + never-log-payload discipline to mirror. **Shares the daemon-singleton `modalbridge.Registry`** the resolver consumes (live producer wiring deferred to #708). |
-| `internal/modalbridge/modal.go:166-186` | `Registry.Lookup` / `Resolve` — `Resolve` is the **atomic consume-and-retire** the cancel resolver calls; it is the AC-4 idempotency gate (returns `ok=false` for an unknown/already-consumed id). |
-| `internal/supervisor/modal.go:34-66` | safe-answer seam (#726): `AcceptTrust` / `Answer` / `SendEsc`. Cancel routes `SendEsc()`. Carries **no** trust decision; ESC is the fail-safe dismiss. |
-| `internal/audit/audit.go:27-81` | `audit.Entry` / `Log` / `Outcome` / `Source`. Cancel writes `OutcomeCancelled` + `SourceRemote`. The `Source` set deliberately mirrors the wire vocabulary — pass **one** value to both the wire dismissal and the audit entry. |
-| `internal/protocol/messaging.go:120-162` | `ModalAnswerPayload` / `ModalCancelPayload` / `ModalDismissedPayload` — the wire structs decoded/emitted. |
-| `internal/protocol/codes.go:188-193` | `TypeModalAnswer` / `TypeModalCancel` / `TypeModalDismissed` constants (the switch cases + the broadcast envelope type). |
-| `cmd/pyry/relay.go:294-320` | `V2SessionConfig` construction site — where `ModalResolver` is wired and where the `modalbridge.New()` singleton is constructed (`startRelayV2` is called once per daemon). |
-| `internal/relay/v2session_test.go:699-790` | `driveToOpen` / `driveToOpenCaps` / `v2Recorder` — the handshake-to-`V2StateOpen` harness the fan-out test reuses to stand up ≥2 interactive heads and capture outbound frames. |
-| `internal/devices/device.go:24-28` | `Device.TokenHash` / `Device.Name` — the non-secret identity fields the audit entry reads. |
-
----
-
 ## Design
 
 ### Package & dependency direction

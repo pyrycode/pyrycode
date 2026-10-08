@@ -6,58 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read by **symbol name**, not line number. `codegraph_search <name>` resolves each
-one; this repo's `make cite-guard` fails a comment citation that points at (or
-within 20 lines of) a declaration, so do not carry line numbers from the ticket
-body into code comments.
-
-### The mechanism you are changing
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/runner.go` | `Restart` | The two halves in one call: `slices.Clone` into `r.args`, then hint + `iterCancel`. The clone is the assignment you are extracting. |
-| `internal/streamsup/runner.go` | `beginSpawn` | The #1481 single-acquisition invariant and the non-reentrancy trap. This doc enumerates the racers; you are adding one. |
-| `internal/streamsup/runner.go` | `RestartFresh` | The precedent for a doc that states *what it deliberately leaves alone* ("Unlike Restart it leaves `r.args` untouched"). Your new method's doc mirrors this shape inverted. |
-| `internal/streamsup/runner.go` | `Runner` (struct) | The `restartMu` field doc: what it guards (`args`, `iterCancel`, `sessionID` + `rotatePending`) and why it is a leaf. |
-| `internal/streamsup/runner.go` | `Run` | The post-child-exit branch. A child ended *externally* takes `drainRestart() == false` → backoff → respawn, so `RestartCount` **increments**. Test-relevant; see Testing strategy. |
-
-### The interface + delegate
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/sessions/runner.go` | `Runner`, `RunnerFactory` | The interface to widen, and the two doc comments AC 5 corrects. Both carry the stale nil-default claim. |
-| `internal/sessions/pool.go` | `New` | The `"sessions: Config.RunnerFactory is required"` error that falsifies the nil-default claim in both docs above. |
-| `internal/sessions/session.go` | `Runner` (method) | The accessor that exists, replacing the phantom `Session.Supervisor()` the interface doc names. |
-| `cmd/pyry/streamsup_runner.go` | `streamRunner` | The delegate set (`Restart`, `Interrupt`, `RestartFresh`, `BeginRotation`) and the `var _ sessions.Runner = streamRunner{}` assertion whose comment carries the stale back-reference. |
-
-### The five doubles (AC 3 — all must gain the method)
-
-| File | Symbol |
-|---|---|
-| `internal/sessions/runner_test.go` | `fakeRunner`, `lifecycleRunner` |
-| `internal/sessions/session_evict_race_test.go` | `raceRunner` |
-| `cmd/pyry/session_router_test.go` | `stubRunner` |
-| `cmd/pyry/inbound_deliver_rotation_test.go` | `baseRunner` |
-
-`git grep -nE '\) Restart\('` returns exactly seven declarations: these five, plus
-`streamRunner.Restart` and `(*streamsup.Runner).Restart`. That enumeration is the
-complete fan-out — verified at spec time.
-
-### Test instruments
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/interface_test.go` | `TestRunner_LiveRestart` | Nearest existing shape. Copy its scaffolding; do **not** copy its `RestartCount == 0` assertion (see Testing strategy). |
-| `internal/streamsup/runner_test.go` | `spawnArgsRecorder`, `idFlagValue` | Log-side argv capture. `count()` is the "no additional spawn" instrument; `all()` gives the argv sequence. |
-| `internal/streamsup/runner_test.go` | `TestRunner_RestartFresh_RotatesThenResumesNewID` | The recorder-driven spawn-sequence pattern: poll `rec.count()` to a target, then `cancel()`/`join()`, then assert over `rec.all()`. |
-| `internal/streamsup/runner_test.go` | `helperRunCfg`, `runInBackground` | Config + Run scaffolding. |
-| `internal/streamsup/helper_test.go` | `helperChild` | The `record_block` mode: records argv, installs a SIGTERM handler, blocks, **never self-exits**. |
-| `internal/sessions/pool.go` | `rekeyLocked` (or `internal/msgqueue/queue.go` → `advanceLocked`) | The repo's `xxxLocked` + "Caller MUST hold …" convention your unexported helper follows. |
-
----
-
 ## Context
 
 `(*streamsup.Runner).Restart` is two operations fused: it installs the next

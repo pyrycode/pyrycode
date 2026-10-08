@@ -1,15 +1,5 @@
 # Spec: `internal/update` — release JSON parsing + semver comparison (#179)
 
-## Files to read first
-
-- `cmd/pyry/main.go:53-54` — `var Version = "dev"`. This is the string the wiring ticket will pass into `CompareVersions(current=Version, latest=…)`. The `"dev"` value (no `v` prefix, not semver) is a real input shape the comparator must reject cleanly so the caller can branch.
-- `cmd/pyry/main.go:151` — `fmt.Println("pyry", Version)` for the `--version` output. Confirms the bare token form (no `v` prefix in our binary's self-report).
-- `internal/sessions/id.go` (any of the small files) — example of a tiny, focused stdlib-only package with table-driven tests as the convention reference.
-- `CODING-STYLE.md` §§ Naming, Error Handling, Testing — package naming (lowercase, single word), error wrapping (`fmt.Errorf("…: %w", err)`), table-driven tests with `name` field, stdlib `testing` only.
-- `docs/PROJECT-MEMORY.md` — current package layout (`internal/{control,e2e,install,sessions,supervisor}`); confirms `internal/update` is a brand-new sibling.
-
-(No prior decisions in `pyrycode-docs` on update logic; this is greenfield.)
-
 ## Context
 
 First slice of `pyry update`. The HTTP fetcher (sister ticket) will GET `https://api.github.com/repos/pyrycode/pyrycode/releases/latest` and pass the raw bytes into `ParseLatestRelease`. The wiring ticket will compare `main.Version` against the parsed tag and decide whether to fetch/install a newer build.

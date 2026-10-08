@@ -5,28 +5,6 @@
 
 ---
 
-## Files to read first
-
-All of these are behind the `e2e_realclaude` build tag. `make check` does **not** compile them; see § Verification.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go` | `TestFinGatherPinnedPidCarriesNoCapturedBytes` | **The model.** Read the whole doc comment and the whole body. This ticket is that test one input later. Every argument shape review will expect is already there: sibling-not-third-plant, the six named channels, the structurally-passing rows as guards rather than vacuities, the no-forbidden-key-walk note, and the control's budget argument. |
-| `internal/e2e/realclaude/finding_run_gather_test.go` | `finGatherReadings` | The carriage. The bare `readings.Ordering = in.Ordering` at the tail, next to the three siblings it joins, and the block above it explaining why the ordering is **not** certified inside the gather. |
-| `internal/e2e/realclaude/finding_run_gather_test.go` | `finGatherNegativeInputs` | The base fixture. Seeds `trailFixtureTrailer`, `PyryExited: true`, no `RunnerPath`, no `PinnedPid`. This is the arm the control's headroom belongs to — see § The arm. |
-| `internal/e2e/realclaude/finding_run_gather_test.go` | `TestFinGatherStagedOrderingReachesTheSightingOutcomes` | Two things: its "What this test does not do" block is the **re-point site** (AC6), and its `base` fixture is the recipe that *does* move the outcome onto the expensive arms — the one this ticket must not copy. |
-| `internal/e2e/realclaude/finding_run_gather_test.go` | `TestFinGatherPinnedPidDoesNotReachTheLiveness` | The **re-point precedent**. Its doc's closing paragraph is the resolved form AC6 must imitate: the test's name rather than a ticket number, plus the sentence saying why. |
-| `internal/e2e/realclaude/finding_run_gather_test.go` | `TestFinGatherReturnsNoCapturedBytes` | The two count claims in its doc (`two of the three inputs…`, `THE THIRD INPUT IS #1458's PinnedPid`) and the paragraph below them. **Verify-site for the counts, edit-site for the paragraph** — see § The two count claims. |
-| `internal/e2e/realclaude/finding_run_gather_test.go` | file header (the block above `import`, § "Three caller-supplied strings cross into the readings VERBATIM") | Read it, change nothing. It enumerates the inputs that have a *legitimate publication to defend*. The ordering is not one, and its counts are the kind that go stale when helpfully extended. |
-| `internal/e2e/realclaude/trail_ordering_premises_test.go` | `trailOrderResult`, `trailCertifyOrdering`, `trailOrderCertified` | The type is two strings, so `==` compares the whole value. The producer takes three bools — that is the whole reason this plant can only be a struct literal. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go` | `trailClassifyRun` | The two sites that read `readings.Ordering`: the `Ordering.Value == ""` guard and the whole-value hand-off to `trailEstablishSighting`. Both sit under step 1's gate-absent branch. The step-8 arm — the `decide(trailOutcomeNoRowMatched, …)` fall-through — is the mutation site for the RED proof. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go` | `TestTrailRunOutcomeCarriesNoCapturedBytes` | Its doc records that `Ordering.Detail` was the one plant of three that reddened at the classifier tier, **on the truncation marker rather than on the needle**. That is this ticket's trap, on this exact field. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go` | `trailDetail` | The shipped renderer and the 512-byte cap the control is measured against. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go` | `trailNeedle` | 42 bytes. The needle every sweep in this family plants. |
-| `internal/e2e/realclaude/background_reach_probe_test.go` | `reachMaxCommandBytes`, `reachTruncationMarker` | The cap (512) and the marker the control must not carry. |
-
----
-
 ## Context
 
 `finGatherReadings` gained `readings.Ordering = in.Ordering` in #1462. That is a new caller-staged input crossing the gather **whole and unnormalised**, and this family's standing rule — set by #1452, restated in `TestFinGatherReturnsNoCapturedBytes`' own doc — is that a new route gets a **sibling sweep** rather than a third plant on the shared one.

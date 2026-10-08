@@ -3,22 +3,6 @@
 **Package:** `internal/attachments` · **Size:** S · **Split from:** #1742
 **Ships:** the primitive only. Placing the call is **#1744**'s (this package's first production caller).
 
-## Files to read first
-
-Turn-1 data load. Read these symbols, not whole files.
-
-- `internal/attachments/registry.go` → `Release` — the one-pair sibling this method is modelled on: what it removes, why it returns nothing, and the "#1817 decides only when to call it" clause that this slice must re-point.
-- `internal/attachments/registry.go` → `reapExpiredLocked` — **the shape to copy.** Range-and-delete under `mu` in one pass; and four rules stated there that this method inherits verbatim: it calls nothing on `Accumulator` (never `reject`), it calls nothing on `Registry` (`Release` included), it is silent, and its "REMOVE-ONLY IS WHAT MAKES A MID-DELIVER REAP BENIGN" paragraph is the concurrency argument this method rests on.
-- `internal/attachments/registry.go` → `Registry` (type doc) — the `mu`-is-a-leaf paragraph and its **"the seven locked methods"** roster, which this slice makes eight. The rule itself does not change.
-- `internal/attachments/registry.go` → `insertLocked` — where the `maxInFlightUploads` gate reads `len(r.uploads)`. AC 4's "the freed slots are usable" is a statement about this gate.
-- `internal/attachments/admission.go` → `maxInFlightUploads`, `uploadIdleTimeout` — the bound (4) this sweep's cost is bounded by, and the window the no-reap decision is measured against. Also `uploadIdleTimeout`'s "IT DOES NOT SUBSUME #1817" paragraph, which is a **do-not-touch** (see § Cites).
-- `internal/attachments/registry_test.go` → `fillRegistry`, `fakeClock`, `testClockStart`, `testConnA`, `testConnB`, `testAttachmentID` — the fixtures every new test reuses. Note `fillRegistry` admits **only under `testConnA`**; AC 4 needs a two-conn fill, so admit directly there rather than widening the helper.
-- `internal/attachments/registry_test.go` → `TestRegistry_SameAttachmentIDOnTwoConns_AreSeparateEntries` — the pointer-identity idiom AC 2 reuses, and the existing statement of the same-id-on-two-conns property.
-- `internal/attachments/registry_test.go` → `TestRegistry_AdmitAtTheBound_ReleaseReturnsTheSlot` — AC 4's one-pair ancestor; this ticket's AC 4 is that test widened to a conn.
-- `internal/attachments/registry_test.go` → `TestRegistry_ConcurrentMixedOperations_AreSafe` — extended by this slice (§ Testing strategy, item 5). Read the workers' post-insert `Lookup` presence assertion before editing; it is why the new sweeper must not target `testConnA`.
-- `docs/knowledge/features/attachments-package.md` § "In-flight upload registry" and § "Mutation-testing lessons" — this package measures sole-redness with `go test -overlay` and has recorded traps (unfiltered runs, `grep -a`, `build failed` / `declared and not used`). § Mutants below depends on them.
-- `internal/relay/v2session.go` → `closeWith` — read only to see the teardown cluster this primitive is built for and the `pushMu` critical section inside it. **Nothing in this slice edits this file.**
-
 ## Context
 
 `Release` removes exactly one `{connID, attachment_id}` pair. A conn that drops mid-upload may hold several — `maxInFlightUploads` is a registry-wide bound and nothing restricts one client to a single attachment below it — and a teardown path holds the conn, never a list of the attachment_ids that conn admitted. Composing `Release` at the call site would require the caller to keep a shadow list of what it admitted, which is this type's own bookkeeping leaking out. So the way in must be keyed on the conn alone.

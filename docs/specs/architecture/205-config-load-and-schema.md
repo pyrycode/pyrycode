@@ -12,30 +12,6 @@ and `pyry pair` wire `Load` from their own tickets. Within all S red lines
 **Depends on:** nothing. The package is a leaf — no imports beyond
 stdlib.
 
-## Files to read first
-
-The developer's turn-1 data load. Each entry is paged in deliberately —
-don't grep for them.
-
-- `internal/sessions/registry.go:31-51` — `loadRegistry`. The
-  reference implementation for "read file → on `fs.ErrNotExist` return
-  zero-value-as-default, otherwise unmarshal, otherwise wrap and
-  surface". Copy the wrap shape (`fmt.Errorf("registry: read %s: %w",
-  path, err)`); just rename the prefix to `config:`.
-- `internal/sessions/registry.go:17-29` — the `registryFile` /
-  `registryEntry` struct shape. Mirror the JSON-tag style: snake_case
-  (`json:"relay_url"`), no `omitempty` on required-with-default fields
-  (we want the field to round-trip even when set to its zero value, so
-  a future operator-written file isn't surprising).
-- `CODING-STYLE.md` § "Error Handling" — `fmt.Errorf("X: %w", err)`
-  wrap shape. § "Testing" — table-driven, stdlib `testing` only,
-  `t.Parallel()`, `t.Helper()` for shared assertions, no testify.
-  § "Naming" — `RelayURL` (acronym all-caps in compounds).
-- The ticket body itself (#205) — five AC items, each maps directly to
-  one test case.
-
-That's the read budget. The whole package is ~30 lines.
-
 ## Context
 
 Phase 3 (mobile + relay) needs a place to put user-configurable values.

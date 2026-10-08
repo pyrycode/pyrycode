@@ -18,22 +18,6 @@ The fix refines that already-trusted "an unexpected startup dialog is blocking" 
 
 ---
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:339-373` — `deliverViaSession`, the production `deliverFn`. **The two `sess.WaitReady(ctx)` call sites to wrap** are line 349 (direct path, `ResolveTranscript == nil`) and the `waitReady` closure at 363-366 (growth path). Both must route through the new gate.
-- `internal/supervisor/supervisor.go:382-465` — `deliverGrowthDeps` + `confirmViaTranscriptGrowth`. **Mirror this exact pattern**: a seam-struct + free function whose timeout/poll are fields so parallel `-race` tests can shrink them without shared globals. The new gate copies this idiom.
-- `internal/supervisor/supervisor.go:477-499` — `ScreenSnapshot`. **Mirror its one-expression render discipline** (`tuidriver.Render(sess.Snapshot(), 0, 0)` consumed inline, never named/stored) so the detector adds no rendered-text variable — only the anchor const.
-- `internal/supervisor/supervisor.go:575-596` — `New`. Add the `settingsWarningFn` seam wiring right after `s.keystrokeFn = sendModalKeystroke` (line ~594), same set-once-immutable pattern.
-- `internal/supervisor/modal.go:96-144` — `sendModalKey` / `sendModalKeystroke` / the `modalKey` enum. The auto-continue keystroke reuses `keyAnswer` with choice `"1"` through the existing `keystrokeFn` seam. `sendModalKeystroke` is the precedent for a thin, unit-untestable-without-live-claude seam impl (the detector mirrors it).
-- `internal/supervisor/modal_test.go:15-111` — the `keystrokeFn`-fake pattern (`sup.keystrokeFn = func(...) error {…}` + `sup.setSession(&tuidriver.Session{})`). The new tests fake `settingsWarningFn` the same way.
-- `github.com/pyrycode/tui-driver@v1.10.0/pkg/tuidriver/ready.go` — `WaitReady` contract + `UnexpectedModalError{Class ModalClass}` (exported; match with `errors.As`). Confirms the Settings Warning returns `Class: ModalClassUnknown`.
-- `github.com/pyrycode/tui-driver@v1.10.0/pkg/tuidriver/answer.go:38-134` — `AnswerModal`/`modalDismissed`. **Read this to understand why we cannot reuse it**: `AnswerModal` confirms dismissal but supports only `ModalClassPermission`/`ModalClassTrustFolder`, not `Unknown`. We send the raw `Answer("1")` keystroke and must implement our own dismissal poll (mirroring `modalDismissed`).
-- `cmd/substrate-guard/main.go:36-129` — the banned-literal allowlist. Confirms `"Settings Warning"` is **not** a banned token (tui-driver owns none of this dialog), so the anchor const is guard-green.
-- `internal/sessions/pool.go:478` — the daemon sets `supCfg.ResolveTranscript`, so the **daemon's readiness gate is the growth-path closure** (line 363). Wrapping both call sites covers daemon + foreground uniformly.
-- `internal/agentrun/ptyrunner/runner.go:400-424` — the agent-run path's separate `WaitReady` handling (`ready.TrustModal` etc.). **Do not touch it** — it keeps its fail-loud readiness (#173, AC4). Scoping the fix to `internal/supervisor` leaves it untouched by construction.
-
----
-
 ## Design
 
 All changes live in `internal/supervisor`. No new exported symbols; no cross-package edits.

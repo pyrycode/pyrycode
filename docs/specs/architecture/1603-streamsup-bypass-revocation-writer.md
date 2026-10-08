@@ -3,30 +3,6 @@
 **Ticket:** [#1603](https://github.com/pyrycode/pyrycode/issues/1603) · **Size:** S · **Labels:** `bug`, `security-sensitive`
 **Blocks:** #1604 (session-layer wiring) · **Split from:** #1596 · **Measurement authority:** #1595
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/envelope.go` | `controlRequest`, `controlRequestInner` | The outer/inner split this ticket extends. The outer type's doc already says the discipline "is kept for symmetry and future control subtypes" — this is that subtype. |
-| `internal/streamsup/envelope.go` | `marshalInterruptEnvelope` | The marshaller to mirror: fixed literals, `json.Marshal`, append `'\n'`. Its doc credits the fixed literals for leaving it "no injection surface of its own" — the sentence this ticket's security argument extends. |
-| `internal/streamsup/envelope.go` | `WriteInterrupt` | The package-level writer to mirror: nil-check FIRST, marshal, single `Write`, never close. Copy its error-wrap shape. |
-| `internal/streamsup/envelope.go` | `ErrNoLiveChild` | The sentinel AC4 requires at both levels. Returned bare, never wrapped. |
-| `internal/streamsup/envelope.go` | `marshalTurnEnvelope` | The injection-resistance argument in prose form; the model for the `requestID` injection test (§ Testing). |
-| `internal/streamsup/runner.go` | `(*Runner).Interrupt` | The three-line method shape to mirror, and its doc's "concrete method, NOT on `sessions.Runner`" reasoning. |
-| `internal/streamsup/runner.go` | `nextInterruptID`, `interruptSeq` | The counter this ticket reuses and renames (§ Design decision 3). |
-| `internal/streamsup/runner.go` | `(*Runner).Stdin` | Returns an **untyped** nil under `r.mu` when no child is live, and releases the lock before returning — which is what makes the writer's `w == nil` check work and keeps the blocking write off the lock. |
-| `internal/streamsup/envelope_test.go` | `TestMarshalInterruptEnvelope` | **AC3's gate. Its `want` literal must not be edited.** |
-| `internal/streamsup/envelope_test.go` | `TestWriteInterrupt_NilRefusal`, `TestWriteInterrupt_WritesEnvelope`, `TestWriteInterrupt_WriteError`, `errWriter` | The four-test shape to mirror; `errWriter` is reused, not redeclared. |
-| `internal/streamsup/envelope_test.go` | `TestMarshalTurnEnvelope_InjectionResistance`, `decodedControlRequest` | The injection table to mirror; the decode shape to extend with `Mode`. |
-| `internal/streamsup/interface_test.go` | `TestRunner_Interrupt_NoLiveChild`, `TestRunner_Interrupt_LiveChildDelivers`, `TestRunner_NextInterruptID_Monotonic` | AC4's runner-level mirror, the live-child delivers pattern, and the test the rename touches. |
-| `internal/streamsup/interface_test.go` | `helperRunCfg`, `runInBackground`, `waitForContains`, `safeBuffer` | Existing harness helpers — reuse, do not re-invent. The `echo_lines` helper child echoes stdin back as `ECHO:<line>`. |
-| `internal/streamsup/parser.go` | `(*Parser).consumeLine`, `case "control_response"` | **Read this before deciding to read the ack.** #1500 already consumes the ack content-free; see § Design decision 5. |
-| `docs/knowledge/features/set-permission-mode-inband-probe.md` | § "The `control_request` line sent", § "The escalation finding" | The verbatim measured line AC1 pins, and the one-direction finding AC2 enforces. |
-
-**Do not read for a pattern to copy:** `internal/e2e/realclaude/set_permission_mode_probe_test.go` → `setModeControlLine`. It takes `mode` as a parameter because a probe must drive both directions. Production must not — that is AC2 and the whole security argument.
-
 ## Context
 
 `internal/streamsup` owns the writer half of claude's stdin control channel. Today it writes exactly two envelope kinds: a user turn (`marshalTurnEnvelope`) and an interrupt control request (`marshalInterruptEnvelope`). The `controlRequest` type's doc has been carrying a promise since #1120 — its structured-encoding discipline "is kept for symmetry and future control subtypes." This ticket delivers the first of those subtypes.

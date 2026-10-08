@@ -1,16 +1,5 @@
 # Spec: install-service WorkingDirectory defaults to cwd (#177)
 
-## Files to read first
-
-- `internal/install/install.go:64-151` — `Options` struct + `Install()` setup; the `WorkDir` default at line 136-143 is what changes.
-- `internal/install/install.go:160-175` — how `templateData.WorkDir` flows into the unit file path picking and template rendering.
-- `internal/install/install_test.go:12-179` — existing table-driven tests; new tests follow the same shape (in-memory `Options`, write to `t.TempDir()`-rooted home, read file, substring-assert).
-- `internal/install/install_test.go:289-306` — `TestInstall_InheritsEnvPath` is the closest analogue: pure-Options input, no environment patching, asserts on file body. Mirror its structure.
-- `cmd/pyry/main.go:1064-1154` — `runInstallService` body: flag parsing, the `install.Install(...)` call site, and the existing "Inherited PATH" print block. The new "WorkingDirectory:" line goes above it (line 1118).
-- `cmd/pyry/main.go:1082` — current `--workdir` flag definition; the help string changes from `~/pyry-workspace` to `current directory`.
-
-No need to read launchd / systemd templates — they already substitute `{{.WorkDir}}` literally; the change is what string we pass in, not how it's rendered.
-
 ## Context
 
 `pyry install-service` today bakes `~/pyry-workspace` (expanded for launchd, `%h/pyry-workspace` for systemd) as `WorkingDirectory` regardless of where the user ran it. On a fresh machine without that directory pre-created, launchd `chdir`s, fails with code 78, and the daemon never binds its socket — surfaced 2026-05-08 setting up the Mac Claudian daemon.

@@ -2,26 +2,6 @@
 
 Capstone of the [#509](../../knowledge/codebase/509.md) / [#510](../../knowledge/codebase/510.md) / [#511](../../knowledge/codebase/511.md) / [#512](../../knowledge/codebase/512.md) migration. Collapses `ptyrunner.Run`'s post-`WritePrompt` body onto a single `for ev := range ch` dispatch on `tuidriver.Session.Events()`. Net effect: mid-run trust modals, MCP failure banners, and network failure anchors are now caught continuously (today they slip past after `WritePrompt`); the inline JSONL drain disappears; the `runWatchdog` goroutine stays as-is.
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:39-55` — current imports (verify `sync`, `tuidriver` already wired; nothing new to add).
-- `internal/agentrun/ptyrunner/runner.go:171-219` — `Run` doc comment + cleanup-LIFO contract. The doc rewrites in lockstep with the body.
-- `internal/agentrun/ptyrunner/runner.go:283-309` — pre-`WritePrompt` phase (`WaitUntil(idle)` + one-shot HasTrustModal / HasMcpFailureBanner / HasNetworkFailure + `WritePrompt`). **Unchanged by this ticket.**
-- `internal/agentrun/ptyrunner/runner.go:311-416` — post-`WritePrompt` body. The block being replaced: `runCtx, cancel := context.WithCancel(ctx)` → `var emitErr error; for entry := range entries { … }` → `runCtx.Err()` / `emitErr` return-site. The new loop slots in at the same place; everything above the `entries, err := tuidriver.TailJSONL` line stays verbatim.
-- `internal/agentrun/ptyrunner/watchdog.go` — `runWatchdog` wrapper. **Untouched.** Spec keeps the goroutine separate.
-- `internal/agentrun/ptyrunner/runner_test.go:28-55` — `helperRunCfg` scaffolding. The three new mid-run tests reuse it verbatim with new `mode` strings.
-- `internal/agentrun/ptyrunner/runner_test.go:58-63` — `happyPathBody` / `noEotBody` JSONL constants. The mid-run-mcp / mid-run-network tests pair `noEotBody` with the new helper modes (the helper writes the banner anchor mid-stream while the JSONL never terminates with end-of-turn — the banner detection short-circuits the loop).
-- `internal/agentrun/ptyrunner/runner_test.go:189-247` — existing modal/banner tests. The mid-run analogues mirror these but use the new helper modes and accept either error path (banner-shown event OR pre-write modal — see § Test plan for the timing argument).
-- `internal/agentrun/ptyrunner/helper_test.go:52-104` — fake-claude `runHelper` + `stdinSeen` synchronisation. The new helper modes copy the `jsonl` mode's "wait for stdin first byte, then act" shape but write a TUI anchor to stdout instead of a JSONL body to disk.
-- `internal/agentrun/ptyrunner/helper_test.go:106-145` — `jsonl` mode's post-`stdinSeen` write block. The three new modes mirror this control flow but target stdout, not the JSONL path.
-- `~/go/pkg/mod/github.com/pyrycode/tui-driver@v0.0.0-20260523181457-c2dcd1e49992/pkg/tuidriver/events.go:111-150` — `Event` struct + `Session.Events(ctx, jsonlPath, startOffset)` signature. Confirm the (`<-chan Event`, `error`) return shape and the per-kind payload-field population.
-- `~/go/pkg/mod/github.com/pyrycode/tui-driver@v0.0.0-20260523181457-c2dcd1e49992/pkg/tuidriver/events.go:152-303` — `mergeEvents` semantics: 50 ms `DefaultPollInterval`, rising-edge classification, modal-axis-dominates-idle-thinking, banner axes independent of modal. Drives the test timing argument (the new helper modes flip the relevant predicate after `stdinSeen`; the 50 ms poll catches it well within the 10 s test deadline).
-- `~/go/pkg/mod/github.com/pyrycode/tui-driver@v0.0.0-20260523181457-c2dcd1e49992/pkg/tuidriver/modal.go:22-30` — `ModalClass` constants. `ModalClassTrustFolder` is the one the loop matches; the other classes are emitted but ignored.
-- `internal/agentrun/streamjson/emitter.go:177` — `Emit(entry tuidriver.JSONLEntry) error` signature. Unchanged; the new loop calls it with `ev.Entry`.
-- `internal/agentrun/budget/budget.go:OnEvent` / `OnEndOfTurn` — verify `OnEvent(entry tuidriver.JSONLEntry)` (post-[#512](../../knowledge/codebase/512.md) signature) and `OnEndOfTurn()` (no args). Unchanged.
-- `docs/knowledge/codebase/512.md` § "Implementation" — the inline drain shape that #513 replaces. Confirms the `emitErr` capture-then-prioritise three-source pattern (ctx-cancel → emitErr → nil) the AC explicitly preserves.
-- `docs/knowledge/codebase/510.md` — watchdog delegation shape. Confirms the `tuidriver.RunWatchdog` glue layer the spec keeps as a separate goroutine.
-
 ## Context
 
 After #512, ptyrunner's post-`WritePrompt` block has three concerns it splits across two goroutines and one inline loop:

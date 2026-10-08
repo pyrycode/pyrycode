@@ -4,29 +4,6 @@ Turns #1704's declaration into a contract a client author can consume: the commi
 **No production source files.** The deliverable is three `testdata` fixtures, three round-trip tests in
 `internal/protocol/interactive_test.go`, and the `docs/protocol-mobile.md` edit.
 
-## Files to read first
-
-| Read | Symbol / section | What to extract |
-|---|---|---|
-| `internal/protocol/interactive.go` | `ModelListPayload`, `ModelOption` | Field **declaration order** — it is the fixture's key order (see § Byte-equality rules). |
-| `internal/protocol/interactive.go` | `ModelListPayload.MarshalJSON`, `ModelOption.MarshalJSON` | The three list encodings, and *why* `TruncatedFields` is exempt. Both sit between the value and the bytes. |
-| `internal/protocol/interactive.go` | `ModelOption`'s doc comment | The SECURITY paragraph and the `Value` paragraph — the doc prose paraphrases these, it does not invent new claims. |
-| `internal/protocol/envelope_test.go` | `canonical`, `readFixture` | `canonical` is `json.Compact` only: it neither sorts keys nor changes escaping. Both facts are load-bearing. |
-| `internal/protocol/interactive_test.go` | `TestModelAnnouncedPayload_RoundTrip`, `TestModelAnnouncedPayload_ZeroValue_RoundTrip` | The shape all three new tests copy, **including** the comment that separates a measured value from a chosen one, and the zero fixture's byte-level guards. |
-| `internal/protocol/interactive_test.go` | `TestBackgroundTaskRosterPayload_RoundTrip`, `TestBackgroundTaskRosterPayload_Empty_RoundTrip` | The two-entry populated/`null` `truncated_fields` pattern, and the empty-frame `bytes.Contains` guard. |
-| `internal/protocol/interactive_test.go` | `TestModelListPayload_NilModelsNormalises`, `TestModelOption_NilSliceEncodings` | The three keys already covered. Do not duplicate their coverage, and **do not modify either test** — in particular `TestModelOption_NilSliceEncodings`'s trailing `p.Models[0].EffortLevels != nil` assertion, which code review's own mutant matrix measured as the *only* thing that catches an entry marshaller normalising in place (that mutant produces byte-identical JSON, so no round trip can see it). It reads like a tidy-up candidate and is not one. |
-| `internal/protocol/testdata/background_task_roster.json`, `background_task_roster_empty.json` | — | AC 1's two named precedents, and the `<` / `&` escaping a fixture must reproduce. |
-| `internal/protocol/testdata/model_announced_zero.json` | — | AC 1's third named precedent: a zero-**payload** frame inside a normal envelope. |
-| `internal/protocol/testdata/rate_limited.json` | — | The `<unmeasured>` sentinel for a field whose value set no capture reports. This spec reuses it. |
-| `docs/protocol-mobile.md` | § Application message types | The registry-row format; the `model_announced` and `session_transition` rows. |
-| `docs/protocol-mobile.md` | § Interactive events (v2, capability-gated), opener paragraph | Count site #1 ("These **fifteen** envelope types…") and its defining clause. |
-| `docs/protocol-mobile.md` | `#### model_announced` | The prose model to follow, and the paragraph that gains the back-link. |
-| `docs/protocol-mobile.md` | `#### session_transition` | Count site #2, the not-one-of-the-fifteen phrasing to mirror, and the insertion point (immediately after it). |
-| `docs/protocol-mobile.md` | `#### background_task_roster` | The nested "Each element of `tasks`:" two-table format the field tables copy. |
-| `docs/knowledge/features/protocol-package.md` | § Model-list payload (#1704) | Records an **unfixed SHOULD FIX**: `TruncatedFields`'s doc enumerates 2 of the 3 cut-able text fields. Do not propagate it into the doc — see § Open questions. |
-| `docs/knowledge/features/protocol-package.md` | § Session-transition payload (#656) | The house rule: struct field order == fixture `payload` key order == doc-table row order. |
-| `internal/relay/v2session_settings.go` | `validModel`, `validEffort` | The exact inbound rule the doc's property 3 states. **Read only — neither is changed here or as a drive-by.** |
-
 ## Context
 
 #1704 declared `TypeModelList`, `ModelListPayload` and `ModelOption` and deliberately shipped no fixtures and no

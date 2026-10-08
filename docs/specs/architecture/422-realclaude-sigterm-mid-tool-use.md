@@ -1,18 +1,5 @@
 # 422 — e2e/realclaude: mid-tool_use SIGTERM cleanup (subprocess + JSONL state)
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go:32-78` — `WithWorktree`, `WithWorktreeAuthenticated`, `ReadJSONL`. The new test uses `WithWorktreeAuthenticated` (real-API). `ReadJSONL` parses through `jsonl.NewReader` which silently drops any trailing partial line — see the explicit `\n`-terminator check in §"JSONL terminal-shape assertions" below; do NOT rely on `ReadJSONL` to surface a half-written tail.
-- `internal/e2e/realclaude/fixtures.go:123-188` — `RunPyryAgentRun` is **not usable here** (synchronous Run, no PID access). The unexported `ensurePyryBuilt` and `parseInitSessionID` ARE reused by the new file (same package).
-- `internal/e2e/realclaude/resilience_test.go:271-350` — the precedent for "drop to `exec.CommandContext` directly when the synchronous helper does not fit": `resolveClaudeBin`, `runClaudeDirect`. This ticket follows the same precedent for a file-local `spawnPyryAgentRun` helper, rather than widening `fixtures.go` for a one-off shape.
-- `internal/e2e/realclaude/tool_loop_test.go:147-178` — `contentBlock`, `parseContentBlocks`. Reused directly; the new test imports nothing new for content-block parsing. (Same package, same build tag, no struct extension required — `tool_use.Name`, `tool_use.ID`, and `tool_result.ToolUseID` are already there.)
-- `internal/e2e/realclaude/prompt_fidelity_test.go:75-89` — `jsonlPathFor` for failure-message diagnostics.
-- `internal/e2e/realclaude/per_agent_test.go:135-144` — `truncate([]byte) string` capped at 1 KiB. Reuse in failure messages; do NOT re-define.
-- `internal/e2e/realclaude/long_session_test.go:35-62` — anti-chain steering wording in `longSessionSystemPrompt`; the new prompt borrows the "run it once, do NOT chain" shape but reduces to a single Bash invocation.
-- `cmd/pyry/agent_run.go:200-247` — `runAgentRun` installs `signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)`, then delegates to `streamrunner.Run`. Ctx-cancel from SIGTERM is the failure path under test.
-- `internal/agentrun/streamrunner/runner.go:37-175` — `killGrace = 5 * time.Second`, `cmd.Cancel = SIGTERM`, `cmd.WaitDelay = killGrace`. **This is exactly the 5-second budget the bounded-exit assertion pins**; pyry's production contract is: claude gets SIGTERM, then SIGKILL 5 s later. If a future change weakens either side of that, this test fires.
-- `internal/agentrun/jsonl/reader.go:171-262` — `Reader.Next` semantics: malformed-JSON lines are logged-and-skipped, trailing partial bytes are retained internally and NEVER surfaced. Explicit byte-tail check is the only way to assert "no half-written line."
-
 ## Context
 
 When pyry receives SIGTERM with a Bash subprocess in flight, three production invariants must hold:

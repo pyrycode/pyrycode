@@ -2,19 +2,6 @@
 
 **Size:** S · **Security-sensitive:** yes · Split from #962.
 
-## Files to read first
-
-- `internal/relay/v2session.go:2107-2266` — `handleDebugBundleRequest` + `debugBundleReplyError` + `bundleInFlight`. Extract the FIXED error contract the e2e asserts: `protocol.CodeServerBinaryOffline` + `msgDebugBundleUnavailable` (const value `"debug bundle unavailable"`, **unexported** → the e2e hardcodes the literal) + `Retryable: true`; and confirm the assemble-error branch logs the EVENT only (`"event":"v2.bundle.assemble_err"`), never the wrapped `err` — the no-leak property the error subtest proves.
-- `internal/relay/v2bundlestream.go:20-153` — `bundleChunkBytes = 48000` (fake archive must exceed this for a multi-chunk stream); `bundleEnvelopes` (0-based ascending `Seq`, trailing `debug_bundle_done` with `Total == N`); `ReassembleBundle` — the receiver contract the test's reassembly mirrors (arrival-order concat, `Seq == chunks-seen`, `done.Total == chunks-seen`).
-- `internal/protocol/messaging.go:261-285` — `DebugBundleChunkPayload{Seq int, Data []byte}` + `DebugBundleDonePayload{Total int}` JSON field tags for decode.
-- `internal/protocol/codes.go:362-391` — `TypeDebugBundleChunk` / `TypeDebugBundleDone` / `TypeRequestDebugBundle` (intercepted pre-`dispatch.Route`) + `CodeServerBinaryOffline` string.
-- `internal/e2e/relay_v2_promote_test.go` (whole, 168 lines) — the **error-path skeleton verbatim**: `pair` → `StartInWithEnv(home, {PYRY_ALLOW_INSECURE_RELAY=1, PYRY_MOBILE_V2=1}, …)` → `waitBinaryHello` → `fakephone.Dial` → `driveHandshakeToOpenDaemon` → seal request (`initSend.Encrypt`) + `sendNoiseMsg` → read one reply (`decryptInnerEnvelope(t, readInnerFrame(…), initRecv)`) → assert `TypeError` / `InReplyTo` / decode `ErrorPayload`.
-- `internal/e2e/relay_v2_daemon_test.go:44-73` and `:378-…` — `driveHandshakeToOpenDaemon` returns `(initSend, initRecv)`; `decryptInnerEnvelope(t, inner, cs)` advances `cs` **once per frame** — the happy-path loop decrypts frames in strict arrival order with `initRecv`.
-- `internal/e2e/relay_v2_handshake_test.go:166` and `:341` — `readInnerFrame(t, phone, timeout)` reads one inner frame (Fatals on timeout); `sendNoiseMsg(t, phone, ciphertext)`.
-- `internal/relay/v2session_debugbundle_test.go:183-260` — the unit-tier template: the **bare** request envelope `{ID, Type: TypeRequestDebugBundle, TS}` (no payload); how chunks+done reassemble; and the `#911` in-flight-gate subtests that already cover AC-3 deterministically in-package (why the e2e defers it).
-- `cmd/pyry/main.go:709-713`, `:761-762`, `:858-870` — `logRing` tees **every** daemon log line (⇒ the real archive is non-deterministic, hence the fake seam); `allowInsecure` is computed at :762; the `debugBundler` closure build site (:867) where the fake override wires in.
-- `internal/e2e/harness.go:80-102`, `:227-245` — `Harness.Stderr *safeBuffer` (daemon-log capture for the no-leak assertion); `StartInWithEnv(t, home, extraEnv, extraFlags…)` env surface.
-
 ## Context
 
 `handleDebugBundleRequest` streams a debug bundle to a paired phone as `debug_bundle_chunk*` frames followed by `debug_bundle_done`. Its design is *what does not leak*: the assemble-error path logs the event but never the wrapped err (which could quote a recording path), and the error reply is a FIXED code/message/`retryable`, so no attacker-influenced or assembly-error text reaches the wire. This ticket proves both paths **end-to-end over the encrypted v2 wire** — not just at the existing `internal/relay/v2session_debugbundle_test.go` unit tier.

@@ -40,32 +40,6 @@ and ship red on `main`. The guard must union both.
   are not application-verb dispatch and are correctly excluded.
 - The **v1 dispatch leg** (retiring under #913) — the guard scopes to v2 only.
 
-## Files to read first
-
-- `internal/protocol/codes.go` — **the guard's constant universe.** Every
-  application `Type*` constant lives here (50 total: the `v1TypeSet` ∪
-  `v2OnlyTypes` partition). The per-constant prose comments already annotate
-  direction (`phone → binary … dispatch.Route write/read verb`; `inbound v2
-  control (intercepted pre-dispatch.Route)`; `binary → phone, outbound …`) —
-  legible to a human, the source for the classification lists below.
-- `cmd/pyry/relay.go:404-417` — the real `Handlers` map literal (surface #1).
-  Each key is a `protocol.Type*` selector; values carry runtime deps, so only the
-  **keys** are static/enumerable.
-- `internal/relay/v2session.go:1811-1846` — `dispatchAppFrame`'s
-  `switch probeEnv.Type` (surface #2); each `case protocol.Type*:` is one
-  intercepted verb. The switch is nested inside an `if json.Unmarshal(...) == nil`
-  block — an `ast.Inspect` walk finds it regardless of nesting.
-- `internal/protocol/compat_test.go` — **prior art to model on.** It already
-  enumerates every wire type and partitions v1/v2 with a totality drift-check
-  (`len(all) == 26`, union-size assertions). This guard is a sibling concern
-  (direction/registration, not v1/v2) using the same drift-check idiom.
-- `internal/protocol/envelope.go:111-145` — `v1TypeSet` (production enumeration
-  of v1 types) for cross-reference; confirms `codes.go` is the single home of
-  `Type*` app constants.
-- `Makefile` — `check: vet test staticcheck substrate-guard e2e`; `test` is
-  `go test -race ./...`, which includes `cmd/pyry` and runs plain (untagged)
-  tests. AC #6 is satisfied with **no Makefile change**.
-
 ## Design
 
 ### Where the guard lives

@@ -6,21 +6,6 @@
 
 **Label:** `security-sensitive` → the Security review section at the end of this spec is mandatory and was run before commit.
 
-## Files to read first
-
-- `internal/agentrun/selfcheck/selfcheck.go:1-63` — current package doc comment. AC5 amends the *What this selfcheck verifies* paragraph and the SECURITY block: state that the self-check verifies claude's RUNTIME-layer enforcement (sentinel does not appear on disk), NOT LLM-layer output (a `tool_use` block may still be emitted), and cross-link the permissions doc with the quote.
-- `internal/agentrun/selfcheck/selfcheck.go:98-151` — `canonicalProbeTool`, `canonicalPrompt`, `canonicalAllow`, `defaultSelfCheckTimeout`, `ErrProbeToolInvoked`, `ErrTimeout`. The prompt becomes a function of the sentinel path; the sentinel-name const + max-turns const land here; `ErrProbeToolInvoked` → `ErrSentinelWritten`.
-- `internal/agentrun/selfcheck/selfcheck.go:172-339` — `Result`, `SelfCheckDenyDefault`. This is the heart of the change: the watcher loop drops the probe-tool branch (keeps end-of-turn + count), and a post-`g.Wait()` `os.Stat` becomes the PASS/FAIL decision. **Note the `MaxTurns: 1` at line 268** — it becomes `2` (AC2).
-- `internal/agentrun/selfcheck/selfcheck.go:341-372` — `probeToolInvokedInRaw` helper. **Deleted entirely** (AC4).
-- `internal/agentrun/ptyrunner/runner.go:118` + `:258-260` — `Config.MaxTurns` doc + the `MaxTurns <= 0` reject. Confirms "remove MaxTurns" is not available; set ≥ 2.
-- `internal/agentrun/budget/budget.go:114-150` — `Counter.OnEvent`/`OnEndOfTurn` boundary semantics. Load-bearing for why `MaxTurns: 2` lets the runtime reach the execute-or-deny step *and* still surfaces turn-2's `end_turn`: SIGTERM fires *after* the 2nd assistant entry is emitted, never before.
-- `cmd/pyry/agent_run_selfcheck.go:37-110` — `runAgentRunSelfCheck` switch + `writeSelfCheckFailMessage`. Sentinel-arm rename, PASS/INCONCLUSIVE rewording, and the FAIL banner rewrite (evidence becomes a path, not JSONL bytes; signature `[]byte` → `string`).
-- `internal/agentrun/selfcheck/selfcheck_test.go:20-32` (`passLine`/`writeLine` fixtures), `:73-104` (`TestSelfCheck_Pass`), `:140-171` (`TestSelfCheck_ProbeToolInvoked`), `:187-237` (`Timeout`/`MalformedLineSkipped`), `:374-429` (`TestProbeToolInvokedInRaw`, deleted). The FAIL test rewires from "emit a `tool_use` line" to "create the sentinel file"; the helper-test is deleted; a new layer-swap regression test is added.
-- `cmd/pyry/agent_run_selfcheck_test.go:14-99` — `selfCheckWriteLine` fixture (deleted) + `TestRunAgentRunSelfCheck_FAIL` (`required` substring list + `Result`/error construction updated).
-- `internal/e2e/realclaude/allowed_tools_enforcement_test.go` — **out of scope** (see § Out of scope). Its local `bashInvokedInRaw`/keyword helpers are a *different* contract; do not touch.
-- Anthropic permissions doc — the AC5 cross-link target: https://code.claude.com/docs/en/permissions — *"Permission rules are enforced by Claude Code, not by the model."*
-- `docs/specs/architecture/539-self-check-probe-tool-rename.md` — the immediate predecessor; this spec mirrors its shape and inherits its no-touch list. `#538`/`#539` shipped and are correct; this is purely the self-check-layer fix.
-
 ## Context
 
 `pyry agent-run --self-check` still FAILs after #538 (argv `--permission-mode dontAsk`) and #539 (`Write` probe off the Bash carveout) shipped, with the message `tool_use name="Write" observed in assistant entry`. The detector watches the wrong layer.

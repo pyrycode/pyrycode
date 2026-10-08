@@ -1,44 +1,5 @@
 # Spec: daemon appends `/v1/server` to a base `relay_url` (or fails loudly) — #631
 
-## Files to read first
-
-- `internal/relay/connection.go:100-143` — `Connect`. The inline `url.Parse` +
-  scheme-check block (lines 113-120) and the `tcfg.URL = cfg.RelayURL`
-  assignment (line 128) are exactly what Option A changes. **Extract:** the
-  current parse/validate flow so the new `resolveDialURL` helper preserves the
-  same `ErrInvalidConfig` wrapping and ordering.
-- `internal/relay/connection_test.go:1-32` — test infra (`testLogger`,
-  `testServerID`); `:506-540` `TestConfig_Validation_TableDriven` (the scheme /
-  parse error matrix that must stay green after the refactor); `:611-625`
-  `TestConfig_AllowInsecureScheme` (the `Connect` + immediate-`Close` pattern, if
-  a Connect-level smoke is wanted). **Extract:** assertion idioms + the error
-  strings the existing table pins (`"wss"`, `"RelayURL parse"`).
-- `internal/transport/wssclient.go:120-141` — sentinel-error block (add
-  `ErrUpgradeRejected` here); `:181-255` — `Connect` dial loop, specifically the
-  INFO `"transport: dial failed, backing off"` line (213) to branch; `:364-372`
-  — `realDial` (capture the `*http.Response`). **Extract:** the dial-fail branch
-  shape and the `dialFn` test seam (`c.dialFn = c.realDial`, line 165).
-- `internal/e2e/internal/fakephone/fakephone.go:63-78` — `Dial` does
-  `baseURL+"/v1/client"`. **This is the convention Option A mirrors** on the
-  daemon side (`/v1/server`). The daemon should treat its configured URL as a
-  base exactly as the phone does.
-- `internal/e2e/internal/fakerelay/fakerelay.go:1-36` — `/v1/server` route +
-  "rejections happen pre-upgrade as HTTP 400/409/503". **Extract:** the route
-  the appended path must hit; the HTTP-status-on-dial-error behaviour.
-- `internal/e2e/relay_test.go:90-124` (`TestRelay_1011`) — the canonical
-  "daemon connected" e2e assertion: `StartInWithEnv` + `readPersistedServerID` +
-  `fr.WaitBinary(ctx, serverID)`. **Extract:** the exact helper set the new
-  base-URL e2e reuses.
-- `internal/config/config.go:22-26` — `DefaultConfig().RelayURL =
-  "wss://relay.pyrycode.dev"` is a base URL with no path: the shipped default is
-  the footgun this ticket fixes.
-- `docs/protocol-mobile.md` § Endpoints — `/v1/server`, `/v1/client` are the
-  canonical, unchanged paths for both v1 and v2.
-- `github.com/coder/websocket@v1.8.13/dial.go:144-168` (module cache) — confirms
-  the Option-B signal: a **non-101 HTTP response** returns `(nil, resp, err)`
-  with `resp != nil`; a **network failure** returns `(nil, nil, err)` with
-  `resp == nil`. No string-matching needed.
-
 ## Context
 
 The daemon dials its configured `relay_url` **verbatim**:

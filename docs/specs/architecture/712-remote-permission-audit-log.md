@@ -7,21 +7,6 @@
 
 ---
 
-## Files to read first
-
-Generated from `codegraph_context` + the reads done during this spec; off-topic hits pruned. The audit primitive imports **only `log/slog`** — it depends on neither `devices` nor `protocol`. The reads below are for the *mapping contract* (#703 maps the gate/modal types onto this primitive's self-contained vocabulary) and for the slog/test idioms to mirror — not because this package imports them.
-
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md` § "Security model — remote permission granting" (lines 134-145), esp. **item 6 "Audit"** (line 141): *"Each remote answer is logged locally (device id, class, decision, time); never on the wire beyond the answer itself. Keys/tokens never logged."* This is the canonical requirement this ticket realizes — note it names **class** as part of the minimum (see § Design, "Why ModalClass").
-- `internal/devices/device.go:4-10` — the package **SECURITY contract**: callers MUST NOT log the plain device token, wrap it into errors, or pass it across slog fields. The audit identifies a device by `TokenHash` / `Name` only. `internal/devices/device.go:24-42` — the `Device.TokenHash` (SHA-256 hex), `.Name`, and `.PushToken` fields: hash+name are the *safe* identity the audit records; `PushToken` is an opaque secret the audit Entry has **no field for** (structurally cannot leak it).
-- `internal/devices/auth.go:64-91` — the gate's **input** vocabulary `RemotePermissionOutcome` (`OutcomeNoAnswer/Allow/Deny/Timeout/Cancel`) that #703 maps **from**, and the explicit "audit is #712's primitive, deliberately separate" notes (lines 58-59, 88). Read to write the gate-outcome → audit-outcome mapping table (§ Design), **not** to import it — the AC mandates a self-contained outcome vocabulary.
-- `internal/protocol/messaging.go:97-118` — `ModalShownPayload.ModalID` (the one-time nonce = the audit's modal identity) and `.Class` (the plain-string modal class, e.g. `"permission"` — the audit's `ModalClass`). `internal/protocol/messaging.go:149-162` — `ModalDismissedPayload.Source` documents the **closed set `{remote, local, timeout}`** the audit `Source` mirrors (so #703 passes one source value to both the wire dismissal and the audit). Read to confirm field names + align source values.
-- `internal/agentrun/jsonl/reader.go:94-110` — the `Logger *slog.Logger` optional-Config idiom (line 99) + "defaults to `slog.Default()`" convention (line 94). `internal/agentrun/jsonl/reader.go:283-287` — the `logger.Warn("jsonl: …", slog.String("err", …))` attr-emit form to mirror (the audit writer uses the same `slog.String` attr form at `Info` level).
-- `internal/agentrun/streamrunner/runner.go:201` — `logger.Warn("streamrunner: …", "key", val)`: the **package-prefixed slog message** convention (the audit message is `"audit: remote permission decision"`).
-- `internal/devices/device_test.go:102-173` — `TestDevice_LegacyOmitsPushFields` / `TestDevice_PopulatedRoundTrip` / `TestDevice_DecodeLegacyDiskShape`: the **encoded-form assertion** templates (a key IS present / a string is NOT present in the serialized output) to mirror for the audit field-completeness + no-leak tests.
-- `docs/specs/architecture/702-remote-permission-gate.md` § Security review, "Producer obligations" (line 218): item **(d)** *"audit the decision via #712, never logging modal body text or tokens"* — the exact contract this ticket fulfills.
-
----
-
 ## Context
 
 Phase 3 of epic #597 (ADR 025, § "Security model" item 6 "Audit"). Answering a remote permission / trust / destructive modal from a phone is the highest-trust action the mobile head can take. #702 (merged) owns the **gate** — the per-device authorization bit and the fail-closed `MayAnswerRemotePermission` / `AuthorizeRemotePermission` predicates. This ticket owns the **audit sink**: the primitive that writes one forensic record per decision the gate produces.

@@ -2,31 +2,6 @@
 
 **Size:** S (confirmed, not overridden). One file modified, zero production source files, ~180 total LOC, no consumer cascade.
 
-## Files to read first
-
-Every path is under `internal/e2e/realclaude/` unless stated. Everything here is `//go:build e2e_realclaude`, so `go vet` and `staticcheck` in `make check` never analyse it — see § Verification.
-
-| Path | What to extract |
-|---|---|
-| `trailer_admissibility_test.go:315-402` | `trailGate`'s seven return sites; the `reason == ""` arm at `:367-378` is the one that splits. Note every arm ends `RunnerPath: in.RunnerPath`. |
-| `trailer_admissibility_test.go:294-314` | The `# The budget arm keys on terminal_reason alone` and `# The runner path is CARRIED, never read` doc blocks. `:303` holds the arm count. |
-| `trailer_admissibility_test.go:642-710` | `trailGateCases()` — its provenance doc (`:642-646`), its row-count claim (`:651`), and the two rows the repair touches (`:703-708`). |
-| `trailer_admissibility_test.go:844-902` | `TestTrailGate` and the `the out-of-contract details name their own sub-case` sub-test. `:874` holds the three-inputs premise; `:883-894` is the fixture repaired by AC3 and the assertion rewritten by AC2. |
-| `trailer_admissibility_test.go:931-1031` | `TestTrailGateIgnoresTheRunnerPath`. `:951-953` is the totality clause; `:980` pins `trailGateResult` at 4 fields (unchanged); `:996-1001` is clause B, the carriage assertion. |
-| `trailer_admissibility_test.go:1234-1295` | `TestTrailAdmissibilityRecordsCarryNoCapturedBytes`. Its gate row (`:1244-1269`) leaves `KeyNames` nil and reaches `trailGateUsable`, which is exactly why AC5 needs a second sub-test. |
-| `trailer_key_names_test.go:158-170` | `trailKeyNamesNoTerminalReason()` / `trailKeyNamesEmptyTerminalReason()` — the shipped pair differing in one key, both carrying `"type":"result"`. |
-| `trailer_key_names_test.go:243-291` | `TestTrailKeyNamesSeparatesAbsenceFromZeroValue` — already proves both fixtures scan to `trailSeen`, differ in `KeyNames`, and collapse to the same decoded `""`. The new arms inherit that premise; do not re-derive it. |
-| `trailer_terminal_reason_test.go:128-137` | `trailReasonKeyName` — the shipped literal. Do not re-type `"terminal_reason"`. |
-| `trailer_terminal_reason_test.go:196-216` | The presence doctrine (`presence must not come from `decodedReason != ""``) and the `slices.Contains(keyNames, trailReasonKeyName)` idiom to copy. |
-| `result_trailer_observation_test.go:120-135` | `trailScanResult.KeyNames`' doc — the field's own statement that claude's own result line is the healthy headless shape. |
-| `result_trailer_observation_test.go:192-213` | `trailScan`'s `trailSeen` return: `KeyNames: trailKeyNames(scanner.Bytes())`, filled off the full line before the cap. |
-| `background_reach_probe_test.go:117-124`, `:945-950` | `reachMaxCommandBytes = 512`, `reachTruncationMarker`, and `reachCapCommand`. This is the binding constraint on the new Details — see § The 512-byte Detail budget. |
-| `internal/agentrun/streamrunner/runner.go:177-179`, `:250-253` | The tee passthrough and the watchdog-only synthesis. Both cites verified accurate at `a3f23c2`; they are what the absence Detail rests on. |
-| `trail_run_outcome_test.go:1074-1131` | `TestTrailRunComposesWithGateCases` — the fourth consumer of the slice. Map-keyed, so a duplicate gate value across rows is fine; `predicateCalls != 2` is the counter an added row must not disturb. |
-| `trail_ptyrunner_composition_test.go:36-42` | The totality claim over `trailGateCases()`. Stays **true and untouched** provided the added row carries `trailRunnerUnread()`. |
-
-Codegraph note: `codegraph_context` returns only `trailScanResult` for this area — the `e2e_realclaude`-tagged files are not fully indexed, so the reading list above came from direct reads. Do not expect `codegraph_callers` to find `trailGate`'s call sites.
-
 ## Context
 
 `trailGate`'s empty-`terminal_reason` arm (`trailer_admissibility_test.go:367-378`) collapses two shapes and publishes one sentence about both. That sentence ends `NO LIVE REPRO EXISTS`, which is true of a trailer whose `terminal_reason` key is on the line with a blank value — `streamjson/emitter.go:383-391` is a chokepoint pyry cannot render past — and **false** of a trailer with no `terminal_reason` key at all, which is what every healthy `PYRY_USE_STREAMJSON=1` run produces: `streamrunner.Run` passes claude's bytes through unchanged and synthesises a trailer only when the idle-stall watchdog fired with no result seen.

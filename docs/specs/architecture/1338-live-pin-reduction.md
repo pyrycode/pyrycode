@@ -6,34 +6,6 @@ One pure function, one named constant, one reading type, one synthetic-bytes fix
 
 ---
 
-## Files to read first
-
-Generated from `codegraph_context` over the ticket title + AC paraphrase, then pruned to what the design
-actually turns on. This is the turn-1 data load — read these before writing a line.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/process_pin_liveness_test.go:120-176` | `pinScan`'s four fields; **`pinPartition:167` assigns `MatchCount = len(out.Matches)`** — the count-from-`len` idiom this spec's `RowCount` copies so a count never has two producers; `pinMatchArgvExcluding:173` signature. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:137-148` | The prose *"reachMatchArgvRows is this package's one full-argv matcher and #1235 must not grow a second"*. Growing a bespoke FIFO matcher here would falsify shipped prose by this ticket's own hand. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:884-929` | `reachMatchArgvRows` — matches on the **uncapped** `command` (`:913`), stores `reachCapCommand(command)` (`:924`), records the hit list in `Needles` (`:925`). The whole of AC4's truncation trap rests on this asymmetry. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:931-962` | `reachCommandColumn` (the cap applies to the command column, i.e. **after** the three integer columns), `reachCapCommand`, `reachMatchedNeedle` — the membership test AC1 mandates. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:111-125` | `reachMaxCommandBytes = 512`, `reachTruncationMarker`, and the cap's stated reason. The fixture derives its padding **from this constant**, never from a literal 512. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:159-169` | `reachProc`'s field set (`PID/PPID/PGID/Command/Needles`) — `Command` and `Needles` are populated for content-matched rows only. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:1159-1218` | `reachArgvFixture` + `TestReachMatchArgvRows` — the four-column table shape and the well-formed-row accounting this trap copies. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:507-542` | `tdnPinHeld` — the shipped FIFO filter, **and the shape not to copy**: it dedupes pids and collapses to a single pgid, returning 0 on a non-singleton group set (`:538-541`). `:511-514` is #1230's live measurement (the constant's whole basis); `:516-520` is the group count of 1 (wrong fill #2). |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:557-575` | `tdnClaudeCommand` — reads `reachMatchedNeedle(m, tdnClaudeNeedle)` over `scan.Matches`, returns `""` unless exactly one row hits. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:150-160` | `tdnClaudeNeedle = "--append-system-prompt-file"` and the argued disjointness from the FIFO needle. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:158-186` | `finOutcomeStaging`'s eight fields, **no json tags and why** — the content rule this spec's reading type mirrors. `PinMatchCount`/`PinWantCount` at `:181-185`. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:343-357` | The count arm. A mis-fill fires `stage-pin-count-unexpected` on a correctly staged run, with no other symptom. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:389-409` | `finOutcomeStagedBase` at `PinMatchCount/PinWantCount: 2` — a gate **input**, not a reading. Read `:395-397` to see the citation this ticket must not repeat. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:190-229` | Why `finAttributeFanOut` takes `[]int` and not `[]reachProc` (the credential channel), and that it dedupes + `sort.Ints` **internally** (`:220-229`). This is why the projection handed on is raw. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:506-568` | `TestTrailRigCarriesMoreThanOneMatchedRow`. Read `:563` and confirm for yourself: it fails on `MatchCount <= 1`, i.e. asserts **`> 1`**, never `== 2`. Do not cite it as corroboration of 2. |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:1-60` | The file-header idiom for this family: scope, the offline inventory, the `go test` run line, then the named sections. |
-| `docs/knowledge/codebase/1268.md:145-157` | #1268's mutation-tested corroboration — dropping the wrapper cut the count 2→1 on a rig-staged `sh -c`. Corroboration only; the primary basis is #1230's live run. |
-| `Makefile:55-56` | `e2e-realclaude` runs `go test -tags e2e_realclaude ./internal/e2e/realclaude/...` — no env gate, no credentials. This file's tests run there for real. |
-
----
-
 ## Context
 
 A later ticket stages one live `pyry agent-run` turn: a `cat` on a FIFO held un-finishable, the

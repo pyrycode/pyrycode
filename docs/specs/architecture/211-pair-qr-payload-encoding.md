@@ -14,46 +14,6 @@ consumer cascade).
 **Depends on:** nothing wired. Imports `internal/identity` for `ServerID`
 type (already on main, #206) and stdlib only otherwise.
 
-## Files to read first
-
-The developer's turn-1 data load. Each entry is paged in deliberately —
-don't grep for them.
-
-- `internal/config/config.go` (whole file, 46 lines) — **the reference
-  shape** for "new leaf package, stdlib-only, three to four exports, ~40
-  LOC, no logger, no consumers wired in this slice." Mirror the package
-  doc-comment format (`// Package pair ...`), the imports-only-stdlib
-  discipline, the test-file co-location.
-- `internal/identity/server_id.go:1-52` — the typed-string newtype this
-  spec consumes. `ServerID` is used as the `Server` field's type; do NOT
-  redeclare or stringify it elsewhere. Re-validation on `Decode` goes
-  through `identity.ParseServerID`; the package contract is "decode
-  returns a `Payload` whose `ServerID` field is parse-validated."
-- `internal/identity/server_id_test.go` (whole file, 95 lines) — table-
-  driven test patterns to mirror (`tt := tt`, `t.Parallel()`, sub-tests
-  via `t.Run(tt.name, …)`, `errors.Is` for sentinel checks).
-- `docs/protocol-mobile.md:55-62` — wire contract for the three fields:
-  - `server-id` — UUIDv4 canonical hex form, the relay's only routing key.
-  - `device-token` — 256-bit random, hex-encoded; **plaintext** at this
-    transport layer (the binary stores `sha256(token)` separately; #208
-    handles hashing).
-  - relay URL — domain-of-trust origin from the phone's POV.
-- `docs/protocol-mobile.md:705-714` — appendix "first pairing" example:
-  the unencoded JSON shape is `{"server":"…","relay":"…","token":"…"}`.
-  Field names and order pinned by this example.
-- `docs/protocol-mobile.md:567-609` — security framing: "paste-fallback is
-  one-time-only," "MUST never display the device-token in plaintext after
-  initial pairing," "per-device tokens leak via QR screenshots auto-uploaded
-  to cloud backup." Read before writing any `Decode` error path — error
-  messages must not echo decoded contents.
-- `CODING-STYLE.md` § "Error Handling" (`fmt.Errorf("X: %w", err)` shape,
-  sentinel-via-`errors.Is`), § "Testing" (table-driven, stdlib `testing`
-  only, `t.Parallel()`).
-- The ticket body itself (#211) — six AC bullets, each maps directly
-  to one or two test cases in `payload_test.go`.
-
-That's the read budget. The whole package is ~40 production lines.
-
 ## Context
 
 Phase 3 (mobile + relay) needs `pyry pair` to print a QR code and a paste-

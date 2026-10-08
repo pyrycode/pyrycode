@@ -11,19 +11,6 @@ This slice makes the queue live: construct one `msgqueue.Queue` in the daemon bo
 
 The single non-obvious design decision: **`sessionRouter.Route` has a side effect** — it stamps the `activeConversation` cursor (`r.active.set`), the #679/#687 follow-active signal that drives the structured turn stream. The synchronous handler called `Route` exactly once per send (at delivery time, which was also send time). With a deferred drain, naively re-resolving via `Route` inside the drain would re-stamp the cursor at *drain* time — moving the follow-active cursor based on drain order rather than phone-interaction order. The design factors a side-effect-free `resolve` core out of `Route` so the drain delivers without touching the cursor.
 
-## Files to read first
-
-- `internal/msgqueue/queue.go:65-191` — `DeliverFunc` contract (must block while busy, return nil only on commit), `Config`, `New` (errors if `Deliver` nil), `Enqueue` (non-blocking, returns stable id). The engine this slice wires.
-- `internal/msgqueue/queue.go:269-363` — `Run` (binds lifecycle ctx, spawns drains for pre-existing backlog, joins on ctx.Done) and `drain` (peek-deliver-advance, retry-on-error after `retry`, leave-head-on-ctx-cancel). The behaviour `newInboundDeliver` must satisfy and the shutdown semantics `Run` already owns.
-- `internal/relay/handlers/send_message.go` (whole, 203 lines) — the handler to swap. Preserve: the malformed/not_found/binary_offline error mapping, the `payload.Text`-never-logged discipline, the `SessionRouter`/`TurnWriter` interfaces. Remove: `Activate`/`WriteUserTurn` calls, both timeout constants, the delivery-result switch, the `context.Canceled` propagation arms (no blocking call remains).
-- `cmd/pyry/main.go:843-985` — `sessionRouter.Route` (the `r.active.set` side effect to factor out), `errNoBoundSession`, `boundSession` (Activate→`Pool.Activate`, WriteUserTurn→session), `activeConversation` (`set`/`watch`/`CurrentConversation`). Read this to see *why* the drain must not stamp.
-- `cmd/pyry/main.go:702-806` — `runSupervisor` lifecycle: the daemon `ctx`, the `ctrlDone` goroutine-and-join pattern (the model for running `Queue.Run`), `pool.Run(ctx)` (the blocking main loop), and the `startRelay` call site (line 770) where `router` is built inline and must become a named var.
-- `cmd/pyry/relay.go:89-216` (`startRelay`, v1 leg, registration at :168) and `:271-333` (`startRelayV2`, v2 leg, registration at :312) — **both** `handlers.SendMessage(router, logger)` sites. Both thread the new queue param.
-- `internal/relay/handlers/send_message_test.go:18-153` — `stubTurnWriter`, `stubSessionRouter`, `routeTo`, `newSendMsgConn`, `sendMsgRequest`, `assertSendMsgEnvelopeShape`. Reuse these; add a stub `Enqueuer`.
-- `cmd/pyry/session_router_test.go:11-40` — `newRouterTestPool` + `TestSessionRouter_Route` harness (real pool + convReg). Extend with the `resolve`-vs-`Route` active-stamp case.
-- `internal/msgqueue/queue_test.go:13-55` — `fakeDeliver`'s per-conversation gate + `entered`/`completed` channels. Mirror this sleepless busy/idle gate pattern in the cmd/pyry wiring test.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md` — line 123 (`send_message` wire-unchanged, queued when busy) and line 130 (§Backpressure bounds the **outbound** push queue, **not** this inbound one — the security gap this spec surfaces).
-
 ## Design
 
 ### Package structure

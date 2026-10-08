@@ -1,21 +1,5 @@
 # 243 — `conv`: wire registry + sweep loop into daemon
 
-## Files to read first
-
-- `cmd/pyry/main.go:88-97` — `resolveRegistryPath(name)`. Returns `~/.pyry/<sanitized-name>/sessions.json` with the home-fallback behaviour. The new conversations resolver mirrors this exactly; do not invent a second path-resolution scheme.
-- `cmd/pyry/main.go:332-432` — `runSupervisor`. Lines 347-349 are where path resolution lives today (socket / sessions registry / claude sessions dir). Lines 383-396 are the `sessions.Config` literal that gains two new fields. Lines 411-432 are the `Pool.Run` invocation + shutdown — no changes here.
-- `internal/sessions/pool.go:51-93` — `Config`. `RegistryPath` (line 56-59) and `ClaudeSessionsDir` (line 61-66) are the precedent for "optional plumbing field with a doc-comment naming the cmd/pyry resolver." The two new fields slot in alongside, same shape.
-- `internal/sessions/pool.go:122-167` — `Pool` struct. `registryPath` (line 129) and `claudeSessionsDir` (line 130) are the unexported mirrors. Two new unexported fields land here.
-- `internal/sessions/pool.go:249-362` — `New`. The `cfg.RegistryPath != ""` and `cfg.ClaudeSessionsDir` plumbing on lines 340-341 is the assignment shape. New fields copy in identically.
-- `internal/sessions/pool.go:707-760` — `(*Pool).Run`. Lines 735-757 are the rotation watcher's conditional registration on `dir != ""`: build the watcher's config, log+skip on construction error, otherwise `g.Go(func() error { return w.Run(gctx) })`. The sweep goroutine mirrors this shape but is even simpler — no construction step, just one `g.Go`.
-- `internal/sessions/rotation/watcher.go:117-140` — `Watcher.Run` for reference: the canonical "long-running goroutine inside Pool.Run's errgroup" shape this ticket adds a sibling for.
-- `internal/conversations/sweep_loop.go` — `RunSweepLoop(ctx, reg, path, interval, log) error` and `SweepInterval = time.Hour`. The function this ticket calls. Pre-conditions: `reg` non-nil, `path` non-empty, `log` non-nil, `interval > 0`. Returns `nil` on ctx cancellation; Save errors are logged + swallowed.
-- `internal/conversations/registry.go:39-62` — `Load(path)`. Missing file returns `&Registry{}, nil` (benign cold start). Zero-byte file returns `&Registry{}, nil`. Malformed JSON returns `nil, error` — wrapped as `registry: parse <path>: %w`. The daemon-side error wrap (`loading conversations: %w`) layers on top.
-- `internal/sessions/pool_test.go:25-79` — `helperPool` and `helperPoolWithSleepArgs`. The existing test-Pool builders. The new integration test reuses `helperPoolWithSleepArgs`'s `/bin/sleep 3600` shape so `Pool.Run` can actually exit cleanly on ctx cancel without needing a real claude.
-- `docs/specs/architecture/242-conv-sweep-loop.md` — sibling spec just merged. Pins what `RunSweepLoop` does, what it does NOT do (no clock injection, no internal errgroup, no final on-shutdown sweep), and the call-site sketch (§ "Call site sketch (sibling #243, NOT this ticket)") this spec implements.
-- `docs/knowledge/features/conversations-registry.md:46-60` — the registry path is `~/.pyry/<sanitized-name>/conversations.json`. "Resolving … is the consumer's job" — sibling-of-sessions discipline pinned by the feature doc.
-- `docs/knowledge/features/conversations-auto-archive.md:239-241` — the "out of scope of #242, into scope of #243" boundary. Pins what this ticket owns and confirms the design constraints carried forward from #242.
-
 ## Context
 
 Phase 3 auto-archive's last slice. The pure pieces have all landed: predicate (#219), `Sweep` + `Registry.Delete` (#237), `RunSweepLoop` + `SweepInterval` (#242). The daemon never loads `conversations.json` and the sweep loop has no caller.

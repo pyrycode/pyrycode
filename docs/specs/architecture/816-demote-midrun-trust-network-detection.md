@@ -1,40 +1,5 @@
 # #816 — agent-run: demote mid-run trust/network detection from fatal to logged
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:518-546` — the `for ev := range ch` event
-  loop. The two cases to change are `EventKindPtyModalShown`+`ModalClassTrustFolder`
-  (521-526) and `EventKindPtyNetworkFailureShown` (532-535). The `EventKindPtyMcpFailureShown`
-  case (527-531) is the **template** — `Warn` + fall-through, no return.
-- `internal/agentrun/ptyrunner/runner.go:396-406` — the startup/idle `ready.TrustModal`
-  / `ready.NetworkFailure` aborts. **These stay fatal — do not touch.**
-- `internal/agentrun/ptyrunner/runner.go:200-221` — `Run`'s return-value contract doc.
-  The bullet at 203-207 currently claims the sentinels also surface "on a mid-run
-  EventKindPty{…} transition." That clause is now stale and must be corrected.
-- `internal/agentrun/streamjson/emitter.go:302-323` — `SetTerminalDetail` semantics:
-  idempotent (first non-empty wins), and **only surfaced when the resolved
-  ExitReason is `ExitReasonError`**. A clean completion or a max_turns stop ignores
-  it. This is why keeping the `SetTerminalDetail` calls on the demoted path is safe.
-- `internal/agentrun/ptyrunner/watchdog.go:30-38` — the watchdog also calls
-  `SetTerminalDetail("watchdog: …")`. Because the detail is first-wins, a mid-run
-  trust/network detection that fired earlier keeps its `trust_modal_detected` /
-  `network_failure_detected` label on a subsequent wedge trailer.
-- `internal/agentrun/ptyrunner/runner_test.go:275-330` — `TestRun_MidRun_ModalAndBannerDetection`,
-  the only test to flip (currently asserts the two sentinels return).
-- `internal/agentrun/ptyrunner/runner_test.go:585-593` — the short-watchdog-opts
-  pattern (`WatchdogTick` + `WatchdogTrackerOpts`) to mirror in the flipped test.
-- `internal/agentrun/ptyrunner/runner_test.go:211-273, 876-909` — the startup tests
-  (`TestRun_TrustModalDetected`, `TestRun_NetworkFailureDetected`,
-  `TestRun_McpFailureNonFatal`, `TestRun_RecordOn_ErrTagged`). They use the `"trust"` /
-  `"network_failure"` (startup) fixtures — **leave green, do not change.**
-- `internal/agentrun/ptyrunner/helper_test.go:63-74, 208-252` — the `mid_trust` /
-  `mid_network_failure` fixtures. They write the anchor after the prompt lands and
-  then wedge (no end-of-turn). **No fixture change needed** — this is exactly the
-  shape the demoted path exercises.
-- Prior art: `docs/specs/architecture/513-ptyrunner-events-unified-stream.md` — the
-  spec that *introduced* mid-run modal/banner monitoring. This ticket reverses only
-  its fatal-on-mid-run policy, not the unified-stream mechanism.
-
 ## Context
 
 `ptyrunner.Run`'s event loop treats a **mid-run** trust-folder modal or network-failure

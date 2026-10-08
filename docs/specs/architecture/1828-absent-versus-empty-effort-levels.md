@@ -6,33 +6,6 @@ reading, and the daemon spells that reading `nil`.
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every entry is a symbol, not a line — resolve with
-`codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/turnevent/event.go` | `ModelOption` (the type doc's omissions paragraph) | The `supportsEffort` clause that says "completely once #1828 settles what an empty list means" — one of the eight deferral sites, and § Decision ¶6 closes it |
-| `internal/turnevent/event.go` | `ModelOption.EffortLevels` (field doc) | The open paragraph this slice REPLACES — it is the third of six — plus the **five that stay**: the purpose/verbatim rule, the per-element cap and unbounded count (#1821), the cut-level warning, the `validEffort` separation, and the untrusted-text paragraph. Exactly one paragraph is replaced |
-| `internal/turnevent/event.go` | `ModelOption.SupportsAutoMode` (field doc) | The collapse argument and its closing RE-DERIVE instruction — the forward reference § Decision must resolve, and the argument it must NOT cite as precedent |
-| `internal/turnevent/event.go` | `ModelOption.TruncatedFields` (field doc) | "nil when nothing was cut, never an empty non-nil slice; `BackgroundTask.TruncatedFields` is the convention's single source" — the house spelling that decides the collapse's DIRECTION |
-| `internal/streamsup/parser.go` | `modelOptionLine` (type doc) | The JSON-`null` carve-out paragraph — deferral site; and the `json` tags, which do not change |
-| `internal/streamsup/parser.go` | `emitModelList` (function doc + body) | The doc paragraph asserting no normalisation happens below (deferral site), and rung 3, which is untouched |
-| `internal/streamsup/parser.go` | `boundEach` (the closure inside `emitModelList`) | Its zero-length early return — the ONE production line this slice changes — and its three-bullet doc, whose first bullet becomes false |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListEffortLevelsReadClaudesKey` | The five rows, the `wantWire` guard, and the doc's "do NOT go looking for a mutant" paragraph — AC 2 amends it |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseDecodesTheCapturedModels` | The `else if len(got.EffortLevels) != 0` arm and the comment above it explaining why it is weak — AC 4 tightens both |
-| `internal/streamsup/parser_test.go` | `fixtureEntryRaw`, `modelEntryFixture`, `modelEntryWithFixture` | The fixture helpers the rows already use. AC 3 asks that the `wantWire` guard SURVIVE, not that it grow |
-| `internal/protocol/interactive.go` | `ModelOption.MarshalJSON` | The wire's already-shipped nil→`[]` normalisation and its stated reason. **Read it; do not touch it** (#1822 owns its `#1690` deferral) |
-| `docs/knowledge/features/streamsup-package.md` | § the `SupportsAutoMode` collapse paragraph and the two testing-lesson paragraphs after it | #1827's measured lesson that sole-redness claims in test docs are usually wrong until run. **Read-only — the documentation phase owns this file** |
-
-Not in the reading list on purpose: `internal/e2e/internal/fakeclaude`'s `initializeModels` and
-`internal/e2e/realclaude`'s `initControlSummarize`. Both read claude's **wire bytes** through literal
-key strings, never `turnevent.ModelOption.EffortLevels`, so this slice cannot break them and must not
-edit them. Their `#1690` deferral comments belong to #1822.
-
----
-
 ## Context
 
 `turnevent.ModelOption.EffortLevels` shipped in #1827 with its **reading deliberately left open**.

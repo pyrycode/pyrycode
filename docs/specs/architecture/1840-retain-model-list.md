@@ -1,27 +1,5 @@
 # #1840 — Retain the decoded model list for the session
 
-## Files to read first
-
-Turn-1 data load. Resolve every symbol with `codegraph_search` / `codegraph_node`; nothing here is cited by line.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/streamsup_runner.go` | `newStreamRunnerFactory` | **The one production `streamsup.NewParser` call site tree-wide.** This is the only line that changes in the event path. Note the ordering: parser first, then `streamsup.New`, then the adapter. |
-| `cmd/pyry/streamsup_runner.go` | `streamRunner`, `Interrupt`, `RestartFresh`, `BeginRotation` | The value-typed adapter, and the three docs that state the **type-assertion vs interface-widening rule** this spec follows. Read all three doc comments — they carry the argument you must not re-litigate. |
-| `cmd/pyry/stream_turn_drain.go` | `sinkFor`, `streamTurnSink`, `droppableCap` | The droppable-class send this design must sit **upstream** of. Read the whole `sinkFor` doc: it says which class drops and why, and it is why retention cannot live downstream. |
-| `cmd/pyry/stream_turn_drain.go` | `turnMarkFor`, `startStreamTurnDrainV2`, `clearForSession` | `turnMarkFor`'s default arm answers `turnMarkNone` for `ModelList` (droppable). `clearForSession` is the repo's **nil-receiver no-op** precedent this spec reuses. |
-| `internal/turnevent/event.go` | `ModelList`, `ModelOption` | Exact field set and, on `Models`, the "Never empty" producer contract that AC 3 turns on. `ModelOption` carries two `[]string` fields — both matter to the clone. |
-| `internal/streamsup/parser.go` | `emitModelList`, `NewParser` | Where the event is minted (fresh `[]ModelOption` per emit, never retained by the parser) and the `NewParser(sink, logger) *Parser` signature the new helper returns. |
-| `internal/streamsup/runner.go` | `Config.RequestInitializeOnSpawn`, `spawnAndWait` | #1839's per-spawn ask — the cardinality that makes "a second report" (AC 2) a **respawn**, not a per-turn event. |
-| `internal/sessions/session.go` | `Session.Runner` | `sup` is assigned once at `Session` construction and never reassigned. That single fact is what makes runner-held retention session-lifetime retention. |
-| `cmd/pyry/stream_turn_drain_test.go` | `streamsup.NewParser(sink.sinkFor(...), …)` in the drain test | The existing in-repo pattern for driving a real stream-json line through a real parser into a real `streamTurnSink`. Copy this shape for the wiring test; do not invent a new harness. |
-| `cmd/pyry/streamsup_runner_test.go` | `TestStreamRunnerFactory_Construct` | The factory test to extend. It already asserts on the returned `streamRunner`'s fields. |
-| `internal/streamsup/parser_test.go` | `modelListLineFixture` | **Shape authority** for the `control_response` initialize line. Unexported and in another package, so copy the JSON shape, not the helper. |
-| `docs/knowledge/features/streamsup-package.md` | § "Decoding the `initialize` ack into `turnevent.ModelList` (#1811)" and § "Firing the ask at spawn time (#1839)" | The three bounded dimensions, and the paragraph stating `ModelList` is an Event **rather than parser-held session state**. Read it before you are tempted to put the retention in `Parser`. |
-| `docs/knowledge/features/sessions-package.md` | § session lifecycle | Confirms idle eviction stops the child, not the `Session`. Relevant to "does the retained value survive an eviction". |
-
----
-
 ## Context
 
 #1839 made every spawned child answer one `initialize` control request. `emitModelList` already decodes that reply's `models` array into a `turnevent.ModelList` — the menu **this subscription can actually run** — bounded in all three dimensions. Nothing keeps it: `turnbridge.MapEvent`'s `default` drops the variant, so the list exists for a microsecond and is gone.

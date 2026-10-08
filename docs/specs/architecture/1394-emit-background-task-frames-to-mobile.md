@@ -19,45 +19,6 @@ Sizing anchor is the direct predecessor rather than the ticket's cited analogue.
 
 ---
 
-## Files to read first
-
-Turn-1 reading list. Line ranges are at `ef7ba1f`; if a range has drifted, the symbol name is authoritative.
-
-**The two insertion sites**
-
-- `internal/turnbridge/outbound.go:62-133` — `MapEvent`'s switch. Insertion site #1. Read the whole function; the contract is in the doc comment at `:44-61` (pure, no I/O, no clock, no sealing, consumer owns the envelope).
-- `internal/turnbridge/outbound.go:93-128` — the `Stall` / `ApiRetry` / `Compacting` / `Unrecognized` arms. **This is the shape to mirror**: conversation identity only, `tc.TurnID` and `tc.Seq` deliberately ignored, and each arm's comment says *why* it is not turn-scoped. The `Unrecognized` arm at `:115-128` is the closest template — it also carries a producer-truncated string and re-caps nothing.
-- `cmd/pyry/interactive_turn_v2.go:228-262` — the `Stall`, `ApiRetry, Compacting` and `Unrecognized` handler arms, ending at the `default:` at `:257`. Insertion site #2. The `ApiRetry, Compacting` arm at `:229-240` is the exact two-line body (`flushDelta` then `emitMapped`) the new arm takes.
-- `cmd/pyry/interactive_turn_v2.go:416-443` — `eventKind`. Insertion site #3. Read the `Unrecognized` arm's comment at `:437-440`: it states the rule AC 4 enforces (variant name only, never the event's claude-derived field).
-
-**Contracts the mapping must satisfy exactly**
-
-- `internal/protocol/interactive.go:149-305` — the three payload structs, `BackgroundTask` row, and `BackgroundTaskRosterPayload.MarshalJSON`. Field names, JSON tags, and the nil→`[]` normalisation. `:248-280` (the marshaller's doc comment) explains why AC 3's assertion must be on produced bytes.
-- `internal/turnevent/event.go:77-232` and `:234-289` — `BackgroundTaskStarted` (`:106`), `BackgroundTaskUpdated` (`:161`), `BackgroundTask` (`:206`), `BackgroundTaskRoster` (`:269`). Source fields for the mapping. Note `BackgroundTaskRoster` has **no** `TruncatedFields`; `DroppedTasks` is its only truncation report.
-
-**Test templates to reuse — do not invent new harness**
-
-- `cmd/pyry/interactive_turn_v2_test.go:1238-1355` — the `Unrecognized` trio: `…FansOutToInteractiveOnly`, `…NoLifecycleMutation`, `…FlushesPendingDeltaFirst`. The closest three-test template for AC 1 + AC 2.
-- `cmd/pyry/interactive_turn_v2_test.go:705-739` — `…StatusPeersNoLifecycleMutation`: how two peers share one lifecycle assertion via `pushTypes`. Reuse this shape for all three background events in one test rather than three.
-- `cmd/pyry/interactive_turn_v2_test.go:431-481` — `…NoAppOutputLogLeak`, the AC 4 template. Note the `pushErr: map[string]error{"a": relay.ErrConnNotFound}` trick that forces the log-heavy push-error branch, and the `if logs == ""` guard that stops the test passing vacuously.
-- `cmd/pyry/interactive_turn_v2_test.go:95` — `pushTypes` helper; also `stubCursor`, `fakeInteractiveBcast`, `discardLogger`, `testConvID` in the same file's preamble.
-- `internal/turnbridge/outbound_test.go:14-253` — `TestMapEventOutbound`'s table (`name` / `ev` / `tc` / `wantTyp` / `wantPayload` / `wantOK`). Add rows here; it compares payloads by value.
-
-**Doc half**
-
-- `docs/protocol-mobile.md:516-521` — § *Interactive events (v2, capability-gated)* opener. **Count literal #1 is on line 518.**
-- `docs/protocol-mobile.md:576-612` — `api_retry` + `compacting`. The fidelity bar: field table, then prose that gives the frame its meaning and states what it is *not*.
-- `docs/protocol-mobile.md:613-687` — `unrecognized_message`. The longest peer; shows how a security caveat about claude-derived text is written into a frame's prose.
-- `docs/protocol-mobile.md:688-690` — `session_transition`. **Count literal #2 is on line 690**, and the sentence is also the insertion boundary (see § *The doc half* below).
-
-**Evidence for the two "do not edit" instructions**
-
-- `cmd/pyry/stream_turn_busy.go:160-172` — `observe`'s `default:` arm, which `return`s before `resolve`/`setBusy`. Confirms the three variants already open and close no turn there by construction. **Verified at HEAD.**
-- `internal/protocol/codes.go:256-258` and `cmd/pyry/relay_guard_test.go:139-141` — the three types are registered and already classed `"push"`. No edit owed.
-- `internal/streamsup/parser.go:47,66,106,155,177` — `maxTaskFieldID` 256, `maxTaskDescription` 4096, `maxTaskPatch` 4096, `maxTaskRosterEntries` 8, `maxTaskRosterDescription` 512. Read only to confirm the caps exist upstream; **this ticket adds no truncation and owes no cap test.**
-
----
-
 ## Context
 
 `internal/streamsup/parser.go` already translates claude's `system/task_started`, `system/task_updated` and `system/background_tasks_changed` lines into `turnevent.BackgroundTaskStarted`, `BackgroundTaskUpdated` and `BackgroundTaskRoster` (#1380, #1382, #1381). #1393 gave all three their v2 protocol shape — payload structs, type constants, testdata fixtures, compat registration.

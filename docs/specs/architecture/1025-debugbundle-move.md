@@ -6,20 +6,6 @@
 
 The 5th and final `v2session.go` carve-out from #964, after #1021 (handshake), #1022 (rekey), #1023 (modal+queue), #1024 (settings) landed. The file is 2086 lines on `main`; this ticket removes the ~160-line debug-bundle block.
 
-## Files to read first
-
-- `internal/relay/v2session.go:1273-1432` — **the exact block to move.** Four contiguous declarations, no interleaved non-debug-bundle code:
-  - `1273-1279` — `const msgDebugBundleUnavailable` (+ doc comment)
-  - `1281-1355` — `func (m *V2SessionManager) handleDebugBundleRequest(...)` (+ doc comment)
-  - `1357-1389` — `func (m *V2SessionManager) debugBundleReplyError(...)` (+ doc comment)
-  - `1391-1432` — `func (m *V2SessionManager) bundleInFlight(...)` (+ doc comment)
-- `internal/relay/v2session.go:1-21` — import block. Confirms `context`, `encoding/json`, `time`, `internal/protocol` are all imported; the new file needs exactly this subset (see § Imports).
-- `internal/relay/v2session.go:1041` — `case protocol.TypeRequestDebugBundle:` in `dispatchAppFrame`. **Stays put** — it is the caller (`m.handleDebugBundleRequest(...)`); a same-package method move is transparent to it.
-- `internal/relay/v2session.go:593-607` — `DebugBundler func() (archive []byte, err error)` field on the config struct. **Stays put** — same-package seam.
-- `internal/relay/v2bundlestream.go` — home of `StreamBundle` (called by `handleDebugBundleRequest`). **Not touched** by this ticket; already a separate file.
-- `internal/relay/v2session_debugbundle_test.go` — the debug-bundle test file. **Already exists, same package, needs no edit** — the move is transparent to it (AC #3).
-- `internal/relay/v2session_rekey.go` / `v2session_modal.go` — sibling carve-outs from prior #964 slices. Mirror their file header, package clause, and import-grouping style for the new file so it reads as a native member of the package.
-
 ## Context
 
 `v2session.go` was the largest readability liability in the 2026-07-15 full-repo review. The #964 program slices its cohesive handler groups into `v2session_<concern>.go` files within the same `package relay`, each a pure move: no behavior change, no API change, no call-site change. This ticket carves out `request_debug_bundle` handling — the request handler, its deterministic error-reply helper, its per-conn in-flight gate, and the shared error-message constant.

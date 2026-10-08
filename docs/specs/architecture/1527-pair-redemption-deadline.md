@@ -2,29 +2,6 @@
 
 **Size:** XS · **Ticket:** [#1527](https://github.com/pyrycode/pyrycode/issues/1527) · Split from #1509 · Followed by #1528 (record first redemption), #1529 (enforce)
 
-## Files to read first
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/devices/device.go` | `Device` | The struct the field joins; the existing optional-field doc-comment style (`Platform`, `PushToken`, `AllowRemotePermissions`) |
-| `internal/devices/device.go` | package doc comment | The token-secrecy contract this slice must not weaken |
-| `internal/devices/registry.go` | `readDevicesFile`, `Load`, `Save` | Plain `json.Unmarshal` (no `DisallowUnknownFields`) + the sort-then-encode write path — why the field is bidirectionally tolerated |
-| `internal/devices/registry.go` | `reconcileDevices` | Whole-struct substitution keyed on `TokenHash` — why no reconcile change is needed here, and why #1528 will have to revisit it |
-| `internal/devices/auth.go` | `Validate` | The predicate that must stay a pure hash lookup this slice |
-| `cmd/pyry/pair.go` | `runPairDefault` | The sole non-test `devices.Device` construction site; the `registry.Add` → `registry.Save` → `pair.Render` order |
-| `cmd/pyry/pair.go` | `renderPairList` | The four-column formatter — proves the new field surfaces in no column |
-| `cmd/pyry/pair.go` | `runPairRevoke` | Load → `Remove` → `Save`; survivors are re-encoded from their loaded structs |
-| `internal/relay/v2session_handshake.go` | the `Devices.Validate` call in `handleNoiseInit` | The single handshake read of the registry; nothing here may consult the new field |
-| `internal/devices/device_test.go` | `TestDevice_AllowRemotePermissionsRoundTrip`, `TestDevice_OmitsAllowRemotePermissionsWhenFalse`, `TestDevice_DecodeLegacyDiskShape` | The three-shape JSON test precedent to mirror, and the legacy fixture JSON to reuse verbatim |
-| `internal/devices/registry_test.go` | `TestRegistry_AllowRemotePermissionsPersists`, `mustParseTime` | The `Save`→`Load` round-trip + hand-authored pre-field envelope pattern |
-| `internal/devices/auth_test.go` | `TestRegistry_Validate_Hit` | The registry-fixture shape for a `Validate` hit |
-| `cmd/pyry/pair_test.go` | `TestRunPairDefault_AllowRemotePermissionsPersists`, `captureStdout` | Isolated-`HOME` end-to-end mint harness |
-| `cmd/pyry/pair_test.go` | `TestRenderPairList_TwoDevices`, `TestRunPairRevoke_RemovesEntry` | The formatter golden and the revoke harness |
-| `internal/relay/v2session_test.go` | `v2PairedRegistry`, `startManager`, `v2TestToken`, `v2TestServerID`, `genV2Keypair`, `silentLogger`, `v2Recorder` | The manager-wiring helpers the new relay test composes |
-| `internal/relay/v2session_modal_test.go` | `openModalConn` | Drives a conn through the real v2 handshake to `open`; the accept-path driver for the inertness pin |
-| `docs/knowledge/features/devices-package.md` | § "Surface" | The prose contract for `Device`'s JSON tags — states the optional-fields-keep-zero-off-disk rule this field follows |
-| `docs/PROJECT-MEMORY.md` | § "Project-level conventions" | `time.Time` round-trip discipline — compare with `time.Time.Equal`, never `==`/`reflect.DeepEqual` |
-
 ## Context
 
 `pyry pair` mints a 256-bit token, persists its SHA-256 hash, and renders the QR. `Validate` is a pure hash lookup with no expiry and no first-use check, so a token that was displayed but never scanned — left in a terminal scrollback, screenshotted, shoulder-surfed off a screen — authenticates indefinitely. Bounding that window needs a durable "this record has not been redeemed yet, and stops being acceptable at T" marker on disk.

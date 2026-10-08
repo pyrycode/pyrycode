@@ -2,25 +2,6 @@
 
 **Size:** XS · **Label:** `security-sensitive` · Split from #1577
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_search` / `codegraph_node`.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/sessions/pool.go` | `DefaultSettings` | The lock discipline and docstring shape to copy; the return convention the new method deliberately **diverges** from. Must end this ticket byte-identical. |
-| `internal/sessions/pool.go` | `UpdateSettings` | The `p.sessions[id]` lookup + bare `ErrSessionNotFound` return that is the shape to mirror, and the absence of any empty-id fallback. Read only its head — the live-apply half is irrelevant here. |
-| `internal/sessions/pool.go` | `Lookup` | The **opposite** empty-id convention (`""` → bootstrap). Read its docstring so you know precisely what you are choosing not to do. |
-| `internal/sessions/pool.go` | `mintSettings` | Its docstring already records the `RWMutex`-non-reentrancy hazard AC-4 restates. This is the in-package precedent for "call me off `p.mu`". |
-| `internal/sessions/session.go` | `SessionSettings`, `SettingsUpdate` | The value type being returned, and the pointer-per-field presence contract on the write side (load-bearing for the security finding below). |
-| `internal/sessions/session.go` | the `settings` field on `Session` | Its comment states the guard discipline verbatim: `Pool.mu`, **not** `Session.lcMu`. |
-| `internal/sessions/pool_update_settings_test.go` | `helperPoolWithSettings`, `TestPool_UpdateSettings_UnknownID` | The warm-start fixture to reuse, and the registry-bytes-unchanged idiom the no-mutation row copies. |
-| `internal/sessions/pool_settings_test.go` | `spawnMintedWithSettings` | The build-then-register-under-`p.mu` idiom the second-session fixture copies, **minus** its `supervise`/`Activate` tail. |
-| `internal/sessions/pool_default_settings_test.go` | `TestPool_DefaultSettings_KnownSettings`, `TestPool_DefaultSettings_NoBootstrap` | Stay green **unmodified** (AC-5). Also the docstring style for the new rows. |
-| `internal/sessions/runner_test.go` | `testRunnerFactory`, `lifecycleRunner` | The runner double every pool test uses; it already implements `SetSpawnArgs` / `Restart` / `WriteUserTurn`, so a concurrent `UpdateSettings` is safe on a non-`Run` pool. |
-| `docs/knowledge/features/sessions-package.md` | § `Pool.DefaultSettings` (#847) | The evergreen writeup this ticket sits beside. Read-only for you; documentation phase extends it. |
-| `docs/PROJECT-MEMORY.md` | § project-level conventions | "Refusal-to-wire-code mapping is the consumer's job" — the convention that decides error-vs-bool below. |
-
 ## Context
 
 `internal/sessions.Pool` is asymmetric about settings. The write side is per-session

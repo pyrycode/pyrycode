@@ -3,23 +3,6 @@
 **Size:** XS. Three comment sites, two files, both `*_test.go`. Zero production files, zero
 statements, zero new symbols. Expected diff: **11 lines added, 11 removed.**
 
-## Files to read first
-
-Symbol anchors, not line numbers — every one resolves with `codegraph_search` or a `git grep`
-on the name. Line spans appear once each in § Design as a measurement snapshot at `c1b1ce1`,
-because AC6 is itself a line-arithmetic criterion; they are not addresses to rely on.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/teardown_liveness_test.go` | file-header doc comment, § *"The reaper line, and the two ways a matcher over it inverts"* — the paragraph beginning `The first is the slog.NewTextHandler` | **Site 1.** The 9-line paragraph. Note its first line is already correct and must not be touched. |
-| same file | `TestTdnClassifyReapLog` → the table row named `slog.Default rendering, one pgid, held present` | **Site 2.** Its two-line leading comment. The row's `name:` field is a string literal and is off-limits (AC5). |
-| `internal/e2e/realclaude/teardown_reap_capture_test.go` | `tdnCaptureReap` doc comment — the paragraph beginning `Why log.SetOutput captures it:` | **Site 3.** Only its first two lines move. |
-| `cmd/pyry/agent_run.go` | `runAgentRunStreamRunner` | The `streamrunner.Config` composite literal: fields are `ClaudeBin`, `WorkDir`, `Args`, `PromptBytes`, `Stdout`, `Stderr` — **no `Logger`**. This is the fact the new wording asserts. |
-| `internal/agentrun/streamrunner/runner.go` | `Run` | `logger := cfg.Logger` / `if logger == nil { logger = slog.Default() }`, and that the same `logger` is handed to `reapDescendantGroupsFn(cmd.Process.Pid, logger)`. Also the `Config.Logger` field's own doc line, *"Optional; nil falls back to slog.Default()."* |
-| `internal/agentrun/streamrunner/reap.go` | `reapDescendantGroupsFn` | Bound to `agentrun.ReapDescendantGroups` — the production wiring that closes the chain. |
-| `cmd/pyry/agent_run_test.go` | the comment naming the `ptyRun` / `newSessionID` seams | The in-repo wording model the ticket cites: state history plainly, don't imply a dead seam is live. Note that none of our three sentences need to mention the deleted package at all. |
-| `docs/knowledge/features/pyry-agent-run-command.md` | — | Background on the single surviving agent-run path. Reconciled by #1555 (merged `5a36235`), so it is current as of today; earlier revisions still described the deleted two-path world. |
-
 ## Context
 
 #1348 deleted the PTY `pyry agent-run` entry point. `runAgentRunPty` has no declaration in the

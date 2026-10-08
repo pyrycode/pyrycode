@@ -3,27 +3,6 @@
 **Size:** xs (verified against the six boundaries — see § Sizing)
 **Scope:** wire vocabulary only. One constant, four guard-list edits, one naming pin. No payload struct, no producer, no emit, no handler, no relay wiring, no fixtures, no `docs/protocol-mobile.md`.
 
-## Files to read first
-
-Read these before writing anything. Every entry names the symbol to read and what to take from it.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/protocol/codes.go` | the `TypeModelList` const block | **The doc form to follow, paragraph for paragraph.** It is the same frame class one field-set away and already carries every paragraph this one needs. Read all seven paragraphs before writing any of yours. |
-| `internal/protocol/codes.go` | the `TypeModelAnnounced` const block | The earlier instance of the subject-noun trap, in its own words. `TypeModelList`'s block cites it; read the source rather than the citation. |
-| `internal/protocol/interactive_test.go` | `TestModelListType_IsNotClaudesVocabulary` | The naming-pin shape: negative equality, negative `strings.Contains`, positive exact-equality. **Read its code, not only its doc comment** — the comment describes two claude words and the code checks them in a specific order, and this ticket's word set is twice the size. |
-| `internal/protocol/interactive_test.go` | `TestModelAnnouncedType_IsNotClaudesSubtype` | The same pin one generation earlier, and the sibling whose payload-bytes half this slice does not carry. Its excluded-key list already names `slash_commands`, which is this ticket's third claude word — read why it is excluded there. |
-| `internal/protocol/compat_test.go` | `TestIsKnownAppType` | The `<type>-rejected` row shape and the two-sentence comment the recent siblings carry. AC 2's one edit that no gate forces. |
-| `internal/protocol/compat_test.go` | `v2OnlyTypes` | The second list, and its one-line-comment-per-group style (each group is its own gofmt alignment island). |
-| `internal/protocol/compat_test.go` | `TestTypeConstants_V1V2Partition` | The third list (`all`), plus the two branches that make omissions loud: "missing from both", and the union-size equality against `len(all)`. |
-| `internal/protocol/compat_test.go` | `TestInboundAppTypeSet_CoversAllExportedTypeConstants` | Read it to confirm you must **not** touch it. Its `all` is the v1-only set, pinned by a literal `23`, and it also asserts `len(inboundAppTypeSet) == len(all)`. Adding a v2 constant there turns it red. |
-| `internal/protocol/envelope.go` | `inboundAppTypeSet` | What the set actually is (the v1 application-type set), so the MUST-NOT paragraph is written from the source rather than from the name. |
-| `cmd/pyry/relay_guard_test.go` | `excludedTypes` | Where the `"push"` entry goes and the comment style the last three siblings established. |
-| `cmd/pyry/relay_guard_test.go` | `TestEveryInboundV2TypeHasHandler` | Assertion #1 (an inbound type needs a real dispatch surface) and Assertion #3 (totality — an unclassified constant is red on its own). Together these are the whole "why no request verb" argument. |
-| `cmd/pyry/relay_guard_test.go` | `codesPath`, `appTypeConstNames` | Why `codes.go` is the guard's home convention rather than an incidental location: the guard AST-parses that one file. |
-| `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` | — (data file; read with a JSON tool, not codegraph) | The authority for the four-word table. Confirm for yourself: `commands` under the control response, `slash_commands` and `terminal_slash_commands` on the `system`/`init` stdout line. |
-| `docs/knowledge/features/protocol-package.md` | § "Model-list payload (#1704 shape, …)" | The recorded lesson on this exact pin: the negative checks alone leave every wrong name green, which is why the exact-equality half exists. **Do not source counts from this file** — its § "Envelope types" prose still says 16 and 19 v1 types where the pinned literal is 23. |
-
 ## Context
 
 The desktop's Actions menu offers reset, compact and knowledge capture as slash commands in an ordinary message. Two of the three are built in; knowledge capture is workspace-specific, so a menu that always offers it is wrong in most repositories and sending it produces an "Unknown command" reply in the thread. claude already knows the answer and the daemon already runs the child that has it: a `control_request` with subtype `initialize` on the child's held-open stdin returns a `commands` array alongside the `models` array — one round trip, two payloads, no new credential and no new trust boundary.

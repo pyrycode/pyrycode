@@ -5,35 +5,6 @@
 
 ---
 
-## Files to read first
-
-`codegraph_context` was run first for this ticket and came back off-target: the task string's `Config`
-matched the `Config` symbol in six `internal/agentrun/*` packages and returned nothing from `cmd/pyry`
-or `internal/streamsup`. The index's `Config` is too overloaded for this query to discriminate. The list
-below is therefore from direct reads, each line range re-verified at `3ef6f81`.
-
-| Path | What to extract |
-|---|---|
-| `cmd/pyry/streamsup_runner.go:70-112` | `newStreamRunnerFactory` — the doc block you extend and the closure the one new line joins. `:105` is the sibling install whose `cfg.SessionID` binding the new line must reuse **verbatim**. |
-| `cmd/pyry/stream_turn_drain.go:102-143` | `exitFor` — the producer you install. Its `func()` type, the non-blocking select, and the `Warn` drop diagnostic (`stream_turn.exit_sink_full`) that T2 keys on. `:106` is a correction site; `:110-113` is **not** — see § Comment corrections. |
-| `cmd/pyry/stream_turn_drain.go:196-217` | The drain's exit arm — the consumer end of the lane. Shows the clear runs inline on the drain goroutine, ahead of the active-session gate. |
-| `cmd/pyry/stream_turn_busy.go:27-54` | The `KNOWN GAP` block (`:31`, `:33` correction sites) and the two paragraphs under it that stay untouched (the UNREACHABLE rotation edge, and SECURITY). |
-| `cmd/pyry/stream_turn_busy.go:154-224` | `clearForSession` — its two-caller doc (`:162` correction site), the nil-receiver no-op, and the idempotence AC4's "panics on nothing" leans on. |
-| `cmd/pyry/stream_turn_busy.go:233-252` | `setBusy` — the unchanged-membership early return that makes the overlapping-teardown case a no-op. |
-| `internal/streamsup/runner.go:110-143` | `Config.OnChildExit` — the full contract (`:113` correction site). The clauses that bear on this slice are quoted in § Design. |
-| `internal/streamsup/runner.go:456-489` | `Run`'s loop and the fire site at `:487-489`. This position is the whole of AC2's structural argument. |
-| `internal/streamsup/runner.go:548-604` | `spawnAndWait` — `cmd.Stdout = r.cfg.Stdout` (`:551`) and `cmd.Wait()` (`:596`): why every event of the dead child is already pushed by the fire. |
-| `internal/streamsup/parser.go:137-165` | `consumeLine` — the exact JSON the fake claude must print to open a turn (`"type":"assistant"`), and that a `result` line is the only thing that yields `TurnEnd`. |
-| `internal/streamsup/parser.go:186-207, 228-235` | `emitAssistant` (one event per content block) and `emit` (sink called **synchronously**, no Parser goroutine). |
-| `cmd/pyry/relay.go:726-747` | The `:743-744` correction site in context — what stays true (still a local; still no delivery reader) vs. the one clause that goes false. |
-| `cmd/pyry/stream_turn_busy_test.go:495-631` | `exitLaneDrain` + the three #1209 exit tests — the background-conversation fixture, the assert-`Busy`-before-`WaitIdle` discipline, and the `waitDropKind` barrier vocabulary the new tests reuse. |
-| `cmd/pyry/streamsup_runner_test.go:275-340` | `TestStreamRunnerFactory_Construct` / `_ErrorPropagation` — the established pattern for driving the factory from a test. |
-| `cmd/pyry/acp_test.go:148-166` | `fakeClaudeScript` — the shell-script fake-claude precedent, including why a `TestHelperProcess` re-exec is the wrong shape here (the Go test binary rejects the `--session-id <uuid>` flag). |
-| `cmd/pyry/acp_test.go:27`, `cmd/pyry/interactive_turn_v2_test.go:45` | `testLogger(w io.Writer)` and `discardLogger()`. |
-| `docs/knowledge/codebase/1206.md:59-70` | The `State()`-from-callback NIT that AC4's third clause exists to keep from becoming a MUST FIX. |
-
----
-
 ## Context
 
 The per-conversation turn-busy tracker closes an open turn on two feeds today: `observe` on a parsed

@@ -3,42 +3,6 @@
 **Size:** S (confirmed; see § Sizing). **Labels:** `security-sensitive` → § Security review below is mandatory and ran.
 **Blocked-by:** none open. **Blocks:** #1411 (the healthy-run silence proofs, both tiers).
 
-## Files to read first
-
-Generated from `codegraph_context` on the ticket title + AC paraphrase, then pruned to what the design actually decides, plus the markdown sites codegraph does not parse.
-
-**The two production edit points**
-
-- `internal/turnbridge/outbound.go:189-214` — the `ThinkingProgress` arm and the `default:` that follows it. The new arm goes **between** them. Extract: the arm's exact shape (comment stating the non-turn-scoped posture, then a single composite-literal `return`), and that `default:` returns `"", nil, false`.
-- `internal/turnbridge/outbound.go:129-146` — `turnevent.BackgroundTaskStarted`, the arm the ticket names as the template. Extract: the `TruncatedFields: e.TruncatedFields` pass-through and the sentence explaining why dropping it would present cut text as complete.
-- `internal/turnbridge/outbound.go:159-188` — `BackgroundTaskRoster`. Extract the **one line that does not transfer**: it deliberately leaves nil as nil because `BackgroundTaskRosterPayload.MarshalJSON` normalises nil→`[]`. `RateLimitedPayload` has no such marshaller, so here nil-left-as-nil produces `null` and *that* is the required wire value. Same code, opposite reason.
-- `cmd/pyry/interactive_turn_v2.go:274-295` — the `ThinkingProgress` handler case. The new case goes immediately after it, before `default:`. Extract: the two-line body (`flushDelta` then `emitMapped`) and the comment structure (shared posture, then the reason specific to *this* variant).
-- `cmd/pyry/interactive_turn_v2.go:140-160` — the top of `Handle`: the empty-cursor drop log at `:143-145` (the log line AC3's test rides) and the follow-active-switch block. Extract: the drop log's three attrs — `msg`, `event=interactive_turn.no_cursor`, `kind=eventKind(ev)`. That is the entire claude-visible surface of that log line.
-- `cmd/pyry/interactive_turn_v2.go:501-509` — the `eventKind` arm that **already exists**. Read it, do not rewrite it. This ticket adds its test only.
-
-**The contract this maps onto**
-
-- `internal/protocol/interactive.go:340-397` — `RateLimitedPayload`'s doc comment and struct. Extract: the five fields and their wire tags, the SECURITY paragraph, and `:371-377` — the explicit statement that this type has **no** `MarshalJSON` because nothing-was-cut is an absence that must reach the wire as `null`.
-- `internal/turnevent/event.go:360-440` — `turnevent.RateLimited`. Extract: "It is a REPORT, never a control input", "opens and closes no turn", the `session_id`/`uuid`/`overage*` exclusions, and that both strings are bounded **at construction** by the producer.
-- `internal/streamsup/parser.go:1227-1265` (`emitRateLimit`) and `:279` (`benignRateLimitStatus = "allowed"`). Extract: the three-rung gate. This is the whole reason the mapping does no filtering — the policy decision is already made upstream. Also extract `:1255-1259` — the two `bound()` calls that fix `TruncatedFields`' member names (`"status"`, `"limit_type"`) and their order.
-
-**The test templates**
-
-- `internal/turnbridge/outbound_test.go:14-40` + `:381-399` — `TestMapEventOutbound`'s table struct and its loop. Extract: the comparison is `reflect.DeepEqual(payload, tt.wantPayload)`, which distinguishes a nil `[]string` from an empty one — that is a free second rung under AC1's nil pin.
-- `internal/turnbridge/outbound_test.go:402-470` — `TestMapEventBackgroundTaskRosterEmptyTasksOnTheWire`. **Take the shape, invert the assertion** (§ AC1 below). Extract: the `want`/`notWant` row struct, the marshal-what-`MapEvent`-returned discipline, and the deliberate control row.
-- `cmd/pyry/interactive_turn_v2_test.go:1830-1867` — `…ThinkingProgressNoLifecycleMutation`. The AC2 bare-event template.
-- `cmd/pyry/interactive_turn_v2_test.go:1869-1927` — `…ThinkingProgressMidTurnDoesNotDisturbOpenTurn`. The AC2 open-turn template; note its own comment on why the event driven *past* the frame is the load-bearing part.
-- `cmd/pyry/interactive_turn_v2_test.go:1966-2001` — `…ThinkingProgressEventKindNamesTheVariant`. The AC3 template, **with one construction defect not to copy** (§ AC3, the timestamp hazard — measured).
-- Helpers in the same file: `stubCursor`, `fakeInteractiveBcast`, `discardLogger()`, `pushTypes()`, `turnStateValues()`, `assistantDeltas()`, `testConvID`.
-
-**The doc sweep targets** (markdown — grep/Read, not codegraph)
-
-- `internal/protocol/codes.go:318-321`, `:252-254` (the optional twin)
-- `docs/protocol-mobile.md:448`, `:931-933`, and `:523` / `:979` (the two count literals — **read only, do not touch**)
-- `docs/knowledge/features/protocol-package.md:12`, `:862`, `:1183`, `:1219`, `:1271`
-- `docs/knowledge/features/turnbridge-package.md:330-334` (the `MapEvent` table)
-- `docs/knowledge/codebase/1394.md`, `docs/knowledge/codebase/1405.md` — the two predecessors' full write-ups
-
 ## Context
 
 `internal/streamsup` translates claude's top-level `rate_limit_event` line into `turnevent.RateLimited` (#1404). `internal/protocol` declares `TypeRateLimited` + `RateLimitedPayload`, both fixtures, both drift-detector registrations, and the `docs/protocol-mobile.md` § `rate_limited` section (#1405). Nothing joins them: `turnbridge.MapEvent` falls to `default:` for the variant, so it returns `ok == false` and the report dies at the daemon boundary. A phone sees an unexplained stall.

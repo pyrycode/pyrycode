@@ -4,36 +4,6 @@
 **Phase:** 1.3a (extends Phase 1 multi-session pool with non-PTY attach for SDK consumers)
 **Size:** S
 
-## Files to read first
-
-The developer's turn-1 reading list. Pull from these to avoid re-discovering the
-attach surface from scratch.
-
-- `internal/control/attach_client.go` (full, 233 lines) — the PTY-mode reference
-  implementation. The new function is a deliberate **subset** of `Attach`: same
-  dial-and-handshake prologue, no `term.MakeRaw`, no `startWinsizeWatcher`, no
-  `copyWithEscape`. Mirror its godoc tone for `AttachStdio`'s.
-- `internal/control/server.go:599-687` (`handleAttach`) — confirms server side
-  needs **no changes**. The zero-cols/zero-rows handshake path
-  (`server.go:651`) already skips the resize seam, and `sess.Attach(conn, conn)`
-  treats the conn as opaque `io.ReadWriter`.
-- `internal/control/protocol.go:116-137` (`AttachPayload`) — `Cols`, `Rows`,
-  `SessionID` all carry `omitempty`. Empty-`SessionID` byte-shape is already
-  pinned by `TestAttach_EmptySessionIDOmittedOnWire`; the same omitempty rule
-  carries `Cols=0`/`Rows=0` off the wire.
-- `cmd/pyry/main.go:454-488` (`runAttach`) — the call site to extend.
-  `parseClientFlags` strips only `-pyry-*` flags; attach-specific flags need a
-  fresh `flag.FlagSet` (precedent: `runSessionsNew`).
-- `cmd/pyry/main.go` (grep for `flag.NewFlagSet` in
-  `runSessionsNew`/`runSessionsRm`) — the established sub-flag parsing pattern.
-- `internal/control/attach_test.go:226-285` (`TestServer_AttachHandshakeAndStream`)
-  and `:746-865` (`TestAttach_ClientSendsSessionID`,
-  `TestAttach_EmptySessionIDOmittedOnWire`) — the test pattern to extend
-  (fakeAttachProvider, server-with-fake-resolver, raw-bytes round trip).
-- `internal/control/attach_client.go:74-100` (the synchronous-stop /
-  `defer stopWinsize()` block) — concrete shape of the goroutine-lifecycle
-  guarantees the new function must replicate (no goroutine outlives the call).
-
 ## Context
 
 ### Problem

@@ -4,36 +4,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. This is the turn-1 data load; the design below assumes you have it.
-
-| Path | What to extract |
-|---|---|
-| `internal/streamsup/parser.go:38-115` | `ignoredLineTypes` (the measured drop set + the 2026-07-27 provenance) and `harnessNoOutputNudge` (the block-level suppression, its byte-exact-match rule, and the sentence naming what would promote it to a set with a pin test — this ticket delivers that second observation). |
-| `internal/streamsup/parser.go:245-283` | `consumeLine`: the `default:` arm returns at `:277` for an ignored type **before** `emitUnrecognized`. This is why "zero events emitted" is the correct definition of "dropped". |
-| `internal/streamsup/parser.go:117-136` | The `Parser` doc: **turn-stateless**, no cross-line accumulator except the partial-line buffer. This is the licence to classify each line with a *fresh* parser. Also the single-writer invariant you must respect in the recorder. |
-| `internal/streamsup/parser.go:304-316` | `truncateRaw`: 16 KiB cap **and** `strings.ToValidUTF8(…, "")`. Proof that the `Unrecognized` lane is not a verbatim route. Do not use it. |
-| `internal/streamsup/runner.go:62-152` | `streamsup.Config` — every field you set. `Stdout` (`:87-91`) is the parser's own seam and this probe's tap point. `Env` (`:96-98`) — leave nil so the child inherits the test process env verbatim. |
-| `internal/streamsup/runner.go:216-254` | `New` — required fields (`ClaudeBin`, `WorkDir`, `SessionID`) and the defaults it fills. |
-| `internal/streamsup/runner.go:541-611` | `spawnAndWait`: `cmd.Stdout = r.cfg.Stdout` (`:553`), `cmd.Env` nil ⇒ inherit (`:555-557`), and `cmd.Cancel` reaping descendant groups on ctx cancel (`:566-569`). The reap is why teardown order is load-bearing. |
-| `internal/streamsup/runner.go:630-652` | `buildArgs` — the fixed `--input-format/--output-format/--verbose` prefix, `--session-id` on first spawn, and the doc line "Never emits -p/--print". This *is* the interactive spawn shape AC1 names. |
-| `internal/streamsup/envelope.go:126-149` | `WriteTurn(ctx, w, prompt)` contract: nil `w` ⇒ `ErrNoLiveChild` (the pre-spawn window you must poll through), writes exactly once, never closes. |
-| `cmd/pyry/streamsup_runner.go:113-124` | Production installs `streamsup.NewParser(...)` as `scfg.Stdout`. Your recorder goes in the same slot — that is what makes "upstream of the parser" structural rather than argued. Note the two flags production adds that this probe does not (`withApprovalArgs`). |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:150-172` | `probeLeverVars` (the never-dump-the-environment rule) and `probePrompt`. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:647-716` | `holdProbeFIFO` — call it, do **not** edit the file. Read the "DO NOT RELEASE THE FIFO BEFORE BOTH READS" reasoning in the #1240 header too. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:606-614` | `probeClaudeVersion(claudeBin) string` — reuse verbatim for provenance. |
-| `internal/e2e/realclaude/fifo_reader_liveness_test.go:80-160` | `fifoLiveRead(path) fifoLiveOutcome` and the three verdicts. Takes no `*testing.T`, never fails a test. |
-| `internal/e2e/realclaude/interactive_background_idle_probe_test.go:140-197`, `:326-459` | The idioms to copy: env gate + skip message, non-`t.TempDir()` artifact dir, `t.Cleanup` LIFO ordering, the buffered(1) rendezvous-stamp goroutine, `bgIdlePrompt` (call it — same package), the did-not-fire-is-a-result posture. **`bgIdleRecordTurn` (`:487`) is the wrong recorder for this ticket** — it reads decrypted phone frames, downstream of the parser. |
-| `internal/e2e/realclaude/interactive_background_idle_probe_test.go:824-846` | `bgIdleRedact` — the precedent you must *exceed*, and the reason why (§ Redaction). |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:1035-1046` | `parseOne(t, line) []turnevent.Event` — call it. Existing precedent for classifying a line by running the shipped parser. |
-| `internal/e2e/realclaude/fixtures.go:96-143` | `WithWorktreeAuthenticated(t) string` — temp `$HOME`, re-pinned credentials, seeded `.claude.json`. Note the credential lives in the **process environment**, which is why the deny-scan can look for its value. |
-| `internal/turnevent/event.go:99-162` | `UnrecognizedSite` constants and the `Unrecognized` struct. `UnrecognizedUserBlock` is the nudge-drift discriminator. |
-| `internal/e2e/realclaude/testdata/` | Fixture naming convention: `<subject>_v<claude-version>[_<variant>].json`. |
-| `internal/e2e/realclaude/resilience_test.go:282` | `resolveClaudeBin(t) string`. |
-
----
-
 ## Context
 
 Four downstream tickets (#1261–#1264) need to map claude's `system/*` and `rate_limit_event` messages into pyry's client surface. Nobody has ever read one. The record is type names and counts, taken on the **headless** surface; the surface that matters is the **interactive** one, and this repo already holds a counter-example to assuming they match (#1218: `ptyrunner` emits zero `system/thinking_tokens`, `streamrunner` ~10/turn).

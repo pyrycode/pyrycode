@@ -1,23 +1,5 @@
 # 1530 — `internal/devices` cross-process locked read-modify-write
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/devices/registry.go` → `Save` — the atomic-write recipe this helper's sibling-lock choice exists to survive: `os.CreateTemp` in `filepath.Dir(path)` → `Chmod 0600` → encode → `Sync` → `Close` → `os.Rename`, plus `os.MkdirAll(dir, 0o700)`. The rename replaces the target's **inode**, which is exactly why the lock must not live on `devices.json`. The `MkdirAll(…, 0o700)` line is also the mode this helper copies for its own parent-directory creation.
-- `internal/devices/registry.go` → `Reload` and `reconcileDevices` — disk is authoritative for membership. Extract: why a reload-merge cannot be folded into `Save` (it would make `pyry pair revoke` resurrect the record it just removed), and hence why the entry point serializes a **caller-supplied** mutation.
-- `internal/devices/registry.go` → `readDevicesFile` — the `SECURITY:` doc-comment block stating the error wraps `path` only, never the file bytes. Every new error surface in this ticket inherits that rule verbatim.
-- `internal/devices/registry_test.go` → `writeDevicesFile`, `mustParseTime` — same-package fixture helpers; reuse them, do not write new ones.
-- `internal/devices/registry_test.go` → `TestRegistry_SaveFilePermissions` — the in-repo precedent for asserting an exact `Mode().Perm()` value on a created file. AC 5's mode assertions follow this shape (and inherit its umask assumption).
-- `internal/devices/registry_test.go` → `TestRegistry_SaveAtomicRenamePreservesOldFile` — the existing rename-shaped test; AC 3's test performs a real `Save` inside the critical section, so mirror how this one stages a registry on disk.
-- `internal/devices/registry_test.go` → `TestReload_ConcurrentReloadValidate` — the package's existing two-goroutine concurrency-test idiom (`sync.WaitGroup`, `t.TempDir()`); the new lock tests match it.
-- `internal/conversations/registry.go` → `Update` — ADR 022's callback-under-lock shape. Extract the **doc-comment discipline**: it spells out what `fn` must not do while the lock is held. Mirror that tone. Do not mirror the mechanism — that lock is a `sync.Mutex`, this one is a file lock.
-- `cmd/pyry/pair.go` → `runPairDefault`, `runPairRevoke`, `resolveDevicesPath` — the two CLI writers. **Read for shape only; this slice rewires nothing.** Note that `runPairDefault` does `identity.LoadOrCreate` + `keys.LoadOrCreate` + a CSPRNG read between its `devices.Load` and its `Save`; that is the wide side of the race the consumer slice will close.
-- `internal/relay/handlers/register_push_token.go` → `RegisterPushToken` — the daemon writer. It calls `Reload` then `Save` on a **long-lived** `*devices.Registry` that already carries un-persisted `LastSeenAt` and push state. This is the single most load-bearing constraint on the API shape below: the entry point must **not** `Load` a fresh registry internally, or the daemon's live state is dropped on the floor.
-- `docs/specs/architecture/341-agentrun-trust-helper.md` § "Lock strategy" — the fully-worked design for this mechanism: sibling lock file, `os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)`, never delete the lock file, `defer` unlock-then-close, kernel-releases-on-exit crash safety. Reuse the reasoning. **Do not copy its blocking `LOCK_EX`** — see § "Divergence from #341".
-- `internal/agentrun/trust/trust.go` → package doc comment (`Best-effort: no file lock`) — confirms #341's spec shipped without its lock, so there is no in-repo flock precedent to copy. This slice writes the first one.
-- `docs/knowledge/decisions/029-devices-registry-reload-at-handshake.md` § "Alternatives considered" and § "Consequences" — the rejected-flock rationale and the "the next reload reconciles it" claim that this ticket overturns. Read for context; **the documentation phase corrects the ADR, not the developer.**
-
 ## Context
 
 `~/.pyry/<name>/devices.json` has three writer paths across two binaries that run as separate OS processes: `runPairDefault` (`Load` → `Add` → `Save`), `runPairRevoke` (`Load` → `Remove` → `Save`), and `RegisterPushToken` (`Reload` → `Save`). `Registry.Save` rewrites the whole file via temp-file + `os.Rename`, so the loser of any interleaving is silently erased. `Registry.mu` serializes goroutines inside one process and does nothing across processes; a `syscall.Flock` sweep over the repo returns zero hits against a working positive control (15 `os.Rename` hits).

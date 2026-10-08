@@ -18,52 +18,6 @@ If you find yourself editing a production file to make an AC pass, **stop and re
 § "Why there is no production change"** — the wiring you think is missing is already
 present, and the failure is almost certainly a test-harness issue, not a product gap.
 
-## Files to read first
-
-- `internal/sessions/pool.go:947-1002` — `buildSession`. The `--session-id <uuid>` spawn
-  point used by `Pool.Create`. **Note `idleTimeout := tpl.IdleTimeout; if 0 { = p.idleTimeoutDefault }`** —
-  a Create-minted session inherits the `-pyry-idle-timeout` flag automatically. This is
-  why no wiring is needed for AC#1.
-- `internal/sessions/pool.go:900-937` — `Pool.Create`. The mint path `sessionMinter.Create`
-  calls. Persists in `stateEvicted`, supervises, then `Pool.Activate`s.
-- `internal/sessions/pool.go:1145-1212` — `Pool.Activate` + `pickLRUVictim`. The
-  cap-enforcing spawn entry. `boundSession.Activate` funnels through here (AC#3). Bootstrap
-  is **not** excluded from the victim set — it can be cap-evicted at runtime.
-- `cmd/pyry/main.go:641-720` — `sessionMinter`, `errNoBoundSession`, `sessionRouter`,
-  `boundSession`. The three adapters #680 exercises. `boundSession.Activate` → `Pool.Activate(ctx, id)`
-  (the comment explicitly names "#680 relies on" this).
-- `cmd/pyry/main.go:558-559` — `IdleTimeout: *idleTimeout, ActiveCap: *activeCap` flow into
-  `sessions.Config`. The flags reach per-conversation sessions.
-- `cmd/pyry/relay.go:163-166` — v1 dispatcher registers `TypeCreateConversation` **and**
-  `TypeSendMessage`. The e2e fakephone (v1) can drive both.
-- `internal/relay/handlers/send_message.go:96-200` — routing → `Activate` → `WriteUserTurn`
-  → `replyAck`. The ack is the AC#2 wire signal.
-- `internal/supervisor/supervisor.go:275-309` — `deliverViaSession`. **The nil-resolver
-  branch (`ResolveTranscript == nil`, which is every per-conversation session) still gates
-  the ack on `sess.WaitReady` + `DeliverPrompt`.** This is why the reactivation+ack test
-  needs fakeclaude in TUI mode (`PYRY_FAKE_CLAUDE_TUI=1`), not `sleep`.
-- `internal/e2e/respawn_after_eviction_test.go` — **the template.** `startEvictionHarness`
-  (pair + relay + fakeclaude-TUI + `-pyry-idle-timeout`), the hello→send_message→drain-to-ack
-  loop, `waitForChildPID`, `containsAll`. Reuse `startEvictionHarness` verbatim and copy the
-  phone-dial/hello block.
-- `internal/e2e/cap_test.go` — `waitForBootstrap`, `waitForSessionState`, `assertActive`,
-  `sleepClaudeScript`/`writeSleepClaude`, `newRegistryHome`. The registry-state assertion
-  vocabulary for AC#1/#3/#4. **`waitForSessionState(t, regPath, id, "evicted"|"active", timeout)`
-  is the workhorse — it takes a session UUID, exactly what you'll extract from
-  conversations.json.**
-- `internal/protocol/conversations_write.go` — `CreateConversationPayload` (3 nilable fields;
-  send all-null to take server defaults) / `ConversationCreatedPayload` (`.ID` is the
-  server-minted conversation UUID).
-- `internal/protocol/codes.go:50-51` — `TypeCreateConversation` / `TypeConversationCreated`.
-- `internal/conversations/conversation.go:44-49` — `CurrentSessionID string json:"current_session_id,omitempty"`.
-  The conversations.json field you read to get a conversation's bound session UUID.
-- `docs/knowledge/features/conversation-session-binding.md` § "Routing" + "Two load-bearing
-  invariants" — the AC#4 trust boundary (phone supplies only the lookup key; routing target
-  is server-stored; empty binding rejected before any `Lookup`).
-- `docs/knowledge/features/idle-eviction.md` § "Activity definition" + § "Eviction cause
-  record" — the cap policy ignores `attached`; the cap-eviction path emits **no** log line
-  (out of scope here — see § Non-goals).
-
 ## Context
 
 EPIC #672 gives each phone discussion its own dedicated claude session.

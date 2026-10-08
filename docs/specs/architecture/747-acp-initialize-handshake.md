@@ -6,19 +6,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/acp/acp.go:53-59` — `Handler` type: `func(ctx, params json.RawMessage) (result any, err error)`. This is the exact contract both new handlers implement.
-- `internal/acp/acp.go:118-129` — `Register(method, h)`: register-before-Serve, panics on duplicate/after-start. The seam both handlers bind against.
-- `internal/acp/acp.go:221-244` — `dispatchRequest`: how a handler's `(result, nil)` becomes a success frame and how a returned `*Error` maps to the wire error. Confirms you return a *value to marshal*, not a pre-encoded frame.
-- `internal/acp/jsonrpc.go:8-39` — `Code*` constants + `Error`/`NewError`. Use `acp.CodeInvalidParams` for a malformed `initialize` params object.
-- `cmd/pyry/acp.go:56-95` — `serveACP`: the composition root. The single edit site (register handlers between `acp.New(...)` and `t.Serve(ctx)`); note the stale `// registers NO handlers (AC#2)` comment to update.
-- `cmd/pyry/acp_test.go:13-51` — `testLogger` helper + the `serveACP`-driven single-shot test style to mirror (feed a reader, run to EOF, assert on the `stdout` buffer). New tests append here.
-- Vault: `Structured-Event Bridge — internal model and ACP mapping` § "ACP taxonomy" + "Divergence 5" (QMD `second-brain/.../structured-event-bridge-acp-mapping.md`) — the **interim capability reference** (ADR #745 is still OPEN; reconcile when it lands). Divergence 5 is the point of this ticket: pyry needs no `fs/*` / `terminal/*` client capabilities.
-- `docs/knowledge/features/acp-package.md` — transport concurrency model, diagnostics discipline, the "internal/acp knows nothing about any concrete ACP method" boundary that drives the *where-do-handlers-live* decision below.
-
----
-
 ## Context
 
 Epic #600 builds `pyry acp` — a thin ACP adapter over a supervised interactive claude session. ACP opens every connection with an `initialize` request that negotiates the protocol version and exchanges capabilities, optionally followed by `authenticate`. #755/#756 landed the JSON-RPC 2.0 transport + dispatch table and the `pyry acp` subcommand that serves it, registering **no** handlers. This ticket registers the first two: `initialize` and `authenticate`.

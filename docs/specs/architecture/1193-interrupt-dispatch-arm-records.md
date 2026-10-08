@@ -7,65 +7,6 @@ dispatcher; see § Security review).
 Split child B of #1190. Unblocked by #1192 (PR #1194, merged 2026-07-25), which landed the
 three signature-stable records and the `activeInterrupter.log` field this slice consumes.
 
-## Files to read first
-
-- `cmd/pyry/main.go:1252-1270` — `interruptRunner`'s doc comment + body. **The function this
-  slice changes.** Extract: the two-arm type switch, *Interrupt matched first* (load-bearing —
-  see § Design D4), and the `default: return nil` inert arm.
-- `cmd/pyry/main.go:1322-1352` — `activeInterrupter.SendEsc`: doc comment (`:1322-1334`) and
-  body (`:1335-1352`). Extract: the two existing `Info` records and their exact shape, the
-  `a.logger()` call form, and the sole call site `return interruptRunner(r)` at `:1351`.
-  **`:1330-1334` is one of the two interim caveats AC5 flips.**
-- `cmd/pyry/main.go:1300-1320` — the `activeInterrupter` struct (`:1300`), its optional
-  `log *slog.Logger` field (`:1306`), and the nil-normalizing `logger()` accessor (`:1315`).
-  Extract: **consume `a.logger()`, never `a.log`** — the field is deliberately optional
-  because the struct is a constructor-less named-field literal.
-- `cmd/pyry/main.go:1272-1291` — `resolveBoundRunner`. Extract: its `(sessions.Runner, bool)`
-  return — no session id reaches the caller, which is *why* the new records identify the
-  conversation. **Do not touch the `conv.CurrentSessionID == ""` guard at `:1283`** (#678
-  cross-conversation isolation enforcement point; `Pool.Lookup("")` returns the bootstrap
-  session).
-- `cmd/pyry/main.go:984-1002` — production wiring. Extract: the one production
-  `activeInterrupter{…}` literal at `:996`, already carrying `log: logger` at `:1001`
-  (#1192). **This slice adds no wiring here.**
-- `cmd/pyry/main.go:735-738` — daemon log level construction: default `slog.LevelInfo`,
-  `Debug` only behind `-pyry-verbose` (`:688`). This is what forces the level decision in
-  § Design D3 and the AC5 caveat.
-- `cmd/pyry/interrupt_routing_test.go:29-51` — the three runner stubs
-  (`interruptRunnerStub:32`, `sendEscRunnerStub:42`, `inertRunnerStub:51`). Extract: **all
-  three already exist** — no new fakes are needed, they just need to be driven through
-  `activeInterrupter` as well as through `interruptRunner`.
-- `cmd/pyry/interrupt_routing_test.go:58-96` — `TestInterruptRunner_Dispatch`. Extract: the
-  **five** direct call sites at `:63,73,82,89,92` (every one changes shape under D1), and
-  the "error from the chosen method propagates" subtest at `:87`.
-- `cmd/pyry/interrupt_routing_test.go:157-259` — `TestActiveInterrupter`. Extract: the four
-  literals at `:179,209,230,251` (**`:251` is the one with no `log:` — it must gain one, see
-  § Testing strategy**), the exact-event constants at `:170-173`, and the arm-exclusivity
-  negative loop at `:198-203` that must stay green.
-- `cmd/pyry/modal_resolve_v2_test.go:83-88` — `auditLogger()`: **JSON**-backed, Debug-level,
-  returns a plain `*bytes.Buffer`. Note `auditRecords()` at `:90-92` filters on
-  `msg == "audit: remote permission decision"` and is **not** reusable here.
-- `internal/relay/v2session_modal.go:434-492` — `handleInterrupt`. Extract: the interim
-  caveat at `:466-468` (**the second caveat AC5 flips**), the `Debug` nil-`Interrupter` arm
-  at `:480-485` (the level caveat AC5 requires), and the `v2.interrupt.keystroke_err` `Warn`
-  at `:486-491` — which is why the new success-path record does **not** need to carry the
-  error (§ Design D2).
-- `internal/relay/v2session_interrupt_test.go:38-56` — the sibling negative-assertion
-  comment. Extract: it says "#1193 adds a success-path record"; that rule stays **true** and
-  the test needs no change (§ Testing strategy, "the two test comments").
-- `internal/streamsup/runner.go:250-264` — `Runner.Interrupt`'s contract: one stdin
-  control_request line, `ErrNoLiveChild` when no child is live, "safe from any goroutine".
-- `internal/supervisor/modal.go:69-71` and `:85-95` — `Supervisor.SendEsc` → `sendModalKey`:
-  capture-then-release, `ErrNoLiveSession` when detached, wrapped error on PTY failure.
-  Together with the previous entry these are why the record is emitted **after** the arm
-  returns (§ Design D2, "ordering").
-- `docs/specs/architecture/1192-interrupt-inert-arm-records.md` — the predecessor spec. Its
-  § D2 (level), § D3 (record shapes), and § "Open questions" #3 (event-family stability) are
-  the fixed points this slice builds around.
-- `docs/knowledge/codebase/1121.md` — the route's origin: why `activeInterrupter` exists and
-  why `interruptRunner` lives in `cmd/pyry` (the only package that sees both concrete runner
-  types).
-
 ## Context
 
 On 2026-07-24 a live desktop run (`real-claude-interrupt`, pyrycode-desktop#483) showed an

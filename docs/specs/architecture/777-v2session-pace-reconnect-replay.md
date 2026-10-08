@@ -2,18 +2,6 @@
 
 Ticket: [#777](https://github.com/pyrycode/pyrycode/issues/777) · Size: **S** · Label: **security-sensitive**
 
-## Files to read first
-
-- `internal/relay/v2session.go:1946-2002` — `replayMissed`: the unbounded inline loop this ticket paces. Note the ring/cursor read under `pushMu`, the gap→`emitResync` branch, the `s.replayThrough = min(afterID, newest)` clamp (#663), and the per-event `s.replayThrough = ev.ID` trailing-watermark advance. **The whole loop moves out; the ring read + gap + clamp stay.**
-- `internal/relay/v2session.go:2362-2418` — `drainOnce`: the existing one-per-Run-pass yielding precedent to mirror exactly (pop one, forward, re-signal if more). This is the shape `drainReplayOnce` copies.
-- `internal/relay/v2session.go:2438-2473` — `forwardEnvelope`: the shared seal-and-forward path. Read its dedup guard (`env.EventID != nil && *env.EventID <= s.replayThrough`) — the trailing watermark must keep this guard from self-dropping replay frames.
-- `internal/relay/v2session.go:2301-2360` — `Push` + `drainCh` non-blocking-wake idiom (cap-1 + default + re-signal). `replayCh` copies this exactly.
-- `internal/relay/v2session.go:712-736` — `Run` select; you add one arm. `internal/relay/v2session.go:1184-1212` — the `handleNoiseInit` success tail that calls `replayMissed` (the point where the conn becomes enumerable, then replay is triggered — the ordering argument hinges on this order).
-- `internal/relay/v2session.go:263-375` — `V2Session` fields + the single-owner-goroutine doc; `:588-665` — `V2SessionManager` fields (add `replayCh` beside `drainCh`); `:2166-2213` — `closeWith` (add `s.replayQueue = nil` beside the timer nils).
-- `internal/eventring/ring.go:44-58` — `eventring.Event` (the `replayQueue` element type); `:156-207` — `After` (returns a *copied* `[]Event` + `gap`) and `NewestID`. `:37-42` — `MaxEventsPerConversation = 1024`.
-- `internal/relay/v2session_replay_test.go:59-136` — `waitConnOpen` + `reconnectScenario`: **the load-bearing harness invariant this change breaks** (see Testing strategy). `internal/relay/v2session_test.go:169` — `waitForEnvelopes(t, rec, n)`, the already-existing poll helper the harness must switch to. `:40-96` — `v2Recorder` (ordered `snapshot()`), `startManager`.
-- `docs/specs/architecture/647-*.md` (if present) and `internal/relay/v2session.go:364-374` — the `replayThrough` dedup contract you must preserve.
-
 ## Context
 
 The v2 session manager is single-goroutine — "the loop is the lock" (`V2SessionManager` doc, `internal/relay/v2session.go:573-587`). Every per-conn op is serialised through `Run`, which makes the Noise `CipherState` single-writer invariant structural: `s.send.Encrypt` and the re-key `s.send, s.recv = …` swap all happen on the one dispatch goroutine, so the send-nonce sequence can never be raced.

@@ -6,24 +6,6 @@
 
 ---
 
-## Files to read first
-
-| Read | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandFieldsAreCapped` | The table this ticket extends: its row struct, its assertion loop, and the `The models array is carried by every row` paragraph AC 3 corrects. **This is where the whole change lands.** |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseCommandsOnlyRungEmits` | What is already pinned on this rung — the record's six attributes, the verbatim names incl. `__remote-workflow`, the event count. Read to know what NOT to re-prove, and for the two doc paragraphs AC 3 corrects (`THE CAP IS NOT PINNED BY THAT`, `NOT a row here: any cap boundary`). |
-| `internal/streamsup/parser_test.go` | `initializeLineFixture`, `commandEntryFixture`, `modelEntryFixture`, `collectEvents` | The fixture set the new row is built from. `initializeLineFixture` is the only builder that can express a `commands` array with no `models` key. |
-| `internal/streamsup/parser_test.go` | `slashCommandNameCapFixture` | The literal `256`, deliberately NOT `maxSlashCommandName` — its doc says why. Every length in the new row comes from it. |
-| `internal/streamsup/parser_test.go` | `slashCommandNamePreview` | The bounded value printer the assertion loop already uses. The new row inherits it and adds nothing. |
-| `internal/streamsup/parser.go` | `emitSlashCommandList` | The single loop holding the cut and the report. The symbol every mutant below edits. |
-| `internal/streamsup/parser.go` | `emitModelList` | Its two calls to `emitSlashCommandList` — rung 4 (commands-only) and rung 5 (models). These are the mutants' other edit points, and rung 4's comment is the "one cap to keep in step" claim that stays. |
-| `internal/streamsup/parser.go` | `truncateField`, `maxSlashCommandName` | The `<=` boundary and the *empty*-replacement scrub. Read so the new row re-proves neither. |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListIsLoggedContentFree` | Confirm its commands-only line's name is far under the cap (it is — `commandsOnlyCommandSentinel`, 35 bytes), which is why the sweep stays green under M1. **Do not edit it.** |
-| `docs/knowledge/features/streamsup-package.md` | § *Proving the bound with a matrix (#1878)* | Two lessons that bind this ticket directly: a row's claimed exclusivity must be **measured**, not reasoned from its inputs; and a `//`-claim sweep built on one phrase misses claims that say the same thing in other words. |
-| `CODING-STYLE.md` | § *Comments — Citing Other Code* | Symbol, never line. `make cite-guard` runs inside `make check`. |
-
----
-
 ## Context
 
 `emitModelList` classifies one top-level `control_response`. Since #1891 two of its rungs

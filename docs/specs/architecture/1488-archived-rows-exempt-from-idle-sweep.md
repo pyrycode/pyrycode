@@ -3,25 +3,6 @@
 Reconcile the destructive auto-archive sweep with the recoverable manual soft-archive: a
 conversation the user archived is never hard-deleted by the idle sweep.
 
-## Files to read first
-
-| File | Symbol / section | What to extract |
-|---|---|---|
-| `internal/conversations/archive.go` | `ShouldArchive`, `archiveIdleThreshold` | The whole file. This is the one production edit. Note the existing `IsPromoted` short-circuit and the doc-comment's `iff` sentence — both matter. |
-| `internal/conversations/archive_test.go` | `TestShouldArchive` | The four-row table shape: inline `Conversation` literals, single `now := time.Date(...)`, `LastUsedAt: now.Add(-d)`. The new row copies it. |
-| `internal/conversations/sweep_test.go` | `TestSweep`, its local `seedSpec` type and `mk` helper | `seedSpec` currently carries `idleDays` + `isPromoted`; `mk` builds IDs as `fmt.Sprintf("%08d-2222-4333-8444-555555555555", i)` and `Cwd` as `/seed-%d`. Both are the identity handles the new row's survivor assertion uses. |
-| `internal/conversations/sweep.go` | `Sweep` | Read-only. Confirms `Sweep` delegates the whole decision to `ShouldArchive` — no second decision site to patch. |
-| `internal/conversations/conversation.go` | `Conversation` — the `IsArchived` and `IsPromoted` field comments | The `IsArchived` comment enumerates its consumers and is falsified by this change. |
-| `internal/conversations/registry.go` | `SetArchived` | Read-only. Confirms the single-field guarantee (it never bumps `LastUsedAt`) — the reason the exemption, not a timestamp bump, is the fix. |
-| `internal/sessions/pool_conv_sweep_test.go` | `TestPool_Run_RegistersSweepLoop_HappyPath` | The **only** out-of-package caller of `ShouldArchive`. Confirm it needs no edit (see § Blast radius). Do not modify it. |
-| `docs/knowledge/features/conversations-auto-archive.md` | §§ *What it is*, *How it works*, *Decisions → Predicate / sweep / wiring split*, *Tests → `TestShouldArchive`*, *Tests → `TestSweep`*, *Out of scope* | Six sites restating the predicate or the row counts. All six are AC-listed. |
-| `docs/knowledge/features/conversations-registry.md` | § *Durable manual-archive primitive (#880)* bullet, § `SetArchived`, § *Related* | Two sites call the sweep "unrelated" / "distinct". AC-listed. |
-
-`codegraph_context` on this task returned exactly the `conversations` package plus two
-`internal/e2e/realclaude` trailer tests; the latter are name-collision noise (neither
-references `ShouldArchive` or `Sweep` — confirmed by `git grep`). The real blast radius is
-one package plus one out-of-package test read.
-
 ## Context
 
 Two archive mechanisms exist and neither reads the other:

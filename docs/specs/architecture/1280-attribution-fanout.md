@@ -6,31 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every design decision below rests on one of them.
-
-- `internal/e2e/realclaude/trailer_admissibility_test.go:127-160` — the seven admissibility constants and what each one *means*. The selection order below is a total order over exactly these; you cannot argue the order without their Detail prose.
-- `internal/e2e/realclaude/trailer_admissibility_test.go:190-197` — `trailAdmitResult`. Documented **trap-free by construction**: two strings, no pointer into either input, no quote of `tdnReapOutcome.Line`. This is why an entry may carry it whole and AC5 stays true by construction.
-- `internal/e2e/realclaude/trailer_admissibility_test.go:356-485` — `trailAdmitAttribution`, the whole function. Note precisely which arms are group-dependent (`tdnReapHeldPGIDKilled` / `tdnReapHeldPGIDAbsent`, `:437-484`) and which fire before the verdict is read at all (`certified == ""` at `:413`, budget at `:425`). That split is the argument for why only three of the seven values can ever co-occur in one fan-out.
-- `internal/e2e/realclaude/trailer_admissibility_test.go:199-208` — `trailDetail`. Reuse it; do not define a `finDetail` (§ Detail helper below).
-- `internal/e2e/realclaude/trailer_admissibility_test.go:504-512` — `trailIsAdmitValue`, the membership predicate. **Call it**, do not re-switch.
-- `internal/e2e/realclaude/trailer_admissibility_test.go:530-536` — `trailReapLine(count int, pgids string)`. `pgids` is spliced **raw** at the end of the line; that is what makes AC5's needle position work.
-- `internal/e2e/realclaude/trailer_admissibility_test.go:973-1028` — `TestTrailAdmissibilityRecordsCarryNoCapturedBytes`. AC5's test is this shape: premise assertion first, then `json.Marshal` + `bytes.Contains`.
-- `internal/e2e/realclaude/teardown_liveness_test.go:112-127` — `tdnReapOutcome`, including `Line` at `:126`. The type the record must **not** carry.
-- `internal/e2e/realclaude/teardown_liveness_test.go:144-219` — `tdnClassifyReapLog`. Read `:147` (the `heldPGID <= 1` guard AC3 exists to keep unreached), `:160-167` (anchored-line skip *then* `Line` fill — the AC5 vacuity trap), and `:191-198` (`LineCount == 0` → `tdnReapNoLine`).
-- `internal/e2e/realclaude/teardown_liveness_test.go:231-265` — `tdnParsePGIDs`. It stops at the first `]` and, for an **unquoted** value, checks nothing after it. That is the licence for the needle's position.
-- `internal/e2e/realclaude/trail_run_outcome_test.go:171-219` — `trailRunReadings`, field by field. `Admit`'s doc comment at `:183-185` states the zero value means "not classified".
-- `internal/e2e/realclaude/trail_run_outcome_test.go:390-400` — C3, and `:587-593` — Step 8. The two arms AC4's consumer-side rows land on.
-- `internal/e2e/realclaude/trail_run_outcome_test.go:605-631` — `trailRunWellFormed()` and `trailRunProofReadings()`. The vary-one-thing base, and the precedent for staging an `Admit` on a `trailRunReadings` by literal.
-- `internal/e2e/realclaude/trail_run_outcome_test.go:1132-1188` — `TestTrailRunOutcomeCarriesNoCapturedBytes`. The structural half (decode to `map[string]json.RawMessage`, reject `command`-shaped keys) is the pattern AC5's test extends.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:120-135` — `pinScan`, and `background_reach_probe_test.go:162-168` — `reachProc`. Read them to see what you are **not** taking as input: `Matches` holds `Command`, verbatim argv.
-- `internal/e2e/realclaude/result_trailer_observation_test.go:300` — `const trailNeedle`. Reuse it; do not invent a second needle.
-- `internal/e2e/realclaude/background_reach_probe_test.go:123` (`reachMaxCommandBytes = 512`), `:945-950` (`reachCapCommand`) — the cap every retained string passes through.
-- `internal/agentrun/reap.go:52` and `:64-65` — the skip list, the emit guard, and the slog call `trailReapLine` renders. Read `:52` closely: it skips `pgid <= 1 || pgid == self || pgid == rootPid`. § The filter is exactly `<= 1` explains why only the first clause is mirrored here.
-
----
-
 ## Context
 
 `trailAdmitAttribution` takes **one** `tdnReapOutcome`, which is the classification of pyry's reap log against **one** held process group. The probe does not have one group — `pinScanArgv` returns `Matches` as a slice, deliberately refusing to resolve "the" pid. Reducing that set to the single `trailAdmitResult` that `trailRunReadings.Admit` accepts is new logic, and it is where a wrong rule silently costs the one finding the probe exists to produce.

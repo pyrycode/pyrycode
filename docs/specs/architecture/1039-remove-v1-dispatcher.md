@@ -22,48 +22,6 @@ every removed name finds only **comments** (historical analogy) in other package
 
 ---
 
-## Files to read first
-
-- `internal/dispatch/dispatch.go:165-537` — the **contiguous removal span**: `Config`,
-  `FirstFrameGate`, `FirstFrameOutcome`, `Dispatcher`, `connState`, `New`, `Register`,
-  `Outbound`, `ActiveConns`, `Run`, `routeConn`, `runConn`, `runGate`, `handleOne`. Delete
-  wholesale (AC1).
-- `internal/dispatch/dispatch.go:89-93` — `setAuth`. **The non-contiguous extra removal /
-  U1000 trap.** Its sole caller is `runGate:518` (deleted). See §Design step 2 — this is a
-  deliberate, U1000-forced deviation from AC2's literal keep-list.
-- `internal/dispatch/dispatch.go:54-163` — the **kept surface** (`Handler`, `Conn` fields,
-  `ConnID`, `Auth`, `NewTestConn`, `NewConn`, `NextID`, `Send`, `Reply`) plus the doc
-  comments that cite removed identifiers and must be re-worded (§Design step 4).
-- `internal/dispatch/dispatch.go:539-611` — `Route` + `sendError` (kept, behaviour
-  **unchanged**). These are the six inbound frame-validation branches the re-homed tests
-  must keep covering: malformed → `protocol.malformed`; `IsV1Compatible` unsupported →
-  `protocol.unsupported`; `IsV1Compatible` unknown-type → `protocol.unknown_type`; default
-  → `protocol.unsupported`; no-handler → `protocol.unsupported`; handler-error → WARN log,
-  no reply.
-- `internal/dispatch/dispatch.go:1-38` — package doc. Rewrite to describe only `Route` +
-  `Conn`; the whole "Run is a single demux goroutine … one goroutine per active conn_id"
-  concurrency model (lines 15-21) is deleted with the machinery.
-- `internal/dispatch/dispatch_test.go:550-618` — the retained `TestRoute_StandaloneInvocation`
-  and `TestRoute_NoHandler_UnsupportedReply`. **These are the exact direct-call pattern** the
-  four re-homed tests must mirror (`NewConn` → `Route` → read `outbound`). Do not modify them.
-- `internal/dispatch/dispatch_test.go:15-67` — shared helpers (`testLogger`, `mustEncode`,
-  `decodeError`, `frame`, `runDispatcher`). Which survive is driven by staticcheck — see
-  §Design step 3.
-- `internal/dispatch/dispatch_test.go:69-231, 309-534` — the tests to re-home / delete;
-  their coverage map is in §Design step 3.
-- `internal/dispatch/gate_test.go` — deleted in full (AC3). Note it defines `helloAckResponse`,
-  which `dispatch_test.go:411` uses **only** inside a deleted test — no dangling reference.
-- `internal/relay/v2session.go:1051` — `dispatch.NewConn(s.connID, outbound, s.device)`. Proof
-  the `auth` field is populated via the **constructor** (not `setAuth`), so `auth` / `Auth()`
-  / `NewConn` stay live after `setAuth` goes.
-- `internal/relay/handlers/register_push_token.go:53` — `dev := c.Auth()`. The live production
-  reader of `Auth()`; another reason the auth field survives.
-- `docs/specs/architecture/913-remove-v1-relay-dispatch-branch.md` — the prior slice; its
-  §Follow-on item 3 is this ticket, and its §Security review already established the v1
-  dispatch surface is dead/unreachable in production.
-
----
-
 ## Context
 
 The v1 relay leg authenticated a phone's first frame through a `FirstFrameGate` closure and

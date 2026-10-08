@@ -13,51 +13,6 @@ capability-gated fan-out) lives in #608. This ticket is the data layer #608 buil
 
 ---
 
-## Files to read first
-
-Generated from the package surface + ADR 025; pruned to what this change touches.
-
-- `internal/protocol/messaging.go:5-50` — **the per-type template.** `SendMessagePayload` /
-  `MessagePayload` / `BackfillSincePayload`: json-tagged struct + doc comment pointing at the
-  `docs/protocol-mobile.md §`. Mirror this exactly for the five new payloads.
-- `internal/protocol/handshake.go:25-41` — `HelloClientPayload` (lines 25-32) and
-  `HelloAckPayload` (lines 37-41): the two structs that gain the `capabilities` field.
-  Note the `Token string json:"token,omitempty"` precedent (line 31) — the byte-identical lever.
-- `internal/protocol/codes.go:36-85` — two const blocks. Lines 36-62 = v1 types (in `v1TypeSet`).
-  Lines 70-85 = the **v2-only** block holding `TypeRekeyRequest`. The five new `Type*` constants
-  join the v2-only partition (a new sibling const block, see Design).
-- `internal/protocol/envelope.go:80-125` — `IsV1Compatible` (91-99) returns `ErrUnknownType`
-  for any type not in `v1TypeSet`; `v1TypeSet` literal (108-125). **Do not add the new types here.**
-- `internal/protocol/compat_test.go:50-119` — `TestV1TypeSet_CoversAllExportedTypeConstants`
-  (50-71, unaffected — touches only v1) and `TestTypeConstants_V1V2Partition` (91-119) with the
-  test-local `v2OnlyTypes` map (80-82). The partition drift-check that must keep passing.
-- `internal/protocol/compat_test.go:8-48` — `TestIsV1Compatible`: the rejection-cases table
-  (27-47) where the five `ErrUnknownType` assertions land.
-- `internal/protocol/messaging_test.go:11-43` — the round-trip test shape (fixture decode → field
-  asserts → re-marshal → canonical byte-equal). Mirror for `interactive_test.go`.
-- `internal/protocol/handshake_test.go:52-141` — `TestHelloClientPayload_RoundTrip` (52-99) and
-  `TestHelloAckPayload_RoundTrip` (101-141): the existing fixture round-trips that MUST keep
-  passing unchanged (byte-stability regression guard for omitempty).
-- `internal/protocol/envelope_test.go:11-27,127-184` — `canonical` / `readFixture` helpers (11-27)
-  used by every test; `TestRoutingEnvelope_TokenOmitempty` (127-155) and `CloseCodeOmitempty`
-  (157-184) — the **programmatic omitempty pattern** to copy for the capabilities tests.
-- `internal/protocol/testdata/hello_client.json`, `hello_ack.json`, `message.json` — fixture
-  shape and value conventions. The two hello fixtures stay **byte-identical** (no edits).
-- `internal/turnevent/taxonomy.go:34-43` — `TurnEndReason` (`end_turn` / `max_tokens` /
-  `max_turn_requests` / `refusal` / `cancelled`). The `turn_end.stop_reason` wire field carries
-  **these exact strings** so #608 maps via `string(reason)`. **Do not import this package** (see
-  Design § no-import rule).
-- `internal/relay/auth.go:100-104` and `internal/relay/v2session.go:688-691` — the only two
-  production `HelloAckPayload{...}` construction sites. Both **keyed** literals → the additive
-  field needs zero changes here. Listed so you can confirm, not edit.
-- `docs/protocol-mobile.md:396-440` — "Application message types" table (396-420) + the
-  `### hello (v2-specific note)` per-type section style (422-440). The doc amendment target.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:102-130` —
-  § Wire-protocol extension: the authoritative field lists for the five types + capability
-  negotiation.
-
----
-
 ## Context
 
 ADR 025 chose **v2-additive + capability negotiation** (§ Decision 2): the Noise transport and

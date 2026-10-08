@@ -44,10 +44,6 @@ No new failure modes. Marshal of `[]string` cannot fail; the existing defensive 
 - `internal/msgqueue/delivered_test.go`: `EnqueueAttached` then mutate the caller's slice → the delivered `QueuedMessage.AttachmentIDs` still holds the original ids (copy-on-entry).
 - `internal/relay/handlers/send_message_test.go`: `TestSendMessage_ComposesPromptFromAttachments` asserts the enqueued ids equal the first-occurrence dedup (`wantResolve`); `TestSendMessage_NoAttachments_DeliveredVerbatim` asserts none enqueued. (AC 1's dedup/order half.)
 
-## Open questions
-
-None.
-
 ## Documentation handoff (pending — documentation stage)
 
 `docs/protocol-mobile.md` § Conversation history (v2): document the optional `attachment_ids` on a stored user `message` entry — omitted when the message named none, never carries a path — and add a changelog line.

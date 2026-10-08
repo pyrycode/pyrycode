@@ -6,26 +6,6 @@
 
 ---
 
-## Files to read first
-
-Everything below is in `internal/e2e/realclaude/` unless noted. All four files are behind the
-`e2e_realclaude` build tag.
-
-| File | Symbols | What to extract |
-|---|---|---|
-| `initialize_control_record_test.go` | `initControlFixtureRecord`, `initControlFullRecord`, `initControlFixtureFields`, `TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken` | The 22-field contract, the fully-populated fixture and why it is deliberately incoherent, the hand-written listing and why it must never be reflection-generated, and the existing "does not survive slugging" subtest you are widening. |
-| `initialize_control_writer_test.go` | `writeInitControlFixture`, `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry`, `compactInitControlRawRows`, `TestInitControlFixture_WriterCapsStderrCapture` | The writer whose path minting you migrate; the round trip whose name assertion you re-point; the cap test that also writes through the writer (its per-row tempdir comment mentions the minted name). |
-| `initialize_control_names_test.go` | `initControlArms`, `initControlArmFixtureName`, `initControlFixtureName`, `TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained` | The arm table you grow into rows, the two namers, and every `#1713` reference you re-point. The declaration's doc comment names itself as the growth point and forbids a second table. |
-| `initialize_control_probe_test.go` | `runInitControlChild`, `initControlControlBudget`, `TestRealClaude_InitializeControl_Capture`, `TestInitControlSummarize_ReadsAllThreePlacements` | The one existing caller: where `setModeWaitFor`'s result is discarded into a log, where the record literal is built, and the precedent for an offline test living in an exec-ing file. |
-| `set_permission_mode_probe_test.go` | `setModeFixtureRecord`, `setModeWaitFor`, `setModeArms`, `setModeFixtureName` | `setModeFixtureRecord.Arm` is the field whose tag and position you copy. `setModeWaitFor` returns `bool` — that return is the measurement AC 2 wants. `setModeArms` is the row-table shape to imitate; `setModeFixtureName` is the namer that interpolates its arm RAW (the anti-pattern). |
-| `inband_bypass_revoke_arms_test.go` | `poolRevokeArms` | The second row-table precedent — a `[]poolRevokeArm` of `{name, flags…}` rows. |
-| `permission_protocol_spike_test.go` | `versionSlug` | Lowercase → fold `[^a-z0-9._-]+` to `_` → clamp at 32. This is why the fixture's arm literal needs an uppercase run. |
-| `offline_exec_ban_test.go` | `finOfflineExecBans`, `TestFinOfflineFilesReachNoExecHelper` | Read the three `initialize_control_*` entries. **You add no entry and change none** — but know that the record and names files are banned from all `os` read/write, which is why the new I/O-bearing test goes in the writer file. |
-| `internal/e2e/internal/fakeclaude/initialize_control_test.go` | `initControlCaptureGlob`, `captureModelKeySets` | UNTAGGED, so `make check` runs it. It globs `initialize_control_v*.json` and walks `control_responses[].response.response.models[]` through generic maps. Confirm for yourself that new record fields are invisible to it — then leave it alone. |
-| `docs/knowledge/features/e2e-realclaude.md` § `initialize_control_names_test.go` and § `initialize_control_record_test.go` | — | The 18-of-22 shared-field claim and #1712's three recorded lessons. **Read-only** — the documentation phase owns this file. |
-
----
-
 ## Context
 
 `initControlFixtureRecord` (#1701) was shaped for one arm at one send point, and

@@ -5,33 +5,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every entry names the **symbol** to read, not a line —
-resolve names with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/modal_resolve_v2.go` | `ApprovalParked` (the whole method incl. its doc block) | **The twin, landed by #1919 in this same file.** Its shape, its doc-block claim list, its membership posture, and its snapshot-under-`mu`-then-ask sequence. This spec is deliberately its sibling; deviate only where § Design says why. |
-| `cmd/pyry/modal_resolve_v2.go` | `streamApprovalBridge` (the type and its doc block) | The leaf-lock contract on `mu` — held around O(1) map ops only, never across `modal.Record`, `perm.Lookup`, `perm.Resolve` or a `Push`. That contract is what forbids holding `mu` across `ActiveConns`. Also: `bcast` and `ctx` are already fields. |
-| `cmd/pyry/modal_resolve_v2.go` | `broadcast` | **The capability gate this report reuses verbatim**: `for _, c := range b.bcast.ActiveConns(ctx) { if !c.Interactive { continue } … }`. Note it takes `mu` *inside* the loop, not across `ActiveConns` — the existing precedent for the lock discipline below. |
-| `cmd/pyry/modal_resolve_v2.go` | `Surface` | Where `byModal[modalID] = req.ToolUseID` is written, and that the `modal.Record` failure path stores **no** correlation and broadcasts nothing — the "never-surfaced" negative AC 3 names. |
-| `cmd/pyry/modal_resolve_v2.go` | `retire` | The **sole** correlation deleter, unconditional, on every terminal `Await` return. This is what makes AC 3's "already-resolved" arm one line instead of four fixtures. |
-| `cmd/pyry/modal_resolve_v2.go` | `newStreamApprovalBridge` | Its 6-parameter signature, and that `bcast` is already parameter 3. **Do not widen it** — see § Sizing constraint. |
-| `cmd/pyry/modal_resolve_v2.go` | `ResolveStream` | That it runs on the relay manager's **`Run` goroutine**. It is the one bridge method from which this report must never be called — see § Concurrency model. |
-| `cmd/pyry/interactive_turn_v2.go` | `interactiveBroadcaster` | The 2-method consumer-side interface (`ActiveConns` + `Push`) the bridge already holds as `bcast`. It does **not** grow a method here. |
-| `internal/relay/v2session.go` | `ActiveConns`, `ActiveConn` | Three contract clauses this design leans on: the `V2StateOpen` gate (un-authenticated peers are never observable), the caller-goroutine constraint (funnelled onto `Run` via `m.snapshot` — safe from *any goroutine other than* `Run`), and "returns nil on ctx cancellation or once `Run` has exited". |
-| `internal/permbridge/permbridge.go` | `Register` | Two facts: an empty id is refused with `ErrDuplicateID` **before** `Surface` ever runs (this bounds AC 3's empty arm — see § Error handling), and the `time.AfterFunc` timer closure is where #1912's consumer will sit. |
-| `cmd/pyry/stream_approval_test.go` | `approvalReport`, `newApprovalReport`, `park` | **The #1919 fixture this ticket reuses rather than reimplements.** It already stands up permbridge + modalbridge + the bridge over `oneInteractiveConn("c1")` and exposes `bcast`, which is the only knob these tests need. |
-| `cmd/pyry/stream_approval_test.go` | `bridgeLen`, `parkApproval`, `TestStreamApprovalBridge_ApprovalParked_LogsNothing` | The correlation-size guard, the raw park helper (needed for the never-surfaced arm), and the capturing-logger pattern AC 5's test copies. |
-| `cmd/pyry/interactive_turn_v2_test.go` | `fakeInteractiveBcast` (the type **and its doc comment**) | Two behaviours that will bite otherwise: `ActiveConns` consumes one scripted `snapshots` entry per call and **reuses the last once exhausted**, and the double carries **no mutex** — both drive § Testing strategy's rules. |
-| `cmd/pyry/queue_state_v2_test.go` | `oneInteractiveConn` | The one-interactive-conn constructor `newApprovalReport` already uses. |
-| `cmd/pyry/modal_resolve_v2_test.go` | `auditLogger` | The `(*slog.Logger, *bytes.Buffer)` capturing pair AC 5's test needs. |
-| `docs/knowledge/features/permbridge-package.md` | § "Why `internal/permbridge` is self-contained", § "Fail-closed / default-deny" | The zero-`internal/`-imports invariant that forces the ticket's shape note, and the fail-closed table this report must not perturb. |
-| `docs/knowledge/features/streamsup-package-per-conversation-turn-busy-track-resolve-an-in-flight-tool-call.md` | the two `#1919` lessons at the end of the file | The "a membership conjunction has an ordering gap" lesson (which recurs here in a different place) and the fixture-sharing lesson (which is why § Testing reuses `approvalReport`). Short file; read the tail. |
-
----
-
 ## Context
 
 Every approval parks in `internal/permbridge` under a fail-closed deadline; `Register`'s

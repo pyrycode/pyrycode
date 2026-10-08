@@ -1,26 +1,5 @@
 # #1575 — A newly-minted session starts at the operator's configured model and effort level
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/sessions/pool.go` | `DefaultSettings` | the source of the inherited values; note it takes `p.mu.RLock()` and resolves `p.bootstrap` fresh |
-| `internal/sessions/pool.go` | `CreateIn` | mint site 1 — the `SessionSettings{}` argument and the comment above it; note it builds **before** `p.mu.Lock()` |
-| `internal/sessions/pool.go` | `buildSession` | where `settings` reaches the argv, and the `#826b` sentence in its docstring |
-| `internal/sessions/pool.go` | `saveLocked` | how `s.settings` is copied into `registryEntry` (the `omitempty` side effect, § Ripple) |
-| `internal/sessions/get_or_create.go` | `materialise` | mint site 2 — the combined zero-value comment covering *both* mint and the #1487 fail-closed reason |
-| `internal/sessions/get_or_create.go` | `GetOrCreateIn` | the caller that must inherit; it passes nothing today |
-| `internal/sessions/revive.go` | `Revive` | the contract paragraph that says a revived session carries zero settings — this is what must stay true |
-| `internal/sessions/session.go` | `SessionSettings`, `claudeSettingsArgs` | field set + the empty-string-emits-no-flag rule that makes AC 4 fall out for free |
-| `internal/sessions/pool_settings_test.go` | `helperPoolArgvRecorder`, `waitArgv`, `spawnMintedWithSettings` | the argv-capture rig; `spawnMintedWithSettings` calls `buildSession` **directly** and must NOT be the basis of the new tests |
-| `internal/sessions/pool_settings_test.go` | `TestPool_BootstrapWarmStart_AppliesSettingsToArgv` | the exact recipe for "pre-write a registry with settings, then `helperPoolArgvRecorder` on the same path" — the fixture every new test needs |
-| `internal/sessions/pool_spawndir_test.go` | `TestPool_CreateIn_SpawnsInGivenDir`, `TestPool_GetOrCreateIn_SpawnsInGivenDir` | the public-entry-point drive shape |
-| `internal/sessions/pool_revive_test.go` | `TestPool_Revive_ActivatesNormally` | how to get a revived session to actually spawn, so its argv can be observed |
-| `internal/sessions/pool_default_settings_test.go` | `TestPool_DefaultSettings_NoBootstrap` | the `&Pool{}` shape AC 4's second case is really about (§ AC 4 second case) |
-| `docs/knowledge/features/sessions-package.md` | § *Two spawn sites* and § `Pool.Revive` | the two evergreen claims to correct |
-
 ## Context
 
 `Pool.buildSession` already turns a `SessionSettings` into `--model` / `--effort` /

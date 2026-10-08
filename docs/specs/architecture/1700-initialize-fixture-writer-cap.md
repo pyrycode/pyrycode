@@ -4,19 +4,6 @@ Test-only. One added test function in one existing test file, plus three
 doc-comment corrections in that same file. No production file changes, no new
 helper, no new type, no ban-list change.
 
-## Files to read first
-
-| Path | Symbol | What to extract |
-| --- | --- | --- |
-| `internal/e2e/realclaude/inband_bypass_revoke_fixture_test.go` | `TestPoolRevokeFixture_WriterCapsChildOutputCapture` | **The template.** The realized form of this whole ticket for the #1643 family: table shape, the range bound, the prefix check, the vacuity control, the no-mutation check, the report-lengths-never-values discipline. Copy its structure. |
-| `internal/e2e/realclaude/inband_bypass_revoke_fixture_test.go` | `capFixtureCapture` | The helper under proof. Read its doc comment — it already records the U+FFFD measurement this ticket's third mutant depends on. Do **not** call it from an assertion. |
-| `internal/e2e/realclaude/initialize_control_writer_test.go` | `writeInitControlFixture` | The subject. Its `out := *rec` copy, its single `capFixtureCapture` call on `StderrCapture`, and its `t.Fatalf`-names-nothing-else discipline. |
-| `internal/e2e/realclaude/initialize_control_writer_test.go` | `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry` | The sibling test in the file you are editing: the tempdir/write/read-back/decode shape to mirror, and the value-printing pattern its own comment says this ticket must **not** inherit. |
-| `internal/e2e/realclaude/initialize_control_record_test.go` | `initControlFullRecord` | The record to mutate. Note the doc comment's fresh-pointer-per-call clause — it names this ticket as the reason. |
-| `internal/e2e/realclaude/initialize_control_record_test.go` | `initControlFixtureRecord` | The `StderrCapture` field and its `json:"stderr_capture"` tag; its doc states this type carries no bound of its own. |
-| `internal/e2e/realclaude/permission_protocol_spike_test.go` | `stderrFixtureCap`, `truncateString` | The cap constant (8 KiB) and the byte-slicing helper. `truncateString` slices **bytes** — that is the whole reason the multi-byte row exists. |
-| `internal/e2e/realclaude/offline_exec_ban_test.go` | `finOfflineExecBans`, `TestFinOfflineFilesReachNoExecHelper` | The twelve-name entry keyed `"initialize_control_writer_test.go"` and its doc comment. Read it to confirm what stays available; **add no name and change no entry.** |
-
 ## Context
 
 `writeInitControlFixture` caps `StderrCapture` at `stderrFixtureCap` before

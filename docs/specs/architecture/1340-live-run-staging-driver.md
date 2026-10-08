@@ -6,46 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing a line. Each entry says what to extract; none of them needs to be re-derived.
-
-**The three blockers — the parts the driver consumes and must not rebuild**
-
-- `internal/e2e/realclaude/finding_live_pin_test.go:97-214` — `finLivePinWantRows = 2` (`:140`) and `finLivePinReduce(scan pinScan, fifoPath string) finLivePinReading` (`:202`). Read the two PROHIBITION paragraphs (`:125-139`) — they name the two wrong fills for `PinWantCount` and the cost of each.
-- `internal/e2e/realclaude/finding_live_pin_test.go:63-99` — `finLivePinReading`'s four fields and its "INPUT ONLY — NEVER PUBLISHED / no json tags" posture. The handle inherits that posture; see § Design.
-- `internal/e2e/realclaude/finding_live_staging_test.go:86-206` — `finLiveStageFIFOName` (`:100`), `finLiveStageSystemPrompt` (`:114`), `finLiveStageCommand` (`:135`), `finLiveStagePrompt` (`:158`), `finLiveStageEnvDelta()` (`:189`). Note `:204-205`: the live FIFO path is "#1340 joins `finLiveStageFIFOName` onto its own `t.TempDir()`" — that is this spec's § Design step 3, already written down by the blocker.
-- `internal/e2e/realclaude/finding_live_assembly_test.go:196-290` — `finLiveAssembleFacts`' five fields and `finLiveAssembleStaging`'s signature + doc. Read `:259-264` (the "if #1340 needs more, that is #1340's argument to make" paragraph) — this spec's § What the handle deliberately does not carry answers it.
-- `internal/e2e/realclaude/finding_staging_fill_test.go:234-264` — `finTranscriptFill`. **Extract one fact:** its Bash selection is content-first over the staged command (`finTranscriptSelectBash`, `:255`), which is why the driver's own waiters are a *timing* wait and never a *selection*.
-- `internal/e2e/realclaude/finding_staging_gate_test.go:290-366` — the gate's arm ORDER: identity → trigger → rendezvous → pin-scan-errored → count → pass-through. The driver's straight-line body (§ Design) is only correct because of this ranking; read it before deciding to add an early return.
-
-**The two nearest precedents — copy their shape, do not re-invent it**
-
-- `internal/e2e/realclaude/background_reach_probe_test.go:320-453` — `runReachProbe`, the closest analogue end to end. **`:355-374` is the cleanup block to copy verbatim** (registration order, the `PyryPID <= 0` guard with its `// LOAD-BEARING` comment, the grace `select`). `:392-399` is the `cmd.Wait` goroutine and the zombie/`Signal(0)` reason.
-- `internal/e2e/realclaude/background_trigger_probe_test.go:438-453` — the same guard **without** the comment. Named here so you can see the one you are NOT copying from; the reach copy's comment cites this line.
-- `internal/e2e/realclaude/teardown_liveness_probe_test.go:372-387` — the one-scan-two-needles pin with its exclusion map and per-entry reasons. Copy the reason strings.
-
-**The shipped helpers the driver calls (signatures + contracts only)**
-
-- `internal/e2e/realclaude/background_trigger_probe_test.go:116-148` — the timing constants (`probeClaudeChildDeadline` 25s, `probeSessionIDDeadline` 20s, `probeRendezvousDeadline` 60s, `probeToolUseDeadline` 30s, `probeToolResultDeadline` 45s, `probePyryExitGrace` 20s) and `probeMaxTurns = "6"`.
-- `internal/e2e/realclaude/background_trigger_probe_test.go:606-745` — `probeClaudeVersion`, `spawnProbePyry`, `holdProbeFIFO`, `probeSyncBuffer`. Note `holdProbeFIFO`'s `:652-655`: the write end never leaves the helper and releases only in the `t.Cleanup` it registers itself.
-- `internal/e2e/realclaude/background_trigger_probe_test.go:759-816` — `probeWaitForBashToolUse` (returns the FIRST Bash tool_use regardless of command — the shipped #1223 gap) and `probeWaitForToolResult` (**matches on `ToolUseID` equality, so an empty id would poll to expiry for nothing** — this is why § Design step 12 guards).
-- `internal/e2e/realclaude/background_trigger_probe_test.go:973-988` — `probeWaitForDirectChild(root, timeout) int`, 0 on timeout. Its internal snapshot is the narrow `ps -axo pid=,ppid=,pgid=` descendant walk (`:870`) and the driver discards it — only the int is returned.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:120-197` — `pinScan`, `pinPartition` (records an exclusion only when it fired, `:146-148`), `pinScanArgv(needles, exclude) (pinScan, error)`; the zero `pinScan` on error at `:194`.
-- `internal/e2e/realclaude/background_reach_probe_test.go:162-168, 869-960` — `reachProc`, `reachScanArgv`'s exact `ps -axww -o pid=,ppid=,pgid=,command=` (`:876`, **no `-E`**), `reachMatchArgvRows`' any-needle rule (`:911-916`), `reachCapCommand` (`:945`), `reachMatchedNeedle` (`:955`).
-- `internal/e2e/realclaude/teardown_liveness_probe_test.go:150-161` — `tdnClaudeNeedle = "--append-system-prompt-file"` and its disjointness-from-the-FIFO-needle argument. `:560-574` — `tdnClaudeCommand` returns `""` on `n != 1`.
-- `internal/e2e/realclaude/fixtures.go:96-107` — `WithWorktreeAuthenticated`: skips (not fails) when neither credential variable is set, and calls `t.Setenv` (so **no `t.Parallel()` anywhere on this path**). `:325` — `ensurePyryBuilt`.
-- `internal/e2e/realclaude/resilience_test.go:282-296` — `resolveClaudeBin`.
-- `internal/e2e/realclaude/finding_run_gather_test.go:239-270` — `finGatherInputs`' six fields. This is the downstream consumer the handle is sized against; read `:250-251` (`Pinned` is `[]int` and never `[]reachProc`) and `:256-269` (`ClaudeState`'s admissible producer).
-
-**Production facts the design rests on (read, do not change)**
-
-- `internal/agentrun/ptyrunner/runner.go:229-243` (package doc) and `:479-485` (the in-function defer-LIFO comment) — `emitter.Close()` writes the trailer BEFORE `sess.Close()`'s SIGTERM. Claude is alive and unsignalled at trailer time. The two comments differ in detail (the in-function one additionally names the second `cancel()` and `[reap]`); both agree on the trailer-before-SIGTERM ordering, which is the only part this driver depends on.
-- `internal/agentrun/ptyrunner/runner.go:398` — the descendant-reap defer, ordered before `sess.Close`. `internal/agentrun/reap.go:75-76` — it costs one `ps` exec. Together: the window between the trailer's write and the reap is roughly one exec, which is why the pin is taken **during** the turn.
-- `internal/agentrun/ptyrunner/runner.go:492-503` — the budget `Terminate` hook reaps INSIDE the hook, before the trailer. `:600-601` / `:606` — `Run` returns `nil` on a cancelled run context exactly as on normal completion. `cmd/pyry/agent_run.go:271-277` — only a non-nil, non-`context.Canceled` error becomes a non-zero exit. Together: **the exit code cannot separate the outcomes, so this driver stages no budget-fired run.**
-
----
-
 ## Context
 
 A live probe of `pyry agent-run` splits cleanly in two. The **staging** half — did the model issue the command we asked for, did the auto-background trigger fire, did the FIFO rendezvous complete, did the during-turn process pin match the expected rows — is deterministic, and is where every observed failure of this rig family has occurred. The **reading** half — what pyry's trailer says, and whether the held command was alive when it was written — needs a live claude and cannot be established any other way.

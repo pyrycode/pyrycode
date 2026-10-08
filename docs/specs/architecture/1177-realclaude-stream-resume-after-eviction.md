@@ -7,24 +7,6 @@
 
 ---
 
-## Files to read first
-
-The developer's turn-1 data load. Read these before writing anything.
-
-- `internal/e2e/realclaude/interactive_stream_liveness_test.go:73-142` — **`TestInteractiveStreamLiveness`**, the setup mold to transcribe: skip gates, isolated workdir, `writeStreamInteractiveConfig` (the stream-json toggle), `pair` (no `--allow-remote-permissions`), `seedBootstrapRegistry` + `seedBoundConversation`, `spawnBootstrapDaemon`, `waitBinaryHello`, `fakephone.Dial`, `driveHandshakeInteractive`, one `sealSendMessage` + drain.
-- `internal/e2e/realclaude/interactive_stream_liveness_test.go:167-254` — **`drainForCompletedTurn`**: the full-turn drain (M1 non-empty `assistant_delta` → M2 terminal `turn_state{idle}`), in-order noise decrypt discipline, non-`noise_msg` skip-without-decrypt. Reuse verbatim for the plant turn; **fork** it (accumulate delta text, return the concat) for the recall turn.
-- `internal/e2e/realclaude/interactive_stream_running_turn_test.go:132-214` — **`startStreamRunningTurnHarness`** (the setup-transcription pattern to mirror) + `driveRunningTurn`. Note it returns a `perConvHarness` but **does not expose the daemon handle** — your harness must, so the test can read the daemon's stderr for the eviction WARN.
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go:369-462` — **`bootstrapDaemon`** type (the `stderr *lockedBuffer` field is your eviction-WARN source; `.stop`, `.waitForReady`) and **`spawnBootstrapDaemon`**. Line 393 hardcodes `-pyry-idle-timeout=0` — this is the single line your spawn variant parameterizes.
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go:160-350, 481-599` — `sealSendMessage`, `driveHandshakeInteractive`, `mustJSON`, `runPyry`, `readPersistedServerID`, `seedBootstrapRegistry`, `seedBoundConversation`, `waitBinaryHello`, `lockedBuffer` (`.String()` is race-safe against the os/exec copy goroutine). All same-package — reuse, never redeclare.
-- `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go:85, 140` — `perTurnReplyBudget = 120 * time.Second` (reuse for both turns) and the `perConvHarness` struct fields (`phone, initSend, initRecv, home, workdir`).
-- `internal/e2e/respawn_after_eviction_test.go:96-136` — the **eviction-observation** pattern to transcribe (NOT import — that file is package `e2e`): registry→`"evicted"`, then a stderr poll for the `session.idle_eviction` WARN with `wantSubstrings = {event=session.idle_eviction, session_id=, idle_timeout=, bootstrap=true}`. This is the #396 reference the ticket points at.
-- `internal/sessions/session.go:516-580` — **`runActive`**: the idle timer is armed **once at session activation** (`time.NewTimer(s.idleTimeout)`, 528-532), fires `idleTimeout` later with **no per-turn reset** (the only re-arm is `attached>0`, 556), and logs the `session.idle_eviction` WARN (565) with `session_id` / `idle_timeout` / `bootstrap` fields. This is *why* the plant turn must complete before the timer fires — the binding timing constraint of the whole test.
-- `internal/streamsup/runner.go:406-435, 583-605` — **`Run`** (`firstRun := true` at 408, re-armed on every `Run()` call) and **`buildArgs`** (firstRun → `--session-id <id>`, else `--resume <id>`; pure, no existence probe). This is *why* re-activation does `--session-id`(refused)→`--resume`.
-- `docs/knowledge/decisions/032-bootstrap-resume-per-spawn-existence-probe.md` — the **supervisor**-path existence-probe that the **stream** path lacks; grounds why real-claude validation is the ground truth for the resume path (the ticket's premise).
-- `docs/knowledge/features/idle-eviction.md` — the idle-eviction feature contract (relay/phone conns are not bridge-`attached`, so the idle timer fires; `-pyry-idle-timeout` default 0 / opt-in).
-
----
-
 ## Context
 
 The interactive **stream** runner (`internal/streamsup`) has three real-claude e2e specs — `interactive_stream_liveness` (#1153, one turn), `interactive_stream_modal_resolution` (#1154, one gated turn), `interactive_stream_running_turn` (#1172, running-turn infra). **None exercises idle eviction + resume.** Idle-evict + respawn is covered end-to-end only against fakeclaude and only on the **PTY/bootstrap** runner (`TestE2E_IdleEviction_RespawnsOnSendMessage`, #396) — and, for the *stream* path, `TestE2E_PerConversation_IdleEvictsAndReactivates` (#680) proves lifecycle/routing but **explicitly defers content-recall to "realclaude's domain."**

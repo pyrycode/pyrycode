@@ -5,28 +5,6 @@ status: spec
 size: XS
 ---
 
-# Files to read first
-
-- `internal/e2e/attach_pty_test.go` — full file (~170 lines). The site of every change in this ticket.
-  - lines 49-101 — `TestHelperProcess` echo mode. The SIGWINCH watcher gets installed here, immediately after the `MakeRaw`+`PYRY_E2E_STARTED` bootstrap and before the stdin echo loop.
-  - lines 122-128 — `tinyNonce` (reused as-is by no-op; nothing in this test needs nonces).
-  - lines 138-171 — `readUntilContains` (reused verbatim by the new test; the new test searches for a literal `winsize rows=N cols=M\n` line, no nonce needed because the dimensions themselves are unique to this test).
-- `internal/e2e/attach_pty.go` — full file (~275 lines). **No edits.** Confirms:
-  - The harness exposes `Master *os.File` for tests to write/read against.
-  - `StartAttach` already handles AC#4 (`t.Skip` on `pty.Open` failure, line 71-74).
-  - `attachCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}` (line 121) makes the slave the attach client's controlling terminal — so SIGWINCH from `pty.Setsize(master, …)` lands on the attach client's process group, which is exactly what this test needs.
-- `internal/control/attach_client.go:78-82, 196-232` — `startWinsizeWatcher` and the `Attach` wiring (#133, already merged). Confirms a SIGWINCH on the attach client process triggers `pty.GetsizeFull(os.Stdin)` → `SendResize(ctx, socketPath, sessionID, cols, rows)` to the daemon. **Critical:** the watcher's `read()` is `pty.GetsizeFull(os.Stdin)` against the attach client's stdin, which is the slave PTY. So when the test resizes the master, `GetsizeFull` returns the freshly-set dimensions, not stale ones.
-- `internal/supervisor/bridge.go:261-271` — `Bridge.Resize`. Confirms the daemon-side path: server's `handleResize` (#137) → `Session.Resize` → `Bridge.Resize` → `pty.Setsize(b.ptmx, …)`. The supervisor's `ptmx` is the master end of the helper's PTY; `Setsize` raises SIGWINCH on the helper child.
-- `internal/control/protocol.go:46-67` — `AttachPayload`. Confirms the handshake's `Cols=0, Rows=0` "sentinel" rule (no resize on zero dims). Load-bearing for the "what does the test see at startup?" analysis (see *Race scenarios*).
-- `internal/supervisor/winsize.go` — full file (58 lines). Pattern reference for the helper's SIGWINCH watcher: `signal.Notify` + buffered chan(1) + goroutine + `pty.GetsizeFull(os.Stdin)` guarded by `term.IsTerminal`. The helper's watcher is the same shape minus the teardown plumbing (the helper exits on stdin EOF; signal.Stop is unnecessary).
-- `internal/e2e/attach_restart_test.go` — full file. Two reusable patterns:
-  - The `pty.Setsize` precedent is absent (no test uses it yet) — but the `regexp.MustCompile` + `readUntilContains` shape (lines 17, 40-42, 76-122) is the model for needle-matching against the master byte stream. The new test uses the simpler `readUntilContains([]byte(...))` since the literal `winsize rows=42 cols=117\n` is unambiguous.
-  - Confirms the existing tests in this package match-by-substring (`bytes.Contains`); they will not flake on the *new* `winsize` lines this ticket introduces (see *Backwards compatibility*).
-- `internal/control/resize_test.go:166-184` — `TestServer_Resize_ForegroundSessionSilent`. Pin: a Resize against a foreground session is silently swallowed. This test goes through bridge mode, not foreground, so the path is fully wired — but the spec acknowledges the foreground path here for completeness.
-- `docs/lessons.md` § "PTY Testing" (lines 9-14) — the `t.Skip` discipline for non-TTY hosts. Already centralised in `StartAttach`; this ticket inherits it.
-- `docs/specs/architecture/125-e2e-attach-pty-harness.md` (whole spec) — the immediately-prior architectural context. Read for shared vocabulary (`AttachHarness`, `readUntilContains`, "the slave is the attach client's controlling terminal").
-- `docs/specs/architecture/133-attach-sigwinch-emitter.md` (whole spec) — the production-code counterpart that #126 covers. The watcher's behaviour in *that* spec's "Concurrency model" section (race-scenario table) is what *this* test exercises. No re-derivation needed.
-
 # Context
 
 `pyry attach`'s SIGWINCH→`SendResize`→`Bridge.Resize`→child-SIGWINCH chain landed in #133 (client) and #136 + #137 (daemon-side seam + wire). Coverage is unit-only:

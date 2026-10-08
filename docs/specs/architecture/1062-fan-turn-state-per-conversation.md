@@ -6,23 +6,6 @@
 
 ---
 
-## Files to read first
-
-- `cmd/pyry/interactive_turn_v2.go:76-111` — `interactiveTurnEmitterV2` struct + its lifecycle fields (`inTurn`, `turnID`, `seq`, `currentState`). **The fix adds one field here.**
-- `cmd/pyry/interactive_turn_v2.go:139-220` — `Handle`: reads the conversation cursor once, type-switches into lifecycle actions. **The switch-detect guard goes at the top, after the empty-cursor check.**
-- `cmd/pyry/interactive_turn_v2.go:222-243` — `startTurnIfNeeded`: opens a turn, mints `turnID`, resets `seq`/`currentState` only when `!inTurn`. **Set the new owning-conversation field here.**
-- `cmd/pyry/interactive_turn_v2.go:245-256` — `transitionTo`: the de-dup (`if e.currentState == state { return }`) that swallows the new conversation's opening `responding`. This is the observed defect site; the fix repairs its precondition, not this function.
-- `cmd/pyry/interactive_turn_v2.go:258-290` — `endTurn` + `flushDelta`: the two primitives the guard composes (flush the abandoned turn's buffered text, then mark it closed). `flushDelta` emits against `deltaConvID` (captured when buffering began), not the live cursor — this is why flush-on-abandon attributes correctly.
-- `cmd/pyry/interactive_turn_stream_v2.go:436-510` — `resolveTarget`: the follow-active resolver. `active.watch()` returns `(convID, switchCh)`; a cursor change fires `switchCh`, the subscriber tears down and re-subscribes. **Confirms the switch is already threaded — no new wiring needed; the emitter detects it via the cursor it already reads.**
-- `cmd/pyry/interactive_turn_v2_test.go` — hermetic emitter test file. Home of `stubCursor` (with `.set`), `fakeInteractiveBcast`, `recordedPush`, `assistantDeltas`, `pushTypes`, `discardLogger`. **The recovered oracle lands here.**
-- `origin/feature/1050:cmd/pyry/zz_repro_1050_test.go` — the RED repro to recover (`git show origin/feature/1050:cmd/pyry/zz_repro_1050_test.go`). Genuinely RED on `main`. Rename off the `zz_repro`/`1050` scratch naming; see Testing strategy for the adaptation.
-- `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go` — the harness the real-claude rung reuses verbatim: `startPerConversationHarness`, `createConversationViaPhone`, `sealSendMessage`, `drainForReply`.
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go:182-239` — `drainForAssistantReply`: the exact drain shape `drainForTurnState` mirrors (decrypt every noise_msg in receive order, skip non-matching envelopes, return on the target).
-- `internal/protocol/interactive.go:16-25` — `TurnStatePayload{ConversationID, State}`; wire `State` ∈ `"thinking" | "responding" | "idle"`. AC3's scoping key.
-- `internal/turnbridge/outbound.go:36-41,111` — `TurnState` constants + `BuildTurnState`; the `responding`/`thinking` values the drain matches.
-
----
-
 ## Context
 
 For a **per-conversation** interactive session (a conversation created over the wire — the daemon mints a dedicated per-conversation claude session), the daemon streams `assistant_delta` and `turn_end` but never fans `turn_state` (thinking/responding). The remote renders the full reply but never learns the turn is running: no interrupt affordance, no observable queue window, and a false "the turn seems to have stalled…" warning after a complete reply.

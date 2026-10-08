@@ -4,33 +4,6 @@ Slice B2 of the split of #460 (itself split from #451). Slice A (#459, merged) s
 
 **This slice is the operator-facing CLI surface only.** A new top-level verb `pyry rekey <conn_id>` that dials the control socket and surfaces the result as a one-line stderr message + exit code. No relay changes. No `ctrl.SetRekeyer(v2mgr)` wire-up — the daemon does not yet construct a `*V2SessionManager` in `cmd/pyry/main.go`, so production-path `pyry rekey` returns the slice A guard `rekey: no rekeyer configured` until the missing daemon-wire-up ticket lands. Same "shipped ahead of cutover" precedent as `pair preflight`.
 
-## Files to read first
-
-Production code:
-
-- `cmd/pyry/main.go:163-194` — top-level `run()` dispatch switch; `case "rekey":` is added here next to the existing case arms (`pair`, `update`, `agent-run`).
-- `cmd/pyry/main.go:1279-1351` — `printHelp` body; one new line is added under the existing verb list (mirrors `pair revoke` placement).
-- `cmd/pyry/pair.go:312-372` — `pairRevokeArgs` / `parsePairRevokeArgs` / `runPairRevoke`. **Canonical shape to mirror verbatim.** Sole-positional FlagSet, `fmt.Fprintln(os.Stderr, "pyry rekey:", err)` + usage line + `os.Exit(2)` for parse failures; `fmt.Fprintf(os.Stderr, "pyry rekey: ...\n", ...)` + `os.Exit(1)` for specific runtime errors; `return fmt.Errorf("rekey: %w", err)` for I/O / transport errors that flow through main's `pyry: ` prefix.
-- `cmd/pyry/pair.go:396-405` — `preflightVerdict`: the precedent for "pure (exitCode, stderrLine) helper" testable seam. The new `rekeyVerdict` follows this idiom verbatim so the unit tests can drive the formatter without invoking `os.Exit`.
-- `cmd/pyry/main.go:284-306` — `splitClientFlags`: pre-extractor for `-pyry-name` / `-pyry-socket` tokens that may appear before the positional. **Not used directly** — `parseClientFlags` is the right wrapper for `pyry rekey`; see § Parser below.
-- `cmd/pyry/main.go:540-551` — `parseClientFlags`: the two-step "peel `-pyry-*` then verb-FlagSet" idiom every control-verb runner uses. `runRekey` calls this first to get `(socketPath, rest)`.
-- `cmd/pyry/main.go:911-952` — `runSessionsRm`: the closest analog for "dial via client helper, branch on typed sentinel vs other error". The `errors.Is(err, sessions.ErrSessionNotFound)` → direct `fmt.Fprintf + os.Exit(1)` arm is the exact shape `runRekey`'s `errors.Is(err, control.ErrConnNotFound)` arm follows.
-- `internal/control/client.go:260-278` — `control.Rekey`: the helper the verb invokes. Returns `nil` on success, `ErrConnNotFound` (reconstructed) on the typed-not-found path, `errors.New(resp.Error)` on every other server-side reject (including the slice A guards `rekey: no rekeyer configured` and `rekey: missing connID`), or a transport-shaped error (`dial`, `send request`, `decode`) on socket failures.
-- `internal/control/server.go:27-35` — `control.ErrConnNotFound` sentinel. The verb's only branch-target on the typed path.
-
-Tests / fixtures:
-
-- `cmd/pyry/sessions_test.go:73-93` — `TestRunSessions_RmDispatch` is the canonical "bogus-socket → returned wrapped error contains verb prefix" pattern. **The transport-error test (AC4 bullet 1) mirrors this verbatim** with `runRekey` substituted for `runSessions`. Note: the path under test returns `fmt.Errorf("rekey: %w", err)` from `runRekey` itself; main's top-level printer prepends `pyry: ` in production but the test asserts on the returned `err.Error()` directly so it never reaches that printer.
-- `cmd/pyry/pair_test.go:307-347` — `TestParsePairRevokeArgs`: table-driven parser-shape test. The new `TestParseRekeyArgs` follows this table format verbatim.
-- `cmd/pyry/pair_test.go:412-456` — `TestRunPairRevoke_SaveFailure`: the wrapped-error-return path. Not directly mirrored (no on-disk state in `pyry rekey`), but cited for the "I/O error → returned wrapped error" idiom that the transport-error path inherits.
-- `internal/control/rekey_test.go:55-85` — `startServerWithRekeyer`: the in-process-server fixture pattern. The cmd/pyry test file can NOT import this helper (it lives in package `control`'s `_test.go`), so § Test fixtures below specifies a minimal local re-implementation of the same shape.
-- `internal/control/rekey_test.go:17-53` — `fakeRekeyer`: the trivial Rekeyer stub. The local re-implementation in `cmd/pyry/rekey_test.go` is structurally identical but defined in package `main` so it is in scope for the tests there.
-
-Convention references:
-
-- `docs/PROJECT-MEMORY.md:20` — "Refusal-to-wire-code mapping is the consumer's job." `pyry rekey` is the topmost consumer: it maps `control.ErrConnNotFound` → operator-readable `pyry rekey: conn_id "<value>" not found`, and everything else → `pyry rekey: <verbatim err.Error()>`.
-- `docs/specs/architecture/459-control-rekey-wire.md` — slice A's spec; consult § "Client-side helper" for the contract `control.Rekey` exposes that this slice consumes.
-
 ## Context
 
 The mobile protocol v2 (`docs/protocol-mobile.md` § Re-key, line 234) names `payload.reason = "manual"` as *"operator-triggered via `pyry rekey <conn_id>`"*. The verb is part of the v2 contract — slice A shipped the wire, slice B1 shipped the manager-side trigger, this slice ships the operator surface that ties them together.

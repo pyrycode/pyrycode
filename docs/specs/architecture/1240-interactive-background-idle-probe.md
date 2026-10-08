@@ -6,33 +6,6 @@
 
 ---
 
-## Files to read first
-
-Turn-1 reading list. Every entry is load-bearing; nothing below re-derives what these already establish.
-
-| Path | Extract |
-|---|---|
-| `internal/e2e/realclaude/interactive_stream_running_turn_test.go:132-199` | `startStreamRunningTurnHarness` — the harness this probe reuses verbatim. Note it seeds `runningTurnBootstrapUUID`/`runningTurnConvID` internally and returns `(*perConvHarness, convID)`. |
-| `internal/e2e/realclaude/interactive_stream_running_turn_test.go:242-355` | `drainForResponding` / `assertNoIdleWithin` — transcribe the **decrypt discipline** from these (every `noise_msg` decrypted in receive order; non-`noise_msg` skipped *without* decrypting). Both **discard** frames; neither is reusable as a recorder. |
-| `internal/e2e/realclaude/interactive_stream_running_turn_test.go:225-230` | `runningTurnPrompt` — read it to see what NOT to do. It steers claude *away* from backgrounding. Do not reuse, do not edit. |
-| `internal/e2e/realclaude/fifo_reader_liveness_test.go:83-179` | `fifoLiveRead`, the three verdict consts, and `fifoLiveOutcome` (already JSON-tagged). Record the struct; do not re-render it. |
-| `internal/e2e/realclaude/fifo_reader_liveness_test.go:39-59` | Two hazards in the header: the dual failure mode (an instrument that can only answer `reader-present`), and why `Kill()` is not the sync point. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:647-716` | `holdProbeFIFO` — the rendezvous channel, the write-end-never-escapes rule, and its `t.Cleanup` shape. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:355-440` | The probe-file idiom this file mirrors: env gate + loud `Skipf`, a non-`t.TempDir` artifact dir, and the record-write cleanup registered FIRST so LIFO runs it LAST. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:603-614` | `probeClaudeVersion` — reuse for AC4's version line. |
-| `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go:158-180` | `sealSendMessage` — the send. |
-| `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go:383-420` | `spawnBootstrapDaemon` — `cmd.Env = append(os.Environ(), …)` at `:403` is why the `t.Setenv` must precede the harness call. |
-| `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go:85,140-146` | `perTurnReplyBudget` (120s) and `perConvHarness` (`phone`/`initSend`/`initRecv`/`home`/`workdir` — **no daemon or socket field; do not add one**). |
-| `internal/e2e/realclaude/fixtures.go:25-34` | `realHome` — the operator's HOME captured at package load, before any `t.Setenv`. This is the redaction key AC4 needs. |
-| `internal/protocol/interactive.go:16-77` | `TurnStatePayload` / `ToolUsePayload` / `ToolResultPayload` / `TurnEndPayload` — the exact field set the record transcribes. |
-| `internal/protocol/codes.go:181-186` | `TypeTurnState`, `TypeAssistantDelta`, `TypeToolUse`, `TypeToolResult`, `TypeTurnEnd`. `protocol.TypeNoiseMsg` is `v2envelope.go:19`. |
-| `internal/turnbridge/outbound.go:44-47,84,147-194` | `maxSummaryLen = 200`; `is_error` is `Status == ToolStatusFailed` (so the background path's `false` is the same `false` a clean success carries); `inputSummary` compacts + truncates; `truncate` appends `…` past 200 runes → a truncated summary is **exactly 201 runes**. |
-| `cmd/pyry/interactive_turn_v2.go:208-217, 267-285, 291-298` | The `TurnEnd` arm, `startTurnIfNeeded`, `transitionTo` — the source of AC3(b)'s structural argument (see § AC3(b) below). |
-| `cmd/pyry/main.go:794-801` | `writeMCPApproveConfig` is called iff `InteractiveRunner == "stream-json"`, and `defer`-removed. Read it to understand *why* AC4 lands on its second arm here (§ AC4). |
-| `cmd/pyry/mcp_config.go:72-127` | `renderMCPApproveConfig` embeds `["mcp-approve", "-pyry-socket", <socketPath>]`; the file is created via `os.CreateTemp("", …)` — a **shared `$TMPDIR`**. |
-
----
-
 ## Context
 
 `cmd/pyry/interactive_turn_v2.go:208-217` emits `turn_end` and then transitions to `idle` in the `turnevent.TurnEnd` arm, unconditionally — nothing consults whether the tool left work behind. Since claude now returns a `tool_result` the moment a Bash command's timeout expires and leaves the command running in the background (claude 2.1.220, observed 2026-07-27), the code *predicts* that a client is told the turn finished while the work it described is still running.

@@ -2,23 +2,6 @@
 
 **Size:** S · **Package:** `internal/streamsup` · **Ticket:** #1247 · **Label:** `security-sensitive`
 
-## Files to read first
-
-| Path | Extract |
-|---|---|
-| `internal/streamsup/parser.go:340-363` | `emitUser` — the exact loop the new guard slots into, and the `block.Type != "tool_result"` arm it must precede |
-| `internal/streamsup/parser.go:38-73` | `ignoredLineTypes` + its comment. **Lines 62-66 are the paragraph AC5 makes wrong and requires corrected in place.** |
-| `internal/streamsup/parser.go:227-234` | the existing known-ignored drop: the log shape (`Debug`, message + `type` attr, no content) the new drop mirrors |
-| `internal/streamsup/parser.go:178-194` | `streamBlock` — `Text` is populated from a block's own `"text"` key; a `tool_result`'s payload lands in `Content`, never in `Text`. This is why the guard cannot be tripped from tool output. |
-| `internal/streamsup/parser_test.go:154-166` | the `"unknown user block type surfaces"` case — the anti-widening guard. **Stays green, unmodified.** |
-| `internal/streamsup/parser_test.go:187-194` | `"known block with unknown extra fields still maps"` — the package's standing position on unknown sibling fields, which the residual in § Security is argued against |
-| `internal/streamsup/parser_test.go:20-28, 220-229` | `collectEvents` + the table-runner shape every new mapping case reuses |
-| `internal/streamsup/parser_test.go:433-444` | `TestParser_IgnoredLineTypesIsTheMeasuredSet` — the "pin the knob so growth is deliberate" idiom this ticket deliberately does **not** copy (§ Design, "Constant, not a set") |
-| `internal/streamsup/runner_test.go:399-445` | `spawnArgsRecorder` — the capturing `slog.Handler` shape AC4's assertion mirrors (4 methods, mutex-guarded, `Enabled` → true) |
-| `internal/turnevent/event.go:99-140` | `UnrecognizedSite` constants; `UnrecognizedUserBlock == "user_block"` is the site string the new log reuses |
-| `docs/specs/architecture/unrecognized-claude-messages.md:47-88, 111-118` | the 2026-07-27 measurement and the four-drop-site table. The `user_block` row's description is now incomplete — see § Out of scope. |
-| `internal/e2e/realclaude/interactive_stream_liveness_test.go:229` | the shared drain's zero-unrecognized `t.Fatalf` — why this is a latent trip-wire, not a live-test deliverable |
-
 ## Context
 
 `emitUser` surfaces every non-`tool_result` block in a `user` message as

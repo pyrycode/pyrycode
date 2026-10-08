@@ -5,31 +5,6 @@
 Edit fan-out: the renamed const has 2 code references and 2 comment references — far under the
 10-call-site red line.
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/relay_v2_perconv_interrupt_test.go` (whole file, 519 lines) | The oracle being extended. `endTurnNeedle:41-47`, the stale StopReason paragraph `:91-97`, the AC1 turn_end wait `:416-443`, the Phase-5 transcript pair `:445-473`. |
-| `internal/e2e/internal/fakeclaude/main.go:495-502` | `interruptEndTurnLine` — the const to replace, and its doc-comment's claim about "exactly what turnbridge's mapper requires". |
-| `internal/e2e/internal/fakeclaude/main.go:725-734` | The ESC handler's own path: `escPending.Swap(false)` → `appendTurnEnd(f)` under the one-shot `escEnded` gate, on the main goroutine. **This is the injection path AC1 requires; it is already correct — do not touch the kicker's trigger path.** |
-| `internal/e2e/internal/fakeclaude/main.go:1037-1049` | `appendTurnEnd` — the writer. Function name and body shape stay; only the const it writes changes. |
-| `internal/e2e/internal/fakeclaude/main.go:94-104` | The `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` env-var doc block, which names the old shape ("assistant end_turn line") and goes stale. |
-| `internal/agentrun/jsonl/testdata/no_end_turn.jsonl:53` | **The base line.** claude 2.1.128's recorded interruption entry — the only one in the repo. 12 top-level keys, no `permissionMode`. Read the whole line; the key set is the point. |
-| `internal/turnbridge/mapper.go:79-101` | `mapEntry`'s `case "user"`: the `ParseToolResult` branch precedes and returns, then `isInterruptMarker` → `TurnEnd{Cancelled}` at `:95`. The mutation site for AC5. |
-| `internal/turnbridge/mapper.go:103-166` | `interruptMarkerSentinel`, `isInterruptMarker`, `userAuthored` (`_, ok := e.Raw["permissionMode"]`), `userText`. The discriminator the staged line must satisfy. |
-| `internal/turnbridge/outbound.go:87-92` | `TurnEnd` → `protocol.TurnEndPayload{StopReason: string(e.Reason)}` — why `TurnEndReasonCancelled` surfaces as the literal `"cancelled"` on the wire. No mapping table in between. |
-| `cmd/pyry/interactive_turn_v2.go:208-217` | **`case turnevent.TurnEnd: if !e.inTurn { drop }`.** The new reachability dependency — see § The coupling this change introduces. |
-| `cmd/pyry/interactive_turn_v2.go:263-306` | `startTurnIfNeeded` / `endTurn` — the only two sites that open and close a turn. Read them to confirm nothing closes a turn on inactivity. |
-| `internal/e2e/relay_v2_interrupt_test.go:55-61` | The #794 sibling's StopReason paragraph — the false-statement-to-be that AC4 covers. Its assertion block at `:280-321` asserts presence + ConversationID only. |
-| `internal/e2e/relay_v2_perconv_turn_end_test.go:52-60` | A third comment reference to `interruptEndTurnLine` by name; it does **not** set the ESC knob. |
-| `docs/knowledge/codebase/1243.md` § "Fixture provenance has exactly two arms" | The verbatim-vs-derived labelling discipline this spec reuses for the fake's const. |
-| `docs/specs/architecture/1191-minted-perconv-interrupt-oracle.md:590-609` | S-2, the finding this ticket discharges. Quote-worthy for the re-derivation's framing. |
-
-Not needed, listed so you don't go looking: `cmd/substrate-guard/main.go` — the banned-pattern list
-(`cmd/substrate-guard/main.go:56-73`) holds screen literals and CSI bytes only. `[Request interrupted
-by user` is transcript prose, not substrate; production already carries the identical string at
-`internal/turnbridge/mapper.go:108` outside the allowlist and the gate is green.
-
 ## Context
 
 `TestRelayV2_PerConversationInterruptStopsRunningTurn` deliberately does not assert the stop reason,

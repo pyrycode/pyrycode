@@ -2,28 +2,6 @@
 
 **Size:** S · **Type:** bug · **Ticket:** [#1492](https://github.com/pyrycode/pyrycode/issues/1492)
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/main.go` | `runSupervisor` | The daemon body. Both edit sites live here: the `defer relayCleanup()` registration, and the `pool.Run` → `<-ctrlDone` → `<-qDone` sequence. |
-| `cmd/pyry/main.go` | `fatalCause` | The exit classification the fix must still reach, and which AC-4 pins. |
-| `cmd/pyry/relay.go` | `startRelay` | What `relayCleanup` closes over: `legCleanup` (conn close + drain) then `<-waitDone`. Also the `conn.Wait()` classifier that calls `w.shutdown(err)` on a persistent 4409. |
-| `cmd/pyry/relay.go` | `startRelayV2` | The returned drain closure. The three producer cleanups it calls are wired **unconditionally** — no PTY/stream gate. |
-| `cmd/pyry/queue_state_v2.go` | `startQueueStateStreamV2`, `queueStateEmitterV2.Run` | The exact deadlock shape: cleanup is `<-done`; `Run` returns only on `<-ctx.Done()` or a closed input channel that nothing closes. |
-| `cmd/pyry/session_error_v2.go` | `startSessionErrorStreamV2` | Same shape. |
-| `cmd/pyry/session_transition_v2.go` | `startSessionTransitionStreamV2` | Same shape. |
-| `internal/msgqueue/queue.go` | `Queue.Run` | `<-ctx.Done()` sits *before* the drain join, so the `<-qDone` receive cannot complete while the daemon ctx is live. Site 2's blocker. |
-| `internal/sessions/pool.go` | `Pool.Run` | `return g.Wait()` — the early non-ctx error source, and the AC-3 mutant site. Note `gctx` is derived from the daemon ctx; cancelling `gctx` does **not** cancel the daemon ctx. |
-| `internal/control/server.go` | `Server.Listen`, `ErrInstanceRunning` | The single reachable error return between `startRelay` and `pool.Run`, and the message text AC-1's test asserts on. |
-| `internal/e2e/harness.go` | `StartIn`, `StartExpectingFailureIn`, `spawn`, `spawnWith` | AC-1's vehicle. Note `spawnWith` builds `-pyry-socket=` from a freshly-minted path and appends `extraFlags` **after** it (flag parsing is last-wins). |
-| `internal/e2e/harness.go` | `ensurePyryBuilt`, `shortHome` | `ensurePyryBuilt` shells out to its own `go build`, so a `-overlay` on `go test` does **not** reach the daemon binary. `PYRY_E2E_BIN` is the seam that does — see § Verification. |
-| `internal/e2e/startup_test.go` | `TestE2E_Startup_CorruptRegistryFailsClean` | The file the new test joins, and the house shape for `RunResult` assertions. |
-| `internal/e2e/relay_test.go` | `TestRelay_4409_PersistentExitsNonZero` | AC-4's stays-green test. |
-| `internal/config/config.go` | `DefaultConfig` | Why the relay leg is on by default (`wss://relay.pyrycode.dev`), and why the new test pins an explicit dead loopback URL instead of inheriting it. |
-
 ## Two corrections to the ticket body
 
 Both are small but load-bearing; neither changes the ACs.

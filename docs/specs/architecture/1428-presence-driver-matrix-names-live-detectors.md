@@ -3,23 +3,6 @@
 **Size: xs.** Comments only, in two files, both already-existing test files. No production
 source file is touched. The cost of this ticket is the *measurements*, not the prose.
 
-## Files to read first
-
-Symbols, not lines — every one resolves with `codegraph_search` / `codegraph_node`.
-
-- `internal/e2e/realclaude/trailer_admissibility_test.go` → `TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone` — **the whole doc comment is the deliverable.** Read the "# The mutant x row matrix" section, the paragraph after it (the ptyrunner-award mutant), and the "Deferred to #1428" paragraph. Two of the four sites live here.
-- `internal/e2e/realclaude/trailer_admissibility_test.go` → `trailGate` — the presence arm is the `against.Value == trailReasonPresentOwesNone` guard returning `trailGatePresentOwesNone`. Four of the six mutants are one-token edits to that guard. The block comment above it states the arm's contract; do not edit it (out of scope) but read it — it is where the ordering arguments already live, so the matrix must not restate them.
-- `internal/e2e/realclaude/trailer_admissibility_test.go` → `trailRunnerUnread` — site 3. The dangling pointer is the closing sentence of its "IT IS NO LONGER WHAT A LIVE RUN READS" paragraph.
-- `internal/e2e/realclaude/trailer_terminal_reason_test.go` → `trailReasonAgainstPath` — the reduction. Its `finRecordRunnerLabel` switch has the `case "ptyrunner"` arm that mutant **M4** widens, and its fall-through returns `trailReasonPathUnnamed`. Read `trailIsReasonValue` for the closed value set.
-- `internal/e2e/realclaude/trail_run_outcome_test.go` → `trailClassifyRun` — site 4. The `readings.Admit.Value == trailAdmitProof` arm returning `trailOutcomeRunningAtTrailer` carries the 68-byte claim; its `decide(...)` format string is what mutant **M6** grows.
-- `internal/e2e/realclaude/trail_run_outcome_test.go` → `TestTrailClassifyRun` — the surviving candidate detector. Its per-row loop asserts `strings.Contains(got.Detail, reachTruncationMarker)` — a **truncation** check, not a headroom check. Extract: what bound it actually enforces.
-- `internal/e2e/realclaude/trail_run_outcome_test.go` → `trailRunProofReadings` — the fixture that reaches the proof arm; it builds on `trailRunWellFormed`, which supplies the certified reason interpolated into that Detail.
-- `internal/e2e/realclaude/trailer_admissibility_test.go` → `TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt` — the sweep that owns both surviving reds for the ptyrunner-award mutant. Its two relevant sub-tests are the row named `an ordinary trailer is usable and certifies its reason` (from `trailGateCases`) and the sub-test `the usable arm diverts to the presence case under one reading`.
-- `internal/e2e/realclaude/background_reach_probe_test.go` → `reachCapCommand`, `reachMaxCommandBytes` — extract the exact truncation predicate: a command of length **exactly** `reachMaxCommandBytes` is returned unchanged; the marker is appended only *past* it. AC4 turns on this boundary.
-- `cmd/cite-guard/main.go` → its package doc — the citation rule the corrected prose must satisfy, and (see § Why these four survived) the thing it does **not** check.
-- `CODING-STYLE.md` § "Comments — Citing Other Code" — the rule in prose.
-- `docs/knowledge/codebase/1434.md` — the shape AC1's measurement record must follow, and its own lesson "A stale byte figure beside a `<=` assertion passes silently", which applies directly to AC4.
-
 ## Context
 
 `TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone`'s header is the one surface whose stated

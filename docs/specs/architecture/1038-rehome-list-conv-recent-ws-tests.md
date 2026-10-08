@@ -2,15 +2,6 @@
 
 **Ticket:** #1038 (split from #966) · **Size:** S · **Security-sensitive:** no
 
-## Files to read first
-
-- `internal/relay/handlers/create_conversation_test.go:44-73` — the **direct-call harness to mirror**: `newCreateConvConn` builds `dispatch.NewTestConn(id, out, nil)` + a buffered `out` channel + a `recv()` helper (2s timeout). This is the exact shape both migrated files adopt.
-- `internal/relay/handlers/create_conversation_test.go:44-52` — `createConvFirstID = 1` note: on a fresh `NewTestConn`, `NextID` starts at 0 so the first reply lands at id=1 (no gate pre-advance). This is why AC#3 holds by construction.
-- `internal/relay/handlers/list_conversations_test.go` — file to migrate (5 test funcs + 4 helpers). Note `TestListConversations_InReplyToAndIDMonotonic:245-273` sends **two frames on the same conn** — the crux case (see § Crux).
-- `internal/relay/handlers/recent_workspaces_test.go` — file to migrate (7 test funcs). Its `runRecentWorkspaces:49-60` helper **calls `runListConvDispatcher` + `recvOutbound` defined in the sibling file** — both are deleted, so this helper must become self-contained (see § Cross-file coupling).
-- `internal/dispatch/dispatch.go:95-163` — `NewTestConn`, `NextID`, `Reply`, `Send` contracts. `Reply` stamps `ID=NextID()`, `InReplyTo=&req.ID`, `TS=now`, then `Send`s a `RoutingEnvelope{ConnID, Frame}` onto the conn's `outbound` channel. The reply-production path is **unchanged** by this ticket.
-- `internal/relay/handlers/list_conversations.go:27-59` / `recent_workspaces.go:44-76` — handler signatures: `ListConversations(reg) dispatch.Handler` / `RecentWorkspaces(reg) dispatch.Handler`, both invoked as `h(ctx, c, env)`. **Neither takes a logger** — the logger today is consumed by `dispatch.Config`, not the handler, so `testLogger(t)` drops out of both migrated files.
-
 ## Context
 
 The Mobile Protocol v1 relay path was removed from production in #913 slice 1. `internal/dispatch` still carries the orphaned v1 `Dispatcher` (`New`/`Config`/`Run`/`Register`/`Outbound`) with zero production callers; a follow-on ticket (#966's removal slice) deletes it. These two handler tests are the last consumers of that harness *as a test scaffold*. Re-homing them onto the direct-call pattern every sibling handler test already uses (`create_conversation_test.go` et al.) removes the dependency and unblocks the deletion.

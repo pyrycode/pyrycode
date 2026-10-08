@@ -1,16 +1,5 @@
 # Spec #1103 — `internal/permbridge`: pending-approval registry with fail-closed default-deny completer
 
-## Files to read first
-
-- `internal/modalbridge/modal.go:89-196` — the registry pattern to mirror: leaf `sync.Mutex`, opaque-id-keyed map, `New`/`Record`/`Lookup`/`Resolve` shape, clone-on-write, one-shot `Resolve` (delete-under-lock). permbridge is the same shape **plus** a per-entry completer + timer.
-- `internal/modalbridge/modal.go:1-14` — package-doc convention: state the relay-free / import-discipline invariant up front. permbridge imports **nothing** from `internal/` (self-contained), so its doc states that explicitly.
-- `cmd/pyry/acp_permission.go:36-79` — the codebase's existing default-deny idiom: every non-`selected` path routes deny; a one-shot arbiter (`resolved atomic.Bool` CompareAndSwap) resolves at most once; the deadline (`timeout`) source. permbridge reuses the *semantics* (deny is the failure mode, one-shot resolution) but arbitrates via **delete-under-mutex** instead of an atomic bool, because the map already needs the lock.
-- `cmd/pyry/acp_permission.go:157-208` — `runRoundTrip` / `route`: the "one goroutine wins the one-shot, routes exactly one outcome, the loser routes nothing" structure the timer-vs-Resolve race mirrors.
-- `CODING-STYLE.md` §§ Error Handling, Concurrency, Testing — sentinel errors + `errors.Is`, channels-for-coordination/mutex-for-state, table-driven `-race` tests, stdlib only.
-- `internal/modalbridge/modal_test.go:1-40` — same-package test idioms (small local helpers, no testify) to match.
-
-The T1 approval contract (fixture `fixture-p4-approval-contract.json`, not in-repo) is fully reproduced in the ticket body — no need to hunt for it.
-
 ## Context
 
 Part of the Streamrunner Interactive permission bridge (ex-T5). The #1075 spike proved that a non-YOLO headless claude spawned with `--permission-prompt-tool mcp__<server>__<tool>` **synchronously blocks** on the MCP tool's allow/deny JSON for the full duration of a pending approval (measured 11.5 s behind an 8 s-delayed approval). A pending request is therefore real owed-silence of *unbounded* length. claude's own deny path does **not** hang the turn, so a timeout or a lost caller must resolve to **deny** — fail-closed / default-deny is the security-critical core of the whole mechanism.

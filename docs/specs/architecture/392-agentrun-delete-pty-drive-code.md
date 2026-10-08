@@ -6,15 +6,6 @@
 
 **Blocked-by:** #375 (closed). The selfcheck rewrite landed on `main` (commit `a209572`) and `internal/agentrun/selfcheck/selfcheck.go` no longer imports `agentrun.{MarkWorkdirTrusted,WriteSettings,SettingsFilename,Drive,DriveConfig}`. Pre-architect grep confirmed the legacy primitives have zero callers across `cmd/` and `internal/`.
 
-## Files to read first
-
-- `internal/agentrun/streamrunner/runner.go:1-22` — package doc comment; line 6 names `internal/agentrun.Drive` as the PTY sibling, which is the only surviving stale reference outside the doomed files. Edit target.
-- `internal/agentrun/selfcheck/selfcheck.go:1-20` — confirms the rewritten self-check no longer depends on the legacy primitives (mentions `streamrunner` + `jsonl.Reader` only, no `agentrun.{Drive,MarkWorkdirTrusted,WriteSettings}`).
-- `docs/knowledge/codebase/375.md` — the format-and-tone reference for the codebase note this ticket adds (`docs/knowledge/codebase/392.md`). Mirror the section layout (header → Implementation → Lessons / Related, omit sections that don't apply).
-- `docs/knowledge/codebase/README.md` — confirms the `<N>.md` filename convention used in the AC.
-
-No need to read the doomed files themselves before deleting — the developer is the *deletion* agent, not a reviewer of what the files do. `git rm` does not require comprehension.
-
 ## Context
 
 `pyry agent-run` and its boot-time self-check both used to drive an interactive `claude` over a PTY: spawn under a tty, sleep + press Enter to dismiss the trust dialog, sleep, type the prompt bytes, watch the on-disk session JSONL for tool events. After #390 introduced `streamrunner` and #391 / #375 cut over both the production verb and the self-check to spawn `claude` with `--input-format stream-json --output-format stream-json --dangerously-skip-permissions` (single JSON envelope on stdin, structured events on stdout), the PTY primitives in `internal/agentrun/` are unreachable. They survive only as compiled-but-unused exported symbols.

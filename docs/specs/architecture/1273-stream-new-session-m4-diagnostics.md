@@ -5,22 +5,6 @@ No production code. No new files. No new exported symbols. No new helpers.
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/relay_v2_stream_new_session_test.go:22-71` | The header comment: the M1–M5 milestone contract and *why* M4 asserts the fresh child's stdin rather than a phone-side delta (the frozen-sink-tag divergence). Do not weaken any of it. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:239-282` | The M2 actuation loop. `post` is captured from `readBootstrapIfPresent(regPath)` — **the same file and field** the AC-3 re-read must use. Note the comment already anticipating "the rare double-actuation case". |
-| `internal/e2e/relay_v2_stream_new_session_test.go:333-376` | M4: the ack #2 loop, the stdin-log poll loop, and the failure message being rebuilt. The whole diff lands here plus five `t.Logf` prefixes. |
-| `internal/e2e/rotation_test.go:143-175` | `readBootstrapIfPresent(regPath) (registryEntry, bool)` — **non-fataling**, one-shot, no polling. This is the AC-3 re-read. Read its doc comment: `ok=false` conflates *missing*, *unparseable*, and *no bootstrap row*. |
-| `internal/e2e/rotation_test.go:111-141` | `waitForBootstrapID` / `waitForBootstrapIDChange` / `readBootstrap` — all three **fatal** on timeout. None of them may be used on the failure path. Shown so you recognise them and skip them. |
-| `internal/e2e/per_conversation_eviction_test.go:375-395` | `boundSessionID(t, convPath, convID)` — reads `conv.CurrentSessionID`, looks like exactly what AC-3 asks for, and **must not be used**. See § "The helper that must not be used". |
-| `internal/e2e/restart_test.go:17-24` | `registryEntry` — the `.ID` field the comparison reads. |
-| `internal/e2e/realclaude/prompt_fidelity_test.go:75-85` | The package's existing `"<unresolved home: …>"` sentinel idiom for a diagnostic helper that cannot resolve its value. Mirror this shape rather than emitting `""`. |
-| `docs/knowledge/codebase/1137.md` | Milestone structure and the post-rotation drain divergence. Background for why M4's observable is the stdin log at all. |
-
----
-
 ## Context
 
 `TestRelayV2_StreamNewSessionRotatesAndRestartsFresh` failed once during QA's `make check`

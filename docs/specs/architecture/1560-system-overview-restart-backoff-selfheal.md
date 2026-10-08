@@ -8,33 +8,6 @@ still the gate the PR must show green.
 
 ---
 
-## Files to read first
-
-Read in this order. Everything below was verified on this branch's tip on 2026-08-20; the
-"what to extract" column is the reason to open it, not a summary you can substitute for it.
-
-| Path | Symbol / section | What to extract |
-| --- | --- | --- |
-| `docs/knowledge/architecture/system-overview.md` | §§ *Restart Cycle*, *Backoff Strategy*, *Fast-crash self-heal (#1165)* | The three sections you are rewriting. Find them by heading text, not by line number. |
-| `internal/sessions/runnerstate.go` | `RunnerConfig` doc comment | **The authoritative record of what #1348 moved vs. dropped.** Its two-bullet list (`SelfHeal`, `ValidateConversation`) and the sentence "Neither has a stream-path equivalent today" are the framing the Fast-crash section should adopt. |
-| `internal/streamsup/runner.go` | `Runner.Run` (doc comment + loop body) | The real restart loop: derived `iterCtx`, parent-ctx shutdown detection, `drainRestart` skipping backoff, the three-way backoff `select`. Its doc comment ends "Mirrors supervisor.Run" — that is the *shape* claim, still true. |
-| `internal/streamsup/runner.go` | `useCreateForm`, `buildArgs` | **The spawn-flag decision as it actually runs.** Read both doc comments in full before writing any sentence about `--session-id`/`--resume` — see § "The AC-1 trap" below. |
-| `internal/streamsup/runner.go` | `Runner.Restart`, `Runner.RestartFresh`, `Runner.drainRestart` | Which names survived into streamsup and what each means now. `RestartFresh`'s doc comment names `new_session` rotation as its purpose — no self-heal anywhere in it. |
-| `internal/streamsup/backoff.go` | `backoffTimer`, `newBackoffTimer`, `backoffTimer.next` | The ladder itself, plus the file header recording it as a verbatim copy of the deleted `internal/supervisor/backoff.go` and why. |
-| `internal/streamsup/runner.go` | `defaultBackoffInitial`, `defaultBackoffMax`, `defaultBackoffReset`, and the `New` arm that applies them | The three numbers and the fact they land on `Config.BackoffInitial` / `BackoffMax` / `BackoffReset` when zero. Re-read the constants at build time — AC 4 requires it. |
-| `internal/sessions/pool.go` | `Pool.RotateBootstrapForSelfHeal` | Confirm it is a live *primitive* with no non-test caller. This is the thing that is easy to misread as evidence self-heal survived. |
-| `cmd/pyry/streamsup_runner.go` | `mapStreamsupConfig`, `streamClaudeSessionsDir` | Proof the by-id transcript probe is **armed on every production path** (`ClaudeSessionsDir` is derived from `WorkDir`, not left empty). This is what makes the AC-1 trap live rather than theoretical. |
-| `docs/knowledge/features/streamsup-package.md` | § "Supervise loop (`Run`)", § "`buildArgs` — the id-flag inversion…", § "`useCreateForm`…" | The pointer target AC 1 offers, and the evergreen prose you should link to rather than re-derive inline. |
-
-**Cite by symbol name, never by line number.** `make cite-guard` fails a `//`-comment
-citation that resolves into a declaration, and the ticket body itself demonstrates why:
-its `runner.go:57-59` / `:281-288` cites for the backoff defaults were already off by four
-and by eighty lines respectively when this spec was written, days after filing. Markdown
-prose is not gated by `cite-guard`, but the same rot applies — write `` `useCreateForm` ``,
-not a file:line.
-
----
-
 ## Context
 
 `docs/knowledge/architecture/system-overview.md` is the architecture authority: repo

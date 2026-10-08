@@ -2,33 +2,6 @@
 
 **Size:** S (confirmed; see § Size check). **Blocker:** #1385 (merged `ef7ba1f`). **Sibling:** #1394 (merged `b43de44` — its edits are already on `main`, so the collision the ticket flagged is resolved; write against `main` as it stands).
 
-## Files to read first
-
-Turn-1 data load. Read these before writing anything; every design decision below is anchored in one of them.
-
-| Path | What to extract |
-|---|---|
-| `internal/turnevent/event.go:291-356` | **The source of truth for the doc section.** `ThinkingProgress`'s doc comment + both field comments carry all four measured consumer hazards with their numbers. Port them; do not re-derive or re-measure. |
-| `internal/turnbridge/outbound.go:100-114` | `ApiRetry` / `Compacting` arms — the exact shape the new `MapEvent` case copies (conversation identity only, `tc.TurnID`/`tc.Seq` ignored, ints across verbatim). |
-| `internal/turnbridge/outbound.go:49-61` | `MapEvent`'s doc comment — states which variants return `ok == false`. Unchanged by this ticket, but read it so you don't contradict it. |
-| `cmd/pyry/interactive_turn_v2.go:229-239` | The `ApiRetry, Compacting` handler case — `flushDelta` then `emitMapped`, no lifecycle call. This is AC2's shape verbatim. |
-| `cmd/pyry/interactive_turn_v2.go:240-255` | The `Unrecognized` case — the AC's cited `:240`. Same shape, different reason. |
-| `cmd/pyry/interactive_turn_v2.go:256-273` | #1394's background-task case. Your case goes immediately after it. |
-| `cmd/pyry/interactive_turn_v2.go:435-465` | `eventKind` — add one arm. 8 non-test call sites across 4 files; it feeds log discriminants only. |
-| `internal/protocol/codes.go:224-261` | The `TypeUnrecognizedMessage` and background-task const blocks — the house comment style for a new outbound-only v2 type, including the "MUST NOT be added to `inboundAppTypeSet`" paragraph. |
-| `internal/protocol/interactive.go:93-117` | `ApiRetryPayload` / `CompactingPayload` — the closest structural peers (bridge-supplied `ConversationID` + plain ints, no `turn_id`). |
-| `internal/protocol/compat_test.go:54-61`, `:163-199`, `:229-258` | The **three** insertion sites: rejected row, `v2OnlyTypes` entry, `all`-slice entry. |
-| `internal/protocol/testdata/compacting.json` | Fixture shape — one line, `id` / `type` / `ts` / `payload`. |
-| `internal/protocol/interactive_test.go:243-262` | `TestCompactingPayload_RoundTrip` — the round-trip test template, ending in `roundTripEnvelope`. |
-| `cmd/pyry/relay_guard_test.go:113-141` | `excludedTypes` — the outbound-push block plus #1393's comment explaining *why* an outbound-only type must be listed. |
-| `internal/turnbridge/mapper.go:11-53` | `mapEvent` — the PTY surface's **sole** entry into `turnevent`, seven mapped kinds and a `default: return nil, false`. AC4's subject. |
-| `internal/turnbridge/mapper_test.go:178-400` | `kindEvent` helper + `TestMapEvent`'s table, incl. its explicit drop rows. |
-| `$(go env GOPATH)/pkg/mod/github.com/pyrycode/tui-driver@v1.12.0/pkg/tuidriver/events.go:25-159` | The `EventKind` iota enum — 18 contiguous members, `EventKindUnknown` … `EventKindError`. AC4's loop bound. |
-| `cmd/pyry/interactive_turn_v2_test.go:630-760` | Existing status-peer tests (`pushTypes`, bare-envelope assertions) — reuse these helpers, don't invent new ones. |
-| `docs/protocol-mobile.md:579-615` | `api_retry` / `compacting` subsections — the fidelity floor for a field table + prose. |
-| `docs/protocol-mobile.md:693-740` | #1394's `background_task_started` subsection — the current fidelity ceiling, and the nearest style anchor. |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:180-200` | `parserIgnoredTypes` / `expectedStreamRunnerOnlySubtypes` — the **already-committed** live pin that ptyrunner emits zero `thinking_tokens`. AC4's premise. **Read only; no edit is owed here.** |
-
 ## Context
 
 #1385 shipped `turnevent.ThinkingProgress{EstimatedTokens, EstimatedTokensDelta}` from `streamsup`'s parser, rate-bounded at one event per `minThinkingTokensPerEvent = 64` tokens of accumulated delta. Nothing consumes it. `turnbridge.MapEvent` has no case for the variant, so it returns `ok == false`; upstream of that, `cmd/pyry/interactive_turn_v2.go`'s type switch has no case either, so the event falls to `default:` (`:274`) and is debug-logged as `interactive_turn.unknown` with `kind="unknown"`. Nothing crosses the wire, and a phone showing "thinking" still cannot separate a slow turn from a wedged one.

@@ -19,38 +19,6 @@ The PTY runner's three teardown call sites are already insulated behind the `rea
 package-var seam. The seam **stays in `ptyrunner`** and is simply re-pointed at the lifted function,
 so `runner.go` and its seam-swap unit tests are untouched.
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/reap.go:1-133` — **the source of the move.** `reapDescendantGroups`
-  (52), `descendantPGIDs` (92), consts `killGrace` (21), `reapPSTimeout` (25), seam var
-  `reapDescendantGroupsFn` (33). Extract: the two functions + `reapPSTimeout` relocate verbatim;
-  `killGrace` and the seam **stay** (see Design). Preserve the three load-bearing guards
-  (`pgid<=1`, `pgid==self`, `pgid==rootPid`) exactly.
-- `internal/agentrun/exitclass.go:1-45` — the **target package** (`package agentrun`) and the sibling
-  helper `ExitErrIsBenign`. Extract: package name + import idiom; the reaper lands in a new sibling
-  file, not appended here.
-- `internal/agentrun/exitclass_test.go:17-40` — the package's **single** `TestMain` + `runExitHelper`.
-  Extract: dispatch shape — it keys on `os.Getenv("GO_EXITCLASS_HELPER") != ""` with **no**
-  `GO_..._HELPER=1` gate. The reap-mode dispatch branch folds in here.
-- `internal/agentrun/ptyrunner/reap_test.go:1-198` — the reap unit tests (4 subtests) + the test-side
-  fixtures (`startReapHelper`, `waitReport`, `processAlive`, `waitGroupGone`, `reapHelperOpts`,
-  `reapHelper`). Extract: all of it relocates; the 4 `reapDescendantGroups(...)` calls become
-  `ReapDescendantGroups(...)`.
-- `internal/agentrun/ptyrunner/helper_test.go:79-87` (reap-mode dispatch in `runHelper`) and
-  `:278-342` (fixture-side `runReapHelper`, `blockUntilKilled`, `spawnGrandchildAndBlock`). Extract:
-  these move to `agentrun`; the env keys rename (see Design); note the grandchild-spawn `append`
-  pattern relies on `os/exec`'s env-dedup-keeps-last — preserve verbatim, only rename keys.
-- `internal/agentrun/ptyrunner/runner.go:302-320, 388-398, 490-504` — the **three** seam call sites
-  (operator-cancel `cmd.Cancel`; post-spawn `defer`; budget `Terminate` hook). Extract: all route
-  through `reapDescendantGroupsFn` — **no edits here**; they keep working once the seam is re-pointed.
-- `internal/agentrun/ptyrunner/runner_test.go:641-693` — the seam-swap doubles (`reapRecorder.record`,
-  `swapReapSeam`, `assertReapedLivePid`). Extract: `record(rootPid int, _ *slog.Logger)` must stay
-  signature-compatible with `agentrun.ReapDescendantGroups` — it is; **no edits here**.
-- `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:116-292` — the SIGTERM-mid-tool e2e
-  (`-tags e2e_realclaude`). Extract: it asserts **process/group liveness** (`waitForProcessGone`,
-  `waitForGroupGone`), never a log string — so the `ptyrunner:`→`agentrun:` log-prefix neutralisation
-  is safe. No edits; may be env-blocked (see [[known-test-flakes]] — realclaude PTY).
-
 ## Context
 
 #565 built `reapDescendantGroups`/`descendantPGIDs` inside `ptyrunner` and deliberately kept them

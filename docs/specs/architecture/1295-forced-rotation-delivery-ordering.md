@@ -4,28 +4,6 @@
 
 ---
 
-## Files to read first
-
-Turn-1 reading list. Each entry says what to extract; do not read past it.
-
-| Path | What to extract |
-|---|---|
-| `cmd/pyry/main.go:1625-1660` | `newInboundDeliver` — **the seam under test.** The exact statement order: `resolve` → `Activate` → `waitIdleForDelivery` → `openForDelivery` → `WriteUserTurn` → `undo` on error. Note that `resolve` runs **once, before the hold**, so a parked delivery writes through a pre-rotation-resolved writer. |
-| `cmd/pyry/main.go:1514-1552` | `inboundActivateTimeout` (30 s) and `streamTurnHoldTimeout` (15 min) doc comments — the two silent bounds the ticket's three-row table names, and the arithmetic against msgqueue's give-up. |
-| `cmd/pyry/inbound_deliver_test.go` (whole file, 557 lines) | **The existing harness this ticket extends.** Reuse: `inboundTestLogger`, `recvStringWithin`, `recvErrWithin`, `assertNoWriteWithin`, `holdTestTracker`'s shape. Read `TestInboundDeliver_StreamHold_HoldsMidTurnSends` (:329) closely — its "the determinism is structural, not timing-based" argument is the one this ticket's test extends across a rotation. |
-| `cmd/pyry/stream_turn_busy.go:349-395` | `waitIdleForDelivery` + `openForDelivery` — the arm being forced, and the "WHY THE HOLD IS DETERMINISTIC" paragraph. |
-| `cmd/pyry/stream_turn_busy.go:200-250` | `clearForSession` — the release. It is **session-keyed**, resolved daemon-side, and skips silently at **Debug** when the session resolves to no conversation. |
-| `cmd/pyry/session_transition_v2.go` — `transitionClearsTurn` + its doc | **Load-bearing and easy to get wrong: the clear is keyed to `NewSessionID`, not `PreviousID`.** For a `ReasonClear` transition that is the *post*-rotation id, and it only resolves because `notifyTransition` drives `rebindConversation` **ahead of** the observer fan-out. |
-| `internal/sessions/transition.go:56-140` | `notifyTransition` → `rebindConversation` → observer, then `RotateForNewSession`. The ordering the fixture must mirror: re-key the binding, *then* fire the clear. |
-| `cmd/pyry/main.go:1447-1478` | `startFreshRunner` — `rotate(oldID)` (which includes the whole transition fan-out **and the clear**) completes **before** `RestartFresh(newID)`. This gap is the window § Design discusses. |
-| `cmd/pyry/relay.go:845-855` | `conversationForSession` — matches `CurrentSessionID` **or** `SessionHistory`. This is what the resolve fake models. |
-| `internal/streamsup/envelope.go:13-18`, `:139-152`; `internal/streamsup/runner.go:263-285` | `ErrNoLiveChild` — returned by `WriteTurn` when `Runner.Stdin()` is nil (before first spawn, between spawns, **mid-restart**). Retryable, writes nothing. The fixture returns this sentinel verbatim. |
-| `internal/msgqueue/queue.go:566-620` | The drain's outcome branches: `err == nil` → advance; `err != nil` → `firstFailedAt` set, 1 Hz `Warn`, `sleepCtx(ctx, q.retry)`, retry the **same head**. Note `Config.RetryInterval` / `GiveUpAfter` are injectable. |
-| `cmd/pyry/interactive_turn_v2_test.go:25,45` · `cmd/pyry/stream_turn_busy_test.go:23` | `testConvID`, `discardLogger`, `stubBusyResolve` — existing package-level test helpers. `stubBusyResolve` takes a **static** map and is therefore *not* reusable here; the rotation needs a mutable one (§ Design). |
-| `docs/knowledge/codebase/1137.md` | Background on the e2e milestone structure (M1–M4) the failure record uses. |
-
----
-
 ## Context
 
 `TestRelayV2_StreamNewSessionRotatesAndRestartsFresh` has failed twice at M4 with the same

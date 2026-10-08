@@ -6,26 +6,6 @@
 
 ---
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`. This is the turn-1 data load; reading these five first should make the rest of the spec unambiguous.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/sessions/pool.go` | `Pool.UpdateSettings` | The two-branch live-apply, the `p.mu` release point, and the install-before-deliver ordering rule. **The branch you are changing.** |
-| `internal/sessions/pool.go` | `inBandDeliverable` | The predicate and — more important — its doc's *keys-on-presence, never on merged-vs-previous* rule. You extend it with a value test on one field; you do not turn it into a differ. |
-| `internal/sessions/pool.go` | `Pool.deliverSettingsInBand` | Fire-and-forget contract, the model→effort ordering rationale, and the never-log list. The revocation becomes its third clause. |
-| `internal/sessions/runner.go` | `Runner`, and `SetSpawnArgs`'s doc on it | The interface you widen, and the precedent doc for a method that is ON it because its consumer is inside `internal/sessions`. |
-| `internal/streamsup/runner.go` | `RevokeBypass`, `Interrupt` | The method you wire (already built by #1603) and the sibling it mirrors. `RevokeBypass`'s doc is one of AC5's two named targets — it currently predicts a type assertion. |
-| `cmd/pyry/streamsup_runner.go` | `streamRunner.SetSpawnArgs`, `streamRunner.Interrupt` | The two adapter-doc shapes: on-the-interface (what you write) vs off-it-by-assertion (what you must not copy). `SetSpawnArgs`'s doc already carries the fail-open argument this ticket reuses. |
-| `internal/sessions/runner_test.go` | `lifecycleRunner`, `runnerDouble`, `restartArgs`/`spawnArgSets`/`userTurns` | The recorder double and its three read accessors. You add a fourth record. |
-| `internal/sessions/pool_update_settings_inband_test.go` | `TestInBandDeliverable`, `TestPool_UpdateSettings_InBand_ModelAndEffort` | The predicate table (two rows flip) and the working template for a no-respawn assertion. |
-| `internal/sessions/pool_update_settings_restart_test.go` | `TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart`, `TestPool_UpdateSettings_YOLOAbsent_NoBypassInBand`, `helperRestartPool`, `doneAppears` | The test to retarget, the test that must NOT move, the pool helper, and `doneAppears`'s doc explaining why it is blind under the double. |
-| `internal/sessions/session.go` | `claudeSettingsArgs` | The one place the YOLO fail-safe is enforced in argv, and the model→effort→bypass order this ticket extends into the delivery path. |
-| `docs/knowledge/features/set-permission-mode-inband-probe.md` | § "Behavioural verdict per direction", § "The escalation finding" | The measurement. Read it; do not re-derive it. |
-
----
-
 ## Context
 
 A bypass-posture change live-applies today by restarting the child. `Pool.UpdateSettings` recomposes the spawn argv and calls `sup.Restart(newArgs)`; that restart is what makes a revocation take effect *now* rather than at the next spawn, and #842's security review rests on exactly that.

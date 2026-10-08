@@ -1,16 +1,5 @@
 # #523 — TestFatalCloseCodes_HaltsReconnect_RacingSendError flake
 
-## Files to read first
-
-- `internal/transport/wssclient.go:374-448` — `serve` + `awaitCloseStatus`. The close-status preference loop and the 50 ms grace branch are the surface this ticket sits on. Read the docstring at L417-432 — it states the invariant the test pins.
-- `internal/transport/wssclient.go:28-41` — cadence constants block, including `closeFrameGrace = 50 * time.Millisecond`. This is the candidate dial if diagnosis points at the production side.
-- `internal/transport/wssclient.go:181-255` — `Connect`. Understand what happens when `serve` returns an error WITHOUT a recognizable close status: the dial loop spins (relay returns HTTP 410 on retry), and `Connect` only escapes via ctx cancellation. This is the failure shape the test catches.
-- `internal/transport/wssclient_test.go:710-871` — `racingCloseRelay` helpers + `TestFatalCloseCodes_HaltsReconnect_RacingSendError`. The 5 s deadline literal is at L814; the failing assertion is at L862. The docstring at L784-796 states the contract the test pins; do not weaken it.
-- `internal/transport/wssclient_test.go:873-956` — `TestAwaitCloseStatus_GraceBranchPreservesCloseError`. This sibling test pins the helper's contract directly (orderings A / B / B′ as named in #290's codebase note). It must remain green; if any fix touches `awaitCloseStatus`, walk these three sub-tests through the new code mentally before running them.
-- `internal/transport/wssclient_test.go:28-68` — `newClientForTest` + `testOpts`. `closeFrameGrace` is overridable via `testOpts.closeFrameGrace > 0` — useful if the diagnosis branch wants the stress test to run with a wider grace.
-- `docs/knowledge/codebase/290.md` — full design rationale for the grace branch, the `prepareRead.done()` override learned-the-hard-way lesson, and the explicit "Order B′" failure mode (recvPump never surfaces a close-status error within grace). This ticket is a stress-flake on the same surface; do not duplicate that note's content, extend it.
-- `docs/knowledge/codebase/288.md` (if present) — sibling regression-test ticket. Skim only for context on why the busy-Send loop exists in this test.
-
 ## Context
 
 `TestFatalCloseCodes_HaltsReconnect_RacingSendError` failed once during PR #522's CI, with `wssclient_test.go:862: Connect did not return before ctx deadline` and a 5.01 s test duration that aligns to the 5 s ctx deadline at L814. Five subsequent `-count=5` reruns of the same test on the same tree all passed; full `make check` on the PR branch and on the merge-base were green. The failing PR touched only `internal/agentrun/...`, never `internal/transport` — the flake is pre-existing.

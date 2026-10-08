@@ -1,15 +1,5 @@
 # Spec — #381: e2e/realclaude per-agent role smoke tests
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go:32-37, 42-61, 66-86, 92-142` — `WithWorktree`, `RunOpts`, `RunResult`, `RunPyryAgentRun`, `ReadJSONL`. The fixtures you build on. Do not modify; do not widen export surface.
-- `internal/e2e/realclaude/tool_loop_test.go:174-202` — `resultTrailer` struct + `parseResultTrailer(stdout)`. Both are package-private but live in the SAME test package (`realclaude`) — you can call them directly from `per_agent_test.go`. Do NOT duplicate them.
-- `internal/e2e/realclaude/allowed_tools_enforcement_test.go:27-71` — pattern for `RunPyryAgentRun` + `ReadJSONL` + assertion-with-truncated-diagnostics. Mirror the failure-message style (truncate stdout/stderr to ~1024 bytes before embedding in `t.Fatalf`).
-- `internal/e2e/realclaude/prompt_fidelity_test.go:79-89` — `jsonlPathFor(workdir, sessionID)` for diagnostic path strings on JSONL-related failures. Already in package; reuse.
-- `internal/agentrun/jsonl/reader.go:40-65` — `Event` field semantics, especially the `EndOfTurn` and `TextChars` fields and the rule that transitional `end_turn` envelopes (thinking-block resolutions) have `EndOfTurn=false`. Read this before writing the "last assistant event" assertion.
-- `agents/dispatcher/src/dispatch.ts:1183-1186` (in the sibling repo `agent-dispatcher`, not in this repo) — `baseTools` literal + `needsAgent = ["architect", "code-review"]` membership check. The line numbers in the ticket body (1190-1193) are stale; use these. Source of truth for the constant the helper mirrors.
-- Ticket #381 issue body — acceptance criteria, the explicit five test names, the "do NOT factor into a table-driven loop" instruction.
-
 ## Context
 
 Pyrycode's `internal/e2e/realclaude/` suite already covers shared infrastructure: tool-loop integrity (#376), allowed-tools enforcement (#365), prompt fidelity (#364). All three exercise pyry's agent-run path with a single representative configuration. The failure mode they don't cover is per-role drift: one dispatcher role's allowed-tools list or system-prompt shape regresses while the others remain green. The 2026-05-14 `/doctor` prompt-poisoning bug failed all five roles together; the next failure of this class will likely hit one role only.

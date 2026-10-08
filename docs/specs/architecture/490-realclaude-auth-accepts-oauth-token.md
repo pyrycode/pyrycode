@@ -2,15 +2,6 @@
 
 **Size:** XS — single-file production change (`fixtures.go`), single-file test extension (`fixtures_test.go`), no signature change, zero call-site cascade across the 12 existing callers.
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go:39-54` — the current `WithWorktreeAuthenticated` body, complete with its named-variable skip message and the single `t.Setenv` re-pin. The only function this ticket rewrites.
-- `internal/e2e/realclaude/fixtures.go:32-37` — `WithWorktree`, which `WithWorktreeAuthenticated` composes over. Confirms the `HOME` pin uses `t.Setenv` so per-test cleanup ordering is guaranteed.
-- `internal/e2e/realclaude/fixtures_test.go:55-102` — `TestWithWorktreeAuthenticated_RealAssistant`, the existing end-to-end test for the API-key happy path. The new test for the OAuth-token branch lives next to it and follows the same shape (`opt-in via env-var presence`, skip otherwise, do not require both creds to be present in CI).
-- `internal/e2e/realclaude/fixtures_test.go:319-342` — `TestRunPyryAgentRun_Timeout`, the subprocess-re-exec pattern. The new skip-message test reuses this idiom because `t.Skipf` calls `runtime.Goexit()`, so the only way to assert on the skip message string is from an outer test that re-execs the test binary with `-test.run=^...$ -test.v` and greps the captured output.
-- `internal/e2e/realclaude/fixtures_test.go:200-206` — `TestMain`. Confirms the test binary already routes `GO_TEST_HELPER_PROCESS=1` into `runFakePyry()` and otherwise falls through to `m.Run()`. The new outer/inner test must NOT set `GO_TEST_HELPER_PROCESS=1` on the inner — it uses its own sentinel env var (e.g. `PYRY_REALCLAUDE_SKIP_INNER=1`) like `TestRunPyryAgentRun_Timeout` does.
-- `internal/e2e/realclaude/budget_test.go:53`, `large_tool_output_test.go:59`, `long_session_test.go:67`, `mcp_smoke_test.go`, `permission_protocol_spike_test.go:55`, `ptyrunner_byte_equivalence_test.go:188`, `resilience_test.go:35`, `sigterm_mid_tool_use_test.go:57` — the 7 opt-in tests (12 call sites total across them) that consume `WithWorktreeAuthenticated`. Read one to confirm the contract: they call the helper, get a workdir back, and never inspect the env themselves. No edit fan-out required.
-
 ## Context
 
 On a Max-only Mac the operator has no `ANTHROPIC_API_KEY`. The credential is an OAuth access token stored in macOS Keychain (service `Claude Code-credentials`), extractable with:

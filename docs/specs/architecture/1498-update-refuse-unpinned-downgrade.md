@@ -2,21 +2,6 @@
 
 `--version <tag>` stays the sanctioned downgrade route.
 
-## Files to read first
-
-| Path | Symbol | What to extract |
-|------|--------|-----------------|
-| `cmd/pyry/update.go` | `doUpdate` | The compare switch and its three exits, the `o.checkOnly` early return, and the `update: <step>: …` error-prefix idiom every step uses. This is the only production file that changes. |
-| `internal/update/version.go` | `CompareVersions`, `Newer`, `Older`, `Same` | Polarity. `CompareVersions(current, latest)` returns `Newer` when **current is newer than latest** — i.e. the rollback case. Do not invert this. |
-| `internal/update/checksum.go` | `AssetName`, `ParseChecksumsFile` | Why the tag string is bound into signature-verified material (see § Security review, Trust boundaries). Read-only — nothing changes here. |
-| `cmd/pyry/update_test.go` | `TestUpdate_AlreadyAtLatest` | The shape the new refusal test mirrors: fake server + a `replace` closure that is a `t.Fatalf` sentinel + an assertion on the captured output. |
-| `cmd/pyry/update_test.go` | `TestUpdate_CheckOnly` | The shape the new `--check` test mirrors, including the "must not download" negative assertion. |
-| `cmd/pyry/update_test.go` | `TestUpdate_PinVersion` | **Already is a pinned downgrade** (current `0.9.1`, pin `v0.9.0`). It is the built-in scope regression guard — a refusal not scoped to the non-pinned path turns it red. Do not modify it. |
-| `cmd/pyry/update_test.go` | `newFakeReleaseServer`, `fakeRelease`, `testSigningPriv`, `testSigningPub` | Existing fixtures. `newFakeReleaseServer` auto-signs whatever checksums it is handed. |
-| `docs/knowledge/features/pyry-update-command.md` | § Flow steps 4–5, § Error contract table | Both go stale on merge. **The documentation phase owns that edit — the developer must not touch this file.** |
-
-Everything under `cmd/pyry/update_e2e_test.go` is unaffected: all five of its `updateOptions` literals set `currentVersion: "0.0.1"` and serve `v999.0.0`, so `CompareVersions` returns `Older` on every one and the new guard never fires. No build-tagged suite needs re-running for this change beyond the usual `make preship` on the release checklist.
-
 ## Context
 
 `doUpdate` treats "latest tag differs from current" as "install it". The compare switch exits on a dev build, on a compare error, and on `Same`; everything else — including `Newer`, which means *the advertised latest is older than what is running* — falls through to `AssetName` → download → verify → replace → restart.

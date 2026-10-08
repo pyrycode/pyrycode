@@ -1,15 +1,5 @@
 # Spec: agent-run pyry-side `--max-turns` enforcement + SIGTERM-then-SIGKILL teardown (#334)
 
-## Files to read first
-
-- `internal/agentrun/jsonl/tail/watcher.go:33-65` — `tail.Config.OnEvent` / `OnEndOfTurn` callback signatures the Counter wires into.
-- `internal/agentrun/jsonl/tail/watcher.go:242-258` — `drain` shows that OnEvent fires for **every** Reader event (all `Kind`s, not just `assistant`); Counter must filter.
-- `internal/agentrun/jsonl/reader.go:45-83` — `Event` shape, in particular `Kind` (whitelist: `assistant`, `user`, `tool_use`, `tool_result`, `system`, `attachment`, `""`) and `EndOfTurn` (deterministic natural-completion signal).
-- `internal/agentrun/jsonl/reader.go:171-242` — confirms `Kind == "assistant"` is the right filter for the budget unit (and that `EndOfTurn=true` always implies `Kind=="assistant"`).
-- `internal/agentrun/drive.go` — current driver. Does **not** yet integrate the tail watcher or the Counter; that integration is a downstream ticket. This spec adds a leaf unit with no call-site changes.
-- `internal/supervisor/spawn.go:27-46` — confirms the `5 * time.Second` grace window we mirror; reuse the value, not a new constant in this package.
-- Parent #329 "Unknown 3 PASS" comment — empirical counting rule (each `type=="assistant"` line = one turn, including empty-content transitional `end_turn`).
-
 ## Context
 
 `pyry agent-run` (#332) spawns interactive `claude`, which — unlike `claude -p` — does **not** self-enforce `--max-turns`. The dispatcher's per-agent turn-budget invariant (its `error:max_turns_salvaged` workflow) presumes claude exits at the budget; that presumption breaks under interactive mode unless pyry enforces the cap itself.

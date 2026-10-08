@@ -2,15 +2,6 @@
 
 **Size:** S · **Security-sensitive:** no (no `security-sensitive` label; trusted-dispatcher input, human-interaction tools, no network/crypto/untrusted surface)
 
-## Files to read first
-
-- `internal/agentrun/settings/settings.go:33-97` — `settingsFile` + `permissions` structs (field-order is **byte-load-bearing**, see the doc comment at :22-32) and the `WriteSettings` body. This is where the deny field and the split into a shared core live.
-- `internal/agentrun/settings/settings_test.go:76-113` — `TestWriteSettings_SingleToolGoldenBytes` and `..._PreservesOrderAndDuplicates`: the exact golden-byte + order/dup patterns to **mirror** for the deny path. `:11-74` — empty-input validation the shared core must keep enforcing.
-- `cmd/pyry/agent_run.go:27-32` — the `settingsWrite = settings.WriteSettings` test seam (switches to `WriteSettingsWithDeny`). `:82-97` — `splitAllowedTools` (reuse verbatim for deny). `:102-188` — `parseAgentRunArgs` (add the flag + field + tokenise). `:288-323` — `runAgentRunPty`; the writer call is at `:298`.
-- `cmd/pyry/agent_run_test.go:696-960` and `:1060-1160` — the six `settingsWrite = func(tools []string) …` mock reassignments (715, 850, 905, 937, 1078, 1141) that must grow a second slice param. `:1245` — `TestSplitAllowedTools` already covers comma/space/mixed tokenisation (deny reuses it).
-- `internal/agentrun/selfcheck/selfcheck.go:104,270` — **DO NOT CHANGE.** Confirms selfcheck keeps its own `settingsWrite = settings.WriteSettings` seam calling `settingsWrite(canonicalAllow)` (1-arg). The additive design deliberately leaves this path untouched.
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:436` — **DO NOT CHANGE.** Stays on `settings.WriteSettings(allowedTools)`.
-
 ## Context
 
 `pyry agent-run` drives one headless claude turn under a PTY. Its tool gate is the per-spawn settings file written by `settings.WriteSettings`, passed to claude via `--settings`, with `permissions.defaultMode:"dontAsk"` and a `permissions.allow` whitelist. Anything **not** in `allow` is offered to the model but runtime-denied on call under `dontAsk`.

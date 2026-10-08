@@ -6,26 +6,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/result_trailer_observation_test.go:529-569` | **The idiom to mirror.** `TestTrailWaitForTrailer`'s first subtest: goroutine + 500 ms sleep + append + `<-done`, asserting `trailBoundFromMiss`. Copy its *structure*, not its assertions. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:242-274` | `trailWaitForTrailer`'s loop. The `lastMiss.IsZero()` branch at `:256-262` is the whole mechanism: zero `lastMiss` ⇒ `trailBoundFromStart`, non-zero ⇒ `trailBoundFromMiss`. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:75-90` | The three `trailBoundFrom*` constants and their doc — in particular `trailBoundFromStart`'s "It BOUNDS NOTHING". |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:98-137` | `trailScanResult` / `trailObservation`. `.Line` is OPERATOR-REVIEW-BEFORE-PASTE; `.Trailer` is the decoded pointer. These two are why the carrier exists. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:414-445` | `finGatherReadings`' trailer leg. `readings.BoundFrom = obs.BoundFrom` (`:422`), then the carrier fill (`:434-445`). One `trailWaitForTrailer` call, `:421`. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1186-1231` | `TestFinGatherSightingComesFromTheClassifiedPoll` — the premise-check idiom (`:1214-1218`) and the doc paragraph AC4 re-states (`:1193-1198`). |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1099-1120` | `TestFinGatherReturnsNoCapturedBytes` — **the shipped precedent for an inline `finGatherInputs` literal** (`:1104-1117`). Also the sweep this row must not weaken. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:105-122` | The header's failure-message licence: what a `t.Fatalf` MAY name, and the three things it MAY NEVER name. Binding on every message this row writes. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:137-165` | The constants block. `finGatherTrailerWait`'s doc (`:138-142`) is AC3's subject. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:852-872` | `finGatherNegativeInputs` — **it seeds the buffer at `:864`**, which is why this row cannot use it. See D1. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:130-131` | `probePollInterval = 200 * time.Millisecond`. Do not introduce a second tick constant. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:721-742` | `probeSyncBuffer`: mutex-guarded, append-only, `Bytes()` returns a copy. This is the `-race` argument. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:203-215` | `finTrailerBuild`'s `Bounded: obs.BoundFrom == trailBoundFromMiss` — the one derivation of `lateness_bounded`. This row adds no second. |
-
----
-
 ## Context
 
 `finGatherReadings` returns a `finSighting` carrier whose reason to exist is that

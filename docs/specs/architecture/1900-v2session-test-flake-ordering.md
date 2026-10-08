@@ -5,31 +5,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Each entry names the symbol and what to extract.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/relay/v2session_test.go` | `TestV2Session_Push_HoldGatedOnProbeNotSendError` | Failure 1's home. Note sub-case (b) runs **first**, sets `sendFail`, waits on `assertQueueDrains`, then flips `sendFail` back before sub-case (a). |
-| `internal/relay/v2session_test.go` | `TestV2Session_RekeyScheduled_TransportDown_NoRekeyFailed_NoClose` | Failure 2's home. Note the transport is dropped **after** `driveToOpen` returns, and the single flat `time.Sleep` gating both the positive and the negative assertions. |
-| `internal/relay/v2session_test.go` | `driveToOpen` | Returns only after the `noise_resp` is recorded. The session is already `V2StateOpen` **and the scheduled rekey timer is already armed** by then — this is the whole of failure 2's hazard. |
-| `internal/relay/v2session_test.go` | `gatedRecorder`, `newGatedRecorder` | The `#874` fixture: one `atomic.Bool` drives `outbound` (records + nil when up, records nothing + `errTransportDown` when down) and `connected()` **in lockstep**. Failure 2's fix must preserve that lockstep. |
-| `internal/relay/v2session_test.go` | `waitForLogContains` | **Already exists.** Poll-until-substring over a `syncLogBuffer`, 2 s deadline, quotes the buffer on failure. This is the wait-until-observed primitive for failure 2 — do not write a new one. |
-| `internal/relay/v2session_test.go` | `bufferLogger`, `syncLogBuffer` | Mutex-guarded Debug-level log sink. `String()` is safe to poll from the test goroutine while Run writes. |
-| `internal/relay/v2session_test.go` | `assertHeldQueued`, `assertQueueDrains`, `queueLen` | The shared assertions. **Neither helper changes in this ticket** — see § Design, "What deliberately does not change". `assertHeldQueued` has 7 call sites; `assertQueueDrains` has 2 (the second is in `v2session_debugbundle_test.go`). |
-| `internal/relay/v2session.go` | `drainOnce` | The pop/unlock/forward sequence. The pop commits under `pushMu`; `pushMu` is released; **then** `forwardEnvelope` runs. That gap is failure 1's hazard. Also holds the transport-down guard that AC3's first mutant deletes. |
-| `internal/relay/v2session.go` | `forwardEnvelope` | Seals under `s.send` and calls `m.send`. Confirms the seal+send is strictly downstream of the pop. |
-| `internal/relay/v2session.go` | `send` (method on `*V2SessionManager`) | Calls `m.cfg.Outbound(env)` and swallows the error at Debug. **It does not consult `transportDown()`** — load-bearing for failure 2's fix. |
-| `internal/relay/v2session.go` | `handleWake` | The `wakeRekeyEmit` arm holds the transport-down deferral that AC3's second mutant deletes, and emits `event=v2.rekey.emit.deferred_transport_down`. |
-| `internal/relay/v2session_handshake.go` | `handleNoiseInit` | Ordering proof for failure 2's fix: `m.send(resp)` → `s.state = V2StateOpen` → `s.rekeyTimer = m.armRekeyTimer(...)`, all sequential on the Run goroutine. |
-| `internal/relay/v2session_rekey.go` | `emitRekeyRequest`, `armRekeyTimer`, `armRekeyRetryTimer`, `armRekeyReplyTimer` | The emit path and the three timer cadences. `emitRekeyRequest` sets `awaitingRekeyReply` and arms the reply window only after `m.send`. |
-| `docs/knowledge/features/v2-session-manager.md` | § "Transport-down hold on the push drain (#874)", § "Scheduled + manual rekey emit gated behind `transportDown()` (#912)" | The two invariants these tests pin, and the documented statement that the `gatedRecorder` drives `outbound` and `connected()` "in lockstep". Read before deciding how to drop the transport. |
-| `docs/knowledge/features/transport-package.md` | § the `#1802` lesson | *"A flaky duration bound on this path is a sign to trace which sleep it actually contributes, not to widen the bound."* The rule this ticket is applying. |
-| `docs/knowledge/features/streamsup-package.md` | § the `#1482` lesson | *"Where the test arms the gate matters as much as what it asserts."* Failure 2 is exactly that shape. |
-
----
-
 ## Context
 
 `internal/relay`'s `V2Session` suite fails roughly two runs in three under full-module `go test -race ./...`, and passed 7/7 in isolation. Two different tests were seen failing across runs, which rules out a deterministically-broken test and points at load-sensitive ordering. `internal/relay/` is byte-identical between `bf68c2a6` (the baseline in the ticket) and current `main` — verified with `git diff --name-only bf68c2a6..HEAD -- internal/relay/`, which is empty — so reproducing on the branch's merge-base is reproducing on `bf68c2a6`.

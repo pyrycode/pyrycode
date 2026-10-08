@@ -5,15 +5,6 @@
 **Size:** S. New package `internal/msgqueue`, 1 production file, 3 exported types, 0 consumer call sites (shipped unwired).
 **Security:** `security-sensitive` — see § Security review (appended after the spec-stage adversarial pass).
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:209-259` — `WriteUserTurn(ctx, id, payload) error`: the **shape the injected delivery seam mirrors**. Extract the reliable-delivery contract: `WaitReady` blocks while claude is busy (no error, just a block), commit-confirm, and the sentinels `ErrNoLiveSession` / `ErrTurnNotCommitted`. This is *the* pacing mechanism — the drain needs no separate turn-state detector.
-- `internal/relay/handlers/send_message.go:46-202` — the **future wiring consumer** (out of scope here). Extract: the `TurnWriter` / `SessionRouter` consumer-declared seams; the `SECURITY:` block (line 84) — **`payload.Text` is NEVER logged**; the synchronous `sendMessageDeliverTimeout` (30s, line 29) request/response shape this queue’s async enqueue-then-drain *replaces*.
-- `internal/eventring/ring.go` (whole file, ~208 LOC) — the **primitive to mirror**: per-conversation `map[string]*convRing`, a per-conversation `uint64` counter starting at 1, `New` panic-on-misconfig, package-doc style, payload-by-reference discipline, and the per-conversation memory-bound rationale (`MaxEventsPerConversation`). This is the outbound sibling; #704 is its inbound counterpart.
-- `internal/turnbridge/producer.go:65-165` and `:320-331` — the **`Config` + `New(cfg) (*T, error)` + `Run(ctx) error` rhythm**, the injected-function-seam idiom, the "shipped unwired" pattern (#606 producer, #616 wired it — the explicit template this ticket cites), and the `sleepCtx(ctx, d) bool` ctx-aware backoff helper to copy for the drain’s retry wait.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:104-130` — wire-protocol section. Extract: `send_message` "Queued by the daemon when claude is busy" (line 123); the `{queued_msg_id, text, ts}` record (line 118); `queue_state` / `dequeue_message` are **#705’s**, not this slice’s (lines 118, 126); the § Backpressure note (line 130) bounds the *outbound* delta queue, **not** this inbound backlog — the inbound bound is the open question this spec’s security review resolves.
-- `CODING-STYLE.md` § Concurrency + § Testing — channels-for-coordination / mutex-for-state, `context.Context` everywhere, table-driven stdlib-only tests, `go test -race`.
-
 ## Context
 
 Today `send_message` delivers **synchronously**: the handler calls `WriteUserTurn`, whose `WaitReady` idle-gate blocks while claude is busy and which fails (bounded by `sendMessageDeliverTimeout`, 30s) if claude stays busy past the cap (#594). So a message typed mid-turn either blocks the per-conn handler goroutine or — on a long turn — fails. Concurrent messages race across handler goroutines with no defined order.

@@ -1,16 +1,5 @@
 # #202 — supervisor hangs in startup under non-TTY stdin (bootstrap-evicted warm-start)
 
-## Files to read first
-
-- `internal/sessions/pool.go:249-352` — `New()` pickBootstrap branch; the load path that captures `lcState` from the persisted registry entry. The fix lives here.
-- `internal/sessions/session.go:21-51` — `lifecycleState` enum, `String()`, and `parseLifecycleState`. Confirm "active" / "evicted" wire encoding and the unknown-string-defaults-to-active rule.
-- `internal/sessions/session.go:242-265` — `Session.Run` state-machine loop. The two `case` arms; the evicted arm calls `runEvicted` which blocks on `activateCh` until something signals.
-- `internal/sessions/session.go:336-346` — `runEvicted`. The exact channel the bootstrap parks on when this bug fires (`<-s.activateCh` / `<-ctx.Done()`).
-- `internal/sessions/pool.go:704-750` — `Pool.Run`. Schedules `sess.Run(gctx)` for the bootstrap via `p.supervise`; **never calls `Activate` on the bootstrap**. Confirms the fix-site choice (`New` not `Run`).
-- `internal/supervisor/supervisor.go:152-213` — `Supervisor.Run`. Sets `State.StartedAt = time.Now()` at line 156 and logs `"spawning claude"` at line 175. The two observable signals AC#2 and AC#3 reference.
-- `internal/sessions/pool_cap_test.go:14-50` — `helperPoolCap` pattern: `/bin/sleep 3600` as fake claude, Bridge mode for stdin/stdout pump, short backoff. The regression test reuses this exact recipe.
-- `internal/sessions/registry.go:14-51` — `registryFile` / `registryEntry` schema and `loadRegistry`. The test fixture writes one of these with `lifecycle_state: "evicted"`.
-
 ## Context
 
 `pyry` invoked from launchd / systemd / a wrapper that pipes `</dev/null` reaches the `"pyrycode starting"` log line and brings the control server up (`pyry status` and `pyry stop` respond) but never logs `"spawning claude"` and never spawns the child. `pyry status` reports the Go zero-time tell: `Started at: 0001-01-01T00:00:00Z`, `Uptime: 2562047h47m16.854775807s` (`time.Duration(math.MaxInt64).String()`). A `sample` of the daemon shows the main goroutine parked on `pthread_cond_wait` — a Go-level channel/sync wait that never gets signalled.

@@ -12,34 +12,6 @@ member, no change to `trailClassifyRun`.
 
 ---
 
-## Files to read first
-
-Turn-1 reading list. Every entry is line-anchored at `ffe4120`; read the range, extract the named
-thing, move on. The whole ticket lives in the first file — read it end to end once, then use this
-list as the index.
-
-| Path + lines | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trailer_admissibility_test.go:366-559` | `trailGate` in full — the ten shipped return sites, where the budget arm sits (`:537-548`), where the usable return sits (`:550-558`). This is where the new arm goes. |
-| `…:441-524` | The absence branch: `trailReasonAgainstPath` **called** at `:496`, `switch against.Value`, three sites. The precedent the new arm follows exactly — including the fmt-ARGUMENT rule at `:484-485`. |
-| `…:461-468` | The "why the count is ten and not eleven" argument. AC5 requires it re-stated, not renumbered. |
-| `…:104-158` | The gate value space. `trailGateAbsentOwesNone`'s doc (`:136-138`, the asserting `#1369` cite) and `trailGateOutOfContract`'s enumerated sub-case count (`:145-156`, FIVE). |
-| `…:754-781` | `trailGateCase` + the `pathVaries` field doc (`:772-780`). |
-| `…:854-952` | `trailGateCases()` — the uniform-path premise (`:860-869`), the usable row (`:872-878`), the max_turns row (`:879-885`), row nine's comment (`:928-950`). |
-| `…:1225-1235` | `trailGateAbsenceCaseMarkers()` — the marker set the new constant must **not** join. |
-| `…:1237-1454` | `TestTrailGateNamesWhichAbsenceCaseFired` — the shape the new driver mirrors: pairwise-containment premise (`:1312-1323`), per-row want/marker table, headroom on the output (`:1438-1451`). |
-| `…:1456-1481` | `trailGateRunnerReadings()` — `readings[0]` is ptyrunner, `readings[1]` is streamrunner. |
-| `…:1483-1713` | The sweep. Doc (`:1483-1551`), clause A/B, the exemption (`:1605-1637`), the absence companion (`:1649-1712`) — the shape the new companion mirrors. |
-| `…:2002-2113` | The leak sweep's key-name sub-test: the per-row `reading` field, the two OUTPUT assertions (`:2089-2099`), the "five of ten" precondition (`:2075-2079`). |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:87-133` | The reduction's value space. `trailReasonPresentOwesNone` (`:109`) and its claim limit (`:94-108`) — including *"Empty or named, both land here"* (`:105-108`). |
-| `…:222-278` | `trailReasonAgainstPath` itself; the presence-side arm at `:236-244` whose Detail is the 395 B this ticket refuses to embed. |
-| `internal/e2e/realclaude/trail_ptyrunner_composition_test.go:9-94` | `TestTrailComposesUnderAPtyrunnerReading`'s doc. **Carries a claim this arm falsifies** — `:29-33`, "trailGateUsable — an arm that ignores the runner path". Assertions stay unamended; that sentence does not. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:398-431` | C2 and C4. Neither is amended; the design's job is to keep both green. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:123` | `reachMaxCommandBytes = 512`. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:307-331` | `trailFixtureTrailer`, `trailPaddedTrailer`, `trailNeedle` (42 B). |
-
----
-
 ## Context
 
 `trailGate` falls through to `trailGateUsable` for any non-empty `terminal_reason` other than

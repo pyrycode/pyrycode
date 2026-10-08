@@ -1,24 +1,5 @@
 # #1881 — Expire an attachment upload that has gone idle
 
-## Files to read first
-
-Everything this slice touches is in `internal/attachments`. Read in this order.
-
-- `internal/attachments/registry.go` → the `Registry` type doc — the lock contract in full: `mu` is a LEAF, the seven locked methods, the two caller-holds/no-lock methods, and the paragraph beginning "THE CLOCK IS A SEAM". Three of the sentences you must rewrite live in this one comment.
-- `internal/attachments/registry.go` → `insertLocked` — the shared critical section `Admit` and `insert` both run, and the home of the `maxInFlightUploads` gate and the admission stamp. **The reap goes at the head of this body.** Extract: why it takes no lock, and why the capacity gate reads `len(r.uploads)` directly rather than calling `count`.
-- `internal/attachments/registry.go` → `lookupAndStamp` — `Deliver`'s stamping look-up. **The reap goes at the head of this body too.** Extract: its miss path stores nothing, and it takes `mu` for its whole body.
-- `internal/attachments/registry.go` → `Admit`, `Deliver` — the two public paths the reap must run under. Extract: `Deliver`'s "AT MOST TWO acquisitions per delivered chunk" claim, which the reap must not break.
-- `internal/attachments/registry.go` → `Lookup`, `count`, `lastChunkAt`, `Release` — the four methods that must **not** reap, and why. Extract: `Lookup`'s "PURE READ", and that `count` and `lastChunkAt` are how the tests observe the reap.
-- `internal/attachments/registry.go` → `entry` — the `lastChunkAt` field the reap reads, and the naming argument that guards it.
-- `internal/attachments/registry.go` → `newRegistryWithClock` — the three constraints on `now`, and why the seam is unexported and nil-tolerant. The reap inherits all three.
-- `internal/attachments/admission.go` → `maxInFlightUploads`, `maxUploadBytes` — the two neighbours the new constant sits beside, their unpublished-receiver-policy posture, and the resident-bytes arithmetic (`maxInFlightUploads × maxUploadBytes` = 64 MiB) the new constant time-bounds without changing.
-- `internal/relay/v2session.go` → `idleTimeout` — the derivation anchor. Extract: the 15-minute figure, the "foregrounded-but-momentarily-quiet phone" argument, and why relay made it a `var` (test override, costing `t.Parallel()`) — which this package deliberately does not copy.
-- `internal/attachments/accumulator.go` → `reject` — a doc-only edit here. Extract both sentences of the paragraph beginning "Dropping the map at the moment of refusal"; the second one's *claim* survives, only its attribution moves.
-- `internal/attachments/registry_test.go` → `fakeClock`, `testClockStart`, `fillRegistry`, `boundChunk`, `withAttachmentID`, `testBoundTotal`, `testBoundFixtureDigest` — every test helper this slice needs already exists. Extract: `fillRegistry` takes the registry as a parameter, so it composes with a clock-injected one.
-- `internal/attachments/registry_test.go` → `TestRegistry_AdmitStampsTheClockReading`, `TestRegistry_LookupAndRepeatAdmitLeaveTheStampWhereItIs`, `TestRegistry_DeliverMovesTheStampForwardForThatPairOnly` — the three existing clock tests. Verify (do not modify) that the reap leaves them green; see § Testing strategy.
-- `docs/knowledge/features/attachments-package.md` § the upload-registry material — background on the family. **Read-only: the documentation phase owns this file, and its own `#1742` claims are explicitly out of scope for you.**
-- `docs/protocol-mobile.md` § Attachments — the "receiver-configured and unpublished — a client learns them by being rejected" sentence the new constant inherits its posture from. No edit here either; the window stays off the wire.
-
 ## Context
 
 `Registry` gives an in-flight upload's slot back on every terminal outcome — completion, an `Add` refusal, an integrity mismatch (#1784). The one ending it does not cover is the upload that never ends. A client that admits a transfer and then stops sending holds its entry, its retained bytes, and one of `maxInFlightUploads` slots forever.

@@ -22,22 +22,6 @@ This ticket is the **join**: thread `promptHolds.end` into the streams manager s
 sink's `onTurnEnd` resolves the held call. Net production change is ~12 lines across two
 `cmd/pyry` files; the substance is the test matrix (AC1–AC5).
 
-## Files to read first
-
-| File / lines | What to extract |
-|---|---|
-| `cmd/pyry/acp_turn_streams.go:104-144` | `start`: the exact `newACPTurnStream(m.transport, sessionID, nil, m.logger)` flip site (line 116) and the per-session closure to build. Producer/Run/wg wiring already correct. |
-| `cmd/pyry/acp_turn_streams.go:34-55` | `acpTurnStreams` struct + `newACPTurnStreams` constructor — add the `onTurnEnd` field and the new param here. |
-| `cmd/pyry/acp.go:115-165` | `serveACPWithPool`: `holds` is built at :118, `streams` at :124. Pass `holds.end` into `newACPTurnStreams`. Update the stale comment at :115-117 ("until then a delivered prompt stays held…"). Same `holds` instance is already shared with the prompt handler (:131). |
-| `cmd/pyry/acp_prompt.go:98-114` | `promptHolds.end(sessionID, stopReason string)` — the resolver being wired. Its `func(string, string)` shape is directly assignable to the seam as a method value. Delete-under-mu = at-most-one of `end`/`fail` finds the entry (AC3). |
-| `cmd/pyry/acp_prompt.go:57-72, 116-130` | `promptHolds` struct + `fail` — the exactly-once invariant `end` shares (delete-under-mu + #765 `Responder.done` CAS). AC3 rests on these; no change needed. |
-| `cmd/pyry/acp_turn_stream.go:65-79` | Sink `Handle` `TurnEnd` branch: `a.onTurnEnd(string(e.Reason))`. This `string()` cast **is** the reason→stopReason identity map. Nil-tolerant (debug-log fallback). No change to the sink. |
-| `internal/turnevent/taxonomy.go:34-43, 70-73` | The five `TurnEndReason` string values (`end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`). These literal strings are what AC1 pins. |
-| `cmd/pyry/acp_prompt_test.go:115-231` | `promptHarness` + `endTurn`/`readReply`/`promptReply` — reuse verbatim for AC2/AC3 (send a prompt, resolve via `holds.end`, assert `stopReason`). `TestACPPrompt_DeliversAndHolds` (:298) is the template. |
-| `cmd/pyry/acp_turn_streams_test.go:33-88` | `TestACPTurnStreams_ScriptedTurnEmitsOrderedFrames` — the AC5 template. `scriptedSubscriber` + `jsonlStreamEvent`/`streamEntry`/`endOfTurnEvent` drive a real producer→sink. Extend with `onTurnEnd → holds.end` on a shared transport. |
-| `cmd/pyry/acp_turn_stream_test.go:27-34, 162-189` | `newStreamHarness(t, onTurnEnd func(string))` + `TestACPTurnStream_TurnEndSignalsAndEmitsNothing` — reuse for AC1's five-reason table. |
-| `internal/acp/responder.go:41-86` | `Responder` (unexported fields), `Reply`, `ReplyError`, `ResponderFrom(ctx)`. A `*Responder` is only obtainable through dispatch — AC5 must run `Serve` once over a `session/prompt` frame to register a real hold before driving the producer (see Testing). |
-
 ## Context
 
 **What problem this solves.** ACP models a turn as a `session/prompt` request that streams

@@ -1,16 +1,5 @@
 # Spec — #274: net: v1 conversations-write payload structs
 
-## Files to read first
-
-- `docs/protocol-mobile.md` §§ `create_conversation`, `conversation_created`, `promote_conversation`, `conversation_updated` (lines 371–437) — the four spec examples. These ARE the golden-file fixtures verbatim (with `"ts": "..."` substituted for a concrete timestamp).
-- `internal/protocol/envelope.go:23-30` — `Envelope` shape; `Payload` is `json.RawMessage`, decoded in two passes by the dispatcher.
-- `internal/protocol/codes.go:47-53` — existing type-name consts (`TypeCreateConversation`, `TypeConversationCreated`, `TypePromoteConversation`, `TypeConversationUpdated`). Use them in tests; do not redefine.
-- `internal/protocol/conversations_read.go` — sibling slice, same package, same documentation style. In particular: `ConversationSummary` (lines 27–34) shows the `*string` + no-`omitempty` pattern for spec-optional fields whose example wire shows `null`. Mirror the rationale comment.
-- `internal/protocol/conversations_read_test.go` — sibling test layout. Reuse `canonical()` and `readFixture()` from `envelope_test.go`; do not re-declare them.
-- `internal/protocol/envelope_test.go:11-27` — `canonical()` / `readFixture()` helpers (package-level, shared across all `_test.go` files).
-- `internal/protocol/push.go` + `push_test.go` — the most recent sibling (#275). Matches the per-type comment + round-trip test pattern this ticket reproduces.
-- `internal/protocol/testdata/conversations.json` — example of a multi-row fixture containing both `"name": "..."` and `"name": null`, demonstrating the round-trip invariant this spec must preserve.
-
 ## Context
 
 Phase 3 Track C, the conversations-write payload slice. Framing primitives (`Envelope`, `RoutingEnvelope`, type-name and error-code consts, `IsV1Compatible`) are merged. The sibling slices `register_push_token` (#275) and conversations-read (#273) established the per-type convention this ticket follows:

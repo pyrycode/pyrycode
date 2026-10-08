@@ -1,30 +1,5 @@
 # #880 — Durable archived state on conversations, surfaced in the list read
 
-## Files to read first
-
-- `internal/conversations/conversation.go:29-72` — the `Conversation` struct. Add the new
-  `IsArchived` flag here; note the field-ordering comment (don't re-order existing fields) and
-  contrast the `IsPromoted` tag (no `omitempty`) with what this field needs (`omitempty` — see Design).
-- `internal/conversations/registry.go:139-189` — `ListFilter`, the `List` filter loop, and the
-  `Update` helper. Extend `ListFilter` with `IsArchived *bool` and add the mirror filter check in `List`.
-- `internal/conversations/registry.go:191-300` — `RebindSession`, `Delete`, `Promote`. These are the
-  package's **semantic single-field mutators** returning hit/miss; model the new `SetArchived` on them
-  (lock → scan → mutate one field → return bool; no `Save`).
-- `internal/conversations/registry.go:63-116` — `Save`/`Load`. `Save` sorts by `LastUsedAt` then `ID`
-  and re-encodes from the in-memory slice; this is what gives the flag its round-trip durability for free.
-  No `created_at` field exists (per the ticket note) — the sort key is `last_used_at`, `id`.
-- `internal/protocol/conversations_read.go:21-34` — `ConversationSummary`. Add `IsArchived bool`
-  here; mirror the `IsPromoted` tag treatment (always serialized, **no** `omitempty`).
-- `internal/relay/handlers/list_conversations.go:37-51` — the projection loop. Add one line mapping
-  `conv.IsArchived` into the summary. The handler stays **unfiltered** (`reg.List()` with no args).
-- `internal/conversations/registry_test.go:455-480` — the existing `List` filter table + the `ptrTo`
-  helper. Extend this table with the `IsArchived` cases rather than writing a new test harness.
-- `internal/relay/handlers/list_conversations_test.go:73-160` — `TestListConversations_*`; reuse this
-  harness (fake lister + reply capture) for the archived-surfacing test.
-- `internal/protocol/compat_test.go:12-15` — confirms only type-string constants are frozen for the
-  conversations frames; there is **no** golden byte assertion on `ConversationSummary`, so adding a
-  wire key is safe.
-
 ## Context
 
 The conversation registry (`internal/conversations`) has no persisted archived state. Auto-archive

@@ -6,15 +6,6 @@ Status: ready for developer
 Size: S (1 production file, ~100 LOC, 0 consumer call sites — #391 is the first consumer)
 Scope: new package `internal/agentrun/streamrunner`. No edits to existing code.
 
-## Files to read first
-
-- `internal/agentrun/drive.go:22-107` — `DriveConfig` / `Drive` pattern this primitive mirrors with one decisive deviation (no PTY, `exec.Cmd` directly). Read for: the `Bin / WorkDir / Args / Env / Logger / PromptBytes` config shape to mirror; the `waitAndMap` ctx-cancel-is-success contract; the "log Warn on write failure, keep going" stdin-write style.
-- `internal/agentrun/drive_test.go:15-106` — `TestDriveHelperProcess` + `helperDriveCfg`. The new test file should clone this exact shape under `streamrunner/` with new env-var names (`GO_STREAMRUNNER_HELPER` / `GO_STREAMRUNNER_HELPER_MODE` / …) and modes scoped to the four observable behaviours below.
-- `internal/agentrun/budget/budget.go:1-60, 158-188` — pinned constants: `GracePeriod` default = 5s, "SIGTERM grace → SIGKILL" wording the new package will reuse for symmetry. Read the doc comment and the `killAfterGrace` body; this primitive's stdlib-equivalent (`cmd.WaitDelay`) does the same thing for the ctx-cancel path.
-- `internal/supervisor/supervisor.go` (only the `SpawnPTY` signature + `cmd.Cancel` / `cmd.WaitDelay` if present) — DO NOT IMPORT. Confirm the file lives under `internal/supervisor` so the dependency-direction lint (`go list -deps`) can assert this new package excludes it.
-- `cmd/pyry/agent_run.go:199-260` — caller surface that will (in #391) build the claude argv and pass it through this primitive. Out of scope for #390 but useful to understand why this primitive owns nothing about flag shape.
-- `docs/lessons.md` (only § "Background-drain prevents PTY block") — not directly applicable (no PTY) but the reasoning carries over: any consumer-supplied writer that blocks will deadlock `cmd.Wait()`. Document this in `Stdout/Stderr` doc-comments.
-
 ## Context
 
 `pyry agent-run` will (in #391) drive `claude --input-format stream-json --output-format stream-json` headlessly: one user-turn JSON envelope on stdin → claude emits a full event stream on stdout → claude exits with a status. No PTY, no trust dialog, no JSONL watcher. The 2026-05-14 probe at `echo '{"type":"user",…}' | claude … --dangerously-skip-permissions` validated this end-to-end.

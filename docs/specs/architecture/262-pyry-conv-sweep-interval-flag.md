@@ -1,19 +1,5 @@
 # Spec — #262: `-pyry-conv-sweep-interval` flag + `Config.SweepInterval` plumbing
 
-## Files to read first
-
-- `internal/sessions/pool.go:23-31` — current `var convSweepInterval = conversations.SweepInterval` package-level seam being replaced.
-- `internal/sessions/pool.go:62-122` — `sessions.Config` struct; new `SweepInterval` field lands here, alongside the existing `ConversationsRegistry` / `ConversationsRegistryPath` fields it semantically pairs with.
-- `internal/sessions/pool.go:151-204` — `Pool` struct; new `convSweepInterval time.Duration` field lands here next to `convReg` / `convRegistryPath` (same lifecycle: read-only after `New`, no lock).
-- `internal/sessions/pool.go:286-401` — `New(cfg Config)`; the `&Pool{...}` literal at 373 is where `convSweepInterval` gets initialized from `cfg.SweepInterval`, with the zero-value fallback to `conversations.SweepInterval`.
-- `internal/sessions/pool.go:798-804` — the `if p.convReg != nil` block in `Pool.Run` that currently reads the package var; switches to `p.convSweepInterval`.
-- `internal/sessions/pool_conv_sweep_test.go` — the existing in-package tests; the `withConvSweepInterval` helper goes away, callers set `pool.convSweepInterval = ...` directly (symmetric with the existing `pool.convReg = reg` / `pool.convRegistryPath = path` assignments at lines 69-70).
-- `internal/sessions/pool_test.go:46-79` — `helperPoolWithSleepArgs`; constructs the pool the conv-sweep tests reuse. Not modified — the new field defaults to `conversations.SweepInterval` when the helper doesn't set it.
-- `cmd/pyry/main.go:200-207` — `pyryFlagValues` map; new `pyry-conv-sweep-interval` key gets added so `splitArgs` consumes the flag and its value before the claude-args split.
-- `cmd/pyry/main.go:391-460` — `runSupervisor`'s flag declarations and the `sessions.New(sessions.Config{...})` call site; new `convSweepInterval := fs.Duration(...)` and a corresponding `SweepInterval: *convSweepInterval` field in the Config literal.
-- `cmd/pyry/main.go:1293-1303` — `printHelp()`'s pyry-flags block; one line added for the new flag with the "(testing)" annotation.
-- `internal/conversations/sweep_loop.go:9-37` — `SweepInterval` constant + `RunSweepLoop` signature; confirms the zero-value semantics ("interval > 0" precondition) so the New-time fallback can't accidentally hand `0` downstream.
-
 ## Context
 
 Ticket #251 (split-source) needs an out-of-process e2e test that drives the conversations sweep loop deterministically. The current seam — package-private `var convSweepInterval = conversations.SweepInterval` swapped via `withConvSweepInterval` in `pool_conv_sweep_test.go` — only works for in-package tests because it mutates a package-level variable in the test process's address space. An e2e test that spawns `pyry` as a subprocess can't reach it.

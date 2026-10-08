@@ -2,22 +2,6 @@
 
 **Epic #597 Phase 3.** Split from #705. Emit `queue_state` to interactive phones whenever a conversation's inbound message backlog changes. Security-sensitive (new outbound dispatch path carrying untrusted, phone-originated text; the `interactive` gate + per-payload conversation scoping are the confidentiality decisions). Size: **S** (held — see § Size).
 
-## Files to read first
-
-- `cmd/pyry/session_transition_v2.go` (whole file, ~224 lines) — **the template.** `sessionTransitionEmitterV2` solves queue_state's exact problem: a callback fired from arbitrary goroutines (`Enqueue`, non-blocking drop-on-full) hands off via a buffered `in chan` to a dedicated `Run` goroutine that does the blocking `ActiveConns` + per-conn `Push`. Copy its shape: struct, `newSessionTransitionEmitterV2`, `Run`, `broadcast`, `toWirePayload`, `startSessionTransitionStreamV2`. Note its EventID-nil + interactive-gate + per-conn-`nextID` discipline.
-- `internal/msgqueue/queue.go:65-83` — `DeliverFunc` / `ChangeFunc` contracts; `:83` is the load-bearing one (`OnChange` fires from **multiple** goroutines — enqueue caller, each drain, remove caller — MUST NOT block, MUST be concurrency-safe; carries only `convID`, consumer re-reads via `Snapshot`).
-- `internal/msgqueue/queue.go:193-216` — `Snapshot(convID) []QueuedMessage`; unknown conv → `nil`; fresh value-copy slice; includes the in-flight head.
-- `internal/msgqueue/queue.go:98-107` — `QueuedMessage{ID, Text, TS}`; `Text` is untrusted phone content (never log it).
-- `internal/protocol/messaging.go:164-198` — `QueueStatePayload{ConversationID, Queued []QueuedItem}` + `QueuedItem{QueuedMsgID, Text, TS}`; the producer maps `QueuedMessage.ID → QueuedMsgID`. **`:173-176`** — empty backlog must emit `[]` (non-nil slice), not `null`; the leaf type can't force it, so the producer must (`make([]QueuedItem, 0, …)`).
-- `internal/protocol/codes.go:225` — `TypeQueueState = "queue_state"`.
-- `cmd/pyry/interactive_modal_v2.go:214-246` — `broadcastInteractive`: the per-conn fan loop with `EventID` left nil ("control events, not part of the turn-event replay ring; `forwardEnvelope`'s dedup never touches `EventID==nil`").
-- `internal/relay/v2session.go:1601-1656` — `broadcastModalDismissed`: documents the **deadlock hazard** — a fan-out running on the manager's Run goroutine MUST NOT call `ActiveConns` (it funnels onto that same goroutine). Explains why queue_state cannot fan out inline from `OnChange`.
-- `internal/relay/v2session.go:2078-2107` (`Push`, non-blocking bounded enqueue), `:2228-2272` (`ActiveConn{ConnID, Interactive}` + `ActiveConns` — funnels onto Run; **safe from any goroutine other than the dispatch goroutine**), `:160-180` (`pushQueue.enqueue` — only `TypeAssistantDelta` is droppable; every other type is never-drop control).
-- `cmd/pyry/main.go:771-796` — queue construction (`:782`, `Config.OnChange` currently absent), `go queue.Run` (`:790`), `startRelay` call (`:792`). The wiring insertion points.
-- `cmd/pyry/relay.go:272-368` — `startRelayV2`: where `mgr` (`relay.NewV2SessionManager`) is built and where `startInteractiveTurnStreamV2` / `startSessionTransitionStreamV2` are wired (`:353`, `:368`). queue_state wires beside them.
-- `cmd/pyry/interactive_turn_v2_test.go:19-75` — `recordedPush` + `fakeInteractiveBcast` (implements `interactiveBroadcaster`: `ActiveConns` + recording `Push`). **This is AC-4's "fake interactive phone."** Reuse verbatim.
-- `docs/protocol-mobile.md:663-683` — the Queue (v2) § already documents the **wire vocabulary** and says emission timing "is the producer's (#722) runtime, documented there." AC-5 fills the `#### queue_state` subsection (`:667`) with the *when/gate/scoping*.
-
 ## Context
 
 Phase 3 of the mobile structured stream. Siblings already landed: #719 (msgqueue introspection + `OnChange`), #720 (`queue_state` wire types), #721 (daemon `send_message`→queue wiring; the queue is live at `cmd/pyry/main.go:782`). A phone with an interactive session can type while claude is busy; those turns buffer in `internal/msgqueue`. This slice makes the daemon **push** the backlog to the phone whenever it changes — enqueue, drain-advance, or remove — so the phone shows what's still waiting and watches it drain.

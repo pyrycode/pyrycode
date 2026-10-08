@@ -4,20 +4,6 @@
 
 Split from #567. Covers the **reporting** path only (the emitter's `num_turns`). The **enforcement** path (`internal/agentrun/budget` Counter, which double-counts identically via `OnEvent`) is the dependent sibling ticket and is **out of scope here**.
 
-## Files to read first
-
-- `internal/agentrun/streamjson/emitter.go:80-97` — `Emitter` struct fields. Add one field (`lastAssistantMsgID string`) next to `numTurns`.
-- `internal/agentrun/streamjson/emitter.go:178-225` — `Emit`. The change site is the `if entry.Type == "assistant"` block; specifically the unconditional `e.numTurns++` at **:189**. Everything else in `Emit` (raw passthrough, usage aggregation, `lastStopReason`/`lastAssistantText` capture, sticky-writeErr) stays byte-for-byte unchanged.
-- `internal/agentrun/streamjson/emitter.go:306-346` + `:388-403` — `Close` trailer composition and the `trailer` struct. The `num_turns` JSON field is **already wired** (`NumTurns: e.numTurns`). Do NOT touch field set or key order — AC#5 requires the byte shape unchanged apart from the value.
-- `internal/agentrun/streamjson/emitter_test.go:44-95` — the `entry` / `assistantEntry` / `textAssistant` helpers. None currently set `Message.ID`; AC#4 needs an id-bearing variant.
-- `internal/agentrun/streamjson/emitter_test.go:209-236` — `TestEmit_NumTurnsCountsAssistantEvents`. **Rewrite target** (AC#4).
-- `internal/agentrun/streamjson/emitter_test.go:579-651` — the `TestReadUsage_*` family. Each emits a single assistant entry with an **empty** `Message.ID` and asserts `num_turns == 1`. These must stay green under the new rule (they do — see Design § "empty-id floor").
-- `internal/agentrun/streamjson/emitter_test.go:705-831` — `lineToEntry` (already parses `msg.ID`) + `TestCapturedFixture_ByteEquivalence`. End-to-end grouping check against the fixture; stays green (fixture has 2 distinct message ids → `num_turns == 2`).
-- `internal/agentrun/streamjson/testdata/captured_run.jsonl` — fixture: `msg_1` (text+tool_use), `msg_2` (text), result line `num_turns: 2`. **Leave unchanged.**
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:506-525` — the `num_turns` relaxation (`both >= 1`) to restore to strict equality (AC#3). `:672-678` is the `ptyResultTrailer`/`NumTurns` decode struct.
-- `internal/e2e/realclaude/testdata/permission_protocol_v2.1.158.json` — **the empirical basis.** Real 2.1.158 `claude -p` capture: 3 assistant `stdout_events` carrying **2 distinct message ids** (`msg_014BuW…` = `[thinking]` then `[tool_use]`; `msg_01Dbd3…` = `[text]`), claude's native result `num_turns: 2`.
-- `$(go list -m -f '{{.Dir}}' github.com/pyrycode/tui-driver)/pkg/tuidriver/jsonl.go:108-135, 297-337` — external module. `JSONLEntry`/`EntryMessage.ID`/`ContentBlock` shapes and `IsEndTurn`/`AssistantText`. **Read the docstring at :292-296 and :318-320**: the library deliberately leaves multi-line-turn grouping to consumers — "A turn whose text is split across multiple lines (one block per line, all sharing message.id) needs msg_id grouping on top — out of scope for the library; consumers compose if needed." This ticket is that consumer-side composition.
-
 ## Context
 
 pyry has two interchangeable agent-run runners. **streamrunner** forwards claude's native `num_turns` from claude's own `type:"result"` envelope. **ptyrunner** (production default) tails the session JSONL and synthesises its own trailer via `internal/agentrun/streamjson`.

@@ -31,61 +31,6 @@ wired at `cmd/pyry/relay.go:413`. Same gap-shape #949 (promote), #974–#976
 handler nothing exercised end-to-end — carrying #980's security twist (a
 path-confinement containment property certified over the encrypted channel).
 
-## Files to read first
-
-- `internal/e2e/relay_v2_change_workspace_test.go` (whole file, ~487 lines) —
-  **closest template** (just-shipped #980, identical security shape: path confinement
-  over the wire). Copy its per-subtest spawn shape (pair → spawn daemon →
-  `driveHandshakeToOpenDaemon` → seal via `initSend.Encrypt` → `sendNoiseMsg` →
-  `decryptInnerEnvelope(readInnerFrame(...), initRecv)`), its `t.TempDir()`-outside-
-  `$HOME` escaping idiom, its `filepath.EvalSymlinks` canonicalisation, and its **dual
-  no-leak check** (`strings.Contains(replyBytes, raw)` AND `strings.Contains(replyBytes,
-  resolved)` both asserted absent — this is AC #4). **Two deliberate departures:** this
-  verb consumes NO conversations registry, so seed **no** `conversations.json`; and the
-  post-condition is on the **filesystem** (dir exists / absent under the temp HOME), not
-  a registry read-back.
-- `internal/relay/handlers/create_workspace_folder.go` (whole file, ~202 lines) — the
-  handler contract. Branch order: decode → **empty-parent guard** → **name-shape guard**
-  → **resolve (confine+create)** → success. The two independent guards and their four
-  static messages (all unexported in `package handlers` — the e2e asserts the literal
-  strings): `"malformed create_workspace_folder payload"`, `"workspace parent path must
-  not be empty"`, `"workspace folder name must be a single path element"` (bad name),
-  `"workspace folder not allowed"` (confine reject). All reject branches reply a fixed
-  static string; parent/name/err are never echoed.
-- `internal/relay/handlers/create_workspace_folder_test.go:106-332` — the in-process
-  assertions to mirror at the wire tier: success replies `workspace_folder_created`
-  carrying the resolver's realpath; confine-reject → malformed static, no marker leak;
-  bad-name inputs (`"a/b", "../x", "..", "/abs", "sub/dir"`).
-- `internal/protocol/workspace.go:5-30` — `CreateWorkspaceFolderPayload{Parent, Name}`
-  (json `parent`, `name`) and `WorkspaceFolderCreatedPayload{Path}` (json `path`). The
-  reply payload has NO `time.Time` field — no `.Equal` discipline needed here.
-- `cmd/pyry/relay.go:86-129` — `resolveWorkspaceFolder`: `expandTilde(parent)` →
-  `filepath.Join(parent, name)` → **creating** `confineWorkdirToHomeCreating` → realpath;
-  every failure wraps `handlers.ErrWorkspaceFolderRejected`. Wired at `:413`.
-- `cmd/pyry/create_workspace_folder_dir_test.go` (whole file) — confiner behaviours and
-  the **`EvalSymlinks` want-value discipline**: `parentReal := EvalSymlinks(parent);
-  want := filepath.Join(parentReal, "new-app")` (line 23-27), the
-  escape-rejected-creates-nothing idiom (line 77-99), and the "sibling temp dir = outside
-  `$HOME`" pattern.
-- `cmd/pyry/main.go:516-571` — `confineWorkdirToHomeCreating`: containment check #1 runs
-  on the symlink-resolved candidate **BEFORE** any `MkdirAll`; on escape, nothing is
-  created. This is why the confine-reject "no dir created outside `$HOME`" assertion is
-  deterministic, not racy.
-- `internal/e2e/relay_v2_promote_test.go` / `internal/e2e/relay_v2_rename_test.go` —
-  model for decoding a NEW reply payload type (there is no existing wire-tier template for
-  `workspace_folder_created`); decode `protocol.WorkspaceFolderCreatedPayload` instead of a
-  conversation record.
-- `internal/e2e/harness.go` — `shortHome` (~line 853; the spawned daemon's `$HOME` =
-  `os.MkdirTemp` under a short root), `RunBareIn`, `StartInWithEnv`, `readPersistedServerID`,
-  `waitBinaryHello`, `relayTestLogger`, `mustJSON` — the spawn/pair helpers the template
-  already uses.
-- `internal/protocol/codes.go:106-122` — `TypeCreateWorkspaceFolder`,
-  `TypeWorkspaceFolderCreated`; and `CodeProtocolMalformed = "protocol.malformed"`
-  (both reject branches map to this one code — the two guards are distinguished by their
-  `Message`, not their `Code`).
-- `internal/protocol/handshake.go` — `ErrorPayload{Code, Message, Retryable, RetryAfterS}`,
-  the reject decode target.
-
 ## Design
 
 One new file, build tag `e2e`, package `e2e`:

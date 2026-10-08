@@ -2,22 +2,6 @@
 
 Test-only. No production file changes. Three files, all under `internal/e2e/realclaude/`.
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapScanner`, `newDropcapScanner`, `addDynamic`, `addDynamicPath`, `applied`, `dropcapPathSpellings`, `dropcapMinNeedle` — **the asymmetry this ticket closes.** `addDynamic` appends unconditionally (so an unset credential lands as `false`); `addDynamicPath` appends nothing when `dropcapPathSpellings` returns `nil` for an empty path, so `applied()` carries **no key at all** for that class.
-- Same file → `dropcapRecord` (the `CredentialScanApplied` field and its tag) and `TestRealClaude_DroppedLineCapture` (the `CredentialScanApplied: scanner.applied()` line inside its composite literal) — the field to copy and the construction-site assignment to copy. `dropcapWriteRecord` is the counter-example: it assigns in the writer, and this family must not.
-- Same file → `TestDropcapRedactionAndDenyScan`, subtest **"a short dynamic needle is skipped and reported, never matched"** — the already-green empty-needle property. **Cite it; do not re-commission it.** It builds its needles by hand and never goes through `newDropcapScanner`, so it proves the `addDynamic` half only and says nothing about the missing-key behaviour above.
-- Same file → the `dropcapClass*` constants (`dropcapClassTempHome`, `dropcapClassOperatorHome`, `dropcapClassArtifactDir`, `dropcapClassWorkdir`) — the four path-class identifiers.
-- `internal/e2e/realclaude/initialize_control_record_test.go` → `initControlFixtureRecord` (doc comment **and** struct), `initControlFullRecord`, `initControlFixtureFields`, `TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken` — the four count-word bumps, the load-bearing-literal list, the hand-written listing, and the `NumField` assertion that needs no edit.
-- `internal/e2e/realclaude/initialize_control_probe_test.go` → the file header (its `-run` filter and its "two non-live tests" sentence), `runInitControlChild` (its doc's "SINCE #1733 IT TAKES A REDACTOR" paragraph, its record literal), `TestRealClaude_InitializeControl_Capture` (the `newInitControlRedactor` construction site), `TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm` — the precedent for an offline test living in this exec-ing file.
-- `internal/e2e/realclaude/initialize_control_writer_test.go` → `TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne` — **the shape AC 2's new test follows**, including its two vacuity `t.Fatalf` controls, the tempdir-each note and the "deliberately no `bytes.Contains`" note. Also `writeInitControlFixture` (`out := *rec`, the shallow copy that preserves nil-ness).
-- `internal/e2e/realclaude/initialize_control_redaction_test.go` → `newInitControlRedactor`, `redactInitControlRecord` (it names its fields explicitly and visits no map), and the synthetic path constants `initControlTempHomeValue` / `initControlWorkdirValue` — reused by the new offline test.
-- `internal/e2e/realclaude/inband_bypass_revoke_fixture_test.go` → `fixtureFieldNonZero` — `reflect.Map` is judged **by length**, in the same arm as `String` and `Slice`.
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans`, the entries for the record, writer and redaction files — why the new helper and its test go in the **probe** file and nowhere else.
-- `docs/knowledge/features/e2e-realclaude.md` § the `initialize_control_record_test.go` entry — background only. **Read-only: the documentation phase owns it, and its "carries 28 fields" numeral is not this ticket's to bump.**
-
 ## Context
 
 `initControlFixtureRecord` is the durable artifact the `initialize` capture commits. #1733 put the redaction census on it — which classes the substitution table actually rewrote. This slice records the other half: which classes the deny-scan's needles were **armed** for.

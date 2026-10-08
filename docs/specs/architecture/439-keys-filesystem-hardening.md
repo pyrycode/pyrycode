@@ -2,15 +2,6 @@
 
 Spec for Pyrycode issue [#439](https://github.com/pyrycode/pyrycode/issues/439).
 
-## Files to read first
-
-- `internal/keys/store.go:65-81` — current `LoadOrCreate` flow (`validDaemonName` → `os.ReadFile` → `parsePersisted` / `mintAndPersist`). This is the function being rewired.
-- `internal/keys/store.go:83-123` — `parsePersisted`. Unchanged; the new read path still feeds its raw bytes here.
-- `internal/keys/store.go:125-178` — `mintAndPersist` → `writeStaticKey`. Note the existing `os.MkdirAll(dir, 0o700)` at line 139 (still useful as a no-op on the create path after this ticket's hardening also runs `MkdirAll`).
-- `internal/keys/static_key.go:22-27` — existing `ErrInvalidDaemonName` / `ErrCorruptKeyFile` sentinels. The two new sentinels live alongside them.
-- `internal/keys/store_test.go:17-90` — `TestLoadOrCreate_FreshCreate` already asserts dir mode `0700` and file mode `0600` on the create path; the new tests for chmod-after-create complement it rather than duplicate.
-- `internal/keys/store_test.go:185-319` — fixture-seeding pattern (`os.MkdirAll(dir, 0o700)` + `os.WriteFile(path, …, 0o600)`) the new mode-mismatch / symlink tests reuse.
-
 ## Context
 
 Mobile Protocol v2 (#430) persists each binary's X25519 static keypair at `~/.pyry/<daemon-name>/static_key.json`. The companion ticket (#438) landed the core primitive: `LoadOrCreate`, key generation, JSON envelope, atomic-write recipe at `0600`. This ticket lands the **filesystem hardening** around that primitive so an accidentally world-readable key file — or a TOCTOU symlink swap between the mode check and the read — cannot silently redirect the daemon to attacker-controlled bytes.

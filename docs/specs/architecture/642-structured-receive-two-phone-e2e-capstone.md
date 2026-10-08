@@ -57,52 +57,6 @@ This is an **extension of a working harness**, not a from-scratch build. The
 genuine foundational build would be **option (a)** — real claude under a
 Noise-phone suite — which is rejected below. So the capstone stays one ticket.
 
-## Files to read first
-
-- `internal/e2e/relay_two_phone_coarse_test.go` (whole file, ~340 lines) — **the
-  template.** Lift the two-phone pair+handshake, `driveHandshakeToOpenDaemonInteractive`
-  / `buildHelloEarlyInteractive` (defined here, same `e2e` package — reuse, do
-  NOT redefine), the conversations.json seed, the send_message drive, and the
-  per-frame decrypt-drain loop. The structured test is this with A's assertion
-  flipped to "receives structured" and B's kept as "receives coarse only."
-- `cmd/pyry/interactive_turn_v2.go:130-137` — `Handle` **drops every event when
-  the cursor is empty** (`interactive_turn.no_cursor`). The load-bearing
-  ordering constraint: a turn must be driven (cursor stamped) **before** the
-  structured JSONL is tailed.
-- `cmd/pyry/interactive_turn_v2.go:306-361` — `emit`: the capability gate
-  (`if !c.Interactive { continue }`) and the v2 envelope shape (Type, Payload,
-  EventID) the phone decrypts.
-- `cmd/pyry/interactive_turn_stream_v2.go:45-96` + `:98-155` — the producer
-  wiring and `resolveLatestSessionJSONL` (tails newest `<uuid>.jsonl` from
-  EOF-at-subscribe). Explains why the producer subscribes once at relay startup
-  and why appends after subscription are seen.
-- `cmd/pyry/relay.go:339-340` — `startInteractiveTurnStreamV2` invocation gate
-  (`bridge != nil && claudeSessionsDir != ""`). Confirms the producer is live in
-  the harness.
-- `internal/e2e/internal/fakeclaude/main.go:96-159` (`main` loop +
-  `emitAssistantIfTriggered`) + `:161-174` (`openSession`) — the trigger pattern
-  to mirror and the `{}\n` write to extend. **This file is on the
-  cmd/substrate-guard allowlist** (#603) — but the new code adds no TUI glyphs,
-  so the allowlist is unchanged.
-- `internal/e2e/rotation_test.go:15-61` — `encodeWorkdir` helper (same `e2e`
-  package — reuse) and the `sessionsDir = home/.claude/projects/encodeWorkdir(home)`
-  alignment pattern.
-- `internal/e2e/harness.go:304-352` — `StartRotationWithRelay` and its trailing
-  `extraEnv ...string` seam (pass `PYRY_FAKE_CLAUDE_TUI=1` and the new trigger
-  env; **no harness.go change needed**).
-- `internal/turnbridge/mapper_test.go:18-170` — the **JSONL-shape oracle.** The
-  `entry(...)` helper shows the exact line shapes that map to each event
-  (assistant text → TextChunk; assistant `tool_use` → ToolStart; user
-  `tool_result` → ToolUpdate; assistant `stop_reason:end_turn` + non-empty text
-  → end-of-turn). Model the fixture lines on these.
-- `internal/e2e/relay_v2_daemon_test.go` (`driveHandshakeToOpenDaemon`,
-  `readInnerFrame`, `decryptInnerEnvelope`, `sendNoiseInit`, `sendNoiseMsg`) and
-  `relay_test.go` (`shortHome`, `relayTestLogger`, `readPersistedServerID`,
-  `mustJSON`) — shared `e2e`-package helpers the test reuses.
-- `docs/knowledge/codebase/634.md`, `632.md`, `633.md`, `603.md` — the slices
-  this capstone closes; 603.md's "ack-pollution drain" and "fakephone closes the
-  WS on a timed-out Receive" lessons are load-bearing for the read loops.
-
 ## Context
 
 The capability-gated dual-path is shipped and **deterministically** proven:

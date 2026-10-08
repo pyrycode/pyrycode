@@ -6,35 +6,6 @@
 
 ---
 
-## Files to read first
-
-The developer's turn-1 data load. Read these before writing anything; the design below assumes all of them.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trail_run_outcome_test.go:100-220` | The run value space and its `run-` prefix convention. **`:164-182`** is the arm this ticket changes; **`:183-214`** is its mirror, which must not move. |
-| `…/trail_run_outcome_test.go:222-301` | `trailRunReadings` (gains two fields) and `trailRunOutcome` (gains one). The Detail content rule at `:276-283`. |
-| `…/trail_run_outcome_test.go:396-530` | `trailClassifyRun`'s preamble + the nine contract checks. **C7 (`:488-497`) is the trap** — see § The one thing that will break every run. |
-| `…/trail_run_outcome_test.go:530-600` | Step 1's switch and the comment (`:530-544`) that forbids falling through to steps 2-8. `case trailGateAbsentOwesNone` is `:565-577`. |
-| `…/trail_run_outcome_test.go:602-620` | Step 2, the reap-log proof arm. Gains `out.Route` and **nothing else** (see AC1 budget note). |
-| `…/trail_run_outcome_test.go:715-771` | `trailRunProofReadings` / `trailRunAbsentOwesNoneReadings` / `trailRunPresentOwesNoneReadings` — the fixture idiom the new helper mirrors, including *why* they are functions and why `Admit` is left zero. |
-| `…/trail_run_outcome_test.go:1074-1135` | `TestTrailClassifyRun`: the per-row marker-absence check (`:1098`), the Gate/Admit provenance assertions (`:1105-1110`) the Route field joins, and the coverage loop (`:1130-1134`) that reddens on a value with no row. |
-| `…/trail_run_outcome_test.go:1580-1627` | `TestTrailRunOutcomeCarriesNoCapturedBytes` — AC4's subject. Note the premise assertion at `:1595` and the forbidden-key walk at `:1618-1626`. |
-| `…/trail_run_outcome_test.go:1633-1664` | `trailRunOutcomeValues()` and the `len(values) != 13` hard site. |
-| `…/trail_sighting_liveness_test.go:145-201` | #1440's three outcome values and five reasons — the closed spaces this arm consumes. |
-| `…/trail_sighting_liveness_test.go:236-401` | `trailSightingResult` and `trailEstablishSighting`. **`:256-284` is why both parameters arrive as whole records**; `:285-300` is the 4×4 assignment rule; `:355-364` is the ordering guard that makes AC2's unstaged case free. |
-| `…/trail_sighting_liveness_test.go:459-490` | `trailSightingPID` (4242) and `trailSightingPin(verdict)` — reuse this, do not build a second pin fixture. |
-| `…/trail_ordering_premises_test.go:107-161` | `trailOrderCertified` and `trailOrderResult`'s two-field shape; the "trap-free by construction" claim the whole-record parameter rests on. |
-| `…/trail_ordering_premises_test.go:242-284` | `trailCertifyOrdering(trailerSighted, pyryExited, holdHeld bool)` — the real producer the new fixture drives. |
-| `…/trail_run_instant_clause_test.go:30-119` | `trailRunCertifiesNothingArms()` and the **two-sided** check. Read `:58-69` before deciding anything about the clause. |
-| `…/trail_run_instant_clause_test.go:121-191` | `TestTrailRunBareAlivenessAtTrailerIsBudgetFiredOnly` — a **source-file sweep**. See § The naming traps. |
-| `…/trail_ptyrunner_composition_test.go:104-251` | The pin AC1 requires to pass **unamended**, including the Detail-headroom `else if` at `:219-226`. |
-| `…/trailer_admissibility_test.go:1164-1298` | The union closed-set map, its stale-count history (`:1172-1177`) and the zero-record walk (`:1304-1330`). |
-| `…/finding_trailer_evidence_test.go:783-785`, `:860-871` | `finTrailerOutcomeValues()` (derives from `trailRunOutcomeValues()`, so it needs no edit) and the `len(distinct) != 20` hard site (which does). |
-| `docs/knowledge/codebase/1440.md`, `1434.md`, `1417.md` | The three nearest predecessors' lessons. #1434's is the one that names the bare-cite trap. |
-
----
-
 ## Context
 
 `trailClassifyRun`'s step-1 switch answers `trailGateAbsentOwesNone` with an unconditional `return` of `trailOutcomeVoidPathOwesNoReason` (`trail_run_outcome_test.go:565-577`). #1440 landed `trailEstablishSighting` — a complete evidence route for the headless stream path, which writes no reap log at all on a clean exit — but wired it to nothing, because a route added at steps 2-8 never fires on the one gate value it exists to serve. This ticket reaches it, from inside the arm.

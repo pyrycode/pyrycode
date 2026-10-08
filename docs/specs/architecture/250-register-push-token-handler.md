@@ -1,21 +1,5 @@
 # Spec: register_push_token handler (#250)
 
-## Files to read first
-
-- `internal/relay/auth.go:77-148` — `AuthenticateFirstFrame` is the existing pattern this handler mirrors: routing envelope in → routing envelope out, build inner Envelope + wrap with json.Marshal, log accept/reject with structured fields, never log secrets. The handler's `buildResponse` helper is local to auth.go (lowercase) and intentionally not shared yet; the new handler duplicates the wrap pattern rather than importing it across the new sub-package boundary.
-- `internal/devices/auth.go:32-46` — `Registry.Validate(plain) (Device, bool)` semantics: the snapshot returned to the caller is a value copy (not a pointer into the registry slice). This is why the new handler takes `*devices.Device` (a snapshot the relay-conn layer cached at first-frame auth) AND needs a new registry mutator to durably update the stored row.
-- `internal/devices/registry.go:111-128, 145-154` — `Add` / `Remove` / `FindByTokenHash` are the existing exported mutators. `UpdatePushRegistration` (this ticket adds) lives alongside, identifies the target row by TokenHash (the only stable key the handler already has), and follows the same `r.mu.Lock` / range-and-mutate pattern.
-- `internal/devices/registry.go:63-107` — `Save` is the atomic write primitive (temp file → fsync → rename). The handler calls it unmodified; the only new failure surface is "Save returned non-nil", mapped to `server.binary_busy`.
-- `internal/devices/device.go:24-43` — `Device` fields, including the `omitempty`-tagged `Platform` and `PushToken` introduced by #282. The dedupe comparison is over `(Platform, PushToken, Name)` exactly — empty-string equals empty-string is the no-write path on a phone that has never registered before but resends an empty payload (theoretical; not a tested case).
-- `internal/protocol/push.go:14-18` — `RegisterPushTokenPayload` (Platform, Token, DeviceName) is the wire shape. All three fields required per spec; the handler does not validate them (no protocol.malformed synthesis here — the dispatcher owns that path).
-- `internal/protocol/envelope.go:23-43` — `Envelope` and `RoutingEnvelope` outer shapes. The handler unmarshals `routing.Frame` into `Envelope`, then unmarshals `env.Payload` into `RegisterPushTokenPayload`.
-- `internal/protocol/codes.go:14-15, 19, 37-41, 61` — `CodeAuthInvalidToken` (unauth-conn case), `CodeServerBinaryBusy` (write-failure case), `TypeAck` / `TypeError` / `TypeRegisterPushToken` wire constants.
-- `internal/protocol/handshake.go:39-48` — `ErrorPayload` (Code, Message, Retryable, RetryAfterS) and `AckPayload` (empty) wire shapes the handler emits.
-- `internal/relay/auth_test.go:23-64, 182-221` — test patterns for fixture-paired registry and ack/error response assertions; reused conceptually (not literally — the new test file is in `internal/relay/handlers/` and cannot import from `internal/relay`).
-- `docs/protocol-mobile.md` § `register_push_token` (lines 480–499) — wire shape, dedupe contract sentence ("if the registered triple is identical to the stored one, no-op"), and the `ack` response choice.
-- `docs/protocol-mobile.md` § Error codes (lines 525–542) — `server.binary_busy` row (retryable: yes; honour retry_after_s) and `auth.invalid_token` row (no retry).
-- `docs/specs/architecture/249-relay-inbound-token-validation.md` — the ticket body's "from `OnNewPhoneConnection` result" wording is stale; #249 actually shipped `AuthenticateFirstFrame` returning a `Device` value. This spec follows what #249 actually shipped, per the ticket's own carve-out ("If #249 lands a different shape than the AC's wording assumes, follow what #249 actually shipped.").
-
 ## Context
 
 Phase 3 Track C — the binary's inbound handler for the phone's `register_push_token` frame. Composes A4 (devices.json registry, #209), A5 (`Validate`, #210), C1 (envelope types, #275), C4 (#249 — first-frame auth returning a matched `Device`), and #282 (Device gains `Platform` and `PushToken`). Per `docs/protocol-mobile.md` § Phone background behaviour (line 144), `register_push_token` is load-bearing for the mobile UX: a backgrounded phone closes its WS and is woken via APNs/FCM using the persisted token.

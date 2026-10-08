@@ -2,19 +2,6 @@
 
 **Size:** S · **Not** `security-sensitive` (read-only reflection of non-secret runtime state from an already-trusted, already-confined local transcript path — no new inbound parsing, no authz, no mutation, no secret; mirrors #847). Leaf of #855; ships **unwired** — the wire child #857 consumes it onto `screen_snapshot`. Same shape as the settings split (#847 leaf → #848 wire).
 
-## Files to read first
-
-- `internal/agentrun/jsonl/reader.go:41-92` — `Event` (`.Usage *UsageBlock`, `.Kind`, `.Raw`, `.EndOfTurn`) + `UsageBlock` (`InputTokens`, `OutputTokens`, `CacheCreationInputTokens`, `CacheReadInputTokens`). Extract: `ev.Usage` is non-nil **only** on assistant entries carrying a `usage` object; these are the four fields the reader sums. Pointer-valued distinguishes "field absent" from "present, all-zeros".
-- `internal/agentrun/jsonl/reader.go:188-262` — `Reader.Next()` contract: returns `io.EOF` at end-of-stream; **malformed lines are log-and-skipped (not errors)**; only genuine read failures and `ErrLineTooLarge` surface as errors. Extract: the loop-until-`io.EOF` pattern the reader wraps, and that it already handles partial lines / the 16 MiB per-line cap / unknown extra keys (`server_tool_use`) for free.
-- `internal/agentrun/jsonl/reader.go:119-132` — `NewReader(src io.Reader, cfg Config)`; `Config.Logger` optional (defaults `slog.Default()`), `StartOffset` unused here (whole-file scan). Extract: construct over an `*os.File`.
-- `internal/agentrun/jsonl/reader_test.go:252-289` — `TestReader_UsageParsedOnAssistant` / `TestReader_UsageNilOnAssistantWithoutUsage`: the exact one-line assistant-with-usage JSON shape to base fixtures on, and how `Usage` surfaces per `Event`.
-- `internal/agentrun/jsonl/reader_test.go:14-50` — fixture-test idiom (`testdata/*.jsonl`, drain-to-EOF loop). The helpers (`newFixtureReader`, `drainAll`) are package-private to `jsonl`; **mirror the pattern**, don't import them.
-- `internal/agentrun/jsonl/testdata/clean.jsonl` — a real 25-assistant-turn transcript. Confirms the usage shape (`"usage":{"input_tokens":6,"cache_creation_input_tokens":19739,"cache_read_input_tokens":15169,"output_tokens":357,"server_tool_use":{…}}` — note extra keys the decoder ignores) and `"model":"claude-opus-4-7"`. Copy a couple of its lines to seed hand-written fixtures.
-- `internal/sessions/reconcile.go:100-124` — `newTranscriptResolver` returns `(path string, size int64, err error)`, `("", 0, nil)` when no transcript exists yet. Extract: this is the seam **#857** calls to obtain the path this reader consumes; its empty-path / nil-error "no transcript" convention pairs with this reader's `path == ""` fresh-session case.
-- `internal/sessions/reconcile.go:181-245` — `newProbePreferredTranscriptResolver`: the resolved path is **already canonicalised and confined** to `~/.claude/projects/<encoded-cwd>/` upstream (AC4 confidentiality guard). Extract: the reader must **not** re-resolve, re-confine, or re-canonicalise — it opens the path it is given.
-- `docs/specs/architecture/847-default-settings-snapshot-fields.md:1-27` — the unwired-leaf precedent: ships unwired, coverage is its own tests, no live consumer until the wire child lands.
-- `CODING-STYLE.md:62-78` — testing idiom (table-driven, stdlib `testing` only, `testdata/` placement, `t.Parallel()`).
-
 ## Context
 
 Clients render a "context window used" gauge (mobile Status sheet: "73% used (146K of 200K tokens)"). Nothing on the daemon reports it. The daemon already resolves the active session's transcript path via the probe-preferred resolver (`internal/sessions` → `supervisor.Config.ResolveTranscript`, `(path, size, err)`, already hardened against the untrusted-probe→path crossing), but nothing decodes the per-turn `usage` figures the transcript carries.

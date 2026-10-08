@@ -6,30 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. This is the turn-1 data load; every design decision below is anchored in one of them.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trail_run_outcome_test.go:100-169` | The eleven `run-*` values and the third-sub-namespace argument at `:108-113`. This spec's seven mirror that argument; do not re-derive the eleven. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:252-268` | `trailIsRunOutcome` — the exact predicate shape to mirror, and the function AC3/AC4 call. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1190-1233` | `trailRunOutcomeValues()` + `TestTrailRunOutcomeValuesAgreeWithThePredicate`. **Reuse `trailRunOutcomeValues()` directly** for AC3's second direction — do not hand-copy the eleven. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1132-1188` | `TestTrailRunOutcomeCarriesNoCapturedBytes` — the shape AC5 names: premise check, `json.Marshal`, `bytes.Contains(trailNeedle)`, then the forbidden-key scan over `map[string]json.RawMessage`. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:186-193, 204-207` | `ArgvScanErrored` (a discriminator, not its text) and `PyryExited`'s safe-zero argument. Both are cited by ACs here. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:296-300` | `trailNeedle` and why it is placed past the byte cap. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:320-372` | `TestTrailConstantsAreClosed` — the empty-string and duplicate-value checks AC1 mirrors, including the zero-value read-back at `:361-371`. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:199-208` | `trailDetail` — `fmt.Sprintf` + `reachCapCommand`'s cap. **Reuse it. Do not mint a `finDetail`.** |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:242-270` | `trailGate` — the contract-guard-at-the-top idiom and the house Detail prose style. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:487-512` | `trailIsGateValue` / `trailIsAdmitValue` — the allowlist switch shape. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:516-544` | `trailGateCase` / `trailGateCases()` — the shared-fixture-table idiom the gate test uses so one case list drives several tests. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:1-44` | The most recent sibling's file header, and at `:37-44` the settled `trailDetail`-not-`finDetail` argument. Match this header's register. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:506-556` | The staged hold command's construction — `t.TempDir()` + `exec.LookPath`. This is the evidence that the *staged* operand is a captured string too (AC5). |
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:1486-1504` | `findBashToolUse` returns `(id, index)` and no command. Confirms the issued command must arrive as a supplied string. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:945-950` | `reachCapCommand` — the 512-byte cap `trailDetail` wraps. |
-
----
-
 ## Context
 
 `trailClassifyRun` (`trail_run_outcome_test.go:344`) owns one probe run's outcome over a closed set of eleven values. It assumes the run *staged* — that a Bash call was issued, that it was the rig's hold command, that the rendezvous completed. This ticket builds the tier below it: the conditions under which a run never got that far, and the rule that such a run is never handed over.

@@ -1,20 +1,5 @@
 # Spec — dispatcher auth-gate + WS 4401 close on reject (#308)
 
-## Files to read first
-
-- `internal/relay/auth.go:77-148` — `AuthenticateFirstFrame(env, token, reg, serverID, logger)`. The pure predicate already returns `AuthOutcome{Response, CloseConn}`; spec re-uses verbatim. Note `ErrMalformedHelloFrame` for the JSON-undecodable inner-frame path, `StatusUnauthorized=4401`, `MsgInvalidToken`.
-- `internal/dispatch/dispatch.go:38-336` — full scaffold from #307. New auth-gate hook plugs into `Run`/`runConn` per-conn flow; `handleOne` (line 280) is the dispatch point that grows a "first frame" branch. Existing `sendError` helper (line 313) is the model for the gate's outbound build.
-- `internal/dispatch/dispatch.go:149-152` — `connState{conn, input}`. Spec adds a per-conn `gateRun bool` to track first-frame-handled state.
-- `internal/relay/connection.go:170-183` — current `Connection.Send(env protocol.RoutingEnvelope) error`. The new `CloseConn` method is a sibling that builds a close-intent routing envelope and forwards via the same `transport.Client.Send` path.
-- `internal/protocol/envelope.go:40-43` — `RoutingEnvelope{ConnID, Frame}`. Spec extends with two optional fields. `omitempty` on both preserves backwards-compatible JSON for existing fixtures.
-- `internal/devices/registry.go:25-53, 170-179` — `Registry.Load(path)` and `FindByTokenHash`. `internal/devices/auth.go:32-46` — `Registry.Validate(plain) (Device, bool)`; AuthenticateFirstFrame already composes this.
-- `cmd/pyry/relay.go:57-146` — current `startRelay`. Spec inserts registry load + gate closure construction; the existing 3-goroutine wiring (dispatcher / forwarder / wait classifier) is unchanged. `cmd/pyry/pair.go:30-36` — `resolveDevicesPath(instanceName)` already returns `~/.pyry/<sanitized>/devices.json`.
-- `internal/e2e/internal/fakerelay/fakerelay.go:269-337, 482-518` — `handlePhone` captures `x-pyrycode-token` from request headers; `phoneRecvPump` wraps phone frames as RoutingEnvelopes. Spec adds Token injection on the first frame per conn_id and CloseCode handling on the binary→phone path.
-- `internal/e2e/internal/fakephone/fakephone.go:108-138` — `Receive` returns on conn close. Spec exposes the WS close status so the e2e can assert 4401.
-- `internal/e2e/relay_test.go:55-92` — pattern for daemon-vs-fakerelay e2e (spawn pyry, `StartInWithEnv`, persisted server-id, `LastBinaryHello` poll). New auth-reject test mirrors this shape.
-- `docs/protocol-mobile.md:85-122, 540-552` — phone→relay→binary handshake spec + WS close code table. Token plumbing and CloseCode are wire-spec additions documented here.
-- `docs/PROJECT-MEMORY.md:20` — Refusal-to-wire-code mapping at the call site convention (auth gate honors it: handler returns sentinels, dispatcher emits `Code*` strings).
-
 ## Context
 
 `internal/relay.AuthenticateFirstFrame` (#249) is a pure predicate that returns the accept/reject decision plus a fully-formed response envelope. No code calls it yet. This slice plugs it into the dispatcher scaffold from #307 so the dispatcher invokes the predicate on the very first frame for each new `conn_id`, forwards the response, and — on reject — also closes that phone's WS with code 4401 (`docs/protocol-mobile.md` § Error codes).

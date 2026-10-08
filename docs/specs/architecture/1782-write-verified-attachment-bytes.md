@@ -1,20 +1,5 @@
 # #1782 — Write verified attachment bytes into a conversation's attachment directory
 
-## Files to read first
-
-| Read | Symbols | What to extract |
-|---|---|---|
-| `internal/attachments/storage.go` | `EnsureDir`, `ErrInvalidID`, `ErrNotContained` | The directory this slice is handed and what it already guarantees; the `errors.New("attachments: …")` sentinel style and the doc-comment register the new sentinel must match. Note `ErrNotContained`'s "host paths here are for the operator's log, safe only because they never reach the wire" note — the new sentinel needs the same kind of note with one addition (see § Error handling). |
-| `internal/attachments/filename.go` | `SanitizeFilename` | The one and only name transform. Total (no error), returns exactly one path component, never begins with `.`, and is explicitly **not unique**. Do not write a second one and do not re-check its postconditions. |
-| `internal/attachments/storage_test.go` | `resolvedInstanceDir`, `wantDir`, `assertEmptyDir`, `TestEnsureDir_DistinctAttachmentIDs` | Reuse the first two helpers verbatim — they are exactly the "build `want` from the resolved root, not from `t.TempDir()` and not from the return value" discipline this ticket's Technical Notes demand. `TestEnsureDir_DistinctAttachmentIDs` is the row that already pins two directories per conversation; this ticket's same-filename test is its consequence one layer up. |
-| `internal/keys/store.go` | `Save` | **The closest precedent — copy this one.** It is the only one of the three that writes raw bytes rather than encoding JSON, so its `f.Write(body)` step is the shape needed here. |
-| `internal/conversations/registry.go` | `Save` | Second instance of the same recipe; confirms the `defer func() { _ = os.Remove(tmp) }()` placement and the `_ = f.Close()` on every mid-sequence failure. |
-| `internal/devices/registry.go` | `Save` | Third instance. Read one of these two to confirm the recipe is house style, not one file's habit. |
-| `internal/transport/wssclient.go` | `ErrFatalClose` (its two `fmt.Errorf` uses) | The repo's precedent for `fmt.Errorf("%w …: %w", sentinel, …, cause)` — sentinel and OS cause both wrapped in one call. This is the shape § Error handling prescribes. |
-| `internal/protocol/attachments.go` | `MaxAttachmentFilenameBytes` | 255, the bound `SanitizeFilename` already truncates to. Context only — nothing in this slice re-checks it. |
-| `docs/knowledge/features/attachments-package.md` | § "Directory resolution and creation (#1781)", § "Sentinels and discard semantics", § "Mutation-testing lessons" | The sentinel family's shape and why the new one is structurally unlike the seven latching ones. From the mutation section, two traps that apply directly here: an overlay mutant that deletes the only use of an import or the sole read of a local **fails the build and scores as a false green**, and `grep -a` is required when reading `go test -v` output. Also the #1781 lesson that a spec can predict a sole-red row its own fixture rules forbid — § Testing strategy names three such rows up front so they are not chased. |
-| `docs/protocol-mobile.md` | § Attachments (the `filename` row), § Error codes (`attachment.storage_failed`) | `filename` is "a display string and a sanitiser input, **never a path**"; `attachment.storage_failed` carries a **static** message, never the host path and never the underlying filesystem error. Both are downstream contracts this slice must not make impossible. This slice edits neither doc and picks no wire code. |
-
 ## Context
 
 `EnsureDir` (#1781) landed on main and returns the symlink-resolved, `0o700`

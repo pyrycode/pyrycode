@@ -3,16 +3,6 @@
 **Size:** XS (architect override from PO's `s` — test-only, one file, no signature change, no edit fan-out).
 **Security-sensitive:** No (test-harness timing; no product code, no trust/input surface).
 
-## Files to read first
-
-- `cmd/pyry/acp_test.go:403-425` — `waitOneClaudeArgv`, the shared poll helper. Line 409 holds the too-tight `3 * time.Second` deadline. This is the single wait everything collapses onto; extract its exact loop shape (20 ms poll, `>1` line ⇒ divergence-6 fatal, empty ⇒ keep polling, one line ⇒ `strings.Fields`).
-- `cmd/pyry/acp_test.go:239-262` — the inline poll **copy** inside `TestACP_SessionNew_SpawnsOneInteractiveClaude` (its own `3 * time.Second` at line 243). Byte-for-byte the same logic as the helper, but it also binds `fields` for the argv-equality assertion at line 266-268. This is the duplicate to delete.
-- `cmd/pyry/acp_test.go:148-166` — `fakeClaudeScript`: the `/bin/sh` fake claude. It `printf '%s\n' "$*" >> argvFile` **after** the pool has exec'd it through the PTY/service-mode path — the source of the async gap the poll bridges. Do not change it.
-- `cmd/pyry/acp_test.go:427-444` — `stripMCPSettingsPair`: consumed on the wait's return value, unchanged.
-- `cmd/pyry/acp_test.go:677` and `cmd/pyry/acp_conformance_test.go:481` — the two existing `waitOneClaudeArgv` callers (SessionLoad, FullSessionDrive). The helper signature stays `(t, argvFile)`, so **both are untouched**.
-- `docs/lessons.md:356-359` — "Control socket dialability lags `Phase: running` — poll, don't single-shot." The established codebase rule for this exact class: when a readiness signal is set by code that runs *before* the observable, poll the observable with a bounded deadline; do not lean on the readiness signal as a memory barrier. This is why the fix stays a robust poll rather than new `WaitForPTY` plumbing.
-- `internal/supervisor/supervisor.go:612-631` — `WaitForPTY` contract, for context on why it is **not** used here (it signals child-spawned, which happens-before the shell's first `printf`, so it cannot serve as the memory barrier for the argv write).
-
 ## Context
 
 QA filed three `cmd/pyry` failures under `make check`, all with the identical assertion `fake claude never recorded its argv`:

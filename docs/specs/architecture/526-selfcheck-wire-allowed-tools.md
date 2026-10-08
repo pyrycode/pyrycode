@@ -1,15 +1,5 @@
 # Spec #526 — Wire `AllowedTools` into selfcheck's `ptyrunner.Config`
 
-## Files to read first
-
-- `internal/agentrun/selfcheck/selfcheck.go:62` — the `ptyRun` package-level seam (`var ptyRun = ptyrunner.Run`) the test suite mocks.
-- `internal/agentrun/selfcheck/selfcheck.go:72-77` — `canonicalAllow` constant (`[]string{"Read"}`); the doc comment couples it to the deny-default invariant and explicitly forbids parallel literals.
-- `internal/agentrun/selfcheck/selfcheck.go:172` — the existing `settingsWrite(canonicalAllow)` call; the same constant must be passed to `ptyrunner.Config.AllowedTools` so the spawn's allow-list and the per-spawn settings file agree byte-for-byte.
-- `internal/agentrun/selfcheck/selfcheck.go:196-215` — the broken `ptyrunner.Config` struct literal. The one-line fix lands here.
-- `internal/agentrun/selfcheck/selfcheck_test.go:36-58` — `installSeams(t)`. Existing tests override `ptyRun` per-case; the new regression test follows the same shape.
-- `internal/agentrun/selfcheck/selfcheck_test.go:71-102` — `TestSelfCheck_Pass`. Closest sibling to the new test (single-line `passLine`, then `select` block waiting for ctx-done). Reuse the fixture pattern verbatim; only the assertions change.
-- `internal/agentrun/ptyrunner/runner.go:245-246` — the `cfg.AllowedTools == nil` check whose presence makes this field load-bearing. Read once to understand why nil (vs empty slice) trips it; the spec does NOT change runner.go.
-
 ## Context
 
 `pyry agent-run --self-check` is the install-time canary that the agent-run pipeline refuses tools NOT on the allow-list. Since commit `058c569` tightened `ptyrunner.Config` to require `AllowedTools` (the synthetic init envelope stamps `Tools: cfg.AllowedTools`), every build off main fails with `pyry: agentrun: self-check: ptyrunner: AllowedTools required` before claude is ever spawned.

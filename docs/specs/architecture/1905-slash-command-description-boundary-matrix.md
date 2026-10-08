@@ -3,23 +3,6 @@
 **Ticket:** [#1905](https://github.com/pyrycode/pyrycode/issues/1905) · `size:s` · `security-sensitive`
 **Scope:** test-only. No production file is touched.
 
-## Files to read first
-
-| Path | Symbol | What to extract |
-| --- | --- | --- |
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandNamesAreCapped` | the table this ticket extends: the row struct (`commandsOnly`, `entries`, `want`, `why`), the rung derivation in the subtest body, and the per-entry assertion block the new rows are graded by |
-| `internal/streamsup/parser_test.go` | `commandEntryWithFixture` | the one helper that adds a key to a command entry — **use it; `commandEntryFixture` must not be widened** |
-| `internal/streamsup/parser_test.go` | `slashCommandDescriptionCapFixture`, `slashCommandNameCapFixture` | the literal cap fixtures and the doc block above them explaining why each field owns one |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseCountsTheCapturedCommands` | the capture-pin idiom the new test copies: guard the capture's own shape first (naming the arm), then replay, then compare against the capture's bytes. Its `TruncatedFields` comment carries the forward reference this ticket discharges |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseDecodesTheCapturedModels` | the *"a guard is a proof a re-capture could silently take away"* shape — `sawAutoModeTrue`/`sawAutoModeAbsent` is the pattern the new guards mirror |
-| `internal/streamsup/parser_test.go` | `capturedCommandEntries`, `capturedCommandString` | the per-entry readers — literal key strings, never the production decode target |
-| `internal/streamsup/parser_test.go` | `capturedInitializeLine`, `slashCommandNamePreview` | the replayed line, and the bounded preview used in every failure message that prints a capped value |
-| `internal/streamsup/initialize_capture_test.go` | `initCaptureArms`, `initCaptureArmNoRequest`, `initCaptureArmLabel`, `capturedInitializePayload` | the arm list, the arm the loop must `continue` past, and the subtest label |
-| `internal/streamsup/parser.go` | `truncateField` | the whole contract in five lines: `<=` keeps, then `strings.ToValidUTF8(s, "")` — a **deletion**, on *both* branches |
-| `internal/streamsup/parser.go` | `maxSlashCommandDescription` | the derivation and, specifically, its `MID-RUNE IS ON THE LIVE PATH` paragraph — the mid-rune reachability measurement the new rows **cross-reference and must not restate** |
-| `internal/streamsup/parser.go` | `emitSlashCommandList` | the `bound` closure and the two sequential `truncateField` calls whose order `TruncatedFields` inherits |
-| `docs/knowledge/features/streamsup-package-the-commands-only-rung-s-emit-lands.md` | § `Description` joins the per-entry shape (#1904) | what the sibling settled, and its lesson about a capture pin asserting a narrower claim than its assertion's scope covers. **Read-only — the documentation phase owns this file** |
-
 ## Context
 
 #1904 landed `Description` on `commandEntryLine` and `turnevent.SlashCommand`, set `maxSlashCommandDescription = 256`, and shipped **liveness rows only** — over-cap-and-fits, both-fields-cut, and the null carve-out. That is #1877's deliberate pattern: the bound is never unproven for a merge window, and the boundary matrix follows one ticket behind. This ticket is that follow-on, and it is #1878's slice replayed one field over.

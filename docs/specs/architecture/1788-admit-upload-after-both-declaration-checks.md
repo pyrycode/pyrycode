@@ -1,15 +1,5 @@
 # #1788 — admit an upload into the registry only after both declaration checks
 
-## Files to read first
-
-- `internal/attachments/registry.go` → `Registry` (the type doc's lock rules), `insert`, `Lookup`, `count` — the locked primitive this entry point composes, and the `PRECONDITION` paragraph that already names this ticket as its one caller.
-- `internal/attachments/admission.go` → `CheckDeclaration`, `CheckDeclaredSize` — the two checks, their sentinels, and `CheckDeclaredSize`'s `PAIRING OBLIGATION` paragraph (the one paragraph this ticket edits).
-- `internal/attachments/accumulator.go` → `NewAccumulator` — the three-scalar constructor this entry point mirrors; `Add` (its fixed check order, steps 2 and 4) — what a caller feeding a repeat's chunk into a surviving incumbent gets.
-- `internal/attachments/accumulator_test.go` → `testBoundFixture`, `testBoundFixtureDigest`, `testChunk`, `testFixtureDigest`, `testFixture` — the fixtures the new tests reuse. Read the comment above `testBoundFixture`: it is package-level and **must not be mutated**, in whole or in a slice.
-- `internal/attachments/registry_test.go` → `testConnA`, `testConnB`, `testAttachmentID`, `TestRegistry_SecondInsertUnderAHeldPair_KeepsTheIncumbent` — the constants the new tests reuse, and the test that pins `insert` directly (AC 4 re-pins the same property through the exported path).
-- `docs/knowledge/features/attachments-package.md` § "Per-upload byte bound (#1777)" and § "In-flight upload registry (#1787)" — why the two checks are siblings rather than one function, and why `insert` never replaces.
-- `docs/knowledge/features/attachments-package.md` § "Mutation-testing lessons" — this package measures sole-redness with `go test -overlay`; read the build-failure trap before running any mutant here.
-
 ## Context
 
 #1787 landed the registry with an unexported, never-replacing `insert` and no policy about what may enter. #1776 and #1777 landed `CheckDeclaration` and `CheckDeclaredSize`, two pure functions with no production caller. This slice is the join: one exported entry point on `Registry` that runs both checks, and only on a nil answer from both constructs an `Accumulator` from the declared numbers and hands it to `insert`.

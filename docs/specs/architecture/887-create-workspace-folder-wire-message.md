@@ -6,26 +6,6 @@
 
 ---
 
-## Files to read first
-
-The developer's turn-1 reading list. Read these before writing code; each line says what to extract.
-
-- `internal/relay/handlers/change_workspace.go` (whole file, ~215 lines) — **the closest template.** Clone its shape at a coarse level: consumer-side injected resolver + `Err*Rejected` sentinel + static message constants + decode→guard→resolve→reply, and especially its SECURITY doc-comment discipline (no-path-in-logs). **Diverge in three ways** (see §Design): this verb takes `{parent, name}` not `{conversation_id, cwd}`, touches **no conversations registry** (no `Update`/`Save`, no `ConversationWorkspaceUpdater`), and replies with a **new** `workspace_folder_created` type (not the reused `conversation_updated`).
-- `internal/relay/handlers/create_conversation.go:86–232` — the **reply-with-a-new-type template** (`c.Reply(ctx, env, protocol.TypeConversationCreated, payloadJSON)`, line 231) and the injected-validator seam (`SessionCreator`, `ErrSpawnDirRejected`). Note **line 118–124**: create logs the decode `err` on malformed — this verb must NOT (see §Error handling, divergence).
-- `cmd/pyry/main.go:535–600` — **`confineWorkdirToHomeCreating`, the primitive to reuse verbatim.** Extract the two load-bearing guarantees the ACs lean on: **containment check #1 is PRE-creation** (line 575–587: escape → reject *before* any `MkdirAll`, so AC #2 "creates nothing on escape" holds for free); and **`MkdirAll(…, 0o700)` runs only when `rest != ""`** (line 583–587), so an already-existing full path skips creation and returns `EvalSymlinks(candidate)` (AC #5 idempotency, AC #4 canonical realpath).
-- `cmd/pyry/main.go:602–644` — `resolveSpawnDir` (the create-path adapter: `expandTilde → confineWorkdirToHomeCreating → trustMark`). This verb's adapter is a **hybrid**: creating like `resolveSpawnDir`, but **no `trustMark`** like `change_workspace`'s `resolveWorkspaceDir` (§The confine adapter).
-- `cmd/pyry/relay.go:69–108` — `resolveWorkspaceDir` (#823's adapter). The new `resolveWorkspaceFolder` is co-located here and follows the same "wrap every failure with the handler sentinel via `%w: %v`" contract, swapping the **non-creating** confiner for the **creating** one and adding a `filepath.Join`.
-- `cmd/pyry/main.go:492–514` — `expandTilde`. Runs on the **parent** before the join (a paired client can't know the daemon's `$HOME`, so it may send `~/…`).
-- `cmd/pyry/relay.go:215–223` (v1 `d.Register` block) and `:405–415` (v2 `Handlers` map) — the **two wiring sites**. Register the new handler at both, mirroring `change_workspace` at `:221` / `:412`.
-- `internal/protocol/conversations_write.go:1–45` — payload doc-comment style; `PromoteConversationPayload` (value-typed required string fields — the shape to mirror, since `parent`/`name`/`path` are all required, not spec-optional-null).
-- `internal/protocol/conversations_write_test.go:1–60` — the `readFixture(t, "<type>.json")` round-trip pattern. The new payloads get a `workspace_test.go` mirroring `TestCreateConversationPayload_RoundTrip` + two `testdata/*.json` fixtures.
-- `internal/protocol/codes.go:50–103` — the `// Conversations.` `Type*` block ending at `TypeChangeWorkspace`. Add the new request + reply consts (§Protocol vocabulary).
-- `internal/protocol/envelope.go:118–141` — `v1TypeSet`. Add **two** entries (request + reply), mirroring the `TypeCreateConversation` / `TypeConversationCreated` pair.
-- `internal/protocol/compat_test.go:9–21, 101–117, 180–218` — three enumerations + the hardcoded count `22` at line 115. All bump by **two** (22 → 24).
-- `cmd/pyry/main.go:481–491` — `withinDir` (the `filepath.Rel` + `..`-boundary containment predicate). Reading it confirms why the confiner rejects `../etc` and does not prefix-confuse `/home/userfoo` with `/home/user`; not edited.
-
----
-
 ## Context
 
 Mobile stubs a create-folder affordance and desktop is building a Create-folder

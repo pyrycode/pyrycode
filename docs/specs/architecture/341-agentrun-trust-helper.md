@@ -1,15 +1,5 @@
 # 341 — `internal/agentrun` trust-state helper
 
-## Files to read first
-
-- `internal/sessions/rotation/watcher.go:108-115` — canonical `filepath.EvalSymlinks` pattern for path comparison against claude-resolved paths (the macOS `/var → /private/var` rule). Mirror this shape in `ResolveWorkdir`.
-- `internal/sessions/rotation/watcher.go:178-184` — second EvalSymlinks call site (probe-path comparison); confirms "EvalSymlinks on an absolute path" is the lingua franca for talking to claude's path keys.
-- `internal/devices/registry.go:63-107` — canonical atomic-write recipe in pyrycode (`os.CreateTemp` in dir → chmod → encode → `Sync` → `Close` → `Rename`). The helper's write step copies this shape; we do NOT extract a shared helper yet (per PROJECT-MEMORY: "duplicated until a fifth registry forces extraction").
-- `internal/install/install.go:119-134` — existing `ResolveWorkDir(flag, cwd, homeDir)` in a different package. NOT what we're reimplementing: that helper resolves CLI flag → absolute path; ours resolves absolute path → realpath. Same surface area, orthogonal job. The name overlap is package-scoped (`install.ResolveWorkDir` vs `agentrun.ResolveWorkdir`) — no clash. Read this only to confirm we are not duplicating its job.
-- Parent #338 issue body — the original ticket before the split; the AC list there is authoritative on what the helper must guarantee. #341 is the helper; #338B is the wire-up.
-- Sibling #337 spec (`docs/specs/architecture/337-agent-run-scaffold.md`) — `agent-run` verb's flag surface. Helps reason about what the eventual caller looks like (which workdir string it will pass), even though #341 has no caller in-diff.
-- `docs/PROJECT-MEMORY.md` § "Atomic-write recipe for on-disk registries" — convention statement (`os.CreateTemp` … `Rename`); spec just points at it.
-
 ## Context
 
 Phase A spike (#329) verified that pre-writing `projects[<realpath(workdir)>].hasTrustDialogAccepted = true` in `~/.claude.json` side-steps the workspace-trust TUI dialog that would otherwise block claude at startup. Without this, pyry would have to drive the dialog via PTY, which is fragile under timing variance.

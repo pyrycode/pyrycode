@@ -4,17 +4,6 @@
 **Size:** S (confirmed — 1 production file, 3 resolver bodies, no signature change ⇒ zero consumer cascade)
 **Security-sensitive:** yes (see § Security review)
 
-## Files to read first
-
-- `cmd/pyry/interactive_turn_stream_v2.go:176-209` — `resolveLatestSessionJSONL`; the warm-offset assignment is `off := res.Size` at :200, cold override `off = 0` at :201-205. **The change site (1 of 3).**
-- `cmd/pyry/interactive_turn_stream_v2.go:284-350` — `resolveOwnBootstrapJSONL`; warm offset `off := info.Size()` at :341, cold override at :342-346. **Change site (2 of 3).** Note the `os.Stat(candidate)` at :333 is *also* the vanish-race existence gate that latches `sawEmpty` — keep the stat; drop only the `.Size()` read.
-- `cmd/pyry/interactive_turn_stream_v2.go:486-521` — `resolveBoundSessionJSONL`; warm offset `off := res.Size` at :512, cold override at :513-517. **Change site (3 of 3).** This is the resolver the two ACP tailers reuse verbatim, so changing it here fixes all three tailers at once.
-- `internal/turnbridge/producer.go:288-370` — the tail seam. `sess.Events(subCtx, path, off, tr)` at :327 forwards `off` straight through; the `cold_start` diagnostic at :367-368 derives `off == 0` — still correct once warm is `-1`. **No edit here.**
-- `internal/transcript/transcript.go:126-186` — `StatByID` / `Newest` return `Result{Path, Size}`. `Result.Size` stays (Family A / `internal/sessions` still reads it); Family B just stops reading it for the offset. **No edit here.**
-- tui-driver v1.12.0 `pkg/tuidriver/jsonl.go:137-141` — `const TailFromEnd int64 = -1` and its doc; `:224-239` — `TailJSONL` rejects `< -1`, resolves `== TailFromEnd` to own-fd size, clamps positive to size. `pkg/tuidriver/events.go:258-259` — `Session.Events` forwards `startOffset` into `TailJSONL` unchanged. **Confirms the sentinel flows with no library or seam change (AC2).**
-- `cmd/pyry/interactive_turn_stream_v2_test.go:248-269, 314-334, 406-423, 489-555, 822-913, 1234-1256` — the warm-offset assertions that flip from `want <size>` to `want tuidriver.TailFromEnd`; the three `_WarmStartTailsFromSize` functions rename to `_WarmStartTailsFromEnd`. The `_ColdStartTailsFromZero` functions and the `("", 0)`-on-not-found assertions stay at `0` (unchanged).
-- `internal/turnbridge/producer_test.go:430-527` — `TestNewTargetSubscriber_SwitchDuringBackoffColdStartsBoundTail`'s local `newBoundResolve` double still returns `info.Size()` for warm, but the test asserts **only** the cold path (`gotOff == 0`, :525). Local test double, not the real resolver — **leave it unchanged** (scope discipline; the cold-start offset-0 property it pins is preserved).
-
 ## Context
 
 The parent #973 sequenced this clause last, behind the tui-driver own-fd `TailJSONL` fix (v1.12.0, its #290) and the resolver consolidation onto `internal/transcript` (blocking ticket #1150, now merged). Today the outbound turn-stream resolvers compute the warm-resume offset by measuring the file's size with a caller `os.Stat` (`res.Size` / `info.Size()`), then hand that number down `producer.go:327` → `Session.Events` → `TailJSONL`, which seeks to it. That caller-stat is one half of a cross-fd TOCTOU: the caller stats file *A*, and by the time the tail opens its fd the on-disk file may be a rotated file *B* — the seek lands *A*'s byte offset into *B*. This is the #929/#930 tail-offset class.

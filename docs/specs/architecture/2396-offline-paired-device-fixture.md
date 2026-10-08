@@ -64,10 +64,6 @@ The private dependency seam lets the test force the save boundary to return a se
 - A forced-save-failure case seeds one successful record, snapshots the registry bytes, then invokes the private helper with a deterministic token reader and a failing save function. It asserts the sentinel error, zero payload, unchanged bytes and logical registry, and absence of the known plaintext token and its complete encoded pairing from the error and every persisted file.
 - Phase B follows RED then GREEN. The touched-scope gate is `go test -race ./internal/e2e/internal/paireddevice/...`, followed by `go vet ./...` and `go build ./cmd/pyry`.
 
-## Open questions
-
-None.
-
 ## Documentation handoff
 
 The issue contains no documentation-only acceptance criterion. The later documentation stage may add the new fixture package to the owning e2e feature overview; no shared documentation is changed by the builder.

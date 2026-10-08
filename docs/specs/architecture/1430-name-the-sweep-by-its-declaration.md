@@ -5,24 +5,6 @@ All facts below were re-derived against `e20f4d2`, which is this worktree's `HEA
 
 ---
 
-## Files to read first
-
-| Read | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trailer_admissibility_test.go:1483-1552` | The renamed test's own doc comment **and** its opening sentence — site A, and the biggest single finding in this spec. Note the doc already carries the declaration-keyed truth at `:1520-1521` ("on exactly the rows that declare pathVaries") while opening with the arm-keyed one. |
-| `…:1575-1640` | The sweep body. `:1615-1624` is the `pathVaries` exemption (value **and** bytes); `:1625-1637` is the undeclared-row invariance. This is the "both directions" the new name claims. |
-| `…:1642-1712` | The companion sub-test — proves the declaring row's variance positively (three distinct Details across five readings). Do not touch; it is the other half of what makes a declaration-keyed name accurate. |
-| `…:760-781` | `trailGateCase`, with `pathVaries` at `:772-780` — site D. |
-| `…:224-232` | `trailGateInput`'s doc — site B. |
-| `…:353-365` | The Detail-is-fixed-prose doc — site C. `:364` is cited by name from `trail_ptyrunner_composition_test.go:55`, one line below the block being rewritten. |
-| `internal/e2e/realclaude/trail_ptyrunner_composition_test.go:28-60` | The file header. `:32-34` is the retraction that makes site E's message stale; `:53-60` is the surviving reason site E must argue from. Also `:56`'s bare `(:1585-1590)`. |
-| `…:196-215` | Site E's assertion, its message, and the sibling at `:205-208` that stays untouched. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1213-1220` | A pure naming cite — already row-scoped and already says "declared". Substitution only; it is the model the other cites should read like. |
-| `docs/knowledge/features/e2e-realclaude.md:786-802` | Site F, and the two claims that must be separated. |
-| `docs/specs/architecture/1414-runner-reading-is-a-property-not-a-gap.md:47-70` | **The house idiom for this exact constraint.** Per-block line-count neutrality, the stop condition, and why `--numstat` equality is necessary but not sufficient. Follow it. |
-
----
-
 ## Context
 
 Four places describe the gate's path-reading **by arm**; the tree stopped keying on the arm at #1420 and keys on a per-row `pathVaries` declaration. The ticket enumerates those four. This spec adds **three more**, all in Go, all left contradicting by a literal reading of the ACs — see § The gap.

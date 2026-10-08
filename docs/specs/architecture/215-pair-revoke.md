@@ -1,20 +1,5 @@
 # Architecture spec — `pyry pair revoke` (ticket #215)
 
-## Files to read first
-
-- `cmd/pyry/pair.go` (entire file, 285 lines) — `runPair` dispatcher (`switch args[0]` with `case "list"`), `pairVerbList` const, `resolveDevicesPath`, sibling parsers (`parsePairListArgs`), and the `os.Exit(2)` direct-exit pattern for usage failures. The new sub-verb is a third leaf appended to this file.
-  - Lines 22–25: `pairVerbList` const + the lockstep-update comment that mentions `revoke`.
-  - Lines 115–128: `runPair` dispatcher — add one case here.
-  - Lines 202–248: `runPairList` + `parsePairListArgs` — the structural template for `runPairRevoke` + `parsePairRevokeArgs` (same `-pyry-name`-only flag set, same exit-2 direct-exit pattern, same `fmt.Errorf("pair %v: %w", ...)` wrap on I/O errors).
-- `internal/devices/registry.go` (entire file) — `Load(path)` returns `*Registry, nil` on missing/zero-byte file (cold-start is not an error), `Remove(name)` returns `bool` (true iff a match was removed; byte-exact name compare), `Save(path)` writes atomically (temp + fsync + rename). Note: `Remove` does NOT call `Save` — the caller persists.
-- `cmd/pyry/main.go:155-177` — top-level verb switch dispatching `pair` → `runPair`. Unchanged for this ticket; included so the developer can locate the `pair`-line entrypoint without grepping.
-- `cmd/pyry/main.go:1182-1245` — `printHelp`'s text block. Append a one-line entry under the existing `pyry pair list` line at line 1208.
-- `cmd/pyry/main.go:600-660` — `main.run` error printer + `runSessions` shape. `main.run` prefixes returned errors with `pyry: `; this is why usage failures use `os.Exit(2)` directly and the not-found path uses `os.Exit(1)` directly (otherwise stderr would carry the duplicate `pyry: pyry pair revoke: …` prefix).
-- `cmd/pyry/pair_test.go` (entire file, 297 lines) — table-driven flag-parse pattern (`TestParsePairListArgs` at lines 259–297), the `t.Setenv("PYRY_NAME", "")` pattern to neutralize ambient env, and the device-fixture shape used in `TestRenderPairList_*`.
-- `internal/e2e/pair_test.go` (entire file, 159 lines) — `RunBareIn(t, home, "pair", …)` E2E pattern, the `~/.pyry/pyry/devices.json` default-instance path, and the post-call registry round-trip via `devices.Load`. `TestPairList_E2E` (lines 94–139) is the structural template for `TestPairRevoke_E2E`.
-- `internal/e2e/harness.go` (around the `RunBareIn` declaration) — `RunBareIn(t, home, args...)` returns `Result{Stdout, Stderr, ExitCode}`. No new harness functions are needed.
-- `docs/specs/architecture/214-pair-list.md` (sibling spec) — verb-dispatch shape rationale and the "do not factor" decision recorded in #214's open questions §1; this spec inherits those decisions verbatim.
-
 ## Context
 
 Ticket #214 turned `runPair` into a sub-verb dispatcher (`runPair` peels `args[0]`, switches to `runPairList` or falls through to `runPairDefault`). This ticket appends a third leaf — the destructive `revoke` sub-verb — under the same dispatcher.

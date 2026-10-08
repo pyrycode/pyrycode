@@ -4,26 +4,6 @@
 **Size:** S (option 1 — teach fakeclaude the glyphs; see § Option choice)
 **Labels:** `security-sensitive` (substrate-seal exemption — see § Security review)
 
-## Files to read first
-
-Code surface the developer loads on turn 1. Paths + what to extract.
-
-- `internal/e2e/internal/fakeclaude/main.go` (whole file, 165 lines) — the helper being changed. Note the existing `main` poll loop, `emitAssistantIfTriggered` (writes to `os.Stdout`), and `startStdinLogger` (the only current stdin reader, gated on `PYRY_FAKE_CLAUDE_STDIN_LOG`). The new TUI mode adds to these.
-- `cmd/substrate-guard/main.go:32-36` — `allowlist` (path-suffix exemptions). One line is added here. Read the whole file (130 lines) to understand the ban patterns — esp. `patterns` at `:53-70` (the two glyphs U+273B `✻` / U+276F `❯` are banned in three encodings each; CSI `\x1b[` is also banned).
-- tui-driver `pkg/tuidriver/ready.go:42-54` (`WaitReady`) and `pkg/tuidriver/state.go:38-54` (`IsIdle` / `IsThinking`) — **the detection contract.** `IsIdle` = `❯` present **AND** `✻` absent; `IsThinking` = `✻` present. Both run over `StripANSI(Snapshot())`.
-  - Module path: `$(go list -m -f '{{.Dir}}' github.com/pyrycode/tui-driver)` → `pkg/tuidriver/`.
-- tui-driver `pkg/tuidriver/buffer.go` (whole, 80 lines) — **decisive design fact:** `Snapshot()` is a **rolling raw-byte window (`DefaultBufferCap` = 4096B), not a terminal-grid emulator.** A glyph persists in the snapshot until ≥4096 later bytes evict it; `\r`/cursor moves do **not** clear it. This is why a single startup `❯` write stays "idle" indefinitely and why the design needs no continuous redraw (each restored flow drives exactly one idle→thinking transition).
-- tui-driver `pkg/tuidriver/deliver.go:94-201` (`DeliverPrompt` / `promptDidCommit`) — commit confirmation polls `IsThinking` (150ms poll, `DefaultPromptCommitTimeout` = 3s). The `✻`-absent / no-"[Pasted text]"-chip "committed-but-slow" fallback is **3s slow** — too slow for the tests' ack deadlines, which is why fakeclaude must emit `✻` for a *fast confirmed* commit (AC #2: "reaches a **confirmed** commit").
-- `internal/supervisor/supervisor.go:199-255` — `WriteUserTurn` + `deliverViaSession`. Note: cursor is stamped **before** `deliverFn` runs (load-bearing for the ack-pollution interaction below); `JSONLPath` is left `""`, so the spinner is the only fast commit signal.
-- `cmd/pyry/assistant_turn.go:83-159` — `assistantTurnEmitter.Run`/`broadcast`. **`broadcast` forwards any non-empty PTY chunk as a `message` envelope when the cursor is non-empty** (`Text = string(chunk)`, no glyph filtering). This is why the `✻` chunk reaches the phone and races the ack — see § Ack-pollution interaction.
-- The five test files (each carries one `t.Skip("blocked on #603 …")` to remove):
-  - `internal/e2e/relay_send_message_test.go` — `TestRelay_SendMessage_AckAndPTYDelivery` (v1; asserts ack + stdin marker)
-  - `internal/e2e/respawn_after_eviction_test.go` — `TestE2E_IdleEviction_RespawnsOnSendMessage` (v1; evict→respawn→ack; **inlines `startEvictionHarness` at `:233`** — the env-injection site for this test)
-  - `internal/e2e/relay_roundtrip_test.go` — `TestRelay_Roundtrip_Appendix` (v1; send_message + assistant echo)
-  - `internal/e2e/relay_assistant_turn_test.go` — `TestRelay_AssistantTurn_BroadcastsMessageEnvelope` (v1; send_message + assistant echo)
-  - `internal/e2e/relay_v2_daemon_test.go` — `TestRelayV2_AssistantTurn_BroadcastsMessageEnvelope` (**v2 / Noise**; sealed send_message + assistant echo). NB: the un-skipped `TestRelayV2_Daemon` subtests in this file are unrelated — they use `/bin/sleep`, not fakeclaude.
-- `internal/e2e/harness.go:304-360` (`StartRotationWithRelay`) — note the trailing `extraEnv ...string` param: the four `StartRotationWithRelay` callers opt into TUI mode through it, **no harness.go change required.** Also `internal/e2e/internal/fakephone/fakephone.go:113-165` (`Receive` + `ErrReceiveTimeout`) for the v1 drain loop, and `relay_v2_handshake_test.go:158` (`readInnerFrame`) + `relay_v2_daemon_test.go:389` (`decryptInnerEnvelope`) for the v2 drain.
-
 ## Context
 
 #594 rewrote `Supervisor.WriteUserTurn` to deliver through `tuidriver.Session.DeliverPrompt` behind a `WaitReady` idle-gate, acking only on a confirmed commit. `internal/e2e/internal/fakeclaude` renders **no claude TUI** — it never emits the idle prompt (`❯`) or thinking spinner (`✻`), so `WaitReady` never reaches idle, the 30s deliver timeout elapses, and `send_message` replies `server.binary_offline` instead of `ack`. Five `//go:build e2e` flows that drive `send_message → WriteUserTurn` were `t.Skip`ped in #594 to absorb this. This ticket restores them by teaching fakeclaude the two glyphs the detection contract needs, so the harness regression-guards the genuine delivery path (today only `deliverFn`-seam unit/handler tested).

@@ -2,17 +2,6 @@
 
 **Size:** XS (confirmed — PO sized XS). One production file (`cmd/pyry/relay.go`), one test file. Zero new exported types. One call-site changed. No `internal/relay` change.
 
-## Files to read first
-
-- `internal/relay/v2session_replay.go:50-75` — `handleRequestSnapshot`: the `KnownConversation` gate (line 59), then the nil-`Snapshotter` arm (66-69) and the `!live` arm (71-75). **This is the control flow the stream path routes into. NO CHANGE here** — the arm already exists and already fires after the gate.
-- `internal/relay/v2session_seams.go:25-32` — `ScreenSnapshotter` interface (`ScreenSnapshot() (text string, live bool)`), exported, consumed by the manager.
-- `internal/relay/v2session_seams.go:266-272` — `Snapshotter ScreenSnapshotter` field doc: *"Optional: when nil, request_snapshot yields a server.binary_offline error reply — the snapshot feature is simply unavailable, not a crash."* This is the contract the fix relies on.
-- `cmd/pyry/relay.go:463-496` — the `V2SessionConfig` literal; the `Snapshotter: w.sup` line (492) is the one line to change, and the `KnownConversation` closure (493-496) is the gate wiring (unchanged).
-- `cmd/pyry/main.go:941` — `sup: bootstrap.Supervisor()` — the origin of `w.sup`.
-- `internal/sessions/session.go:245-258` — `Session.Supervisor()` type-asserts the stored runner to `*supervisor.Supervisor` and **returns nil for a stream-json runner** (the typed-nil source); `Session.Runner()` is total for both runner types. This nil-on-stream-path behaviour is the mechanism, established by #1077.
-- `internal/supervisor/supervisor.go:550-558` — `ScreenSnapshot()` dereferences `s.sessMu` on the first line; **called on a nil receiver it panics** (why a typed-nil-in-interface, not just a nil pointer, is the bug).
-- `internal/relay/v2session_test.go:3789-3842` — existing cases `"foreign conversation rejected"` (uses a **live** snapshotter, still returns `CodeConversationNotFound` → proves gate-first) and `"nil Snapshotter reports offline"` (→ `CodeServerBinaryOffline`, retryable). **The end-to-end offline degrade AND the security-critical gate ordering are already pinned here.** Reuse `fakeSnapshotter` if any relay-level assertion is wanted (it is not — see Testing).
-
 ## Context
 
 The stream-json runner (`*streamsup.Runner`, constructed and pool-supervised as of #1109) structurally has no PTY/screen: no tui-driver seal, no transcript tailing. When the daemon's bootstrap session is stream-json-backed and a phone sends `request_snapshot`, there is nothing to render, so the request must degrade to the existing offline reply.

@@ -3,17 +3,6 @@
 **Ticket:** #811 · **Size:** S · **Labels:** `size:s`, `security-sensitive`
 **Chosen mechanism:** a new zero-dependency `internal/debugbundle` package whose `Assemble(recordingsDir, logs)` reads the newest `.cast` from a caller-supplied recordings directory and the caller-supplied log-ring snapshot, streams them plus a JSON manifest into an in-memory `tar`+`gzip` archive, and returns the archive bytes alongside a content-free `Manifest`. Pure content assembly — no wire, no pairing, no disk write. Serving the bytes to a paired client is the sibling ticket #813 (over the chunked transport of #812).
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:612-623` — `recordingPath`: the **as-shipped** `.cast` name is `<stamp>-<sessionID>.cast`, `stamp = time.Now().UTC().Format("20060102T150405Z")` (per-second UTC, session id embedded). Extract: the name forms a single `*.cast` glob must match.
-- `internal/agentrun/ptyrunner/runner.go:625-648` — `finalizeRecording`: the post-run rename appends `-ok`/`-err` **before** `.cast`, so finalized files are `<stem>-ok.cast` / `<stem>-err.cast` and the **in-flight** file has no suffix. Extract: three name forms, all matched by `*.cast`; "current session" = newest.
-- `internal/agentrun/ptyrunner/runner.go:650-676` — `pruneOldRecordings`: the `filepath.Glob(filepath.Join(dir, "*.cast"))` idiom + the comment proving `*` never crosses a separator (non-recursive, cannot escape `dir`). Extract: the exact glob to reuse; do **not** copy the prune/mtime-cutoff logic (out of scope).
-- `internal/control/logs.go:57-73` — `RingBuffer.Snapshot() []string` (oldest-first copy) and `Cap()`. Extract: the log source is a `[]string`; `Assemble` accepts it as a parameter (no import of `internal/control`).
-- `internal/control/server.go:498-503` — the `pyry logs` handler builds its reply from `s.logs.Snapshot()`. Extract: proof that "the same content `pyry logs` returns" is exactly `Snapshot()`.
-- `cmd/pyry/main.go:707` — `control.NewRingBuffer(200)`: the flat 200-line ring, one shared buffer, **no per-session key**. Extract: confirms per-session log filtering is impossible here (out of scope; whole-ring only).
-- `internal/update/install.go:35-70` — `ExtractBinary`: the in-repo `archive/tar` + `compress/gzip` precedent (reader side). Extract: the stdlib API shape and import set to mirror on the **writer** side.
-- `docs/specs/architecture/802-debug-capture-setting.md` §§ "Design", "Security review" — the recorder's security posture (`0600 O_EXCL`, non-synced dir, "recording is the highest-value secret surface", content-free logging). Extract: the inherited invariants this ticket must not weaken.
-
 ## Context
 
 When a client app misbehaves, the operator wants the session's evidence — the terminal recording (#802, when capture was on) plus the recent daemon logs — without SSHing into the host. This ticket packages those two sources into one in-memory archive with a manifest. It is the **producer**; the sibling serving path (#812 chunked transport, #813 request verb) is the consumer that hands the bytes to a paired client over the encrypted channel.

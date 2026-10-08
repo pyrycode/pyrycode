@@ -1,31 +1,5 @@
 # Spec: realclaude MCP server smoke tests (#384)
 
-## Files to read first
-
-The reading list below is the developer's turn-1 data load. Open each in order; the spec assumes you have. Line ranges are illustrative — file may have shifted by a few lines under refactor.
-
-- `internal/e2e/realclaude/fixtures.go` — `RunPyryAgentRun` (line 123), `RunOpts` (line 83), `RunResult` (line 111), `WithWorktree` (line 32), `WithWorktreeAuthenticated` (line 45), `ReadJSONL` (line 59). The four new tests call `RunPyryAgentRun` with the same shape as every other realclaude test; reuse, don't fork.
-- `internal/e2e/realclaude/tool_loop_test.go` — full file. Two things to lift, both same-package-visible:
-  - `parseContentBlocks` (line 168) + `contentBlock` struct (line 155) — decoder for assistant/user message content arrays.
-  - `parseResultTrailer` (line 197) + `resultTrailer` struct (line 185) — decoder for the stream-json trailer.
-  - The tool-loop assertion shape (lines 67–121) — assistant `tool_use` → user `tool_result` correlation by `tool_use_id` → subsequent assistant text. Identical structural walk applies to MCP tools; only the expected `name` differs.
-- `internal/e2e/realclaude/per_agent_test.go` — full file. Reference for the per-role test pattern. Note that the dispatcher's `dispatcherBaseTools` list at lines 31–53 uses `mcp__context7__*` (no plugin prefix). The actual tool names exposed by the local claude differ — see § "Tool-name pinning" below.
-- `internal/e2e/realclaude/resilience_test.go` — `TestRealClaude_BashTool_NonZeroExit` (line 35) for the JSONL tool-loop assertion idiom with `is_error` and content-non-empty checks.
-- `internal/e2e/realclaude/prompt_fidelity_test.go` — `jsonlPathFor` (line 79) for failure-diagnostic path construction.
-- `cmd/pyry/agent_run.go` — `buildClaudeArgs` (line 254). Confirms that `pyry agent-run` does NOT pass `--mcp-config`; MCP server resolution happens via claude's own config discovery from `$HOME`. This drives the HOME-handling decision below.
-- `docs/PROJECT-MEMORY.md` § "Where things live" — what to update under `docs/knowledge/codebase/<ticket>.md` in the documentation phase (out of scope for this developer turn, but informs the test-file location and conventions).
-
-External reference (not in this repo): running `claude mcp list` locally shows the canonical server-name shapes, e.g.:
-
-```
-qmd: qmd mcp - ✓ Connected
-codegraph: codegraph serve --mcp - ✓ Connected
-plugin:context7:context7: npx -y @upstash/context7-mcp - ✓ Connected
-plugin:figma:figma: https://mcp.figma.com/mcp (HTTP) - ✓ Connected
-```
-
-The line shape and connection-status sentinels (`✓ Connected`, `✗ Failed to connect`, `! Needs authentication`) are the only thing the pre-flight probe parses.
-
 ## Context
 
 The five dispatcher agents (po, architect, developer, code-review, documentation) declare `mcp__qmd__*`, `mcp__context7__*`, `mcp__codegraph__*`, and `mcp__plugin_figma_figma__*` in their `--allowed-tools` list. If any of those MCP servers undergoes a protocol break — renamed tool, changed parameter shape, broken stdio handshake at startup — the affected agent silently fails (the model never calls the tool, or the call wedges) or hangs to `max_turns`. Today the only signal that catches this is a post-hoc human noticing degraded agent quality.

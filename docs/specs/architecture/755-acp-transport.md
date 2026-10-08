@@ -4,18 +4,6 @@
 **Size:** S — 2 production files, 3 exported types, greenfield package, zero consumer fan-out.
 **Security-sensitive:** No (not labelled; no auth/crypto/network/untrusted-remote surface — a local editor speaks to this over stdio).
 
-## Files to read first
-
-Read these before writing code. Each line says what to extract.
-
-- `internal/control/logs.go:23-93` — `RingBuffer` + `SlogTee` stderr-diagnostics convention. **What to extract:** the injected-`*slog.Logger` pattern. #755 only needs to *accept* a logger and write diagnostics to it; the ring-buffer/tee wiring is the subcommand's concern (#756), not this ticket. Do NOT build a ring buffer here.
-- `internal/control/server.go:436-491` — `handle`: single-connection `json.NewDecoder`/`json.NewEncoder` decode→switch→encode loop. **What to extract:** the "decode one frame, switch on its shape, encode exactly one reply" idiom and the verbatim-error-to-response discipline. `internal/acp` mirrors this shape but over an `io.Reader`/`io.Writer` (not a `net.Conn`) and with JSON-RPC framing instead of the control verb enum.
-- `internal/agentrun/jsonl/reader.go:1-132` — line-buffer sizing (`maxLineBytes = 16<<20`, `initialBufCap = 8192`), the `ErrLineTooLarge` stance, and the **"MUST NOT log line contents"** caution in the package doc. **What to extract:** buffer-cap constants to reuse, and the discipline that the read loop logs *offsets and error kinds only, never the line bytes* — an ACP request's `params` may carry user prompt content.
-- `internal/dispatch/dispatch.go` — the mobile-wire `Handler` + dispatch-table + `Register`/`Run` precedent (Register-before-Run enforced via `atomic.Bool`, duplicate-Register panics, carrier-agnostic: imports only its own wire types). **What to extract:** the registration + running-guard shape to mirror. **Do NOT import `internal/protocol` or any mobile envelope type** — `internal/acp` defines its own JSON-RPC wire types (Technical Notes).
-- `internal/control/server.go:253-269` — `NewServer` nil-guard + default-logger construction pattern (`panic` on required-nil, `slog.Default()` on optional-nil logger). **What to extract:** the constructor validation idiom `New` should mirror.
-- `cmd/substrate-guard/main.go:34-36` — the allowlist + scan scope. **What to extract:** confirmation that `internal/acp` is trivially green — it names no claude-TUI substrate literals (it drives no claude in this ticket), so AC 5's substrate-guard requirement needs no allowlist entry.
-- `CODING-STYLE.md` §§ "Interface Design", "Error Handling", "Testing" — func-type handler idiom, `fmt.Errorf("%w")` wrapping, `errors.Is`, table-driven stdlib-only tests, `t.Parallel()`.
-
 ## Context
 
 Epic #600 makes `pyry acp` speak the Agent Client Protocol (Zed-stewarded, JSON-RPC 2.0, line-delimited over stdio): the host writes one JSON object per line to the agent's stdin; the agent replies and streams notifications one JSON object per line to stdout; stderr carries human-readable diagnostics only, never protocol frames.

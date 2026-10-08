@@ -7,29 +7,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/result_trailer_observation_test.go:57-90` | The two shipped closed value spaces, verbatim. Your constants must be pairwise-distinct from all six of these strings, and AC5's closure test asserts it. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:98-137` | `trailScanResult` (the gate's input) and `trailObservation`. Note the **embedding** at `:126` — that is why AC2 pins the gate's *output* rather than claiming the gate owns the only read. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:108-119` | The pointer trap's own doc comment. `Trailer` is nil unless `State == trailSeen`, deliberately, and the comment states why a value type would be worse. This ticket is that comment's first consumer. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:164-208` | `trailScan`'s three return sites. Confirm with your own eyes that `Trailer` is set on exactly one of them — the gate's contract checks exist for hand-built fixtures, not for anything this function emits. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:282-317` | `trailFixtureTrailer` (`terminal_reason: "completed"`), `trailPaddedTrailer` (`"max_turns"`, `error_max_turns`, `is_error: true`), `trailNeedle`, `trailOverlongPad`. **Reuse these; do not write new trailer fixtures.** |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:326-372` | `TestTrailConstantsAreClosed` — the shape AC5 says to follow, including the zero-value pin. Read how its inner `closed` helper is scoped (a closure, one space per call) so you understand why cross-space distinctness needs a different structure, not a third call. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:96-127` | `tdnReapHeldPGIDKilled` / `HeldPGIDAbsent` / `NoLine` / `InstrumentFailed` and the `tdnReapOutcome` record. `LineCount` (json `reap_lines_seen`) is the field AC3's "exactly one reap line" reads off. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:144-219` | `tdnClassifyReapLog`'s body — specifically **which (Verdict, LineCount) pairs it can emit**. This is the authority for the predicate's contract checks; read it before writing them. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:309-314` | `tdnDetail`. Your family gets its own equivalent — see § Design, "One detail helper". |
-| `internal/e2e/realclaude/teardown_liveness_test.go:330-358` | The positive-allowlist constant block: kebab-case, each constant carrying the argument for why it is not a collapse of its neighbour. Both your blocks follow this. |
-| `internal/e2e/realclaude/tool_loop_test.go:194-206` | `resultTrailer` — `TerminalReason` is the only field the gate reads. Confirm there is no `result` member; that absence is why the gate's output is publishable. |
-| `internal/agentrun/streamjson/emitter.go:375-391` | The chokepoint that makes a blank `terminal_reason` unreachable on today's pyry. Cite **this**, not `wireFields`' empty `default`, in the gate's empty-reason comment. |
-| `internal/agentrun/streamjson/emitter.go:428-437` | `wireFields` — `ExitReasonMaxTurns → ("error_max_turns", "max_turns", true)`. The source of the `"max_turns"` literal, and of § Open questions Q1's unpinnable-rename gap. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:111-125, :945-950` | `reachMaxCommandBytes`, `reachTruncationMarker`, `reachCapCommand`. The cap every `Detail` goes through. |
-
-Not code, read before writing prose: `docs/specs/architecture/1266-result-trailer-observation.md` (§ Design and § Security review) and `docs/knowledge/codebase/1266.md`.
-
----
-
 ## Size decision — recorded, because two red lines nominally trip
 
 Projected total written work: **~650–730 lines in one new file**, from **twelve** named outcomes (five gate, seven predicate — see the correction below). That is over the architect's ~600-line red line, and twelve outcomes is over the ~10-branch red line.

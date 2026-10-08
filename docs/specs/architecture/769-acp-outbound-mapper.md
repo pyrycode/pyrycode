@@ -3,17 +3,6 @@
 **Ticket:** [#769](https://github.com/pyrycode/pyrycode/issues/769) · **Size:** S · **Security-sensitive:** no
 **Epic:** #600 (`pyry acp`) · **Consumer:** #750 (streaming adapter, blocked on this) · **Contract:** [ADR 027](../../knowledge/decisions/027-acp-mapping.md)
 
-## Files to read first
-
-- `internal/turnbridge/outbound.go:49-104` — **the template.** `MapEvent(ev, tc) (typ, payload any, ok bool)`: exhaustive switch over the sealed `turnevent.Event`, pure value-to-value, `ok == false` for the no-wire-representation cases. Mirror its structure and doc-comment discipline exactly; ACP framing differs (see Design).
-- `internal/turnbridge/outbound_test.go:14-187` — **the test template.** `TestMapEventOutbound`: one table, one case per sealed variant + drop cases, `reflect.DeepEqual` on the payload struct. Copy this shape.
-- `internal/turnevent/event.go:23-103` — the sealed `Event` sum type and the four mapped variants' exact fields (`TextChunk{MessageID,Text}`, `ThoughtChunk{MessageID,Text}`, `ToolStart{ToolCallID,Title,Kind,RawInput,Locations}`, `ToolUpdate{ToolCallID,Status,Content}`) plus `TurnEnd`, `Stall`, and `Location{Path,Line}`.
-- `internal/turnevent/taxonomy.go:9-32` — `ToolKind` / `ToolStatus` are string-backed and their values **are** the ACP strings; `ToolStatusPending == "pending"`, `ToolKindOther == "other"`. This is why kind/status "mapping" is `string(e.Kind)`, not a table.
-- `internal/turnevent/content.go` — the sealed `ToolContent` sum (`TextContent{Text}`, `DiffContent{Path,OldText,NewText}`, `TerminalContent{TerminalID}`, `nil`). The `mapToolContent` helper switches over this exhaustively (mirror `resultSummary` in the template, `outbound.go:144-155`).
-- `internal/modalbridge/modal.go:1-14` — sibling-package doc-comment style + the relay-free / import-discipline framing to echo (this package imports only `turnevent` + stdlib).
-- ADR 027 §"Outbound" table + §"ACP taxonomy reference" (`docs/knowledge/decisions/027-acp-mapping.md:35-47,77-88`) — the authoritative outbound mapping + the `session/update` variant discriminants and `stopReason` values.
-- **Exact ACP wire field names** (vault `structured-event-bridge-acp-mapping.md`, ported below so the developer needs no vault access): `sessionUpdate`, `content`, `toolCallId`, `title`, `kind`, `status`, `rawInput`, `locations` (`path`, `line`), tool content shapes `content`/`diff` (`path`,`oldText`,`newText`)/`terminal` (`terminalId`).
-
 ## Context
 
 Epic #600 makes `pyry acp` a thin adapter over the neutral `turnevent` core (ADR 027). This ticket is the **pure value-to-value outbound layer**: it defines the ACP `session/update` payload structs and one exhaustive mapping function `turnevent.Event → session/update payload`. It is the exact mirror of the mobile head's `turnbridge.MapEvent` — same neutral source, different framing (ACP `sessionUpdate` discriminant vs. the mobile v2 envelope; `ThoughtChunk` **is** mapped here where mobile drops it).

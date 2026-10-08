@@ -1,23 +1,5 @@
 # #1692 — fakeclaude answers an `initialize` control request with a canned model list
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/internal/fakeclaude/main.go` | `runStreamJSON` | The read→dispatch loop. The `else if honorInterrupt` arm is what the new arm sits **beside**, never inside. Note the 5-parameter signature — it does **not** grow here. |
-| `internal/e2e/internal/fakeclaude/main.go` | `interruptControlRequest`, `inControlRequest` | The subtype predicate to generalise, and the decode struct that already matches the `initialize` request shape with no change (`request_id` top-level, `request.subtype` nested). |
-| `internal/e2e/internal/fakeclaude/main.go` | `writeInterruptAck` | The ack envelope precedent — `subtype` and `request_id` nested **under** `response` — plus the `map[string]any` + `writeJSONLine` idiom and the honest-provenance doc-comment style. |
-| `internal/e2e/internal/fakeclaude/main.go` | `writeRateLimitEvent` | The other "transcribed verbatim from a committed capture" writer. Copy its provenance-comment discipline: name the capture, say what is transcribed and what is invented. |
-| `internal/e2e/internal/fakeclaude/stream_detect_test.go` | `TestRunStreamJSON_InterruptAckRider`, `interruptControlRequestLine` | The untagged unit-test shape to copy: hand-mirror the inbound line, decode the emitted line into a **literal** target, assert the nesting positively and the top-level `subtype` negatively. |
-| `internal/e2e/internal/fakeclaude/stream_detect_test.go` | `TestRunStreamJSON_NonUserLinesIgnored` | Must stay green **unmodified** — it feeds a `subtype:"interrupt"` control line in default mode and asserts zero output bytes. It is half of AC4's regression proof. |
-| `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` | — | The capture. Entries live at `control_responses[].response.response.models`. Read the two entries this spec cans **out of this file**, verbatim. |
-| `internal/e2e/realclaude/initialize_control_names_test.go` | `initControlFixtureName`, `initControlArmFixtureName`, `initControlArms` | Why the glob will match **more than one** file after #1713/#1715 land, and why one of those future files (`control_no_request`) legitimately carries no `control_responses` at all. Drives the aggregate-not-per-file non-vacuity rule below. |
-| `internal/streamsup/parser.go` | `(*Parser).consumeLine`, its `case "control_response"` arm | Why emitting this answer cannot change any existing e2e's client-visible frames: the arm reads **nothing below the top-level `type`**, so an ack carrying an inner payload and one carrying none are consumed identically, content-free, into a `Debug` log. |
-| `internal/protocol/interactive.go` | `ModelOption`, `ModelOption.MarshalJSON` | #1704's decision that absent and empty both publish as `[]` on the **wire**, and that the daemon-internal distinction is left for #1690. This is why the fake must omit the keys rather than emit empties. |
-| `docs/knowledge/features/fakeclaude-binary.md` | § Stream-json mode, § Interrupt mode (`honorInterrupt`) | House rules for stream riders: default-off, byte-identical when unset, the call-site-not-inside-the-seam discipline, and why a new env knob has to justify itself. **Read-only — the documentation phase owns this file.** |
-
 ## Context
 
 The daemon is gaining the ability to send its stream child a `control_request` with

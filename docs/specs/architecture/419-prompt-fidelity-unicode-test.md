@@ -1,17 +1,5 @@
 # Spec: e2e/realclaude — UTF-8 prompt fidelity round-trip test (#419)
 
-## Files to read first
-
-- `internal/e2e/realclaude/prompt_fidelity_test.go` (whole file, ~90 LoC) — the template to clone. The new test mirrors this 1:1 except for the prompt literal and the test function name. Note in particular:
-  - `const distinctivePrompt = "..."` at line 18 — the literal-constant pattern to copy
-  - the early returns on `result.ExitCode != 0` and `result.SessionID == ""` (lines 41–52) — copy verbatim, they are the same failure modes
-  - the `for e := range events { if e.Kind == "user" ... }` loop (lines 57–65) — copy verbatim
-  - the trailing "no user entry found" diagnostic with the `kinds` slice (lines 67–72) — copy verbatim
-  - `jsonlPathFor` at line 79 is an unexported, package-scoped helper. Reuse it directly from the new file (same `package realclaude`, same build tag) — do NOT duplicate it.
-- `internal/e2e/realclaude/fixtures.go:83-116` — `RunOpts` field set and `RunResult` shape. Confirms `Workdir`, `Prompt`, `SystemPrompt`, `AllowedTools`, `MaxTurns`, `Effort`, `Model` are all available; no new fields required.
-- `internal/e2e/realclaude/fixtures.go:32-78` — `WithWorktree` and `ReadJSONL`. Confirms the same fixture surface used by the ASCII test is also what the new test consumes.
-- `Makefile:28-30` — the `e2e-realclaude` target. It runs `go test -tags e2e_realclaude ./internal/e2e/realclaude/...`, so a new `*_test.go` file under the same build tag is picked up automatically. No Makefile changes needed.
-
 ## Context
 
 The ticket body is authoritative. In short: the existing prompt-fidelity test uses an ASCII-only literal by design ("unlikely to appear in any system"). That pins the prompt-handoff path but not UTF-8 byte preservation. A regression in JSON escape handling, re-encoding, or buffer slicing on a multi-byte UTF-8 boundary would land silently. Finnish-speaking users are a real cohort; non-ASCII input is realistic, not edge-case.

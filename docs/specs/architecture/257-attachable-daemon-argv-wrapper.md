@@ -4,19 +4,6 @@
 **Size:** S · **Security-sensitive:** no (test-only harness plumbing over the local control socket; no untrusted input, no security property under test)
 **Decomposition:** mechanism 2 of #918 — the `os.Args[0]` test-binary stand-in. #918 (`/bin/sleep` default) and #929 (argv-immune fakeclaude) are the sibling mechanisms; both landed, no file overlap.
 
-## Files to read first
-
-- `internal/e2e/auto_attach.go:257-310` — `spawnAutoAttachDaemon`, the **line-for-line template**. Copy its args/env shape into `spawnAttachableDaemon`.
-- `internal/e2e/auto_attach.go:103-127` — `echoClaudeScript` + `writeEchoClaude(t, home)`, the reusable shell wrapper. **Reuse verbatim — do not redefine.**
-- `internal/e2e/auto_attach.go:67-101` — `safeBuffer` (`Write`/`String`/`Bytes`, mutex-guarded). The type AC#4 reuses for `StdioAttachClient.Stderr`. **Already exists — do not redefine.**
-- `internal/e2e/attach_pty.go:151-199` — `spawnAttachableDaemon`, the function to migrate (Change 1). Its doc comment (151-155) also needs updating.
-- `internal/e2e/attach_pty.go:66-95` — `StartAttach`, caller #1. Confirms the returned stdout buffer stays (signature is preserved; see Change 1).
-- `internal/e2e/attach_stdio.go:27-54` — `StdioAttachClient` struct; `Stderr` field type change target is line 41 (Change 2).
-- `internal/e2e/attach_stdio.go:98-132` — `startStdioAttach`, caller #2 (discards the stdout buffer via `_`); `Stderr` init (line 103) and the `attachCmd.Stderr = c.Stderr` assignment (line 132).
-- `internal/e2e/attach_stdio_test.go:26-59` — the `t.Skip` to remove (line 34) and the stale rationale comment to clean (27-33) (Change 3).
-- `internal/e2e/attach_stdio_no_pty_test.go:28-44` — the non-gating conditional unskip (line 31 carries a stale `#167` gate) (Change 4).
-- `internal/sessions/pool.go:1208` — `base := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))`. The root cause: every built session (including the bootstrap session) gets `--session-id <uuid>` appended. Read-only context.
-
 ## Context
 
 `spawnAttachableDaemon` (`attach_pty.go:156`) wires the supervised "claude" as `-pyry-claude=os.Args[0]` — the Go e2e test binary itself, unwrapped — and passes `-- -test.run=TestHelperProcess` so the binary re-execs into `TestHelperProcess` (echo mode).

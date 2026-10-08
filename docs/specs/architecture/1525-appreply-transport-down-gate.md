@@ -1,30 +1,5 @@
 # Spec: Probe transport-down in `forwardAppReply` before the seal (#1525)
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/relay/v2session.go` → **`forwardAppReply`** — the only function this ticket edits. Read the whole body plus its doc comment: the `V2StateOpen` gate, the `s.send.Encrypt` seal, the two never-emit-unsealed drop branches, and the trailing `m.send`.
-- `internal/relay/v2session.go` → **`transportDown`** — the predicate to reuse verbatim. Nil `Connected` ⇒ reads "up".
-- `internal/relay/v2session.go` → **`drainOnce`** — the #874 precedent for an *in-function* hold. Read its leading transport-down comment block; it states the whole rationale (probe off-lock, before the seal, because the post-send `Outbound` error is too late).
-- `internal/relay/v2session.go` → **`handleWake`**, the `wakeRekeyEmit` arm — the #912 precedent for a *call-site* gate, and the reason this ticket does **not** copy that placement (see § Design, "Placement").
-- `internal/relay/v2session.go` → **`send`** — why the post-hoc error is useless here: it swallows the `Outbound` error at Debug, after the nonce is spent.
-- `internal/relay/v2session.go` → **`Run`**, the `m.appReply` arm — the single call site of `forwardAppReply`.
-- `internal/relay/v2session.go` → **`forwardToRun`** — the worker→Run hand-off, and its `s.done` arm. Load-bearing for § Testing strategy (why the AC5 test is a direct call, not a driven scenario).
-- `internal/relay/v2session.go` → **`forwardEnvelope`** — its doc comment states the package's no-AEAD-bytes-in-logs discipline that AC3 points at.
-- `internal/relay/v2session_seams.go` → **`V2SessionConfig`**, the `Connected` field — the seam's documented contract, including "NOT a security decision" and the accepted up→down residual race.
-- `internal/relay/v2session_test.go` → **`gatedRecorder`**, **`newGatedRecorder`**, its `outbound` / `connected` methods — the transport-flip harness. Note: when down, `outbound` records **nothing** and returns `errTransportDown`. That detail decides how AC2 must be asserted.
-- `internal/relay/v2session_test.go` → **`driveToOpen`**, **`openSession`** — handshake driver; `initRecv` is the nonce oracle.
-- `internal/relay/v2session_test.go` → **`decryptAppFrame`**, **`sealAppFrame`** — the oracle and its inbound twin.
-- `internal/relay/v2session_test.go` → **`bufferLogger`** (a `slog.LevelDebug` handler), **`waitForLogContains`**, **`waitForEnvelopes`** — log capture + the synchronisation knob for a manager action that emits no envelope.
-- `internal/relay/v2session_test.go` → **`TestV2Session_Push_ReconnectWhileDownDoesNotSeal`** — the #874 precedent test named in AC1.
-- `internal/relay/v2session_test.go` → **`TestV2Session_RekeyScheduled_DeferredWhileTransportDown_EmitsOnRecovery`** — the #912 precedent test named in AC1. Its "clean decrypt under `initRecv` proves zero seals happened while down" comment is the oracle argument to mirror.
-- `internal/relay/v2session_appframe_test.go` → **`blockingHandler`**, **`prolificHandler`**, **`waitForConnNoiseMsg`** — the handler doubles that make a reply arrive at a chosen moment. `blockingHandler` is what holds a handler open across the transport flip.
-- `internal/relay/v2session_appframe_test.go` → **`TestV2Session_SlowHandler_DoesNotStallOtherConn`** — the closest structural template for the new test (two handler types registered, one blocking, one prolific).
-- `internal/relay/connection.go` → **`Connected`**, and `internal/transport/wssclient.go` → **`IsConnected`** — the production seam behind the probe. Both are mutex/`closeCh`-guarded; the probe is safe to call from Run.
-- `cmd/pyry/relay.go` → **`startRelayV2`**, the `relay.V2SessionConfig{…}` literal — confirms `Connected: conn.Connected` is wired in production, so this guard is live rather than nil-inert.
-- `docs/knowledge/features/v2-session-manager.md` § "Out of scope (deferred)" — the bullet beginning **"Extending the `transportDown()` guard beyond `drainOnce`"**. This is the deferral the ticket overrides. Read it; do **not** edit it (see § Note for the documentation phase).
-
 ## Context
 
 `forwardAppReply` seals a handler reply under `s.send` with no transport-liveness probe ahead of the `Encrypt`, and hands the result to `send`, which swallows the `Outbound` error at Debug. A reply sealed while the binary↔relay leg is down is therefore dropped *after* the Noise send counter advanced.

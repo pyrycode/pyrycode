@@ -2,17 +2,6 @@
 
 **Size:** XS — one file (`Makefile`), four recipe lines plus one comment block. No Go source changes.
 
-## Files to read first
-
-| Path | Symbol | What to extract |
-|---|---|---|
-| `Makefile` | targets `test`, `e2e`, `e2e-realclaude`, `e2e-liverelay`, `e2e-install`, `e2e-update` | The six `go test` recipes. Four change; `test` and `e2e` do not. |
-| `internal/e2e/harness.go` | `ensurePyryBuilt` | The subprocess `go build` of `cmd/pyry` shared by the `e2e` **and** `e2e-install` suites — the file carries `//go:build e2e \|\| e2e_install`. Also builds fakeclaude a few lines below. |
-| `internal/e2e/realclaude/fixtures.go` | `ensurePyryBuilt` | Realclaude's own copy of the same subprocess build (plus the self-ref guard — read it, don't touch it). |
-| `internal/e2e/liverelay/liverelay_test.go` | `ensureRelayBuilt`, `ensurePyryBuilt`, `defaultSiblingRelayRepo` | Two build sites (sibling relay + `cmd/pyry`), and the resolution logic that decides whether the suite **runs or skips**. Load-bearing for the AC2 repro — see § Testing strategy. |
-| `cmd/pyry/update_e2e_test.go` | the two `exec.Command("go", "build", …)` sites | Builds `cmd/pyry` and `internal/brokenpyry`. The second is the one outside the recipe's dependency graph. |
-| `docs/release-tooling.md` | § *Live-claude suite — read the count, not the exit code* | The two existing false-green modes. A replayed cache is the third. **Pointer only — the documentation phase owns this file; do not edit it in this ticket.** |
-
 ## Context
 
 `make e2e` carries `-race -count=1`. The other four opt-in recipes invoke `go test` bare.

@@ -3,31 +3,6 @@
 **Size:** S (confirmed; one new sibling test plus six comment sites, all inside `internal/e2e/realclaude`, no production file)
 **Measured against:** `a9d3ed5` (the merge of #1458)
 
-## Files to read first
-
-Everything below is behind the `e2e_realclaude` build tag. Resolve every symbol with
-`codegraph_search` / `codegraph_node`; no line numbers are given because none survive the
-insertion this ticket makes.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go` | `TestFinGatherRunnerPathCarriesNoCapturedBytes` | **The shape to follow.** Premises first, per-channel naming, published Details named individually, the marshal sweep over the returns. |
-| same file | `finGatherReadings`, `finGatherInputs` | The route: `readings.PinnedPid = in.PinnedPid`, whole and unnormalised. `PinnedPid`'s field doc is comment site 3. |
-| same file | `TestFinGatherPinnedPidDoesNotReachTheLiveness`, `finGatherPinnedReadings`, `finGatherPinnedReadPID` | The sibling this one sits beside; its doc is site 5, `finGatherPinnedReadings`' is site 4. Note the "FIXTURES AND NOT LIVE `pinReadState` CALLS" paragraph — the new plant needs the same disclaimer. |
-| same file | `finGatherNegativeInputs` | The fixture the new test builds on: usable gate certifying `completed`, an attribution that is not proof, `PyryExited` true. |
-| same file | `TestFinGatherReturnsNoCapturedBytes` | Site 1, the doc that currently says no sweep covers `PinnedPid`. Also the test that marshals `readings` — the reason a third plant here is red against correct code. |
-| same file | `TestFinGatherPyryExitIsObservableAtTheOutcome` | Proof that `finGatherNegativeInputs` with `PyryExited` true classifies to `trailOutcomeNoRowMatched`. That is the arm the control's byte budget is measured on. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go` | `trailClassifyRun` | The consumer. Read the step-8 arm (`trailOutcomeNoRowMatched`), the `decide` closure, the provenance struct literal at the top, and the no-C10 note. Confirm for yourself that no arm reads `readings.PinnedPid` except through `trailEstablishSighting`. |
-| same file | `TestTrailRunOutcomeCarriesNoCapturedBytes` | Site 2. Also the classifier-tier sweep whose `plantedPin` closure the new plant mirrors, and whose doc records the budget-kill-wearing-a-leak-kill's-clothes measurement. |
-| same file | `trailRunOutcome`, `trailRunReadings` | Field sets and json tags: `pinStateOutcome` marshals `detail`, `state_column`, `tool_stderr`; `trailRunOutcome` publishes no pin field at all. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go` | `trailDetail` | `reachCapCommand(fmt.Sprintf(...))` — the single rendering path the control must travel. |
-| `internal/e2e/realclaude/background_reach_probe_test.go` | `reachCapCommand`, `reachMaxCommandBytes`, `reachTruncationMarker` | The 512-byte cap and the marker the control must be shown *not* to carry. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go` | `pinStateOutcome`, `pinClassifyState` | The instrument-failed branch: `ToolStderr = reachCapCommand(stderr)` folded into `Detail`. The shape the plant stands in for. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go` | `trailNeedle` | The needle to reuse — 42 bytes, which the control's budget has to pay for. |
-| `internal/e2e/realclaude/finding_exit_path_probe_test.go` | `finExitRunProbe` | Site 6, the live caller's `PinnedPid:` comment. |
-| `docs/knowledge/codebase/1458.md` | § "From five rounds of code review" | The cite-tail method. Read it before touching any comment. |
-| `cmd/cite-guard/main.go` | package doc | What the guard flags (explicit `file.go:NNN` into a declaration) and what it deliberately does not (bare `:NNN`, ranges). |
-
 ## Context
 
 #1458 opened a route: the live probe reads a pinned pid with `pinReadState` after pyry exits and

@@ -12,25 +12,6 @@ no edit-and-cp.**
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-| --- | --- |
-| `internal/agentrun/ptyrunner/runner.go:232-298` | `Run` entry: validation block, `cmd` build, `EnsureClaudeEnv` (line 280), `tuidriver.Spawn(cmd, SpawnOpts{})` (line 282), `defer sess.Close()` (line 290). **The recorder block + its defer go between line 280 and line 282.** |
-| `internal/agentrun/ptyrunner/runner.go:399-447` | The rest of the documented defer-LIFO chain (`cancel`/`emitter.Close`/`counter.Stop`/`wg.Wait`). Confirms run-order so the new recorder defer lands **last**. |
-| `internal/agentrun/ptyrunner/runner.go:180-231` | `Run` doc-comment, esp. the **Cleanup ordering** block (219-231) — must be updated to append `finalizeRecording()` as the new last LIFO step. |
-| `internal/agentrun/ptyrunner/runner.go:1-57` | Package doc (no-content-logging discipline para, lines 19-27) + import block (add `path/filepath`; `time`, `os`, `io`, `fmt` already imported). Add the "recorder is a separate opt-in artifact, not a log" carve-out. |
-| tui-driver `pkg/tuidriver/castrecorder.go` (whole, ~117 lines) | `NewCastRecorder(w io.Writer, cols, rows int) *CastRecorder` → `WriteHeader() error` once → pass as `SpawnOpts.Mirror`. **The recorder owns no lifecycle — the consumer owns and closes the underlying `*os.File`.** `*CastRecorder` satisfies `io.Writer` (compile-time assert line 61). |
-| tui-driver `pkg/tuidriver/session.go:37-49, 84-128, 243-265` | `SpawnOpts.Mirror` is read at spawn time; the PTY reader goroutine is the **only** writer of `Mirror`; `Close()` does `s.PTY.Close()` then `<-s.readerDone` (line 262-263) — the happens-before that makes a post-`Close` file close/rename race-free. |
-| tui-driver `pkg/tuidriver/pty.go:10-16, 120-140` | `DefaultPtyRows uint16 = 40`, `DefaultPtyCols uint16 = 120`; `StartPTY` sets the PTY to exactly those. **This is the cols/rows source** (resolves the ticket's open design point). |
-| `internal/agentrun/ptyrunner/runner_test.go:38-128` | `helperRunCfg(t, mode, stdout, stderr, jsonlBody)`, `testSessionID`, `happyPathBody`, `parseTrailer` — reuse verbatim for the recording tests. |
-| `internal/agentrun/ptyrunner/helper_test.go:69-167` | Fake-claude modes. `jsonl` → clean (`nil`) → `-ok`; `trust`/`network_failure` → sentinel error → `-err`. All modes write `❯ ` to the PTY (so the mirror always captures ≥1 event). |
-| `cmd/pyry/agent_run.go:288-323` | `runAgentRunPty`. **Not modified by this ticket** (see Design § "Where the env var is read"). Listed so the developer confirms no cmd-side change. |
-| `.gitignore` (whole, ~40 lines) | Add `*.cast`. |
-| `go.mod:11` | `github.com/pyrycode/tui-driver v0.0.0-20260523181457-c2dcd1e49992` → bump to `v0.0.0-20260531143940-6bec180ad34c` (publishes `NewCastRecorder`). |
-
----
-
 ## Context
 
 ptyrunner drives claude as an interactive TUI under a PTY. The **control channel**

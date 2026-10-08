@@ -58,10 +58,6 @@ The probe is one synchronous, short-lived app-server process inside the factory 
 - `cmd/pyry`: `TestCodexRunnerFactory_DaemonHome` (existing) stays green — it is the signed-in, current case: runner returned, runs, binds.
 - `internal/codexsup`: `TestSignedIn` against the fake: default → true; `FAKECODEX_SIGNED_OUT=1` → false. `TestMethodNamesInSchema` covers `account/read` in both packages automatically.
 
-## Open questions
-
-None.
-
 ## Documentation handoff
 
 None required by the ticket.

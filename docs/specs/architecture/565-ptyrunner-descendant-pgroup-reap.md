@@ -1,15 +1,5 @@
 # Spec: ptyrunner reaps claude's descendant process groups on SIGTERM (#565)
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:288-360` — the spawn site (`exec.CommandContext` → `tuidriver.Spawn`) and the `defer sess.Close()` registration. The fix sets `cmd.Cancel`/`cmd.WaitDelay` between `EnsureClaudeEnv(cmd)` (line 294) and `tuidriver.Spawn` (line 344). **This is the only production wiring change.**
-- `internal/agentrun/streamrunner/runner.go:181-184` — the exact `cmd.Cancel = SIGTERM` + `cmd.WaitDelay = killGrace` pattern to mirror, and `streamrunner/runner.go:41-44` for `killGrace = 5 * time.Second`.
-- `internal/agentrun/ptyrunner/runner.go:450-466` — the budget `Terminate`/`Kill` hooks. Confirms the budget-hit teardown path is **separate** from operator-SIGTERM (it signals claude directly and does not cancel the parent ctx). Drives the "Open questions" scope note.
-- `internal/supervisor/spawn.go:38-52` — `SpawnPTY` shows the same `cmd.Cancel`/`cmd.WaitDelay` shape already in the codebase (`spawnWaitDelay = 5s`); the precedent that this is the house pattern for graceful PTY teardown.
-- `internal/e2e/realclaude/sigterm_mid_tool_use_test.go` — the verification test. Key regions: doc-comment carve-out at lines **11-13, 39-43**; `waitForBashSubprocess` returning `bashPGID` (lines 158, 348-362); the self-reap `t.Cleanup` at **167-169**; invariant-1 comment + assertion at **219-227**; the four post-exit invariants at 229-281. AC #3/#4 edit this file.
-- `internal/agentrun/ptyrunner/helper_test.go` — existing `TestHelperProcess`/helper-mode scaffold (modes like `jsonl_exit143`); the unit test extends it with one new "spawn child in a fresh process group and block" mode rather than building fresh scaffolding.
-- tui-driver `Session.Close()` (`github.com/pyrycode/tui-driver@v1.0.1/pkg/tuidriver/session.go:331-362`) — **read-only context.** Close already does SIGTERM → 3s grace → SIGKILL on claude. This 3s grace is the effective bounded-exit backstop and the reason `cmd.WaitDelay`'s exact value is non-binding (see Concurrency model).
-
 ## Context
 
 `pyry agent-run` (ptyrunner, the default path) leaks claude's in-flight Bash subprocess when the operator sends SIGTERM. claude (2.1.158) runs every Bash command in a **detached process group two levels below pyry**:

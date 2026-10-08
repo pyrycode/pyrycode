@@ -1,17 +1,5 @@
 # 910 — `ResolveWorkdir` canonicalises each path component to its on-disk case
 
-## Files to read first
-
-- `internal/agentrun/workdir.go:15-33` — the function to change. Current body is `filepath.Abs` → `filepath.EvalSymlinks`; the doc comment (line 15-22) claims to "mirror how claude resolves a workdir" but omits case. This is the **only** production file the spec modifies, and the doc comment is AC-4's target.
-- `internal/agentrun/workdir_test.go:11-74` — existing tests. Reuse the `t.TempDir()` fixture shape, the `runtime.GOOS` skip pattern (line 12), and the `errors.Is(err, fs.ErrNotExist)` assertion (line 71). AC-5's new test lands here; the four existing tests must still pass unchanged (AC-3).
-- `internal/agentrun/trust/trust.go:50-54` and `:100-101` — the **sole production caller**. `markWorkdirTrustedIn` calls `agentrun.ResolveWorkdir(workdir)` (line 51) and writes the result as `projects[realpath]` (line 101). Confirms: fixing `ResolveWorkdir`'s output fixes the trust-map key.
-- `cmd/pyry/agent_run.go:299-330` — `runAgentRunPty`. `realpath, err := trustMark(parsed.workdir)` (line 300); that same `realpath` is the trust key **and** `ptyrunner.Config.WorkDir` (line 318, the spawn cwd). One source for both.
-- `cmd/pyry/main.go:627-644` — `resolveSpawnDir` (per-conversation daemon flow). `confineWorkdirToHomeCreating` → `trustMark(realpath)` → returns trustMark's realpath (line 643). So the spawn cwd here is also `ResolveWorkdir`'s output.
-- `cmd/pyry/main.go:678-695` — daemon bootstrap. `confineWorkdirToHome(*workdir)` → `trustMark(workdirReal)` → `trustedWorkdir` threaded into `Bootstrap.WorkDir`. Same trustMark-return-is-spawn-cwd pattern (comment at line 684-687 states the byte-identical invariant).
-- `cmd/pyry/main.go:442-490` — `confineWorkdirToHome` + `withinDir`. The `$HOME`-confinement invariant the security review must confirm is **not** weakened. These helpers are **unchanged** by this ticket; the spec explains why (§ "Why the confine helpers need no change").
-- `internal/agentrun/ptyrunner/runner.go:64-67` — `ErrTrustModalDetected`. This is the abort AC-2 prevents: when the trust key misses, claude renders the trust modal, `WaitReady` classifies it (`ready.TrustModal`), and `Run` aborts with this sentinel.
-- `docs/specs/architecture/341-agentrun-trust-helper.md` — the original `ResolveWorkdir` + `MarkWorkdirTrusted` spec. Establishes the "mirror claude's path resolution" contract this ticket finally honours, and the security-review section format.
-
 ## Context
 
 `ResolveWorkdir` is the canonicaliser that turns a configured workdir into the key claude reads from `~/.claude.json`'s `projects` map (via `trust.MarkWorkdirTrusted`) and into the child's spawn cwd. Its doc comment promises to "mirror how claude resolves a workdir before reading `~/.claude.json`'s projects map," but the body only runs `filepath.Abs` + `filepath.EvalSymlinks`.

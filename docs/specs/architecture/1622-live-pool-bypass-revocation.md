@@ -5,47 +5,6 @@
 
 ---
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`. **The ticket
-body's line citations into `interactive_stream_inband_model_test.go` are stale by roughly seven
-lines** (it cites `inbandRunner` at `:374`; it is at 381 today, and every other `:NNN` in that
-paragraph is off by the same amount). Do not chase them — the names below are the contract.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/interactive_stream_inband_model_test.go` | `TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel` | The whole drive shape this ticket re-points: factory → instrument check → `Run` goroutine → wait-for-child → turn → `UpdateSettings` → settle → turn → assert |
-| same | `inbandRunner` | The `sessions.Runner` adapter. **Needs no change** — it embeds `*streamsup.Runner`, which already carries `RevokeBypass` |
-| same | `inbandWaitForChild`, `inbandSendTurn`, `inbandWaitResults` | Reused verbatim except for `inbandSendTurn`'s parameter type (see § The two edits) |
-| same | `inbandTapRecorder`, its `Write` and `consume` | The line-splitting `io.Writer` shape and the `maxPartial` / `skipUntilNewline` discipline. **Read it as the pattern; do not reuse the type** — its field set is models + result count |
-| same | `newInbandSpawnCounter`, `inbandSpawnHandler` | The message-discriminating `slog.Handler` shape. **Read it as the pattern; do not reuse it** — it drops every record but `"spawning claude"`, including the one AC 3 exists to surface |
-| same | `inbandBaseArgs` | The trap AC 2 is about: it is literally `--dangerously-skip-permissions`. Copying it defeats this ticket twice over |
-| same | `inbandMaxPartial`, `inbandSpawnWait`, `inbandPoll`, `inbandTurnBudget`, `inbandResendAfter`, `inbandRunExitWait` | Package-level constants reused as-is |
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `setModeRecorder` and its `add` | **The instrument AC 3 needs, already written.** Captures `control_response` verbatim, `permissionMode` off every `system`/`init`, result count and turn boundaries. Takes a whole line, so it needs a splitter in front of it |
-| same | `snapshotControlResponses`, `controlResponseCount`, `snapshotInitModes`, `resultCount`, `snapshotLines`, `nonJSONCount` | The accessors the new test reads through |
-| same | `setModeWaitFor` | Already takes a `func() int`. Needs no widening; the control-response wait uses it directly |
-| `internal/sessions/pool.go` | `Pool.UpdateSettings` | The no-change early return, the persist, the `SetSpawnArgs` install, the branch |
-| same | `inBandDeliverable` | Why a revoke (`YOLO` non-nil and false) returns true and an enable returns false |
-| same | `Pool.deliverSettingsInBand` | The `RevokeBypass` call and the `Info` record whose message literal is `"sessions: in-band settings command not delivered"` — note the `sessions: ` prefix |
-| same | `Pool.New` | The warm-start branch: `pickBootstrap` selects the entry, `SessionSettings{Model, Effort, YOLO}` is loaded from it, and `bootstrapArgs` is base + `claudeSettingsArgs(settings)` |
-| same | `Pool.Default`, `Pool.DefaultSettings` | The two accessors the instrument checks read |
-| `internal/sessions/registry.go` | `registryEntry`, `loadRegistry`, `pickBootstrap` | The exact on-disk JSON keys to seed, and the three fail-closed paths that yield a non-bypass child |
-| `internal/sessions/session.go` | `claudeSettingsArgs`, `Session.spawnArgs` | The single site that turns `YOLO: true` into `--dangerously-skip-permissions` |
-| `internal/sessions/id.go` | `NewID`, `ValidID` | The seeded entry's `id` must be a canonical UUIDv4 — `writeMCPSettings` hard-errors otherwise |
-| `internal/streamsup/runner.go` | `Runner.RevokeBypass`, `Runner.nextControlID` | The request id is minted from an internal atomic counter and is **not readable from the test** |
-| same | `Runner.spawnAndWait` | `cmd.Stdout = r.cfg.Stdout` — the fact that settles "does the tap see `control_response`" |
-| same | `buildArgs` | The fixed `--input-format/--output-format/--verbose` prefix and the `--session-id` / `--resume` suffix wrapped around the pool's argv |
-| `docs/knowledge/features/set-permission-mode-inband-probe.md` | — | #1595's live record: the `success` ack, `bypassPermissions` → `default` on the next init, no respawn. This is the borrowed evidence every expected value below rests on |
-
-**One frozen note is wrong and the ticket already settled it.** `docs/knowledge/codebase/1595.md`
-explains #1595's divergence from #1582 as needing "the raw `control_response`, which that seam sits
-downstream of". `Runner.spawnAndWait` assigns `cmd.Stdout = r.cfg.Stdout`, so `Config.Stdout` **is**
-the child's raw stdout sink and carries every line claude writes, `control_response` included. Do not
-redesign around the parenthetical. `docs/knowledge/codebase/` is read-only, so this stays recorded
-here.
-
----
-
 ## Context
 
 #1595 proved the bytes: a `set_permission_mode` control request carrying `mode: "default"`,

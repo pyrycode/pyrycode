@@ -1,36 +1,5 @@
 # 1877 — Bound each slash command's name and emit the command list on the model-list rung
 
-## Files to read first
-
-This is the turn-1 data load. Every entry names a **symbol**, never a line — resolve
-each with `codegraph_search` / `codegraph_node`, and read the symbol's whole doc block
-rather than grepping a phrase out of it. Three of the eight corrections below sit
-inside paragraphs whose *surviving* sentences must be left verbatim, so a grep-sized
-read is the failure mode this list exists to prevent.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/parser.go` | `emitModelList` | The four-rung classification, the placement of `commands := len(...)`, and where `logControlResponse` sits relative to `p.emit`. This is the only function whose body changes. |
-| `internal/streamsup/parser.go` | `truncateField` | The cut-and-report helper you reuse unchanged: byte cut, `<=` boundary, scrub, `(string, bool)`. |
-| `internal/streamsup/parser.go` | `commandEntryLine` | The decode target (`Name`, one field). Its doc block holds corrections **C3** and **C4** *and* one sentence that must stay verbatim. |
-| `internal/streamsup/parser.go` | `controlResponseLine` | The nesting path to `Commands`, and why absent / null / empty are one reading. |
-| `internal/streamsup/parser.go` | `maxModelResolved` | The doc shape your new constant copies: measurement, multiple, one-constant-per-meaning, per-entry term, transient-vs-retained. |
-| `internal/streamsup/parser.go` | `maxModelEffortLevel` | The shorter end of the same shape — a per-element cap that delegates the aggregate elsewhere. Your constant is nearer this one in length. |
-| `internal/streamsup/parser.go` | `logControlResponse` | Correction **C5**, and the sentence three lines from it that must stay verbatim. |
-| `internal/streamsup/parser.go` | `emitModelAnnounced` | The one-field precedent: *no* `bound` closure, *no* sequential-statements rule, because one field decides no `TruncatedFields` order. Your loop follows this, not `emitModelList`'s models loop. |
-| `internal/turnevent/event.go` | `SlashCommandList` | Corrections **C6** and **C7**; also the `IT IS PUBLISHED BY NO PATH TODAY` and `SECURITY` paragraphs, both of which survive. |
-| `internal/turnevent/event.go` | `SlashCommand` | The two fields you construct, and `TruncatedFields`' nil-not-empty convention plus its `TODAY THE ONLY NAME IT CAN CARRY IS "name"` sentence (survives). |
-| `cmd/pyry/interactive_turn_v2.go` | `eventKind` | Corrections **C8** (three clauses in the `ModelAnnounced` arm) and **C9** (two in the `SlashCommandList` arm). Read both arms whole. |
-| `internal/protocol/interactive.go` | `SlashCommand` | Its `TruncatedFields` doc names the **wire** names — `"name"` is the one that matters here, and it coincides with the daemon's snake_case name. |
-| `internal/protocol/interactive.go` | `SlashCommandListPayload.MarshalJSON` | The wire's `[]`-is-a-positive-statement position, which AC 3 weighs and does **not** inherit. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseCountsTheCapturedCommands` | Keep-green update **T2**, and the comment inside it this change falsifies. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseDecodesTheCapturedModels` | Keep-green update **T1**. |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListIsLoggedContentFree` | Keep-green update **T3**; its `capturedCommand` leak sentinel is the record-unchanged pin and must stay green. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseAckReportsTheCommandCount` | Read it, change **nothing**. It is AC 3's ack pin. |
-| `internal/streamsup/parser_test.go` | `commandEntryFixture`, `initializeLineFixture` | The two builders your new over-cap test composes; no new fixture builder is needed. |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListFieldsAreCapped` | The idiom for a cap test in this package — the shape **T4** follows, at two entries rather than its full matrix. |
-| `docs/knowledge/features/streamsup-package.md` | the **"Decoding the initialize ack into `turnevent.ModelList` (#1811)"** block and the **"Reading the `initialize` ack's committed captures, in-package (#1810)"** block above it, both inside § `Turn I/O — envelope write + stdout parser (#1088)` | The accumulated lessons for this whole vertical — the caps, the per-entry `TruncatedFields` convention, the collapse decisions, and how the captures are read in-package. Read-only: the documentation phase owns this file. |
-
 ## Context
 
 `emitModelList` decodes one top-level `control_response` line and classifies it onto

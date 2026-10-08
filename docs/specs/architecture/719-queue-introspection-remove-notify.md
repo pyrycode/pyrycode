@@ -4,18 +4,6 @@
 **Size:** S (additive API on one existing package; ~80 production LOC, 2 new exported types, 0 consumers).
 **Security-sensitive:** yes — see § Security review (mandatory pass, appended after PASS).
 
-## Files to read first
-
-Turn-1 data load. Read these before writing any code; the design is a thin additive layer on top of them.
-
-- `internal/msgqueue/queue.go:86-114` — `queued{id,text,ts}`, `convQueue{items,nextID,draining}`, `Queue{mu,convs,…}`. The exact fields the new accessors read/mutate; **`draining`** is the in-flight signal AC #2 hinges on.
-- `internal/msgqueue/queue.go:140-160` — `Enqueue`: the append-then-`maybeSpawnDrainLocked` shape. You restructure its `defer q.mu.Unlock()` into an explicit unlock + post-unlock `notify` (AC #3 fire site #1).
-- `internal/msgqueue/queue.go:211-272` — `drain` + `advanceLocked`: **peek `items[0]` → unlock → deliver → lock → `advanceLocked` (`items = items[1:]`)**. This is the invariant `Remove` must not break: `advanceLocked` blindly drops index 0 assuming it is still the just-delivered head. Fire site #3 (delivery-advance) goes right after the advance unlock.
-- `internal/msgqueue/queue_test.go:21-117` — `fakeDeliver` (per-conv `gates` channel to pin a delivery "in flight", `entered`/`completed` channels, in-flight counter that fails if >1) + `recvWithin` + `equalStrings`. **Reuse all of it**; the new tests need the gate to hold the head in flight and a small `OnChange` recorder.
-- `internal/eventring/ring.go:140-207` (`After`, `NewestID`) — the **sibling outbound store's** snapshot-under-lock + copy-out idiom (`out := make(...); copy(out, …)`). `Snapshot` mirrors this. Same package shape as msgqueue.
-- `docs/knowledge/features/msgqueue-package.md` — the evergreen package reference: drain pacing, the `closed`-flag happens-before, the "leaf lock, never held across `deliver`" discipline, the `text`-never-logged + convID-is-a-key-only security stance. The new API must preserve every one of these.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:118,126` — the consumers that drive the shapes: `queue_state = {conversation_id, queued:[{queued_msg_id, text, ts}]}` and `dequeue_message = {conversation_id, queued_msg_id}`. `QueuedMessage{ID,Text,TS}` is the engine-side projection of that record; `Remove(convID, id)` is `dequeue_message`'s engine op. **No wire types in this slice.**
-
 ## Context
 
 `internal/msgqueue` (#704) is write-and-drain only: `Enqueue` (append, returns a stable per-conversation id) and `Run` (serial drain through an injected `DeliverFunc`). There is no way to **observe** the backlog, **remove** a queued message, or **learn when the backlog changes**. The phone-facing `queue_state` / `dequeue_message` surface (#705 siblings) needs all three.

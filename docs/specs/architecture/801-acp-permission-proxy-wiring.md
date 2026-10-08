@@ -9,28 +9,6 @@ ticket supplies the three collaborators and the per-session lifecycle. It is the
 ACP twin of #796 (which live-wired the outbound turn stream) and the last unwired
 ACP outbound adapter before the #754 conformance capstone.
 
-## Files to read first
-
-- `cmd/pyry/acp_permission.go` (whole file, ~316 lines) — **the proxy this ticket
-  wires.** Do NOT modify it. Key contracts to extract:
-  - `newACPPermissionProxy(caller permissionCaller, kb modalKeystroker, sessionID string, timeout time.Duration, logger *slog.Logger) *acpPermissionProxy` (`:86`) — the constructor this ticket calls.
-  - `Handle(ctx context.Context, ev tuidriver.Event)` (`:108`) — the modal-event sink; gates internally on `EventKindPtyModalShown`+`ModalClassPermission` (start round-trip) and `EventKindPtyModalHidden` (retire). Everything else is a no-op. **The drain calls this on every event; the proxy does the filtering.**
-  - The type doc (`:36–55`) — the default-safe-deny security argument and the content-free-logging posture the wiring must not weaken.
-  - `handleShown` (`:124`) spawns `go p.runRoundTrip(cctx, …)` where `cctx = context.WithTimeout(ctx, p.timeout)`. The `ctx` it receives IS the drain's ctx → the round-trip inherits teardown-cancel and the answer window from the same parent. This is load-bearing for the timeout AC and the no-leak AC.
-- `cmd/pyry/acp_turn_streams.go` (whole file, 177 lines) — **the per-session manager to extend.** `start(id)` (`:82`) is where the one new line goes; `newACPTurnStreams` / `attach` / `wait` / the `started` idempotency map / the `wg` are all reused as-is. Extract the exact `resolve`-closure + `NewTargetSubscriber` + fresh-`Tracker` shape at `:107–123` — the permission drain builds an identical fixed target.
-- `cmd/pyry/interactive_modal_stream_v2.go:110–153` — `runModalStream`, the mobile leg's mapper-free raw-`tuidriver.Event` drain. **`runPermissionModalStream` is its ACP sibling, but simpler** (no `screenText`, no kind pre-filter — the proxy's `Handle` filters). Also read the type/function doc at `:22–53` for the "second `Session.Events()` subscription is blessed by tui-driver" argument you'll cite.
-- `cmd/pyry/acp.go:88–168` — `serveACPWithPool`. Read to confirm the wiring needs **no change here**: `streams` already receives `runCtx`/`pool`/`claudeSessionsDir`/`logger` and gets the transport via `streams.attach(t)` in the register closure (`:130`). The permission proxy's three collaborators are all reachable from inside the manager.
-- `cmd/pyry/interactive_turn_stream_v2.go:329` — `resolveBoundSessionJSONL(dir, sessionID string) func(ctx) (path string, startOffset int64, err error)`. Reuse verbatim as the fixed-target JSONL resolver (fresh per subscription for the #671 cold/warm offset reset).
-- `cmd/pyry/acp_turn_streams_test.go` (whole file) — **the test patterns to mirror.** In particular:
-  - `TestACPTurnStreams_ScriptedTurnEmitsOrderedFrames` (`:35`) — drives events through the wired drain via `scriptedSubscriber`, NOT through `start()`. The permission AC1/AC2 tests mirror this shape exactly.
-  - `TestACPTurnStreams_LifecycleTeardownJoinsProducer` (`:133`) — the real-fake-claude-pool lifecycle test. After this ticket, `start(id)` also spawns the permission drain, so this test's `wait()` now joins **two** goroutines per session; verify it still returns (it will — the permission drain also exits on ctx cancel). This is free AC4 coverage.
-  - `TestACPTurnStreams_EmptyDirDisablesStreaming` (`:187`) — asserts `dir == ""` disables the whole `start()`; the permission drain is disabled by the same shared guard, so this test stays green unchanged.
-- `cmd/pyry/interactive_turn_stream_v2_test.go:550–590` — `scriptedSubscriber` (`streams []<-chan tuidriver.Event`, `subscribe(ctx)`, `callCount`, `resolveCount`). Reuse verbatim; its `subscribe` satisfies `turnbridge.Subscriber`, which is what `runPermissionModalStream` consumes. **This is the AC3 seam.**
-- `cmd/pyry/acp_permission_test.go` (whole file) — the proxy's existing unit tests. Extract the `permissionCaller` / `modalKeystroker` test doubles and `generousTimeout`; the wired tests build the proxy over the same doubles but drive it through the drain.
-- `internal/turnbridge/producer.go:25–63,191–300` — `Subscriber` / `SessionHost` / `Target` / `NewTargetSubscriber`. Extract why the modal drain still needs a JSONL `Resolve` (`sess.Events(ctx, path, off, tr)` is JSONL-gated) — this is why `dir == ""` disables the permission drain too.
-- `internal/supervisor/modal.go:52–66` — `Answer` / `SendEsc` (`*supervisor.Supervisor` satisfies `modalKeystroker`). No change; read to confirm the keystroke contract (best-effort, `ErrNoLiveSession` when no child).
-- `internal/relay/v2session.go:81` — `modalDenyTimeout = 2 * time.Minute`, the daemon's existing deny-on-timeout window. The ACP permission Call deadline mirrors this value for policy consistency.
-
 ## Context
 
 **Epic #600 — `pyry acp` as a thin adapter over the shared remote-head core.**

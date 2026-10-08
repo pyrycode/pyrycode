@@ -3,27 +3,6 @@
 Zero production files. Everything lands in `internal/e2e/realclaude/`, behind the
 `e2e_realclaude` build tag.
 
-## Files to read first
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/interactive_stream_inband_bypass_revoke_test.go` | `seedBypassRegistry` | The function being parameterized. Its doc comment is AC 1's second clause; the three silent-failure modes, the `sessions.NewID` rationale and the `0600` rationale in it stay true and stay. |
-| same file | `revokeSeedEntry`, `revokeSeedFile` | The on-disk shape. Note `YOLO bool \`json:"yolo"\`` with **no** `omitempty` — deliberate, see § "The one edit that must not happen". |
-| same file | `TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode` | The one and only call site (confirmed by `codegraph_impact` and a repo-wide literal grep). Its instrument check B reads the posture back through `pool.DefaultSettings()`; that check is unchanged by this ticket. |
-| same file | the package-level header comment at the top of the file | **Do not edit it.** Its "a seeded registry entry carrying yolo:true" sentence describes *that test's* call, which still passes `true`, so it does not go stale. |
-| `internal/sessions/registry.go` | `registryEntry` | The `json:"yolo,omitempty"` tag, and the doc comment recording the fail-closed invariant (missing key → false; malformed value → whole parse fails). This is the asymmetry the seed deliberately does not copy. |
-| `internal/sessions/registry.go` | `loadRegistry`, `pickBootstrap` | `(nil, nil)` for an absent or empty file — the cold-start path AC 2 has to distinguish a stored `false` from. `pickBootstrap` selects on `"bootstrap"` true. |
-| `internal/sessions/pool.go` | `New` | The `pickBootstrap` block that lifts `SessionSettings{Model, Effort, YOLO}` off the entry — the warm-start seam this seed feeds. |
-| `internal/sessions/pool.go` | `DefaultSettings` | Why it is the **wrong** seam for the `control_default` arm: it reports the same `YOLO: false` for a stored false and for a cold start. |
-| `internal/sessions/pool.go` | `UpdateSettings` | The `merged == sess.settings` no-change early return — the gate that makes a `revoke` row seeded `false` a silent no-op in #1643. |
-| `internal/sessions/session.go` | `claudeSettingsArgs` | `true` → `--dangerously-skip-permissions`; `false` → nothing at all. Over an empty base argv that is `["--dangerously-skip-permissions"]` vs `[]`. |
-| `internal/sessions/id.go` | `NewID`, `ValidID` | The mint and the canonical-UUIDv4 predicate AC 2's id clause calls. `ValidID` takes a `string`, so the call is `sessions.ValidID(string(id))`. |
-| `internal/sessions/settings.go` | `writeMCPSettings` | The `ValidID` gate on the warm-start id — why a hand-written id string is not an option. |
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `setModeArm`, `setModeArms` | The row-struct shape to mirror (`name`, `launchYOLO`) and the table **not** to extend or reuse: it carries #1595's own `targetMode` semantics and a fourth `enable` row. |
-| `internal/e2e/realclaude/offline_exec_ban_test.go` | `finOfflineExecBans`, `TestFinOfflineFilesReachNoExecHelper` | The package's deterministic enforcement that an offline file reaches no exec / credential / skip helper. The new file gets one entry. |
-| `internal/e2e/realclaude/finding_key_name_bounds_test.go` | any of its four `Test…` functions | The shape of a credential-free, assertion-only test file in this package: `t.Parallel()`, table of rows, failure messages that name the downstream consequence. |
-| `docs/knowledge/features/e2e-realclaude.md` | the `interactive_stream_inband_bypass_revoke_test.go` (#1622) entry | What the harness already proves and what it deliberately does not. |
-
 ## Context
 
 #1643 is a live three-arm probe of pyry's in-band bypass revocation: a revoked

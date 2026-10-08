@@ -5,24 +5,6 @@ status: spec
 size: S
 ---
 
-# Files to read first
-
-Read these before doing any exploration. They are the load-bearing surfaces this spec composes; reading them up front is cheaper than rediscovering them via grep.
-
-- `cmd/pyry/main.go:248-310` — flag block in `runSupervisor`, the `sessions.New(sessions.Config{...})` literal, and the `control.NewServer(... nil)` call. New flag and the two wirings (`ActiveCap`, `sessioner`) land in this region.
-- `internal/sessions/pool.go:75-93` — `Config.ActiveCap` doc and contract (zero = uncapped, treats `<=0` as unset). The wire-in must preserve this — `-pyry-active-cap=0` (default) maps to today's behaviour byte-for-byte.
-- `internal/sessions/pool.go:803-882` — `Pool.Create`. New-session args are `append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))` — load-bearing for the supervised-child choice (see "Supervised child selection" below).
-- `internal/sessions/pool.go:1004-1083` — `Pool.Activate` + `pickLRUVictim`. The cap-bind/evict path the test exercises. `pickLRUVictim` excludes the target and returns nil when `active < activeCap`.
-- `internal/sessions/session.go:281-330` — `runActive`'s idle timer. The timer is **one-shot** (armed once at `runActive` entry, reset only when it fires while `attached>0`). `touchLastActive` does not reset it — relevant for the interleave test's timing.
-- `internal/control/client.go:94-118` — `SessionsNew(ctx, socketPath, label) (string, error)`. The test driver. One-shot dial; the server side has `sessioner` configured by this ticket.
-- `internal/control/server.go:33-122` — existing `Sessioner` interface and `NewServer` parameter list. `*sessions.Pool` satisfies `Sessioner` directly (per #75 spec § "No adapter needed"); main.go's `nil` becomes `pool`.
-- `internal/e2e/harness.go:160-220,315-390` — `StartIn` variadic `extraFlags`, `spawn`, `spawnOpts`. `-pyry-active-cap=N` and `-pyry-claude=<script>` flow through `extraFlags` last-wins.
-- `internal/e2e/idle_test.go` — full file; reuses `waitForBootstrapState` and the registry-poll pattern. New tests use the same shape.
-- `internal/e2e/restart_test.go:13-49,117-148` — `registryEntry` / `registryFile` types, `newRegistryHome`, `readRegistry`, `mustReadFile`. Reused verbatim by the new test file.
-- `docs/specs/architecture/41-concurrent-active-cap.md` — full spec. Cap policy, capMu serialisation, LRU victim picking. Confirms cap-evict transitions the victim through `Session.Evict` → `stateEvicted` (same on-disk write as idle).
-- `docs/specs/architecture/40-idle-eviction-lazy-respawn.md` — full spec. Idle timer arming and the `lifecycle_state == "evicted"` write rule.
-- `docs/specs/architecture/75-control-sessions-new.md:188-225` — confirms `*sessions.Pool` satisfies `control.Sessioner` directly; the "wire pool with one line" call site is `cmd/pyry/main.go`'s `control.NewServer`.
-
 # Context
 
 #41 landed the concurrent-active cap with LRU eviction. Its package-level race test (`TestPool_ActiveCap_RaceConcurrentActivate` in `internal/sessions/pool_cap_test.go`) had to switch to Bridge mode to avoid PTY contention; binary-level behaviour against a real PTY-backed child is uncovered. #40's idle eviction has package-level coverage and a sibling e2e (#115). What's missing is binary-boundary cap coverage and binary-boundary coverage of the cap+idle interleave — two policies sharing the same `Session.Evict` primitive.

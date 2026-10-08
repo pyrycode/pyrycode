@@ -1,17 +1,5 @@
 # 296 — `net/e2e`: fakephone harness package
 
-## Files to read first
-
-- `docs/protocol-mobile.md:85-122` — § Phone → relay → binary. The exact header set the `/v1/client` upgrade must carry (`x-pyrycode-server`, `x-pyrycode-token`, `x-pyrycode-device-name`); the relay performs no token validation; phones never see the routing envelope wrapper.
-- `docs/protocol-mobile.md:177-203` — § Message envelope. The wire shape (`id`, `type`, `ts`, `payload`, `in_reply_to`, `payload_encrypted`) and the "one envelope per WS text frame, UTF-8" framing rule. The harness round-trips this shape via the structs in `internal/protocol`.
-- `internal/protocol/envelope.go` (all 95 lines) — the `Envelope` struct this package marshals/unmarshals. Note that `Payload` is `json.RawMessage` (deferred decode), so the harness needs no awareness of per-type payload structs. Also note `RoutingEnvelope` exists in this package but is **out of scope here** — the phone speaks raw envelopes; the wrap/unwrap is the relay's job.
-- `internal/e2e/internal/fakeclaude/main.go` (all 92 lines) — precedent for the `internal/e2e/internal/` shape: minimal surface area, no global state, single production file. fakeclaude is `package main`; fakephone is `package fakephone` (importable library), so the production file is `fakephone.go`, not `main.go`. The "one prod .go + one _test.go" shape carries over.
-- `internal/e2e/internal/fakerelay/fakerelay.go:39-52` — import set the sibling harness uses (`github.com/coder/websocket`, `internal/protocol`). Same library, same pin (v1.8.13 in `go.mod`). Required for header interop with the fakerelay's `/v1/client` handler.
-- `internal/e2e/internal/fakerelay/fakerelay.go:233-253` — what the relay reads off the phone upgrade request: `r.Header.Get("X-Pyrycode-Server" | "X-Pyrycode-Token" | "X-Pyrycode-Device-Name")`. The fakephone must set those header keys (Go's `http.Header` is canonicalised — set as `x-pyrycode-server` or `X-Pyrycode-Server`, both Get-equivalent).
-- `internal/transport/wssclient.go:355-365` — the `realDial` helper. Shows the exact `websocket.DialOptions{HTTPHeader: ...}` shape and `websocket.Dial(ctx, url, opts)` call site this package mirrors. The fakephone's Dial is a one-call equivalent (no reconnect loop, no backoff, no ping pump — those are transport-layer concerns this harness deliberately omits).
-- `CODING-STYLE.md` § Naming, § Error wrapping, § Testing — public API surface stays small; sentinel errors are package-level `var Err* = errors.New(...)`; tests use stdlib `testing` only with `httptest` + `coder/websocket` server-side.
-- `docs/specs/architecture/295-fakerelay-harness.md` § "Public API surface", § "Why match `coder/websocket` instead of mixing libraries" — restates the library pin and "constructed running, no Start/Stop state machine" ergonomics that the sibling adopts and this ticket mirrors.
-
 ## Context
 
 Phase 3 Track C, e2e tooling. Sibling slice to #295 (the fake relay) and consumed alongside it by the still-to-come daemon-side roundtrip test (third split from #254). The wire-protocol implementation landed across #246, #256, and the #271–#275 split, but there is no daemon-side test that exercises envelopes over a real WS endpoint. The roundtrip test needs both ends of the relay mocked in-process:

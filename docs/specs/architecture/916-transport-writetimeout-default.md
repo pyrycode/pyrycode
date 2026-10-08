@@ -2,16 +2,6 @@
 
 **Size:** XS (confirmed — 1 production file, 1 test file, purely additive, no signature change, no consumer cascade).
 
-## Files to read first
-
-- `internal/transport/wssclient.go:28-63` — the `const` block and `Config` struct. The new default constant lives here; `Config.WriteTimeout`'s doc comment (currently line 46-47, on the struct-level comment) gets a field-level doc.
-- `internal/transport/wssclient.go:151-175` — `New`. The defaulting site: mirror the "mutate the local `cfg` before the struct literal" posture used by sibling constructors. The Logger nil-panic (line 153-155) is the anchor to insert after.
-- `internal/transport/wssclient.go:514-528` — `sendPump`. The `context.WithTimeout(ctx, c.cfg.WriteTimeout)` at line 520 is where the zero value bites. **Read-only** — the fix does NOT go here (see Design § "Why default in `New`").
-- `internal/transport/wssclient_test.go:414-489` — `TestSmoke_HttptestEchoServer`. The exact template for the end-to-end send test (poll-send until live, then echo-receive). The new test copies this but **omits** `WriteTimeout` from the `Config`.
-- `internal/transport/wssclient_test.go:29-69` — `newClientForTest` / `testOpts`. The construction helper the new test reuses; note it does NOT touch `WriteTimeout`, so a `cfg` with the field unset flows straight through `New` and picks up the default.
-- `internal/relay/connection.go:127-133` — the sole production caller, sets `WriteTimeout: 10 * time.Second`. Confirms the default value to match. **Do NOT modify this file** (see Open questions).
-- Convention reference (no need to open, but this is the established pattern): `internal/dispatch/dispatch.go:283` (`if cfg.OutboundBuffer <= 0 { cfg.OutboundBuffer = 32 }`) and `internal/agentrun/budget/budget.go:87` (`if cfg.GracePeriod == 0 { cfg.GracePeriod = defaultGracePeriod }`) both default a config knob by mutating the local `cfg` inside the constructor. This spec follows that shape.
-
 ## Context
 
 `sendPump` wraps every write in `context.WithTimeout(ctx, c.cfg.WriteTimeout)` (wssclient.go:520). `WithTimeout(ctx, 0)` returns an already-expired context, so when `Config.WriteTimeout` is the zero value every `conn.Write` fails immediately with deadline-exceeded → `sendPump` returns → `serve` tears the conn down → the client reconnect-loops. Logs read `connected` then instantly `disconnected`, pointing at the network rather than the config — expensive to misdiagnose.

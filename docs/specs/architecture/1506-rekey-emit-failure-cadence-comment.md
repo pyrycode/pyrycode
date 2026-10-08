@@ -2,23 +2,6 @@
 
 **Size:** XS — comment-only, one file, one contiguous doc-comment block. No production behaviour change, no new symbols, no consumer call sites.
 
-## Files to read first
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/relay/v2session_rekey.go` | `emitRekeyRequest` | The doc comment being corrected, and the four failure branches it describes (the two `json.Marshal` guards, the `s.send.Encrypt` guard, the `marshalInnerFrameV2` guard). Note that `s.awaitingRekeyReply = true` and the `armRekeyReplyTimer` call sit *after* all four returns. |
-| `internal/relay/v2session_rekey.go` | `handleManualRekey` | The `s.rekeyTimer.Stop()` + `s.rekeyTimer = nil` block that runs immediately **before** the `emitRekeyRequest` call. This is the manual-path hole. |
-| `internal/relay/v2session_rekey.go` | `rekeyComplete` | The only success-path re-armer: clears `awaitingRekeyReply`, stops/nils `rekeyReplyTimer`, replaces `rekeyTimer` with a fresh `armRekeyTimer`. |
-| `internal/relay/v2session_rekey.go` | `armRekeyTimer`, `armRekeyRetryTimer` | The 1-hour cadence vs the #912 short retry cadence — two different helpers, armed at different sites. |
-| `internal/relay/v2session.go` | `handleWake` | The `wakeRekeyEmit` arm: the `transportDown()` gate returns *before* the emit and is the sole `armRekeyRetryTimer` site, so the seal-failure path has already passed it. The `wakeRekeyReplyTimeout` arm is what bounds the `awaitingRekeyReply` early skip (it closes the conn). |
-| `internal/relay/v2session.go` | `sealError` | The referent of the retained "same posture as `sealError`" clause — confirm it is still a live symbol before keeping the phrase. |
-| `internal/relay/v2session_handshake.go` | `handleNoiseInit` | The initial `s.rekeyTimer = m.armRekeyTimer(...)` in the success tail — the third and last production arm site. |
-| `internal/noise/noise.go` | `CipherState.Encrypt` | The thin wrapper: it forwards flynn's error verbatim under a `noise: encrypt: %w` wrap. No error of its own. |
-| `docs/protocol-mobile.md` | § Re-key | The 1-hour rule the false clause claims to uphold. Cite by section, never by line. |
-| `docs/protocol-mobile.md` | § "Out of scope (v2)" | The "Per-message-counter rotation" bullet — the project decision that the 2⁶⁴ counter is not a practical limit. |
-| `docs/knowledge/codebase/912.md` | — | The stop-and-nil ordering rationale, in #912's own words. Confirms the manual-path hazard is a known, still-open shape. |
-| `cmd/cite-guard/main.go` | package doc | The citation rule the new comment must satisfy. Read before writing, not after `make check` fails. |
-
 ## Context
 
 `emitRekeyRequest`'s doc comment closes with a recovery contract for the seal/marshal failure branches. The scheduled half of it is false, and the manual half is misleading:

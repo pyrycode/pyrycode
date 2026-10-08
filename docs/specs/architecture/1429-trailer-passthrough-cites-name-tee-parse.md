@@ -4,29 +4,6 @@
 replacements. Every claim below re-derived at `1d2c53d` (the ticket's numbers
 were taken at `e20f4d2`; see § Drift check — they all still hold).
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/agentrun/streamrunner/runner.go:170-176` | The **wrong** target: `childCtx, cancelChild := context.WithCancel(ctx)` plus its comment. Cancellation plumbing — the words "operator SIGTERM/SIGINT", "no-result teardown". Nothing about claude's bytes. |
-| `internal/agentrun/streamrunner/runner.go:177-179` | The **right** target: `// Tee-parse stdout … bytes pass through unchanged` + `parser := newStreamParser(cfg.Stdout, nil)`. This is the passthrough all four cites describe. |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:23-32` | Site 1 (`:28`), inside the file-header doc's "absence means opposite things on the two runner paths" bullet pair. |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:91-109` | Site 2 (`:97`), `trailReasonPresentOwesNone`'s doc. Here the cite is the **reason** the claim limit exists — read the whole paragraph to see that the argument breaks if the cite points at cancellation code. |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:222-244` | Sites 3 and 4 (`:232`, `:242`), inside the two streamrunner arms' **published** `Detail` format strings. These reach a probe record a human reviews. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:126`, `:1212` | The already-shipped **correct** form (`:177-179`), in a doc comment and in a published Detail respectively. Precedent for both shapes being fixed; match it. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:307-309` | `trailDetail` = `reachCapCommand(fmt.Sprintf(...))`. Explains why the cap check cannot see a length change under 512 bytes. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:945-950` | `reachCapCommand`: pure passthrough at or under `reachMaxCommandBytes`. Confirms the Details are returned verbatim, so `len(Detail)` measures the format-string expansion exactly. |
-| `docs/knowledge/features/e2e-realclaude.md:819` | The same doc's **correct** cite of the passthrough. The fix at `:1104` is bringing one line into agreement with this one. |
-| `docs/knowledge/features/e2e-realclaude.md:1100-1108` | Site 5 (`:1104`), the stale cite in the evergreen doc. |
-| `docs/specs/architecture/1417-gate-admits-absent-reason-owes-none.md:343` | Where this defect was found and deliberately deferred. Confirms the deferral was explicit, not an oversight. |
-
-Codegraph was queried (`codegraph_context` on the passthrough/childCtx
-distinction); it returns the `streamrunner.Run` body and confirms the two blocks'
-layout but nothing beyond the reads above. This ticket is entirely
-comment-and-string text, which codegraph does not index — the grep sweeps in
-§ Residual are the authoritative instrument here, and that is expected, not a
-gap.
-
 ## Context
 
 Four Go sites and one evergreen-doc line cite `streamrunner/runner.go:170-176`

@@ -3,20 +3,6 @@
 **Ticket:** #813 · **Size:** S · **Labels:** `size:s`, `security-sensitive`
 **Chosen mechanism:** a new inbound v2 control verb `request_debug_bundle`, intercepted in `internal/relay/v2session.go`'s `dispatchAppFrame` (like `request_snapshot` / `interrupt` / `dequeue_message`), that assembles the bundle via an injected `DebugBundler` closure (over #811's `debugbundle.Assemble`) and delivers it via #812's `(*V2SessionManager).StreamBundle`. The capstone that wires #811 (producer) and #812 (transport) into one paired-client request/response flow. No new authorization gate — pairing is enforced structurally at the Noise IK handshake (an unpaired device is refused with 4401 and never reaches `dispatchAppFrame`).
 
-## Files to read first
-
-- `internal/relay/v2session.go:1477-1539` — `dispatchAppFrame`: the probe-switch that routes control types (`TypeRequestSnapshot`, `TypeInterrupt`, `TypeDequeueMessage`, …) to manager methods **before** `dispatch.Route`. Extract: add one `case protocol.TypeRequestDebugBundle:` arm here; this is the interception seam, NOT the `Handlers` map.
-- `internal/relay/v2session.go:1590-1707` — `handleRequestSnapshot` + `snapshotReplyError`: the exact structural template. A manager method that runs on the Run goroutine, replies via `m.forwardEnvelope` (never `c.Send`), and never logs content. Extract: mirror its shape for `handleDebugBundleRequest`; reuse the `forwardEnvelope` seal-and-forward path for the error reply.
-- `internal/relay/v2bundlestream.go:71-108` — `StreamBundle(ctx, connID, blob)`: the async delivery mechanism. Its docstring already states it is "safe to call from any goroutine, including a future handler on the Run goroutine" — this ticket IS that caller. Extract: the call contract (returns on enqueue, not delivery; first `Push` error stops).
-- `internal/debugbundle/bundle.go:66-124` — `Assemble(recordingsDir, logs) → (archive, Manifest, err)` and `DefaultRecordingsDir()`. Extract: the producer the wired closure calls; the archive is self-describing (manifest.json inside marks recording present/absent), so the handler never inspects the Manifest.
-- `internal/protocol/codes.go:253-278` — the `TypeInterrupt` / `TypeDebugBundleChunk` const block + the "MUST NOT be added to v1TypeSet" discipline. Extract: where to add `TypeRequestDebugBundle` and the doc-comment conventions to mirror.
-- `internal/protocol/compat_test.go:67-144` — the v1/v2 partition drift detector. Extract: the FOUR edits a new v2 control type forces (rejected-case in `TestIsV1Compatible`, `v2OnlyTypes` map, `TestTypeConstants_V1V2Partition` list). Missing any fails the build.
-- `internal/relay/v2session_test.go:700-860` — `openSession`, `driveToOpen`, `sealAppFrame`, `decryptAppFrame`, `waitForEnvelopes`. Extract: the full harness for driving a paired handshake to open, sending a sealed app frame, and decrypting captured outbound frames. `initSend` seals phone→binary; `initRecv` decrypts binary→phone.
-- `internal/relay/v2session_test.go:761-798` — `driveToOpenCaps` + the unpaired-token / handshake-reject tests nearby. Extract: how to drive an *unpaired* handshake (AC3) — reuse the existing 4401-reject fixture; do not build a new gate.
-- `cmd/pyry/relay.go:276-351` — `startRelayV2` + the `NewV2SessionManager(V2SessionConfig{…})` literal. Extract: where the new `DebugBundler` config field is set; mirror `Snapshotter`/`KnownConversation` optional-seam wiring.
-- `cmd/pyry/main.go:707-711`, `:838` — `logRing := control.NewRingBuffer(200)` and the `startRelay(…)` call. Extract: `logRing.Snapshot()` is the log source; build the `DebugBundler` closure here and thread it through `startRelay` → `startRelayV2`.
-- `internal/control/logs.go:58-73` — `RingBuffer.Snapshot() []string` (oldest-first copy). Extract: the exact log-snapshot call the closure wraps (same source `pyry logs` returns).
-
 ## Context
 
 Third and final slice of the debug-bundle feature (split from #803):

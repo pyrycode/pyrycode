@@ -2,36 +2,6 @@
 
 **Size:** S · **Security-sensitive:** yes · **Package:** `internal/relay` (+ `cmd/pyry` wiring)
 
-## Files to read first
-
-- `internal/relay/v2session.go:1375-1418` — `handleNoiseInit` success tail: where `s.interactive`
-  is set, `s.state = V2StateOpen`, the push queue is created, timers are armed, and the `#647`
-  replay hook fires. **The reconcile call site is here.**
-- `internal/relay/v2session.go:2100-2137` — `broadcastModalDismissed`: the near-exact structural
-  precedent — a manager-internal modal *control* fan-out that builds a `protocol.Envelope`
-  (`ID: 1` non-load-bearing), gates on `V2StateOpen && s.interactive`, and calls `m.Push`. The
-  reconcile is this, **unicast to one conn** and sourced from a snapshot instead of a dismissal.
-- `internal/relay/v2session.go:2944-2973` — `Push`: enqueues under `pushMu`, signals `drainCh`;
-  returns `ErrConnNotFound` when no queue exists. Safe to call on the Run goroutine.
-- `internal/relay/v2session.go:2984-3060` / `3178-3213` — `drainOnce` / `forwardEnvelope`: the
-  seal-and-forward path. Confirms the `V2StateOpen` gate is **re-checked at seal time**, and that
-  `#874` transport-down HOLD and `#777` replay-gating apply to the reconcile's queued frames too.
-- `internal/relay/v2session.go:555-737` — `V2SessionConfig`: the optional-seam family the new
-  field joins. `SnapshotSettings`/`SnapshotUsage` are the primitive-returning-closure precedents;
-  `ModalResolver`/`Snapshotter` the consumer-declared-interface precedents.
-- `internal/modalbridge/modal.go:188-214` — `Registry.Snapshot()` (the #876 seam this consumes):
-  pure read, mints no id, clones `Options`, returns non-nil-empty for an empty registry.
-- `cmd/pyry/interactive_modal_v2.go:214-246` — `broadcastInteractive`: today's raise-time modal
-  fan-out on the **producer** goroutine (unguarded `nextID`). Read to understand why the reconcile
-  **avoids** this goroutine's send state rather than sharing it.
-- `cmd/pyry/relay.go:403-407, 445-497` — `modalReg := modalbridge.New()` and the
-  `NewV2SessionManager(relay.V2SessionConfig{…})` literal: the single wiring site.
-- `internal/protocol/messaging.go:104-125` — `ModalShownPayload` (six fields, no `answer_token`;
-  `modal_id` is the sole nonce/correlation key). `AnswerToken` (messaging.go:127-143) lives only on
-  the **inbound** `ModalAnswerPayload` — the re-send carries none.
-- `internal/relay/v2session_modal_test.go:110-232, 234-315` — `openModalConn` /
-  `noiseMsgsForConn` / `assertModalDismissed` harness helpers + the fan-out test shape to mirror.
-
 ## Context
 
 `modal_shown` is broadcast exactly once, at raise time, to the conns connected at that instant

@@ -3,51 +3,6 @@
 **Comments only.** No signature, no assertion, no behaviour change. Four files, thirteen edit
 regions, zero production logic touched.
 
-## Files to read first
-
-Read these before editing anything. The first four are the edit surface; the rest are the ground
-truth every rewritten sentence has to be checked against.
-
-- `internal/turnevent/event.go` → `ModelList` (the type doc), `ModelOption.EffortLevels`,
-  `ModelOption.SupportsAutoMode`, `ModelOption.TruncatedFields` — five of the thirteen regions.
-  Read each doc comment **whole**; in every case the surviving conclusion is a neighbouring
-  sentence to the false premise.
-- `internal/streamsup/parser.go` → `maxModelResolved` (its final paragraph), `emitModelList`,
-  `logControlResponse` — five regions. Same rule: read the whole comment.
-- `internal/streamsup/parser_test.go` → the two subtests whose names are
-  `"the record names both numbers"` and `"the record names how many levels were dropped"` — two
-  regions, both comment-only.
-- `internal/e2e/internal/fakeclaude/initialize_control_test.go` → the file's leading package
-  comment — one region, one clause.
-- `internal/turnbridge/outbound.go` → `MapEvent`, its `turnevent.ModelList` arm — **the arm exists
-  and every field crosses 1:1**, `DroppedModels` carried and `TruncatedFields` crossed as the slice
-  it is. This is what falsifies "MapEvent's default drops the variant".
-- `cmd/pyry/interactive_turn_v2.go` → `interactiveTurnEmitterV2.Handle`'s `turnevent.ModelList`
-  case, and `emitMapped` (the emit path, which calls the ring's `Append` before the per-conn
-  fan-out). This is the live-lane delivery **and** the eventring append, in one place. Note the
-  arm's own "TWO QUEUES, TWO ANSWERS" paragraph — the live send is **droppable** at the fan-in.
-- `cmd/pyry/session_model_hold.go` → `sessionModelHold`, `sessionModelHold.Sink`,
-  `sessionModelHold.ModelList` — the per-session retention (#1840), which sits **above** the
-  droppable send.
-- `cmd/pyry/session_model_list.go` → `resolveBoundModelList` — the retained list shaped into a
-  `protocol.ModelListPayload`. **It has no production caller**; only tests call it. Do not describe
-  it as a delivery path.
-- `internal/relay/v2session_modelreconcile.go` → `reconcileModelLists`, and
-  `internal/relay/v2session_seams.go` → `V2SessionConfig.RetainedModelLists` — the connect-time
-  seam (#1863). `reconcileModelLists` returns immediately when `RetainedModelLists` is nil, and
-  **nothing in the tree sets it**. This is what a comment must not describe as shipped.
-- `internal/protocol/interactive.go` → `ModelListPayload`, `ModelListPayload.DroppedModels`,
-  `ModelOption.MarshalJSON` — the wire's side. `MarshalJSON` normalises `EffortLevels` nil→`[]`
-  and **deliberately exempts `TruncatedFields`**, so nothing-was-cut reaches the wire as `null`.
-- `docs/knowledge/features/streamsup-package.md` § the `emitModelList` / retention passages — the
-  package overview is already current on the shipped state (it names #1848's arm, #1849's `Handle`
-  case and #1840's hold). Read it rather than re-deriving; **do not edit it**, the documentation
-  phase owns it.
-- The precedent: `git show d27ec837` (#1639) did this exact sweep for `model_announced`, and
-  `git show c639ac8b` (#1861) did it three days ago for `internal/protocol`'s comments about *this
-  very value*. #1861's diff is the house phrasing to match — past tense for the premise, present
-  tense for what shipped, and an explicit statement of what is still outstanding.
-
 ## Context
 
 `internal/streamsup` decodes claude's `initialize` reply into `turnevent.ModelList`. Both packages'

@@ -8,34 +8,6 @@ unmodified worktree. Where a number appears, it came out of a run, not an estima
 
 ---
 
-## Files to read first
-
-Read these before writing anything. This is the turn-1 data load; the rest of the spec assumes it.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trail_run_outcome_test.go:100-113` | The value space's header doctrine: positive allowlist, the `run-` prefix, why the third sub-namespace is load-bearing. The count sentence lives here. |
-| `…/trail_run_outcome_test.go:185-210` | `trailOutcomeVoidPathOwesNoReason`'s doc — **the shape to copy** for the new value, and the paragraph at `:192-197` that this ticket falsifies. |
-| `…/trail_run_outcome_test.go:250-301` | The evidence-route space: two values, `trailRunRouteValues`, `trailIsRunRoute`. `trailRouteSighting`'s doc at `:270-273` says "Set on `trailOutcomeAliveAtSightingByOrdering` **alone**" — this ticket makes that false. |
-| `…/trail_run_outcome_test.go:376-414` | `trailRunOutcome`, the Detail **content rule**, and the `Route` field doc at `:396-401`. |
-| `…/trail_run_outcome_test.go:650-672` | The "no C10 over `Ordering`/`PinnedPid`" note. Do not add one; it would answer out-of-contract on every run that exists. |
-| `…/trail_run_outcome_test.go:676-690` | Why step 1's switch has **no default arm** and why an evidence route must be consulted *inside* an arm, never by falling through. |
-| `…/trail_run_outcome_test.go:711-756` | **The arm this ticket edits.** Both of its outcomes. |
-| `…/trail_run_outcome_test.go:1308-1391` | `TestTrailClassifyRun`: the `wantRoute` map (`:1319-1322`), the three provenance assertions (`:1352-1366`), the truncation-marker check (`:1345`), the coverage loop (`:1386-1390`). |
-| `…/trail_run_outcome_test.go:1854-1982` | `TestTrailRunOutcomeCarriesNoCapturedBytes`, and specifically the REFUTED block at `:1954-1981` — **this test is RED before your edit**, see § AC5. |
-| `…/trail_run_outcome_test.go:2036-2084` | `trailDeclaredFinishInstantClause` (117 B), why it sits at the end of the file, and the exchange-not-append arithmetic. |
-| `…/trail_sighting_liveness_test.go:138-204` | The sighting space's three values and five reasons. `trailSightingUnestablished` (`:159-164`) is the input this ticket keys on; its doc states the claim limit you inherit **verbatim**. |
-| `…/trail_sighting_liveness_test.go:330-404` | `trailEstablishSighting` — the route. Consumed whole, never re-decided. Note which reason pairs with which value. |
-| `…/trail_sighting_liveness_test.go:474` | `trailSightingPin(verdict)` — the fixture the new row needs. No new fixture is required. |
-| `…/trail_run_instant_clause_test.go:30-129` | **Not named in the ticket.** `trailRunCertifiesNothingArms()` and the test that makes "exactly these arms carry the clause" checkable. The new value joins the list. |
-| `…/trailer_admissibility_test.go:352` | `trailDetail` → `reachCapCommand`, the silent 512-byte truncation every Detail inherits. |
-| `…/trailer_admissibility_test.go:1214-1297` | The union map. Equality-based, **blind to containment** — hence § Naming below. |
-| `…/finding_trailer_evidence_test.go:783-785, :861-871` | **Not named in the ticket.** `finTrailerOutcomeValues()` derives from `trailRunOutcomeValues()`, so `len(distinct) != 21` at `:865` goes RED on your edit. |
-| `…/trail_ptyrunner_composition_test.go:180-251` | AC2's pin. Read it; do not edit it. It drives `trailGateUsable` + `trailAdmitProof` and never reaches the arm you are changing. |
-| `docs/specs/architecture/1446-sighting-route-on-the-absent-owes-none-arm.md` | The blocker's spec. Its § on the exchange-not-append Detail budget is the direct precedent for § Detail budget below. |
-
----
-
 ## Context
 
 `trailClassifyRun`'s step-1 arm for `trailGateAbsentOwesNone` (`trail_run_outcome_test.go:711-756`)

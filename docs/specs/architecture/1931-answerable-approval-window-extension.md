@@ -4,23 +4,6 @@ Registry primitive only. Ships **unwired**: nothing injects the report in this s
 daemon behaviour is byte-identical when it lands and both e2e tiers stay green untouched.
 `internal/permbridge` shipped the same way in #1103.
 
-## Files to read first
-
-| Where | Symbols | What to extract |
-|---|---|---|
-| `internal/permbridge/permbridge.go` | `Register` | The single line this ticket changes — the `time.AfterFunc` arming site. The whole insert happens under `mu`; that happens-before is why a 0-duration timer cannot fire before install. |
-| `internal/permbridge/permbridge.go` | `resolve` | The security core. `delete` under `mu` is the sole arbiter of who writes `p.ch`. **Do not add a branch to it.** Read its doc comment before writing anything. |
-| `internal/permbridge/permbridge.go` | `pending`, `Registry` | The struct that holds the timer, and the leaf mutex. Note `p.timer.Stop()` runs *outside* `mu` in `resolve` — that placement constrains the extension design (§ Concurrency model). |
-| `internal/permbridge/permbridge.go` | package doc, `Await` | The two claims AC 5 rewrites, verbatim. Read both before writing code, not after. |
-| `internal/permbridge/permbridge_test.go` | `awaitWithin`, `waitRetired`, `registryLen`, `sampleRequest` | Reuse all four. This package tests timers with short real durations and polling, not a fake clock — do not introduce one. |
-| `internal/permbridge/permbridge_test.go` | `TestRegistry_AllowVsTimeoutRace` | The one-shot proof shape scenario 5 extends. |
-| `internal/permbridge/permbridge_test.go` | `TestRegistry_TimeoutPathDenies`, `TestRegistry_LostCallerSelfCleans` | The no-report default. Both must stay green **unedited** — that is the "byte-identical unwired" claim's own test. |
-| `cmd/pyry/modal_resolve_v2.go` | `ApprovalAnswerable` | The production report this seam is shaped for. Read its doc for four things: the signature (`func(string) bool`, no ctx, no error), the level-not-edge contract that AC 3 leans on, the parked ∧ connected conjunction, and the "never from the relay `Run` goroutine" rule. |
-| `internal/control/server.go` | `handleApprove`, `watchApproveConn` | The only production `Register` caller, and the *second* deny lane: caller-disconnect and daemon-shutdown already deny outside the timer. The timer is not the only bound, and this ticket does not touch that lane. |
-| `cmd/pyry/main.go` | `mcpApprovalTimeout`, `approvalTimeout` | The window in production: 10 minutes, `PYRY_APPROVAL_TIMEOUT`-overridable. Its doc already argues "waiting is not the unsafe state" — the premise this ticket builds on. |
-| `docs/knowledge/features/permbridge-package.md` | § "Fail-closed / default-deny", § "The one-shot: `resolve`" | The invariant table this change adds rows to, and the **reused-id NIT** contract (§ Error handling below says what happens to it). Read-only — the documentation phase owns this file. |
-| `docs/specs/architecture/1915-parked-approval-answerable-report.md` | § "The shape does not foreclose #1912's injection" | Why the injected type is exactly `func(string) bool`, and why the nil-bridge panic guard belongs at the wiring site rather than here. |
-
 ## Context
 
 Every approval parked in `permbridge` arms a fail-closed deadline in `Register`. When it

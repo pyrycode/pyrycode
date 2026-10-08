@@ -14,22 +14,6 @@ The v2 control verbs handled inside `V2SessionManager.dispatchAppFrame` have met
 
 2. **fakeclaude does NOT currently rotate on `/clear`.** The ticket's Technical Notes assume "a fakeclaude that actually rotates its JSONL on `/clear`", but the real stand-in rotates its JSONL **only on a file trigger** (`PYRY_FAKE_CLAUDE_TRIGGER`, see `main.go:337-346`), never on a keystroke. For the registry-rotation assertion to be *caused by* the `new_session` frame (and not vacuous), fakeclaude must rotate in response to the `/clear` keystroke. **The developer adds a new keystroke-triggered rotation mode** — a small, purely-additive change that mirrors the existing `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` mode exactly.
 
-## Files to read first
-
-- `internal/e2e/relay_v2_interrupt_test.go:68-142` — **the v2 bring-up template.** The exact pair → decode pubkey → compute `sessionsDir` → pre-create `<initialUUID>.jsonl` → `fakerelay.New` → `StartRotationWithRelay(..., fr.URL()+"/v2/server", "PYRY_MOBILE_V2=1", <modes>)` → `readPersistedServerID` → `waitBinaryHello` → `fakephone.Dial` → `driveHandshakeToOpenDaemonInteractive` skeleton. Clone this bring-up; drop everything after it (the send_message/turn/kicker machinery is NOT needed — new_session needs no bound conversation, no TUI mode, no cursor stamp).
-- `internal/e2e/relay_v2_interrupt_test.go:323-362` — the stdinLog keystroke oracle (bounded poll + `hasBareESC`). Adapt the *shape* for the direct `/clear` oracle (scan the on-disk stdin log for the `/clear` bytes).
-- `internal/e2e/rotation_test.go:44-173` — **the on-disk rotation assertion shape (AC-2).** Reuse verbatim (same package, same `e2e` build tag): `waitForBootstrapID`, `waitForBootstrapIDChange`, `readBootstrap`, `readBootstrapIfPresent`, `uuidStemPattern`, `claudeSessionsDir`, `encodeWorkdir`. Do NOT redefine any of them (duplicate-symbol compile error).
-- `internal/e2e/harness.go:309-366` — `StartRotationWithRelay` signature + the env vars it sets and its `extraEnv ...string` tail (where `PYRY_FAKE_CLAUDE_CLEAR_ROTATES=1` goes). `trigger` "need not refer to an existing file" — point it at a never-created path so the file-trigger rotation stays dormant and only `/clear` rotates.
-- `internal/e2e/internal/fakeclaude/main.go:91-113` — the `envEscEndsTurn` doc block: **the exact pattern the new mode mirrors** (raw/verbatim keystroke detection → signal main goroutine → one-shot file mutation).
-- `internal/e2e/internal/fakeclaude/main.go:279-402` — `main()` loop + the `rotated`/`escEnded` one-shot gates + `startStdinReader` invocation condition; `:616-642` `containsBareESC`; `:644-657` `openSession`; `:659-723` `startStdinReader` (the stdin-reader + `escPending`/`turnPending` signal-only discipline). These are the exact seams the new mode extends.
-- `internal/e2e/internal/fakeclaude/esc_detect_test.go` — the untagged table-driven detector test to mirror for the new `/clear` detector.
-- `internal/relay/v2session.go:2596-2637` — `handleNewSession`: interactive gate → nil-`SessionStarter` guard → best-effort `StartNewSession()`. Confirms no reply / no broadcast (on-disk observable only) and the AC-3 non-interactive inert path (`if !s.interactive { return }`).
-- `internal/relay/v2session.go:1801-1832` — `dispatchAppFrame` with `case protocol.TypeNewSession: m.handleNewSession(s)` (confirms the frame is intercepted pre-`dispatch.Route`).
-- `internal/supervisor/modal.go:73-144` — `StartNewSession` → `sendModalKeystroke`'s `keyStartNewSession` arm: `sess.ClearInputLine()` (Ctrl-U, 0x15) then `sess.TypePrompt("/clear")` byte-by-byte + trailing `\r`. **These are the exact bytes fakeclaude must detect.**
-- `cmd/pyry/relay.go:483-494` — production wiring (`SessionStarter: w.sup`). Confirms fact 1 above: the observable path is live in the spawned daemon.
-- `internal/protocol/codes.go:422` — `TypeNewSession = "new_session"`, phone→binary inbound v2 control, no payload.
-- `docs/lessons.md:50-56` (`/clear` rotates the UUID; the registry self-heals by following the most-recently-modified JSONL) and `docs/lessons.md:256-261` (the `--session-id` stand-in gotcha — why this **bootstrap-only** test is safe: `Pool.New`'s bootstrap path uses `tpl.ClaudeArgs` verbatim with no `--session-id` append, and the rotation is in-session, so fakeclaude never sees `--session-id`).
-
 ## Design
 
 Two deliverables, no new shared infra (per the ticket's "ride the existing harness").

@@ -4,28 +4,6 @@
 **Labels:** `enhancement`, `size:s`, `security-sensitive`
 **Split from:** #1832
 
-## Files to read first
-
-Read these before writing anything. Every entry names a symbol; resolve it with
-`codegraph_search` / `codegraph_node` rather than opening the file at a line.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/turnevent/event.go` | `ModelList`, `ModelOption` | The shape and the doc register this slice mirrors: an aggregate variant plus its non-`Event` element type. `ModelOption`'s practice of documenting AT THE TYPE what an absent field reads as. |
-| `internal/turnevent/event.go` | `BackgroundTask`, `BackgroundTaskRoster` | `BackgroundTask.TruncatedFields` is the single source of the nil-vs-empty-slice convention every sibling cites. `BackgroundTaskRoster.DroppedTasks` is where the "each dimension reports where it happens" argument was first made. |
-| `internal/turnevent/event.go` | the `isTurnEvent` marker block, and the `var _ Event = …` block under it | Where the new marker line goes (value receiver, aligned with its neighbours). Note the assertion block is already short by one — see § Open questions. |
-| `internal/protocol/interactive.go` | `SlashCommand` | The mirrored declaration order, the measured per-entry key set, the `__remote-workflow` charset fact, and the SECURITY paragraph the daemon-side doc restates for its own consumers. |
-| `internal/protocol/interactive.go` | `SlashCommandListPayload` | The count measurement (51 entries at claude 2.1.239 here, 74 at 2.1.220 elsewhere), the "declared ahead of its producer" sequencing argument, and `DroppedCommands`' "NOTHING COUNTS IT YET" honesty. |
-| `internal/protocol/interactive.go` | `SlashCommand.MarshalJSON` | The aliases absent-vs-empty collapse — and the sentence that says the DAEMON-internal alias reading is #1825's call. This slice declares no alias field and settles nothing there. |
-| `cmd/pyry/interactive_turn_v2.go` | `eventKind` | The arm to add and the register to write it in. Its `ModelList` and `ModelAnnounced` arms carry the name-alone argument; the `ModelAnnounced` arm also carries the stale variant count this slice must correct. |
-| `cmd/pyry/interactive_turn_v2.go` | `Handle`, `emitMapped` | Why `Handle`'s `default` arm is a LIVE `eventKind` site for this variant (no case claims it) and `emitMapped`'s unmapped drop is not (nothing routes the variant there). |
-| `cmd/pyry/stream_turn_busy.go` | `turnMarkFor` | The opener WHITELIST and its `default`. It needs no production arm — read the DISCHARGED note to see the same thing happening for `RateLimited`. |
-| `cmd/pyry/stream_turn_busy_test.go` | `TestTurnMarkFor_TotalOverEveryVariant`, `turnEventVariants` | The AST-derived totality gate that reddens the moment the marker lands, the row format, and the `ModelList` row (#1811) whose comment is this row's model. |
-| `cmd/pyry/interactive_turn_v2_test.go` | `TestInteractiveTurnEmitterV2_ModelListEventKindNamesTheVariant`, `emitterModelListFixture`, `emitterModelListSentinels` | The rig to copy verbatim in structure: the `ReplaceAttr` that drops slog's time attr, the empty cursor, the sentinel-naming rule, and the derive-negatives-from-the-fixture helper. |
-| `cmd/pyry/stream_turn_drain.go` | `sinkFor`, `startStreamTurnDrainV2` | The two other reachable drop-logging sites and their content-free SECURITY notes — the reason the kind function must stay name-only. |
-| `internal/turnbridge/outbound.go` | `MapEvent` | Read its `default` (returns `("", nil, false)`). Confirm for yourself that an unmapped variant is dropped. **Add no arm here** — that is a later slice's. |
-| `docs/knowledge/features/turnevent-package.md` | § "The three sum-type seams", § "Why no errors, and no construction-time validation" | The value-receiver marker rule, the one-assertion-per-variant convention, and the package's standing refusal to validate at construction — which is why neither new type gets a constructor or a `Valid()`. |
-
 ## Context
 
 `protocol.SlashCommand` and `protocol.SlashCommandListPayload` landed in #1727 as

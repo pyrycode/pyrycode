@@ -2,19 +2,6 @@
 
 **Size:** S (single function in `cmd/pyry/main.go`, ~5 production lines, no new imports/types; tests across `cmd/pyry` + `internal/e2e`).
 
-## Files to read first
-
-- `cmd/pyry/main.go:419-512` — `runSupervisor`: the daemon serve path (foreground + service mode). Flag parse (`*workdir` at 424), `claudeSessionsDir`/`defaultCwd` derivation (439-440), `sessions.New` with `Bootstrap.WorkDir = *workdir` (483-499). **This is the single edit site.**
-- `cmd/pyry/agent_run.go:28` and `:288-323` — the `trustMark` package-var seam (`var trustMark = trust.MarkWorkdirTrusted`) and the established cmd-layer pattern in `runAgentRunPty`: `realpath, err := trustMark(parsed.workdir)` → `WorkDir: realpath`. **Mirror this exactly.**
-- `cmd/pyry/agent_run_test.go:696-720, 822, 967` — how existing tests save/restore + override `trustMark` (the test seam to reuse for the new `cmd/pyry` test).
-- `internal/agentrun/trust/trust.go:28-130` — `MarkWorkdirTrusted` contract: returns the resolved realpath, atomic temp+rename, errors on missing workdir / malformed-or-unreadable `~/.claude.json`, never logs file contents.
-- `internal/agentrun/workdir.go:23-33` — `ResolveWorkdir` (Abs + `EvalSymlinks`, wraps `fs.ErrNotExist` on a missing path) — the source of the AC-4 missing-workdir error.
-- `internal/agentrun/trust/trust_test.go` — existing coverage to **reuse** (mark write, symlink→realpath, missing-workdir error, malformed-JSON error). No new trust tests.
-- `internal/supervisor/supervisor.go:636-641` — `runOnce`: `cmd.Dir = s.cfg.WorkDir`. The existing, faithful child-cwd threading — confirms the supervisor needs **no change**; passing realpath as `WorkDir` satisfies AC-2.
-- `internal/sessions/pool.go:351-361` and `:423` — `supervisor.Config.WorkDir = cfg.Bootstrap.WorkDir` (bootstrap) and `sessionTpl: cfg.Bootstrap` (per-session template). Confirms realpath placed in `Bootstrap.WorkDir` reaches both the bootstrap supervisor and `buildSession`; no `internal/sessions` change needed.
-- `internal/e2e/harness.go:185-201` (`Start`/`StartIn` — custom HOME + `extraFlags`) and `:371` (`StartExpectingFailureIn` — captures a startup-failure `RunResult`). The harness entry points for the AC-1 and AC-4 e2e tests; the daemon already runs with `HOME=t.TempDir()`.
-- `docs/specs/architecture/470-agent-run-ptyrunner-cutover.md` (Security review section) and `docs/knowledge/codebase/470.md` — the "thread the realpath, not the raw path" gotcha and a security-review precedent to mirror.
-
 ## Context
 
 **Problem.** The supervised claude (the daemon's long-lived interactive host) is spawned in `internal/supervisor` with `cmd.Dir = s.cfg.WorkDir` and **no trust pre-mark**. In a workdir claude has not yet trusted, claude renders its workspace-trust modal:

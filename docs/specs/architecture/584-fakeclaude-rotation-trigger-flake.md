@@ -2,13 +2,6 @@
 
 **Size:** XS · **Security-sensitive:** no (label absent) · **Chosen fix:** Option 2 (test-only poll-loop tightening)
 
-## Files to read first
-
-- `internal/e2e/internal/fakeclaude/main_test.go:62-93` — **the only edit site.** The poll loop (62-86) breaks the instant the rotated `<uuid>.jsonl` appears; the single-shot `os.Stat(triggerPath)` assertion (91-93) then races. This is what changes.
-- `internal/e2e/internal/fakeclaude/main_test.go:182-199` — `waitForFile` / `signaledBy` helpers already in this file. No new helper is needed; the fix is inline in the existing loop.
-- `internal/e2e/internal/fakeclaude/main.go:147-156` — the rotation block: `f.Close()` → `openSession(dir, newU)` (observable) → `os.Remove(trig)`. **Read-only.** This confirms the window the test must tolerate: the rotated JSONL becomes observable *before* the trigger is removed. Production code is **not** modified under the chosen option.
-- `internal/e2e/internal/fakeclaude/main.go:1-7` — package doc-comment asserting the "close-OLD-fd-before-open-NEW-fd" invariant (AC-3). Confirm it stays intact; since production is untouched, it does. No prose edit.
-
 ## Context
 
 `TestFakeClaude_OpensInitialAndRotatesOnTrigger` passes in isolation but flakes under the full parallel `-tags e2e` load with:

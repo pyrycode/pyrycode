@@ -3,23 +3,6 @@
 **Ticket:** [#1313](https://github.com/pyrycode/pyrycode/issues/1313) (split from #1310) · **Size:** S · **Labels:** `security-sensitive`
 **Baseline:** `8ce6a7f` (current `main`, after #1312 merged). Every line number below was re-measured at that commit.
 
-## Files to read first
-
-| Path + lines | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go:1369-1471` | `TestFinGatherSightingCarriesTheDecodedScalars` — the fill check this ticket turns into a measurement. Its recompute idiom (`:1426-1430`) is what AC3 mandates; its doc holds two of the three stale cites. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1242-1367` | `TestFinGatherSightingReportsTheMissBound` (#1312) — **the shape to mirror.** Standalone test, a measured contrast, a doc that says what it does not assert. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:105-122` | The file header's failure-message rule. A message MAY name the four scalars; it MAY NEVER name the observation's `Line` or a `trailScanResult`'s trailer. This is the binding constraint on the new test. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:422-505` | `finGatherReadings` — the gather. The carrier fill is `:442-453`; the gate is computed at `:431` and the attribution guard at `:467`. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1107-1146` | `TestFinGatherReturnsNoCapturedBytes` — the shipped idiom for asserting about `Line` **without printing it** (`:1141-1145` prints `len(line)` only). Do not modify this test. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:560-571`, `:644-651` | The two correct targets for stale cites 2 and 3 (C4's row; the C2 recompute idiom). |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:98-121` | `trailScanResult` — `Line` is capped and OPERATOR-REVIEW-BEFORE-PASTE; `Trailer` is "the decode of the FULL line, not of `Line`". This doc is the claim under test. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:164-208` | `trailScan` — `Line: reachCapCommand(...)` at `:182`, `Trailer: &tr` at `:183` decoded from the full line. The two reads, three lines apart. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:297-313` | `trailNeedle`'s "placed PAST the cap" design intent, and `trailPaddedTrailer`'s wire order with `terminal_reason` last. |
-| `internal/e2e/realclaude/finding_artifact_write_test.go:167-191` | **`finWriteTrailerPad` — the precedent for this ticket's new constant.** A single-consumer pad in its own `--- the fixture ---` section, doc carrying the measured byte offsets, declared immediately above its consumer. Its `:180-183` already measured pad 200 independently. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:123-124`, `:945-950` | `reachMaxCommandBytes = 512`, `reachTruncationMarker`, and `reachCapCommand`'s `s[:512] + marker` shape. |
-| `internal/e2e/realclaude/tool_loop_test.go:194-203` | `resultTrailer`'s field set. It is comparable with `==`; it has no `result` member. |
-
 ## Context
 
 `finGatherReadings` returns a `finSighting` whose four decoded scalars must come from `trailScanResult.Trailer` — the decode of the **full** line — and never from `trailScanResult.Line`, which `reachCapCommand` truncates at 512 bytes. That separation is what makes the cap safe: truncation degrades human-readable evidence and never a field the consumer branches on.

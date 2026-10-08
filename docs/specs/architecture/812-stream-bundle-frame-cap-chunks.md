@@ -15,22 +15,6 @@ This ticket delivers **the streaming primitive**: move an arbitrarily-large `[]b
 
 It is independently testable: assert the emitted, decrypted chunks reassemble to exactly the input, and that every emitted frame's ciphertext stays under the cap.
 
-## Files to read first
-
-- `internal/relay/v2session.go:2358-2417` — **`Push(ctx, connID, env)`**: the mandated send path. Enqueues onto the per-conn `pushQueue`, returns immediately, never touches `s.send`/`m.sessions`/`Outbound`; safe from any goroutine (incl. a handler on the Run goroutine — its cap-1 `drainCh` send is non-blocking). `StreamBundle` loops over this. Returns `ErrConnNotFound` when the conn isn't open. **Extract: the exact contract `StreamBundle` inherits.**
-- `internal/relay/v2session.go:2419-2502` — **`drainOnce`**: pops one buffered envelope per Run pass, FIFO per conn, seals via `forwardEnvelope`. Proves chunks leave in enqueue order.
-- `internal/relay/v2session.go:2581-2634` — **`forwardEnvelope`**: the single seal-and-forward path. `V2StateOpen` gate (keeps output from an un-authenticated/torn-down peer), `s.send.Encrypt(json.Marshal(env))`, wrap `noise_msg`. Note `env.EventID != nil` is the replay-dedup guard — bundle envelopes leave `EventID` nil, so the guard is inert for them. **Extract: plaintext = `json.Marshal(env)`; ciphertext = plaintext + 16-byte AEAD tag — this drives the chunk-size derivation.**
-- `internal/relay/v2session.go:144-238` — **`pushQueue` drop policy**: `droppable` is `Type == TypeAssistantDelta` *only*. Bundle chunks are control-class → **never dropped**; admitted past cap via soft-overflow. This is why AC#2 (all chunks delivered, in order) holds through the transport.
-- `internal/relay/v2session.go:53-57` + `:955-982` — `maxNoisePayloadBytes = 65535` and the inbound `decodeInnerFrameV2` cap it's enforced against. The outbound side must keep each sealed ciphertext ≤ this, or the phone rejects the frame at 4421.
-- `internal/protocol/codes.go:99-160` — the v2-only `const (...)` block pattern (rekey/snapshot/resync/session_transition). **Add a new `debug_bundle_*` block here in the same shape** (with the "MUST NOT be added to v1TypeSet" doc).
-- `internal/protocol/messaging.go:67-81` — `MessageChunkPayload` / `BackfillDonePayload` — the payload-struct shape to mirror for the two new payloads.
-- `internal/protocol/envelope.go:19-40` + `:111-135` — `Envelope` fields (`ID/Type/TS/Payload/EventID`); `v1TypeSet` — the new types **must NOT** be added here.
-- `internal/protocol/compat_test.go:104-179` — `v2OnlyTypes` map + `TestTypeConstants_V1V2Partition` `all` list + `TestIsV1Compatible` "-rejected" cases. **The two new types must be registered in all three** (test-file edits), else the drift detector fails the build.
-- `internal/relay/v2session_test.go:698-798` + `:831-860` — `driveToOpen` → `openSession{mgr, rec, initRecv}` (phone's `initRecv` decrypts binary→phone frames), plus `decryptAppFrame`. The integration test's harness.
-- `internal/relay/v2session_test.go:169-231` — `waitForEnvelopes`, `decodeNoiseMsg` (extracts ciphertext from a captured `noise_msg` — used for the cap assertion), `v2Recorder.snapshot()`.
-- `internal/relay/v2session_test.go:2923` — `TestV2Session_Push_InterleavedWithReply_DecryptsUnderRace` — the closest existing "Push then decrypt phone-side" test; model the integration test on it.
-- `internal/protocol/messaging_test.go:212-270` + `testdata/message_chunk.json` — the golden round-trip pattern (`readFixture`) for the new payload structs.
-
 ## Design
 
 Two packages, three production files.

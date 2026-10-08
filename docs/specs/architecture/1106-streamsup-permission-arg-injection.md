@@ -3,18 +3,6 @@
 **Ticket:** [#1106](https://github.com/pyrycode/pyrycode/issues/1106) · size **S** · `security-sensitive`
 **Chain:** #1079 (permbridge M) → #1103 (registry) / #1104 (blocking verb) / #1105 (`pyry mcp-approve` stdio) → **#1106** (this: the enforce-vs-skip switch)
 
-## Files to read first
-
-- `cmd/pyry/agent_run.go:332-366` — `buildStreamRunnerClaudeArgs`: the current shape and the **hardcoded `--dangerously-skip-permissions`** (line 359) this ticket makes conditional. Note the flag slot: after `--verbose`, before `--append-system-prompt-file`.
-- `cmd/pyry/agent_run.go:280-293` — `runAgentRunStreamRunner`: the **sole production caller** of `buildStreamRunnerClaudeArgs`. It is the legacy `PYRY_USE_STREAMJSON=1` path; it stays always-YOLO (pass `yolo=true, mcpConfigPath=""`) — behaviour-preserving.
-- `cmd/pyry/mcp_approve.go:19-34` — `mcpServerName = "pyry_approve"`, `approveToolName = "approve"`. **Reuse these constants; do not re-literal.** The full tool reference `mcp__pyry_approve__approve` is derived from them (satisfies AC-3 structurally — the names cannot drift from what the merged subcommand advertises).
-- `cmd/pyry/mcp_approve.go:62-69` — `runMCPApprove` resolves the socket via `parseClientFlags("pyry mcp-approve", args)`. This pins the config's server-command arg vector: `["mcp-approve", "-pyry-socket", <socket>]`.
-- `cmd/pyry/main.go:237-238` — dispatch: `runMCPApprove(os.Args[2:])`. Everything after `pyry mcp-approve` is what `parseClientFlags` sees, so `-pyry-socket` must be the **first token after** `mcp-approve`.
-- `cmd/pyry/main.go:336-358` — `splitClientFlags` peels `-pyry-*` value-flags **off the front** and stops at the first non-`pyry-*` token. Confirms the arg ordering above; a trailing `-pyry-socket` would not be peeled.
-- `cmd/pyry/update.go:85-93` — `resolveExecutable()` (`os.Executable()` with `os.Args[0]` fallback): the source for the config's `command` (the running pyry binary, so the fork is the same binary).
-- `internal/agentrun/settings/settings.go:92-125` — `writeSettings` tmp-file recipe (`os.CreateTemp` → `json.NewEncoder(f).Encode` → `f.Close()` → return name, remove-on-error). Mirror this for `writeMCPApproveConfig`.
-- `cmd/pyry/agent_run_test.go:444-492` — `TestBuildStreamRunnerClaudeArgs_Shape`: the golden-argv table test to extend for the new signature + non-YOLO case.
-
 ## Context
 
 `buildStreamRunnerClaudeArgs` (`cmd/pyry/agent_run.go`) today **unconditionally** injects `--dangerously-skip-permissions`. That flag disables claude's permission path entirely. The permbridge (#1103–#1105) built the other half of the switch: `pyry mcp-approve` is an MCP stdio server that routes every non-allowlisted tool use through the daemon's approval registry and blocks on an allow/deny verdict. The T1 spike (#1075) proved that claude, spawned with `--permission-prompt-tool mcp__pyry_approve__approve --mcp-config <file> --strict-mcp-config --permission-mode default` (and **no** `--dangerously-skip-permissions`), synchronously gates every tool through that server.

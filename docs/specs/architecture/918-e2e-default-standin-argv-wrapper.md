@@ -3,17 +3,6 @@
 **Size:** XS (PO sized S; overriding downward — one production file, a symbol relocation, one default-value swap).
 **Security-sensitive:** no (no label; test-support code, no design surface, no untrusted input).
 
-## Files to read first
-
-- `internal/e2e/harness.go:516-566` — `spawnWith`, the shared spawn core. The zero-value `spawnOpts` path (`o.claudeBin == ""` → `/bin/sleep`) is the single line this ticket changes. Note the last-wins flag layout (`-pyry-claude=` in the standard set, `extraFlags` appended after).
-- `internal/e2e/harness.go:461-475` — `spawnOpts`; the doc already states "Zero-value yields the existing `/bin/sleep 99999` behaviour." That contract text changes with this ticket.
-- `internal/e2e/harness.go:173-188` — `Start` doc comment describing the supervised stand-in as `/bin/sleep 99999`. Update to describe the wrapper.
-- `internal/e2e/cap_test.go:16-35` — `sleepClaudeScript` const + `writeSleepClaude(t, home)`. **This is the fixture being relocated.** Note it currently lives under `//go:build e2e` (line 1).
-- `internal/supervisor/supervisor.go:771-780` — `buildClaudeArgs`: `if sessionID != "" { return append(args, "--session-id", sessionID) }`. The authoritative #839 append site (pool.go resolves the id and passes it in). Confirms the appended flag lands after the configured claude args, and that any stand-in must tolerate a trailing `--session-id <uuid>`.
-- `internal/e2e/bootstrap_warm_start_test.go:32-75` — target test #1. Drives `StartIn(t, home)` twice on the default path and asserts `Phase: running`. Read only to confirm no assertion touches the stand-in binary (line 64's `/bin/sleep` is a narrative comment, not an assertion).
-- `internal/e2e/startup_test.go:13-40` — `StartExpectingFailureIn` corrupt-registry test. Read to confirm the no-regression claim: it asserts on `.pyry/test/sessions.json`, never on `home`'s file listing, so an added `home/sleep-claude.sh` is invisible to it.
-- Build-tag map (verified, do not re-derive): `harness.go` and `attach_pty.go` compile under `e2e || e2e_install`; **every** `*_test.go` in the package (including `cap_test.go`) compiles under `e2e` only. The `e2e_install` install tests (`install_{darwin,linux}_test.go`) never call `Start`/`StartIn`/`spawnWith` — they spawn with an explicit `-pyry-claude=/bin/sleep` override, so they are untouched by the default-path change.
-
 ## Context
 
 **Problem.** The fake-daemon e2e suite's *default* supervised stand-in (the zero-value `spawnWith` `spawnOpts` path used by `Start` / `StartIn` / `StartInWithEnv`) invokes `/bin/sleep` directly. Since #839 (PR #882), the daemon appends `--session-id <uuid>` to **every** bootstrap spawn (`buildClaudeArgs`, `supervisor.go:771`). Both BSD and GNU `sleep(1)` reject the unknown flag with a usage banner and exit immediately, so the bootstrap child crash-loops under backoff (observed `Phase: backoff, Restart count: 4`). Three default-path tests that need the child to reach and hold `running` go red:

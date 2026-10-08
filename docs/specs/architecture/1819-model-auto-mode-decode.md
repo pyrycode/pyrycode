@@ -2,56 +2,6 @@
 
 `feat(streamsup)` · size **s** · `security-sensitive`
 
-## Files to read first
-
-Production:
-
-- `internal/streamsup/parser.go` → `modelOptionLine` — the decode target this slice adds a field to,
-  and the doc that promises a WHOLE-LINE failure for a mistyped value. Read the doc in full; two of
-  its sentences are rewritten here.
-- `internal/streamsup/parser.go` → `emitModelList` — the four rungs and the per-entry loop. The new
-  field is assigned in the composite literal and does **not** go through the `bound` closure.
-- `internal/streamsup/parser.go` → `maxModelResolved` — read the "THE ENVELOPE ARITHMETIC IS COMPLETE"
-  and amplification paragraphs **only to confirm they do not move**. See § Caps below.
-- `internal/streamsup/parser.go` → `maxModelListEntries` — same: read to confirm, not to edit.
-- `internal/streamsup/parser.go` → `logControlResponse` — the four-attribute record. Nothing is added
-  to it; AC 3's "no log line carries decoded content" is satisfied by leaving it alone.
-- `internal/turnevent/event.go` → `ModelOption` — the daemon's type. Its omissions paragraph and the
-  sentence naming the now-closed #1809 are both rewritten here.
-- `internal/turnevent/event.go` → `ModelList` — the `Models` field doc's "three strings are bounded"
-  clause needs one amendment (§ Doc edits).
-- `internal/protocol/interactive.go` → `ModelOption` — read `SupportsAutoMode`'s shipped doc. It is
-  the reading downstream already chose (#1704) and the field this one mirrors. **Not edited here.**
-
-Tests:
-
-- `internal/streamsup/parser_test.go` → `TestParser_InitializeControlResponseDecodesTheCapturedModels`
-  — AC 1's pin. Extended, not duplicated. `capturedModelString` is the helper the bool accessor mirrors.
-- `internal/streamsup/parser_test.go` → `modelListLineFixture`, `modelEntryFixture`,
-  `modelEntriesFixture` — the fixture builders. `modelEntryFixture`'s three-parameter signature is
-  **not** widened (§ Testing strategy).
-- `internal/streamsup/parser_test.go` → `TestParser_InitializeControlResponseRejectBranches` — where
-  AC 3's rows go. Its `wantAttrs` `reflect.DeepEqual` is the exact-attribute comparison that already
-  makes a new log attribute red.
-- `internal/streamsup/parser_test.go` → `TestParser_ModelListFieldsAreCapped` — the table idiom to
-  copy (per-row `check` closure, per-entry expectations indexed against the fixture).
-- `internal/streamsup/initialize_capture_test.go` → `capturedModelEntries` — read its doc: it decodes
-  with **literal key strings** rather than through the production target, and says why. That idiom is
-  load-bearing for AC 2's fixture guard.
-- `internal/streamsup/initialize_capture_test.go` → `capturedInitializePayload` — the reader; it mints
-  its own path from package constants and selects by arm from a closed set.
-
-Read-only, for posture (do **not** edit — the documentation phase owns them):
-
-- `docs/knowledge/features/streamsup-package.md` § "Decoding the initialize ack into
-  `turnevent.ModelList` (#1811)" — the absence-is-the-zero-value posture, and the two test-writing
-  lessons on this exact code (per-entry accumulator ordering; the equivalent-mutant cardinality
-  boundary). Its "keeps exactly three of claude's payload keys" sentence goes stale with this slice;
-  the documentation phase folds that in, not the developer.
-- `internal/e2e/internal/fakeclaude/main.go` → `initializeModels` — the canned two-arm list. Its "a
-  map per entry, not a struct with `omitempty`" paragraph is the clearest statement in the tree of
-  why absence is a missing key. **Not edited here**: its deferral to the closed #1690 is #1822's.
-
 ## Context
 
 `emitModelList` decodes claude's `initialize` reply into `turnevent.ModelList`. #1811 shipped the

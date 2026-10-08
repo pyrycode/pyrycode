@@ -1,12 +1,5 @@
 # Spec — #505: Align ptyrunner_byte_equivalence allowlist with #503 audit decisions
 
-## Files to read first
-
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:73-97` — current allowlist (`expectedStreamRunnerOnly`, `expectedPtyRunnerOnly`); the two tables you'll edit. `expectedStreamRunnerOnly` is populated with 8 bare `// #503` comments to upgrade; `expectedPtyRunnerOnly` is initialised-but-empty and gets 4 new entries.
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:128-141` — current `envelopeShape` doc-comment; the block you'll replace with audit-pointing wording. Block landmark: starts with `// envelopeShape captures the per-line dispatcher-visible structural shape`.
-- `docs/audits/2026-05-23-ptyrunner-streamrunner-byte-equivalence.md` — full read. Sections that drive every comment you'll write: "Per-field / per-event decisions" (per-field rationale) and "Ptyrunner-only events" (the four new entries' rationale).
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:238-303` (`additiveDriftViolations`) — for context only. Read once so you understand WHY the allowlist's failure message points contributors at #503/audit doc; do not modify.
-
 ## Context
 
 `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go` carries 8 streamrunner-only allowlist entries (1 Event + 7 ResultTrailerFields) marked `// #503` with no per-field rationale, an empty `expectedPtyRunnerOnly` table that should hold 4 known ptyrunner-only emissions, and an `envelopeShape` doc-comment that frames the divergence as ptyrunner being "a strict subset by design" — generic, no per-field justification.

@@ -4,19 +4,6 @@
 
 `security-sensitive` — the security-review pass at the end of this spec is mandatory and PASS-gated.
 
-## Files to read first
-
-- `internal/protocol/messaging.go:88-118` — `ModalOption` + `ModalShownPayload`: the exact wire struct to fill (`ModalID`, `Class`, `Title`, `Prompt`, `Options []ModalOption`, `DefaultOptionID`). Note: no `omitempty` on any field.
-- `internal/turnevent/permission.go:1-38` — `PermissionRequest` / `PermissionOption` / `NewPermissionRequest`: the internal type AC1 says to build before serializing. Construct-then-validate-downstream convention.
-- `internal/turnevent/taxonomy.go:45-76,112` — `PermissionOptionKind` values (`allow_once`/`allow_always`/`reject_once`/`reject_always`) + `permissionOptionKinds` ordered slice + `.Valid()`. These are the four permission options.
-- `cmd/pyry/interactive_turn_v2.go:25-34` — `interactiveBroadcaster` interface (`ActiveConns`+`Push`); **reuse it verbatim** (same package). `:302-362` — `emit()`: the ~25-LOC capability-gated fan-out (marshal once, snapshot conns, filter `Interactive`, per-conn monotonic `env.ID`, `Push`). The surfacer mirrors this.
-- `internal/relay/v2session.go:1810-1869` — `(*V2SessionManager).Push` contract (non-blocking, `ErrConnNotFound`, drop-policy). `:1984-2034` — `ActiveConn{ConnID, Interactive}` + `ActiveConns`. `:1947-1982` — `forwardEnvelope`: confirms a control envelope with `EventID == nil` is **never** dropped by the replay-dedup guard.
-- `internal/agentrun/ptyrunner/runner.go:513-539` — the existing `for ev := range ch { switch ev.Kind { case EventKindPtyModalShown: … } }` drain shape (detect-and-abort only; reads no snapshot, extracts no options — option/title extraction is net-new).
-- `internal/conversations/id.go:7-19` — `NewID`: the `crypto/rand` → UUIDv4 nonce idiom to mirror for `modal_id`.
-- `internal/supervisor/supervisor.go:424-446` — `ScreenSnapshot() (text string, live bool)`: renders the live screen to **plain text inside the tui-driver seal** (the substrate-guard-safe source the deferred live wiring will feed as `screenText`).
-- tui-driver `pkg/tuidriver/modal.go:19-30` — `ModalClass` constants (`ModalClassPermission = "permission"`, `ModalClassTrustFolder = "trust-folder"`, plus `mcp`/`agents`/`slash-picker`/`ask-user-question`/`model-select`/`permissions-config`). `events.go:84-107,122-127` — modal axis is **rising-edge** (`EventKindPtyModalShown` fires once when a class becomes active; `Event.Modal` carries the class, no title/options).
-- `docs/protocol-mobile.md:614-659` — § Modal: the `modal_shown` field table + the security & validation contract (`modal_id` is the sole correlation key; no `conversation_id`).
-
 ## Context
 
 Phase 3's outbound modal bridge. When tui-driver detects a permission/trust modal on claude's screen, the daemon turns it into a typed `modal_shown` event and pushes it to interactive phones — **never raw PTY bytes** (ADR 025). This slice establishes the **outstanding-modal registry**, keyed by a one-time `modal_id` nonce, that #717's inbound resolution half consumes to route answers back and to reject stale/replayed answers.

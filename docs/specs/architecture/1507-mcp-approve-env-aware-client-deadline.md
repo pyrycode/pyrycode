@@ -2,24 +2,6 @@
 
 **Size:** XS. One production file (`cmd/pyry/mcp_approve.go`), one test file (`cmd/pyry/mcp_approve_test.go`), ~55 lines of total written work, no new exported names, one production call site.
 
-## Files to read first
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/mcp_approve.go` | `runMCPApprove` | The `&approveServer{…}` composite literal whose `timeout` field hardcodes `mcpApprovalTimeout + mcpApproveClientMargin`. This literal is what moves. |
-| `cmd/pyry/mcp_approve.go` | `mcpApproveClientMargin` | The 30s margin, and a doc comment that states the old derivation ("added to `mcpApprovalTimeout`") — it must be reworded with the code. |
-| `cmd/pyry/mcp_approve.go` | `approveServer`, `toolsCall` | `timeout` is read exactly once, by `toolsCall`'s `context.WithTimeout`. Confirms the field is the whole surface being changed and that the value is read-only after construction. |
-| `cmd/pyry/main.go` | `approvalTimeout`, `envApprovalTimeout`, `mcpApprovalTimeout` | The env-aware accessor to switch to: reads `PYRY_APPROVAL_TIMEOUT`, falls back to the 2m constant on unset/empty/unparseable, and **does not clamp** a non-positive value. |
-| `cmd/pyry/main.go` | `runSupervisor` | The daemon end of the same socket: `ctrl.SetApprovalRegistry(approvals, approvalTimeout())`. This is the source the client must now match, and it reads the env once at daemon start. |
-| `cmd/pyry/approval_timeout_test.go` | `TestApprovalTimeout` | The table shape and `t.Setenv` idiom the new test mirrors — including the existing "empty falls back to default" row this ticket's table extends. |
-| `cmd/pyry/mcp_approve_test.go` | `newApproveServer`, `testLogger` | **Name collision — read this before naming anything.** `newApproveServer` is already declared in this package as a test helper (fixed 5s timeout, discard logger). The production constructor cannot reuse that name. `testLogger(io.Discard)` is the logger the new test passes. |
-| `cmd/pyry/mcp_approve_test.go` | import block | `io`, `os`, `testing`, `time` are already imported — the new test adds no imports. |
-| `internal/control/client.go` | `Approve`, `request` | The doc contract this ticket restores ("callers MUST pass a ctx whose deadline is >= the daemon's approval window") and the `defer conn.Close()` in `request` that makes client-deadline expiry close the socket. |
-| `internal/control/server.go` | `watchApproveConn` | EOF on that conn → `Deny(reasonApproveDisconnect)`. This is why premature expiry is a *deny*, not a split-brain — the correction the ticket body makes to its own filing. |
-| `internal/streamsup/runner.go` | `Config.Env` and its use in the spawn | Production leaves `Env` nil, so `cmd.Env` stays nil and claude inherits the daemon's environment. Background for "does the env actually reach the subprocess" (see § Environment propagation). |
-| `cmd/pyry/mcp_config.go` | `mcpServerSpec`, `renderMCPApproveConfig` | The mcp-config entry carries `command`/`args` only — no `env` key — so `pyry mcp-approve` inherits claude's environment. |
-| `docs/knowledge/features/pyry-mcp-approve-command.md` | § "The fail-closed core (`tools/call approve`)" step 4, and the `mcpApproveClientMargin` paragraph under it | Both state the pre-change derivation. **Read-only for the developer** — see § Out of scope. |
-
 ## Context
 
 The two ends of the `mcp.approve` control-socket call derive their windows from different sources. The daemon passes `approvalTimeout()` (env-aware) into the pending-approval registry; `runMCPApprove` builds the client read deadline from the raw `mcpApprovalTimeout` constant plus `mcpApproveClientMargin`. So with `PYRY_APPROVAL_TIMEOUT=10m` the client's ctx expires at 2m30s while the daemon is still holding a 10m window open.

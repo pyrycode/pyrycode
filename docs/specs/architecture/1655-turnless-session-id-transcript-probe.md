@@ -6,28 +6,6 @@ One new file: `internal/e2e/realclaude/session_transcript_probe_test.go`. **No p
 
 ---
 
-## Files to read first
-
-Read in this order. Each entry names the symbol and what to take from it.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/interactive_stream_new_session_test.go` | `streamNewSessionTranscriptDir` | The empirical dir finder AC 1 mandates. Signature `(t, home, id string, timeout) string`; polls `<home>/.claude/projects/*/` for `<id>.jsonl`, `t.Fatalf`s with a tree listing on timeout. **Call it. Do not edit it** — `TestInteractiveStreamNewSessionRotatesAndSpawnsFresh` depends on it. Also read `requireTranscriptAppears` and `projectsTree` in the same file for the polling and diagnostic idiom. |
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `runSetModeChild` | The working precedent for launching claude directly via `exec.CommandContext` with a stream-json argv, holding stdin, capturing stdout/stderr. Take the launch shape and the "record every outcome, Fatal only on a broken instrument" discipline. **Do not** take its recorder/fixture surface — see § Deliberate non-goals. |
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `setModeTurnLine` | The user-turn stream-json envelope the control arm writes. Same package, same build tag — call it, do not re-marshal a second envelope shape. |
-| `internal/e2e/realclaude/permission_protocol_spike_test.go` | `captureClaudeVersion`, `truncateString`, `packageDir` | Version capture for the record (returns raw + leading token) and the byte-cap helper for captured streams. This file is also the **nearest size analogue**: a full live-claude evidence spike, fixture writer included, in 276 lines. |
-| `internal/e2e/realclaude/fixtures.go` | `WithWorktreeAuthenticated`, `WithWorktree` | Pins `$HOME` to a per-test tempdir via `t.Setenv` and re-pins whichever credential is present. Two consequences the design leans on: the projects scan is hermetic, and **both arms must live in one test function** (a second function gets a different `$HOME`). |
-| `internal/transcript/transcript.go` | `StatByID`, `Result.Found`, `ValidStem` | The by-id existence primitive #1630 will consume. Absent file ⇒ `(Result{}, err)` wrapping the raw `os.Stat` error — that is the expected answer here, not a failure. |
-| `internal/sessions/reconcile.go` | `DefaultClaudeSessionsDir`, `encodeWorkdir` | The production recomputation AC 1 compares against. `EvalSymlinks` then encode-every-non-alphanumeric; resolves `$HOME` through `os.UserHomeDir`, so it lands under the pinned temp home. |
-| `internal/agentrun/workdir.go` | `ResolveWorkdir`, `canonicalCase` | The canonicalisation streamsup applies to `Config.WorkDir` before setting `cmd.Dir`. Applies `canonicalCase` *on top of* `EvalSymlinks` — the asymmetry against `DefaultClaudeSessionsDir` that AC 1's comparison exists to record. |
-| `internal/streamsup/runner.go` | `buildArgs`, `spawnAndWait`, `killGrace` | `buildArgs` is the argv shape both arms must mirror on a first spawn. `spawnAndWait` shows the `cmd.Cancel` (SIGTERM + reap) / `cmd.WaitDelay` pairing and its doc comment records that a spontaneous crash never invokes `cmd.Cancel`. `killGrace` is the 5 s window AC 3's termination mirrors. |
-| `docs/knowledge/features/set-permission-mode-inband-probe.md` | § "`init.permissionMode` after the change" | The measured fact that **`init` is emitted per turn, not at spawn** — the reason a turnless arm can never use an `init` line as its liveness signal. Also the doc shape AC 4 asks the record to match. |
-| `docs/knowledge/features/transcript-package.md` | — | Where the by-id/probe/newest primitives are meant to be used from, and the not-found conventions of the two adapter families. |
-| `docs/knowledge/features/e2e-realclaude.md` | — | Package conventions: credential gating, fixed-id reservations, what the suite is allowed to assume. |
-| `docs/knowledge/decisions/032-bootstrap-resume-per-spawn-existence-probe.md` | § Context | The rule #1630 carries into streamsup, and one hazard worth knowing: claude **refuses** `--session-id <uuid>` when `<uuid>.jsonl` already exists (~220 ms exit). Both probe ids must therefore be fresh — they are, under a fresh `$HOME`. |
-
----
-
 ## Context
 
 `buildArgs` picks a spawn's id flag from a one-way latch: `--session-id` on the first spawn, `--resume`

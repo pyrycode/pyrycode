@@ -5,31 +5,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every entry names the **symbol** to read, not a line —
-resolve names with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/modal_resolve_v2.go` | `streamApprovalBridge` (the type and its doc block) | The leaf-lock contract on `mu` — held around O(1) map ops only, never across `modal.Record`, `perm.Lookup`, `perm.Resolve` or a `Push`. This is the constraint the new method must not break. |
-| `cmd/pyry/modal_resolve_v2.go` | `Surface` | Where `byModal[modalID] = req.ToolUseID` is written, and that `activeConv()` is used only to stamp the modal's `conversation_id` — not as a delivery key. |
-| `cmd/pyry/modal_resolve_v2.go` | `retire` | The **sole** correlation deleter, unconditional, running on every terminal `Await` return. This is what makes AC 2's "by any path" one fixture instead of four. |
-| `cmd/pyry/modal_resolve_v2.go` | `newStreamApprovalBridge` | Its 6-parameter signature. **Do not widen it** — see § Sizing constraint. |
-| `cmd/pyry/modal_resolve_v2.go` | `streamApprovalResolver`, and the `streamApprovals` / `activeConv` / `notifyBlocked` fields on `modalResolverV2` | The in-tree precedent for an optional dependency assigned *after* construction, and the interface that must **not** grow a second method. |
-| `cmd/pyry/stream_turn_busy.go` | `ToolCallInFlight` | The exact contract this report delegates to: membership only, both ids collapse to one `false`, **no nil-receiver guard** and why. |
-| `cmd/pyry/stream_turn_busy.go` | `Busy` | The signature this report's posture mirrors — `bool`, never `(bool, error)`, never handing back an id. |
-| `cmd/pyry/stream_turn_busy.go` | `clearForSession` | The conversation-id-is-sensitive log rule AC 5 names ("resolved daemon-side, stamped on the wire, never logged"). |
-| `cmd/pyry/stream_turn_busy.go` | `setBusy` | That an empty tool-call id is silently no delta, and that `inflight` moves with `busy` under one acquisition — the reason the report's tracker half can go negative while `byModal` is still populated. |
-| `cmd/pyry/relay.go` | the `if w.approvals != nil` block that calls `newStreamApprovalBridge`, and the `modalResolver.activeConv` / `modalResolver.notifyBlocked` assignments above it | The single production wiring site, and the adjacent assign-after-construct precedent. `w.busy` is in scope at both. |
-| `cmd/pyry/main.go` | the `var turnBusy *turnBusyTracker` block, and the `approvals := permbridge.New()` line | Proof that the two discriminants differ: `approvals` is minted **unconditionally**, `turnBusy` only when `streamSink != nil`. |
-| `cmd/pyry/stream_approval_test.go` | `bridgeLen`, `parkApproval`, `lastModalShown`, and `TestStreamApproval_NoBodyLeakInLogs` | The bridge stand-up idiom (13 existing constructions), the park helper, and the capturing-logger pattern AC 5's test reuses. |
-| `cmd/pyry/stream_turn_busy_test.go` | `stubBusyResolve`, and `TestTurnBusyTracker_ToolCallInFlightNegativesCollapse` | The resolve stub and the `tr.observe("sess-a", turnevent.ToolStart{ToolCallID: …})` drive idiom. Same package — reuse directly, do not re-declare. |
-| `internal/permbridge/permbridge.go` | `Register` | That an empty id is refused with `ErrDuplicateID` **before** `Surface` runs. This bounds what the AC-3 empty-tool-id fixture can honestly claim. |
-| `docs/knowledge/features/streamsup-package-per-conversation-turn-busy-track-resolve-an-in-flight-tool-call.md` | whole file (short) | Why retention is nested rather than flat, and why a distinct-id independence fixture cannot separate the two. That property is #1917's and is **already pinned there** — do not re-pin it here. |
-
----
-
 ## Context
 
 `streamTurnHoldTimeout` bounds the delivery hold at 15 minutes, and msgqueue's give-up then

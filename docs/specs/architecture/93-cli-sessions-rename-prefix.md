@@ -24,60 +24,6 @@ ticket body the helper stays in `cmd/pyry` and gets opportunistically
 lifted into `internal/sessions` only when the third caller (1.1e
 `attach`) arrives.
 
-## Files to read first
-
-- `cmd/pyry/main.go:626-671` — `resolveSessionIDViaList` helper.
-  Read end-to-end: input contract (`arg != ""` precondition,
-  empty rejected at parse time), exact-match-first resolution
-  order, the three return shapes (canonical id + nil,
-  `sessions.ErrSessionNotFound`, `errAmbiguousPrefix` wrapping a
-  sorted multi-line `<uuid> <label>` body). The helper consumes
-  `control.SessionsList` and is the only data path the resolver
-  uses — no direct `Pool.List`.
-- `cmd/pyry/main.go:581-588` — `errAmbiguousPrefix` sentinel
-  declaration. Already used by `runSessionsRm`; this ticket adds
-  the second `errors.Is` branch that matches it.
-- `cmd/pyry/main.go:690-731` — `runSessionsRm` handler. The
-  precedent for the exact insertion shape: parse → resolve →
-  switch on resolver errors (ambiguous + not-found) → wire call →
-  switch on wire errors (typed sentinels including the race-window
-  not-found). Mirror this verbatim for rename, dropping the
-  bootstrap-rejection branch (rename has no bootstrap special-case).
-- `cmd/pyry/main.go:760-796` — `runSessionsRename` (current full-UUID
-  shape from #92). The function this ticket modifies. The doc
-  comment block at lines 760-775 needs the "no prefix resolution
-  in this slice" line removed and replaced with a one-line note
-  that `<id>` is now resolver-fed.
-- `cmd/pyry/main.go:21` — top-level reserved-verb comment.
-  Unchanged — verb name is the same; no help-text edit.
-- `cmd/pyry/main.go:1040` — `printHelp` line. Unchanged for the
-  same reason.
-- `internal/e2e/sessions_rename_test.go` (whole file, 163 lines)
-  — current rename e2e. Two new tests append at end:
-  `TestSessionsRename_E2E_Success_Prefix` and
-  `TestSessionsRename_E2E_AmbiguousPrefix`.
-- `internal/e2e/sessions_rm_test.go:63-96` —
-  `TestSessionsRm_E2E_Success_Prefix`. Verbatim template for the
-  rename success-prefix test (swap `rm` → `rename` and add the
-  new-label positional + post-condition on `entry.Label`).
-- `internal/e2e/sessions_rm_test.go:166-237` —
-  `TestSessionsRm_E2E_AmbiguousPrefix`. Verbatim template for
-  rename's ambiguous-prefix test, including the pigeonhole-bound
-  collision-mining loop. The post-condition swaps from "both
-  sessions still in registry" to "both sessions' labels unchanged
-  in registry" — the resolver bails before any wire mutation,
-  so the labels do not flip.
-- `cmd/pyry/sessions_test.go:148-167` — `TestRunSessions_RenameDispatch`
-  (already present from #92). Unchanged. The new prefix logic
-  lives below the dispatch — the dispatch test continues to
-  exercise its own assertion (router routes to handler).
-- `docs/specs/architecture/99-cli-sessions-rm.md` § "Handler
-  (runSessionsRm) — prefix resolution" and § "Error handling".
-  The full precedent for resolver-error mapping; rename inherits
-  the shape verbatim.
-- `docs/specs/architecture/92-cli-sessions-rename.md` § "Open
-  questions" #2 — confirms the deferred work this ticket lifts.
-
 ## Context
 
 `pyry sessions rename <id> <new-label>` (delivered by #92) accepts

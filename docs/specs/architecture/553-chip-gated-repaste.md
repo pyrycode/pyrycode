@@ -8,35 +8,6 @@ clean RED→GREEN, then lost uncommitted on a wiped local branch. The design liv
 the recovered session log and the live-probe evidence; the job is to re-create it
 byte-for-intent. **The evidence base is closed — do NOT re-run live probes.**
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:336-372` — the prompt-deliver retry loop. The
-  unconditional re-deliver `logger.Warn` at **L364** is the exact line the chip gate
-  replaces. Extract: loop structure, `committed` flag semantics, `promptDidCommit` call
-  shape.
-- `internal/agentrun/ptyrunner/runner.go:520-556` — `maxPromptAttempts`/`defaultPromptCommitTimeout`/
-  `promptCommitPoll` consts + `promptDidCommit`. Extract: the detector idiom (`IsThinking`
-  OR `os.Stat(jsonl)`), where to add `hasPastedChip` and `commitModeJSONLDelay` neighbours.
-- `internal/agentrun/ptyrunner/runner.go:39-56` — import block. **`"bytes"` is NOT yet
-  imported** — the developer must add it for `bytes.Contains`.
-- `internal/agentrun/ptyrunner/runner_test.go:19-36` — `loggerSyncWriter` (mutex-guarded
-  `strings.Builder`). The integration tests capture `cfg.Logger` through this.
-- `internal/agentrun/ptyrunner/runner_test.go:536-565` — `TestRun_MaxTurnsExhaustion_NoBenignWarns`.
-  **This is the pattern to copy** for both new integration tests: `slog.NewTextHandler(logBuf,
-  &slog.HandlerOptions{Level: slog.LevelWarn})`, run, assert on `logBuf.String()`.
-- `internal/agentrun/ptyrunner/runner_test.go:567-604` — `TestRun_WatchdogFires`. Shows the
-  `PromptCommitTimeout` override + short-window idiom the new tests reuse.
-- `internal/agentrun/ptyrunner/helper_test.go:69-164` — `runHelper`: the idle-render `switch`
-  (L76-98) and the `jsonl` delayed-write goroutine (L125-164). The two new modes extend
-  both; `writeSessionJSONLBody` is extracted from L149-162.
-- `internal/agentrun/ptyrunner/helper_test.go:48-79` — `helperRunCfg` + `happyPathBody`. The
-  new integration tests call `helperRunCfg(t, "<mode>", …, happyPathBody)`.
-- tui-driver `pkg/tuidriver/ansi.go:18-23` — `StripANSI(snap []byte) []byte`. Confirmed
-  present at the pinned module version; the detector calls it.
-- tui-driver `pkg/tuidriver/state.go:38-54` — `IsIdle` / `IsThinking`. `hasPastedChip`
-  mirrors `IsThinking`'s one-line `bytes.Contains(StripANSI(snap), …)` shape. Note: the
-  chip text carries no `✻`, so `IsIdle` still fires when the chip is present.
-
 ## Context
 
 PR #547 (Mode B paste-recovery, merged) re-delivers a prompt **unconditionally** whenever

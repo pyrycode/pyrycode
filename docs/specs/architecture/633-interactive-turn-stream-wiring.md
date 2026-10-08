@@ -6,28 +6,6 @@ Wire the #615 **producer** (`internal/turnbridge`) to the #632 **consumer** (`in
 
 ---
 
-## Files to read first
-
-Read these before writing code; line ranges are the load-bearing parts.
-
-- `cmd/pyry/relay.go:260-331` — `startRelayV2`: the seam. Note the existing foreground-gated `startAssistantTurnBridgeV2` (313-319) and the drain-ordering contract (321-330: observer-cleanup **before** `<-mgrDone`). Your wiring mirrors this exactly.
-- `cmd/pyry/relay.go:88-237` — `startRelay`: the only caller of `startRelayV2` (line 141). You add one param here and forward it; the `<-waitDone` classifier (210-235) is untouched.
-- `cmd/pyry/main.go:481-493` — the only caller of `startRelay`; `claudeSessionsDir` is already in scope (computed at `main.go:417`). You thread it into the `startRelay` call.
-- `cmd/pyry/main.go:114-131` — `resolveClaudeSessionsDir` → `sessions.DefaultClaudeSessionsDir`: how `claudeSessionsDir` is derived (the dir the resolver scans). May be `""` (gate on it).
-- `internal/turnbridge/producer.go:29-73` — `Subscriber`, `SessionHost`, `Config`, `New`. `New` errors only when `Subscribe == nil`.
-- `internal/turnbridge/producer.go:81-118` — `Run`'s outer re-subscribe loop + `drain`: `OnEvent` runs on **this single goroutine, serially** (the #632 named assumption you must honour).
-- `internal/turnbridge/producer.go:120-194` — `NewSessionSubscriber`: calls `resolve` **fresh on every (re)subscription**; spawns the `go func(){ sess.Wait(); cancel() }()` watcher only on the success path (the "no leaked goroutine" linchpin — verified, not re-implemented).
-- `cmd/pyry/interactive_turn_v2.go:21-78` — `interactiveBroadcaster`, `interactiveTurnEmitterV2`, `newInteractiveTurnEmitterV2(sup cursorReader, bcast interactiveBroadcaster, logger)`. `*relay.V2SessionManager` satisfies `interactiveBroadcaster`; `*supervisor.Supervisor` satisfies `cursorReader`.
-- `cmd/pyry/interactive_turn_v2.go:80-130` — `Handle(ctx, ev)`: the `OnEvent` target. The ctx-less seam is bridged by a closure capturing the relay ctx.
-- `internal/supervisor/supervisor.go:301-356` — `Session()` and `WaitForPTY()`: `*supervisor.Supervisor` satisfies `turnbridge.SessionHost`. Note `Session()` is nil-safe; `WaitForPTY` blocks until a Session is live (re-keyed per `runOnce`).
-- `internal/supervisor/supervisor.go:461-467, 486-620` — `buildClaudeArgs` (`--continue` on every restart) + `runOnce`: the supervisor restarts claude **only on process exit** (`sess.Wait()`); `/clear` does **not** restart it. This is why re-subscription is restart-driven — see § "The `/clear` mechanism".
-- `internal/sessions/reconcile.go:50-89` — `mostRecentJSONL`: the rotation-discipline reference (UUID-stem filter, mtime pick, lexicographic tie-break). Your resolver is the same scan but returns `(path, size)` instead of a `SessionID`, and lives in `package main` (do **not** export/reuse this private helper).
-- `cmd/pyry/assistant_turn_v2.go` / `cmd/pyry/interactive_turn_v2_test.go` — reuse the `package main` test doubles: `stubCursor`, `fakeInteractiveBcast`, `discardLogger`, `testConvID` (from `assistant_turn_test.go` / `interactive_turn_v2_test.go`, same package).
-- tui-driver v1.3.0 `pkg/tuidriver/events.go` (`Session.Events` tails a **fixed** path from a fixed offset; channel closes on ctx-cancel / tail-close / session-end) and `pkg/tuidriver/jsonl.go` (`WaitForSessionJSONL`, `TailJSONL`, `SessionJSONLPath`). Read to confirm: the offset = `startOffset` means "start here"; passing current size = "tail only new lines".
-- `docs/knowledge/codebase/615.md`, `632.md`, `589.md` — producer lifecycle, emitter contract + named single-`Run`-goroutine assumption, and the `startRelayV2` foreground-gate + teardown-ordering template, respectively.
-
----
-
 ## Context
 
 **What.** #615 shipped the producer — `New`, `Run`'s re-subscribe loop, `NewSessionSubscriber` over `Session.Events`, and an injected JSONL `resolve` closure — deliberately unwired. #632 shipped the consumer — `newInteractiveTurnEmitterV2` + `Handle`, the capability-gated structured emitter — also unwired (tested against an injected event source). Both deferred the production wiring to this slice.

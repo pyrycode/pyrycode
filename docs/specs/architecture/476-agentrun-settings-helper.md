@@ -1,15 +1,5 @@
 # 476 — `internal/agentrun/settings/` helper (slimmed, per-spawn deny-default permissions JSON)
 
-## Files to read first
-
-- `internal/agentrun/trust/trust.go:1-46` — sibling subpackage pattern landed by #475. **Mirror this shape:** subpackage `package <name>` under `internal/agentrun/`, package doc-comment that opens with the package's one-line purpose and ends with the "MUST NOT log file contents" discipline note (tightened for this package's payload), free function returning `(result, error)`, error-prefix convention `agentrun/<subpkg>: <step>: %w`.
-- `internal/agentrun/trust/trust_test.go:1-60` — test conventions to copy: `t.Parallel()` on every test; small inline `readJSON(t, path)` / file-byte helpers; stdlib `testing` + `encoding/json` only; no testify. The `t.TempDir()` / `os.TempDir()` distinction matters — see § Testing strategy.
-- `internal/agentrun/ptyrunner/runner.go:77-79` and `runner.go:161-163` — `Config.SettingsPath` field (required, validated for non-emptiness at ptyrunner entry). This is the consumer signature this helper feeds; the helper's return value is the literal string the caller will assign to `cfg.SettingsPath`.
-- `internal/agentrun/workdir.go:1-7` — parent-package doc comment establishes the `agentrun` package family's "MUST NOT log file contents" rule. The new `settings` subpackage doc comment mirrors this. (No re-use of code from `workdir.go` — this helper has no workdir parameter.)
-- `docs/specs/architecture/339-agent-run-settings-file.md` § "Internal payload type" (lines 97-110) and § "Byte-for-byte JSON shape" (lines 111-130) — the JSON shape, field-order rule, and `nil`-vs-`[]string{}` consideration. **Read once; this spec re-pins only the deltas vs #339.** The #339 shape (`{"permissions":{"allow":[...],"defaultMode":"deny"}}` compact, no `SetIndent`) is unchanged.
-- `docs/specs/architecture/475-agentrun-trust-helper.md` § "What changes vs #341" — the "slimmed re-introduction" template this spec mirrors for #339 → #476.
-- `docs/PROJECT-MEMORY.md` § "Atomic-write recipe for on-disk registries" — convention statement. **This helper does NOT need the atomic rename**; the `os.CreateTemp` random suffix is the per-spawn uniqueness primitive and there is no pre-existing file to overwrite. Noted here so the developer does not mechanically import the recipe.
-
 ## Context
 
 The 2026-05-19 pivot back to PTY drive (#329 tracking; ptyrunner in #471/#472; cutover in #470) re-introduces the per-spawn deny-default permission contract that #392 deleted alongside stream-json mode.

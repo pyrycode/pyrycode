@@ -3,26 +3,6 @@
 **Size:** s (confirmed; see § Scope check)
 **Labels:** `enhancement`, `size:s`, `security-sensitive`
 
-## Files to read first
-
-Read these before writing anything. This list is the turn-1 data load; everything the design needs is in it.
-
-- `cmd/pyry/interactive_turn_v2.go` → `interactiveTurnEmitterV2.Handle` — the type switch you add one arm to. Read the `ModelAnnounced` and `RateLimited` arms end to end; they are the shape, and their doc comments state the switch's own rule for when two variants merge into one arm and when they stay apart.
-- `cmd/pyry/interactive_turn_v2.go` → `eventKind` — its `ModelAnnounced` arm and its `ModelList` arm are the two comments this commit corrects (§ Comment corrections). `eventKind` itself needs **no new case**: the `ModelList` arm already exists and already returns `"model_list"`.
-- `cmd/pyry/interactive_turn_v2.go` → `emitMapped`, `emit` — the two functions the arm reaches. `emit` owns the capability gate, the `eventring` append and the per-conn fan-out; the arm adds none of that.
-- `internal/turnbridge/outbound.go` → `MapEvent`'s `turnevent.ModelList` case — what the arm's payload will be. Extract two rules it states and that the arm inherits: nothing is re-capped or re-ordered, and the payload **shares backing arrays** with the event (§ The carry-never-mutate rule).
-- `cmd/pyry/session_model_hold.go` → `sessionModelHold.Sink` — proof the event already travels this lane: it stores the list and then forwards `ev` unchanged to `streamTurnSink.sinkFor`'s closure. Read its type doc for why the retention sits *upstream* of the fan-in send. Do **not** wire the emitter to this type (§ Explicit non-goals).
-- `cmd/pyry/stream_turn_busy.go` → `turnMarkFor` — the `default` arm answers `turnMarkNone` for `ModelList` with no code change. The emitter arm must agree with that answer.
-- `cmd/pyry/stream_turn_drain.go` → `streamTurnSink.sinkFor` — where a `turnMarkNone` event is refusable at `droppableCap`. Extract: the live lane is best-effort by construction, and that is the loss point the arm's comment names but does not fix.
-- `cmd/pyry/stream_turn_busy_test.go` → `TestTurnMarkFor_TotalOverEveryVariant` — already carries a `turnevent.ModelList` row pinned at `turnMarkNone`. **No change.** Read it so you assert the same lifecycle answer in the emitter tests.
-- `cmd/pyry/interactive_turn_v2_test.go` → `TestInteractiveTurnEmitterV2_ModelAnnouncedNoLifecycleMutation`, `TestInteractiveTurnEmitterV2_ModelAnnouncedMidTurnDoesNotDisturbOpenTurn`, `TestInteractiveTurnEmitterV2_ModelAnnouncedEventKindNamesTheVariant` — the three tests this slice's tests mirror one variant over.
-- `cmd/pyry/interactive_turn_v2_test.go` → `TestInteractiveTurnEmitterV2_NoAppOutputLogLeak` — the existing rig you extend. Read its "MIND THE POLARITY" paragraph: the log-absence half is passed by an arm that silently drops the event, so the payload-presence half is what discriminates.
-- `cmd/pyry/interactive_turn_v2_test.go` → `stubCursor`, `fakeInteractiveBcast`, `pushTypes`, `pushesFor`, `assistantDeltas`, `turnStateValues`, `discardLogger`, `testConvID` — reuse every one of these; add no new test double.
-- `internal/protocol/interactive.go` → `ModelListPayload`, `ModelOption`, and their `MarshalJSON` methods — what a decoded envelope looks like. Note the deliberate asymmetry the tests must not "fix": `EffortLevels` normalises nil→`[]`, `TruncatedFields` leaves nil as `null`.
-- `internal/streamsup/parser.go` → `maxModelListEntries` — the aggregate size bound already applied at the producer, with the arithmetic against the 65519-byte envelope cap written out. This is why the arm adds no cap of its own (§ Security review, Network & I/O).
-- `docs/knowledge/features/turnbridge-package.md` § "The outbound adapter (`MapEvent` / `BuildTurnState`)" — the per-variant mapping table; the `ModelList` (#1848) row states every field-level rule the arm inherits.
-- `docs/knowledge/features/streamsup-package.md` § the `newStreamRunnerFactory` / drain description — how a parsed `turnevent` reaches `interactiveTurnEmitterV2.Handle` on the stream-json path.
-
 ## Context
 
 `turnevent.ModelList` has had a wire mapping since #1848: `MapEvent` returns `protocol.TypeModelList` and a fully populated `ModelListPayload`. **Nothing calls it.** `interactiveTurnEmitterV2.Handle` has no case for the variant, so a decoded list falls into the `default` and logs `interactive_turn.unknown`. The desktop consumer ([pyrycode-desktop#561](https://github.com/pyrycode/pyrycode-desktop/issues/561)) has been blocked since 2026-08-19 on a menu that never arrives.

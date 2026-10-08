@@ -2,14 +2,6 @@
 
 **Size:** XS (dropped from PO's `s`). Test-harness-only: one file, no production change, ~6 mechanical gate inserts around an existing barrier method. The ticket explicitly authorizes the XS drop for "a pure mechanical barrier insert."
 
-## Files to read first
-
-- `internal/e2e/internal/fakerelay/fakerelay.go:527-549` — `Server.WaitBinary(ctx, serverID) bool`. The existing readiness barrier: polls `s.binaries[serverID]` every 2ms until present or ctx done. This is the fix's sole primitive; **no change here.**
-- `internal/e2e/internal/fakerelay/fakerelay.go:210-255` — `handleBinary` pre-upgrade claim check (L218) and post-accept registration insert (L254). The window between `websocket.Accept` (L225) and the `s.binaries[serverID] = bc` insert (L254) is the race. `TestBinaryUpgrade_FirstClaimWins`'s second dial reads the claim check at L218.
-- `internal/e2e/internal/fakerelay/fakerelay.go:285-305` — `handlePhone`. Header validation (L289) returns 400 *before* the binary-existence check (L300) that returns 503. This ordering is why `TestPhoneUpgrade_RequiresAllHeaders` is **not** affected (see § Excluded).
-- `internal/e2e/internal/fakerelay/fakerelay_test.go:425-483` — `TestForceCloseBinary` and `TestWaitBinary`. The **precedent to mirror**: `if !s.WaitBinary(ctx, "alpha") { t.Fatal("binary registration did not complete") }`. Copy this idiom verbatim.
-- `internal/e2e/internal/fakerelay/fakerelay_test.go:79-82` — `dialCtx(t)` returns a 3s-timeout context; every gated test already has one in scope named `ctx`. Reuse it for the `WaitBinary` call.
-
 ## Context
 
 Under full-suite `go test -race ./...` load, fakerelay tests that dial a *dependent* connection immediately after establishing a binary intermittently fail: a phone gets `503` "no binary online" instead of `101`, or a first-claim-wins conflict is missed. Always passes in isolation; failing test *set* varies run-to-run — the signature of a harness synchronization race, not a product defect.

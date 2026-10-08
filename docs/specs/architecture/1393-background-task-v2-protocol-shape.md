@@ -4,32 +4,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/protocol/interactive.go:1-14` | The file's standing doctrine: "wire vocabulary only: pure structs and their (de)serialization", and **"No field carries omitempty: every field is always present on the wire"**. Both constrain this ticket. |
-| `internal/protocol/interactive.go:117-145` | `UnrecognizedMessagePayload` — the closest shape precedent: bridge-supplied `conversation_id` first, a producer-truncated string field, a `SECURITY:` doc block explaining why the field is a plain `string` and not `json.RawMessage`. Model your `patch` doc on this. |
-| `internal/protocol/interactive.go:91-115` | `ApiRetryPayload` / `CompactingPayload` — the analogue commit's payloads. Doc-comment density and the "The bridge (#608) supplies ConversationID because the internal marker carries none" sentence to mirror. |
-| `internal/protocol/codes.go:168-187` | The v2 interactive const block. Note its hand-counted trailer **"these six live in the latter"** — do **not** add to this block, or that word needs bumping. |
-| `internal/protocol/codes.go:189-203` | The `TypeApiRetry`/`TypeCompacting` block — a *separate* const block with its own "these two live in the latter" trailer. **This is the pattern to copy**: a new block, its own count word, no edit to a neighbour. |
-| `internal/protocol/codes.go:215-223` | The `TypeUnrecognizedMessage` single-const block — shows the trailing `// binary → phone, outbound v2 …` inline comment style each const carries. |
-| `internal/turnevent/event.go:105-128` | `BackgroundTaskStarted` — authoritative field docs + the daemon-vs-claude naming rule (`tool_call_id`, **not** claude's `tool_use_id`). |
-| `internal/turnevent/event.go:160-198` | `BackgroundTaskUpdated` — why `Patch` is a plain `string` and not `json.RawMessage` (truncation leaves it invalid JSON); the UTF-8 scrub caveat (`TruncatedFields` reports the **cap cut only**, never scrub removals). |
-| `internal/turnevent/event.go:200-231` | `BackgroundTask` — the roster element. Field order is `TaskID, TaskType, Description, TruncatedFields`; **no** `tool_call_id`, **no** `patch`. |
-| `internal/turnevent/event.go:268-290` | `BackgroundTaskRoster` — why `DroppedTasks` is a count rather than a `TruncatedFields` entry, and why this variant has no top-level `TruncatedFields`. |
-| `internal/streamsup/parser.go:47,66,106,155,177` | The five producer caps: `maxTaskFieldID` 256, `maxTaskDescription` 4096, `maxTaskPatch` 4096, `maxTaskRosterEntries` 8, `maxTaskRosterDescription` 512. The envelope-cap test mirrors these as **local** constants (see § Testing). |
-| `internal/streamsup/parser.go:802-807` | `truncateField` — caps are **byte** caps (`len(s) <= limit`, `s[:limit]`), not rune caps. This is what makes 6-bytes-out-per-input-byte the true ceiling. |
-| `internal/protocol/envelope_test.go:11-18` | `canonical` is `json.Compact` — a **byte-level** comparison. Fixture bytes must match Go's marshalling exactly, including struct field order and `null` vs `[]`. This is what makes the fixtures real pins. |
-| `internal/protocol/interactive_test.go:14-28, 210-240` | `roundTripEnvelope` and `TestApiRetryPayload_RoundTrip` — the exact test shape to replicate four times. |
-| `internal/protocol/compat_test.go:51, 157, 218` | The three registration sites, per type: rejection table, `v2OnlyTypes` map, `all` list in `TestTypeConstants_V1V2Partition`. |
-| `cmd/pyry/relay_guard_test.go:117-130` | `excludedTypes`. `TestEveryInboundV2TypeHasHandler` enumerates every `Type*` constant; an unregistered new type turns `make check` red. |
-| `internal/protocol/conversations_read.go:10-25` | `ConversationsPayload` + `ConversationSummary` — the naming precedent for a payload and its **row** type (row carries no `Payload` suffix), and the package's willingness to be deliberate about `null` on the wire. |
-
-Not owed an edit, verified: `internal/turnbridge/mapper.go` (PTY path, not this one), `internal/turnbridge/outbound.go` (#1394), `internal/protocol/envelope.go`'s `inboundAppTypeSet` (**must not** gain these), `docs/protocol-mobile.md` (#1394).
-
----
-
 ## Context
 
 `internal/streamsup/parser.go` already translates claude's `system/task_started`, `system/task_updated` and `system/background_tasks_changed` lines into `turnevent.BackgroundTaskStarted` / `BackgroundTaskUpdated` / `BackgroundTaskRoster`. `internal/turnbridge/outbound.go`'s `MapEvent` returns `ok == false` for all three, so they reach nothing on the wire.

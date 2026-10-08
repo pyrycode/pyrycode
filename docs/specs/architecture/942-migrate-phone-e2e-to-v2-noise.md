@@ -8,24 +8,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/e2e/relay_v2_daemon_test.go:44-73` — **`driveHandshakeToOpenDaemon(t, phone, pubKey, token) (initSend, initRecv *noise.CipherState)`**: the exact non-interactive Noise_IK handshake driver all three tests reuse. `initSend` seals phone→daemon; `initRecv` opens daemon→phone.
-- `internal/e2e/relay_v2_daemon_test.go:89-186` — `testV2DaemonListConversationsRoundTrip`: the canonical **spawn → pair → decode pubkey → dial → handshake → sealed round-trip** template. Copy its shape. Proves an inbound verb round-trips over a *non-interactive* conn.
-- `internal/e2e/relay_v2_daemon_test.go:249-266` — the local `roundTrip` closure (seal → `sendNoiseMsg` → `readInnerFrame` → `decryptInnerEnvelope`): the inline sealed request/reply idiom to mirror.
-- `internal/e2e/relay_v2_daemon_test.go:373-396` — `decryptInnerEnvelope(t, inner, cs)`: sealed inner-frame → `protocol.Envelope`. Asserts the frame is `noise_msg`; does **not** assert the application `Type` — the caller does.
-- `internal/e2e/relay_v2_handshake_test.go:149-177,341` — `sendNoiseInit`, `readInnerFrame`, `sendNoiseMsg` signatures.
-- `internal/e2e/relay_v2_handshake_test.go:179-201` — `buildHelloEarly(t, token)`: the **non-interactive** v2 hello the driver embeds (ProtocolVersions `["v2"]`, token, **no `Capabilities`**). Confirms the migration preserves the original tests' no-capability semantics.
-- `internal/e2e/harness.go:856-912` — relocated helpers. **Keep** `shortHome` (856), `readPersistedServerID` (866), `relayTestLogger` (881), `mustJSON` (913) — all have many surviving v2 callers. **`recvEnvelope` (894-912) → DELETE**: its only two callers are the v1 `per_conversation` tests migrating away, and its own doc comment already states *"v2 tests cannot use this — their frames are Noise-encrypted."*
-- `internal/e2e/harness.go:208-260` — `StartIn`, `StartInWithEnv(t, home, extraEnv []string, extraFlags ...string)`, `spawnWith`/`spawnOpts` — the daemon-start seams (unchanged; only the env/route args flip).
-- `internal/e2e/respawn_after_eviction_test.go` — target 1. Lines to touch: `79-80` (route), `149-169` (Phase-3 dial+hello → handshake), `176-214` (Phase-4 send+drain → sealed), `266-267` (env).
-- `internal/e2e/register_push_token_test.go` — target 2. Lines: `41-45` (env+route), `59-90` (dial+hello → handshake), `92-121` (register send/recv → sealed).
-- `internal/e2e/per_conversation_eviction_test.go` — target 3. Lines: `85`,`178` (routes), `112-131` (Test-A send_message → sealed), `258-260` (env), `291-362` (rewrite `dialHelloPhone` + `createConversationViaPhone` to thread cipher states).
-- `cmd/pyry/relay.go:455-466` — the **v2 `Handlers` map**: `send_message`, `create_conversation`, `register_push_token` are registered **unconditionally** (identical to `list_conversations`). No interactive-capability gate on inbound dispatch → the non-interactive handshake is sufficient. **Do not modify** (production, owned by #913).
-- `docs/knowledge/codebase/941.md` — what the sibling relocated and why.
-
----
-
 ## Context
 
 The legacy v1 relay leg (`PYRY_MOBILE_V2=0`, `/v1/server`, plaintext `hello`/`hello_ack`) is being retired in #913. Three e2e tests still **dial a phone and complete a handshake** before exercising daemon behaviour; once the v1 branch is gone a v1-handshaking phone can never open, so each test would hang. This ticket re-authors their dial + handshake over the sealed v2 Noise_IK path so their behaviour coverage survives:

@@ -16,41 +16,6 @@ Purely additive: one new public method + its funnel plumbing in a single
 production file. No change to the inbound dispatch path, no new wire shapes, no
 change to v1. It is the v2 analog of v1's `dispatch.Dispatcher.ActiveConns()`.
 
-## Files to read first
-
-- `internal/relay/v2session.go:1310-1391` — `Push` / `handlePush`: the exact
-  funnel this method mirrors (public method does channel I/O on the caller's
-  goroutine; private handler reads `m.sessions` on Run's goroutine). Copy the
-  shape; drop the seal/marshal steps.
-- `internal/relay/v2session.go:106-114` — `pushReq` struct (the `{…, reply chan T}`
-  request shape to clone as `snapshotReq`).
-- `internal/relay/v2session.go:350-357,383-390` — `push` channel field doc +
-  allocation in `NewV2SessionManager`; the new `snapshot` channel sits beside it.
-- `internal/relay/v2session.go:401-421` — `Run`'s `select`; add one arm next to
-  the `m.push` arm.
-- `internal/relay/v2session.go:1364-1373` — `handlePush`'s `m.sessions[connID]` /
-  `s.state != V2StateOpen` gate: the same `V2StateOpen` predicate this snapshot
-  filters on (the security gate — § Security review).
-- `internal/relay/v2session.go:138-220` — `V2SessionState` constants +
-  `V2Session` struct + the `State()` doc-comment that names "a broadcast layer
-  added in a later slice" (this ticket) and flags the cross-goroutine-read concern.
-- `internal/relay/v2session_test.go:2733-2777` — `TestV2Session_Push_NotOpen_…`:
-  the **white-box session-injection** idiom (`mgr.sessions[id] = &V2Session{…}`)
-  the state-filter tests reuse, and *why it is `-race` clean* (the request
-  channel send is the happens-before edge; Run touches the map only when it
-  services the request).
-- `internal/relay/v2session_test.go:706-743` — `driveToOpen` + the `openSession`
-  struct: the real-handshake harness the concurrency (`-race`) test drives.
-- `internal/relay/v2session_test.go:2460-2562` — `TestV2Session_Push_Interleaved…`:
-  the interleave-under-`-race` pattern the AC#3 test mirrors (hammer the new
-  method from a goroutine while inbound frames drive `dispatchAppFrame`).
-- `internal/relay/v2session_test.go:2839-2862` — `TestV2Session_Push_CtxCancelled_…`:
-  the "Run not started ⇒ ctx.Done is the only ready case" deterministic pattern.
-- `docs/knowledge/codebase/571.md` § "Out of scope (deferred)" — names this slice
-  and the recommended `ActiveConnIDs() []string` direction.
-- `docs/knowledge/features/v2-session-manager.md` — evergreen manager doc; its
-  "no broadcast surface" deferral narrows to this enumeration primitive.
-
 ## Context
 
 `V2SessionManager.sessions` (`map[string]*V2Session`) is owned exclusively by the

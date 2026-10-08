@@ -1,21 +1,5 @@
 # Spec #1496 — Class-aware fan-in overflow: reserve slots so a turn-closing envelope is never crowded out
 
-## Files to read first
-
-Symbol names, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `cmd/pyry/stream_turn_drain.go` → `streamTurnSink`, `newStreamTurnSink`, `streamTurnSinkBuf`, `streamTurnEnvelope`, `sinkFor`, `exitFor`, `startStreamTurnDrainV2` — the entire change surface. Extract from the type doc: the channel is **never closed**, has a **documented sole reader**, and has **N concurrent producers**. Those three are the constraints that rule out every "just make it a real queue" design.
-- `cmd/pyry/stream_turn_busy.go` → `turnBusyTracker.observe` (the opener/closer switch this spec extracts), `clearForSession`, `setBusy`, `Busy` — extract the **asymmetry**: an open with no close wedges forever; a close with no open is a no-op `delete`. That asymmetry is why reserving capacity for closers alone is sufficient.
-- `internal/relay/v2session_modal.go` → `pushQueue.enqueue`, `pushQueueCap`, `queuedEnv` — the precedent this ticket names. Extract *which* trilemma leg it yields (strictly-bounded, via documented soft overflow) and *what bounds the excursion* (#911's per-conn in-flight gate). This spec yields the **other** leg; § Design says why.
-- `internal/turnevent/event.go` → `Event`, `TextChunk`, `ThoughtChunk`, `ToolStart`, `ToolUpdate`, `TurnEnd`, `RateLimited`, `Stall`, `ApiRetry`, `Compacting`, `Unrecognized`, `BackgroundTaskStarted`, `BackgroundTaskUpdated`, `BackgroundTaskRoster`, `ThinkingProgress` — the full variant set the new classifier must be total over. Note the set has grown three times since `observe` was written (#1380, #1382, #1404); the classifier's whitelist discipline is what has absorbed that.
-- `cmd/pyry/interactive_turn_v2.go` → `eventKind` — the content-free type discriminant for log fields. Reuse it; do not re-derive a second variant-name mapping.
-- `cmd/pyry/stream_turn_drain_test.go` → `dropWatcher` (it already forwards **whole records** on its `recs` channel — built for exactly this kind of level+field-set assertion), `TestStreamTurnSink_ExitDropWhenFull` (mirror its assertion shape verbatim for the new Warn test), `feedLines`, `waitDropKind`, `assertNoPush`.
-- `cmd/pyry/stream_turn_busy_test.go` → `stubBusyResolve` (the session→conversation stub every tracker test uses), and the `observe` tables — those must stay **green unmodified**, which is the regression pin on the classifier extraction.
-- `cmd/pyry/streamsup_runner.go` → `newStreamRunnerFactory` — where `sinkFor` and `exitFor` are installed. Extract: **one producer goroutine per live runner**, which is what bounds the check-then-send slop in § Concurrency model.
-- `internal/relay/v2session.go` → `V2SessionManager.ActiveConns` — the synchronous round-trip to the relay `Run` goroutine that `emitter.Handle` → `transitionTo` makes per emit. This is the evidence the drain really does stall, i.e. the saturated state is reachable rather than theoretical.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md` § "Backpressure / replay" — the never-drop-control promise plus its 2026-07-10 amendment (which narrowed reconnect reconciliation and left never-drops unchanged).
-- `docs/knowledge/features/streamsup-package.md` § "Non-blocking send, drop-newest" — the claim this change amends. **Do not hand-edit**; the documentation phase owns it.
-
 ## Context
 
 `sinkFor` does a non-blocking send onto the 256-slot fan-in and, on a full channel, drops the **newest envelope of any class** — `turnevent.TurnEnd` included — at `Debug`. `pushQueue.enqueue`, the precedent its own comment cites, is deliberately class-aware and never drops a control event. The fan-in is therefore the one place in the stream-json path where a `turn_end` can vanish.

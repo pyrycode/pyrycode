@@ -1,16 +1,5 @@
 # 295 — `net/e2e`: fakerelay harness package
 
-## Files to read first
-
-- `docs/protocol-mobile.md:67-122` — § Authentication. The wire-spec for the `/v1/server` and `/v1/client` upgrade contracts: which headers are required, first-claim-wins for server-ids, the `4409`/`4404` close codes. The fake relay models the **routing** half of this contract; it does NOT model token validation, the 30-second grace period on server-id release (out of scope per AC: "while the first holder's connection is open"), or the binary-side hello/hello_ack dance.
-- `docs/protocol-mobile.md:100-122` — § Routing envelope. The exact JSON shape (`{"conn_id": "...", "frame": ...}`) carried on every binary↔relay frame. Phone↔relay frames are raw (no wrapper). The fake relay's job is the wrap/unwrap transform at the routing seam.
-- `internal/e2e/internal/fakeclaude/main.go` (all 92 lines) — precedent for an `internal/e2e/internal/` package: minimal surface area, env-only or constructor-only config, no global state, no transitive deps beyond stdlib + one library. fakeclaude is a `package main` binary because it re-execs; fakerelay is an importable library (`package fakerelay`), so the file is `fakerelay.go` not `main.go`, but the "one production .go + one _test.go" shape carries over.
-- `internal/transport/wssclient.go:1-35` — package doc-comment style and the `coder/websocket` import surface. This is the project's first WS user; #295 is the second. Same library, same dependency pin.
-- `internal/transport/wssclient_test.go:102-154` (`newTestRelay`) — existing pattern for an `httptest.NewServer` + `websocket.Accept` upgrader. The new package generalises this from "echo server" to "two-endpoint routing server"; the file structure (`httptest.NewServer` wrapper, `t.Cleanup` shutdown, `*atomic.*` for cross-goroutine state) is the precedent to follow.
-- `internal/transport/wssclient.go:337-396` — the recv/send/ping pump triplet and the cancel-then-drain shutdown pattern. The fake relay reuses the recv-pump + send-pump shape per accepted conn (no ping loop — `coder/websocket` auto-responds to pings on the server side, and this harness doesn't need to originate them).
-- `CODING-STYLE.md` § Concurrency, § Naming, § Logging — `*slog.Logger` injected via constructor, `context.Context` everywhere, channels for coordination, `sync.Mutex` for state, `t.Cleanup` for shutdown in tests. No global state.
-- `docs/protocol-mobile.md:711-735` — the worked example sequence diagram (binary upgrades, phone upgrades, relay assigns `conn_id`, frames flow wrapped). Read this once to anchor the data-flow diagram in § Design.
-
 ## Context
 
 Phase 3 Track C, e2e tooling. The wire-protocol implementation landed across #246–#250, #256, #271–#275 with unit/integration coverage per ticket but **no daemon-side test against a real WS endpoint**. The daemon-side e2e coverage requires both ends of the relay mocked in-process:

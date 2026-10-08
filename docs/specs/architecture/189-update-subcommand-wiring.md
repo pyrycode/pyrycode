@@ -12,26 +12,6 @@ This ticket consumes two `internal/update` I/O primitives plus the four pure-fun
 
 Before starting implementation, confirm `internal/update/fetch.go` and `internal/update/replace.go` both exist on disk in your worktree. If either is missing (the dispatcher should already have rebased onto main, but verify), stop and route the ticket back via `needs-rework:po` — do not stub the primitives locally, and do not invent surrogate signatures.
 
-## Files to read first
-
-- `cmd/pyry/main.go:140-172` — the `run()` switch where `case "update":` lands; mirror the `runX(os.Args[2:])` calling convention used by `runStatus`, `runStop`, `runAttach`, `runSessions`, `runInstallService`. Errors return up; `main()` already wraps them with `"pyry: <err>"` to stderr and exits 1, so `runUpdate` returns plain `error`.
-- `cmd/pyry/main.go:1060-1174` — `runInstallService` is the closest sibling: same shape (`flag.NewFlagSet("pyry <verb>", flag.ContinueOnError)`, plain `fmt.Printf` for progress lines, `fmt.Errorf("install-service: …", err)` wrapping). `runUpdate` reuses this voice — no logger, no slog; the `update` verb is a one-shot CLI command, not part of the supervisor.
-- `cmd/pyry/main.go:1176-1230` — `printHelp()` body. New `pyry update` line goes alphabetically between `pyry stop` and `pyry status` in the verb listing block (line ~1188). One-line summary mirrors the existing voice ("download and install the latest release").
-- `cmd/pyry/main.go:53` — `var Version = "dev"` is the input to `runUpdate`; `internal/update.CompareVersions` rejects `"dev"` with `ErrInvalidVersion`. Branch on `errors.Is(err, update.ErrInvalidVersion)` to print "running a dev build, skipping update check" and return nil; do not attempt a self-update of a `-dev` build (would clobber `go install` output with a release tarball).
-- `internal/update/version.go:62-110` — `ParseLatestRelease` returns the raw `tag_name` (e.g. `"v0.9.2"`, leading `v` preserved). `CompareVersions` strips the leading `v` and returns `Older`/`Same`/`Newer` plus an error. Compare via this function, not raw `==`, so `v0.9.1` and `0.9.1` collapse correctly.
-- `internal/update/checksum.go:35-56` — `AssetName(version, runtime.GOOS, runtime.GOARCH)` produces the GoReleaser tarball filename. Pass the bare semver or the `v`-prefixed form interchangeably; the function strips the prefix.
-- `internal/update/checksum.go:58-90` — `ParseChecksumsFile(text, assetName)` returns the lowercase hex digest for the named asset. Wraps `ErrAssetNotInChecksums` and `ErrMalformedChecksums` for `errors.Is`.
-- `internal/update/checksum.go:92-105` — `VerifySHA256(data, expectedHex)` returns nil on match, `ErrChecksumMismatch` (wrapped) otherwise.
-- `internal/update/install.go:35-65` — `ExtractBinary(tgzData, "pyry")` returns the binary's bytes from the in-memory tarball.
-- `internal/update/fetch.go` (#182, PR #193) — `Fetcher` struct: zero-value `BaseURL` defaults to `https://api.github.com`, zero-value `HTTPClient` defaults to `http.DefaultClient`, zero-value `UserAgent` defaults to `pyry/dev`. Set `UserAgent: "pyry/" + Version` from `cmd/pyry`. `FetchLatestRelease(ctx, "pyrycode/pyrycode")` and `FetchAsset(ctx, url)` are the two methods you call.
-- `internal/update/replace.go` (#187, PR #195) — `AtomicReplace(targetPath, newData, mode)`. Pass `0o755` for mode. Same-filesystem caveat is on the function, not on you — `os.Executable()` returns an absolute path that's already on the install filesystem.
-- `docs/specs/architecture/186-update-extract-binary.md` — sibling-spec voice (sentinel errors, doc-comment shape, "evidence-based fix" framing). Mirror this style in production-side comments; the wiring file should feel like a continuation of the package, not a new dialect.
-- `docs/PROJECT-MEMORY.md:8-50` — the four landed primitives' "Out of scope" lists collectively define what this ticket is responsible for. The `dev` sentinel handling and `MapHostPlatform` (use `runtime.GOOS`/`runtime.GOARCH` directly) are explicitly punted to here.
-- `docs/guide.md:1-66` — voice and section style for the new "Updating pyry" paragraph (after "Installing", before "Foreground mode" — alphabetical-ish flow from install → update → run).
-- Issue #189 body — the five acceptance criteria are the contract, including the verbatim progress lines (`==> Current version:`, `==> Latest version:`, `==> Downloading <asset>...`, `==> Verifying SHA-256... ok`, `==> Replacing <path>...`, `==> Updated to <v>.`).
-
-No prior knowledge doc on the wiring layer exists — the four primitive specs cover the lower half. This spec is the cap.
-
 ## Context
 
 `pyry update` is the user-facing command that ties together the four pure-function primitives (`internal/update`) plus the two I/O primitives (Fetcher #182, AtomicReplace #187) into a single update flow. The wiring matches the documented UX from the issue body: print current version, resolve target, optionally short-circuit, fetch + verify + extract + replace, print "Updated to <v>." on success.

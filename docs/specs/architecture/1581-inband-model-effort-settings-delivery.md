@@ -4,31 +4,6 @@
 
 ---
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_search` / `codegraph_node`, then Read the enclosing declaration.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/sessions/pool.go` | `Pool.UpdateSettings` | The whole function **and its doc**. The tail (recompose argv → capture `sup` → release `p.mu` → `sup.Restart`) is the only production site this ticket changes. The doc is one of the six stale-claim sites. |
-| `internal/sessions/session.go` | `Session.spawnArgs`, `claudeSettingsArgs`, `SettingsUpdate` | `spawnArgs` is the single argv-recompose path; `claudeSettingsArgs` is where the YOLO fail-safe lives (one origin) and where the model→effort→bypass ordering convention comes from. `SettingsUpdate`'s three pointer fields are the presence contract the partition keys on. |
-| `internal/sessions/runner.go` | `Runner` | `SetSpawnArgs`'s interface doc — the swap-without-kill contract #1580 shipped for exactly this caller. **No interface change in this ticket.** |
-| `internal/streamsup/runner.go` | `(*Runner).SetSpawnArgs`, `(*Runner).Restart`, `(*Runner).setArgsLocked`, `(*Runner).WriteUserTurn` | The production implementations. `setArgsLocked` is the single assignment site both installers route through. `WriteUserTurn`'s doc names the exact two errors that reach a caller. |
-| `internal/streamsup/envelope.go` | `WriteTurn`, `marshalTurnEnvelope`, `ErrNoLiveChild` | `WriteTurn` takes the **raw prompt** and builds the envelope, so the payload this ticket writes is the command text itself. `marshalTurnEnvelope`'s doc carries the single-physical-line injection argument the security review leans on. |
-| `internal/streamsup/runner_test.go` | the SetSpawnArgs two-spawn test (the one whose comment reads *"once that child ends, the next spawn re-execs with the newly installed argv"*) | The cross-package proof that an installed argv reaches the next spawn. The sessions-side tests assert the **call**; this asserts the **effect**. Do not re-prove it in `internal/sessions`. |
-| `internal/sessions/runner_test.go` | `lifecycleRunner` (esp. its `restarts`, `setArgs` fields and `WriteUserTurn`) | The double every pool test runs against. `WriteUserTurn` returns `nil` and records nothing — trap 2. `SetSpawnArgs` records to `setArgs` and deliberately does **not** call `recordArgv` — trap 3. |
-| `internal/sessions/pool_settings_test.go` | `recordingRunnerFactory`, `recordArgv`, `waitArgvRaw`, `spawnMintedWithSettings` | `recordingRunnerFactory` ignores `cfg.ClaudeBin` and returns a `lifecycleRunner` — this is *why* trap 1 (`doneAppears`) is vacuous. |
-| `internal/sessions/pool_mcp_settings_test.go` | `waitArgv`, `stripMCPSettings` | `stripMCPSettings` is reusable on a raw `setArgs` entry: every recomposed argv carries the #943 `--settings <path>` pair, so a raw `reflect.DeepEqual` against `["--model","opus"]` will fail. |
-| `internal/sessions/pool_update_settings_restart_test.go` | `helperRestartPool`, `mintEvicted`, `clearRecording`, `doneAppears`, and all seven `TestPool_UpdateSettings_*` | The file this ticket edits. Six tests stay byte-identical; the seventh is rewritten. |
-| `internal/relay/v2session_settings.go` | `handleSetSessionSettings`, `validModel`, `validEffort` | The only production entry into `Pool.UpdateSettings`, and the sole validating boundary. Two of the six stale-claim sites are in this handler's comments. |
-| `cmd/pyry/main.go` | `settingsUpdaterAdapter.UpdateSettings` | Confirms the single production call chain: relay handler → adapter → `Pool.UpdateSettings`. Nothing else calls it. |
-| `cmd/pyry/relay.go` | the `SettingsUpdater:` field comment in the v2-manager config literal (in the function that builds it, near the `DebugBundler:` field) | Stale-claim site 3. |
-| `docs/knowledge/features/sessions-package.md` | § **Live-restart on a real change (#842)** | Stale-claim site 5. Evergreen — maintained, not frozen. |
-| `docs/knowledge/features/v2-session-manager.md` | § **Inbound `set_session_settings` (#845)** | Stale-claim site 6. |
-| `docs/knowledge/decisions/031-settings-restart-fire-and-forget.md` | whole file, **read-only** | Frozen record. Its last Consequences bullet already flagged the `--session-id`-on-second-spawn question that this ticket's crash-loop is. **Do not edit it.** |
-
----
-
 ## Context
 
 A client's run-configuration sheet sets model, effort, and permissions posture. `Pool.UpdateSettings` persists all three, then live-applies them by **tearing down and respawning the child** (`sup.Restart(newArgs)`, added by #842).

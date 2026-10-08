@@ -5,30 +5,6 @@
 
 ---
 
-## Files to read first
-
-Read these before editing. Each line says what to extract; nothing else in these files needs reading.
-
-| Path | What to extract |
-|---|---|
-| `internal/acpbridge/outbound.go:315-387` | `MapUpdate`'s doc comment + the whole switch. The two comment sites (`:331-333`, `:380-385`), the arm shape to copy, and the `return X{...}, "", true` convention for non-chunk variants. |
-| `internal/acpbridge/outbound.go:142-313` | The four payload types #1401 shipped — `BackgroundTaskStarted`, `BackgroundTaskUpdated`, `BackgroundTaskRoster` (+ its `MarshalJSON` at `:280-286`), `BackgroundTask`. **Field names and types only** — do not restate their doc comments at the arms. |
-| `internal/acpbridge/outbound.go:38-68` | The extension-discriminant `const` block. Comment site 3 is its closing sentence at `:61-63`. |
-| `internal/acpbridge/outbound.go:394-418` | `mapToolContent` / `mapLocations` — the shape `mapBackgroundTasks` mirrors, in particular `mapLocations`' `if len(x)==0 { return nil }` prologue. |
-| `internal/turnbridge/outbound.go:129-188` | The mobile arms for the same three events. **Which facts matter**, and the stated reason a nil `Tasks` is forwarded rather than pre-allocated. The ACP framing differs (no `ConversationID`) — do not copy wholesale. |
-| `internal/turnevent/event.go:106-289` | The three neutral source types + `turnevent.BackgroundTask`. Exact field names for the arms. |
-| `internal/turnevent/permission.go:75-83` | `func (PermissionRequest) isTurnEvent()` and `var _ Event = PermissionRequest{}` — the reason the counts in § "The six comment sites" differ from the ticket body's. |
-| `internal/acpbridge/outbound_test.go:11-168` | `TestMapUpdate` — the exhaustiveness table and its loop (note `reflect.DeepEqual` on `update`). AC 1's rows go here. |
-| `internal/acpbridge/outbound_test.go:170-258` | `TestMapUpdate_WireShape` — drives `MapUpdate` then marshals its return (`:245-255`). AC 2's byte rung goes here. |
-| `internal/acpbridge/outbound_test.go:260-356` | `TestBackgroundTaskPayloadWireShape` — #1401's golden over hand-built values. **Only its doc comment (`:260-269`) changes.** Also: its fixture values, so the new rows use different ones. |
-| `cmd/pyry/acp_turn_stream.go:57-104` | `Handle` — comment sites 4 and 5. Note it pre-switches `TurnEnd`/`Stall` only, then calls `MapUpdate` at `:95`. |
-| `internal/turnbridge/mapper.go:21-54` | `mapEvent` — the eight `turnevent` kinds this lane's producer emits. Proves `ApiRetry`/`Compacting` reach `MapUpdate` and return `ok == false`, which is why site 5's "unreachable" claim is false. |
-| `docs/knowledge/decisions/027-acp-mapping.md` § divergence 7 | Already updated by this architect run — the gating decision (AC 4) is recorded. Read it; do not re-litigate it. The three outbound rows at `:45-47` are **not** yours (see § Work allocation). |
-
-Already correct, do **not** touch: `cmd/pyry/interactive_turn_v2.go:480-490` (`eventKind` has all three arms, #1394) and `cmd/pyry/acp_conformance_test.go:643-645` (`TestACPConformance_DialectLock` already pins the three strings, #1401).
-
----
-
 ## Context
 
 `acpbridge.MapUpdate` is the pure adapter from the neutral `turnevent.Event` model to ACP `session/update` payloads. #1401 declared the four background-task payload types, picked the three `pyry/`-prefixed extension discriminants, and gave the roster a `MarshalJSON` that normalises a nil `Tasks` to `[]`. Nothing references them: the three neutral variants still fall to `default:` and return `ok == false`, so a desktop client cannot separate a turn that ended with work still running from a genuine finish (#1240's symptom). The mobile lane has carried these facts since #1394.

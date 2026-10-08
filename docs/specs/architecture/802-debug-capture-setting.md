@@ -3,21 +3,6 @@
 **Ticket:** #802 · **Size:** S · **Labels:** `size:s`, `security-sensitive`
 **Chosen mechanism:** a persisted default-OFF `bool` in `~/.pyry/config.json` that, when ON, threads a fixed local recordings directory into the bootstrap `supervisor.Config`; the supervisor attaches tui-driver's existing `SpawnOpts.RecordTo` cast recorder to the one interactive-session spawn. No change to the agent-run (`PYRY_RECORD_DIR`) path.
 
-## Files to read first
-
-- `internal/config/config.go:12-46` — `Config` struct, `DefaultConfig()` overlay, `Load` decode. The new `bool` field lands here; Go's zero value gives default-OFF for free (no `DefaultConfig` change).
-- `internal/config/config_test.go:19-81` — the `RelayURL` table-driven load test. Clone the "missing file → default", "partial `{}` → default", "full file overrides" cases for `debug_capture`. This is where AC1 (unset → OFF) and AC2 (persist across reload) are exercised.
-- `internal/supervisor/supervisor.go:80-144` — `supervisor.Config`. Add the `RecordDir string` field here, next to the other spawn inputs.
-- `internal/supervisor/supervisor.go:656-675` — `runOnce`; the single `tuidriver.Spawn(cmd, tuidriver.SpawnOpts{MirrorOutput: true})` call at line 671 is the **only** spawn seam. This is where `RecordTo` is populated. Both foreground (line 727+) and service/Bridge mode (line 680+) flow through this one call, so recording covers both with one edit.
-- `internal/agentrun/ptyrunner/runner.go:316-362, 607-676` — the existing recorder posture: the `SECURITY:` comment (0600, non-synced dir, not-a-log), `recordingPath`, and the prune/finalize lifecycle. **Read for the security contract and the reasons; do NOT modify (out of scope). Deliberately reuse only the minimum** — dir-create + unique path — not prune/rename.
-- `internal/sessions/pool.go:148-165` — `SessionConfig` (per-session invocation shape). Add `RecordDir string` here.
-- `internal/sessions/pool.go:383-410` — the **bootstrap** `supervisor.Config` construction (the daemon's interactive session). Map `SessionConfig.RecordDir` → `supCfg.RecordDir` here.
-- `internal/sessions/pool.go:1041-1051` — `buildSession`, the per-caller (`pyry sessions new` / ACP) `supervisor.Config`. **Leave untouched** — these are not "the daemon's interactive session"; `RecordDir` stays its zero value `""` here.
-- `cmd/pyry/main.go:710-730` — the daemon `config.Load` → `sessions.New(sessions.Config{Bootstrap: SessionConfig{...}})` wiring. Resolve the recordings dir here and set `Bootstrap.RecordDir` from `cfg.DebugCapture`.
-- `cmd/pyry/main.go:120-137` — `resolveClaudeSessionsDir`; mirror its `os.UserHomeDir()` + `filepath.Join` shape for the new `resolveRecordingsDir` helper.
-- tui-driver `pkg/tuidriver/session.go:38-53` (`SpawnOpts.RecordTo` doc) — confirms tui-driver owns the file end to end: opens `0600 O_EXCL`, writes the asciinema-v2 header on `Spawn`, closes on `Session.Close`. The consumer owns only path lifecycle (dir creation, pruning, rename).
-- `.gitignore:8-12` — `*.cast` is already ignored repo-wide (belt-and-suspenders; the default dir lives outside the repo anyway).
-
 ## Context
 
 When the client app misbehaves, a full terminal recording of the interactive session makes root-causing far faster. The recording captures every PTY byte — the prompt, claude's output, and all tool output, which can include file contents and secrets — so it must be strictly opt-in and off by default.

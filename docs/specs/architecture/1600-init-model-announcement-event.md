@@ -5,47 +5,6 @@
 
 ---
 
-## Files to read first
-
-Generated from `codegraph_context`, pruned to what the design actually needs. Read in this order; symbol names resolve with `codegraph_search` / `codegraph_node`.
-
-**The shape you are copying** — read all three, they are the same design at three levels of complexity:
-
-- `internal/streamsup/parser.go` → `emitSystemSubtype` — the switch you add one arm to. Its doc states the rule the whole family rests on: *the case arms are the ONE enumeration of the mapped set*.
-- `internal/streamsup/parser.go` → `emitBackgroundTaskStarted` — the family's canonical emitter. Extract: the `bound` closure, the sequential-statements-not-composite-literal rule, the undecodable Debug's exact message and attribute shape, and the doc paragraph on decoding from top-level bytes.
-- `internal/streamsup/parser.go` → `emitRateLimit` — the precedent for **suppressing on an empty field** (`case "":`). This is the arm AC 3 follows, *not* `emitBackgroundTaskStarted`'s emit-with-empty-field rule.
-- `internal/streamsup/parser.go` → `emitThinkingProgress` — the precedent for a **silent consumed-drop** (its `EstimatedTokensDelta <= 0` arm returns `true` and logs nothing). This is the drop-path logging you copy.
-
-**The decode targets and the caps:**
-
-- `internal/streamsup/parser.go` → `streamLine` — the line-level segmentation struct. Extract: why the subtype's shape stays a *separate* struct, and the top-level-bytes-only invariant that stops a tool result from forging a control shape.
-- `internal/streamsup/parser.go` → `systemThinkingTokensLine` — the simplest sibling decode target (two fields, no container). Your struct is one field and mirrors its doc structure.
-- `internal/streamsup/parser.go` → `maxTaskFieldID`, `maxRateLimitField` — the two identifier-shaped caps AC 2 names. Extract: both are 256, both are separate constants *even though they are equal*, and the doc states why folding them would be wrong.
-- `internal/streamsup/parser.go` → `truncateField` — the cut helper. Extract: `<=` boundary (a field of exactly `limit` bytes is **not** truncated), and that the returned value can come out 1–3 bytes under the limit when a cut lands mid-rune.
-
-**The event package:**
-
-- `internal/turnevent/event.go` → `RateLimited` — the doc style for a claude-derived, producer-bounded variant.
-- `internal/turnevent/event.go` → `Unrecognized` — the `Truncated bool` report shape you adopt (see § Design, decision 3).
-- `internal/turnevent/event.go` → `isTurnEvent` markers and the `var (_ Event = …)` block — both need a line.
-
-**The daemon side:**
-
-- `cmd/pyry/interactive_turn_v2.go` → `eventKind` — one arm. Read `ThinkingProgress`'s and `RateLimited`'s arms: their docs state *why* the arm exists (the other call sites' `unknown`), which AC 4 restates.
-- `cmd/pyry/stream_turn_busy.go` → `turnMarkFor` — read the `DISCHARGED 2026-08-09 (#1404)` paragraph. **No change here.** Confirms the whitelist absorbs a new variant, and this ticket discharges the prediction a second time.
-- `internal/turnbridge/outbound.go` → `MapEvent` — read the `default` arm only. **No change here.** No wire frame appears until the client-facing slice adds one.
-
-**Tests you must change or read:**
-
-- `internal/streamsup/parser_test.go` → `TestParser_IgnoredLineTypesStaySilent` — **this test goes RED if you do nothing.** Its `system/init` row's fixture carries `"model":"claude-opus-5"`, so under AC 1 it now emits. See § Design, decision 6.
-- `internal/streamsup/parser_test.go` → `TestParser_RateLimitIsLoggedContentFree` — the no-log sweep you copy exactly. Extract: the sweep covers the **emit** path as well as the drop paths, the distinctive sentinel values, and the `t.Fatalf` guard that fails when the sweep would be vacuous.
-- `internal/streamsup/parser_test.go` → `collectEvents`, `logRecorder`, `taskFieldIDCapFixture` — existing helpers. The cap-fixture block's doc states the rule: a fixture written as the constant it validates asserts nothing about the number.
-- `internal/streamsup/capture_test.go` → `capturedSystemLine` — the exactly-one reader. **Verified: the capture holds exactly one `system`/`init` record**, so this works unchanged; no plural reader and no helper generalization is needed.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapClassify`, `TestDropcapClassification` — read `dropcapClassify` to see *why* AC 3's pin holds: it runs the shipped parser and derives `dropped` from "zero events emitted", so it needs no mirror update.
-- `cmd/pyry/interactive_turn_v2_test.go` → `TestInteractiveTurnEmitterV2_NoAppOutputLogLeak` — the `cmd/pyry`-side no-log precedent, referenced but **not extended** by this ticket (see § Testing).
-
----
-
 ## Context
 
 claude emits a `system` line with subtype `init` once **per turn**, carrying a top-level `model`. `emitSystemSubtype` has no arm for it, so it falls through to the `ignoredLineTypes["system"]` drop in `consumeLine` and the value never becomes an event.

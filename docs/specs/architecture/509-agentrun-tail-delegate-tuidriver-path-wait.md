@@ -2,30 +2,6 @@
 
 Confirms PO's size: **S**. One production file, one test file, a mechanical `go.mod` / `go.sum` bump.
 
-## Files to read first
-
-- `internal/agentrun/jsonl/tail/watcher.go` (full file, 295 LOC) — the only production file in scope. Lines to internalise:
-  - 27–31 — `probeRetryDelays` schedule (`[]time.Duration{0, 50ms, 200ms}`). Goes away.
-  - 36–65 — `Config` (keep unchanged). The `Workdir` doc-comment at 37–40 currently names `agentrun.EncodeProjectDir`; reword to mention the encoding without naming the helper.
-  - 89–139 — `New`. Lines 106–113 (home resolution) stay; lines 115–122 are the surface to change (drop `agentrun.EncodeProjectDir`, derive path via `tuidriver.SessionJSONLPath`, keep `MkdirAll` and `fsnotify.Add(dir)`).
-  - 146–203 — `Run`. Lines 154–165 (initial stat) and the CREATE-branch handling at 179–186 collapse into a single up-front `tuidriver.WaitForSessionJSONL` call; the WRITE pump at 187–195 stays verbatim.
-  - 205–236 — `openAndDrain`. Drops the bounded-retry call; the `errors.Is(err, fs.ErrNotExist)` log-and-return-false branch goes away because `WaitForSessionJSONL` has already guaranteed appearance.
-  - 270–294 — `openWithRetry`. Deleted.
-- `internal/agentrun/jsonl/tail/watcher_test.go` (full file, 392 LOC) — test seam.
-  - 90–99 — `expectedEncodedDir` helper; its body becomes `filepath.Dir(tuidriver.SessionJSONLPath(home, resolved, sessionID))`. (Test-only; `agentrun.EncodeProjectDir` continues to exist for other callers.)
-  - 209–250 — `TestWatcher_LateCreate`; stays green unchanged. The wait loop now polls at 50 ms (DefaultPollInterval) instead of stepped 0/50/200; `writeLineByLine` already delays 20 ms between lines, so the first appearance is detected within one tick.
-  - 254–299 — `TestWatcher_ExistingFile`; stays green unchanged. `WaitForSessionJSONL` short-circuits on the up-front stat.
-  - 370–391 — `TestWatcher_ContextCancellation`; stays green. The wrap now produces `fmt.Errorf("... %w", context.Cause(ctx))`; `errors.Is(err, context.Canceled)` still matches through the wrap.
-- `github.com/pyrycode/tui-driver/pkg/tuidriver/jsonl.go` (in module cache after the `go get`, full file) — confirms exact signatures and semantics:
-  - `func SessionJSONLPath(home, cwd, sessionID string) string` — pure join; calls `EncodeCwd(cwd)` internally; does NOT resolve symlinks.
-  - `func WaitForSessionJSONL(ctx context.Context, path string) error` — initial `os.Stat`; on `IsNotExist`, polls at `DefaultPollInterval` (50 ms); on cancel/deadline returns `fmt.Errorf("... %w", context.Cause(ctx))`; on any non-NotExist stat error, returns wrapped without polling.
-  - `DefaultPollInterval = 50 * time.Millisecond`.
-- `github.com/pyrycode/tui-driver/pkg/tuidriver/cwd.go` (in module cache) — `EncodeCwd` rule (every non-`[a-zA-Z0-9]` byte → `-`, no run-collapse). Don't duplicate its tests.
-- `internal/agentrun/workdir.go` (full file, 44 LOC) — confirms `agentrun.ResolveWorkdir` is the resolver we still need. `EncodeProjectDir` itself is no longer called by the watcher, but `ResolveWorkdir` is, so the package import remains.
-- `docs/lessons.md` § "Claude session storage on disk" (lines 50–66) and § "fsnotify reports as-watched, kernel probes report canonicalised" (lines 219–223) — the on-disk layout and the realpath-before-encode invariant. The realpath step is non-negotiable on macOS: claude resolves `/var → /private/var` before encoding; pyry must match or the JSONL tail watches the wrong directory.
-
-No QMD search required — the encoding rule and the layout are pinned in code (tuidriver) and in lessons.md.
-
 ## Context
 
 `internal/agentrun/jsonl/tail/watcher.go` today reconstructs `~/.claude/projects/<encoded>/<sid>.jsonl` locally (lines 106–122) and absorbs the "fsnotify CREATE fires before `open(2)` succeeds" race via a hand-rolled `openWithRetry` walking `probeRetryDelays = {0, 50ms, 200ms}` (lines 270–294). Both responsibilities are now owned by the tui-driver library:

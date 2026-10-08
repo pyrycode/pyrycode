@@ -2,22 +2,6 @@
 
 **Ticket:** #1074 · **Size:** S · **Label:** `security-sensitive`
 
-## Files to read first
-
-Read these before writing code. Each line names what to extract.
-
-- `internal/turnevent/event.go:72-103` — the `Stall struct{}` template: type doc, `isTurnEvent()` marker, and the `var _ Event = Stall{}` compile-time assertion. Your two new types mirror this exactly (plus fields).
-- `internal/turnbridge/mapper.go:20-38` — `mapEvent`'s switch. The `EventKindStallDetected` arm is your template; add four new arms. The `default: return nil, false` is why the new PTY kinds are dropped today.
-- `internal/turnbridge/outbound.go:62-104` — `MapEvent`'s switch. The `turnevent.Stall` arm (lines 93-99) is your template — conversation-id only, `tc.TurnID`/`tc.Seq` ignored.
-- `internal/protocol/codes.go:168-187` — the v2 interactive-events const cluster (`TypeTurnState`…`TypeStall`) and its "MUST NOT be added to `inboundAppTypeSet`" doc rationale. Add a peer const block.
-- `internal/protocol/interactive.go:79-89` — `StallPayload`, and the file header's **no-`omitempty`** rule (lines 12-14). Your two payload structs follow it.
-- `cmd/pyry/interactive_turn_v2.go:218-234` — the `turnevent.Stall` arm in `Handle` (flush delta, emit, NO lifecycle mutation) and `eventKind` (lines 388-407). Both get two new arms.
-- `internal/protocol/compat_test.go:143-244` — the `v2OnlyTypes` map + `TestTypeConstants_V1V2Partition` + `TestIsKnownAppType`. These drift-detectors are the **only** consumers of the new `Type*` constants and MUST be updated (see § Testing).
-- `internal/protocol/interactive_test.go:188-208` + `internal/protocol/testdata/stall.json` — the per-payload round-trip test + fixture pattern (`readFixture` → decode → assert fields → `roundTripEnvelope`). Two new fixtures + two new tests mirror this.
-- `internal/turnbridge/mapper_test.go:66-189` — `TestMapEvent` table + `kindEvent` helper. Note: the api-retry cases need `tuidriver.Event{Kind:…, Retry: tuidriver.ApiRetryAttempt{Current:…, Total:…}}`, so a `kindEvent` variant (or inline literal) that sets `Retry`.
-- `cmd/pyry/interactive_turn_v2_test.go:497-620` — the four `Stall*` emitter tests (fans-out-interactive-only, no-lifecycle-mutation, mid-turn, cursor-empty). Your emitter tests are a tightly-scoped subset of these (see § Testing — do not duplicate all four per event).
-- tui-driver `pkg/tuidriver/events.go:72-130,209-217` + `apiretry.go:8-17` (read via `go doc` or the module cache) — the four `EventKindPtyApiRetry{Shown,Hidden}` / `EventKindPtyCompacting{Shown,Hidden}` kinds, the `Event.Retry ApiRetryAttempt` field, and `ApiRetryAttempt{Current, Total int}` with its `{0,0}` "count unavailable" sentinel.
-
 ## Context
 
 Two claude sub-states now stop at pyry and never reach a remote head: claude's

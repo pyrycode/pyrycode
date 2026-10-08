@@ -27,43 +27,6 @@ This ticket closes that gap: fakephone → fakerelay → spawned daemon. Same ga
 (promote) and #974–#976 / #980 / #981 (rename/delete/archive/change/create) closed for
 their verbs — a handler nothing exercised end-to-end.
 
-## Files to read first
-
-- `internal/e2e/relay_v2_rename_test.go` (whole file, ~309 lines) — **closest NOT-sec
-  template.** Copy its per-subtest boilerplate verbatim: `shortHome` → `RunBareIn "pair"`
-  → `decodePairPayload` + base64-decode pubkey → seed `conversations.json` →
-  `fakerelay.New` → `StartInWithEnv(PYRY_ALLOW_INSECURE_RELAY=1, PYRY_MOBILE_V2=1,
-  -pyry-relay=…/v2/server)` → `readPersistedServerID` → `waitBinaryHello` →
-  `fakephone.Dial` → `driveHandshakeToOpenDaemon` → seal an `Envelope` with
-  `initSend.Encrypt` → `sendNoiseMsg` → `decryptInnerEnvelope(readInnerFrame(...), initRecv)`.
-  **Diverge from it in two ways:** (a) no not-found / error subtest — this verb has no
-  error path; (b) **no on-disk reassertion** — `recent_workspaces` is a pure read and
-  Saves nothing, so there is no registry mutation to read back (drop the entire
-  `os.ReadFile(convPath)` + `onDisk` block the rename test uses).
-- `internal/relay/handlers/recent_workspaces.go:44-77` — the handler contract the test
-  asserts: fold each non-empty `Cwd` → max `LastUsedAt`; skip `strings.TrimSpace(Cwd)==""`;
-  `sort.SliceStable` most-recent-first then `Path` ascending; reply
-  `protocol.TypeRecentWorkspacesList`. Archived conversations are **included** by design
-  (#888) — a folder is not "un-used" by archiving its conversation; irrelevant to this
-  test's seeds but note it if tempted to seed an archived row.
-- `internal/protocol/workspace.go:32-58` — the three payload types: `RecentWorkspacesPayload{}`
-  (empty request body — send `mustJSON(t, protocol.RecentWorkspacesPayload{})`, marshals to
-  `{}`), `RecentWorkspacesListPayload{Workspaces []RecentWorkspace}` (reply; slice always
-  non-nil so empty marshals `[]` not `null`), and `RecentWorkspace{Path string "path";
-  LastUsedAt time.Time "last_used_at"}`.
-- `cmd/pyry/relay.go:420` — the registration
-  `protocol.TypeRecentWorkspaces: handlers.RecentWorkspaces(w.convReg)`. The test is a
-  live RED-on-main guard on this line (see § RED-on-main guard).
-- `internal/e2e/relay_v2_promote_test.go:36-63` — the direct-seed idiom:
-  `convPath := filepath.Join(home, ".pyry", "test", "conversations.json")` (the `test`
-  segment comes from `-pyry-name=test` in the pair call), then `os.WriteFile(convPath,
-  convJSON, 0o600)` **before** `StartInWithEnv`. This spec seeds the same way.
-
-> Not needed (unlike the sec siblings): `internal/protocol/codes.go`,
-> `internal/protocol/handshake.go` (`ErrorPayload`), `filepath.EvalSymlinks`,
-> `os.MkdirAll`. There is no error reply and no path resolution — `Cwd` values are
-> opaque strings the handler never touches the filesystem for.
-
 ## Design
 
 One new file, build tag `e2e`, package `e2e`:

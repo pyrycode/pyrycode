@@ -13,49 +13,6 @@ ticket body describes #482 as a pre-cutover gate, but the empirical-validation
 test is still load-bearing as a regression baseline against future drift in
 either runner.
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:165-419` — `Run` contract + the
-  unexported `buildArgs` shape the argv-flags test mirrors. The package doc
-  (lines 1-37) documents the logging discipline + forbidden imports.
-- `internal/agentrun/streamrunner/runner.go:101-175` — `Run` signature + the
-  `userTurn` stream-json envelope shape; the test uses `streamrunner.Run`
-  verbatim. No need to construct the envelope manually — the package owns it.
-- `internal/agentrun/streamjson/emitter.go:251-273` — `trailer` JSON shape
-  ptyrunner emits via `Emitter.Close`. Pin the normalization rules against the
-  field set declared here.
-- `internal/agentrun/streamjson/testdata/captured_run.jsonl` — the wire shape
-  streamrunner forwards from `claude -p --output-format stream-json` (lines
-  1-7). Compare against the emitter trailer shape above; the field deltas
-  become the test's documented normalization rules.
-- `internal/agentrun/trust/trust.go:40-130` — `MarkWorkdirTrusted` realpath
-  return + `~/.claude.json` atomic write. The ptyrunner side wires this once
-  before the run; the realpath becomes `ptyrunner.Config.WorkDir`.
-- `internal/agentrun/settings/settings.go:57-86` — `WriteSettings` tempfile
-  path + `defer os.Remove` cleanup contract. The ptyrunner side wires this and
-  the test owns the cleanup defer.
-- `internal/e2e/realclaude/smoke_test.go:12-24` — the established
-  `exec.LookPath("claude")` gate + install-or-adjust-PATH guidance. The new
-  argv-flags test mirrors this gate verbatim.
-- `internal/e2e/realclaude/fixtures.go:32-54` — `WithWorktree` / 
-  `WithWorktreeAuthenticated` HOME-pinning helpers. `WithWorktreeAuthenticated`
-  is the right entry for the byte-equivalence test (needs `ANTHROPIC_API_KEY`).
-- `internal/e2e/realclaude/prompt_fidelity_test.go:28-73` — established
-  pattern for a real-claude assertion: HOME pinned via `WithWorktree`,
-  prompt/system files written into the workdir, exit-code assertion, JSONL
-  read for content checks. The byte-equivalence test mirrors the workdir setup
-  but skips the `pyry agent-run` exec wrapper (calls `Run` directly).
-- `cmd/pyry/agent_run.go:324-358` — `buildStreamRunnerClaudeArgs` shape that
-  the test mirrors verbatim for the streamrunner side. (cmd/pyry is `package
-  main` so the function is not importable; the test re-states the argv shape
-  literally and pins it against the helper output to catch drift.)
-- `internal/sessions/id.go:20-43` — `NewID` UUIDv4 generator + `ValidID`
-  predicate. The ptyrunner side uses `NewID` to mint a session-id per run.
-- `docs/knowledge/codebase/479.md` — sibling slice that wired the budget
-  Counter + watchdog Tracker on top of the JSONL tail; explains why
-  `MaxTurns` enforcement differs between the two runners (streamrunner via
-  `--max-turns` flag, ptyrunner via pyry-side `internal/agentrun/budget`).
-
 ## Context
 
 Two parallel claude-spawn primitives now coexist in tree, both producing the

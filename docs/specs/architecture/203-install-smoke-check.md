@@ -1,14 +1,5 @@
 # Spec — install.sh post-install smoke check (#203)
 
-## Files to read first
-
-- `install.sh` (entire file, 139 lines) — the script you're extending. Today it ends after `info "next: see ...deployment.md"` (line 136); the new logic appends after that.
-- `docs/deployment.md` § "Updating the binary" (Linux block ~lines 107–124, macOS block ~lines 202–222) — the canonical restart commands you mirror: `systemctl --user restart pyry` and `launchctl kickstart -k gui/$UID/dev.pyrycode.pyry`.
-- `cmd/pyry/main.go:461-491` (`runStatus`) — exact stdout shape the smoke check greps. The lines printed are `Phase:`, `Child PID:`, `Restart count:`, `Last uptime:` (optional), `Next backoff:` (optional), `Started at:`, `Uptime:`. Each is `Key:` + spaces + value; key column width is fixed (printf `%-14s`-style alignment).
-- `internal/control/dial.go:25-95` — `dial` already retries `ENOENT`/`ECONNREFUSED` for ~1.5s, and `runStatus` wraps the whole call in a 5s context deadline. **Do not add an extra sleep before invoking `pyry status`** — its built-in retry+timeout *is* the grace period named in AC #1.
-- `internal/install/install.go:186` and `internal/install/install_test.go:130` — confirm the default launchd label is literally `dev.pyrycode.pyry` and the default systemd unit is `pyry.service` (i.e. `defaultName() == "pyry"`). The smoke check only handles the default name; `-pyry-name foo` deployments are out of scope (see § Out of scope).
-- `docs/knowledge/features/install-e2e.md` § "Linux / systemd Specifics" → "Skip Discipline" — pattern to mirror for "is user-systemd usable?" detection (`systemctl --user is-system-running` returning `offline`/`unknown` means no D-Bus session, treat as "no service to restart").
-
 ## Context
 
 **The bug being defended against (#202).** v0.10.1 introduced a startup deadlock: under non-TTY stdin (launchd, systemd, Claudian, wrapper scripts), the supervisor reaches `"pyrycode starting"` and brings the control server up — but never reaches `"spawning claude"`. `Started at` stays at `0001-01-01T00:00:00Z`; `Uptime` reports `time.Duration(math.MaxInt64).String()` = `2562047h47m16.854775807s`. `pyry status` works (control server is alive), but the values it prints are sentinels.

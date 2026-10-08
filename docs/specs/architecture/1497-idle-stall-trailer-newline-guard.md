@@ -3,20 +3,6 @@
 **Size:** XS (~22 production lines across two files; the rest is tests)
 **Package:** `internal/agentrun/streamrunner`
 
-## Files to read first
-
-- `internal/agentrun/streamrunner/watchdog.go` → `streamParser` — the struct doc block enumerates the tracked state (`lastEvent`, `awaiting`, `sawResult`); this ticket adds a fourth field and the doc block must grow with it.
-- `internal/agentrun/streamrunner/watchdog.go` → `Write` — forwards to `p.dst` FIRST, then feeds `b[:n]`. The `n` slice, not `b`, is what actually reached stdout; the guard keys off it.
-- `internal/agentrun/streamrunner/watchdog.go` → `feed` — where the partial remainder is kept, and where it is dropped to `nil` past `maxBuf`. Extract: the drop happens *after* the bytes were forwarded, which is why `len(p.buf)` is not a sound signal.
-- `internal/agentrun/streamrunner/watchdog.go` → `hasSeenResult` — the house shape for a mutex-guarded bool accessor (field `sawResult`, method `hasSeenResult`). The new accessor mirrors it exactly.
-- `internal/agentrun/streamrunner/watchdog.go` → `writeIdleStallResult` — already appends its own trailing `'\n'`; only the leading separator is missing. This function's signature changes.
-- `internal/agentrun/streamrunner/runner.go` → `Run` — the `wd.hasFired()` / `!parser.hasSeenResult()` block is the single call site. Extract also: the comment above it establishing that `cmd.Wait()` has returned, so `Run` is the sole writer to `cfg.Stdout` here.
-- `internal/agentrun/streamrunner/watchdog_test.go` → `TestRun_IdleStall_AfterToolResult` — the test tightened for AC#2. Currently asserts with `strings.Contains`, which cannot see a stray blank line.
-- `internal/agentrun/streamrunner/watchdog_test.go` → `TestStreamParser_OversizedLine` — the shape the new parser-level test copies (construct the parser directly, shrink `maxBuf`, feed an oversized blob). Stays green unmodified.
-- `internal/agentrun/streamrunner/helper_test.go` → `TestStreamRunnerHelperProcess`, `blockUntilSigterm` — the fake-claude switch and the SIGTERM-handling block used by every stall mode. The new mode is one more `case`.
-- `internal/agentrun/streamrunner/runner_test.go` → `helperRunCfg` — how a Run-level test wires `Config` to the helper process.
-- `docs/knowledge/features/streamrunner-package.md` § "Fake claude helper modes" — the mode list the documentation phase will extend; read for the house description style, do not edit.
-
 ## Context
 
 When the idle-stall watchdog kills claude, `Run` synthesises the `result` trailer itself. That trailer is the *only* signal the run produced anything: `Run` returns nil on this path by contract, and the dispatcher classifies `subtype: error_idle_stall` / `terminal_reason: idle_stall` as a transient runner-side error it auto-retries (unlike `max_turns` / `timeout`, which it deliberately never retries).

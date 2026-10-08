@@ -2,14 +2,6 @@
 
 Phase 3 foundation. Adds on-disk persistence for the `Conversation` entity introduced in #216, mirroring the `internal/devices` registry pattern (atomic write + mutex-guarded in-memory state).
 
-## Files to read first
-
-- `internal/conversations/conversation.go` — entity + `ConversationID` type. Note the comment at line 18–19: "#217 owns the generator and the validity predicate." This spec satisfies that.
-- `internal/devices/registry.go:1-155` — the reference implementation. Same envelope shape, same atomic-write recipe, same mutex discipline. Copy structure verbatim and rename.
-- `internal/devices/registry_test.go:1-355` — the test file to mirror. Cover the same eight scenarios (load-missing, load-empty, load-malformed, round-trip, remove-present, remove-absent, find-by-X, file-permissions, stable-ordering, atomic-rename-preserves-old, concurrent-rw) adapted to the conversation-specific verbs.
-- `internal/sessions/id.go:1-70` — the `NewID` / `ValidID` template. The conversation ID generator is a byte-for-byte clone with `SessionID` → `ConversationID`.
-- `CODING-STYLE.md` — gofmt, `log/slog` (not used in this package — pure data layer), error wrapping (`fmt.Errorf("...: %w", err)`), `context.Context` is **not** required here (registry methods are sync, in-memory, never block on I/O after Load/Save returns).
-
 ## Context
 
 `internal/conversations/conversation.go` defined the on-disk record shape but is I/O-free. This ticket adds:

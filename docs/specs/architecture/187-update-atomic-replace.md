@@ -1,15 +1,5 @@
 # Spec: `internal/update` — atomic in-place binary replace (#187)
 
-## Files to read first
-
-- `internal/sessions/registry.go:53-92` — `saveRegistryLocked`. The repo's existing temp-file + fsync + rename pattern. Mirror its structure (CreateTemp in same dir → Chmod → write → Sync → Close → Rename, with a `defer` that best-effort-removes the temp path so error paths leave nothing behind). Differences from this ticket: registry creates the parent dir with `MkdirAll` (we don't — see "Out of scope") and writes via a JSON encoder (we write raw bytes).
-- `internal/update/checksum.go` — sister file in the same package. Confirms the package doc comment (already on `version.go`, no need to repeat), the error-sentinel + wrapping convention (`var ErrFoo = errors.New(...)`, returned as `fmt.Errorf("doing X: %w", ErrFoo)`), and that `internal/update` is stdlib-only.
-- `internal/update/checksum_test.go` — table-driven test layout (`t.Parallel()` per subtest, inline assertions, `errors.Is` for sentinel errors, no helpers, no `testdata/`). Mirror exactly.
-- `internal/update/restart.go` — sister file landed in #181. Confirms the "pure helper, no wiring" shape this ticket follows.
-- `CODING-STYLE.md` §§ Naming, Error Handling, Testing — already followed by `version.go` / `checksum.go` / `restart.go`. Cited so a fresh reader doesn't have to re-derive.
-
-(QMD search on `pyrycode-docs` for "atomic replace" / "fsync rename" returns only `internal/sessions/registry.go`'s pattern, already cited above. No prior ADR.)
-
 ## Context
 
 Third I/O slice of the `pyry update` work, sibling to:

@@ -86,10 +86,6 @@ No new goroutine kind or lock is introduced. `handle` parses and parks on the Co
 - Builder gate: `go test -race ./cmd/pyry/... ./internal/e2e/internal/fakecodex/...`, `go vet ./...`, and `go build ./cmd/pyry`.
 - Dispatcher-owned live gate remains pending under `needs-real-claude`: GPT-6 Luna at low effort first, with GPT-6 Sol fallback only if Luna does not call the tool.
 
-## Open questions
-
-None.
-
 ## Documentation handoff
 
 Pending for the documentation stage:

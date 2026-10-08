@@ -1,16 +1,5 @@
 # Spec: `internal/update` — HTTP fetcher for release JSON + asset bytes (#182)
 
-## Files to read first
-
-- `internal/update/version.go` — sibling file in the same package; mirror its file-header doc comment style and exported-error pattern (`ErrMalformedRelease`, `ErrInvalidVersion` declared at top, wrapped at return sites with `fmt.Errorf("…: %w", …)`).
-- `internal/update/version_test.go` — establishes the package's table-driven test convention with `t.Parallel()` per subtest and `errors.Is` for sentinel assertions; reuse the same shape for the cases that don't need an `httptest.Server`.
-- `internal/update/checksum.go:1-32` — confirms package doc comment is on `version.go` (not repeated elsewhere) and that exported errors live next to the function that returns them. Same convention applies to this ticket: the new sentinel (if any) goes at the top of `fetch.go`.
-- `cmd/pyry/main.go:53-54` — `var Version = "dev"`. The wiring ticket will pass `"pyry/" + Version` as the `UserAgent` field; the doc comment on `Fetcher.UserAgent` should reference this so the developer knows what shape of value to expect.
-- `CODING-STYLE.md` §§ Error Handling, Testing, Dependencies — stdlib-only `net/http`, table-driven tests, error wrapping with `%w`, no testify.
-- `docs/lessons.md` § "PTY master backpressure stalls slave-side process exit" and § "fsnotify reports as-watched, kernel probes report canonicalised — match in one form" — **not directly relevant** to this ticket; listed here only because they're in the same lessons file. Skip.
-
-(No prior `pyrycode-docs` decisions on HTTP fetching; this is greenfield.)
-
 ## Context
 
 This is the network-I/O slice of `pyry update`, paired with the pure-function tickets:

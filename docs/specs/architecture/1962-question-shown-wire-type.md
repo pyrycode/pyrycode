@@ -3,26 +3,6 @@
 **Size:** S (confirmed against PO's estimate; see § Sizing)
 **Deliverable:** one exported constant, its doc block, three test registrations, one naming pin. Nothing constructs the frame; nothing emits it.
 
-## Files to read first
-
-Read these before writing anything. Every entry names a symbol, not a line — resolve with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/protocol/codes.go` | `TypeSlashCommandList` | **The form this whole ticket copies.** Its doc block is the paragraph structure AC #1 enumerates: grouping rationale → daemon's-name rule → discriminating-words → MUST-NOT-`inboundAppTypeSet` → no-request-verb → vocabulary-only forward reference. Copy the *structure*, write your own words. |
-| `internal/protocol/codes.go` | `TypeAttachmentChunk` | The last block in the file. New blocks append after the current last one — that is the file's convention (every block since `TypeSessionError`). |
-| `internal/protocol/interactive_test.go` | `TestSlashCommandListType_IsNotClaudesVocabulary` | The pin's form. Take the **names half only** — the four checks before the `json.Marshal`. The payload-bytes half after it is #1963's. |
-| `internal/protocol/interactive_test.go` | `TestModelListType_IsNotClaudesVocabulary` | The four-check skeleton in its clearest form: equality against claude's word, `Contains` on its shortened root, `Contains` on its array key, exact pin last. |
-| `internal/protocol/compat_test.go` | `v2OnlyTypes`, `TestTypeConstants_V1V2Partition`, `TestIsKnownAppType` | The **three** registration sites in this file — the allowlist entry, the `all` list entry, and the rejection row. All three are yours. |
-| `internal/protocol/compat_test.go` | `TestInboundAppTypeSet_CoversAllExportedTypeConstants` | Read to confirm what you must **not** touch: its `all` list is v1 inbound only and its `23` literal stays `23`. Bumping it is how this ticket fails AC #4. |
-| `cmd/pyry/relay_guard_test.go` | `excludedTypes` | The `"TypeSlashCommandList": "push"` entry and its comment are the exact form to mirror, with `#1927` as the pending producer. |
-| `internal/protocol/envelope.go` | `inboundAppTypeSet` | The set the constant must **not** join, and the doc comment above it explaining why v2-only types stay out. |
-| `internal/protocol/messaging.go` | `ModalShownPayload`, `ModalOption`, `ModalAnswerPayload` | The three facts the new-family argument rests on: `DefaultOptionID`'s documented MUST invariant, `ModalOption`'s flat `{id,label}`, `ModalAnswerPayload`'s single `OptionID`. |
-| `internal/modalbridge/modal.go` | `denyByClass` | The fail-safe default-is-deny mapping. Name this symbol when the doc block carries the security argument. |
-| `docs/protocol-mobile.md` | § Modal, the `default_option_id` row | The invariant in its normative form: "MUST equal one of `options[].id`", plus the #716 fail-safe convention. |
-| `docs/knowledge/features/protocol-package.md` | § Constants, the **v2 slash-command-list vocabulary** entry; § Drift detectors | Two things: the declare-then-emit precedent, and **the trap-word misattribution warning** — see § Design, "One lesson the analogue carries that you must not copy". |
-| `internal/e2e/realclaude/testdata/ask_user_question_v2.1.239.json` | — | claude's own key set, already committed. `tool_name` is `AskUserQuestion`; `tool_input` carries `questions`, each entry `question` / `header` / `multiSelect` / `options`, each option `label` / `description`. Read it rather than trusting this table. |
-
 ## Context
 
 claude's clarifying-question tool rides the same approval bridge as a permission prompt: the call blocks on `pyry mcp-approve`, `handleApprove` parks it in `internal/permbridge` keyed by `tool_use_id`, and `streamApprovalBridge.Surface` raises it to clients. That surfacer hard-codes `tuidriver.ModalClassPermission` and uses the tool name as the prompt body, so a clarifying question today reaches a remote client as a modal titled "Permission required" whose body reads as `AskUserQuestion`.

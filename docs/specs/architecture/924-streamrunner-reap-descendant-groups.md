@@ -18,39 +18,6 @@ holding locks/ports/CPU unbounded.
 This slice **consumes** the shared reaper — it does not re-implement the process walk. It is the
 byte-for-byte streamrunner analogue of the ptyrunner wiring.
 
-## Files to read first
-
-- `internal/agentrun/streamrunner/runner.go:174-232` — the spawn + `cmd.Cancel`/`cmd.WaitDelay`
-  block (line 183 is the existing `cmd.Cancel`); the single edit site. Note `childCtx` (167) wraps
-  the operator `ctx`, and `cancelChild` is passed to the watchdog — this is why one reap in
-  `cmd.Cancel` covers both teardowns.
-- `internal/agentrun/ptyrunner/reap.go:18-25` — the `reapDescendantGroupsFn` seam var to mirror
-  verbatim (drop ptyrunner's `killGrace` const — streamrunner already defines its own at
-  `runner.go:44`).
-- `internal/agentrun/ptyrunner/runner.go:302-320` — the parity wiring: reap-then-SIGTERM inside
-  `cmd.Cancel`, and the comment explaining why it is race-free (claude + tree alive at fire time).
-- `internal/agentrun/ptyrunner/runner_test.go:641-717` — `reapRecorder`, `swapReapSeam`,
-  `assertReapedLivePid`, and `TestRun_MaxTurnsExhaustion_ReapsDescendantGroups`; the test doubles +
-  assertion helper + one reap test to mirror.
-- `internal/agentrun/streamrunner/runner_test.go:102-125` — `TestRun_CtxCancelMidRun`; the
-  existing ctx-cancel harness the new reap test clones (same `sleep` helper mode, same cancel-mid-run
-  shape) — the reap test adds the seam swap + assertion on top of it.
-- `internal/agentrun/streamrunner/helper_test.go:36-55, 84-94` — `helperRunCfg` + the `sleep` fake-
-  claude mode (installs a SIGTERM handler, prints `got SIGTERM`, exits 0) the new test reuses.
-- `internal/agentrun/reap.go:35-73` — `ReapDescendantGroups` + the three load-bearing guards
-  (`pgid<=1`, `pgid==self`, `pgid==rootPid`), so you can confirm the guards already spare
-  pyry/claude/init and the streamrunner side adds nothing.
-- `internal/e2e/realclaude/sigterm_mid_tool_use_test.go` (whole file) — the #565 real-claude
-  premise/regression harness. It already passes `--output-format=stream-json`; the premise gate
-  (AC#1) runs it with `PYRY_USE_STREAMJSON=1`. All its process-tree helpers (`waitForBashSubprocess`,
-  `waitForGroupGone`, `descendantsOf`, …) are reusable as-is.
-- `cmd/pyry/agent_run.go:266-293, 354-366` — `PYRY_USE_STREAMJSON=1` dispatch to
-  `runAgentRunStreamRunner` + `buildStreamRunnerClaudeArgs` (forwards `--allowed-tools`, system
-  prompt, `--max-turns`, `--model`, `--effort`), confirming the premise-gate harness triggers a real
-  Bash tool call on the stream-json path.
-- `docs/knowledge/codebase/565.md` — the reaper's design rationale and the "graceful SIGTERM does not
-  make claude reap its own Bash group, 3/3" measurement the premise gate re-confirms.
-
 ## Design
 
 ### AC#1 — Premise gate (verify before implementing)

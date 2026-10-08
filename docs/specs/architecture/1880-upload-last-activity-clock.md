@@ -4,25 +4,6 @@
 **Package:** `internal/attachments` (one production file: `registry.go`).
 **Blocks:** #1881 (idle window + reaper), #1817 (release every upload held by one conn).
 
-## Files to read first
-
-Symbols, not lines. Resolve each with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/attachments/registry.go` | `Registry` (type doc) | The `mu`-is-a-leaf paragraph and the "five locked methods" roster — both are rewritten by this slice. Also the "one `*Accumulator` per conn-and-attachment_id pair" sentence. |
-| `internal/attachments/registry.go` | `insertLocked` | The store site. This is where the admission stamp lands, and where the incumbent and capacity branches return *before* the store. |
-| `internal/attachments/registry.go` | `Admit` | Confirms the whole decision runs under one acquisition of `mu`; unchanged by this slice except through `insertLocked`'s body. |
-| `internal/attachments/registry.go` | `Lookup` | The body changes by one expression; the doc gains the load-bearing "deliberately does not stamp" paragraph. |
-| `internal/attachments/registry.go` | `Deliver` | Its step-1 call site, its numbered step list, and the acquisition-count paragraph — all three are rewritten. |
-| `internal/attachments/registry.go` | `count` | The precedent for an unexported member whose only callers are in-package tests. Copy its doc's shape for the new accessor. |
-| `internal/streamsup/watchdog.go` | `newStallTracker` | The repo's nil-tolerant clock seam, verbatim idiom: `if now == nil { now = time.Now }` inside the constructor. Also `stallTracker`'s `now func() time.Time` field placement. |
-| `internal/streamsup/watchdog_test.go` | `fakeClock` (its `now` and `advance` methods) | The controllable-clock double to copy into `registry_test.go`. This package has no clock double yet. |
-| `internal/attachments/registry_test.go` | `TestRegistry_DeliverIncomplete_KeepsTheEntry` | The exact fixture AC 2 needs: a declaration that survives `Add` and answers `ErrIncomplete`, so the entry is still held after the delivery. |
-| `internal/attachments/registry_test.go` | `boundChunk`, `withAttachmentID`, `testBoundTotal`, `testConnA`, `testConnB`, `testAttachmentID` | The fixture helpers every new test must reuse. Do **not** invent a declaration — see § Fixture admissibility. |
-| `internal/attachments/registry_test.go` | `TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent` | The shape AC 3's repeat-`Admit` clause extends: same held-pair fixture, one more assertion. |
-| `docs/knowledge/features/attachments-package.md` § "In-flight upload registry" and § "Mutation-testing lessons" | — | Every landed decision about `mu`, the incumbent look-up, and this package's overlay-mutant recipe. Read the "satisfied by construction" and "filtered `-run`" entries before measuring anything. |
-
 ## Context
 
 `Registry` holds each in-flight upload's `*Accumulator` under a `{connID, attachmentID}` pair and records nothing about *when* the pair was last touched, so nothing can distinguish a transfer mid-stream from one abandoned an hour ago. #1881 is the policy that reaps an idle entry; it needs a truthful activity time to measure, and it needs to be provable by advancing a clock rather than by sleeping.

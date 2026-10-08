@@ -2,27 +2,6 @@
 
 **Size:** S · **Security-sensitive:** yes (Noise send-CipherState single-ownership on an internet-exposed surface) · **Extends:** #909
 
-## Files to read first
-
-Read these before writing code. Code refs are current as of this spec (main @ `becde57`).
-
-- `internal/relay/v2session.go:436-473` — **`Run` select loop.** The eight existing arms and the single-goroutine-actor contract. You add one arm here (`m.appReply`).
-- `internal/relay/v2session.go:623-723` — **`dispatchAppFrame`.** Two halves: the control-envelope discriminator (`:640-680`, stays on Run) and the spawn-Route-then-blocking-drain loop (`:682-722`, *this is what blocks Run for the handler's whole duration* — the body moves off-Run). This is the surgical center of the ticket.
-- `internal/relay/v2session.go:725-751` — **`forwardAppReply`.** The seal-and-forward body (`s.send.Encrypt` → wrap → `m.send`), doc-commented "MUST run only on the Run goroutine" (#909). You add a `V2StateOpen` gate; the call site moves from the inline drain to the new `m.appReply` arm — still on Run.
-- `internal/relay/v2session.go:938-1035` — **`drainOnce` + `Push`.** The *exact* pattern to mirror for the new reply arm: per-conn buffered queue mutated off-Run under a leaf lock, a cap-1 `drainCh` non-blocking wake, seal on Run one-item-per-pass. Read the field docs on `drainCh`/`replayCh` (`:341-357`) — the new `m.appReply` field's doc should match this house style.
-- `internal/relay/v2session.go:154-278` — **`V2Session` struct + Run-owned-field doc convention** (see `lastActivityAt:243`, `replayQueue:268`). Add `appFrames` + `done` fields following this style.
-- `internal/relay/v2session.go:301-388` — **`V2SessionManager` struct.** Add the `appReply` channel field.
-- `internal/relay/v2session.go:799-850` — **`closeWith`.** Where per-session teardown lives (timers stopped, push queue deleted, session removed from map). Add the worker-stop (`close(s.done)`) here, symmetric with the `m.queues` delete.
-- `internal/relay/v2session_handshake.go:293-357` — **`handleNoiseInit` success tail.** Where `s.device`, `V2StateOpen`, the push queue, and the idle timer are set up. Create `s.appFrames`/`s.done` and spawn the worker here — *after* `s.device` is set and state is `V2StateOpen` (establishes the happens-before the worker relies on).
-- `internal/relay/v2session_handshake.go:419-438` — **`handleNoiseMsg`, `V2StateOpen` case.** `s.recv.Decrypt` runs on Run here (stays on Run — recv-cipher is single-owner too), then calls `dispatchAppFrame`. **This call is unchanged** — only `dispatchAppFrame`'s body changes.
-- `internal/relay/v2session_seams.go:244-260` — **`V2SessionConfig.Handlers` doc.** Its SECURITY note ("handlers run on the manager's single dispatch goroutine … drained before `dispatchAppFrame` returns") is already stale post-#909 and this ticket falsifies it further. Rewrite it to describe the worker model.
-- `internal/relay/handlers/create_conversation.go:53-59` and `:162-164` — **stale "per-conn goroutine" comments** (the retired v1 dispatcher's model). Required comment fix per the ticket.
-- `internal/relay/v2session_appframe_test.go` — **#909 test harness to reuse:** `prolificHandler`, `appFrameCount`, `driveToOpen`, `v2Recorder`, `sealAppFrame`, `waitForOutboundCount`, `decryptAppFrame`, the `openSession` struct (`frames`/`initSend`/`initRecv`). Your AC tests extend this file.
-- `internal/relay/v2session_modal_test.go` — modal deny-on-timeout harness for AC-1(b).
-- `docs/knowledge/codebase/909.md` — the partial fix, the **interleave-drain pattern**, the `forwardAppReply` single-owner invariant, and the "Out of scope: head-of-line blocking" bullet that *is* this ticket. Read-only.
-- `docs/specs/architecture/909-v2-appframe-concurrent-drain.md` — mirror its security-review structure.
-- `docs/knowledge/features/v2-session-manager.md` § Concurrency / § Out of scope — the evergreen narrative to stay consistent with. **Read-only — documentation phase owns it.**
-
 ## Context
 
 `V2SessionManager.Run` (`v2session.go:436`) is a single-goroutine actor: one `select` over inbound frames, per-session timers (`wake`, `modalTimeout`), manual rekey, the push drain, reconnect, replay, and snapshot. Every Noise cipher operation — `s.recv.Decrypt` on inbound, `s.send.Encrypt` on every outbound seal — happens on this goroutine, because flynn/noise `CipherState`s are single-owner (a concurrent `Encrypt` reuses a send-nonce, corrupting the encrypted wire and forcing a 4421 close of a live session).

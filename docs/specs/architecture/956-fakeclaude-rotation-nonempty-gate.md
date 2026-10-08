@@ -4,14 +4,6 @@
 **Size:** XS — one test-harness file, ~5 lines, zero production code.
 **Security-sensitive:** No (test-harness timing; no auth/crypto/untrusted-input surface). No security-review pass.
 
-## Files to read first
-
-- `internal/e2e/fakeclaude_test.go:79-104` — `waitForRotatedJSONL`, the polling consumer. This is the **only file to change.** Extract: the poll loop matches a `<uuid>.jsonl` **name** and returns immediately (line 94-95) with no content check — that early return is the defect.
-- `internal/e2e/fakeclaude_test.go:49-60` — the caller + the line-59 `Size()==0` sanity assertion the race trips. After the fix this assertion becomes deterministically satisfied; keep it as documentation of the invariant.
-- `internal/e2e/internal/fakeclaude/main.go:586-599` — `openSession`, the producer. Confirms the three-syscall gap (`OpenFile` → `WriteString("{}\n")` → `Sync`) and that the file is opened `O_WRONLY|O_APPEND|O_CREATE` and **never truncated** afterward. This append-only fact is what makes a "size > 0" latch monotonic. Read-only reference — **do not modify.**
-- `internal/e2e/harness.go:271-321` — `StartRotation`, the harness constructor the test uses. Read-only reference for context; unmodified.
-- `docs/knowledge/features/fakeclaude-binary.md` — producer writer inventory (per the ticket); confirms `{}\n` is the only rotation payload.
-
 ## Context
 
 `TestE2E_StartRotation_PrimitiveWiresFakeClaude` intermittently fails under the full-suite `-race` leg of `make check` with:

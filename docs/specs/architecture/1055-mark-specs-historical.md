@@ -4,15 +4,6 @@
 
 **Security-sensitive:** no (label absent). Pure documentation annotation; no design surface, no untrusted-input path, no code change.
 
-## Files to read first
-
-Codegraph is not useful here — it parses code, not markdown — so the reading list is the doc files themselves plus the ticket.
-
-- `docs/specs/README.md` (whole file, 8 lines) — existing content the AC1 statement **appends to**, not rewrites. Current text: "Per-ticket build artifacts. Created during the development pipeline." + the `architecture/` / `code-reviews/` subdir list.
-- `docs/specs/architecture/392-agentrun-delete-pty-drive-code.md:1-6` — the sharpest hazard; its top line instructs deleting the PTY-drive code that is now the default runner. Confirms *why* the banner is needed and shows the current top-of-file shape (a `# Ticket #392 — …` H1) the banner must sit **above**.
-- `docs/specs/architecture/337-agent-run-scaffold.md:1-8` — a spec whose first line is an `# …` H1 immediately followed by `## Files to read first`; the banner goes above that H1, so the file will no longer start with the H1 (valid markdown — a blockquote-first file is fine).
-- The GitHub issue #1055 body — the **exact banner text** and the strictly-additive constraint (both reproduced below so the developer needn't leave the spec).
-
 ## Context
 
 The 2026-07-15 docs review found the tree's biggest hazard is unmarked historical layers sitting beside maintained docs with equal apparent authority. Per-ticket specs under `docs/specs/` are write-once build artifacts — never current-state authority — but nothing in the tree says so, so an assistant or pipeline agent searching the docs surfaces a stale spec ("delete the current default path") with the same authority as shipped truth.

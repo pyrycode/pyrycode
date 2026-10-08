@@ -15,52 +15,6 @@ CLOSED — no open dependencies.
 
 ---
 
-## Files to read first
-
-- `cmd/pyry/relay.go:26-49` — `authGate`. Delete (AC-3). Sole caller is the v1
-  branch at `relay.go:322`; once the branch goes it is an orphaned unexported
-  symbol → `staticcheck` U1000.
-- `cmd/pyry/relay.go:169-234` — `relayWiring` struct. Drop the `v2Enabled` field
-  (181-183) **and** its mention in the struct doc comment (line 167). The v2 leg
-  becomes unconditional, so no field replaces it.
-- `cmd/pyry/relay.go:259-411` — `startRelay`. Collapse `if w.v2Enabled { …v2… }
-  else { …v1… }` (304-382) into the unconditional v2 leg. **Preserve verbatim**
-  the shared `conn.Wait()` classifier below the branch (384-404: 4409-conflict →
-  `shutdown()`, ctx-cancel → debug, other terminal error → warn) and the final
-  `cleanup` (406-410).
-- `cmd/pyry/relay.go:437-598` — `startRelayV2`, the surviving leg. **Unchanged.**
-  Note its `Handlers:` map (503-515) registers the *identical* 11-verb handler set
-  the v1 branch registered (324-334) — no app-verb coverage is lost.
-- `cmd/pyry/main.go:761-772` — the `PYRY_MOBILE_V2` env read (`v2Enabled :=
-  os.Getenv("PYRY_MOBILE_V2") != "0"`, line 772) and its 10-line comment
-  (763-771). Delete both.
-- `cmd/pyry/main.go:872-889` — the `relayWiring{…}` literal. Drop `v2Enabled:
-  v2Enabled,` (877). All other fields stay.
-- `cmd/pyry/main.go:1173-1180` — `activeConversation.CurrentConversation()`, a
-  surviving `cursorReader` implementer. Its doc comment (1174) points at the
-  stale `assistant_turn.go:24` — repoint to `cursorReader`'s new home.
-- `cmd/pyry/assistant_turn.go` — the coarse v1 assistant-turn bridge. Whole file
-  deletes **after** relocating the `cursorReader` interface (24-26) out. Everything
-  else (`assistantTurnQueueSize`, `connBroadcaster`, `assistantTurnEmitter`,
-  `newAssistantTurnEmitter`, `startAssistantTurnBridge`, methods) is v1-only.
-- `cmd/pyry/interactive_turn_v2.go:67-117` — `interactiveTurnEmitterV2` (field
-  `sup cursorReader`, line 68) + `newInteractiveTurnEmitterV2`. The natural new home
-  for the `cursorReader` interface (its surviving consumer).
-- `cmd/pyry/assistant_turn_test.go` — whole file deletes **after** relocating the
-  shared test helpers (see §Design step 4 — **note the third helper the ticket body
-  omits**).
-- `cmd/pyry/interactive_turn_v2_test.go:1-16` — recommended relocation target for
-  the shared test helpers (already consumes all three). Needs `io` +
-  `sync/atomic` imports added.
-- `cmd/pyry/active_conversation_test.go:178` — a `cursorReader` doc-comment
-  reference to keep coherent (optional cosmetic).
-- `docs/knowledge/decisions/024-noise-ik-mobile-e2e.md` — ADR 024, the hard v2
-  cutover (no mixed-mode wire). `025-mobile-remote-head-interactive-session.md` —
-  ADR 025, whose 2026-06-22 amendment removed old-app-version support. The
-  ratification basis for retiring v1.
-
----
-
 ## Context
 
 Ratified 2026-07-12: no shipping client speaks v1. ADR 024 made v2 a hard cutover;

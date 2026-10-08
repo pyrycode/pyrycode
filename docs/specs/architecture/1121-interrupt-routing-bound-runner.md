@@ -2,22 +2,6 @@
 
 **Size:** S · **Security-sensitive:** yes (cross-conversation isolation) · **Blocked-by:** #1120 (merged)
 
-## Files to read first
-
-- `internal/relay/v2session_modal.go:462-478` — `handleInterrupt`: the seam being redirected. Extract its **contract to preserve**: `s.interactive` gate → nil-`Interrupter` guard → best-effort `SendEsc()` (error Warn-logged, tolerated, no reply, no payload/screen logged). This handler does **not** change.
-- `internal/relay/v2session_seams.go:34-42` and `:320-324` — the `Interrupter interface{ SendEsc() error }` and its `V2SessionConfig` field. **Unchanged.** Note the interface doc already abstracts `SendEsc` as "claude's own interrupt" (not literally an Esc) — this is why we keep the method name.
-- `cmd/pyry/relay.go:535-543` — the `Interrupter: w.sup` wiring line (the bug). This is the one line whose value changes.
-- `cmd/pyry/relay.go:176-185` — `relayWiring` struct fields (`active`, `boundHost`, `sup`): where the new adapter field is declared.
-- `cmd/pyry/main.go:786-812` — the `boundHost` closure: the **resolution shape to mirror** (`convReg.Get → CurrentSessionID guard → pool.Lookup → sess.<accessor>`). Note it returns `sess.Supervisor()`, which is **nil for a streamsup runner** — that is why interrupt cannot reuse `boundHost` verbatim.
-- `cmd/pyry/main.go:1081-1089` and `:1106-1129` — `errNoBoundSession` + `sessionRouter.resolve`: the **LOAD-BEARING empty-`CurrentSessionID` guard**. The comment states it plainly: `Pool.Lookup("")` returns the **bootstrap** session, so an unbound conversation without this guard routes into shared bootstrap claude — the exact isolation break #678 forbids and this ticket must not reintroduce. The new resolver copies this guard.
-- `cmd/pyry/main.go:923-940` — the `relayWiring{...}` literal: where the new adapter is constructed and passed.
-- `internal/sessions/session.go:234-248` — `Session.Supervisor()`: the accessor the new `Session.Runner()` parallels (but type-preserving — returns the interface, not the concrete).
-- `internal/sessions/runner.go:9-46` — the `Runner` interface + doc. **Do not widen it.** Its doc explicitly declares interrupt-style access "speculative surface" (#1077). The interrupt is reached off-interface.
-- `cmd/pyry/streamsup_runner.go:26-38` and `:147-150` — the `streamRunner` adapter (wraps `*streamsup.Runner`, lives in `cmd/pyry`) and its `sessions.Runner` assertion. The new `streamRunner.Interrupt()` method lands here.
-- `internal/streamsup/runner.go:235-249` — `(*streamsup.Runner).Interrupt()` (#1120, the primitive). Its doc names this ticket: reach it "via its own narrow interface or a type assertion." Returns `ErrNoLiveChild` (retryable) when no child is live — never panics.
-- `internal/supervisor/modal.go:69` — `(*supervisor.Supervisor).SendEsc()`: the PTY leaf actuator. Unchanged.
-- `internal/sessions/runner_test.go:16-32` — the `fakeRunner` shape (5 `Runner` methods, all trivial). The cmd/pyry AC2 fake extends this shape + one `Interrupt()`/`SendEsc()` method.
-
 ## Context
 
 The relay's inbound `interrupt` control frame (`internal/relay` `handleInterrupt`) is wired to the **bootstrap** supervisor: `cmd/pyry/relay.go` sets `Interrupter: w.sup`, where `w.sup = bootstrap.Supervisor()`. But turns are routed to **per-conversation bound runners** (#678). So an interrupt actuates against the idle bootstrap child, not the runner executing the active conversation's turn — a latent mis-routing bug and a cross-conversation isolation gap.

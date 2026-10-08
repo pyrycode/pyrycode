@@ -6,34 +6,6 @@
 
 ---
 
-## Files to read first
-
-Generated from the codegraph query for this ticket plus the ticket's own citations. `codegraph_context` returned only `protocol.TypeRateLimited` (one node) — the work is almost entirely test and fake-harness code, which the index carries thinly — so the list below is the ticket's cites verified at `f9ae5ab` and expanded by direct reads.
-
-| Path + lines | What to extract |
-|---|---|
-| `internal/e2e/relay_v2_stream_unrecognized_test.go:46-239` | **The template.** The whole drive shape: pair → seed → fakerelay → daemon → phone dial → interactive handshake → `sealSend` → drain-until-`turn_end`. Lift `sealSend` / `nextEnv` verbatim in spirit. Note its assertion is a POSITIVE (`len(unrecognized) != 2`); this ticket inverts that, which is why the control exists. |
-| `internal/e2e/internal/fakeclaude/main.go:332-356` | The env-const block. `envStreamBogus` at `:352`; the new value-carrying const goes here, beside the value-carrying precedents (`envJSONLTriggerDir`, `envApproveSocketFile`, `envTrustTrigger`). |
-| `internal/e2e/internal/fakeclaude/main.go:606-629` | `main()`'s stream branch — where the rider value is read (`:628`) and passed. The `envStreamBogus` comment at `:621-627` is the doc shape to mirror. |
-| `internal/e2e/internal/fakeclaude/main.go:1455-1509` | `runStreamJSON` doc + signature + turn loop. The `emitBogus` hook at `:1481-1485` is exactly where the new hook goes. The doc's "-race clean by construction" claim must survive. |
-| `internal/e2e/internal/fakeclaude/main.go:1579-1615` | `writeBogusLines` + its needle constants — the writer shape and the "constants not inline literals so the e2e asserts against the same strings" rationale. |
-| `internal/e2e/internal/fakeclaude/main.go:1378-1382` | `streamSessionID = "fake-stream"` — the `session_id` the fed line stamps. |
-| `internal/e2e/internal/fakeclaude/stream_detect_test.go:269-324` | The two bogus-rider unit tests (`_BogusRider`, `_BogusRiderOffIsByteIdentical`) — the exact pair to mirror. Also the file holding 9 of the 10 `runStreamJSON` call sites. |
-| `internal/streamsup/parser.go:1156-1275` | `emitRateLimit` — the three-rung gate. Rung 1 (benign → silence) is AC-1's subject; rung 2 (any other non-empty status → one event) is AC-2's. |
-| `internal/streamsup/parser.go:627-662` | `rateLimitEventLine` / `rateLimitInfo`. **The exact JSON keys the fake must write:** `rate_limit_info.status`, `.rateLimitType`, `.resetsAt`. Note `uuid`/`session_id`/the four overage keys are deliberately absent from the decode target. |
-| `internal/streamsup/parser.go:258-295` | `benignRateLimitStatus = "allowed"` (`:279`) and the closed drop-reason set. Read the doc for why the match is byte-exact. |
-| `internal/streamsup/parser.go:211-256` | `maxRateLimitField = 256` — the per-string cap, and why there is no rate bound. Tells you AC-2's fixture is nowhere near truncation. |
-| `internal/turnbridge/outbound.go:211-252` | The mapper. Every field crosses verbatim; **a nil `TruncatedFields` is what puts `"truncated_fields":null` on the wire** — `RateLimitedPayload` deliberately has no nil→`[]` `MarshalJSON`. |
-| `cmd/pyry/interactive_turn_v2.go:296-314` | The emitter arm: `flushDelta` then `emitMapped(ctx, convID, ev)`, no turn-lifecycle mutation. Confirms the frame is conversation-scoped and needs no open turn. |
-| `internal/protocol/interactive.go:338-397` | `RateLimitedPayload` field names + JSON tags (`conversation_id`, `status`, `limit_type`, `resets_at`, `truncated_fields`), and the SECURITY paragraph. |
-| `internal/e2e/realclaude/interactive_stream_liveness_test.go:167-288` | `drainForCompletedTurn`. The `TypeUnrecognizedMessage` arm at `:229-258` is the sentinel template — copy its "here is the legitimate cause, here is the bug" phrasing. Update the doc comment's "a THIRD thing" at `:174-176`. |
-| `internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json:57-65` | The captured line. Its `rate_limit_info` object is what AC-1 means by "match the capture". `$SESSION_ID` and the `uuid` are placeholders — the fake supplies its own. |
-| `internal/e2e/harness.go:409-467` | `StartStreamInteractiveWithRelay` — `extraEnv ...string` is how the rider reaches the child. |
-| `internal/e2e/harness.go:469-488` | `seedBoundConversation` — the second half of the UUID double-seed. A mismatch with `seedBootstrapRegistry`'s id drops every event and hangs the drain for the full deadline. |
-| `docs/knowledge/features/protocol-package.md:1219` | The single evergreen sentence AC-4 corrects. |
-
----
-
 ## Context
 
 `emitRateLimit`'s three-rung gate has unit coverage at the parser. What it has never had is proof that its **silence** survives parser → `turnbridge.MapEvent` → the interactive v2 emitter → an encrypted frame on a connected client. #1410 closed the last gap in that chain (the mapper case), so both tiers below now assert something.

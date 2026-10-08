@@ -2,28 +2,6 @@
 
 Ticket: https://github.com/pyrycode/pyrycode/issues/1753 · Size: **S** · Blocker: #1752 (landed)
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-| Where | Symbol / section | What to extract |
-|---|---|---|
-| `internal/protocol/attachments.go` | `AttachmentChunkPayload` | The eight field contracts, and the **three obligations its doc comment writes onto this ticket**: the per-chunk bound is "#1753's, not a constant here"; "#1753's fixtures pin the full shape"; `TotalChunks == ceil(Size / bound)` where the bound counts **raw bytes**. |
-| `internal/protocol/interactive_test.go` | `maxV2AppEnvelope` | The 65519 test-local constant to measure against, and the comment explaining why it is *not* exported. That reasoning does **not** carry over to this ticket's bound — see § Design. |
-| `internal/protocol/interactive_test.go` | `TestToolUsePayload_FitV2EnvelopeCap` | The worst-case-fill shape this ticket's cap proof copies: `<` fill, hostile envelope ids, `t.Logf` of the measured size, one `>=` assertion. Its header paragraph is also the model for saying out loud what a hostile fill on an unbounded field does and does not prove. |
-| `internal/protocol/interactive_test.go` | `TestModelListPayload_ZeroValue_RoundTrip` | The `bytes.Contains(canonical(t, raw), …)` byte-guard pattern — the only assertion shape that survives fixture regeneration. Also the "a frame no producer will ever emit; it exists for the encoding, not the scenario" sentence. |
-| `internal/protocol/interactive_test.go` | `roundTripEnvelope` | The canonical byte-equality helper every round-trip test ends on. In-package — call it directly. |
-| `internal/protocol/envelope_test.go` | `readFixture`, `canonical` | Fixture read + JSON compaction. Both in-package. |
-| `internal/protocol/envelope.go` | `Envelope` | The seven wire keys and which three are `omitempty` — this is the wrapper whose worst case the cap arithmetic budgets for. |
-| `internal/relay/v2bundlestream.go` | `bundleChunkBytes` | The **form** to copy for the constant's comment: the arithmetic spelled out, the test named as the enforcer, and "if that ever fails, LOWER this constant — never raise it". Copy the form, **not the value** — it measures sealed ciphertext against 65535, this ticket measures a marshalled envelope against 65519. |
-| `internal/protocol/testdata/` | `conversations.json`, `ack.json` | The house shape for a **daemon → client response** frame: `in_reply_to` present. `send_message.json` is the client → daemon counterpart with no `in_reply_to`. This is what makes the two directional fixtures structurally different rather than merely differently-valued. |
-| `internal/protocol/testdata/` | `debug_bundle_chunk.json` | The house shape for a fixture whose payload carries a `[]byte` field. |
-| `internal/conversations/id.go` | `ValidID` | The canonical-shape precedent `AttachmentChunkPayload`'s doc names for `AttachmentID`: exactly 36 chars, UUIDv4 form. Anchors `MaxAttachmentIDBytes`. |
-| `docs/knowledge/features/protocol-package.md` | § "Slash-command-list payload (#1727 shape, #1718 fixtures…)" | **Four traps recorded from the last fixture ticket, all of which apply here verbatim:** the `go test -overlay` generator recipe, the sole-redness claim trap, `readFixture`-once-outside-the-loop, and the zsh-vs-bash heredoc trap. Read all four bullets. |
-| `docs/knowledge/features/protocol-package.md` | § "Model-list payload (#1704 shape, #1705 fixtures…)" | The populated-vs-zero fixture redundancy lesson: a populated fixture only earns distinct coverage on a key where one of its rows lands on that key's zero value. |
-| `docs/protocol-mobile.md` | § Application-envelope size cap | Where 65519 comes from (65535 Noise transport message − 16-byte AEAD tag). |
-| `docs/protocol-mobile.md` | § `tool_result` | The six-bytes-per-escaped-byte arithmetic already worked out for a bounded text field, with a measured worst case. The escape ceiling this ticket's arithmetic reuses. |
-
 ## Context
 
 #1752 shipped `AttachmentChunkPayload` as wire vocabulary — eight fields, no producer, no consumer, no validator. It also wrote three obligations into its doc comment that are the specification for this slice: publish the per-chunk raw-byte bound, pin the full shape with fixtures in both directions, and make `TotalChunks == ceil(Size / bound)` a checkable relationship for #1741's allocation guard.

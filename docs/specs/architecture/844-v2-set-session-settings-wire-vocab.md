@@ -15,48 +15,6 @@ persists). This follows the established wire-vocab → handler split precedent:
 
 ---
 
-## Files to read first
-
-- `internal/protocol/codes.go:64-106` — the v2-only `Type*` const-block pattern
-  (`TypeRekeyRequest`, the interactive events). Copy the doc-comment shape: the
-  "MUST NOT be added to v1TypeSet … the drift detector in compat_test.go
-  partitions …" boilerplate is load-bearing and every v2 cluster repeats it.
-- `internal/protocol/codes.go:304-337` — `TypeNewSession` (inbound v2 control) and
-  `TypeRequestDebugBundle`: the closest naming precedent for the request verb
-  (imperative, phone → binary, intercepted pre-`dispatch.Route`).
-- `internal/protocol/codes.go:1-31` — the `Code*` error-constant block; add a new
-  **`// Session errors.`** group here in spec-table order.
-- `internal/protocol/messaging.go:36-64` — `SessionTransitionPayload`: struct-shape
-  precedent, and the **contrast** for the optional-field decision. It uses
-  `*string` **without** `omitempty` to force a literal `null` on the wire. This
-  ticket wants the opposite (key *absent*, not `null`), so it uses `omitempty` —
-  see § Design.
-- `internal/protocol/messaging.go:30-33` — `BackfillSincePayload`: the inline
-  comment explaining the omitempty/no-omitempty wire-shape trade-off, and the
-  byte-equal regression-guard idea its test encodes.
-- `internal/protocol/compat_test.go:82-212` — the three partition tests you must
-  extend: `TestIsV1Compatible` (rejection cases), `TestV1TypeSet_CoversAll…`
-  (leave untouched — it counts v1 types only), `TestTypeConstants_V1V2Partition`
-  (`all` list + `v2OnlyTypes` map), and `TestErrorCode_Constants_MatchSpec` (the
-  drift assertion — add `session.not_found`, bump the count 12→13).
-- `internal/protocol/messaging_test.go:82-118` — `TestBackfillSincePayload_RoundTrip`:
-  the exact golden round-trip shape to mirror (unmarshal envelope → assert Type →
-  unmarshal payload → assert pointer nil/non-nil → re-marshal → `bytes.Equal` on
-  `canonical()`).
-- `internal/protocol/envelope_test.go:11-30` — `canonical(t, b)` and
-  `readFixture(t, name)` helpers the new test reuses (both are package-local).
-- `internal/sessions/session.go:75-88` — `sessions.SettingsUpdate{Model, Effort
-  *string; YOLO *bool}`: the decode target the handler sibling will `json.Unmarshal`
-  the request payload into. Field names + pointer semantics must line up 1:1.
-- `docs/protocol-mobile.md:405-450` — the Application-message-types table (append two
-  rows after the `request_debug_bundle` row at line 448).
-- `docs/protocol-mobile.md:708-718` — the `### New session (v2)` subsection: the
-  prose template for the new `### Session settings (v2)` subsection.
-- `docs/protocol-mobile.md:804-811` — the Error-codes *additions* table; append the
-  `session.not_found` row here.
-
----
-
 ## Context
 
 Desktop (pyrycode-desktop#156) and a forthcoming mobile client both need one shared

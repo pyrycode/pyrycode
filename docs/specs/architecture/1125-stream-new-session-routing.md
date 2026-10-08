@@ -7,21 +7,6 @@ bootstrap supervisor — with **no `/clear` keystroke**. The routing twin of the
 interrupt sibling #1121; consumes the runner-level `RestartFresh(newID)` mechanism
 delivered by #1124.
 
-## Files to read first
-
-- `cmd/pyry/main.go:1198-1249` — `resolveBoundRunner` + `activeInterrupter` + `interruptRunner`. **This spec's three new symbols mirror these one-for-one.** Extract: the `CurrentSessionID == ""` isolation guard (never resolve to bootstrap), the injected-seam struct shape, the type-switch dispatch idiom.
-- `cmd/pyry/main.go:930-940` — the relay-worker literal where `activeInterrupter` is populated (`currentConv: active.CurrentConversation`, `resolveRunner` over `resolveBoundRunner`). The new `activeSessionStarter` is wired in the same literal, identically.
-- `cmd/pyry/relay.go:183-186` — the worker struct field `activeInterrupter relay.Interrupter`. Add the sibling `activeSessionStarter` field here.
-- `cmd/pyry/relay.go:565-576` — the `Interrupter:`/`SessionStarter:` wiring block in the `V2SessionConfig` literal. Change `SessionStarter: w.sup` → `SessionStarter: w.activeSessionStarter` (+ its comment).
-- `internal/sessions/transition.go` (whole file, 107 lines) — `onRotate`, `rebindConversation`, `notifyTransition`. The new `RotateForNewSession` lives here and reuses `notifyTransition(ReasonClear)`. Extract: the rotate→rebind→observe sequence and the off-`Pool.mu` `notifyTransition` discipline.
-- `internal/sessions/pool.go:586-627` — `RotateID` body (the re-key + bootstrap-flip + `saveLocked`). `RotateForNewSession` reuses this re-key logic under `Pool.mu`.
-- `internal/sessions/pool.go:1386-1428` — `RegisterAllocatedUUID` / `registerAllocatedUUIDLocked` / `IsAllocated` + their doc. Extract: the skip-set invariant — **every id pyry mints and spawns claude with via `--session-id` must be registered before the spawn**, or the fsnotify watcher treats the resulting `<id>.jsonl` CREATE as a claude self-rotation.
-- `internal/streamsup/runner.go:314-371` — `RestartFresh(newID)` + `nextSpawnID` (rotatePending → `--session-id <newID>`, one fresh spawn, then `--resume`). Extract: this is a **concrete** method deliberately off `sessions.Runner`; the empty-id Warn no-op; the "leaves `r.args` untouched" contract.
-- `cmd/pyry/interrupt_routing_test.go` (whole file) — the exact test shape to mirror: `baseRunner` stub, per-arm dispatch stubs, `TestResolveBoundRunner` (real pool), `TestActiveInterrupter` (injected fakes, bootstrap-untouched proof). `newRouterTestPool(t)` helper is reused.
-- `internal/sessions/transition_test.go` — reuse its rotation/rebind/observer test helpers for `TestRotateForNewSession`.
-- `internal/conversations/registry.go:232` — `RebindSession(oldID, newID string) bool` (returns true iff a conversation owned oldID). Called inside `notifyTransition`'s rebind; confirms the active conversation's `CurrentSessionID` moves oldID→newID.
-- `internal/relay/v2session_modal.go:480-521` — `handleNewSession`. **Unchanged** — the `s.interactive` capability gate + nil-seam guard stay exactly as-is. Extract: only the *adapter behind the `SessionStarter` seam* changes; the relay handler and its `v2session_newsession_test.go` are untouched.
-
 ## Context
 
 Today `new_session` is a **bootstrap mis-route** plus an **indirect** rotation:

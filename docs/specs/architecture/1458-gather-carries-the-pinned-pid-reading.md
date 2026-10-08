@@ -5,29 +5,6 @@
 
 ---
 
-## Files to read first
-
-All paths are `internal/e2e/realclaude/` unless stated. Resolve each symbol with
-`codegraph_node` / `codegraph_search`; do not go hunting by line number.
-
-| File → symbol | What to extract |
-|---|---|
-| `finding_run_gather_test.go` → `finGatherInputs` | The seven fields today, the **§ "All three staged fields keep the readings' own names, types and ZERO-POLARITY"** heading, and the `ClaudeState` / `RunnerPath` field docs. The heading is the naming rule the new field obeys, and it is one of the sites AC4 moves. |
-| `finding_run_gather_test.go` → `finGatherReadings` | The **§ "The caller's obligations"** block (where the new obligation goes), the per-matched-pid `pinReadState` loop (**leave it exactly as it is**), and the two-line "caller's own two readings, carried WHOLE" tail (where the pass-through goes). |
-| `finding_run_gather_test.go` → `TestFinGatherRunnerPathDoesNotReachTheScan` | The shape AC2's test mirrors: a shared `finGatherInputs` base, rows differing in one field, premise-asserts before the negative. |
-| `finding_run_gather_test.go` → `finGatherRunnerPathCases`, `TestFinGatherGateReadsTheRunnerPathTheRunTook` | The **only** recipe that drives a gather to `trailGateAbsentOwesNone`: seed `trailKeyNamesNoTerminalReason()`, `RunnerPath: tdnRunnerFromArgv(tdnFixtureStreamArgv)`. AC3's test is unreachable without it. |
-| `finding_run_gather_test.go` → `TestFinGatherReturnsNoCapturedBytes` | Its **§ "Both plants, and the one that is excluded"** scope note — an AC4 group-2 site. Read it; do **not** add a plant to it. |
-| `trail_run_outcome_test.go` → `trailRunReadings` | The `PinnedPid` field doc — why it is taken **whole**, and why it is never folded into `Liveness`. This is the contract the pass-through must not narrow. |
-| `trail_run_outcome_test.go` → `trailClassifyRun` | Two regions: the **no-C10 note** (AC4 group 1) and the comment block above the `readings.Ordering.Value == ""` guard, which holds one group-2 paragraph and **two group-3 paragraphs you must not touch**. |
-| `trail_sighting_liveness_test.go` → `trailSightingReasonPidReadFailed` | Its doc names *"the zero `\"\"` of an unfilled pinStateOutcome"* among the shapes it answers for. That sentence is why an unfilled pin needs no guard and why the empty case is honest. |
-| `process_pin_liveness_test.go` → `pinReadState`, `pinClassifyState`, `pinStateOutcome` | The producer, its seven fields, and the branch that puts **raw `ps` stderr** into `ToolStderr` (capped by `reachCapCommand`, otherwise verbatim). Note that `pinReadState(0)` returns `pinStateInstrumentFailed`, **not** the zero — see the fourth trap below. |
-| `finding_exit_path_probe_test.go` → `finExitRunProbe` | Step 3 (`claudeState := pinReadState(h.ClaudePID).Verdict` — the **wrong pid**) and step 4's `finGatherInputs` literal, where the new field is staged. |
-| `finding_live_pin_test.go` → `finLivePinReduce`, `finLivePinWantRows`, `finLivePinReading` | The measured cardinality of `h.Pin.PGIDs`: one entry per FIFO-matched row, `finLivePinWantRows == 2` on a healthy run, both entries naming one group; **nil** when the scan failed. This is AC1's selection rule's basis. |
-| `finding_live_run_test.go` → `finLiveRunHandle` | Its doc's *"finGatherInputs' seven fields need neither"* bullet — an AC4 group-2 site. |
-| `trail_ordering_premises_test.go` → `trailCertifyOrdering` | Its **§ "The premises are supplied, not recovered"** — an AC4 group-3 site. Verify, expect no edit. |
-
----
-
 ## Context
 
 `trailClassifyRun`'s `trailGateAbsentOwesNone` arm consults the pinned-pid sighting

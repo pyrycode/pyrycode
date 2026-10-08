@@ -2,22 +2,6 @@
 
 **Size:** S (1 production file, ~15–25 net production LOC, 0 new exported types). `security-sensitive`.
 
-## Files to read first
-
-- `internal/relay/v2session.go:1689-1760` — `dispatchAppFrame`: the whole function under change. Extract the current shape — per-frame `outbound` (cap `handlerOutboundBuf`), synchronous `dispatch.Route`, then the drain-and-seal loop. This is the ~30 lines you rewrite.
-- `internal/relay/v2session.go:1675-1688` — `dispatchAppFrame`'s doc comment: the synchronous-handler assumption and the "channel deliberately NOT closed" property (from #446). Both survive the fix; the doc comment needs a targeted rewrite.
-- `internal/relay/v2session.go:238-246` — `handlerOutboundBuf = 8` const + comment. **Unchanged** — the buffer stays 8; the fix removes the *dependence* on it being large enough, it does not resize it.
-- `internal/relay/v2session.go:1599-1673` — `handleNoiseMsg`, the sole caller of `dispatchAppFrame` (line 1670, `V2StateOpen` branch). Confirms no signature/caller change.
-- `internal/relay/v2session.go:925-962` — `Run`: the single dispatch goroutine. `dispatchAppFrame` runs on this goroutine (Run → `handleFrame` → `handleNoiseMsg` → `dispatchAppFrame`). This is the goroutine that must remain the sole owner of `s.send.Encrypt`.
-- `internal/relay/v2session.go:3035-3044` — `m.send`: the forward-to-relay seam (`m.cfg.Outbound`). Called on Run; unchanged.
-- `internal/relay/v2session.go:790-829` — `V2SessionManager` struct + the single-owner-goroutine invariant comments (the `wake`/`manualRekey`/`pushMu` doc blocks). The canonical statement of why off-Run work funnels *back* onto Run before touching `s.send`. Your fix must not violate this.
-- `internal/dispatch/dispatch.go:130-163` — `Conn.Send` / `Conn.Reply`: `Send` blocks on `c.outbound <- routing`, unblocking only on ctx cancel. This is the blocking primitive that deadlocks today.
-- `internal/dispatch/dispatch.go:539-586` — `Route`: single-frame dispatch through the handler table. Synchronous; returns after `h(ctx, conn, env)` returns. Handlers reply via `conn.Send`/`conn.Reply` only — they never touch `s.send`.
-- `internal/relay/v2session_test.go:862-938` — `TestV2Session_OpenState_EncryptedRoundTrip`: the exact harness the regression test copies — `driveToOpen`, `sealAppFrame`, `decryptAppFrame`, `v2Recorder`, `waitForEnvelopes`, a `Handlers` map keyed by `protocol.TypeListConversations`.
-- `internal/relay/v2session_test.go:98-169` — `startManager` + `waitForEnvelopes` (and `waitForOutboundCount` at :1861) — how a test drives frames and observes sealed outbound with a deadline (a deadlock surfaces as a timeout here).
-- `docs/knowledge/codebase/446.md` — the ticket that introduced `dispatchAppFrame`, `handlerOutboundBuf`, and the synchronous-handler invariant. Read the "Lessons learned" → head-of-line-blocking note and the "never close the channel" pattern; both frame this fix. **Do not add `docs/knowledge/codebase/909.md`** — documentation phase owns it.
-- `docs/knowledge/features/v2-session-manager.md` § transition table / "Out of scope" — the "per-conn fan-out for handler dispatch" follow-up. This fix is *narrower* than that follow-up (see Open questions).
-
 ## Context
 
 **The deadlock.** `dispatchAppFrame` (v2session.go:1731) allocates a per-frame `outbound` channel of capacity `handlerOutboundBuf = 8`, runs `dispatch.Route` **synchronously on the manager's single Run goroutine**, and drains that channel only **after** `Route` returns. `Conn.Send` (dispatch.go:135) blocks when the channel is full and unblocks only on ctx cancel — and the ctx is the manager's `runCtx`, which cancels only at daemon shutdown.

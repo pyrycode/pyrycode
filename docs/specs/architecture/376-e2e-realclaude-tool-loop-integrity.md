@@ -1,13 +1,5 @@
 # Spec — #376 e2e/realclaude: tool loop integrity test (multi-turn with Bash)
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go` — `WithWorktree`, `RunPyryAgentRun`, `RunOpts`, `RunResult`, `ReadJSONL`, `JSONLEntry`. The full fixture surface this test composes against. Note the validation rules in `validateRunOpts` (`Workdir/Prompt/SystemPrompt/AllowedTools/MaxTurns/Effort/Model` all required and non-empty/positive).
-- `internal/e2e/realclaude/allowed_tools_enforcement_test.go` — closest sibling. Lift its structure verbatim (file header comment, `WithWorktree`, `RunPyryAgentRun`, ExitCode/SessionID gates, `ReadJSONL`, inline-helper-on-`e.Raw` pattern). The inline `bashInvokedInRaw` helper at lines 76–94 is the precedent for the parser this spec adds.
-- `internal/e2e/realclaude/prompt_fidelity_test.go` — second sibling. The `jsonlPathFor` helper at lines 79–89 already exists in the package; the new test reuses it for failure messages (no need to redefine).
-- `internal/agentrun/jsonl/reader.go:38-83` — `Event` struct. `Event.Raw` carries the verbatim JSONL line bytes; `Event.Kind` whitelists `assistant`/`user`/`tool_use`/`tool_result`/`system`/`attachment`/`""`. **Crucial:** the on-disk JSONL emits `tool_use`/`tool_result` as content blocks **inside** `assistant.message.content[]` and `user.message.content[]` — NOT as top-level `Kind == "tool_use"` / `Kind == "tool_result"` events. This test parses `e.Raw` for those nested content blocks.
-- `internal/agentrun/streamjson/emitter.go:251-275` (`trailer` struct) and `internal/agentrun/streamjson/testdata/captured_run.jsonl:7` (the synthesised `result` trailer fixture). Authoritative shape of the `type:"result"` line on pyry's stdout. **Note:** pyry's emitter does NOT include `permission_denials` (claude-only field) — see [Design § Result trailer source and `permission_denials`](#result-trailer-source-and-permission_denials) below.
-
 ## Context
 
 #364 (prompt fidelity) and #365 (`--allowed-tools` enforcement) exercise single-turn behaviour. The interesting failure surface for stream-json mode is the multi-turn tool loop: claude emits `tool_use`, executes the tool itself, emits `tool_result`, continues to the next assistant turn, and eventually reaches `end_turn`. A regression test pins the protocol shape so a silent change in claude's stream-json contract surfaces in CI rather than at the next user-facing breakage.

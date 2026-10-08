@@ -5,34 +5,6 @@
 
 ---
 
-## Files to read first
-
-Turn-1 data load. Read these before writing anything; the design below is expressed in their vocabulary.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trailer_admissibility_test.go:104-234` | The two shipped value spaces verbatim — seven `gate-*`, seven `admit-*`. AC4's rejection list draws from here, and the new `order-*` values must be pairwise-distinct from all fourteen. Also the house style for a value's doc comment: what it says, and what it explicitly refuses to say. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:297-343` | `trailGateResult` and `trailAdmitResult`. **`trailAdmitResult` (`:340-343`) is the shape this ticket copies exactly** — `Value` + `Detail`, nothing else. Read `trailGateResult`'s field docs for why a third field has to earn its place. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:345-354` | `trailDetail` — the only Detail formatter this family uses, and its 512-byte cap via `reachCapCommand`. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:358-427` | `trailGate`'s doc block and its signature. `:361-365` is the purity contract AC1 names verbatim: no exec, no clock, no filesystem, no `*testing.T`, never fails a test. Copy its shape, not its words. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:1164-1304` | `TestTrailAdmissibilityConstantsAreClosed` — the union map this ticket joins. Note it prints **no count literal** (`:1172-1176` says why), that the loop at `:1248-1261` is what catches an empty or colliding value, and that the zero-record walk at `:1263-1293` is per-record-type. Two prose sentences go stale when a fifth space joins — see § Scope. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:100-220` | The thirteen `run-*` values. Read `:108-113` for the sub-namespace-prefix argument — it is the reason this ticket's values carry `order-`. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:155-163` | `trailOutcomeVoidLivenessInstrument`'s doc — the "would manufacture a clean negative out of the instrument's breakage" sentence the ticket quotes. This spec applies the same reasoning one layer up. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:222-270` | `trailRunReadings`. **Read-only for this ticket.** #1437 owns its shape; do not add a hold field here or anywhere in this file. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1571-1627` | `TestTrailRunOutcomeCarriesNoCapturedBytes`. The structural half at `:1609-1626` (marshal → decode to `map[string]json.RawMessage` → walk keys against `command`/`args`/`comm`/`argv`) is the shape AC5 names. Note the premise assertion at `:1594-1599` — the test asserts the fixture classified as expected *before* it asserts anything about the bytes. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1629-1678` | `trailRunOutcomeValues` + `TestTrailRunOutcomeValuesAgreeWithThePredicate`. **This is AC4's named shape**: list, both directions, a count asserted against the ticket's own enumeration, and a rejection loop over the adjacent spaces' values. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:647-663` | `holdProbeFIFO`'s doc. `:652-655` is the load-bearing fact: the write end never leaves the helper and the only release is its own `t.Cleanup`, which runs after the subtest body. That is what makes "the hold was held for the whole of the wait" something a caller in the subtest body can *know* rather than assume. |
-| `internal/e2e/realclaude/finding_stage_held_group_test.go:168-188` | `finStageSubject` — needles, pinned pids, a group, a row count. **No hold boolean.** Confirms the ticket's claim that no shipped gather records the fact, so it is a caller-supplied parameter. |
-| `internal/e2e/realclaude/finding_stage_held_group_test.go:202-260` | `finStageHeldGroup` — how a hold is actually staged, and the defer-vs-`t.Cleanup` ordering argument. Context for what the caller is asserting when it passes `holdHeld=true`. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:372-384` | `finSighting` — the **wrong** input. Its `TerminalReason` / `StopReason` / `Subtype` / `KeyNames` marshal as `terminal_reason` / `stop_reason` / `subtype` / `trailer_keys`, none of which is `command`-shaped, so AC5's key sweep would not catch it. The parameter type is the enforcement. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:267-299` | `trailWaitForTrailer` — the sighting supplier. This predicate consumes the *fact that* it returned a `trailSeen` observation, never the observation. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:325` | `trailNeedle`, and the reason AC5 does **not** use it here. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:119-124` and `:945-950` | `reachMaxCommandBytes = 512`, `reachTruncationMarker`, `reachCapCommand`. Truncation is silent past the cap — the Details below are sized to stay well under it. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:519-574` | `TestFinOutcomeConstantsAreClosed` — the *other* closure shape in this package (a self-contained per-family map). Read it to understand why this ticket joins the union map instead; § Design records the choice. |
-| `CODING-STYLE.md` § Testing | Table-driven, `t.Run`, stdlib `testing` only, no testify. |
-
----
-
 ## Context
 
 A staged probe run holds its command un-finishable — blocked on a FIFO nobody writes to — for the whole of the wait on pyry's exit. Three instants are then ordered by construction: the trailer is sighted on pyry's stdout, then pyry exits, then the rig re-reads a pid it pinned while the command was still reachable. That ordering is what lets a later reading of the pid say something about the earlier sighting.

@@ -2,20 +2,6 @@
 
 **Size:** S. Three production files touched (`internal/relay/handlers/create_conversation.go`, `cmd/pyry/relay.go`, `cmd/pyry/main.go`), ~160 LOC including tests. Call-site cascade for the signature change is 2 production + 5 test = 7, under the 10-site red line. `security-sensitive` — security-review pass appended at the end.
 
-## Files to read first
-
-- `internal/relay/handlers/create_conversation.go:30-122` — the whole handler. `ConversationCreator` interface (30-33), the SECURITY comment to update (46-52), the mint→Create→Save→Reply body (53-121). This is where the substantive change lands.
-- `internal/relay/handlers/send_message.go:47-60` — `TurnWriter`: the consumer-declared-interface idiom to mirror for `SessionCreator` (plain types only, no `internal/sessions` import). `:15-29, :88-115` — the 30s `context.WithTimeout` bound-the-spawn pattern to copy for the mint call.
-- `internal/sessions/pool.go:870-937` — `Pool.Create(ctx, label) (SessionID, error)`: the exact mint surface. Read the docstring carefully — the empty-id-vs-non-empty-id error contract (873-879) and the "ctx cancel after supervise may still activate" residue (895-899) drive the handler's error handling.
-- `internal/sessions/pool.go:939-965` — `buildSession`: confirms the spawn workdir is `tpl.WorkDir` (= the trusted shared workdir) and that the claude argv gets `--session-id <minted-uuid>` only — never the label, never `Cwd`. This is the AC#4 enforcement point.
-- `internal/sessions/pool.go:1145-1172` — `Pool.Activate` cap path: `ActiveCap<=0` is uncapped; otherwise LRU-evicts a victim. Grounds the security finding on process exhaustion.
-- `internal/conversations/conversation.go:43-49` — `Conversation.CurrentSessionID string` (`json:"current_session_id,omitempty"`): the binding field, already round-tripped by the registry.
-- `internal/conversations/registry.go:64-124` — `Save` (atomic temp+rename, sorts by LastUsedAt then ID) and `Create` (append, caller owns uniqueness). Confirms AC#3 persistence is automatic once the field is populated before `Save`.
-- `cmd/pyry/relay.go:88-101, :142-164, :271-315` — `startRelay` / `startRelayV2` signatures + the two `handlers.CreateConversation(...)` registration sites (v1 dispatcher at :162, v2 manager map at :301) that thread the new collaborator.
-- `cmd/pyry/main.go:580-591` — the `startRelay(...)` call (pool already in scope, passed as the `transitions` arg) and `poolResolver{pool}` at :591 — the precedent adapter for the new `sessionMinter` (`:625-633`).
-- `internal/relay/handlers/create_conversation_test.go` — all 5 existing tests + helpers; the `SessionCreator` param cascades through every `CreateConversation(...)` call here, and `TestCreateConversation_CreatedID_ValidatesForSendMessage:258-282` must be rewritten (its premise "no claude session spawned at create time" inverts).
-- `internal/relay/handlers/send_message_test.go:27-60` — `stubTurnWriter`: the test-double idiom to mirror for `stubSessionCreator`.
-
 ## Context
 
 Today `create_conversation` only writes a registry row (`create_conversation.go:84-90`) with `CurrentSessionID` left empty, so every discussion shares the single bootstrap claude. This slice — the foundational cut of #672 — wires the create path onto the existing `sessions.Pool` so each conversation gets its own dedicated, isolated session, recorded via the existing `Conversation.CurrentSessionID` field. The session spawns in the daemon's already-trust-marked shared workdir (`cmd/pyry/main.go:513` `trustMark`); the phone-influenced `Cwd` is deliberately **not** a spawn input here — distinct per-conversation working directories (and the trust/boundary validation they require) are the per-conversation-workdir follow-up.

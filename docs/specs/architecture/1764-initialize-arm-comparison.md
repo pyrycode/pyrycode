@@ -3,20 +3,6 @@
 **Size:** S (PO's `size:s` confirmed — re-checked against this spec in § Scope check.)
 **Shape:** test-only, offline, additive. One new file in `internal/e2e/realclaude/`, one `finOfflineExecBans` entry, three one-sentence prose corrections. No production file changes.
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/e2e/realclaude/initialize_control_record_test.go` → `initControlFixtureRecord`, `initControlResultTrailer`. The decode target and the trailer fields. Read the record's doc comment for the "no parallel struct, no new fields" contract; this slice decodes through it and adds nothing to it.
-- `internal/e2e/realclaude/initialize_control_window_test.go` → `initControlReadWindow`, `initControlWindowField`, and the file header. `initControlWindowField` is **reused verbatim** by this slice's reducer — it is the package's untrusted-bytes field decoder. The header is also the shape to copy for this file's own header (offline claim → ban-entry pointer → `go test -tags` recipe).
-- `internal/e2e/realclaude/set_permission_mode_probe_test.go` → `probeOutcome`, `setModeProbeOutcome`, `setModeTurnWindows`, `setModeOutcomeAt`, `setModeFieldMatches`. The shape to borrow. **Borrow the shape, not the field set, and not `setModeOutcomeAt`'s return type** — § Design says why for both.
-- `internal/e2e/realclaude/initialize_control_names_test.go` → `initControlArms`, `initControlArm`, `initControlArmFixtureName`, `initControlFixtureName`; the file header's "swept by three globs" paragraph; and the token table inside `TestInitControlFixtureName_AvoidsCommittedFamiliesAndStaysContained`. The arm table is the single source of truth for the arm set and for which arm is the control. The header paragraph is correction 1. The token table is why the new glob must **not** join that test's family-glob subtests (§ Design, "Do not add the glob to the collision tables").
-- `internal/e2e/realclaude/initialize_control_probe_test.go` → `TestRealClaude_InitializeControl_SendPointArms`, `runInitControlChild`. The live writer that mints these fixtures; its write-set check carries correction 3 in a `t.Errorf` string.
-- `internal/e2e/realclaude/permission_protocol_regression_test.go` → `TestRealClaude_PermissionProtocol_RegressionFixtures`, `assertRegressionFixture`. The package's glob-over-committed-fixtures idiom: relative glob including the `testdata/` prefix, loud fatal on zero matches, per-file subtests, `t.Errorf` rather than `t.Fatalf` inside per-finding checks so one run reports every problem at once.
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans`, `TestFinOfflineFilesReachNoExecHelper`. The table to extend, and the matcher's rule: a bare `*ast.Ident` **or** a dotted selector, comments not parsed.
-- `internal/e2e/realclaude/testdata/initialize_control_v2.1.239_before_first_turn.json`, `…_after_completed_turn.json`, `…_control_no_request.json` — the three inputs. Read `arm`, `turn_boundaries`, `send_point_index`, `after_send_point_system_init_count`, `after_send_point_result_trailers` before designing against § Design's table. **Do not dump `stdout_events` into a run log** (§ Security review).
-- `docs/knowledge/features/e2e-realclaude.md` § `initialize_control_window_test.go` (#1762) and § `initialize_control_names_test.go` — the family's accumulated lessons: the non-nil-empty contract, the `type`+`subtype` keying of the init count, and what a mutation table in this family actually proves. Read-only; the documentation phase owns this file.
-
 ## Context
 
 #1763 committed three arm captures of the `initialize` control-request measurement: two arms that send the request at different send points, and one that sends nothing. #1762 built the send-point window reader. Nothing yet compares the arms.

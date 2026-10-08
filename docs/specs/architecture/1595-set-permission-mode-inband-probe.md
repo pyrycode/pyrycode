@@ -4,51 +4,6 @@ Measurement-only ticket. Nothing in `internal/`, `cmd/` changes; one new file un
 `internal/e2e/realclaude/`, its captured fixtures, and one knowledge doc. #1596 acts on
 what this records.
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/e2e/realclaude/permission_protocol_spike_test.go` → `TestRealClaude_PermissionProtocol_Spike`
-  — the whole shape this file mirrors: direct `exec.CommandContext("claude", …)`, one reader
-  goroutine over a `bufio.Scanner`, a fixture written on every outcome, and a test that passes
-  either way. **Read the whole file**; four of its helpers are reused verbatim.
-- `internal/e2e/realclaude/permission_protocol_spike_test.go` → `captureClaudeVersion`,
-  `versionSlug`, `packageDir`, `truncateString` — **reuse these four as-is** (same package, no
-  import, no copy). They are the difference between this ticket fitting in `s` and not. Do not
-  reimplement them and do not modify them.
-- `internal/e2e/realclaude/permission_protocol_spike_test.go` → `writeFixture`, `fixtureRecord`
-  — the shapes the new writer and record type mirror. `writeFixture` hardcodes one filename per
-  version, so it cannot be reused for four arms; write a sibling. **Do not edit either** — the
-  regression test below depends on both.
-- `internal/e2e/realclaude/permission_protocol_regression_test.go` → `fixtureGlob`,
-  `fixtureNameRE`, `assertRegressionFixture` — the trap the ticket names. Extract: exactly which
-  filenames get swept into a test that asserts a different argv's findings.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapFixtureGlob` — the *other*
-  testdata glob in this package. Both globs must miss the new names.
-- `internal/e2e/realclaude/interactive_stream_inband_model_test.go` →
-  `inbandWaitResults`, `inbandSendTurn`, `inbandTapRecorder` — the poll-until-result-count idiom
-  and the mutex-guarded stdout recorder. Extract the *idiom*; do not reuse `inbandTapRecorder`
-  itself (it is wired into `streamsup.Config.Stdout` and carries a partial-line accumulator this
-  file does not need — see § Design, "why a plain Scanner").
-- `internal/e2e/realclaude/fixtures.go` → `WithWorktreeAuthenticated` — the credential/skip gate.
-  Accepts `CLAUDE_CODE_OAUTH_TOKEN`; returns the pinned `$HOME`.
-- `internal/e2e/realclaude/resilience_test.go` → `resolveClaudeBin` — the binary resolver with the
-  fork-bomb guard. Use it, not a bare `exec.LookPath`.
-- `internal/streamsup/envelope.go` → `controlRequest`, `controlRequestInner`,
-  `marshalInterruptEnvelope` — the exact production wire shape of a control line and the
-  structured-encoding discipline (never string concatenation) the new marshaller must copy.
-- `internal/streamsup/runner.go` → `(*Runner).Interrupt`, `nextInterruptID` — where the id is
-  minted and the documented fact that the `control_response` ack is never read. This ticket reads
-  it; that is the new part.
-- `internal/sessions/session.go` → `claudeSettingsArgs`, `(*Session).spawnArgs` — the one place
-  `--dangerously-skip-permissions` enters an argv. It is what "pyry's invocation" means in AC 5.
-- `internal/sessions/pool.go` → `inBandDeliverable` — the predicate whose `YOLO != nil → false`
-  arm this measurement exists to inform. Read its doc comment; it names the missing measurement
-  in as many words.
-- `docs/knowledge/features/permission-protocol-spike.md` — §§ "Findings" and "Reproducing the
-  matrix". Finding #2 (Bash ran under every mode) is the reason a behavioural read needs a
-  control, and § "Reproducing" is the rename-between-runs workaround that does not transfer here.
-
 ## Context
 
 pyry expresses the bypass posture as a spawn-time flag, so changing it live means killing the

@@ -3,45 +3,6 @@
 **Size:** xs (confirmed — see § Size check)
 **Scope:** `internal/streamsup` (production + test), `internal/turnevent` (two comment sentences)
 
-## Files to read first
-
-Read these before touching anything. This is the turn-1 data load; the block being moved is short but the
-comment prose around it is what this ticket is actually about.
-
-- `internal/streamsup/parser.go` → `emitModelList` — the four-rung classification and, at its tail, the
-  block being moved. Read the whole function doc: the paragraph split in § Design rests on which
-  sentences are about the RUNG and which about the CONSTRUCTION.
-- `internal/streamsup/parser.go` → `commandEntryLine` — the decode struct the new emitter's parameter
-  carries, and the home of two of AC 3's five cites plus two of the four that must NOT move. The
-  sentence-level discipline this ticket needs is visible here: two *adjacent* sentences, one moves and
-  one does not.
-- `internal/streamsup/parser.go` → `maxSlashCommandName` — the cap, and the doc that already owns "there
-  is no `sessionModelHold` analogue for this array". AC 4 cites this rather than restating it.
-- `internal/streamsup/parser.go` → `logControlResponse` — the six-attribute record. AC 1's "same record,
-  same keyword, same six attributes" is structural only as long as the record stays written by
-  `emitModelList` before the call. Nothing here changes.
-- `internal/streamsup/parser.go` → `truncateField` — the `<=` boundary the cap rides on. Unchanged; read
-  it so you can tell that the moved `truncateField(entry.Name, maxSlashCommandName)` call is untouched.
-- `internal/turnevent/event.go` → `SlashCommandList` — the "THE PRODUCER HAS SINCE ARRIVED" paragraph
-  (cite that moves) and the "IT IS PUBLISHED BY NO PATH TODAY" paragraph (explicitly out of scope, see
-  § Do not fix). `SlashCommandList.Commands` holds the second cite that moves.
-- `internal/turnevent/event.go` → `SlashCommand` — the element type. Its `Name` doc states the verbatim
-  rule at the consumer; the producer's restatement travels with the block unchanged.
-- `internal/streamsup/parser_test.go` → `TestParser_SlashCommandListIsSuppressed` — AC 2's placement
-  sentence and AC 3's fifth cite, both in this one doc comment.
-- `internal/streamsup/parser_test.go` → `TestParser_SlashCommandFieldsAreCapped`,
-  `TestParser_InitializeControlResponseCountsTheCapturedCommands`,
-  `TestParser_InitializeControlResponseAckReportsTheCommandCount`,
-  `TestParser_ModelListIsLoggedContentFree` — the four tables that between them are this ticket's whole
-  regression net. Read them to confirm none needs an assertion edit.
-- `cmd/pyry/interactive_turn_v2.go` → `eventKind`, its `turnevent.SlashCommandList` arm — the
-  enumeration AC 4 must POINT AT rather than copy. Also read `Handle` and `emitMapped` in the same file:
-  AC 4's factual claim depends on the call graph, not on this spec's prose (see § The trap in AC 4).
-- `docs/knowledge/features/streamsup-package.md` § "Producing `turnevent.SlashCommandList` (#1877)" and
-  the three lessons under it — in particular *"a sink-reachability enumeration carried over from the spec
-  still needs checking against the call graph"*. That lesson is about the exact paragraph AC 4 asks you
-  to write. Read it before writing the new doc, not after.
-
 ## Context
 
 `emitModelList` classifies one top-level `control_response` line onto four rungs. #1877 made rung 4

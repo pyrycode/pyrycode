@@ -2,16 +2,6 @@
 
 **Size:** XS — 5 files, ~5 LOC total (one call-site replacement per file). No new files, no new exported types, no test code added. The 5 tests being modified ARE the test surface; no separate test additions are needed because the sibling #490 already ships `TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet`, which pins the named-variable skip-message contract that this ticket now flows through 5 more call sites.
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go:39-77` — `WithWorktreeAuthenticated` as it stands post-#490. Reads both `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`, skips with a single named-variable message when neither is set, re-pins whichever is present, then composes `WithWorktree(t)`. The replacement target — its contract is identical to what the 5 call sites need.
-- `internal/e2e/realclaude/prompt_fidelity_test.go:28-29` — `TestRealClaude_PromptFidelity`, line 29 is the `WithWorktree(t)` call to replace.
-- `internal/e2e/realclaude/prompt_fidelity_unicode_test.go:30-31` — `TestRealClaude_PromptFidelity_Unicode`, line 31 is the call to replace.
-- `internal/e2e/realclaude/tool_loop_test.go:27-28` — `TestRealClaude_ToolLoopIntegrity`, line 28 is the call to replace.
-- `internal/e2e/realclaude/allowed_tools_enforcement_test.go:37-38` — `TestRealClaude_AllowedToolsEnforcement`, line 38 is the call to replace.
-- `internal/e2e/realclaude/per_agent_test.go:83-95` — `runRoleSmokeTest` helper, line 85 is the call to replace. The 5 top-level `*_RoleLoop` tests (`PO`, `Architect`, `Developer`, `CodeReview`, `Documentation`) all delegate here — single-point edit covers all 5 subtests.
-- `docs/specs/architecture/490-realclaude-auth-accepts-oauth-token.md` — the sibling spec. Confirms `WithWorktreeAuthenticated`'s skip-message substring contract is already test-pinned in `fixtures_test.go`; this ticket inherits that pin without duplicating it.
-
 ## Context
 
 Five test files in `internal/e2e/realclaude/` use plain `WithWorktree(t)` rather than `WithWorktreeAuthenticated(t)` but still spawn `claude` end-to-end via `pyry agent-run`. Without auth in the outer environment, `claude` returns "Not logged in · Please run /login" and the test either times out at the 31-second ptyrunner deadline or fails with the 5-second streamrunner exit-1 — depending on the default runner. Reproduced 2026-05-20 on both runners; the failure mode is the same → env gap, not a runner regression.

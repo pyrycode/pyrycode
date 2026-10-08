@@ -3,21 +3,6 @@
 **Size:** XS (architect downgrade from S — see *Sizing* below).
 **Security-sensitive:** No. A fixed-`/clear` mechanical actuator: carries no trust decision, accepts no caller-supplied free text, loosens no control. The authorization gate lives entirely in the future consumer (the `new_session` wire verb, split from #824). Same classification as the #726 keystroke seam it templates from.
 
-## Files to read first
-
-- `internal/supervisor/modal.go:12-32` — `modalKey` enum + `String()`. Add `keyStartNewSession` as a fourth constant here and a matching `String()` case (`"start new session"`, feeding the error prefix). Widen the type doc one line: the enum now carries the `/clear` slash-command actuator too, i.e. an abstract keystroke *intent*, not strictly modal-resolution.
-- `internal/supervisor/modal.go:34-66` — the three verb methods (`AcceptTrust` / `Answer` / `SendEsc`). `StartNewSession()` is a new sibling one-liner in the same shape: `return s.sendModalKey(keyStartNewSession, "")`. Copy the shared doc-contract paragraph (no `ctx`, `ErrNoLiveSession` when detached, loud wrapped error on PTY failure).
-- `internal/supervisor/modal.go:68-91` — `sendModalKey`: the capture-then-release helper AC-1 names. **Reuse verbatim** — do not duplicate the lock/nil-check/wrap block. It already provides capture-under-`sessMu`, nil-session → wrapped `ErrNoLiveSession` (writes nothing), and the `supervisor: <verb>: %w` wrap.
-- `internal/supervisor/modal.go:93-113` — `sendModalKeystroke`, the production `keystrokeFn`. Add a `case keyStartNewSession:` that composes the `/clear` sequence (see § Design). The `default` unknown-key guard stays the last branch.
-- `internal/supervisor/supervisor.go:193-199` — `keystrokeFn` field. **Read-only:** its signature `func(sess *tuidriver.Session, k modalKey, choice string) error` is unchanged by a new enum value, so supervisor.go needs **no edit**.
-- `internal/supervisor/supervisor.go:565-566` — `New` already wires `s.keystrokeFn = sendModalKeystroke`. The new key routes through it automatically. **No edit.**
-- `internal/supervisor/modal_test.go:15-63` — `TestSupervisor_ModalKeystroke_DispatchesAbstractVerb`: extend the table with a start-new-session row. This is the AC-4 dispatch assertion.
-- `internal/supervisor/modal_test.go:65-109` — `TestSupervisor_ModalKeystroke_NoLiveSessionFailsLoud`: extend the table with a start-new-session row (AC-2, "writes nothing").
-- tui-driver `pkg/tuidriver/session.go:335-398` (module `github.com/pyrycode/tui-driver@v1.9.0`) — `TypePrompt` (types text byte-by-byte with inter-byte delay, settles, then writes a single isolated `\r` commit) and `ClearInputLine` (Ctrl-U line-kill + settle). These are the two calls to compose. Both funnel their PTY writes and return the first non-nil write error, never panic.
-- tui-driver `pkg/tuidriver/keys.go:72-99` — `SendKeys` (spike-only hatch, "not intended for production drivers") and the `writeRaw` funnel. Explains why the compose uses `TypePrompt`, not a hand-rolled `SendKeys("/clear\r")`.
-- tui-driver `pkg/tuidriver/modal.go:36` + `picker.go:243-256` — `ModalClassSlashPicker` and `isSlashPicker`: the classification that a live `/clear` trips. Context only (the parenthetical in AC-4); classifying it requires a live claude and is out of unit-test scope.
-- `docs/lessons.md:54` — `/clear` rotates claude's session UUID even under `--resume`. Confirms the observation side (rotation watcher, `session_transition`) is a **separate** subsystem in `internal/sessions/` (`Pool.RotateID` / `onRotate`) that this ticket does **not** touch.
-
 ## Context
 
 The daemon can drive claude's modal keystrokes (`AcceptTrust` / `Answer` / `SendEsc`, the sealed seam from #726) but has no way to trigger `/clear` — the "start a new session" slash command a local user types at the terminal. `Pool.RotateID` / `onRotate` only *observe* the on-disk UUID rotation that `/clear` causes; nothing *drives* it.

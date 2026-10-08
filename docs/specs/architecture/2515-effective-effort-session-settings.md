@@ -48,6 +48,3 @@ The protocol type is immutable by convention and has no goroutines, locks, I/O, 
 
 Pending for the documentation stage: update `docs/protocol-mobile.md` under “Session settings” with the exact string/null/omitted semantics for `effective_effort`, and state that `effort` remains the saved choice.
 
-## Open questions
-
-None.

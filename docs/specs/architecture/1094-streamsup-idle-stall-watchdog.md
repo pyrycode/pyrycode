@@ -15,38 +15,6 @@ Ships as one standalone, additive component that composes with #1087's existing 
 **`runner.go`/`parser.go`/`envelope.go` are not modified**. It ships unwired: the pool/relay/`cmd/pyry`
 consumer, and the pending-permission signal producer, are follow-on slices (#1079/#1080, T4/T7).
 
-## Files to read first
-
-- `internal/agentrun/streamrunner/watchdog.go:54-234` — **the lift target.** Extract three things:
-  (a) `watchdogTickFor` (54-63) — the idle/8-clamped-to-[5ms,5s] tick derivation, **lift verbatim**;
-  (b) `streamParser` + `Write`/`feed`/`consumeLine`/`snapshot` (65-183) — the byte-buffer line splitter
-  + the structural-`type`-only `awaiting`/`lastEvent` tracking, **lift the mechanics**; (c) `watchdog`
-  + `startWatchdog` + `wait` (192-234) — the poll goroutine shape. Divergences below (§ Design).
-- `internal/agentrun/streamrunner/watchdog.go:236-289` — the **KILL machinery** (`idleStallResult`,
-  `idleStallUsage`, `writeIdleStallResult`). **DO NOT LIFT.** Read only to know precisely what to
-  exclude: no synthetic `result` trailer, no `sawResult` field, no `cancel()` on fire.
-- `internal/agentrun/streamrunner/watchdog_test.go:172-334` — test idioms to mirror: `fakeClock`
-  (12-28), `TestStreamParser_AwaitingTransitions` (172-214), `TestWatchdogTickFor` (319-334). The
-  Run-level `TestRun_SlowTool_NoFire` (97-121) is the type-aware "in-flight tool silence must NOT fire"
-  precedent for this slice's AC1 no-fire test.
-- `internal/streamsup/parser.go:19,41-64` — the existing **turn-stateless `Parser`** and its documented
-  "single-writer, no mutex" invariant. The watchdog's tracker is its deliberate complement (stateful +
-  mutexed, because the poll goroutine reads its state — see § Concurrency). **Reuse `defaultMaxParseBuf`
-  (line 19) — same package, do not redefine.**
-- `internal/streamsup/parser_test.go:13-26` — `discardLogger` and `collectEvents` helpers; reuse them.
-- `internal/streamsup/runner.go:84-90` — the **`Config.Stdout io.Writer` seam** the watchdog composes
-  onto (`Config.Stdout = io.MultiWriter(parser, wd.Writer())`, deferred to the wiring slice). Confirms
-  the seam; no change to this file.
-- `docs/specs/architecture/1088-streamsup-turn-io.md` — the sibling additive slice this one mirrors in
-  shape: standalone component, zero `runner.go` diff, caller composes the seam. Read § "Composition" and
-  § "Concurrency model".
-- `docs/knowledge/features/streamsup-package.md` § "Out of scope" — pins #1094 as the receive-side
-  watchdog, split from #1089 alongside the shipped #1093 send-side gate (no shared code, no blocked-by).
-- QMD `second-brain` → `Streamrunner Interactive - Spike Findings` (T1, #1075) — § the approval
-  round-trip **blocks claude synchronously until the approval tool answers** (8s approver delay → 11.5s
-  turn): unbounded owed-silence, the measured justification for emit-not-kill. Also the type taxonomy
-  (`system/init` per-turn, `assistant`/`user`/`result` transitions) the tracker keys on.
-
 ## Context
 
 `streamrunner` (the one-shot stream-json runner) already ships a type-aware idle watchdog: it reads only

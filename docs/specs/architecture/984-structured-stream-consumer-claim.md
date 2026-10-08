@@ -6,42 +6,6 @@
 
 ---
 
-## Files to read first
-
-Load these before touching anything — the fix lands in exactly one function, but the diagnosis
-spans the producer (test), consumer (fakeclaude), and daemon tail (ruled out).
-
-- `internal/e2e/internal/fakeclaude/main.go:435-459` — **`emitStructuredJSONLIfTriggered`, THE fix site.**
-  Read-then-remove consumer: `os.ReadFile(path)` → `if len==0 return` (the #958 gate) → `f.Write` →
-  `f.Sync()` → **`os.Remove(path)`**. The residual race is the read→remove window; extract the
-  removal-of-a-changed-file bug here.
-- `internal/e2e/internal/fakeclaude/main.go:394-400` + `:169-170` — the poll loop calls `emit` every
-  `pollInterval` (50 ms) on the **single main goroutine**. There is exactly one consumer; no
-  in-process concurrency inside fakeclaude. This is why a fixed sidecar claim-name is safe.
-- `internal/e2e/internal/fakeclaude/jsonl_trigger_test.go` — the #958 **untagged** contract test
-  (`package main`, no `//go:build e2e`, runs in the default `go test` gate). Its three subtests
-  ("empty is skipped, not removed" / "non-empty consumed and removed" / "missing is a no-op") MUST
-  stay green; the new destroy-newer subtest is added here.
-- `internal/e2e/relay_two_phone_structured_test.go:279-310` — **the producer.** The 250 ms `kicker`
-  goroutine re-drops `midTurnLine` (self-healing) and `dropFull` (a `sync.Once`) drops the 4-line
-  `fixture` exactly once after stopping+joining the kicker (`<-kickerDone`). The fixture carries the
-  only `tool_use`/`turn_end`; its single loss == the observed failure signature. READ ONLY — do not
-  modify.
-- `internal/e2e/relay_two_phone_structured_test.go:312-372` — A's decrypt-drain loop + the
-  **vacuous-pass guard** (`failVacuous`, `required`, A-observes-full-set-before-B). AC4: this stays
-  byte-identical. The fix does not touch this file.
-- `cmd/pyry/interactive_turn_stream_v2.go:252-361` — `resolveOwnBootstrapJSONL`: the daemon tail
-  settles (~500 ms, retry-driven) and tails **from EOF**. Read to confirm the tail is *demonstrably
-  settled before `dropFull` fires* (A must receive its first envelope first) — this RULES OUT the
-  tail as the permanent-loss cause. Not modified.
-- `internal/e2e/relay_v2_interrupt_test.go:112-212` — **sibling** `TestRelayV2_InterruptStopsRunningTurn`:
-  same trigger, but kicker-only; its `turn_end` comes from ESC→`appendTurnEnd` (a direct session
-  append, main.go:562), NOT through the trigger. Re-verify after the fix (non-binding AC).
-- `docs/specs/architecture/958-jsonl-trigger-empty-read-gate.md` — the empty-read gate this fix
-  generalises. Same consumer, same single-seam philosophy.
-
----
-
 ## Context
 
 `TestTwoPhoneStructured_InteractiveReceivesStream` is red-on-main under `make check`'s

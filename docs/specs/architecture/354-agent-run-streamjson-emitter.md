@@ -16,18 +16,6 @@ This ticket lands the JSONL → stdout bridge: a new leaf package that re-emits 
 
 The budget Counter from #334 is **not** wired here. The Counter's integration is a separate ticket; the emitter exposes a pluggable `SetExitReason` setter so that future integration can call `SetExitReason("max_turns")` from the Counter's `Terminate` hook without re-architecting this code.
 
-## Files to read first
-
-- `internal/agentrun/jsonl/reader.go:42-93` — `Event{StopReason, TextChars, EndOfTurn, Raw, Kind, Usage}` and `UsageBlock{InputTokens, OutputTokens, CacheCreationInputTokens, CacheReadInputTokens}` shapes. Kind whitelist: `"assistant"|"user"|"tool_use"|"tool_result"|"system"|"attachment"|""`.
-- `internal/agentrun/jsonl/tail/watcher.go:33-65` — `tail.Config` callback contract (`OnEvent func(jsonl.Event)`, `OnEndOfTurn func()`); both fire from the `Run` goroutine.
-- `internal/agentrun/jsonl/tail/watcher.go:140-203` — `Run` lifecycle: blocks until end-of-turn fires, ctx cancels, or an unrecoverable I/O error; returns nil after `OnEndOfTurn` is invoked.
-- `cmd/pyry/agent_run.go:184-228` — current `runAgentRun` shape; the spawn entry-point this spec replaces.
-- `cmd/pyry/agent_run.go:263-271` — current `buildClaudeArgs`; adds one `--session-id <uuid>` pair.
-- `internal/agentrun/drive.go:50-107` — `Drive` lifecycle, in particular its contract: nil on operator-driven ctx cancel, `*exec.ExitError` on a child non-zero exit that was NOT ctx-driven.
-- `internal/conversations/id.go:8-19` — `NewID()` pattern for UUIDv4-shaped IDs (`crypto/rand` + version/variant nibbles). Mirror this in the new emitter wire-up (or call it through; see § Design).
-- `internal/agentrun/budget/budget.go` package doc — confirms `SetExitReason("max_turns")` is the planned plug point for the future Counter integration.
-- Captured `claude -p --output-format stream-json` `type:"result"` trailers from a sibling dispatcher fixture (project-external; see § Trailer schema below for the embedded extracts) — derive the exact wire field-set.
-
 ## Trailer schema (derived from captured fixture)
 
 Four captured `result` lines from a real `claude -p --output-format stream-json` run (kept verbatim for posterity; do not invent fields outside this set):

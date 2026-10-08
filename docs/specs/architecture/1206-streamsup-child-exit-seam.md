@@ -6,26 +6,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/streamsup/runner.go:395-492` | `Run`'s supervise loop in full. This is the whole design surface — the fire window is `:444`–`:450`, and every citation below indexes into this range. |
-| `internal/streamsup/runner.go:104-115` | `Config`'s optional-field block, ending in the `onSpawn` unexported test seam. The new field goes here; `onSpawn`'s comment is the tone and density to match, **not** the visibility to copy. |
-| `internal/streamsup/runner.go:494-564` | `spawnAndWait` — the `(started bool, waitErr error)` contract, the two pre-launch `return false, …` sites (`:533`, `:538`), the `onSpawn` invocation (`:547-549`), `cmd.Wait` (`:551`), and the `takeStdin` drop (`:557-561`) that makes `Stdin()` nil before the new callback runs. |
-| `internal/streamsup/runner.go:176-218` | `New` — copies `cfg` wholesale into the Runner. Confirms the new field needs **no** validation, no default, and no `New` edit at all. |
-| `internal/streamsup/state.go:10-14` | `PhaseStopped` = "Run has returned". The one-line proof that the existing lifecycle surface cannot express per-child exit (AC2's negative half). |
-| `internal/streamsup/runner_test.go:41-92` | `helperRunCfg` / `runInBackground` / `waitForContains` — the harness every new test builds on. |
-| `internal/streamsup/runner_test.go:299-332` | `TestRunner_RestartsOnCrash` — the crash-respawn shape to mirror, including the buffered-channel `onSpawn` counter idiom. |
-| `internal/streamsup/runner_test.go:396-502` | `spawnArgsRecorder` + `TestRunner_SpawnSetupFailureRetainsSessionID` — the direct-`&Runner{}` construction that bypasses `New`'s `exec.LookPath`, and the recorder that counts spawn *attempts* (the only observer that sees iterations where no child launched). |
-| `internal/streamsup/runner_test.go:504-539` | `TestRunner_TeardownSIGTERM` — the shutdown shape. |
-| `internal/streamsup/runner_test.go:648-739` | `TestRunner_RestartFresh_RotatesThenResumesNewID` — the deliberate-restart shape and the `sync.Once`-guarded-callback idiom. |
-| `internal/streamsup/helper_test.go:31-103` | The fake-child mode table. `crash` (`:77`), `echo_lines` (`:58`), and `record_block` (`:87` — never self-exits, so any exit is caller-caused) are the three modes this ticket needs. No new mode. |
-| `cmd/pyry/streamsup_runner.go:155-175` | `mapStreamsupConfig` — the sole production `streamsup.Config` literal, named-field. Confirms the new field is nil in production with zero edits (AC5). |
-| `cmd/pyry/stream_turn_busy.go:27-35` | The `KNOWN GAP` comment this seam exists to eventually close. **Read-only for this ticket** — it stays as-is (see § Out of scope). |
-
----
-
 ## Context
 
 `internal/streamsup` has no way to tell anything outside the package that a claude child died. `Run` supervises one child at a time and respawns on the backoff ladder; the only lifecycle state that escapes is `PhaseStopped`, which means "`Run` has returned" (`state.go:14`) and fires exactly once, on permanent shutdown (`runner.go:415-419`). A crash-and-respawn is therefore invisible from outside: no pool transition (`RotateBootstrapForSelfHeal` deliberately fires none, `internal/sessions/pool.go:659-667`), no `TurnEnd` on the fan-in (the abandoned turn produces no `result` line), and the respawn's own `system`/`init` line is dropped by the turn-stateless parser (`parser.go:158-164`).

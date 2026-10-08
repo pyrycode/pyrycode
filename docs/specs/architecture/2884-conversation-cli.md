@@ -73,10 +73,6 @@ selectors, id-only output, syntax/runtime exit codes, and help. Run scoped race
 checks for `cmd/pyry` and tagged e2e, `go vet ./...`, and build the binary into scratch.
 The verifier owns the full-module gate.
 
-## Open questions
-
-None.
-
 ## Documentation handoff
 
 - Pending documentation stage: `README.md`, beside the paragraph beginning

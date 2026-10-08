@@ -159,10 +159,6 @@ CI runs `-tags=e2e` only on the e2e job; default `go test ./...` is
 unaffected because the file is build-tagged `e2e` (already true of
 `startup_test.go`).
 
-# Open questions
-
-None.
-
 # Out of scope
 
 - Asserting on log content about the missing dir. Production may or may not

@@ -158,34 +158,6 @@ bytes (substrate seal; see § Security review).
 
 ---
 
-## Files to read first
-
-- `cmd/pyry/interactive_turn_stream_v2.go:98-155` — `resolveLatestSessionJSONL`; the
-  `startOffset = size` semantics (lines 106-107, 147) and the purity doc to update.
-  **This is the fix site.**
-- `internal/turnbridge/producer.go:152-214` — `NewSessionSubscriber`; the retry loop
-  (`subscribeRetryDelay`, the `resolve` → `WaitForSessionJSONL` → `sess.Events(path,
-  off)` sequence). Confirms `off` flows straight to the tail; confirms single
-  goroutine.
-- `internal/turnbridge/mapper.go:45-75` — `mapEntry`; the `assistant` → `Assistant
-  Text` → `TextChunk` branch. Read to see why a mapper-test fixture is vacuous-green
-  (the reply shape already maps).
-- `cmd/pyry/interactive_turn_stream_v2_test.go:76-155` —
-  `TestResolveLatestSessionJSONL_*`; the temp-dir pattern (`writeJSONL`,
-  `uuidA/B/C`) the new cold-start test mirrors. **Regression test goes here.**
-- `internal/e2e/relay_two_phone_structured_test.go:126-160` — the pre-create
-  workaround comment that documents the exact race; the structured-stream assertions
-  that prove the mapper path. Read to understand both the bug and why the deterministic
-  e2e masks it.
-- `internal/e2e/internal/fakeclaude/main.go:193-216` — `emitStructuredJSONLIfTriggered`
-  appends to an already-open file `f`; fakeclaude never reproduces "no file at
-  subscribe," which is why CI is green while live is red.
-- tui-driver (sibling checkout, read-only) `pkg/tuidriver/jsonl.go:307-337`
-  (`AssistantText`) and `:39-78` (`WaitForSessionJSONL` — "claude defers JSONL
-  creation until first input lands"). Context only; **do not modify tui-driver.**
-
----
-
 ## Concurrency model
 
 No new goroutines. The producer's single `Run` goroutine drives `subscribe → resolve

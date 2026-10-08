@@ -9,25 +9,6 @@ This slice mirrors **#656** (`session_transition`) and **#701** (modal) — the 
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every addition mirrors an existing precedent in this exact package — copy the precedent, don't invent. Line numbers are HEAD at spec time; re-confirm by symbol if drifted.
-
-- `internal/protocol/codes.go:162-193` — **the modal `const` block.** The precedent for this ticket's constant block: a dedicated `const ( … )` block, a "Two natures in one cluster" rationale comment (outbound event + inbound control), and the "MUST NOT be added to v1TypeSet" paragraph. Mirror its shape for the `queue_state` / `dequeue_message` pair.
-- `internal/protocol/messaging.go:76-147` — **the modal payload cluster.** `ModalOption` (nested struct → the model for `QueuedItem`), `ModalShownPayload` (outbound, carries the nested array `options []ModalOption` → the model for `QueueStatePayload.Queued`), and `ModalAnswerPayload` (inbound v2 control, the "intercepted at dispatchAppFrame, NO dispatch.Route handler" doc → the model for `DequeueMessagePayload`). Copy the json-tag + no-`omitempty` discipline verbatim.
-- `internal/protocol/messaging.go:36-58` — **`SessionTransitionPayload`** (#656). The `time.Time` json-tag discipline (`occurred_at`, RFC3339Nano) — the model for `QueuedItem.TS` (`ts`). `package protocol` already imports `time` (messaging.go:3) — no new import.
-- `internal/msgqueue/queue.go:98-107` — **`QueuedMessage{ID uint64, Text string, TS time.Time}`.** The engine-side projection of ADR 025's `{queued_msg_id, text, ts}` record that the producer (#722) maps into the wire `QueuedItem` (ID → `queued_msg_id`). Confirms `queued_msg_id` is a **`uint64`** counter (JSON number), not a string/nonce. `Snapshot(convID) []QueuedMessage` is the data `queue_state` reports; `Remove(convID, id)` is the op behind `dequeue_message`. **Reference only — do NOT import `msgqueue` from `internal/protocol`** (leaf-data package; the mapping lives in the producer #722).
-- `internal/protocol/compat_test.go:39-63, 97-172` — the three test edit sites: `TestIsV1Compatible` rejection cases (39-63), the `v2OnlyTypes` map (97-124), and `TestTypeConstants_V1V2Partition`'s `all` slice + union-count check (126-172).
-- `internal/protocol/messaging_test.go:274-345` — **`TestModalShownPayload_RoundTrip` (nested-array case) and `TestModalAnswerPayload_RoundTrip`.** The exact templates: nested-array round-trip via `roundTripEnvelope`, and the simple inbound-control round-trip.
-- `internal/protocol/interactive_test.go:14-28` — `roundTripEnvelope(t, env, payload, raw)` helper. Same package, reusable for both new round-trip tests; re-marshalling the decoded payload is what pins struct → wire shape.
-- `internal/protocol/testdata/modal_shown.json` — nested-array fixture shape (`"options":[{...},{...}]`). Author the new fixtures in **struct-field order** — `canonical()` (envelope_test.go:11) compacts but does **not** sort keys, so json key order must equal Go field order or the byte-equal check fails.
-- `internal/protocol/envelope.go:111-135` — `v1TypeSet`. **Do NOT add either new constant here.** The partition test enforces their absence; this is the one file you must not touch.
-- `docs/protocol-mobile.md:402-438` — § Application message types table; add two rows after the `modal_dismissed` row (438).
-- `docs/protocol-mobile.md:614-659` — § Modal (v2); the outbound-event + inbound-control + "ungated vs gated" doc structure to mirror for a new § Queue (v2) section (place after § Modal, before § Backfill semantics at 661).
-- `docs/lessons.md` / PROJECT-MEMORY § "time.Time round-trip discipline" — monotonic-clock stripping; tests MUST compare `time.Time` via `.Equal`, never `==`/`reflect.DeepEqual`.
-
----
-
 ## Context
 
 Epic #597 Phase 3 (split from #705) adds a queued-message backlog: a phone that types while claude is busy has its turn buffered in `internal/msgqueue` (the engine — #704, extended #719) and drained one-at-a-time on turn-end. The phone needs to **see** that backlog and **cancel** an entry it no longer wants:

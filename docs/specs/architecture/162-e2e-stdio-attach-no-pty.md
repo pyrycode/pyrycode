@@ -5,57 +5,6 @@ status: spec
 size: XS
 ---
 
-# Files to read first
-
-Read these before exploring on your own — they are the load-bearing
-surfaces this spec composes.
-
-- `internal/e2e/attach_stdio.go` — full file (~265 lines). The harness
-  this test consumes. Critical references:
-  - `attach_stdio.go:50-53` — `attachCmd *exec.Cmd` and `attachDone
-    chan struct{}` are unexported but in-package; the new test reads
-    `c.attachCmd.Process.Pid` directly. No new exported field required.
-  - `attach_stdio.go:155-167` — the harness already burns 500 ms after
-    `attachCmd.Start()` waiting for an early-exit handshake failure. By
-    the time `startStdioAttach` returns, the child has been alive at
-    least 500 ms and is past handshake. The fd-inspection probe runs
-    immediately on return, so any PTY allocation that would have
-    happened during initialization is already visible.
-  - `attach_stdio.go:244-265` — `teardown` ordering. The new test does
-    not change cleanup; harness `t.Cleanup` runs after the test body
-    and tears down the attach client + daemon as usual.
-
-- `internal/e2e/attach_stdio_test.go` — full file (~57 lines). The
-  byte-flow sibling test. Two things to mirror:
-  - `attach_stdio_test.go:27-31` — the `t.Skip("blocked on #167 …")`
-    guard. The new test takes the same skip until #167 lands; at that
-    point both skips come off in one PR. Do not invoke the harness
-    from a test that knows the harness can't actually drive the CLI.
-  - `attach_stdio_test.go:26` — function naming convention
-    (`TestE2E_AttachStdio_*`). Match it.
-
-- `internal/e2e/attach_pty.go:62-74` — precedent for the
-  `t.Skipf("e2e: <mechanism> unavailable: %v", err)` shape on platform
-  capability gating. The new test uses the same wording for fd
-  inspection unavailability (AC#2).
-
-- The `cmd/pyry/runAttach --stdio` path
-  (`cmd/pyry/main.go:438-522`, summarised in spec #154 / #161) and
-  `internal/control/attach_stdio_client.go` — for context only. The
-  contract under test is "`pyry attach --stdio` does not allocate a
-  PTY anywhere in its own process." The unit tests at
-  `internal/control/attach_stdio_client_test.go` already prove the
-  client function never imports `creack/pty`; this e2e test is the
-  *binary-level* defence: a future refactor that pulls in a PTY
-  somewhere inside `cmd/pyry/runAttach`'s `--stdio` branch (e.g. a
-  helper that wraps stdio in a pty.Open before bridging) would slip
-  past the unit boundary, and this test catches it.
-
-- Go stdlib `os/exec` and `os` packages — `os.ReadDir`,
-  `os.Readlink`, `runtime.GOOS`, `exec.LookPath`, `exec.Command`. No
-  new dependencies; stdlib only (matches CODING-STYLE.md "stdlib over
-  dependencies").
-
 # Context
 
 ## Why this slice exists

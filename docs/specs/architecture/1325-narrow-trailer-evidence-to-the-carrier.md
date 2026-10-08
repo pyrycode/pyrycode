@@ -6,30 +6,6 @@ Line numbers are as of `eea9f91`. Locate by symbol, never by line.
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go` — **the whole file (898 lines)** | The only file this ticket edits. Read it end to end before the first edit; every decision below is a surgery on prose that argues for itself. |
-| `…/finding_trailer_evidence_test.go:827-898` | `TestFinTrailerRecordCarriesNoCapturedBytes` — the four-checks-in-a-trench-coat test. §2 and §3 are its surgery. |
-| `…/finding_trailer_evidence_test.go:449-554` | `TestFinTrailerRecordReadsTheDecodedTrailer` — the shell. Row 1 (`:464-506`) is deleted by §4; row 2 (`:516-553`) survives and is re-stated by §5. |
-| `…/finding_trailer_evidence_test.go:139-154` | `finTrailerRecord`'s Detail content rule — the **type-level** statement of the headroom rule and the source of §3's replacement argument. `:151` carries a second dangling pointer; `:153-154`'s cite is untouched. |
-| `…/finding_trailer_evidence_test.go:290-326` | `finTrailerSighting` — the fixture-side copy of the gather's fill, and its **agreement obligation** (`:294-301`). §5's re-stated row is the only executable pin on this half of it. |
-| `…/finding_trailer_evidence_test.go:556-671` | `TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer` — where §4's zero-fields assertions land, driven on **both** arms. Also `:577-582`, the fixture argument §2 reuses. |
-| `…/finding_trailer_evidence_test.go:337-447` | `TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator` — the absent row (`:366-372`), its state assertion (`:405-408`) and the executable coverage loop (`:437-441`) that §4's `trailAbsent` claim lands on. |
-| `…/finding_run_gather_test.go:1077-1192` | `TestFinGatherReturnsNoCapturedBytes` — where §2's retired in-cap claim now holds. The in-cap precondition **asserted in code** is `:1138-1146`; the carrier is swept as the third return at `:1158-1191` (`:1164-1172` argues why). |
-| `…/finding_run_gather_test.go:1681-1712` | `TestFinSightingReachesNoScanType` — where §4's panic claim now holds. `:1704-1709` names "the panic-on-unchecked-deref obligation the discriminated optional imposes". |
-| `…/finding_run_gather_test.go:1526-1677` | `TestFinGatherSightingScalarsComeFromTheFullLineDecode` — the **other half** of the agreement obligation, and the naming and shape §5 mirrors. Note `:1662-1667`'s pair precondition and `:1668-1676`'s assertion form. |
-| `…/finding_run_record_test.go:466-475` | `finRecordSeenTrailer` / `finRecordAbsentTrailer` — build `finTrailerRecord` with the **shipped** `finTrailerBuild`. First leg of §3's travel argument. |
-| `…/finding_run_record_test.go:137-151`, `:193`, `:754-757` | `finRecordRun.Trailer` embedded **whole** under `json:"trailer"`, pinned by `TestFinRecordEmbedsTrailerRecordWhole`. `:141` cites `TestFinTrailerRecordCarriesNoCapturedBytes` and is **out of scope, not falsified** — do not touch. |
-| `…/finding_run_record_test.go:930-940` | `TestFinRecordCarriesNoCapturedBytes`' doc: "The marshal sweep below IS recursive — it walks the embedded sub-records". Second leg of §3's travel argument. |
-| `…/finding_artifact_write_test.go:759-780` | The artifact's Detail walk: collects every Detail by JSON path, asserts **at least six** (`:763-767`, naming the trailer's as one), and applies the *identical* `room < len(trailNeedle)` test per path (`:772-780`). Third leg of §3. **Read-only — this file is #1326's.** |
-| `docs/specs/architecture/1320-trailer-builder-takes-the-sighting-carrier.md:215-231` | #1320's handoff and its Open Question 3 (the shell decision §6 settles) and 4 (the stale "pad 200" cite, #1326's). |
-
-**Do not edit** `finding_run_gather_test.go`, `finding_run_record_test.go` or `finding_artifact_write_test.go`. They are #1324's and #1326's.
-
----
-
 ## Context
 
 Since #1320 (merged at `eea9f91`) `finTrailerBuild` takes `finSighting` — eight scalars, no `.Line`, no `*resultTrailer` — in place of a `trailObservation`. Three rows in `finding_trailer_evidence_test.go` were written against the old channel. #1320 migrated each minimally and marked it `SUPERSEDED BY #1320, RETIRED BY #1321 — NOT A LIVE GUARD`, leaving the argument for retiring them here.

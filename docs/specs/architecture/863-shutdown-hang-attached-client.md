@@ -6,23 +6,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/supervisor/bridge.go:220-263` — `Bridge.Attach`: the input-pump goroutine. The two block points (`in.Read` at 235, `b.in <- chunk` at 239) and the exit cleanup (252-260) that clears `attached`/`output`. This is the primary edit site.
-- `internal/supervisor/bridge.go:53-97` — `Bridge` struct + `NewBridge`. Where the new terminal-shutdown signal field is declared and initialised. Note the existing per-iteration `iterCancel` (`cancelMu`-guarded, re-created by `BeginIteration`) — the new signal is **distinct** from it (terminal, never re-created).
-- `internal/supervisor/bridge.go:139-162` — `BeginIteration`/`EndIteration`. Confirms `iterCancel` is per-iteration and closed on **every** child exit (including restarts), which is why it cannot carry the shutdown abort.
-- `internal/control/server.go:355-394` — `Serve`: the `handleWG.Wait()` + `s.streamingWG.Wait()` that hangs. No code change here, but this is the symptom site.
-- `internal/control/server.go:396-418` — `Close`: currently closes only the listener + socket, holding `s.mu` across the whole body (`defer s.mu.Unlock()`). Must be restructured to also close tracked streaming conns **after releasing `s.mu`**.
-- `internal/control/server.go:762-875` — `handleAttach`: the handoff point (861-874) where the streaming goroutine is spawned on `streamingWG`. Conn registration is added here; the detach-watcher goroutine (868-873) is where deregistration is added.
-- `internal/control/server.go:198-223` — `Server` struct: where the conn-set field is declared. `NewServer` (253-269) initialises it.
-- `internal/sessions/session.go:239-263` — `Session.Attach`: the wrapper that delegates to `s.bridge.Attach` and closes `wrapped` when `bridgeDone` fires. Unchanged, but shows the `done` chain the fix relies on.
-- `internal/sessions/session.go:360-421` — `Session.Run`: the active↔evicted loop. The `defer` bridge-shutdown hook goes at the **top of this function** (fires once on permanent termination). Read `runActive:457-521` to confirm `s.sup.Run` returns on **eviction** too — this is why the hook must NOT live in `supervisor.Run`.
-- `internal/sessions/pool.go:1065-1083` — `supervise`: `g.Go(func() error { return sess.Run(gctx) })`. Proves `Session.Run` is invoked exactly once per session (bootstrap + minted), so a `defer` there fires exactly once, on shutdown (gctx cancel) or removal.
-- `internal/control/attach_test.go:527-624` — `TestServer_StopWhileAttached`: the existing test that closes the client conn from the **test side** (613) and explicitly notes it cannot reproduce the production cascade. AC-4 requires this test still passes; AC-5 requires a new test that does NOT close the conn from the test side.
-- `docs/lessons.md` § "Bridge input pump must be scoped per-iteration" — the per-iteration cancel machinery the send-abort extends (referenced by the ticket's technical notes).
-
----
-
 ## Context
 
 When the daemon shuts down (SIGTERM, `pyry stop`, or the `pyry update` restart) while a control client is attached, the process never exits on its own. The `Bridge.Attach` input-pump goroutine loops `in.Read(conn)` and only exits when that read fails — but nothing server-side closes the conn, so an idle client's read blocks forever. `handleAttach`'s detach-watcher (tracked on `streamingWG`) blocks on `<-done`; `Serve` blocks on `streamingWG.Wait()`; `main.go` blocks on `<-ctrlDone`. The service manager escalates to SIGKILL — every stop-while-attached becomes a dirty exit.

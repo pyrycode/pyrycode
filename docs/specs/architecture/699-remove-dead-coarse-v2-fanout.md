@@ -6,24 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before editing. Line ranges are current as of this spec.
-
-- `cmd/pyry/assistant_turn_v2.go` (whole file, 218 lines) — **the deletion target.** The coarse v2 emitter (`assistantTurnEmitterV2`, `newAssistantTurnEmitterV2`, `startAssistantTurnBridgeV2`) and the `v2Broadcaster` interface. Its gate `if c.Interactive { continue }` (line 151) is the complement of the structured filter; the whole file is dead.
-- `cmd/pyry/relay.go:257-273` — `startRelayV2` doc comment; the paragraph describing the v2 assistant-turn bridge is removed.
-- `cmd/pyry/relay.go:334-342` — the coarse-bridge wiring block (`var bridgeCleanup func()` + the `startAssistantTurnBridgeV2` call) — removed.
-- `cmd/pyry/relay.go:369-382` — the `startRelayV2` return-cleanup; the `bridgeCleanup` call is removed and the comment reworded.
-- `cmd/pyry/assistant_turn_v2_test.go` (whole file) — **deletion target.** Defines `pushCall`, `stubV2Broadcaster`, `newStubV2Broadcaster`, `nonInteractive`, `drainPushes`, `msgIDOf`, and the `TestAssistantTurnEmitterV2_*` tests. **Verified: none of these symbols are referenced by any other `cmd/pyry` test** — clean deletion. (`stubCursor`, `discardLogger`, `testConvID`, `testChunk` are shared helpers but are *defined elsewhere*, in `assistant_turn_test.go`; they survive.)
-- `internal/e2e/relay_two_phone_coarse_test.go` (whole file) — **deletion target, but with a helper-relocation wrinkle (§ Design, step 4).** Defines `TestTwoPhoneCoarse_NonInteractiveOnly` (delete) **and two helpers the structured e2e still uses**: `buildHelloEarlyInteractive` (line 278) and `driveHandshakeToOpenDaemonInteractive` (line 307).
-- `internal/e2e/relay_two_phone_structured_test.go:187, 397` — calls `driveHandshakeToOpenDaemonInteractive`; its comment at :397 references the coarse file. This is the surviving consumer of the two helpers above.
-- `cmd/pyry/interactive_turn_v2.go:334` and `cmd/pyry/session_transition_v2.go:129` — the structured-path guards `if !c.Interactive { continue }`. **These stay** (see § Design, "What we keep" and § Security review). They are the reason `ActiveConn.Interactive` is *not* dead after this change.
-- `internal/relay/v2session.go:1984-2082` — `ActiveConn` struct, `ActiveConns`, `handleActiveConns`; the `Interactive` flag plumbing. **Untouched** — `internal/relay` is not in this ticket's diff.
-- `docs/protocol-mobile.md:411, 468-485` — the `message` wire-type row and the capability-negotiation section; the live-routing-path prose for the coarse fan-out is trimmed (AC#5).
-- `cmd/pyry/assistant_turn.go:18-24` — `assistantTurnQueueSize` + `cursorReader` are defined **here (the v1 file)**, not in the file being deleted. Confirms the deletion is self-contained.
-
----
-
 ## Context
 
 Per the 2026-06-22 amendment to **ADR 025**, pyrycode ships the app and daemon together; there is no old-app install base, so every phone always negotiates the `interactive` capability. That makes the **v2 (Noise)** coarse / non-interactive `message` fan-out dead code:

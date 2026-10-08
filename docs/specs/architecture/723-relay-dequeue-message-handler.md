@@ -4,26 +4,6 @@
 **Phase 3 (epic #597), capstone of the queued-backlog wire side.** Split from #705.
 **Size:** S. **Label:** `security-sensitive` (inbound handler mutating daemon queue state from an untrusted phone frame — § Security review below is mandatory and was run on this spec).
 
-## Files to read first
-
-Generated from `codegraph_context` + the reads behind this design. Each entry is turn-1 data for the developer; read these before writing code.
-
-- `internal/relay/v2session.go:1310-1369` — `dispatchAppFrame`: the v2 control-envelope discriminator switch (the interception point). Add the `TypeDequeueMessage` case here, beside `TypeInterrupt` / `TypeModalCancel`.
-- `internal/relay/v2session.go:1677-1719` — `handleInterrupt`: **the closest structural template.** It gates on `s.interactive` *first*, then a nil-seam guard, then the one action. `handleDequeueMessage` mirrors this shape exactly. Note its doc comment's parenthetical "(dequeue is ungated, …)" is now stale — see § Design note.
-- `internal/relay/v2session.go:1539-1571` — `handleModalCancel`: the "decode-tolerant, fire-and-no-reply, nil-resolver-inert" idiom for an inbound control frame that mutates daemon state via an injected seam. Same never-echo-payload discipline.
-- `internal/relay/v2session.go:426-505` — `V2SessionConfig`: where the optional consumer-declared seams live (`Snapshotter`, `KnownConversation`, `ModalResolver`, `Interrupter`). Add the `QueueRemover` field here with the same nil-is-inert doc style.
-- `internal/relay/v2session.go:367-424` — the consumer-declared interface block (`ScreenSnapshotter`, `Interrupter`, `ModalResolver`). Add `QueueRemover` here, same "declared in the consumer so internal/relay imports neither internal/msgqueue nor cmd/pyry" rationale.
-- `internal/msgqueue/queue.go:218-263` — `Remove(convID string, id uint64) bool` + `notify`. **The engine op is already done.** Read the contract: `false` on unknown-conv / unknown-id / already-delivered / in-flight-head; `notify`(→`OnChange`) fires **only on success**. The `convID` parameter IS the mutation scope — `Remove(A,…)` provably touches only `A`'s FIFO (the security boundary).
-- `internal/protocol/messaging.go:200-214` — `DequeueMessagePayload{ConversationID string, QueuedMsgID uint64}`. The wire payload to decode. (There is **no** `DropQueued` type — an earlier draft's name; ignore it.)
-- `internal/protocol/codes.go:226` — `TypeDequeueMessage = "dequeue_message"` already exists, documented "intercepted pre-`dispatch.Route`". No protocol change needed.
-- `cmd/pyry/relay.go:273-341` — `startRelayV2`: the `V2SessionConfig{…}` literal. Add `QueueRemover: queue`. The `queue` parameter (line 283) is widened from `handlers.Enqueuer` to `*msgqueue.Queue` — see § Wiring.
-- `cmd/pyry/relay.go:89-107` + `cmd/pyry/main.go:788-805` — `startRelay`'s `queue` parameter (line 98) is the same widen; `main.go` already passes the concrete `*msgqueue.Queue` (`msgqueue.New`), so the call sites are unchanged.
-- `cmd/pyry/queue_state_v2.go` (whole file, ~213 lines) — the #722 producer. **AC-4 is already satisfied by this:** it Run-loops on the `OnChange` hand-off channel and re-broadcasts `queue_state`. The handler does NOT emit `queue_state`; `Remove`'s `notify` drives it automatically.
-- `internal/e2e/relay_v2_daemon_test.go:42-130` — the spawned-daemon v2 Noise harness (`driveHandshakeToOpenDaemon`, `waitBinaryHello`, seal via `initSend.Encrypt` / unseal via `initRecv.Decrypt`, `sendNoiseMsg`, `readInnerFrame`). The AC-5 backbone.
-- `internal/e2e/relay_two_phone_structured_test.go:425-498` — `driveHandshakeToOpenDaemonInteractive` (interactive-capability handshake; asserts the `hello_ack` grants `interactive`). Reuse directly (same `package e2e`).
-- `internal/e2e/harness.go:178-205` + `:371` — `StartIn` supervises `/bin/sleep 99999` as "claude" (never commits a turn ⇒ backlog persists = the deterministic "no live claude") and `seedBoundConversation(t, home, convID, boundSessionID)` (send_message requires a **bound** conversation or it rejects pre-enqueue).
-- `internal/relay/handlers/send_message.go:50-58, 116-160` — `Enqueuer` (consumer interface) and the enqueue path: send_message validates the binding via `router.Route`, then `queue.Enqueue(convID, text)`. Confirms the queue is keyed by the **phone-asserted, Route-validated** `conversation_id` — the same id `dequeue_message` carries back.
-
 ## Context
 
 ADR 025's mobile remote head lets a phone queue `send_message` turns into a daemon-resident FIFO (`internal/msgqueue`) while claude is busy; the #722 producer pushes a `queue_state` snapshot to interactive phones on every backlog change. This slice closes the loop: it lets the phone **cancel** a queued message before it drains, by wiring the already-designated `dequeue_message` inbound control frame to `msgqueue.Remove`.

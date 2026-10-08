@@ -2,16 +2,6 @@
 
 Filter four WARN call sites in `internal/agentrun/{ptyrunner,budget,streamrunner}` through a shared predicate so the OS-level "process already gone" responses to our own SIGTERM/SIGKILL/close stop showing up as failures on every routine `max_turns` exhaustion.
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:281-285` — the `defer sess.Close()` block whose `cerr` is the misclassified WARN. The fix wraps `cerr` in the predicate before the existing `logger.Warn(...)`.
-- `internal/agentrun/budget/budget.go:127-142` — `OnEvent` arming + `Terminate()` call; the `logger.Warn("budget: terminate failed", …)` at line 137 is one of the four sites.
-- `internal/agentrun/budget/budget.go:178-193` — `killAfterGrace`; the `logger.Warn("budget: kill failed", "err", err)` at line 191 is the second budget site.
-- `internal/agentrun/streamrunner/runner.go:160-175` — the synchronous stdin write + close pair. The `logger.Warn("streamrunner: stdin close failed", "err", err)` at line 167 is the fourth site. The sibling `stdin write failed` at line 164 stays a WARN — that is a mid-write failure, not a teardown response, and is explicitly out of scope per the issue body.
-- `internal/agentrun/workdir.go:1-8` — confirms the parent `package agentrun` already exists and is non-empty. The new predicate file (`exitclass.go`) goes in this package; its sibling subpackages import it.
-- `internal/agentrun/budget/budget_test.go:295-334` — `TestTerminateError_DoesNotBlockKill` and `TestKillError_IsLogged` are the existing tests that exercise the two budget WARN sites. Both pass non-benign errors (`errors.New("simulated …")`) so neither needs changing — confirm by re-reading. They also document the slog `Level: LevelWarn` + `syncWriter` capture pattern the new regression tests reuse.
-- `internal/agentrun/ptyrunner/runner_test.go:28-55` and `internal/agentrun/ptyrunner/helper_test.go` — `helperRunCfg` + `TestPtyRunnerHelperProcess` is the established fake-claude pattern (helper re-execs `os.Args[0]` with env vars). The new ptyrunner regression test reuses this scaffold with a new helper mode that responds to SIGTERM with `os.Exit(143)`.
-
 ## Context
 
 `pyry agent-run --max-turns N` emits one WARN per terminated run today:
