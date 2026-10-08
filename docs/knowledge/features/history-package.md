@@ -18,7 +18,7 @@ wire-serving consumer,
 | --- | --- |
 | [Shape](history-package-shape.md) | Entry and metadata contracts, paging bounds and durable ID allocation. |
 | [A cleanup on a failed write is not the guarantee it looks like](history-package-failed-write-recovery.md) | Write rollback and read tolerance after fresh or active segment failures. |
-| [Producers (#2114, #2115)](history-package-producers.md) | Interactive and channel provenance, visibility, delivery ordering and producer tests. |
+| [Producers (#2114, #2115)](history-package-producers.md) | Captured provenance, runtime dividers and interrupted work, visibility, delivery ordering and producer tests. |
 | [`LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)](history-package-watermarks.md) | Raw durable cursors, displayable unread watermarks and lazy recovery. |
 
 ## Why not claude's transcripts

@@ -4,17 +4,19 @@ Part of [the history package overview](history-package.md).
 
 ## Producers (#2114, #2115)
 
-Three call sites in `cmd/pyry` append through one seam,
+Interactive output, session transitions, runtime lifecycle facts and delivered
+operator messages in `cmd/pyry` append through one seam,
 `appendConversationHistory` (`cmd/pyry/conversation_history.go`): the
 interactive emitter's `emit` chokepoint
 (`cmd/pyry/interactive_turn_v2.go`), session transitions' `broadcast`
 (`cmd/pyry/session_transition_v2.go`), and (#2115) `newOperatorMessageHistory`
 (`cmd/pyry/operator_message_history.go`), used by queued stream placement and
-`msgqueue.Config.OnDelivered`.
-The first two already resolve the four event values — conversation
+`msgqueue.Config.OnDelivered`. Runtime opening/interruption facts use
+`interactiveTurnEmitterV2.recordRuntimeFact` through the same append seam.
+The existing legacy emitters resolve the four event values — conversation
 id, wire type, marshalled payload, one hoisted timestamp — for the ring
 append or the fan-out itself, so their log append needed no new mapping, only
-a nil-guarded call before the per-conn loop in each. The third resolves them
+a nil-guarded call before the per-conn loop in each. Operator history resolves them
 from a safe `msgqueue.QueuedMessage`, available before the write through
 `msgqueue.DeliveryMessage` and again at confirmation through `OnDelivered`,
 not from an envelope in flight (see below).
@@ -23,19 +25,21 @@ not from an envelope in flight (see below).
 
 Capture the producer before fan-in and retain it through flush.
 `newStreamRunnerFactory` and `newCodexRunnerFactory` supply fixed `claude` and
-`codex` kinds to `streamTurnSink.sinkForTag`, which reads the daemon routing tag
+`codex` kinds to `streamTurnSink.sinkForSessionTag`, which reads the daemon routing tag
 once per event into `streamTurnEnvelope.source`. The drain resolves that
 envelope's session, including historical bindings, before passing its captured
-provenance to `interactiveTurnEmitterV2.HandleFor`; unresolved sessions still
+provenance and runtime incarnation to `interactiveTurnEmitterV2.handleForSource`;
+`HandleFor` retains the incarnation-zero entry surface. Unresolved sessions still
 drop. Neither the active cursor nor subprocess fields supply attribution.
 An append-time `CurrentSessionID` lookup would assign a delayed predecessor's
 event to its successor. These IDs are daemon routing IDs, distinct from
 conversation IDs and Codex thread IDs.
 
 `convTurnState` retains provenance by value, keyed by conversation, agent kind
-and session ID. Main/child buffered text, child lane identities and lifecycle
-state therefore keep their source through timer flush, rotation and
-`closeForConversation`. Reused message or parent IDs cannot merge different
+and session ID, plus producer incarnation when runtime history is enabled.
+Main/child buffered text, child lane identities and lifecycle
+state therefore keep their source through timer flush, rotation and closure.
+Reused message or parent IDs cannot merge different
 sources. Separate buffers alone would still join old-source text across an
 intervening successor event and reorder timer output: `HandleFor` flushes the
 preceding source before selecting another, leaving at most one text buffer per
@@ -49,8 +53,10 @@ phase with that source's provenance. Repeated activity in the same phase
 updates ownership before conversation-level deduplication. Deduplicating only
 within each source would let a delayed predecessor end clear the successor's
 reconnect snapshot, while subsequent responding chunks silently skip repair.
-Conversation-wide close processes older phases first and emits one final idle
-without inventing a `turn_end`. See [connect-time phase reconciliation](v2-session-manager-state-machine-connect-time-turn-phase-reconcile-running.md)
+The compatibility conversation-wide close processes older phases first and emits
+one final idle without inventing a `turn_end`. Runtime exits and boundaries close
+only the captured dying source, preserving replacement work and other sources.
+See [connect-time phase reconciliation](v2-session-manager-state-machine-connect-time-turn-phase-reconcile-running.md)
 and [retained emitter state](streamsup-package-draining-turnevents-into-the-interactive-emitter.md).
 
 `appendConversationHistory` combines optional captured provenance with existing
@@ -153,8 +159,127 @@ untagged entries remain untouched. Visibility stays `clear` shown and
 `idle_evict` hidden. Legacy live/page payload meanings, durable identities,
 unread watermarks and recipient gates retain their behavior, including eviction's
 mirrored wire session IDs. Nil/failed storage still allows eligible fan-out with
-absent history identity. Ordinary enqueue remains nonblocking and drops on full;
-committed switches retain their transition/history, row and sealing order.
+absent history identity. The compatibility enqueue remains nonblocking and drops
+on full; runtime enqueue retains each captured boundary behind a coalescing wake
+without waiting for storage or publication.
+Committed switches retain their transition/history, row and sealing order.
+
+### Runtime boundaries and main-work closure (#3013)
+
+#### Divider causes and reset outcomes
+
+Runtime facts use `SessionTransition.Cause` independently of legacy `Reason`.
+`runtimeDivider` accepts a captured owner, a nonempty predecessor and a changed
+routing pair; first creation, equal-ID/no-op and refused transitions produce no
+divider. Unknown causes and unresolved ownership do not invent one. Each actual
+boundary appends one `session_divider`, retaining `conversation_id`, `cause`,
+`occurred_at`, known `previous_session_id` / `new_session_id` and
+`previous_agent` / `next_agent`. A switch retains both actual agents. Divider
+metadata names the captured predecessor when its routing ID and harness are
+known; unavailable source metadata remains absent. The facts use daemon routing
+IDs, never native agent thread IDs or a later active binding.
+
+| Runtime divider cause | Explicit visibility | Legacy delimiter |
+| --- | --- | --- |
+| `operator_reset` | Shown | `clear` |
+| `claude_clear` | Shown | `clear` |
+| `agent_switch` | Shown | `clear` |
+| `recovery` | Shown | None |
+| `workspace_change` | Shown when supplied | None |
+| `idle_sleep` | Hidden | `idle_evict` |
+| `capacity_eviction` | Shown | `idle_evict` |
+
+Capacity eviction retains its own closure cause even though its legacy delimiter
+is the same hidden `idle_evict` as sleep. Both lack a successor in the raw
+divider; legacy wire payloads still mirror the evicted ID into both fields.
+Workspace change is vocabulary with no current producer. Recovery onto a new
+session can record a divider, but `RotateBootstrapForSelfHeal` remains uncalled
+in production: this history path adds no recovery or self-heal policy.
+
+`activeSessionStarter.resetThenRotate` passes the completed wrap-up's actual
+boolean to `Pool.RotateForNewSessionWithHandoff`: `written` when a note was
+written and `skipped` otherwise. Only an operator-reset divider carries the
+optional `reset_handoff_outcome`. Callers without that observation, including
+`RotateForNewSession`, leave it absent/unknown. Invalid values such as `pending`
+or `assumed` are omitted; neither timing nor a successful rotation proves that
+a handoff note was written. The outcome carries no note text.
+
+#### Hidden openings and interrupted main work
+
+`startTurnIfNeeded` writes hidden `main_turn_opened` once with the conversation,
+minted turn ID, occurrence time and captured source metadata. Thinking alone can
+open the turn; the fact preserves its identity without persisting thought text,
+tool inputs or prompts. Live-state readings still do not become thread items.
+`trackRuntimeTool` retains unfinished ordinary main-thread tools by their existing
+tool call ID and name. Successful/failed results and denied calls retire them;
+an ordinary turn end retires the turn. Agent/Task launchers and child tools are
+excluded from this closure vocabulary; their lifecycle and background-task
+endings remain [#2969](https://github.com/pyrycode/pyrycode/issues/2969).
+
+The drain's `closeRuntimeSource` flushes buffered predecessor text, writes shown
+`main_tool_interrupted` for each unfinished ordinary main call, then writes one
+shown `main_turn_interrupted` for the open turn before the divider. Endings retain
+the existing tool/turn identities, actual closure cause, occurrence time and
+source metadata. Repeated closure adds no second ending; already ended turns,
+completed/failed tools and denied calls are not interrupted again. A child crash
+retaining the session closes preceding work with `child_exit` and no divider.
+Exit epochs protect newer same-session work and delivery reservations from stale
+exits, including reservations made before replacement output. Rotation retains
+the retiring source for the exit callback: reading only the current routing tag
+or last output source can instead identify the successor.
+
+#### Publication ordering
+
+Ordinary callbacks capture and retain boundaries under the short
+output-acceptance lock, without storage,
+network I/O or waiting for the drain. Each boundary waits for its predecessor's
+accepted-output watermark; delayed A→B→C facts retain both routing pairs and their
+captured owners. Evictions also wait for the matching consumed producer stop,
+including late parsed tails, so closure retains the eviction cause rather than
+falling back to `child_exit`. Interactive output, confirmation-only operator
+placement and channel posts share drain/publication coordination: old buffered
+text precedes interruption, interruption precedes the divider, and successor
+entries follow it in durable entry-ID order. Confirmation placement retains its
+whole-queue fence. Never wait for the drain while holding the post gate.
+
+A pending channel hold lasts until boundary publication finishes, even after
+the boundary leaves its pending queue; releasing it at dequeue lets a post pass
+the divider. Delivery release checks retained open main turns, not just running
+phase projection: a denial can open successor work without a running phase.
+Committed switches wait through transition publication, row publication and
+transport sealing before reset exclusion releases. Both relay configurations
+install this runtime path, including history-only operation.
+
+#### Producer incarnation isolation
+
+Idle sleep and capacity eviction reactivate under the same routing ID.
+`beginRuntimeProducer` allocates a fresh
+daemon-local incarnation before each Claude/Codex `Run` starts its output
+goroutines. Envelopes, retained stops, source state, accepted-output watermarks
+and captured boundaries carry it; durable/wire provenance keeps the existing
+routing identity. Sealing only the ID would suppress the replacement's hidden
+opening and terminal idle. `streamSessionTag.Rotate` and successful
+`CompareAndSwap` register every routing alias under the same acceptance lock as
+boundary capture, before any output. Registering only on first output leaves a
+chained boundary or pre-output eviction targeting incarnation zero, reopening
+old work or waiting forever for the wrong stop. Refused announced clears preserve
+another live tag's destination ownership; older unbound callers retain zero.
+
+Delayed sealed-predecessor events keep their captured provenance and closed turn
+address without opening work or changing successor busy/idle placement. Late text
+retains chunk bounds and sequence progression. Other conversations stay untouched.
+
+#### Legacy exclusion and write failures
+
+All four runtime types are history-only: hidden openings, shown interruptions
+and even shown dividers remain excluded from legacy pages, ring replay and live
+traffic by `legacyHistoryType`. Visibility never grants transport eligibility.
+Best-effort nil/failed storage does not change closure, sealing, eligible legacy
+publication, payload meanings or recipient gates. Append failures use the existing
+content-free discriminants, never payloads or filesystem error text. Daemon-start
+reconciliation remains [#3014](https://github.com/pyrycode/pyrycode/issues/3014).
+See [ADR 042](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks)
+and [drain source lifecycle](streamsup-package-draining-turnevents-into-the-interactive-emitter.md).
 
 ### Operator delivery provenance (#2983)
 
@@ -233,6 +358,7 @@ recipient gates keep their original meaning.
 | `background_task_updated` | Hidden for patch-only updates; shown when `Status` or `Summary` is nonempty. |
 | Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
+| Runtime history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden only for `idle_sleep`. All remain ineligible for legacy delivery. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -366,6 +492,34 @@ rule would be defeated by relaying them.
 **Test-shape traps worth knowing before touching these producers
 again:**
 
+- **Rotate before successor output and reactivate the same routing ID.**
+  `TestRuntimeHistoryRotationBeforeOutput` delays B across A→B→C;
+  `TestRuntimeHistoryEvictionBeforeOutput` supplies late parsed tails and both
+  stop lanes before releasing operator/channel writes. Output before boundary
+  notification would populate the alias map and conceal missing registration.
+  `TestRuntimeHistoryEvictionReactivation` and
+  `TestRuntimeHistoryRunnerReactivationIncarnation` cover both eviction causes
+  and both harnesses, checking fresh turn identities, terminal idle and isolation
+  from old text, endings and exits. Different routing IDs alone miss permanent
+  sealing of a reused ID. `TestRuntimeHistoryRoutingRegistrationRefusals` checks
+  that a refused rotation preserves another producer's destination.
+- **Assert retained work as well as phase and placement.**
+  `TestRuntimeHistorySealedPredecessorCannotCloseSuccessor` opens successor work
+  with a denial, then supplies late predecessor endings; a phase-only assertion
+  misses an open turn with no running phase.
+  `TestRuntimeHistoryStaleExitCannotPlaceSuccessorDelivery` reserves delivery
+  before any successor output, so a declined exit must skip idle placement too.
+  `TestRuntimeHistoryWriterOrdering` checks raw entry order across interactive,
+  operator and channel writers and preserves another conversation.
+- **Check hidden openings and history-only isolation at the real writers.**
+  `TestRuntimeHistorySourceClosure` opens with thinking, closes an unfinished
+  ordinary tool exactly once, excludes completed/denied calls and Agent launchers,
+  and crosses the late-text chunk bound without reopening the predecessor.
+  `TestRuntimeHistoryDividerMapping`, `TestRuntimeHistoryActualResetHandoff` and
+  `TestRuntimeHistoryResetOutcomeAndNoops` check distinct causes, visibility and
+  actual/unknown outcomes. `TestRuntimeHistoryFactsLegacyIsolation` uses healthy,
+  nil and failed storage while checking pages, ring/live eligibility and
+  content-free logs; successful storage alone cannot prove legacy exclusion.
 - **Delay both delivery and recording to prove the capture boundary.**
   `TestOperatorDeliveryProvenance_ReceivingSessionRotation` rotates the actual
   resolved session during activation, rebinds the conversation, then rotates
