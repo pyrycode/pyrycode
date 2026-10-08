@@ -19,7 +19,7 @@ var closingHashes = regexp.MustCompile(`[ \t]+#+[ \t]*$`)
 var setext = regexp.MustCompile(`^ {0,3}(=+|-+)[ \t]*$`)
 var thematicBreak = regexp.MustCompile(`^ {0,3}(?:\*(?:[ \t]*\*){2,}|-(?:[ \t]*-){2,}|_(?:[ \t]*_){2,})[ \t]*$`)
 var containerStart = regexp.MustCompile(`^ {0,3}(?:>|(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$))`)
-var containerText = regexp.MustCompile(`^ {0,3}(?:>[ \t]*|(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)\S`)
+var containerText = regexp.MustCompile(`^ {0,3}(?:>[ \t]*|(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)[^ \t]`)
 var referenceStart = regexp.MustCompile(`^ {0,3}\[[^]]+\]:`)
 var listMarker = regexp.MustCompile(`^(?:[-+*]|([0-9]{1,9})[.)])([ \t]*)`)
 
@@ -39,6 +39,29 @@ var htmlBlocks = []struct{ start, end *regexp.Regexp }{
 	{regexp.MustCompile("^<(?:(?:[A-Za-z][A-Za-z0-9-]*)(?:[ \\t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \\t]*=[ \\t]*(?:[^ \\t\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*[ \\t]*/?|/[A-Za-z][A-Za-z0-9-]*[ \\t]*)>[ \\t]*$"), regexp.MustCompile(`^[ \t]*$`)},
 }
 
+// markdownBlank checks structural whitespace, which permits only spaces and
+// tabs. Title and resolution matching separately trim surrounding whitespace.
+func markdownBlank(line string) bool { return strings.Trim(line, " \t") == "" }
+
+// markdownLines keeps original line-ending bytes for section offsets. CommonMark
+// accepts LF, CRLF and lone CR; the final entry can be empty.
+func markdownLines(data []byte) []string {
+	text := string(data)
+	var lines []string
+	start := 0
+	for i := 0; i < len(text); i++ {
+		if text[i] != '\n' && text[i] != '\r' {
+			continue
+		}
+		if text[i] == '\r' && i+1 < len(text) && text[i+1] == '\n' {
+			i++
+		}
+		lines = append(lines, text[start:i+1])
+		start = i + 1
+	}
+	return append(lines, text[start:])
+}
+
 // stripContainers removes leading block quote and list item markers. code
 // reports container content that starts an indented code block.
 func stripContainers(line string) (content string, stripped, code bool) {
@@ -47,7 +70,7 @@ func stripContainers(line string) (content string, stripped, code bool) {
 		rest := strings.TrimLeft(content, " \t")
 		if strings.HasPrefix(rest, ">") {
 			content, stripped = strings.TrimPrefix(rest[1:], " "), true
-			if after := strings.TrimLeft(content, " "); strings.TrimSpace(after) != "" && len(content)-len(after) >= 4 {
+			if after := strings.TrimLeft(content, " "); !markdownBlank(after) && len(content)-len(after) >= 4 {
 				return content, true, true
 			}
 			continue
@@ -57,7 +80,7 @@ func stripContainers(line string) (content string, stripped, code bool) {
 			return content, stripped, false
 		}
 		content, stripped = rest[len(m[0]):], true
-		if len(m[2]) >= 5 && strings.TrimSpace(content) != "" {
+		if len(m[2]) >= 5 && !markdownBlank(content) {
 			return content, true, true
 		}
 	}
@@ -81,7 +104,7 @@ func singleReference(line, next string) bool {
 // reference definitions) yield an "unsupported Markdown" reason instead of guessed
 // section bounds.
 func parse(name string, data []byte) (int, string, []heading) {
-	lines := strings.SplitAfter(string(data), "\n")
+	lines := markdownLines(data)
 	offset, first, ticket, identity := 0, 0, 0, ""
 	if m := filenameTicket.FindStringSubmatch(name); m != nil {
 		var err error
@@ -149,7 +172,7 @@ func parse(name string, data []byte) (int, string, []heading) {
 		line := text(i)
 		trimmed := strings.TrimLeft(line, " ")
 		indent := len(line) - len(trimmed)
-		blank := strings.TrimSpace(line) == ""
+		blank := markdownBlank(line)
 		column0 := !blank && line[0] != ' ' && line[0] != '\t'
 		wasIndented, wasBlank := previousIndented, previousBlank
 		previousIndented, previousBlank = !blank && !column0, blank
@@ -166,7 +189,7 @@ func parse(name string, data []byte) (int, string, []heading) {
 		}
 		// An indented fence may sit in a list item, which a less indented
 		// line would close along with the fence.
-		if fenceChar != 0 && indent < fenceIndent && strings.TrimSpace(line) != "" {
+		if fenceChar != 0 && indent < fenceIndent && !blank {
 			unsupportedAt(i, "line less indented than its open fence")
 		}
 		if indent <= 3 && len(trimmed) > 0 && (trimmed[0] == '`' || trimmed[0] == '~') {
@@ -175,7 +198,7 @@ func parse(name string, data []byte) (int, string, []heading) {
 				width++
 			}
 			if fenceChar != 0 {
-				if trimmed[0] == fenceChar && width >= fenceSize && strings.TrimSpace(trimmed[width:]) == "" {
+				if trimmed[0] == fenceChar && width >= fenceSize && markdownBlank(trimmed[width:]) {
 					fenceChar = 0
 				}
 				paragraph = -1
@@ -261,7 +284,7 @@ func parse(name string, data []byte) (int, string, []heading) {
 			headings = append(headings, h)
 			paragraph = -1
 			lazyContainer = false
-		} else if strings.TrimSpace(line) == "" || thematicBreak.MatchString(line) {
+		} else if blank || thematicBreak.MatchString(line) {
 			paragraph = -1
 			lazyContainer = false
 		} else if containerStart.MatchString(line) && !(paragraph >= 0 && !lazyContainer && !interrupts(line)) {
@@ -307,7 +330,7 @@ func interrupts(line string) bool {
 		return true
 	}
 	m := listMarker.FindStringSubmatch(rest)
-	if m == nil || strings.TrimSpace(rest[len(m[0]):]) == "" {
+	if m == nil || markdownBlank(rest[len(m[0]):]) {
 		return false
 	}
 	return m[1] == "" || m[1] == "1"
