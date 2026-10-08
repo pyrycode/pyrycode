@@ -69,3 +69,7 @@ None. Unknown launcher attribution is fixed at first child observation and is no
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-08
+
+## Revisions
+
+- 2026-10-08: The package race check exposed `TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature` in `cmd/pyry/stream_turn_drain_test.go`, whose child-only fixture expected a synthetic main turn. Read that test and `startStreamTurnDrainV2`'s timer/shutdown loop; update the fixture to receive only a timer-delivered child delta and join the drain before asserting no main lifecycle state or extra frames. Production design is unchanged. The additional test edit keeps total written work below 800 lines.

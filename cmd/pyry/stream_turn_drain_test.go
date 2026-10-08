@@ -319,10 +319,20 @@ func TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature(t *testing
 		`","message":{"id":"m-child","role":"assistant","content":[` +
 		`{"type":"thinking","thinking":"` + thinkingSecret + `","signature":"` + signatureSecret + `"},` +
 		`{"type":"text","text":"` + visibleText + `"}]}}`
-	feedLines(sink, "sess-a", attributed, resultLine)
+	feedLines(sink, "sess-a", attributed)
 
-	got := collectEnvs(t, bcast.pushed, 4)
-	if want := []string{protocol.TypeTurnState, protocol.TypeAssistantDelta, protocol.TypeTurnEnd, protocol.TypeTurnState}; !slices.Equal(envTypes(got), want) {
+	got := collectEnvs(t, bcast.pushed, 1)
+	cancel()
+	cleanup() // join before reading drain-owned lifecycle state
+	if emitter.inTurn {
+		t.Fatal("child-only text opened a main turn")
+	}
+	select {
+	case env := <-bcast.pushed:
+		t.Fatalf("child-only text published extra frame %s", env.Type)
+	default:
+	}
+	if want := []string{protocol.TypeAssistantDelta}; !slices.Equal(envTypes(got), want) {
 		t.Fatalf("attributed text envelope types = %v, want %v", envTypes(got), want)
 	}
 	var delta protocol.AssistantDeltaPayload
@@ -348,7 +358,7 @@ func TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature(t *testing
 	if !foundDelta {
 		t.Fatal("ordinary attributed text did not reach an assistant_delta")
 	}
-	if delta.Text != visibleText || delta.ParentToolUseID != parentID {
+	if delta.Text != visibleText || delta.ParentToolUseID != parentID || delta.TurnID == "" || delta.Seq != 0 {
 		t.Errorf("assistant_delta = {text:%q parent:%q}, want {%q %q}",
 			delta.Text, delta.ParentToolUseID, visibleText, parentID)
 	}

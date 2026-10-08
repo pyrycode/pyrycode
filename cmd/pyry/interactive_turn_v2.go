@@ -112,8 +112,8 @@ type interactiveTurnEmitterV2 struct {
 	bcast  interactiveBroadcaster
 	logger *slog.Logger
 
-	// Per-conversation turn state (#2739). Every conversation with a turn open or
-	// text buffered owns one convTurnState in turns; the embedded pointer is the
+	// Every conversation with a turn open, text buffered or child attribution
+	// retained owns one convTurnState in turns; the embedded pointer is the
 	// conversation the current call is about, selected by selectConversation at the
 	// top of HandleFor and closeForConversation. Embedding is what lets every method
 	// below keep naming e.inTurn, e.seq or e.deltaBuf and mean "this conversation's".
@@ -196,12 +196,14 @@ type interactiveTurnEmitterV2 struct {
 // (#2739). Before it the emitter held one of each, so a second conversation's
 // event either was dropped upstream or closed the first one's turn.
 type convTurnState struct {
-	inTurn       bool                 // whether a turn is currently open
-	turnID       string               // current turn's id, minted at turn start
-	turnConvID   string               // the conversation this state belongs to while a turn is open
-	seq          int                  // per-turn assistant-delta counter; 0 at each turn boundary
-	currentState turnbridge.TurnState // last-emitted turn_state, for transition de-dup
-	childLanes   map[string]*assistantDeltaLane
+	inTurn         bool                 // whether a turn is currently open
+	turnID         string               // current turn's id, minted at turn start
+	turnConvID     string               // the conversation this state belongs to while a turn is open
+	seq            int                  // per-turn assistant-delta counter; 0 at each turn boundary
+	currentState   turnbridge.TurnState // last-emitted turn_state, for transition de-dup
+	childLanes     map[string]*assistantDeltaLane
+	launcherTurns  map[string]string // Agent/Task call ID to its originating turn
+	childToolTurns map[string]string // child tool ID to its fixed originating turn
 
 	deltaBuf    strings.Builder // accumulated assistant text for the open (un-flushed) delta
 	deltaMsgID  string          // MessageID of the buffered text; meaningful only while deltaBuf.Len() > 0
@@ -239,11 +241,12 @@ func (e *interactiveTurnEmitterV2) selectConversation(convID string) {
 	e.convTurnState = st
 }
 
-// releaseConversation forgets convID's state once it holds nothing: no open turn
-// and no buffered text. This is what bounds turns to the conversations with work
-// in flight. The selection itself is left alone; the next HandleFor reselects.
+// releaseConversation forgets empty state. Child attribution survives main-turn
+// closure and is released by closeForConversation at session exit or teardown.
+// The selection itself is left alone; the next HandleFor reselects.
 func (e *interactiveTurnEmitterV2) releaseConversation(convID string) {
-	if st, ok := e.turns[convID]; ok && !st.inTurn && st.deltaBuf.Len() == 0 {
+	if st, ok := e.turns[convID]; ok && !st.inTurn && st.deltaBuf.Len() == 0 &&
+		len(st.childLanes) == 0 && len(st.launcherTurns) == 0 && len(st.childToolTurns) == 0 {
 		delete(e.turns, convID)
 	}
 }
@@ -304,7 +307,7 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 		// Thought text is never forwarded; thinking surfaces only as a state.
 		e.transitionTo(ctx, convID, turnbridge.StateThinking)
 	case turnevent.TextChunk:
-		if !e.startTurnIfNeeded(convID) {
+		if v.ParentToolCallID == "" && !e.startTurnIfNeeded(convID) {
 			return
 		}
 		// Lane/message-boundary flush: changing either key ends the prior delta
@@ -316,12 +319,10 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 		if !e.ensureDeltaLane(convID, v.ParentToolCallID) {
 			return
 		}
-		// Safe before buffering: during a text run the state is already
-		// responding, so this is a no-op and never emits a turn_state ahead of
-		// buffered text; it only emits on the first content of a turn, when the
-		// buffer is necessarily empty.
-		e.transitionTo(ctx, convID, turnbridge.StateResponding)
 		if v.ParentToolCallID == "" {
+			// Main text alone changes the main phase. A lane switch already
+			// flushed prior text, preserving arrival order before this transition.
+			e.transitionTo(ctx, convID, turnbridge.StateResponding)
 			e.suggestions.noteAssistantText(convID, v)
 		}
 		wasEmpty := e.deltaBuf.Len() == 0
@@ -339,13 +340,23 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 			e.flushTimer.Reset(coalesceWindow)
 		}
 	case turnevent.ToolStart:
+		if v.ParentToolCallID != "" {
+			origin := e.emitChildTool(ctx, convID, v.ParentToolCallID, v.ToolCallID, ev)
+			e.rememberLauncher(v, origin)
+			return
+		}
 		if !e.startTurnIfNeeded(convID) {
 			return
 		}
 		e.flushDelta(ctx) // buffered text precedes the tool_use it logically preceded
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
+		e.rememberLauncher(v, e.turnID)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.ToolUpdate:
+		if v.ParentToolCallID != "" {
+			e.emitChildTool(ctx, convID, v.ParentToolCallID, v.ToolCallID, ev)
+			return
+		}
 		if !e.startTurnIfNeeded(convID) {
 			return
 		}
@@ -353,6 +364,11 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.ToolProgress:
+		if origin := e.childToolTurns[v.ToolCallID]; origin != "" {
+			e.flushDelta(ctx)
+			e.emitMappedAt(ctx, convID, ev, origin, 0)
+			return
+		}
 		// A progress reading belongs to the tool row that ToolStart already opened.
 		// It is turn-scoped but lifecycle-neutral: preserve wire order by flushing
 		// prior text, then publish without emitting another turn_state or retaining
@@ -363,33 +379,14 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.ToolCallDenied:
-		// claude refused a tool call it had already announced (#2233). TURN-SCOPED,
-		// taking ToolStart/ToolUpdate's shape above rather than the status peers' below,
-		// and the reason is the join: this frame names ONE call the client has already
-		// seen a tool_use for, carries that call's tool_use_id, and must land in the
-		// same turn as it. The captured line order puts it strictly between the two
-		// (assistant/tool_use → system/permission_denied → user/tool_result), so
-		// startTurnIfNeeded ordinarily finds the turn the tool_use opened and mints
-		// nothing; it is called anyway so a denial arriving first still addresses a
-		// turn rather than an empty string.
-		//
-		// It deliberately does NOT call transitionTo, which is the one place it departs
-		// from the two arms it otherwise copies. A denial reports no lifecycle change:
-		// the ToolStart before it already set responding, and emitting a second
-		// turn_state would claim a transition this event does not report. turnMarkFor
-		// answers turnMarkNone for the variant and #2232 pinned that with a row in the
-		// turn-mark totality guard, so nothing downstream reads a busy edge off it.
-		//
-		// Flush any pending delta first so buffered text keeps its wire position ahead
-		// of the denial. Like turn_state this flows through emit() and is NOT a
-		// droppable delta (the droppable set is assistant_delta only, #610), so it holds
-		// a queue slot; that is bounded by the producer rather than here — one frame per
-		// permission_denied line, no accumulator and no dedup.
-		//
-		// No capability gate in the arm, and no second bound on claude's five strings.
-		// The interactive grant is filtered once, in emit(), for every frame type; all
-		// five were bounded at construction by streamsup's maxTaskFieldID /
-		// maxDenialProse. Writing either here is how a single gate stops being single.
+		// Denials join the announced call by tool ID. A known child uses its
+		// retained origin; an unknown call keeps the main-turn opening behavior.
+		// Neither changes phase. Flush prior text before publishing the denial.
+		if origin := e.childToolTurns[v.ToolCallID]; origin != "" {
+			e.flushDelta(ctx)
+			e.emitMappedAt(ctx, convID, ev, origin, 0)
+			return
+		}
 		if !e.startTurnIfNeeded(convID) {
 			return
 		}
@@ -929,6 +926,44 @@ func (e *interactiveTurnEmitterV2) ensureDeltaLane(convID, parentID string) bool
 	return true
 }
 
+// rememberLauncher retains observed spawning calls, including nested agents,
+// until their producing session is closed. Ordinary main tools need no retention.
+func (e *interactiveTurnEmitterV2) rememberLauncher(v turnevent.ToolStart, origin string) {
+	if origin == "" || v.ToolCallID == "" || (v.Title != "Agent" && v.Title != "Task") {
+		return
+	}
+	if e.launcherTurns == nil {
+		e.launcherTurns = make(map[string]string)
+	}
+	if _, exists := e.launcherTurns[v.ToolCallID]; !exists {
+		e.launcherTurns[v.ToolCallID] = origin
+	}
+}
+
+// emitChildTool fixes a child call's origin on first observation. Unknown
+// launchers use a parent-keyed lane ID, never the currently open main turn.
+func (e *interactiveTurnEmitterV2) emitChildTool(ctx context.Context, convID, parentID, toolID string, ev turnevent.Event) string {
+	origin := e.childToolTurns[toolID]
+	if origin == "" {
+		origin = e.launcherTurns[parentID]
+		if origin == "" {
+			if !e.ensureDeltaLane(convID, parentID) {
+				return ""
+			}
+			origin = e.childLanes[parentID].turnID
+		}
+		if toolID != "" {
+			if e.childToolTurns == nil {
+				e.childToolTurns = make(map[string]string)
+			}
+			e.childToolTurns[toolID] = origin
+		}
+	}
+	e.flushDelta(ctx)
+	e.emitMappedAt(ctx, convID, ev, origin, 0)
+	return origin
+}
+
 func (e *interactiveTurnEmitterV2) deltaAddress(parentID string) (string, int) {
 	if parentID == "" {
 		return e.turnID, e.seq
@@ -963,9 +998,8 @@ func (e *interactiveTurnEmitterV2) transitionTo(ctx context.Context, convID stri
 	e.emit(ctx, convID, typ, payload)
 }
 
-// endTurn closes the selected conversation's turn and discards every main/child
-// lane identity and counter. It need not touch the delta buffer — callers flush
-// before every turn end.
+// endTurn closes the selected conversation's main turn. Background child
+// identities and counters survive until session teardown. Callers flush first.
 func (e *interactiveTurnEmitterV2) endTurn() {
 	convID := e.turnConvID
 	e.inTurn = false
@@ -973,7 +1007,6 @@ func (e *interactiveTurnEmitterV2) endTurn() {
 	e.turnConvID = ""
 	e.seq = 0
 	e.currentState = ""
-	e.childLanes = nil
 	e.phases.clear(convID)
 }
 
@@ -1058,14 +1091,19 @@ func (e *interactiveTurnEmitterV2) closeForConversation(ctx context.Context, con
 	// longer publish, and a held suggestion clears, whether or not a turn is open.
 	e.suggestions.invalidate(conversationID)
 	st, ok := e.turns[conversationID]
-	if !ok || !st.inTurn {
+	if !ok {
 		return
 	}
 	e.convTurnState = st
 	defer e.releaseConversation(conversationID)
 	e.flushDelta(ctx)
-	e.transitionTo(ctx, conversationID, turnbridge.StateIdle)
-	e.endTurn()
+	if e.inTurn {
+		e.transitionTo(ctx, conversationID, turnbridge.StateIdle)
+		e.endTurn()
+	}
+	e.childLanes = nil
+	e.launcherTurns = nil
+	e.childToolTurns = nil
 }
 
 // splitDeltaText splits s into consecutive chunks of at most max bytes each,

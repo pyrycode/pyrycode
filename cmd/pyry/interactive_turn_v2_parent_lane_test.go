@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -79,7 +80,12 @@ func TestInteractiveTurnEmitterV2_ParentLaneTimerFlushKeepsIdentity(t *testing.T
 
 	first := strings.Repeat("x", maxDeltaTextBytes+1)
 	e.Handle(ctx, turnevent.TextChunk{MessageID: "one", ParentToolCallID: parentLaneA, Text: first})
-	e.flushDelta(ctx)
+	select {
+	case <-e.flushC():
+		e.flushAll(ctx)
+	case <-time.After(5 * time.Second):
+		t.Fatal("idle child text did not arm the coalescing timer")
+	}
 	e.Handle(ctx, turnevent.TextChunk{MessageID: "one", ParentToolCallID: parentLaneA, Text: "second"})
 	e.flushDelta(ctx)
 
@@ -100,11 +106,12 @@ func TestInteractiveTurnEmitterV2_ParentLaneTimerFlushKeepsIdentity(t *testing.T
 	}
 }
 
-func TestInteractiveTurnEmitterV2_TurnEndResetsParentLanes(t *testing.T) {
+func TestInteractiveTurnEmitterV2_TurnEndRetainsParentLanes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	_, bcast, e := newParentLaneEmitter(t, testConvID)
 
+	e.Handle(ctx, turnevent.ThoughtChunk{})
 	e.Handle(ctx, turnevent.TextChunk{MessageID: "old", ParentToolCallID: parentLaneA, Text: "old-child"})
 	e.Handle(ctx, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 	e.Handle(ctx, turnevent.TextChunk{MessageID: "new-main", Text: "new-main"})
@@ -122,12 +129,12 @@ func TestInteractiveTurnEmitterV2_TurnEndResetsParentLanes(t *testing.T) {
 		t.Errorf("parent ids leaked across turn reset: %q, %q, %q", deltas[0].ParentToolUseID, deltas[1].ParentToolUseID, deltas[2].ParentToolUseID)
 	}
 	for i, d := range deltas {
-		if d.Seq != 0 {
-			t.Errorf("delta %d seq = %d, want 0 for its fresh lane", i, d.Seq)
+		if want := []int{0, 0, 1}[i]; d.Seq != want {
+			t.Errorf("delta %d seq = %d, want %d", i, d.Seq, want)
 		}
 	}
-	if deltas[0].TurnID == deltas[2].TurnID {
-		t.Errorf("child lane reused turn id %q across outer turns", deltas[0].TurnID)
+	if deltas[0].TurnID != deltas[2].TurnID {
+		t.Errorf("child lane changed turn id %q across outer turns", deltas[0].TurnID)
 	}
 	if deltas[1].TurnID == deltas[0].TurnID || deltas[1].TurnID == deltas[2].TurnID {
 		t.Errorf("new main lane turn id %q aliases a child lane", deltas[1].TurnID)
@@ -190,11 +197,11 @@ func TestInteractiveTurnEmitterV2_AttributedDeltaUsesRingAndHistory(t *testing.T
 	e.hist = store
 
 	e.Handle(ctx, turnevent.TextChunk{MessageID: "child", ParentToolCallID: parentLaneA, Text: "retained child"})
-	e.Handle(ctx, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+	e.flushAll(ctx)
 
 	events, gap := e.ring.After(testConvID, 0)
 	if gap {
-		t.Fatal("ring reports a gap for a four-frame turn")
+		t.Fatal("ring reports a gap for one child delta")
 	}
 	entries := historyEntries(t, store, testConvID)
 	assertLogMatchesRing(t, entries, events)
