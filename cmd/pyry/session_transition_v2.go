@@ -136,7 +136,9 @@ func (e *sessionTransitionEmitterV2) publishSwitch(ctx context.Context, t sessio
 		e.runtimeSink.queueBoundary(t, func() {
 			e.broadcast(ctx, t)
 			if b, ok := e.bcast.(interface{ FlushPushes(context.Context) error }); ok {
-				_ = b.FlushPushes(ctx)
+				if err := b.FlushPushes(ctx); err != nil {
+					return
+				} // daemon cancellation
 			}
 		}, done)
 		select {

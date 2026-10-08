@@ -150,6 +150,9 @@ func (s *streamTurnSink) exitForSessionTag(tag *streamSessionTag) func() {
 		if source := tag.lastSource.Load(); source != nil {
 			env.source = *source
 		}
+		if retired := tag.retiringSource.Swap(nil); retired != nil {
+			env.source.SessionID = *retired
+		}
 		if !s.offer(env, true) {
 			s.logger.Warn("relay: stream-turn exit retained; sink full", "event", "stream_turn.exit_sink_full", "session_id", env.sessionID)
 		}

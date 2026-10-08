@@ -93,6 +93,9 @@ func (e *interactiveTurnEmitterV2) closeRuntimeSource(ctx context.Context, convI
 	for _, key := range keys {
 		e.convTurnState = e.turns[key]
 		e.flushDelta(ctx)
+		if seal && e.inTurn {
+			e.runtimeClosedTurnID, e.runtimeClosedSeq = e.turnID, e.seq
+		}
 		if e.inTurn {
 			ids := make([]string, 0, len(e.runtimeTools))
 			for id := range e.runtimeTools {

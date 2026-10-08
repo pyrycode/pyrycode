@@ -198,19 +198,21 @@ type interactiveTurnEmitterV2 struct {
 // convTurnState retains one producing session's lifecycle and buffered text
 // within a conversation. Selection, flushing and closing retain that source.
 type convTurnState struct {
-	runtimeTools   map[string]string
-	runtimeEpoch   uint64
-	conversationID string
-	source         history.SessionProvenance
-	inTurn         bool                 // whether a turn is currently open
-	turnID         string               // current turn's id, minted at turn start
-	turnConvID     string               // the conversation this state belongs to while a turn is open
-	seq            int                  // per-turn assistant-delta counter; 0 at each turn boundary
-	currentState   turnbridge.TurnState // this source's main phase
-	phaseOrder     uint64               // order of this source's last main-phase event
-	childLanes     map[string]*assistantDeltaLane
-	launcherTurns  map[string]string // Agent/Task call ID to its originating turn
-	childToolTurns map[string]string // child tool ID to its fixed originating turn
+	runtimeTools        map[string]string
+	runtimeEpoch        uint64
+	runtimeClosedTurnID string
+	runtimeClosedSeq    int
+	conversationID      string
+	source              history.SessionProvenance
+	inTurn              bool                 // whether a turn is currently open
+	turnID              string               // current turn's id, minted at turn start
+	turnConvID          string               // the conversation this state belongs to while a turn is open
+	seq                 int                  // per-turn assistant-delta counter; 0 at each turn boundary
+	currentState        turnbridge.TurnState // this source's main phase
+	phaseOrder          uint64               // order of this source's last main-phase event
+	childLanes          map[string]*assistantDeltaLane
+	launcherTurns       map[string]string // Agent/Task call ID to its originating turn
+	childToolTurns      map[string]string // child tool ID to its fixed originating turn
 
 	deltaBuf    strings.Builder // accumulated assistant text for the open (un-flushed) delta
 	deltaMsgID  string          // MessageID of the buffered text; meaningful only while deltaBuf.Len() > 0
@@ -259,6 +261,9 @@ func (e *interactiveTurnEmitterV2) selectConversation(convID string, source hist
 // closure and is released by closeForConversation at session exit or teardown.
 // The selection itself is left alone; the next HandleFor reselects.
 func (e *interactiveTurnEmitterV2) releaseConversation(key string) {
+	if st := e.turns[key]; st != nil && st.runtimeClosedTurnID != "" && e.runtimeSealed[runtimeSourceKey(st.conversationID, st.source.SessionID)] {
+		return
+	}
 	if st, ok := e.turns[key]; ok && !st.inTurn && st.deltaBuf.Len() == 0 &&
 		len(st.childLanes) == 0 && len(st.launcherTurns) == 0 && len(st.childToolTurns) == 0 {
 		delete(e.turns, key)
@@ -319,8 +324,16 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 	key := e.selectConversation(convID, captured)
 	defer e.releaseConversation(key)
 	if e.runtimeFacts && e.runtimeSealed[runtimeSourceKey(convID, captured.SessionID)] {
-		if _, thought := ev.(turnevent.ThoughtChunk); !thought {
-			e.emitMapped(ctx, convID, ev)
+		switch v := ev.(type) {
+		case turnevent.ThoughtChunk:
+		case turnevent.TextChunk:
+			for _, text := range splitDeltaText(v.Text, maxDeltaTextBytes) {
+				v.Text = text
+				e.emitMappedAt(ctx, convID, v, e.runtimeClosedTurnID, e.runtimeClosedSeq)
+				e.runtimeClosedSeq++
+			}
+		default:
+			e.emitMappedAt(ctx, convID, ev, e.runtimeClosedTurnID, 0)
 		}
 		return
 	}

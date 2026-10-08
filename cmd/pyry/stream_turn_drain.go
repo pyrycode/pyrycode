@@ -381,8 +381,9 @@ func (s *streamTurnSink) takeLifecycleCloses() []string {
 // it here because the invariant belongs to this value; RestartFresh's own empty-id
 // refusal means production never reaches the guard.
 type streamSessionTag struct {
-	id         atomic.Pointer[string]
-	lastSource atomic.Pointer[history.SessionProvenance]
+	id             atomic.Pointer[string]
+	lastSource     atomic.Pointer[history.SessionProvenance]
+	retiringSource atomic.Pointer[string]
 }
 
 // newStreamSessionTag returns a tag seeded with the runner's construction-time
@@ -405,6 +406,9 @@ func (t *streamSessionTag) ID() string { return *t.id.Load() }
 func (t *streamSessionTag) Rotate(newID string) {
 	if newID == "" {
 		return
+	}
+	if oldID := t.ID(); oldID != newID {
+		t.retiringSource.CompareAndSwap(nil, &oldID)
 	}
 	t.id.Store(&newID)
 }

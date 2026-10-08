@@ -352,10 +352,26 @@ func TestRuntimeHistorySourceClosure(t *testing.T) {
 	e.closeRuntimeSource(ctx, testConvID, "a", string(sessions.CauseClaudeClear), time.Now().UTC(), true, 0)
 	e.closeRuntimeSource(ctx, testConvID, "a", string(sessions.CauseClaudeClear), time.Now().UTC(), true, 0)
 	e.HandleFor(ctx, testConvID, turnevent.ThoughtChunk{Text: "late-thought"}, a)
+	e.HandleFor(ctx, testConvID, turnevent.TextChunk{Text: strings.Repeat("x", maxDeltaTextBytes+8)}, a)
 	e.flushAll(ctx)
 	counts := map[string]int{}
+	var oldTurn string
+	var lateChunks int
 	for _, entry := range historyEntries(t, store, testConvID) {
 		counts[entry.Type]++
+		if entry.Type == historyTurnOpened && entry.Session != nil && entry.Session.SessionID == "a" {
+			var p runtimeHistoryFact
+			_ = json.Unmarshal(entry.Payload, &p)
+			oldTurn = p.TurnID
+		}
+		if entry.Type == protocol.TypeAssistantDelta && strings.Contains(string(entry.Payload), "xxxx") {
+			var p protocol.AssistantDeltaPayload
+			_ = json.Unmarshal(entry.Payload, &p)
+			lateChunks++
+			if len(p.Text) > maxDeltaTextBytes || p.TurnID != oldTurn {
+				t.Fatalf("late delta lost bound/identity: %+v", p)
+			}
+		}
 		if strings.Contains(string(entry.Payload), "private-thought") || strings.Contains(string(entry.Payload), "late-thought") {
 			t.Fatal("thought text persisted")
 		}
@@ -369,6 +385,9 @@ func TestRuntimeHistorySourceClosure(t *testing.T) {
 	}
 	if counts[historyTurnOpened] != 2 || counts[historyToolInterrupted] != 1 || counts[historyTurnInterrupted] != 1 {
 		t.Fatalf("facts: %v", counts)
+	}
+	if lateChunks != 2 {
+		t.Fatalf("late chunks=%d", lateChunks)
 	}
 	if !e.turns[testConvID+"\x00codex\x00b"].inTurn {
 		t.Fatal("successor work was closed")
@@ -428,5 +447,28 @@ func TestRuntimeHistoryFactsLegacyIsolation(t *testing.T) {
 				t.Fatal("failed storage not logged")
 			}
 		})
+	}
+}
+
+func TestRuntimeHistoryExitCapturesRetiredSource(t *testing.T) {
+	sink := newStreamTurnSink(8, discardLogger())
+	tag := newStreamSessionTag("a")
+	produce, exit := sink.sinkForSessionTag(tag, "claude"), sink.exitForSessionTag(tag)
+	produce(turnevent.ThoughtChunk{})
+	<-sink.ch
+	tag.Rotate("b")
+	// Old-child output may arrive after RestartFresh has already rotated the
+	// routing tag. It must not replace the identity of the child being stopped.
+	produce(turnevent.ToolProgress{})
+	<-sink.ch
+	exit()
+	if env := <-sink.ch; env.sessionID != "b" || env.source.SessionID != "a" {
+		t.Fatalf("retired exit: %+v", env)
+	}
+	produce(turnevent.ThoughtChunk{})
+	<-sink.ch
+	exit()
+	if env := <-sink.ch; env.source.SessionID != "b" {
+		t.Fatalf("replacement exit: %+v", env)
 	}
 }
