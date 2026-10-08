@@ -103,6 +103,16 @@ const MaxSegmentBytes int64 = 1 << 20
 // math.MaxInt would read and decode every segment of the log.
 const MaxPageEntries int = 4096
 
+// MaxEntryID is the largest durable ID, exactly representable by JSON clients
+// using IEEE-754 numbers. A conversation at this ID refuses further appends.
+const MaxEntryID uint64 = 1<<53 - 1
+
+// ErrIDExhausted reports a conversation with no safely allocatable entry ID.
+var ErrIDExhausted = errors.New("history: entry id space is exhausted")
+
+// ErrInvalidMetadata reports inconsistent session provenance.
+var ErrInvalidMetadata = errors.New("history: session provenance is invalid")
+
 // ErrInvalidID reports a conversation id that is not of canonical shape. It is
 // raised before the filesystem is touched, so a refusal leaves nothing behind.
 var ErrInvalidID = errors.New("history: conversation id is not of canonical shape")
@@ -156,7 +166,8 @@ var ErrUnknownVersion = errors.New("history: segment carries a schema version th
 var ErrCorruptSegment = errors.New("history: segment does not decode")
 
 // Entry is one retained wire envelope: the durable id this package mints plus
-// the three fields eventring.Event retains. The per-connection envelope id is
+// the three fields eventring.Event retains and optional session/visibility
+// metadata. The per-connection envelope id is
 // deliberately absent, exactly as it is there — it is meaningless across
 // connections.
 //
@@ -166,10 +177,42 @@ var ErrCorruptSegment = errors.New("history: segment does not decode")
 // so in practice the bytes are unchanged. HTML escaping is off, so '<', '>' and
 // '&' survive as written.
 type Entry struct {
-	ID      uint64          `json:"id"`
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
-	TS      time.Time       `json:"ts"`
+	ID      uint64             `json:"id"`
+	Type    string             `json:"type"`
+	Payload json.RawMessage    `json:"payload"`
+	TS      time.Time          `json:"ts"`
+	Session *SessionProvenance `json:"session,omitempty"`
+	Shown   *bool              `json:"shown,omitempty"`
+}
+
+// SessionProvenance identifies the producing child. Kind is "claude" or "codex"
+// with a nonempty SessionID, or "none" with no SessionID for a daemon-authored
+// fact without a bound child. A nil provenance means unknown, as in legacy logs.
+// SessionID is opaque; it is never interpreted as a path or authorization.
+type SessionProvenance struct {
+	Kind      string `json:"kind"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// Metadata records optional facts outside the opaque payload. A nil Shown uses
+// the legacy type rule; explicit true or false overrides that rule.
+type Metadata struct {
+	Session *SessionProvenance
+	Shown   *bool
+}
+
+func (p *SessionProvenance) valid() bool {
+	if p == nil {
+		return true
+	}
+	switch p.Kind {
+	case "claude", "codex":
+		return p.SessionID != ""
+	case "none":
+		return p.SessionID == ""
+	default:
+		return false
+	}
 }
 
 // Page is one answer from the backward walk.
@@ -192,7 +235,7 @@ type convLog struct {
 	loaded   bool
 	seg      uint64 // active segment number, 0 before the first append
 	segBytes int64  // size of the active segment on disk
-	nextID   uint64 // the next entry id for this conversation
+	lastID   uint64 // the last durable entry id, 0 before the first append
 
 	latestDisplayableID     uint64
 	latestDisplayableLoaded bool
@@ -270,8 +313,22 @@ func newStore(instanceDir string, maxSegmentBytes int64) *Store {
 // platter, because the ticket rules crash consistency out of scope rather than
 // buying it with an fsync per append.
 func (s *Store) Append(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time) (uint64, error) {
+	return s.AppendWithMetadata(convID, typ, payload, ts, Metadata{})
+}
+
+// AppendWithMetadata records an envelope and its session/visibility facts.
+// It shares Append's authorization, payload and durability contract. Nil fields
+// are omitted on disk; existing Append callers always write absent metadata.
+// Invalid provenance returns ErrInvalidMetadata before creating a directory.
+// Both paths allocate IDs through MaxEntryID, then return zero and ErrIDExhausted
+// without changing segment files or watermarks. Callers must not mutate payload
+// or metadata during the call; neither is retained after it returns.
+func (s *Store) AppendWithMetadata(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time, metadata Metadata) (uint64, error) {
 	if !conversations.ValidID(string(convID)) {
 		return 0, fmt.Errorf("%w: conversation id %q", ErrInvalidID, string(convID))
+	}
+	if !metadata.Session.valid() {
+		return 0, ErrInvalidMetadata
 	}
 	if !json.Valid(payload) {
 		return 0, fmt.Errorf("%w: conversation %q: not valid JSON", ErrInvalidPayload, string(convID))
@@ -294,7 +351,11 @@ func (s *Store) Append(convID conversations.ConversationID, typ string, payload 
 		return 0, err
 	}
 
-	line, err := encodeEntry(Entry{ID: c.nextID, Type: typ, Payload: payload, TS: ts})
+	if c.lastID >= MaxEntryID {
+		return 0, ErrIDExhausted
+	}
+	entry := Entry{ID: c.lastID + 1, Type: typ, Payload: payload, TS: ts, Session: metadata.Session, Shown: metadata.Shown}
+	line, err := encodeEntry(entry)
 	if err != nil {
 		return 0, err
 	}
@@ -323,9 +384,9 @@ func (s *Store) Append(convID conversations.ConversationID, typ string, payload 
 		return 0, err
 	}
 
-	id := c.nextID
-	c.nextID++
-	if displayableType(typ) {
+	id := entry.ID
+	c.lastID = id
+	if displayableEntry(entry) {
 		c.latestDisplayableID, c.latestDisplayableLoaded = id, true
 	}
 	if seg != c.seg {
@@ -382,13 +443,14 @@ func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, erro
 	if err != nil {
 		return 0, err
 	}
-	return c.nextID - 1, nil
+	return c.lastID, nil
 }
 
-// LatestDisplayableEntryID returns the newest durable entry id excluding
-// turn_state, stall, api_retry, compacting, and session_transition. All other
-// types count, including unknown types; missing, empty and status-only logs
-// return zero. Payloads remain opaque. It shares Append's authorization
+// LatestDisplayableEntryID returns the newest durable entry id whose explicit
+// Shown is true, or whose type is displayable when Shown is absent. The legacy
+// rule excludes turn_state, stall, api_retry, compacting, and session_transition;
+// all other types count, including unknown types. Missing, empty and entirely
+// hidden logs return zero. Payloads remain opaque. It shares Append's authorization
 // precondition and rechecks directory containment on every call.
 //
 // The first lookup walks backwards until it finds a qualifying entry. Successful
@@ -427,7 +489,7 @@ func (s *Store) LatestDisplayableEntryID(convID conversations.ConversationID) (u
 			return 0, err
 		}
 		for k := len(entries) - 1; k >= 0; k-- {
-			if displayableType(entries[k].entry.Type) {
+			if displayableEntry(entries[k].entry) {
 				c.latestDisplayableID, c.latestDisplayableLoaded = entries[k].entry.ID, true
 				return c.latestDisplayableID, nil
 			}
@@ -435,6 +497,13 @@ func (s *Store) LatestDisplayableEntryID(convID conversations.ConversationID) (u
 	}
 	c.latestDisplayableID, c.latestDisplayableLoaded = 0, true
 	return 0, nil
+}
+
+func displayableEntry(e Entry) bool {
+	if e.Shown != nil {
+		return *e.Shown
+	}
+	return displayableType(e.Type)
 }
 
 func displayableType(typ string) bool {
@@ -582,11 +651,12 @@ func (s *Store) Page(convID conversations.ConversationID, cursor string, limit i
 }
 
 // load recovers convID's append cursor from disk the first time this process
-// touches the conversation: the active segment, its size, and the next entry id.
+// touches the conversation: the active segment, its size, and the last entry id.
 // Callers hold s.mu.
 //
-// nextID comes from the last entry of the newest segment that holds one. In the
-// ordinary case that is the newest segment and the loop reads nothing extra;
+// lastID comes from the last entry of the newest segment that holds one. It is
+// recovered without arithmetic, so even an oversized legacy ID cannot wrap.
+// In the ordinary case that is the newest segment and the loop reads nothing extra;
 // walking further back covers a newest segment left holding only a header,
 // which a crash mid-append can produce and which would otherwise restart the id
 // space at 1 while older entries still carry higher ids.
@@ -615,7 +685,7 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 	if err != nil {
 		return nil, err
 	}
-	c.nextID = 1
+	c.lastID = 0
 	for i := len(segs) - 1; i >= 0; i-- {
 		entries, size, complete, err := s.readSegment(filepath.Join(dir, segs[i].name))
 		if err != nil {
@@ -628,7 +698,7 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 			}
 		}
 		if n := len(entries); n > 0 {
-			c.nextID = entries[n-1].entry.ID + 1
+			c.lastID = entries[n-1].entry.ID
 			break
 		}
 	}
