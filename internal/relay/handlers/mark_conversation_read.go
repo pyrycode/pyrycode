@@ -34,8 +34,8 @@ type ConversationReadMarker interface {
 
 // MarkConversationRead returns a dispatch.Handler for a mark_conversation_read
 // frame (#2780). It raises the named conversation's host-local read mark to
-// max(held, min(up_to, newest durable history entry id)), so a mark can neither
-// move back nor cover entries that do not exist yet. Every success replies with
+// max(held, min(up_to, newest displayable durable history entry id)), so a mark
+// can neither move back nor cover entries that do not exist yet. Every success replies with
 // conversation_updated, correlated via in_reply_to and carrying the stored
 // read_up_to. Only an actual advance is also pushed through announce, to every
 // eligible client including the requester; a no-op pushes nothing.
@@ -80,7 +80,7 @@ func MarkConversationRead(reg ConversationReadMarker, hist historyLatestReader, 
 		if hist == nil {
 			return replyError(ctx, c, env, protocol.CodeHistoryUnavailable, msgMarkReadHistoryUnavail, true)
 		}
-		latest, err := hist.LatestEntryID(id)
+		latest, err := hist.LatestDisplayableEntryID(id)
 		if err != nil {
 			logger.Error("relay: mark_conversation_read history read failed",
 				"event", "mark_conversation_read.history_unavailable",

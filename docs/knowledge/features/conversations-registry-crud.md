@@ -152,8 +152,9 @@ test while failing the actual malformed-payload acceptance criterion.
 
 Raises the durable host read mark (`ReadUpTo`, #2779) of the conversation whose `ID` matches to
 `max(held, min(upTo, latest))`, where `held` is the mark already on disk and `latest` is the
-caller-supplied newest durable history entry id. Returns the stored record and whether the mark
-actually advanced; a miss returns `ErrConversationNotFound`. An unchanged mark (`upTo <= held`, or
+caller-supplied newest displayable durable history entry id (zero when none exists).
+Returns the stored record and whether the mark actually advanced; a miss returns
+`ErrConversationNotFound`. An unchanged mark (`upTo <= held`, or
 an empty conversation with `latest == 0`) returns `advanced == false` and **does not call
 `persist`** — a no-op never touches disk.
 
@@ -181,9 +182,10 @@ regardless of arrival order, and an unrelated `Save` call cannot rename an older
 snapshot over this one's advance, because `Save` also takes `saveMu` first.
 
 Sole caller is `handlers.MarkConversationRead` ([`relay-package-handlers.md`](relay-package-handlers.md)
-§ `MarkConversationRead`), which resolves the conversation via `Get` and reads the newest history
-entry id *before* calling this method — so `latest` is always the caller's own fresh read, never
-reconsulted here, and a history-store failure never reaches this method at all. `ErrConversationNotFound`
+§ `MarkConversationRead`), which resolves the conversation via `Get` and calls
+`hist.LatestDisplayableEntryID` *before* calling this method — so `latest` is always
+the caller's own fresh read, never reconsulted here, and a history-store failure
+never reaches this method at all. `ErrConversationNotFound`
 from a concurrent delete between that `Get` and this call is truthfully re-reported as `conversation.not_found`,
 not folded into the save-failure code.
 

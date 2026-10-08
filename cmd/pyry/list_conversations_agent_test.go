@@ -71,6 +71,6 @@ func TestListConversations_AgentFromRealPool(t *testing.T) {
 // emptyAgentListHistory isolates agent wiring from durable history lookup.
 type emptyAgentListHistory struct{}
 
-func (emptyAgentListHistory) LatestEntryID(conversations.ConversationID) (uint64, error) {
+func (emptyAgentListHistory) LatestDisplayableEntryID(conversations.ConversationID) (uint64, error) {
 	return 0, nil
 }

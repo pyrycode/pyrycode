@@ -44,7 +44,8 @@ type ConversationSummary struct {
 
 	// ReadUpTo is the stored durable history read mark, including zero.
 	ReadUpTo uint64 `json:"read_up_to"`
-	// LatestEntryID is the newest durable history entry, or zero for no entries.
+	// LatestEntryID is the newest durable history entry excluding turn_state,
+	// stall, api_retry, compacting, and session_transition, or zero if none exists.
 	LatestEntryID uint64 `json:"latest_entry_id"`
 	// ArchivedAt is when the conversation was archived (#2698), so a client
 	// orders its Archive screen newest-archived first. A pointer without

@@ -79,10 +79,10 @@ func AgentOf(conv conversations.Conversation, harnessFor SessionHarnessFunc) str
 	return protocol.AgentClaude
 }
 
-// historyLatestReader is the append cursor read needed by conversation lists.
+// historyLatestReader supplies the displayable watermark for unread state.
 // *history.Store supplies it in production.
 type historyLatestReader interface {
-	LatestEntryID(conversations.ConversationID) (uint64, error)
+	LatestDisplayableEntryID(conversations.ConversationID) (uint64, error)
 }
 
 const msgListHistoryUnavailable = "conversation history is unavailable"
@@ -131,7 +131,7 @@ func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarne
 				}
 				agent = ""
 			}
-			latestID, err := hist.LatestEntryID(conv.ID)
+			latestID, err := hist.LatestDisplayableEntryID(conv.ID)
 			if err != nil {
 				return replyError(ctx, c, env, protocol.CodeHistoryUnavailable, msgListHistoryUnavailable, true)
 			}

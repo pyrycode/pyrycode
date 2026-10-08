@@ -16,7 +16,9 @@ import (
 
 type emptyListHistory struct{}
 
-func (emptyListHistory) LatestEntryID(conversations.ConversationID) (uint64, error) { return 0, nil }
+func (emptyListHistory) LatestDisplayableEntryID(conversations.ConversationID) (uint64, error) {
+	return 0, nil
+}
 
 const listReadID conversations.ConversationID = "11111111-1111-4111-8111-111111111111"
 const listOtherID conversations.ConversationID = "22222222-2222-4222-8222-222222222222"
