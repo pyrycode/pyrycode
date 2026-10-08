@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -77,7 +78,10 @@ const streamTurnSinkCloseReserve = 32
 // runtime branch.
 type streamTurnEnvelope struct {
 	sessionID string
-	ev        turnevent.Event
+	// source is captured from the runner's kind and this event's routing tag.
+	// Its zero value keeps callers without a known producer untagged.
+	source history.SessionProvenance
+	ev     turnevent.Event
 	// exit marks a child-exit signal for sessionID; ev is unset and never read.
 	exit bool
 	// exitEpoch is this exit's position on the fan-in's exit lane, stamped by
@@ -435,50 +439,29 @@ func (s *streamTurnSink) exitFor(sessionID string) func() {
 	return s.exitForTag(func() string { return sessionID })
 }
 
-// sinkForTag returns the per-Parser sink closure the factory hands to
-// streamsup.NewParser, tagging each envelope with whatever tag reports AT THE
-// MOMENT THE EVENT ARRIVES. Every path out of it is a NON-BLOCKING send or an
-// early return: the Parser runs on claude's
-// stdout forwarder goroutine, so a blocking send on a full channel would wedge
-// the child. The channel IS the queue and drops rather than blocks, mirroring the
-// emitter's owns-no-queue principle. offer takes only a short leaf lock.
+// sinkForTag captures the daemon routing tag once per arriving event. A
+// production factory supplies its fixed producer kind; omitted kind leaves
+// provenance absent. Neither subprocess output nor the current conversation
+// supplies these source facts.
 //
-// WHAT it drops is class-aware (#1496), split by what LOSING one costs rather
-// than by wire type. A droppable event is refused at the droppableCap watermark:
-// one event of transcript fidelity, self-healing on the next event. A
-// closing-class event — turnMarkClose, i.e. turnevent.TurnEnd — skips the
-// watermark and sends against the FULL capacity, because losing one leaves
-// turnBusyTracker's mark open with nothing that could ever clear it: no TurnStart
-// exists, so every later send_message parks until streamTurnHoldTimeout and
-// msgqueue gives up with a session_error.
-//
-// Reserving for closers ALONE is exactly sufficient, and that follows from the
-// tracker's asymmetry rather than from optimism: `setBusy` is idempotent, so
-// losing some openers changes nothing and losing all of them means the turn never
-// opens and the arriving TurnEnd is a no-op delete. Only open-without-close
-// wedges.
-//
-// The class split deliberately NARROWS ADR 025's wire-level never-drop set, which
-// counts tool_* as control. That set is classified on protocol.Envelope.Type at
-// the outbound pushQueue; here the fan-in carries turnevent.Event one layer
-// upstream, and applying the wire set literally would reserve for ToolStart /
-// ToolUpdate — leaving the droppable class empty exactly in the filed repro, a
-// tool-heavy burst. tool_* keeps its never-drop status downstream in pushQueue,
-// untouched; this reserve is additive protection at a second queue.
-//
-// The watermark and send are serialized by offer's leaf lock, also used to
-// position confirmed runner stops after their preceding enqueues. The send never
-// waits for channel capacity.
-//
-// The tag is read ONCE, at the top, and that read is reused for the envelope and
-// for any drop record below it. A rotation racing this closure therefore moves the
-// whole event from one id to the other and can never split one event across two —
-// which is what keeps a drop diagnostic attributable to the envelope it describes.
-func (s *streamTurnSink) sinkForTag(tag func() string) func(turnevent.Event) {
+// The callback never blocks the child's stdout forwarder. offer serializes its
+// capacity check and send under a short leaf lock. Droppable events are refused
+// at droppableCap, reserving the remaining capacity for TurnEnd. A closing event
+// can still exhaust that reserve and is logged at Warn; other drops are Debug.
+// Logs reuse the captured tag and include only content-free discriminants.
+func (s *streamTurnSink) sinkForTag(tag func() string, kind ...string) func(turnevent.Event) {
+	producerKind := ""
+	if len(kind) > 0 {
+		producerKind = kind[0]
+	}
 	return func(ev turnevent.Event) {
 		sessionID := tag()
+		env := streamTurnEnvelope{sessionID: sessionID, ev: ev}
+		if producerKind != "" {
+			env.source = history.SessionProvenance{Kind: producerKind, SessionID: sessionID}
+		}
 		if turnMarkFor(ev) == turnMarkClose {
-			if !s.offer(streamTurnEnvelope{sessionID: sessionID, ev: ev}, true) {
+			if !s.offer(env, true) {
 				// Past the reserve a closer can still be lost, so the residual must be
 				// VISIBLE: Warn, not Debug, because the daemon's default level is
 				// LevelInfo (see the level selection in `runSupervisor`) — the same
@@ -498,7 +481,7 @@ func (s *streamTurnSink) sinkForTag(tag func() string) func(turnevent.Event) {
 			return
 		}
 
-		if s.offer(streamTurnEnvelope{sessionID: sessionID, ev: ev}, false) {
+		if s.offer(env, false) {
 			return
 		}
 
@@ -683,7 +666,7 @@ func startStreamTurnDrainV2(
 			if turnMarkFor(env.ev) == turnMarkOpen {
 				busy.publishPostBoundary(conversationID, true)
 			}
-			emitter.HandleFor(ctx, conversationID, env.ev)
+			emitter.HandleFor(ctx, conversationID, env.ev, env.source)
 			if turnMarkFor(env.ev) == turnMarkClose {
 				busy.publishPostBoundary(conversationID, false)
 			}

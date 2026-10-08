@@ -66,3 +66,7 @@ Pending for documentation stage: in `docs/knowledge/features/history-package.md`
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-08
+
+## Revisions
+
+- 2026-10-08: retained-state tests exposed that independent source buffers could join same-source text across intervening successor events and reorder a conversation's flushes. `HandleFor` now flushes another source's pending text before selecting the incoming source, preserving arrival order while retaining each source's lifecycle and child identities. At most one source per conversation holds buffered text.

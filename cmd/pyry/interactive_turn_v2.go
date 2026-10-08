@@ -112,12 +112,10 @@ type interactiveTurnEmitterV2 struct {
 	bcast  interactiveBroadcaster
 	logger *slog.Logger
 
-	// Every conversation with a turn open, text buffered or child attribution
-	// retained owns one convTurnState in turns; the embedded pointer is the
-	// conversation the current call is about, selected by selectConversation at the
-	// top of HandleFor and closeForConversation. Embedding is what lets every method
-	// below keep naming e.inTurn, e.seq or e.deltaBuf and mean "this conversation's".
-	// Read/written only on the single drain goroutine.
+	// Each conversation and producing source retains its own convTurnState in
+	// turns. The embedded pointer selects the current call's state, so promoted
+	// fields such as inTurn, deltaBuf and source share the same ownership. Only
+	// the drain goroutine selects or mutates these states.
 	*convTurnState
 	turns map[string]*convTurnState
 
@@ -192,10 +190,11 @@ type interactiveTurnEmitterV2 struct {
 	flushTimer *time.Timer
 }
 
-// convTurnState is one conversation's turn lifecycle and delta-coalescing state
-// (#2739). Before it the emitter held one of each, so a second conversation's
-// event either was dropped upstream or closed the first one's turn.
+// convTurnState retains one producing session's lifecycle and buffered text
+// within a conversation. Selection, flushing and closing retain that source.
 type convTurnState struct {
+	conversationID string
+	source         history.SessionProvenance
 	inTurn         bool                 // whether a turn is currently open
 	turnID         string               // current turn's id, minted at turn start
 	turnConvID     string               // the conversation this state belongs to while a turn is open
@@ -230,24 +229,31 @@ func newInteractiveTurnEmitterV2(sup cursorReader, bcast interactiveBroadcaster,
 	}
 }
 
-// selectConversation points the embedded state at convID's, creating it on first
-// sight. Only the drain goroutine calls it.
-func (e *interactiveTurnEmitterV2) selectConversation(convID string) {
-	st, ok := e.turns[convID]
+// selectConversation selects convID's producing source, creating its state on
+// first sight, and returns the retention key. Only the drain goroutine calls it.
+func (e *interactiveTurnEmitterV2) selectConversation(convID string, source history.SessionProvenance) string {
+	key := convID
+	if source.Kind != "" {
+		// Conversation IDs and fixed producer kinds cannot contain this delimiter;
+		// the remaining suffix is the complete opaque daemon routing ID.
+		key += "\x00" + source.Kind + "\x00" + source.SessionID
+	}
+	st, ok := e.turns[key]
 	if !ok {
-		st = &convTurnState{}
-		e.turns[convID] = st
+		st = &convTurnState{conversationID: convID, source: source}
+		e.turns[key] = st
 	}
 	e.convTurnState = st
+	return key
 }
 
 // releaseConversation forgets empty state. Child attribution survives main-turn
 // closure and is released by closeForConversation at session exit or teardown.
 // The selection itself is left alone; the next HandleFor reselects.
-func (e *interactiveTurnEmitterV2) releaseConversation(convID string) {
-	if st, ok := e.turns[convID]; ok && !st.inTurn && st.deltaBuf.Len() == 0 &&
+func (e *interactiveTurnEmitterV2) releaseConversation(key string) {
+	if st, ok := e.turns[key]; ok && !st.inTurn && st.deltaBuf.Len() == 0 &&
 		len(st.childLanes) == 0 && len(st.launcherTurns) == 0 && len(st.childToolTurns) == 0 {
-		delete(e.turns, convID)
+		delete(e.turns, key)
 	}
 }
 
@@ -276,24 +282,34 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 	e.HandleFor(ctx, e.sup.CurrentConversation(), ev)
 }
 
-// HandleFor drives the emitter one event at a time for convID, the conversation
-// whose session produced it. An empty convID drops the event (mirrors #589).
-// Otherwise it selects convID's own turn state and type-switches the event into
-// the lifecycle actions and the ordered envelopes they emit (see the per-kind
-// table in the spec). Another conversation's open turn and buffered text are
-// untouched: each conversation keeps its own (#2739), which replaced #1062's
-// follow-active switch that ended the prior conversation's turn whenever the
-// cursor moved. Not safe for concurrent use — designed for the producer's single
-// Run goroutine.
-func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string, ev turnevent.Event) {
+// HandleFor handles one event for the conversation resolved from its producing
+// session. Empty convID drops the event. The optional source is captured before
+// fan-in; omission retains unknown provenance. Main/child buffers and lifecycle
+// state retain their source, and another conversation's state stays untouched.
+// Only the single drain goroutine may call it.
+func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string, ev turnevent.Event, source ...history.SessionProvenance) {
 	if convID == "" {
 		e.logger.Debug("relay: interactive-turn drop; no cursor",
 			"event", "interactive_turn.no_cursor",
 			"kind", eventKind(ev))
 		return
 	}
-	e.selectConversation(convID)
-	defer e.releaseConversation(convID)
+	var captured history.SessionProvenance
+	if len(source) > 0 {
+		captured = source[0]
+	}
+	// Preserve this conversation's arrival order when sources interleave. Flush
+	// the preceding source before selecting the next, without discarding either
+	// source's lifecycle or child lane identities.
+	for key, st := range e.turns {
+		if st.conversationID == convID && st.source != captured && st.deltaBuf.Len() > 0 {
+			e.convTurnState = st
+			e.flushDelta(ctx)
+			e.releaseConversation(key)
+		}
+	}
+	key := e.selectConversation(convID, captured)
+	defer e.releaseConversation(key)
 
 	switch v := ev.(type) {
 	case turnevent.ThoughtChunk:
@@ -1090,20 +1106,21 @@ func (e *interactiveTurnEmitterV2) closeForConversation(ctx context.Context, con
 	// The producing session exited or was torn down (#2831): its turn can no
 	// longer publish, and a held suggestion clears, whether or not a turn is open.
 	e.suggestions.invalidate(conversationID)
-	st, ok := e.turns[conversationID]
-	if !ok {
-		return
+	for key, st := range e.turns {
+		if st.conversationID != conversationID {
+			continue
+		}
+		e.convTurnState = st
+		e.flushDelta(ctx)
+		if e.inTurn {
+			e.transitionTo(ctx, conversationID, turnbridge.StateIdle)
+			e.endTurn()
+		}
+		e.childLanes = nil
+		e.launcherTurns = nil
+		e.childToolTurns = nil
+		e.releaseConversation(key)
 	}
-	e.convTurnState = st
-	defer e.releaseConversation(conversationID)
-	e.flushDelta(ctx)
-	if e.inTurn {
-		e.transitionTo(ctx, conversationID, turnbridge.StateIdle)
-		e.endTurn()
-	}
-	e.childLanes = nil
-	e.launcherTurns = nil
-	e.childToolTurns = nil
 }
 
 // splitDeltaText splits s into consecutive chunks of at most max bytes each,
@@ -1191,18 +1208,17 @@ func (e *interactiveTurnEmitterV2) flushDelta(ctx context.Context) {
 	}
 }
 
-// flushAll flushes every conversation's buffered text: the drain's flushC case,
-// since the one timer stands for every conversation's oldest unflushed chunk. The
-// order across conversations is unspecified; each conversation's own frames stay
-// in order, which is the only order a client can observe.
+// flushAll flushes every retained source's buffered text. Source changes already
+// flush preceding text, leaving at most one active buffer per conversation. The
+// shared timer covers all conversations; order across conversations is unspecified.
 func (e *interactiveTurnEmitterV2) flushAll(ctx context.Context) {
-	for convID, st := range e.turns {
+	for key, st := range e.turns {
 		if st.deltaBuf.Len() == 0 {
 			continue
 		}
 		e.convTurnState = st
 		e.flushDelta(ctx)
-		e.releaseConversation(convID)
+		e.releaseConversation(key)
 	}
 	e.flushTimer.Stop()
 }
@@ -1250,7 +1266,7 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 	// result is known; absent or failed storage does not prevent their delivery.
 	ts := time.Now().UTC()
 	historyEntryID := appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
-		convID, typ, payloadJSON, ts)
+		convID, typ, payloadJSON, ts, e.source)
 	if !legacyHistoryType(typ) {
 		return // durable facts never enter the legacy ring or live fan-out
 	}

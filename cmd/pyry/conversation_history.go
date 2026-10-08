@@ -17,11 +17,18 @@ import (
 // returns nil identity; eligible legacy events still publish and enter replay.
 // Failure logs carry only the event, canonical conversation ID and a content-free
 // reason, because payloads and filesystem paths must never reach telemetry.
-func appendConversationHistory(store *history.Store, logger *slog.Logger, event, convID, typ string, payload json.RawMessage, ts time.Time) *uint64 {
+// An optional producing source is combined with visibility; omission preserves
+// absent provenance rather than inferring the current session or inventing none.
+func appendConversationHistory(store *history.Store, logger *slog.Logger, event, convID, typ string, payload json.RawMessage, ts time.Time, source ...history.SessionProvenance) *uint64 {
 	if store == nil {
 		return nil
 	}
-	id, err := store.AppendWithMetadata(conversations.ConversationID(convID), typ, payload, ts, historyVisibilityMetadata(typ, payload))
+	metadata := historyVisibilityMetadata(typ, payload)
+	if len(source) > 0 && source[0].Kind != "" {
+		captured := source[0]
+		metadata.Session = &captured
+	}
+	id, err := store.AppendWithMetadata(conversations.ConversationID(convID), typ, payload, ts, metadata)
 	if err != nil {
 		// Warn, not Debug: the neighbouring per-conn drops lose one frame to one
 		// conn, while this loses an event from the durable record permanently —
