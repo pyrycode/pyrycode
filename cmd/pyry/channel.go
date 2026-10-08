@@ -13,8 +13,10 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 // The three refusal reasons channelCreator can return. They are CONSTANTS, and
@@ -334,6 +336,28 @@ func channelPoster(
 			"conversation_id", string(convID),
 			"created", len(matches) == 0)
 		return nil
+	}
+}
+
+// channelPostSession reads the resolved conversation at acceptance. Missing
+// facts stay unknown; a known empty binding is explicitly without a session.
+func channelPostSession(reg *conversations.Registry, harnessFor func(sessions.SessionID) (string, error)) func(conversations.ConversationID) *history.SessionProvenance {
+	return func(id conversations.ConversationID) *history.SessionProvenance {
+		c, ok := reg.Get(id)
+		if !ok {
+			return nil
+		}
+		if c.CurrentSessionID == "" {
+			return &history.SessionProvenance{Kind: "none"}
+		}
+		if harnessFor == nil {
+			return nil
+		}
+		kind, err := harnessFor(sessions.SessionID(c.CurrentSessionID))
+		if err != nil || (kind != protocol.AgentClaude && kind != protocol.AgentCodex) {
+			return nil
+		}
+		return &history.SessionProvenance{Kind: kind, SessionID: c.CurrentSessionID}
 	}
 }
 
