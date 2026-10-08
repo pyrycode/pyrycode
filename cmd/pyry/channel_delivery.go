@@ -20,7 +20,7 @@ import (
 
 // channelDeliveryHistory must be the composition root's existing history store.
 type channelDeliveryHistory interface {
-	Append(conversations.ConversationID, string, json.RawMessage, time.Time) (uint64, error)
+	AppendWithMetadata(conversations.ConversationID, string, json.RawMessage, time.Time, history.Metadata) (uint64, error)
 	Page(conversations.ConversationID, string, int) (history.Page, error)
 }
 type channelDeliveryFactory func(string, channelDeliveryHistory, func(conversations.ConversationID, string), *slog.Logger) (*channelDelivery, error)
@@ -380,7 +380,7 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 		if err != nil {
 			return err
 		}
-		if _, err := d.hist.Append(post.ConversationID, protocol.TypeAssistantDelta, raw, post.TS); err != nil {
+		if _, err := d.hist.AppendWithMetadata(post.ConversationID, protocol.TypeAssistantDelta, raw, post.TS, historyVisibilityMetadata(protocol.TypeAssistantDelta, raw)); err != nil {
 			return err
 		}
 		appended = true
@@ -390,7 +390,7 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 		if err != nil {
 			return err
 		}
-		if _, err := d.hist.Append(post.ConversationID, protocol.TypeTurnEnd, raw, post.TS); err != nil {
+		if _, err := d.hist.AppendWithMetadata(post.ConversationID, protocol.TypeTurnEnd, raw, post.TS, historyVisibilityMetadata(protocol.TypeTurnEnd, raw)); err != nil {
 			return err
 		}
 		appended = true

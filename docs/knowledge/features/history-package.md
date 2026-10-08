@@ -111,7 +111,9 @@ Callers must not mutate payload or metadata during an append; the store retains
 neither caller pointers nor payload bytes after the call, only scalar cache
 values. These storage facts support
 [ADR 042's history-backed thread](../decisions/042-daemon-built-thread.md);
-producer adoption belongs to #2966 and legacy transport filtering to #2965.
+the existing producers now declare visibility and filter legacy delivery
+(see [Producers](#producers-2114-2115) and [Reader](#reader-2116)). Session
+attribution belongs to #2966.
 
 `limit` is **clamped** to `MaxPageEntries`, never refused above it — a page is
 "up to `limit` entries", so an over-large ask from #2116 pages rather than
@@ -306,7 +308,7 @@ interactive emitter's `emit` chokepoint
 (`cmd/pyry/session_transition_v2.go`), and (#2115) `newOperatorMessageHistory`
 (`cmd/pyry/operator_message_history.go`), used by queued stream placement and
 `msgqueue.Config.OnDelivered`.
-The first two already resolve the four values `Append` wants — conversation
+The first two already resolve the four event values — conversation
 id, wire type, marshalled payload, one hoisted timestamp — for the ring
 append or the fan-out itself, so their log append needed no new mapping, only
 a nil-guarded call before the per-conn loop in each. The third resolves them
@@ -314,9 +316,66 @@ from a safe `msgqueue.QueuedMessage`, available before the write through
 `msgqueue.DeliveryMessage` and again at confirmation through `OnDelivered`,
 not from an envelope in flight (see below).
 
+Channel posts are a fourth writer: `channelDelivery.deliver` bypasses the
+common seam and calls `AppendWithMetadata` through `channelDeliveryHistory`
+for each assistant delta and its `channelPostTurnEndPayload`. It uses the
+same `historyVisibilityMetadata` classifier: post text is shown, completion
+is hidden. Its raw-page deduplication and requirement that all writes succeed
+before publication remain intact; see
+[channel delivery and recovery](control-plane-channel-post-live-delivery.md#live-announcements-bounded-replay-and-durable-recovery).
+
+### Legacy eligibility and explicit visibility (#2965)
+
+`legacyHistoryType` is a fixed allowlist of the existing producer vocabulary
+from `turnbridge.MapEvent`/`MapState`, operator messages and session transitions.
+A new history-only type is excluded by default from every connection's legacy
+history, live fan-out and reconnect replay, whether its stored `Shown` is nil,
+false or true. Visibility controls the
+[unread watermark](#unread-state-uses-a-separate-lazily-recovered-watermark-2954),
+not permission to reach a transport. Conversely, an eligible legacy event still
+reaches its existing recipients and history pages when `Shown` is false,
+including normal turn ends, info banners and live status readings. This preserves
+[ADR 042's compatibility boundary](../decisions/042-daemon-built-thread.md#compatibility):
+old apps treat unknown history entries as read-mark barriers.
+
+`interactiveTurnEmitterV2.emit` appends once before checking this allowlist,
+including when no clients are connected. An excluded fact returns before
+`Ring.AppendWithHistoryID` or recipient enumeration, so it cannot enter live
+delivery or reconnect replay, even if storage is absent or fails. Successful
+appends remain readable through raw `Store.Page` after reopening. Raw storage
+accepts arbitrary types; the transport vocabulary is closed independently.
+
+All four existing writers now use `AppendWithMetadata` with explicit
+`Metadata.Shown`, classified from the already-marshalled payload by
+`historyEntryShown`. They leave `Metadata.Session` absent and add neither
+`shown` nor `session` to legacy wire payloads. Stored payloads, timestamps,
+durable IDs and existing recipient gates keep their original meaning.
+
+| Entry | Explicit visibility for new writes |
+| --- | --- |
+| `turn_end` | Hidden only when `StopReason == "end_turn"`, `IsError == false`, `Outcome` is absent/empty or `success`, `TerminalReason` is absent/empty or `completed`, and `ErrorCategory` is absent/empty. All other ends are shown: cancellation, limits, unknown stop reasons, `end_turn` with `error_max_turns`, or `success` with `is_error: true`. Channel-post completion satisfies the hidden case. |
+| `banner` | Hidden only for `Level == "info"` with `StopsTurn == false`; stopping info banners, other levels and unknown levels are shown. |
+| Live readings | Hidden: `turn_state`, `stall`, `api_retry`, `compacting`, `tool_progress`, `thinking_progress`, `background_task_roster`, `background_task_progress`, `rate_limited`, `context_usage`, `model_announced`, `session_facts`, `mcp_status`, `model_list`, `slash_command_list`. |
+| `background_task_updated` | Hidden for patch-only updates; shown when `Status` or `Summary` is nonempty. |
+| Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
+| `session_transition` | `clear` is shown; `idle_evict` is hidden. |
+| New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
+
+**Task-update status is an open terminal-notification contract.** Any nonempty
+status counts as shown, including unfamiliar values; restricting the classifier
+to known terminal words would silently hide future completion facts. Conditional
+legacy payloads that fail decoding conservatively classify as shown; classification
+does not rewrite or reject their payloads.
+
+Previously stored entries are neither rewritten nor reclassified. Their absent
+visibility retains the store's legacy type fallback, which excludes only
+`turn_state`, `stall`, `api_retry`, `compacting` and `session_transition`.
+Explicit visibility governs the same unread watermark in warm and reopened
+stores. Raw pages still include hidden entries and retain their durable IDs.
+
 **Carry the append result, not a second lookup or another counter (#2861).**
-`appendConversationHistory` returns the successful `Store.Append` id as an
-immutable `*uint64`, shared by every direct live recipient as
+`appendConversationHistory` returns the successful `Store.AppendWithMetadata`
+id as an immutable `*uint64`, shared by every direct live recipient as
 `Envelope.HistoryEntryID`. The operator commit carries it with the safe payload
 and placement timestamp through `operatorMessage` to
 `operatorMessageEmitterV2.broadcast`; reconstructing it at broadcast would lose
@@ -422,9 +481,9 @@ and would sail past a `== nil` guard. `Store` is not nil-receiver-safe
 on either append path, so `appendConversationHistory` checks
 explicitly rather than relying on a nil-receiver method, and every emitter
 test that builds an emitter with no store keeps working unchanged. A
-failing append never suppresses the wire emit or the ring append. It returns nil
-metadata; an absent store also returns nil, omitting `history_entry_id` rather
-than encoding null or zero. The failure is logged at `Warn`
+failing append never suppresses an eligible legacy wire emit or ring append.
+It returns nil identity; an absent store also returns nil, omitting
+`history_entry_id` rather than encoding null or zero. The failure is logged at `Warn`
 with an `errors.Is`-derived discriminant (`invalid_id` / `invalid_payload`
 / `write`), never the error's own text: `history`'s errors format absolute
 filesystem paths (`open segment %q`), and the log's own MUST-NOT-log-content
@@ -432,6 +491,16 @@ rule would be defeated by relaying them.
 
 **Test-shape traps worth knowing before touching these producers
 again:**
+
+- **Check actual writes, transport and unread recovery together.**
+  `TestHistoryProjection_InteractiveMetadata` drives `emit` across the full
+  classification, comparing raw metadata with unchanged wire/ring payloads,
+  identities and recipient gates. `TestHistoryProjection_OtherProducerMetadata`
+  drives clear/idle transitions, operator text and channel delivery. Both verify
+  unread watermarks in warm and reopened stores; the interactive cases also
+  preserve an older entry's absent visibility. A classifier-only test would
+  miss a writer still using `Append`, and a correct raw metadata assertion alone
+  would miss hidden eligible events disappearing from legacy delivery.
 - **Separate the id sequences to prove provenance.** When history, ring and
   envelope counters coincide, substituting either live counter for the stored id
   stays green. `TestLiveProducers_HistoryEntryID` keeps history id 8, ring id 4
@@ -543,9 +612,32 @@ hidden entries, cached zero and raw/page retention across actual segments.
 
 ## Reader (#2116)
 
-The first caller of `Store.Page` outside this package's own tests is
-`internal/relay`'s `request_history` handler, adapted at
-`cmd/pyry/relay.go` via `newHistoryPager`. That adapter classifies
+`internal/relay`'s `request_history` handler reads through `newHistoryPager`,
+wired at `cmd/pyry/relay.go`. The adapter filters exactly one bounded raw
+`Store.Page` result with `legacyHistoryType`; it never scans ahead to fill a
+page after excluding new history-only types. Filtering ignores `Entry.Shown`,
+so hidden eligible legacy events still appear, while new types stay excluded
+with absent, false or true visibility. Neither metadata field is projected
+onto `protocol.HistoryEntry`; eligible entries retain their original durable
+ID, timestamp and payload bytes, newest-first.
+
+The adapter forwards that raw page's opaque `Cursor` and `AtStart` unchanged.
+An empty filtered page with `AtStart == false` retains a usable cursor to the
+next older raw page. Consecutive empty pages and an entirely filtered log are
+valid walks; **consumers terminate on `AtStart`, never on an empty entry list**.
+A terminal page has `AtStart == true` and an empty cursor. Treating an empty
+list as exhaustion loses older eligible content; scanning ahead instead would
+turn one bounded request into work proportional to the hidden history.
+
+`TestHistoryProjection_BoundedWalk` compares each projected page with its raw
+page in warm and reopened stores, using mixed and entirely excluded logs,
+consecutive empty pages and nil/false/true visibility. It verifies cursor
+preservation, termination and exactly-once delivery of eligible IDs, timestamps
+and payloads. `TestHistoryProjection_UnknownEmitIsDurableOnly` checks one raw
+append and no ring/live publication with and without connected clients.
+
+Cursor validation stays in `Store.Page`: the adapter passes cursors through
+unparsed and retains the existing error outcomes. It classifies
 `Store.Page`'s sentinels with `errors.Is` — the same pattern
 `historyAppendFailure` (above) established for the write side — into
 `historyPageFailure`, a read-path twin in the same file: `invalid_cursor`,

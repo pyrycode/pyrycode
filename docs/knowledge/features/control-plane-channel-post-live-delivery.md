@@ -129,15 +129,22 @@ event text, conversation ID and turn ID. The post stays pending. Expiry never
 delivers, interrupts, marks idle, abandons or ends a still-live Claude turn.
 It is a diagnostic threshold, not a delivery timeout.
 
-`history.Store.Append` is per-event, so a recorded prefix can be visible while a
-later write retries. `channelDelivery.deliver` scans **every** newest-first
-`Page`, matching the conversation, turn ID, sequence and text, then appends only
+`history.Store.AppendWithMetadata` is per-event, so a recorded prefix can be
+visible while a later write retries. `channelDelivery.deliver` scans **every**
+newest-first `Page`, matching the conversation, turn ID, sequence and text, then appends only
 missing chunks in ascending sequence, then the matching four-field completion.
 Looking only at the newest page would duplicate a prefix hidden by unrelated
 newer entries. A failure at any write, including completion after every delta,
 keeps accepted work pending for automatic retry and publishes nothing to replay,
 live clients or wake. Delta-only pending records need completion and publication;
 retry reconciles the same identity without duplicating durable chunks/completion.
+
+The narrow `channelDeliveryHistory` interface uses `AppendWithMetadata` and
+raw `Page`. Each new delta stores explicit `shown: true`; the normal host-post
+completion stores `shown: false`, through the shared
+[history producer classifier](history-package.md#legacy-eligibility-and-explicit-visibility-2965).
+Both types remain eligible for legacy history, replay and live delivery;
+visibility metadata changes unread accounting without changing their payloads.
 
 After process restart, undelivered or partially recorded posts resume with their
 original identities and chunk order, yielding exactly one history delta per
@@ -192,6 +199,13 @@ durable recording → per-event shared replay recording → live fan-out → wak
 independence and automatic retry with and without an announcer;
 `TestChannelDelivery_ConcurrentFIFO` compares durable acceptance, history and
 announcement order.
+
+**History doubles must intercept the method delivery actually calls.**
+`testPostHistory`, `testBlockedPostHistory` and `testPosterHistory` implement
+`AppendWithMetadata`. Overriding only `Append` on a double with an embedded
+`Store` lets the promoted metadata method bypass injected failures or shutdown
+barriers. Forward the supplied metadata when delegating to the real store so
+those tests also exercise the production visibility contract.
 
 `TestChannelDelivery_PublishedCompletionBeforePostAndSuccessor` holds completion
 publication to prove tracker-idle alone cannot release a post.
