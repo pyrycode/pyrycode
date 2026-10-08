@@ -967,7 +967,7 @@ func (s *Session) runActive(ctx context.Context) error {
 			// session and drives a real respawn instead of no-oping against the
 			// dying child (#1186). beginEvict signals ahead of the flip; endEvict
 			// persists and closes evictedCh only after the child stops.
-			s.beginEvict(ReasonEviction)
+			s.beginEvict(ReasonEviction, CauseIdleSleep)
 			cancelSup()
 			drainSup()
 			s.endEvict()
@@ -982,7 +982,7 @@ func (s *Session) runActive(ctx context.Context) error {
 			// two-phase commit as the idle path (#1186): signal, then flip to
 			// evicted before teardown so a racing Activate is never lost, close out
 			// after.
-			s.beginEvict(ReasonEviction)
+			s.beginEvict(ReasonEviction, CauseCapacityEviction)
 			cancelSup()
 			drainSup()
 			s.endEvict()
@@ -1091,13 +1091,13 @@ func (s *Session) transitionTo(newState lifecycleState) error {
 // pre-persist half (signal + flip + reset the opposite channel), run before
 // teardown; endEvict is the persist + close-wake half, run after. transitionTo is
 // retained unchanged for the stateActive (reactivation) direction.
-func (s *Session) beginEvict(reason TransitionReason) {
+func (s *Session) beginEvict(reason TransitionReason, causes ...LifecycleCause) {
 	if reason != "" && s.pool != nil {
-		s.pool.notifyTransition(SessionTransition{
-			PreviousID: s.currentID(),
-			Reason:     reason,
-			OccurredAt: time.Now().UTC(),
-		})
+		var cause LifecycleCause
+		if len(causes) > 0 {
+			cause = causes[0]
+		}
+		s.pool.notifyEviction(s, reason, cause)
 	}
 	s.lcMu.Lock()
 	s.lcState = stateEvicted

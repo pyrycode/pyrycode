@@ -344,42 +344,48 @@ func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool {
 	return false
 }
 
-// RebindSession re-points the conversation currently bound to oldID at newID,
-// recording oldID in SessionHistory. Returns true iff a conversation was
-// rebound. The scan and mutation happen atomically under r.mu, so there is no
-// find-then-update window a concurrent Create/Delete could redirect.
-//
-//   - hit  → CurrentSessionID = newID; SessionHistory = append(SessionHistory, oldID)
-//   - miss → no mutation, false (the rotated session is owned by no conversation)
-//
-// An empty oldID returns false immediately without scanning: an unbound
-// conversation carries CurrentSessionID == "" (the unset sentinel) and must
-// NEVER be swept into a rebind by a stray empty-id call. This is a
-// data-integrity guard at the primitive boundary, not the primary eviction
-// defense — that lives at the call site, which only rebinds on a /clear
-// rotation (where NewID is non-empty). Precondition (caller-guaranteed on the
-// rotation path): oldID and newID are non-empty and distinct.
-//
-// First match wins, mirroring Get/Update: a session id binds exactly one
-// conversation (set once at creation), so the first match is the only match;
-// pathological duplicates rebind the first only — deterministic and documented.
-//
-// RebindSession does NOT call Save — disk persistence is the caller's concern,
-// matching the Create / Update / Promote / Delete convention.
+// RebindSession updates the first current binding matching oldID and appends
+// oldID to its history. Empty oldID never matches an unbound conversation.
+// Persistence is the caller's concern; oldID and newID must be distinct.
 func (r *Registry) RebindSession(oldID, newID string) bool {
+	_, ok := r.RebindSessionOwner(oldID, newID)
+	return ok
+}
+
+// RebindSessionOwner captures the owner atomically with RebindSession's mutation.
+// A miss returns an empty owner and false; historical bindings are not matched.
+// It does not persist. Callers must supply a nonempty, distinct newID.
+func (r *Registry) RebindSessionOwner(oldID, newID string) (ConversationID, bool) {
 	if oldID == "" {
-		return false
+		return "", false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range r.conversations {
-		if r.conversations[i].CurrentSessionID == oldID {
-			r.conversations[i].CurrentSessionID = newID
-			r.conversations[i].SessionHistory = append(r.conversations[i].SessionHistory, oldID)
-			return true
+		c := &r.conversations[i]
+		if c.CurrentSessionID == oldID {
+			c.CurrentSessionID = newID
+			c.SessionHistory = append(c.SessionHistory, oldID)
+			return c.ID, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// SessionOwner returns the first conversation currently bound to sessionID.
+// Empty and historical IDs have no owner in this lookup. No binding is changed.
+func (r *Registry) SessionOwner(sessionID string) (ConversationID, bool) {
+	if sessionID == "" {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.conversations {
+		if c.CurrentSessionID == sessionID {
+			return c.ID, true
+		}
+	}
+	return "", false
 }
 
 // SwitchSession serializes the rebind and its Save with other registry saves
