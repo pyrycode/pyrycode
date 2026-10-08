@@ -10,9 +10,10 @@ un-map back to a `tuidriver.Event` for `turnbridge` to re-map.
 
 ```go
 type streamTurnEnvelope struct {
-    sessionID string
-    source    history.SessionProvenance
-    ev        turnevent.Event
+    sessionID   string
+    source      history.SessionProvenance
+    incarnation uint64 // daemon-local producer activation; absent from wire/storage provenance
+    ev          turnevent.Event
 }
 
 type streamTurnSink struct { /* one buffered chan streamTurnEnvelope */ }
@@ -32,9 +33,9 @@ func startStreamTurnDrainV2(
 ```
 
 **Fan-in, not fan-out.** N per-session Parsers (each fixed at runner construction, one per
-`newStreamRunnerFactory` invocation) push `{sessionID, source, ev}` onto the one buffered channel (256 slots, the
+`newStreamRunnerFactory` invocation) push captured source, incarnation and event onto the one buffered channel (256 slots, the
 `pushQueueCap` precedent); `startStreamTurnDrainV2` spawns the sole reader goroutine. There is no
-session-keyed registry and no subscribe/unsubscribe — the per-conn fan-out stays entirely inside the
+subscription registry and no subscribe/unsubscribe — the per-conn fan-out stays entirely inside the
 unchanged emitter, so this is deliberately *not* shared fan-out infrastructure.
 
 **Non-blocking send, class-aware drop since #1496.** `sinkFor`'s closure runs on claude's stdout forwarder
@@ -54,7 +55,7 @@ output and before later output. The wake channel coalesces; it does not own
 the close. See [retained stop transport](streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md).
 
 **Per-event conversation attribution, not an active-conversation gate (#2739).** The drain goroutine
-resolves `conversationFor(env.sessionID)` and forwards to `emitter.HandleFor(ctx, convID, ev, env.source)` under
+resolves `conversationFor(env.sessionID)` and forwards to `emitter.handleForSource` with captured provenance and incarnation under
 **that** conversation's id — never the cursor's. Only an event whose session resolves to no conversation
 at all is dropped, logged content-free as `stream_turn.no_conversation` (`kind` + `session_id` only).
 Every conversation's events reach its own history, ring and clients, whichever conversation currently
@@ -62,7 +63,7 @@ holds the daemon's cursor; a background conversation's connection receives its o
 active one does.
 
 **Capture history provenance before fan-in (#2981).** Claude and Codex factories
-pass their fixed kind to `sinkForTag`. Its single tag read supplies both routing
+pass their fixed kind to `sinkForSessionTag`. Its single tag read supplies both routing
 and `source`, so rotation after enqueue cannot substitute the successor. The
 drain passes this captured value only after the existing resolution gate.
 Omitted kinds keep provenance absent; no cursor, conversation binding at append
@@ -97,10 +98,11 @@ production never calls it.
 `*convTurnState` (`inTurn`, `turnID`, `turnConvID`, `seq`, `currentState`, `childLanes`,
 `launcherTurns`, `childToolTurns`, and the
 `deltaBuf`/`deltaMsgID`/`deltaParent`/`deltaConvID` coalescing group) and keeps `turns map[string]*convTurnState`,
-one entry per conversation/kind/session ID with a turn open, text buffered or child attribution retained.
+one entry per conversation/kind/session ID/producer incarnation with a turn open,
+text buffered, child attribution retained or a sealed predecessor's closed turn address.
 Absent-source callers retain the conversation-only key. `source` is retained by value.
-`selectConversation(convID, source)` re-points the embedded pointer at that source's own state,
-creating it on first sight at the top of `HandleFor`. `closeForConversation` selects
+`selectConversation` re-points the embedded pointer at that source's own state,
+creating it on first sight in `handleForSource`. `closeForConversation` selects
 each retained source for the conversation. Both run only on the drain goroutine.
 Because the state is embedded
 rather than copied into a map of structs, every method below keeps reading `e.inTurn`, `e.seq`,
@@ -108,13 +110,45 @@ rather than copied into a map of structs, every method below keeps reading `e.in
 fields after driving one conversation through `Handle` keep compiling unchanged; moving the fields into
 the map directly would have forced rewriting every one of them. `endTurn` clears only main lifecycle
 fields: child text lane IDs/sequences and launcher/tool origins survive main closure and later turns.
-`releaseConversation(key)`, deferred at the end of `HandleFor` and called after flushes, deletes
-the entry only when it holds no open turn, buffered text or retained child attribution.
-`closeForConversation` (the drain's session-exit and conversation-teardown paths) flushes pending
+`releaseConversation(key)`, deferred after handling and called after flushes, deletes
+the entry only when it holds no open turn, buffered text, retained child attribution
+or sealed closed turn address.
+The compatibility `closeForConversation` path flushes pending
 content, closes every retained main turn and clears child attribution for only that conversation.
 Older main phases close first, preserving the conversation projection until one final idle.
 It also clears retained attribution when already idle, emitting no idle transition or synthetic
 `turn_end`. Other conversations' state is untouched.
+
+**Runtime retirement follows the dying producer (#3013).** `closeRuntimeSource`
+replaces conversation-wide exit cleanup in the runtime-enabled daemon. It flushes
+the predecessor, records shown interrupted ordinary main tools and one main-turn
+ending, then publishes the divider. A same-session exit uses `child_exit` without
+a divider and closes only work preceding its exit epoch. A stale exit cannot
+release a successor reservation, even before that successor emits output.
+The retiring source retained by `streamSessionTag.Rotate` identifies an old
+child after its live routing tag or last-output source has advanced.
+
+Idle sleep and capacity eviction retain the routing ID on reactivation, so each
+Claude/Codex `Run` gets a fresh daemon-local incarnation before producer startup.
+Sealing, accepted-output watermarks, retained stops and emitter state use that
+incarnation; permanent routing-ID sealing would suppress fresh main-turn openings
+and terminal idle. `Rotate` and successful `CompareAndSwap` register aliases
+under the boundary-capture lock before output, preserving another live tag's
+destination on refusal. First-output registration alone misses chained rotations
+and pre-output evictions, letting predecessor work reopen or waiting for the
+wrong stop forever. Incarnations never alter wire or durable source identities;
+original `HandleFor` and unbound callers retain zero.
+
+Runtime boundaries wait for predecessor accepted output and, on eviction, its
+consumed stop including late parsed tails. Ordinary callbacks retain facts and
+signal a coalescing wake under a short lock without publication I/O. Channel
+holds survive dequeue until publication finishes under the post gate; removing
+the hold at dequeue lets a post overtake the divider. Confirmation-only operator
+placement uses the drain with a whole-queue fence. Delivery release checks open
+turns, since a denial may open one without a running phase. Sealed predecessor
+events keep legacy provenance and bounded text sequencing but bypass successor
+busy/idle mutation. See [runtime history facts and ordering](history-package-producers.md#runtime-boundaries-and-main-work-closure-3013)
+for visibility, closure exclusions and focused regression tests.
 
 **Child attribution must be independent of main lifecycle (#2960).** Guarding only
 `startTurnIfNeeded` would still lose child identities at `endTurn` or idle release,
@@ -188,8 +222,10 @@ streamRunner](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto
 place**, while the surviving runner's already-bound sink kept its construction-time tag — a mapping gone
 stale at rekey (#2010, surfaced by the `slash_command_list`/`model_list` docs re-derivation), not a narrow
 race window. `newStreamRunnerFactory` now mints an atomic-backed `streamSessionTag` that `RestartFresh`
-rotates through `Config.OnSessionRotate`, and both fan-in lanes (`sinkForTag`/`exitForTag`, which `sinkFor`
-now delegates to) read that tag once per event rather than a captured constant — see [Session rotation
+rotates through `Config.OnSessionRotate`. Production event callbacks use
+`sinkForSessionTag` to read the live tag; `exitForSessionTag` also retains the
+dying predecessor across rotation. `sinkForTag` / `exitForTag` remain compatibility
+entry surfaces rather than production attribution sources — see [Session rotation
 notification](streamsup-package-session-rotation-notification-onsessionrotate.md). #2739's `conversationFor`
 resolution (`conversationForSession`, which also checks `SessionHistory`) means a tail from a session that
 has *already* rotated away still resolves to its conversation rather than needing the tag fix at all; the
@@ -220,8 +256,9 @@ and the history/live/replay ordering guarantee.
 **Published completion, not an idle snapshot, releases durable posts (#2811).**
 The drain gates tracker observation and `HandleFor` together under the
 `channelDelivery` mutex, clearing published activity only after completion has
-been handled. An accepted exit similarly calls `closeForConversation` to flush
-buffered text and close lifecycle before releasing activity. Early eviction
+been handled. An accepted runtime exit similarly calls `closeRuntimeSource` to flush
+buffered text and close the dying source before releasing activity;
+compatibility callers retain `closeForConversation`. Early eviction
 holds survive completion until confirmed producer stop; stale exits preserve
 newer reservations. Emitter mutation remains on this goroutine throughout.
 Without a relay URL, `startRelay` still constructs a history-backed emitter with

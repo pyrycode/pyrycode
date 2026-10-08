@@ -52,7 +52,8 @@ import (
 // which is inert: the compile-time interface assertions in this package's tests
 // are the only such values and they call nothing.
 type streamRunner struct {
-	r *streamsup.Runner
+	r             *streamsup.Runner
+	beginProducer func()
 	sessionRetentions
 	install *settingsInstaller
 	// wrapUp is the #2477 reply capture chained into this runner's sink chain. A
@@ -213,7 +214,12 @@ func (a streamRunner) WriteUserTurn(ctx context.Context, conversationID string, 
 
 func (a streamRunner) WaitForPTY(ctx context.Context) error { return a.r.WaitForPTY(ctx) }
 
-func (a streamRunner) Run(ctx context.Context) error { return a.r.Run(ctx) }
+func (a streamRunner) Run(ctx context.Context) error {
+	if a.beginProducer != nil {
+		a.beginProducer()
+	}
+	return a.r.Run(ctx)
+}
 
 // Restart installs the recomposed argv WITH the kill, through the #2446 shaping
 // seam rather than straight to the runner: the argv Pool.UpdateSettings hands
@@ -778,7 +784,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// placement it DOES need is being on the parser's side of the channel, which
 		// the chain's own doc states is what the retentions get from, and only from,
 		// sitting here.
-		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, sink.sinkForTag(tag.ID, "claude"), cfg.Logger)
+		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, sink.sinkForSessionTag(tag, "claude"), cfg.Logger)
 		contextUsage := newTurnEndContextUsageRequester(follow.Sink, cfg.Logger)
 		// #2450 chains the vocabulary persister at the head of the same run of
 		// non-retaining decorators, for the reason the two above it sit here: it needs
@@ -808,7 +814,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		}
 		parser, held := newSessionParser(parserSink, cfg.Logger)
 		scfg.Stdout = parser
-		exitSink := sink.exitForTag(tag.ID)
+		exitSink := sink.exitForSessionTag(tag)
 		// The hold outlives respawns; invalidate joins before either exit path
 		// reports the child gone. Retention never infers task completion.
 		onChildExit := func() {
@@ -869,7 +875,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// path cannot be handed different shaping inputs. It sits below
 		// streamsup.New because the runner is what it forwards to.
 		install := newSettingsInstaller(r, mcpServersPath, approval.stdio, cfg.OperatorBypass, cfg.PermissionMode)
-		return streamRunner{r: r, sessionRetentions: held, install: install, wrapUp: wrapUp}, nil
+		return streamRunner{r: r, sessionRetentions: held, install: install, wrapUp: wrapUp, beginProducer: func() { sink.beginRuntimeProducer(tag) }}, nil
 	}
 }
 

@@ -9,9 +9,17 @@ import (
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 func (p *sendNowPlacement) bindQueued(ctx context.Context, sink *streamTurnSink, store *history.Store, isClaude func(string) bool, logger *slog.Logger) {
+	p.confirmationDispatch = func(commit func()) {
+		if sink.runtimeEnabled.Load() {
+			sink.dispatchPlacement(ctx, commit)
+		} else {
+			commit()
+		}
+	}
 	p.record = func(convID string, msg msgqueue.QueuedMessage, source ...history.SessionProvenance) {
 		newOperatorMessageHistory(store, sink.publishOperator, nil, logger, source...)(convID, msg)
 	}
@@ -38,6 +46,12 @@ func (s *streamTurnSink) observePlacementIdle(sessionID string) {
 }
 
 func (s *streamTurnSink) dispatchPlacement(ctx context.Context, commit func()) {
+	if s.runtimeEnabled.Load() {
+		if ctx.Err() == nil {
+			s.queueBoundary(sessions.SessionTransition{}, commit, nil)
+		}
+		return
+	}
 	select {
 	case <-ctx.Done():
 	case s.placementCommands <- commit:

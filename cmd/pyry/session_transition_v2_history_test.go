@@ -373,9 +373,8 @@ func TestSessionTransitionEmitterV2_HistoryOncePerTransition(t *testing.T) {
 	}
 }
 
-// A transition that never reaches the wire never reaches the log either: both
-// existing drops return before the append, so the log records what was fanned
-// out and never what was refused.
+// Refused transitions write nothing. Recovery has a history-only divider while
+// remaining absent from the legacy stream.
 func TestSessionTransitionEmitterV2_DroppedTransitionsWriteNothing(t *testing.T) {
 	t.Parallel()
 
@@ -418,7 +417,12 @@ func TestSessionTransitionEmitterV2_DroppedTransitionsWriteNothing(t *testing.T)
 			if len(bcast.pushes) != 0 {
 				t.Fatalf("fanned out %d envelopes for a dropped transition; want 0", len(bcast.pushes))
 			}
-			if entries := historyEntries(t, store, testConvID); len(entries) != 0 {
+			entries := historyEntries(t, store, testConvID)
+			if tt.trans.Cause == sessions.CauseRecovery {
+				if len(entries) != 1 || entries[0].Type != historySessionDivider || entries[0].Shown == nil || !*entries[0].Shown {
+					t.Fatalf("recovery facts: %+v", entries)
+				}
+			} else if len(entries) != 0 {
 				t.Fatalf("log holds %d entries for a dropped transition; want 0", len(entries))
 			}
 			// The drop's own Debug line is below the buffer logger's level; a Warn

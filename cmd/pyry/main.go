@@ -757,7 +757,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 				}
 				return sess.Runner(), id, cwd, true
 			},
-			rotate: pool.RotateForNewSession,
+			rotate:            pool.RotateForNewSession,
+			rotateWithHandoff: pool.RotateForNewSessionWithHandoff,
 			// #1475: the same validator the mint and revive paths use, re-run at
 			// rotation time on the recorded workspace rather than trusting it.
 			spawnDirFor: resolveSpawnDir,

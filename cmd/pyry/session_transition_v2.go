@@ -47,8 +47,10 @@ type switchTransitionPublication struct {
 // logged. Ownership comes from captured facts or the exact-session registry
 // resolver; an unresolved event is dropped without guessing a routing key.
 type sessionTransitionEmitterV2 struct {
-	bcast  interactiveBroadcaster
-	logger *slog.Logger
+	runtimeSink    *streamTurnSink
+	runtimeContext context.Context
+	bcast          interactiveBroadcaster
+	logger         *slog.Logger
 
 	// resolveConv supplies ownership only when the transition has none captured.
 	resolveConv func(string) (string, bool)
@@ -103,6 +105,16 @@ func (e *sessionTransitionEmitterV2) Enqueue(t sessions.SessionTransition) {
 		return // the dedicated publisher owns the single switch outcome
 	}
 	t = e.capture(t)
+	if e.runtimeSink != nil {
+		if t.ConversationID == "" {
+			return
+		}
+		if t.PreviousID == t.NewID || (t.Cause != "" && t.PreviousID == "") {
+			return
+		}
+		e.runtimeSink.queueBoundary(t, func() { e.broadcast(e.runtimeContext, t) }, nil)
+		return
+	}
 	select {
 	case e.in <- t:
 	default:
@@ -115,6 +127,26 @@ func (e *sessionTransitionEmitterV2) Enqueue(t sessions.SessionTransition) {
 // publishSwitch waits off Run through consumer delay and queue pressure. The
 // daemon context, never a requesting connection, owns both waits.
 func (e *sessionTransitionEmitterV2) publishSwitch(ctx context.Context, t sessions.SessionTransition) {
+	if e.runtimeSink != nil {
+		t = e.capture(t)
+		if t.ConversationID == "" || t.PreviousID == "" || t.PreviousID == t.NewID {
+			return
+		}
+		done := make(chan struct{})
+		e.runtimeSink.queueBoundary(t, func() {
+			e.broadcast(ctx, t)
+			if b, ok := e.bcast.(interface{ FlushPushes(context.Context) error }); ok {
+				if err := b.FlushPushes(ctx); err != nil {
+					return
+				} // daemon cancellation
+			}
+		}, done)
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
+		return
+	}
 	req := switchTransitionPublication{transition: e.capture(t), done: make(chan struct{})}
 	select {
 	case e.switches <- req:
@@ -131,9 +163,16 @@ func (e *sessionTransitionEmitterV2) publishSwitch(ctx context.Context, t sessio
 // A nonempty captured fact is authoritative, including an unsupported agent:
 // unavailable provenance must not be replaced with a later binding or default.
 func (e *sessionTransitionEmitterV2) capture(t sessions.SessionTransition) sessions.SessionTransition {
+	if t.ResetHandoffOutcome != nil {
+		outcome := *t.ResetHandoffOutcome
+		t.ResetHandoffOutcome = &outcome
+	}
 	p, ok := toWirePayload(t)
-	if !ok || p.NewSessionID == "" {
-		return t
+	if !ok {
+		p.NewSessionID = string(t.NewID)
+		if p.NewSessionID == "" {
+			p.NewSessionID = string(t.PreviousID)
+		}
 	}
 	if t.ConversationID == "" && e.resolveConv != nil {
 		if id, found := e.resolveConv(p.NewSessionID); found {
@@ -141,13 +180,18 @@ func (e *sessionTransitionEmitterV2) capture(t sessions.SessionTransition) sessi
 		}
 	}
 	agent := &t.NextAgent
-	if t.Reason == sessions.ReasonEviction {
+	if t.Reason == sessions.ReasonEviction || t.NewID == "" {
 		agent = &t.PreviousAgent
 	}
 	if *agent == "" && e.resolveAgent != nil {
 		if kind, found := e.resolveAgent(p.NewSessionID); found {
 			*agent = kind
 		}
+	}
+	if t.PreviousAgent == "" && (t.Cause == sessions.CauseOperatorReset || t.Cause == sessions.CauseClaudeClear || t.Cause == sessions.CauseRecovery) {
+		// These transitions rekey one runner; its captured successor harness is
+		// also the actual predecessor harness. Switches supply both independently.
+		t.PreviousAgent = t.NextAgent
 	}
 	return t
 }
@@ -183,6 +227,16 @@ func (e *sessionTransitionEmitterV2) Run(ctx context.Context) {
 // agent facts. Unknown reasons and unresolved ownership drop; individual Push
 // failures do not abort other recipients unless the daemon context is cancelled.
 func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.SessionTransition) {
+	if p, ok := runtimeDivider(t); ok {
+		raw, err := json.Marshal(p)
+		if err == nil {
+			source := history.SessionProvenance{Kind: t.PreviousAgent, SessionID: string(t.PreviousID)}
+			if source.Kind != "claude" && source.Kind != "codex" {
+				source = history.SessionProvenance{}
+			}
+			appendConversationHistory(e.hist, e.logger, "session_divider.history_append_err", t.ConversationID, historySessionDivider, raw, t.OccurredAt, source)
+		}
+	}
 	payload, ok := toWirePayload(t)
 	if !ok {
 		e.logger.Debug("relay: session-transition drop; unknown reason",
@@ -382,6 +436,10 @@ func startSessionTransitionStreamV2WithHarness(
 	emitter := newSessionTransitionEmitterV2(bcast, resolveConv, logger)
 	emitter.resolveAgent = resolveAgent
 	emitter.hist = hist
+	if busy != nil {
+		emitter.runtimeSink = busy.runtimeSink
+	}
+	emitter.runtimeContext = ctx
 	if len(switched) > 0 {
 		emitter.switched = switched[0]
 	}
@@ -394,6 +452,9 @@ func startSessionTransitionStreamV2WithHarness(
 		// Capture and enqueue before the turn-busy clear. Queue pressure never
 		// waits on fanout, and committed switches use the dedicated publisher.
 		emitter.Enqueue(t)
+		if emitter.runtimeSink != nil {
+			return
+		}
 		if sid, ok := transitionClearsTurn(t); ok {
 			// busy may be nil: the tracker is constructed only on the stream path
 			// (relay.go) while this install is unconditional, so PTY mode reaches here

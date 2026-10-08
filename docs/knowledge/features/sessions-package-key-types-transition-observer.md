@@ -15,9 +15,9 @@ silent compatibility primitive. Listening alone therefore cannot discover a
 fresh conversation's session ID.
 
 Successful `Pool.RotateBootstrapForSelfHeal` emits an internal recovery fact,
-but no legacy wire delimiter or history boundary. Self-heal remains uncalled
-in production; it adds no automatic recovery policy. Workspace change is
-lifecycle vocabulary only, with no producer.
+and the runtime history consumer records a shown divider without a legacy wire
+delimiter. Self-heal remains uncalled in production; it adds no automatic
+recovery policy. Workspace change is lifecycle vocabulary only, with no producer.
 
 Clients discover or re-read IDs through
 [`request_session_settings`](../../protocol-mobile.md#request_session_settings):
@@ -63,14 +63,16 @@ func (p *Pool) PublishSwitchTransition(oldID, newID SessionID, metadata ...Switc
 and `AgentSwitch` flag retain their existing meanings; both observer setters
 and existing rotation signatures remain compatible. The daemon's
 `toWirePayload` maps only `ReasonClear` and `ReasonEviction`, rejecting empty
-or unknown reasons before routing, history append or wire fan-out.
+or unknown reasons before legacy history append or wire fan-out. Runtime
+history-only dividers and predecessor closure use `Cause` independently; see
+[runtime history boundaries](history-package-producers.md#runtime-boundaries-and-main-work-closure-3013).
 
 | Lifecycle cause | Producer | Legacy reason → wire delimiter |
 |---|---|---|
 | `CauseOperatorReset` (`operator_reset`) | `RotateForNewSession` / `RotateForNewSessionWithHandoff` | `ReasonClear` → `clear` |
 | `CauseClaudeClear` (`claude_clear`) | `AdoptAnnouncedID` | `ReasonClear` → `clear` |
 | `CauseAgentSwitch` (`agent_switch`) | `PublishSwitchTransition` | `ReasonClear`, `AgentSwitch: true` → `clear` |
-| `CauseRecovery` (`recovery`) | `RotateBootstrapForSelfHeal` | Empty reason; no legacy delimiter or history boundary |
+| `CauseRecovery` (`recovery`) | `RotateBootstrapForSelfHeal` | Empty reason; no legacy delimiter; shown runtime divider |
 | `CauseWorkspaceChange` (`workspace_change`) | None | No event produced |
 | `CauseIdleSleep` (`idle_sleep`) | `Session.runActive` idle timer | `ReasonEviction` → `idle_evict` |
 | `CauseCapacityEviction` (`capacity_eviction`) | `Session.runActive` cap signal | `ReasonEviction` → `idle_evict` |
@@ -92,9 +94,13 @@ evicted session. See [legacy transition provenance](history-package-producers.md
 `RotateForNewSession` delegates to `RotateForNewSessionWithHandoff` with nil.
 The additive method copies an optional caller-supplied outcome string so later
 caller mutation cannot rewrite the fact. `ResetHandoffOutcome` is a
-classification, never handoff text; nil means unknown. Real daemon reset
-outcomes, history adoption of these richer facts and daemon-start facts remain
-follow-up work in #2968 under [ADR 042](../decisions/042-daemon-built-thread.md).
+classification, never handoff text; nil means unknown. The daemon's
+`activeSessionStarter.resetThenRotate` passes its actual wrap-up outcome as
+`written` or `skipped`. The runtime divider retains only these known outcomes;
+callers without the observation leave it absent, never pending or assumed.
+Runtime history closes predecessor main work before dividers; daemon-start
+reconciliation remains [#3014](https://github.com/pyrycode/pyrycode/issues/3014)
+under [ADR 042](../decisions/042-daemon-built-thread.md).
 
 **Func type, not interface.** Matches the package's closure-injection precedent
 (`RunnerConfig.AdoptAnnouncedReset`).
@@ -142,14 +148,17 @@ and [the deterministic test](sessions-package-testing.md#lifecycle-fact-provenan
   reset status, including when post-commit cleanup fails, without another
   rebind or save. Existing two-argument callers leave metadata unknown even
   if the pool could look it up; empty/equal session pairs emit nothing.
-  The ordinary observer clears busy/suggestions but skips wire enqueue;
+  The ordinary observer skips duplicate switch enqueue;
   `SetSwitchTransitionPublisher` owns the single ordered outcome through the
-  existing emitter goroutine's daemon-cancellable lane. Only that dedicated
-  publisher may wait; ordinary observers must return without waiting.
+  runtime drain's daemon-cancellable boundary lane, including predecessor
+  closure before the divider. Compatibility installations retain the emitter
+  lane. Only that dedicated publisher may wait; ordinary observers must return
+  without waiting.
 - **Recovery** — successful `RotateBootstrapForSelfHeal` captures and rebinds
   the owner like other rotations, then notifies internally with `CauseRecovery`
-  and an empty reason. Legacy consumers produce no wire event, history boundary
-  or turn clear. There is no production caller.
+  and an empty reason. Runtime history closes predecessor work and records a
+  shown divider; legacy consumers produce no wire delimiter. There is no
+  production caller.
 - **Idle sleep and capacity eviction** — `Session.beginEvict` calls
   `notifyEviction` before the lifecycle state flip and child teardown.
   It captures the session ID, membership and current owner under the pool lock
@@ -167,7 +176,7 @@ reorder signals. The non-blocking burden is therefore the observer's: the
 `TransitionObserver` contract documents "MUST NOT block — hand off to a buffered
 channel"; #657 owns the non-blocking impl. See [codebase/659.md](../codebase/659.md).
 
-The ordinary 16-entry drop-on-full queue is unsuitable for committed switches:
+The compatibility ordinary 16-entry drop-on-full queue is unsuitable for committed switches:
 a dropped signal would leave a changed binding with no transition, history
 boundary or row update. The switch publisher waits through consumer delay and
 Run-owned sealing before reset exclusion releases, so queue pressure delays
@@ -177,6 +186,16 @@ duplicating history or fanout; `TestRelayAgentSwitchPublicationQueuePressure`
 fills the ordinary queue before commitment and checks the one durable boundary
 and ordered row. See [switch publication](conversation-session-binding.md#switching-to-the-other-agent-2672)
 and [FIFO push completion](v2-session-manager-concurrency.md).
+
+Runtime-enabled installations retain each ordinary fact in the stream sink
+behind its predecessor's accepted-output watermark, with a coalescing wake
+rather than drop-on-full transition transport. Callbacks still do no publication
+I/O and do not wait for the drain or post gate. Committed switches wait through
+closure, divider/legacy publication, row publication and transport sealing.
+Evictions wait for the captured producer incarnation's consumed stop and late
+parsed tails; routing IDs alone are insufficient because reactivation reuses
+them. See [drain retirement](streamsup-package-draining-turnevents-into-the-interactive-emitter.md)
+for source registration before output and retained delivery holds.
 
 **This pattern does not transfer to every pool setter — check whose goroutines
 read the field, not which precedent the setter resembles.** #2148's

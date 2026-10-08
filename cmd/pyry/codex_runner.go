@@ -104,7 +104,7 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 		model, effort := codexTurnSettings(cfg.ClaudeArgs)
 		// #2663 chains the wrap-up reply capture where newStreamRunnerFactory
 		// does, on the producer's side of the fan-in send; see wrapUpCapture.
-		wrapUp := newWrapUpCapture(h.sink.sinkForTag(tag.ID, "codex"))
+		wrapUp := newWrapUpCapture(h.sink.sinkForSessionTag(tag, "codex"))
 		return newCodexRunner(codexRunnerConfig{
 			Binary:         bin,
 			Home:           h.home,
@@ -112,7 +112,8 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 			Tag:            tag,
 			Sink:           wrapUp.Sink,
 			WrapUp:         wrapUp,
-			OnExit:         h.sink.exitForTag(tag.ID),
+			OnExit:         h.sink.exitForSessionTag(tag),
+			beginProducer:  func() { h.sink.beginRuntimeProducer(tag) },
 			Model:          model,
 			Effort:         effort,
 			PermissionMode: cfg.PermissionMode,
@@ -329,6 +330,7 @@ type codexRunnerConfig struct {
 	Tag               *streamSessionTag
 	Sink              func(turnevent.Event)
 	OnExit            func()
+	beginProducer     func()
 	Model, Effort     string
 	PermissionMode    string
 	Backoff           time.Duration
@@ -457,6 +459,9 @@ func (r *codexRunner) WaitForPTY(context.Context) error { return nil }
 // the shutdown return, as streamsup's OnChildExit does. A deliberate restart
 // relaunches at once; a crash or a failed start backs off.
 func (r *codexRunner) Run(ctx context.Context) error {
+	if r.cfg.beginProducer != nil {
+		r.cfg.beginProducer()
+	}
 	r.updateState(func(s *sessions.State) {
 		s.Phase = sessions.PhaseStarting
 		s.StartedAt = time.Now()
