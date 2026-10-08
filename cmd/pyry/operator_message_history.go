@@ -42,8 +42,12 @@ import (
 // OnDelivered only acknowledges placement. Unregistered messages, including
 // Codex/no-stream deliveries, still commit at confirmation. Legacy send-now
 // callers retain expect/attach placement.
-func newOperatorMessageHistory(store *history.Store, push func(operatorMessage), place *sendNowPlacement, logger *slog.Logger) msgqueue.DeliveredFunc {
+func newOperatorMessageHistory(store *history.Store, push func(operatorMessage), place *sendNowPlacement, logger *slog.Logger, source ...history.SessionProvenance) msgqueue.DeliveredFunc {
 	return func(convID string, msg msgqueue.QueuedMessage) {
+		captured := place.takeSource(convID, msg.ID)
+		if len(source) != 0 {
+			captured = source[0]
+		}
 		payload, err := json.Marshal(protocol.MessagePayload{
 			ConversationID: convID,
 			MessageID:      msg.MessageID,
@@ -90,7 +94,7 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 			// the log stores.
 			ts := time.Now().UTC()
 			historyEntryID := appendConversationHistory(store, logger, "operator_message.history_append_err",
-				convID, protocol.TypeMessage, payload, ts)
+				convID, protocol.TypeMessage, payload, ts, captured)
 			if push != nil {
 				push(operatorMessage{convID: convID, payload: payload, ts: ts, historyEntryID: historyEntryID})
 			}

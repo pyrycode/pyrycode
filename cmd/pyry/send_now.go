@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -62,7 +63,7 @@ func newSendNowDeliver(resolve func(string) (handlers.TurnWriter, error), isClau
 			return err
 		}
 		if _, ok := msgqueue.DeliveryMessage(ctx); ok && place != nil && place.record != nil {
-			err := place.write(ctx, convID, payload, func() error { return w.WriteUserTurn(ctx, convID, payload) })
+			err := writeOperatorTurn(ctx, convID, payload, w, place, true)
 			if err != nil {
 				undo()
 			}
@@ -94,13 +95,14 @@ type sendNowPlacement struct {
 	resolve  func(sessionID string) (conversationID string, ok bool)
 	waitIdle func(ctx context.Context, conversationID string) error
 
-	record   func(string, msgqueue.QueuedMessage)
+	record   func(string, msgqueue.QueuedMessage, ...history.SessionProvenance)
 	dispatch func(func())
 	isClaude func(string) bool
 	managed  map[string]map[uint64]*placedMessage
 	writes   map[string]*placementWriteLock
 	mu       sync.Mutex
 	pending  map[string][]*placedMessage
+	sources  map[string]map[uint64]history.SessionProvenance
 }
 
 type placedMessage struct {
@@ -114,6 +116,7 @@ type placedMessage struct {
 	writeErr error
 	notified bool
 	placed   bool
+	source   history.SessionProvenance
 }
 
 func newSendNowPlacement(ctx context.Context, resolve func(string) (string, bool), waitIdle func(context.Context, string) error) *sendNowPlacement {

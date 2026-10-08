@@ -156,6 +156,46 @@ mirrored wire session IDs. Nil/failed storage still allows eligible fan-out with
 absent history identity. Ordinary enqueue remains nonblocking and drops on full;
 committed switches retain their transition/history, row and sealing order.
 
+### Operator delivery provenance (#2983)
+
+Operator provenance names the successful receiving session, not the binding
+at enqueue time. `writeOperatorTurn` captures `history.SessionProvenance` by
+value immediately before the receiving writer's `WriteUserTurn`, after
+activation, idle waits and Claude placement write serialization.
+`boundSession.operatorProvenance` reads that session's live `Session.ID()` and
+its construction-fixed `claude` or `codex` kind supplied by `Pool.HarnessFor`.
+The ID is the daemon's routing session ID, never a conversation ID, Codex
+thread ID or client field. A message queued under A but written to B names B;
+later rotation, rebinding or agent switching cannot replace that snapshot.
+
+Resolution precedes activation and idle waits, so even a resolution-time ID
+can predate a rotation. Placement selection must also use the receiving
+writer's fixed kind: a later conversation-kind lookup could choose the
+successor's placement path while the original writer still receives the turn.
+Unknown writers retain the existing placement behavior without inventing
+provenance. See [session binding](conversation-session-binding.md) and
+[ADR 042's session provenance](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
+
+Successful Claude writes retain the snapshot on the managed placement entry
+before signaling the write outcome. Ordinary echo/idle placement and send-now
+echo/idle fallback pass it to the safe producer when they commit. Successful
+Codex/no-stream writes retain it by conversation and queue ID until
+`sendNowPlacement.takeSource` consumes it at confirmation. Failed writes retain
+no source and create no delivered entry; a retry captures its own receiving
+session. Existing placement order and exactly-once recording, including late
+echoes and callbacks, remain intact.
+
+`newOperatorMessageHistory` still builds history and publication content only
+from the safe `msgqueue.QueuedMessage` projection: client-readable text,
+attachment IDs and existing client metadata. Composed prompts, echoed delivery
+text, host paths and private matching digests remain absent from payloads and
+logs. `appendConversationHistory` combines the captured source with existing
+visibility; raw pages expose it in warm and reopened stores. Legacy entries
+stay untagged, and callers without source information remain usable with
+absent provenance, never inferred as `none`. Legacy live/replay/page payloads,
+unread watermarks, durable identity and recipient gates retain their behavior,
+including eligible publication with absent identity on nil/failed storage.
+
 ### Legacy eligibility and explicit visibility (#2965)
 
 `legacyHistoryType` is a fixed allowlist of the existing producer vocabulary
@@ -179,9 +219,9 @@ accepts arbitrary types; the transport vocabulary is closed independently.
 
 All four existing writers now use `AppendWithMetadata` with explicit
 `Metadata.Shown`, classified from the already-marshalled payload by
-`historyEntryShown`. Interactive output, channel posts and session transitions
-also use captured `Metadata.Session` when source facts are available; operator
-messages leave it absent.
+`historyEntryShown`. Interactive output, channel posts, session transitions and
+delivered operator messages also use captured `Metadata.Session` when source
+facts are available; unknown provenance stays absent.
 Neither `shown` nor `session` is added to legacy wire payloads. Stored payloads, timestamps, durable IDs and existing
 recipient gates keep their original meaning.
 
@@ -326,6 +366,16 @@ rule would be defeated by relaying them.
 **Test-shape traps worth knowing before touching these producers
 again:**
 
+- **Delay both delivery and recording to prove the capture boundary.**
+  `TestOperatorDeliveryProvenance_ReceivingSessionRotation` rotates the actual
+  resolved session during activation, rebinds the conversation, then rotates
+  again before confirmation. A rebind only after writing would miss a cached
+  resolution-time ID. `TestOperatorDeliveryProvenance_Placement` makes the
+  conversation-kind lookup disagree with the receiving writer and delays
+  callbacks across echo/idle placement; correct metadata alone would miss the
+  wrong placement path. `TestOperatorDeliveryProvenance_WaitsAndRetry` changes
+  the source during activation/idle waits and rejects the first write, so a
+  successful retry must carry its own source.
 - **Delay a path the captured event still reaches.**
   Captured conversation ownership bypasses the old resolver, so holding that
   resolver no longer delays switch publication. `TestRelayAgentSwitchDelayedPublication`

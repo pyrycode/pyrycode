@@ -282,13 +282,7 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 			return err
 		}
 		defer finished()
-		write := func() error { return w.WriteUserTurn(ctx, convID, payload) }
-		var writeErr error
-		if place != nil && place.isClaude(convID) {
-			writeErr = place.write(ctx, convID, payload, write)
-		} else {
-			writeErr = write()
-		}
+		writeErr := writeOperatorTurn(ctx, convID, payload, w, place, false)
 		if writeErr != nil {
 			// Returned VERBATIM (unwrapped): msgqueue classifies ErrNoLiveSession,
 			// ErrTrustModalPending and turncommit.ErrDropped by errors.Is, and the undo

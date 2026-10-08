@@ -8,10 +8,13 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
+	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 )
 
 func (p *sendNowPlacement) bindQueued(ctx context.Context, sink *streamTurnSink, store *history.Store, isClaude func(string) bool, logger *slog.Logger) {
-	p.record = newOperatorMessageHistory(store, sink.publishOperator, nil, logger)
+	p.record = func(convID string, msg msgqueue.QueuedMessage, source ...history.SessionProvenance) {
+		newOperatorMessageHistory(store, sink.publishOperator, nil, logger, source...)(convID, msg)
+	}
 	p.dispatch = func(commit func()) { sink.dispatchPlacement(ctx, commit) }
 	p.isClaude = isClaude
 	idle := p.idle
@@ -75,7 +78,7 @@ func (p *sendNowPlacement) lockWrite(convID string) func() {
 // write registers the safe queued projection at the final composed write
 // boundary. The result signal precedes caller cleanup: an echo may be waiting
 // for it while the drain holds the post-publication gate.
-func (p *sendNowPlacement) write(ctx context.Context, convID string, payload []byte, write func() error) error {
+func (p *sendNowPlacement) write(ctx context.Context, convID string, payload []byte, write func() error, source ...*history.SessionProvenance) error {
 	msg, ok := msgqueue.DeliveryMessage(ctx)
 	if !ok || p.record == nil {
 		return write()
@@ -83,7 +86,8 @@ func (p *sendNowPlacement) write(ctx context.Context, convID string, payload []b
 	unlock := p.lockWrite(convID)
 	defer unlock()
 	e := &placedMessage{id: msg.ID, digest: sha256.Sum256(payload), queued: true,
-		sentNow: msg.SentNow, outcome: make(chan struct{}), commit: func() { p.record(convID, msg) }}
+		sentNow: msg.SentNow, outcome: make(chan struct{})}
+	e.commit = func() { p.record(convID, msg, e.source) }
 	p.mu.Lock()
 	if p.managed == nil {
 		p.managed = make(map[string]map[uint64]*placedMessage)
@@ -95,6 +99,9 @@ func (p *sendNowPlacement) write(ctx context.Context, convID string, payload []b
 	p.pending[convID] = append(p.pending[convID], e)
 	p.mu.Unlock()
 	e.writeErr = write()
+	if e.writeErr == nil && len(source) != 0 && source[0] != nil {
+		e.source = *source[0]
+	}
 	close(e.outcome)
 	if e.writeErr != nil {
 		p.mu.Lock()
@@ -110,6 +117,63 @@ func (p *sendNowPlacement) write(ctx context.Context, convID string, payload []b
 		p.dispatch(func() { p.takeQueued(convID, e) })
 	}()
 	return nil
+}
+
+type operatorProvenanceWriter interface {
+	operatorProvenance() history.SessionProvenance
+}
+
+// writeOperatorTurn captures at the final writer call, after activation and
+// idle waits. Only successful writes retain source information for recording.
+func writeOperatorTurn(ctx context.Context, convID string, payload []byte, w handlers.TurnWriter, p *sendNowPlacement, sendNow bool) error {
+	provider, known := w.(operatorProvenanceWriter)
+	claude := sendNow
+	if known {
+		claude = provider.operatorProvenance().Kind == "claude"
+	} else if !sendNow && p != nil {
+		claude = p.isClaude(convID)
+	}
+	var source history.SessionProvenance
+	write := func() error {
+		if known {
+			source = provider.operatorProvenance()
+		}
+		return w.WriteUserTurn(ctx, convID, payload)
+	}
+	if p != nil && claude {
+		return p.write(ctx, convID, payload, write, &source)
+	}
+	if err := write(); err != nil {
+		return err
+	}
+	if msg, ok := msgqueue.DeliveryMessage(ctx); ok && p != nil && source.Kind != "" {
+		p.mu.Lock()
+		if p.sources == nil {
+			p.sources = make(map[string]map[uint64]history.SessionProvenance)
+		}
+		if p.sources[convID] == nil {
+			p.sources[convID] = make(map[uint64]history.SessionProvenance)
+		}
+		p.sources[convID][msg.ID] = source
+		p.mu.Unlock()
+	}
+	return nil
+}
+
+// takeSource consumes confirmation-only attribution. Claude keeps its source
+// on the managed placement entry, synchronized by the write outcome signal.
+func (p *sendNowPlacement) takeSource(convID string, id uint64) history.SessionProvenance {
+	if p == nil {
+		return history.SessionProvenance{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	source := p.sources[convID][id]
+	delete(p.sources[convID], id)
+	if len(p.sources[convID]) == 0 {
+		delete(p.sources, convID)
+	}
+	return source
 }
 
 func (p *sendNowPlacement) forgetLocked(convID string, id uint64) {
