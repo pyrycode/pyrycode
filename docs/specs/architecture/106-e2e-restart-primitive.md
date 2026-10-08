@@ -4,6 +4,14 @@
 **Size:** S
 **Depends on:** #68 + #69 (harness already shipped)
 
+## Historical review (#2987)
+
+Historical startup design: #839 removed newest-JSONL bootstrap adoption and #1149
+removed mostRecentJSONL. Bootstrap spawning uses an explicit persisted ID; do not copy
+the retired reconciliation step. See [startup reconciliation
+history](../../knowledge/features/jsonl-reconciliation.md) and [current ID flag
+selection](../../knowledge/features/streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md).
+
 ## Context
 
 Phase 1.2 has shipped the registry (#34), reconcile (#38), rotation watcher (#39), idle eviction (#40), and the active-cap (#41). All five have unit-level coverage; none has binary-level coverage of the central guarantee — *sessions persist across daemon restart*. That guarantee is what makes the whole phase load-bearing, and the only honest way to test it is at the binary boundary: spawn pyry, kill it, spawn it again, prove the on-disk registry survived.
@@ -311,10 +319,6 @@ go test -race ./...
 ```
 
 The test exercises a real binary against a real (pre-populated, then rewritten-by-pyry-or-not) on-disk file. There is no mocking. The supervised "claude" remains `/bin/sleep infinity` (existing harness default), keeping PTY/child-startup variability out of the assertions.
-
-## Open questions
-
-None. The code paths involved (`pool.New`, `loadRegistry`, `pickBootstrap`, `reconcileBootstrapOnNew`, `Server.Listen`'s stale-socket handling) are all read in this spec; the test design follows from the existing invariants.
 
 ## Out of scope (explicit)
 

@@ -6,6 +6,14 @@
 **Status:** Draft for development
 **Size:** **S** (~150 lines production + tests, no consumer churn)
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 ## Context
 
 Slice 1 of 2 for parent ticket #27. Introduce the `internal/sessions` package as a self-contained, well-typed unit with its own tests. No consumer rewiring lands here — `cmd/pyry/main.go` and `internal/control` continue to consume `*supervisor.Supervisor` directly. Child B (#29) flips both consumers in one mechanical follow-up commit on the same feature branch.

@@ -5,6 +5,14 @@ status: spec
 size: XS
 ---
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 # Context
 
 Today the only e2e coverage of `pyry attach` is `TestE2E_Attach_RoundTripsBytes` (#125) — bytes flow terminal → daemon → child → back. There is no test asserting that the documented `Ctrl-B d` detach sequence cleanly disconnects the attach client without taking down the daemon or its supervised child.

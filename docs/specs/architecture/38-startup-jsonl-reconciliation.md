@@ -4,6 +4,14 @@
 **Size:** S (~90 production lines)
 **Depends on:** Phase 1.2a (#34) — `internal/sessions` registry, `Pool.saveLocked` seam.
 
+## Historical review (#2987)
+
+Historical startup design: #839 removed newest-JSONL bootstrap adoption and #1149
+removed mostRecentJSONL. Bootstrap spawning uses an explicit persisted ID; do not copy
+the retired reconciliation step. See [startup reconciliation
+history](../../knowledge/features/jsonl-reconciliation.md) and [current ID flag
+selection](../../knowledge/features/streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md).
+
 ## Context
 
 When a user runs `/clear` in claude, claude rotates the session UUID: it stops writing to `<old-uuid>.jsonl` and starts writing to `<new-uuid>.jsonl`. Pyry's 1.2a registry froze the bootstrap UUID at first cold-start mint; after a `pyry stop`/restart it still points at the pre-clear UUID. Phase 1.2c (lazy respawn) and any operator-visible read would surface the wrong conversation.

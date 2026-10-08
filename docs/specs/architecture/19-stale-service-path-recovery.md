@@ -181,12 +181,6 @@ N/A — documentation only.
 - No Go tests, no `go vet`, no `staticcheck` runs needed — this PR touches
   zero `.go` files.
 
-## Open questions
-
-None. Every acceptance-criterion bullet has a single obvious resolution
-above. The developer should not need to make architectural judgement calls;
-this spec is a content checklist.
-
 ## Out of scope (and why)
 
 - **`pyry install-service --refresh`** (the ticket's "Option B"). Deferred

@@ -1,5 +1,13 @@
 # #136 — Bridge.Resize seam + apply handshake Cols/Rows
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 ## Context
 
 Today `internal/control` accepts `Cols`/`Rows` in `AttachPayload` but the supervisor has no API to apply them. Three places document the gap (`protocol.go`, `supervisor.go`, `attach_test.go`'s `TestServer_AttachIgnoresGeometryToday`). This ticket adds a typed resize seam — `Bridge.Resize(rows, cols uint16) error` — and uses it from the control server's attach handler to honor handshake geometry. The wire-protocol resize message and the live-resize applier are deferred to #137; the client-side SIGWINCH handler is deferred to #133.

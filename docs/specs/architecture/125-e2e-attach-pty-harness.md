@@ -5,6 +5,14 @@ status: spec
 size: S
 ---
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 # Context
 
 `pyry attach` is the only interactive surface in the product, and the only one currently uncovered at the binary boundary. Unit tests cover the wire protocol (`internal/control/attach_*`) and the bridge pump (`internal/supervisor/bridge_test.go`); the existing e2e harness (`internal/e2e/harness.go`) drives non-interactive verbs against a daemon whose claude is `/bin/sleep 99999`. There is no test that proves a byte typed at a user's terminal travels: terminal → attach client → control socket → bridge → supervisor PTY → claude → and back.

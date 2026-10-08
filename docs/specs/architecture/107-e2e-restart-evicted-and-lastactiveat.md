@@ -299,10 +299,6 @@ go test -race ./...
 
 The tests exercise a real binary against a real on-disk file. The supervised "claude" remains `/bin/sleep infinity` (existing harness default), keeping PTY/child-startup variability out of the assertions.
 
-## Open questions
-
-None. The lifecycle string values (`"active"`, `"evicted"`), registry path (`<HOME>/.pyry/test/sessions.json` under `-pyry-name=test`), warm-start invariants (no save without state change), and harness primitives (`StartIn`, `Stop`) are all read in this spec.
-
 ## Out of scope (explicit)
 
 - **Bootstrap-evicted warm-start.** The permutation where the bootstrap session itself starts in `stateEvicted` (lifecycle goroutine enters `runEvicted`, no claude child). Functionally distinct path; deserves its own ticket so failures isolate cleanly.

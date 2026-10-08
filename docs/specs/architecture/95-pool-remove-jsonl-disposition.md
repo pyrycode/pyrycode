@@ -437,12 +437,6 @@ The Errors table in the same doc gains entries for:
 1.1d-A2, ticket #95)" summarising the surface and the under-`Pool.mu`
 disposition discipline.
 
-## Open questions
-
-None — design is fully specified. The two architect-discretion items
-called out by the AC (the field-shape choice and the partial-failure
-ordering) are resolved above with rationale.
-
 ## Out of scope (reaffirmed)
 
 - Process termination, registry remove, bootstrap rejection,

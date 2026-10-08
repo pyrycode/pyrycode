@@ -1,15 +1,17 @@
 # `internal/sessions` Package
 
-The session-addressable runtime layer that wraps `internal/supervisor` with identity (`SessionID`) and registry (`Pool`) semantics. One `Pool` holds the set of supervised claude instances managed by a single `pyry` process.
-
-Today the pool holds exactly one entry — the **bootstrap session** — so external behaviour is unchanged from the pre-Phase-1 supervisor-only world. The package shape is the seam Phase 1.1+ extends additively (multi-session CLI, `pyry attach <id>`, idle eviction) without touching `internal/supervisor`.
+The session-addressable runtime owns session identity, registry persistence and
+lifecycle through `Runner`/`RunnerFactory`. One `Pool` manages its bootstrap and
+additional sessions. `internal/supervisor` and terminal attach were removed in
+\#1348; see
+[current runner ownership](sessions-package-key-types-runner-interface-runnerfactory.md).
 
 ## Package Layout
 
 ```
 internal/sessions/
   id.go         SessionID, NewID()
-  session.go    Session: wraps one supervisor + optional bridge
+  session.go    Session: owns one Runner and its lifecycle
   pool.go       Pool: registry, lifecycle, Config, SessionConfig, RotateID
   registry.go   On-disk sessions.json (loadRegistry, saveRegistryLocked)
   reconcile.go  encodeWorkdir; DefaultClaudeSessionsDir
@@ -43,13 +45,17 @@ Sentinels (`ErrSessionNotFound`, `ErrPoolNotRunning`, `ErrCannotRemoveBootstrap`
 
 ## Dependency Direction
 
-```
-internal/sessions  →  internal/supervisor
-```
-
-`internal/sessions` imports `internal/supervisor`. The reverse is forbidden — verifiable with `go list -deps ./internal/supervisor/...`. `internal/sessions` does **not** import `internal/control`; control will (after Phase 1.0b) import sessions for `SessionID` and the resolver interface, never the other way around.
+`internal/sessions` depends on its `Runner` interface and accepts implementations
+through `RunnerFactory`. It does not import `internal/control` or the deleted
+`internal/supervisor`. The daemon composition root supplies the runner factory
+and control adapters.
 
 ## Production Consumers (Phase 1.0b)
+
+Historical Phase 1.0b wiring follows. The bootstrap-only, terminal-attach and
+`--continue` statements describe that phase, not current behavior; current session
+ownership is documented under
+[Runner/RunnerFactory](sessions-package-key-types-runner-interface-runnerfactory.md).
 
 After #29, `cmd/pyry/main.go` constructs `*sessions.Pool` and `internal/control` consumes a `SessionResolver` (defined inside `internal/control` — see [control-plane.md](control-plane.md)). External behaviour is unchanged:
 

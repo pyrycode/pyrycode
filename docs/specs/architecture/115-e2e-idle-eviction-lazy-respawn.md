@@ -5,6 +5,13 @@ status: spec
 size: S
 ---
 
+## Historical review (#2987)
+
+The missing-list discussion is historical: pyry sessions list is implemented; pyry list
+is not the command. Socket injection and timing rationale remain historical test
+guidance. See [current session-list
+contract](../../knowledge/features/control-plane-sessions-list-seam-1-1b-b1.md).
+
 # Context
 
 Idle eviction and lazy respawn shipped in #40, exercised today only by package-level integration tests in `internal/sessions/`. Those tests build `Pool` in-process with stub bridges; they do not run the assembled `pyry` binary, do not exercise the control plane's `handleAttach` Activate-before-Attach call, and do not observe the on-disk registry under daemon ownership.

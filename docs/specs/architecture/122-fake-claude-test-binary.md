@@ -5,6 +5,14 @@ status: spec
 size: S
 ---
 
+## Historical review (#2987)
+
+Historical watcher motivation: #2137 removed the production fsnotify/open-descriptor
+watcher. The fake-claude rotation mode and StartRotation harness still exist; their
+existence does not prove a live watcher. See [current fake-claude
+modes](../../knowledge/features/fakeclaude-binary.md) and [rotation
+retirement](../../knowledge/features/rotation-watcher.md).
+
 # Context
 
 The e2e harness today hardcodes the supervised child to `/bin/sleep 99999` (`internal/e2e/harness.go:243-252`). That child opens no JSONLs, so it cannot exercise `internal/sessions/rotation`'s production behaviour: matching `<uuid>.jsonl` CREATE events to a tracked PID via `/proc/<pid>/fd` (Linux) or `lsof` (macOS), and calling `Pool.RotateID` when claude has clearly pivoted to a fresh UUID.
