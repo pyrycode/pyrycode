@@ -14,6 +14,13 @@ The natural seams produce incoherent slices:
 
 The four files in `internal/sessions/rotation/` (watcher + probe interface + two build-tagged probes) cohere as one logical unit: a probe interface, two implementations, one consumer. Edit fan-out is under 5 call sites (Pool gains methods; `Pool.Run`'s body changes; cmd/pyry already wires `ClaudeSessionsDir`). Line count, not fan-out, is the binding constraint, and it sits inside the M ceiling.
 
+## Historical review (#2987)
+
+Historical rotation design: #2137 removed the fsnotify/open-descriptor watcher and its
+rotation test. Current conversation_reset handling uses sessionResetFollower and
+Pool.AdoptAnnouncedID. See [rotation retirement and
+replacement](../../knowledge/features/rotation-watcher.md).
+
 ## Context
 
 When a user runs `/clear` inside a supervised claude, claude rotates the session UUID: it stops writing to `<old-uuid>.jsonl` in `~/.claude/projects/<encoded-cwd>/` and starts writing to `<new-uuid>.jsonl`. #38 made the **startup** path self-heal: on `Pool.New`, scan the dir, pick the most-recently-modified JSONL, call `Pool.RotateID`. This ticket is the **live** half: while pyry is running, detect the rotation within ~1 second so lazy respawn (1.2c) and any in-flight reads see the post-clear UUID.

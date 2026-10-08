@@ -5,6 +5,14 @@ status: spec
 size: XS
 ---
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 # Context
 
 Today the e2e suite has one test exercising `pyry attach` end-to-end: `TestE2E_Attach_RoundTripsBytes` (#125), which proves a single round-trip of bytes from the user's terminal to claude and back. There is no test asserting the *load-bearing* property of the supervisor's restart loop: when the supervised child exits and the supervisor respawns it, the attach client survives and the user's terminal session keeps working.

@@ -1,5 +1,13 @@
 # Spec: Fix foreground-mode supervisor stdin reader leak (#78)
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 ## Context
 
 `internal/supervisor/supervisor.go:309-317` runs two `io.Copy` goroutines

@@ -1,5 +1,12 @@
 # Spec — Ticket #118: rotation watcher exact-match path comparison must tolerate symlink resolution
 
+## Historical review (#2987)
+
+Historical rotation design: #2137 removed the fsnotify/open-descriptor watcher and its
+rotation test. Current conversation_reset handling uses sessionResetFollower and
+Pool.AdoptAnnouncedID. See [rotation retirement and
+replacement](../../knowledge/features/rotation-watcher.md).
+
 ## Context
 
 The rotation watcher matches fsnotify CREATE events against the platform probe's report of which JSONL each tracked PID has open. The match gate at `internal/sessions/rotation/watcher.go:167` does a lexical comparison via `filepath.Clean`:
@@ -142,10 +149,6 @@ go vet ./...
 ```
 
 Confirm both pass on darwin (the platform where the bug actually bites) before commit. Linux CI will exercise the new symlink test through the explicit `os.Symlink`.
-
-## Open questions
-
-None. The technical notes in the ticket already pin the primitive (`filepath.EvalSymlinks`), the fix site (event-side via watcher startup), and the fallback discipline. The existing-test adjustment above is a consequence of the chosen design — not a separate decision to make.
 
 ## Out of scope (per ticket)
 

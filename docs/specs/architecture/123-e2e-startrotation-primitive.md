@@ -5,6 +5,14 @@ status: spec
 size: S
 ---
 
+## Historical review (#2987)
+
+Historical watcher motivation: #2137 removed the production fsnotify/open-descriptor
+watcher. The fake-claude rotation mode and StartRotation harness still exist; their
+existence does not prove a live watcher. See [current fake-claude
+modes](../../knowledge/features/fakeclaude-binary.md) and [rotation
+retirement](../../knowledge/features/rotation-watcher.md).
+
 # Context
 
 Today the e2e harness hardcodes the supervised child to `/bin/sleep 99999` (`harness.go:248-252`). That child opens no JSONLs, so production code that observes filesystem behaviour of the supervised child — notably `internal/sessions/rotation` — cannot be exercised end-to-end through pyry.

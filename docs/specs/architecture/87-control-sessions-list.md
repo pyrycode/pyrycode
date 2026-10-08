@@ -441,14 +441,6 @@ omitempty field on `Response` must not change their wire bytes by a
 single byte. Pinned by the extended `TestProtocol_SessionsRoundTripBackCompat`
 table.
 
-## Open questions
-
-None. Sort order, time encoding, state encoding, error envelope
-(unused), and seam shape are all settled by precedent (#60, #75,
-#90, #98) and the AC. If any test ergonomics require a smaller
-`fakeSessioner.List` shape than the FIFO approach above, prefer
-shrinking inside the test file rather than reshaping the seam.
-
 ## Out of scope
 
 - The CLI verb (`case "list":` in `runSessions`, table renderer,

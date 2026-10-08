@@ -1,6 +1,9 @@
 # Pool.ResolveID (1.1e-A)
 
-The typed prefix resolver Phase 1.1e-B's `pyry attach <id>` wire + CLI surface (and any future verb taking a session selector) consumes instead of inlining the same `strings.HasPrefix` walk over `Pool.List`. The natural pairing with `Pool.Lookup`:
+`Pool.ResolveID` resolves a full UUID, unique prefix or empty bootstrap selector.
+The terminal attach consumer was removed in #1348. Current CLI rename/remove
+resolve selectors client-side through `resolveSessionIDViaList` before sending a
+canonical ID.
 
 | Caller-supplied input | API |
 |---|---|
@@ -27,7 +30,9 @@ func (p *Pool) ResolveID(arg string) (SessionID, error)
 
 **No minimum prefix length.** A one-character prefix is accepted as long as it is unique. Refusing short prefixes (1- or 2-char) for safety is a CLI-layer guard, not a pool invariant — the same posture as `Pool.Rename` declining to validate `newLabel` and `Pool.Create` declining to validate `label`.
 
-**No whitespace trimming.** The pool primitive accepts whatever string the caller hands it. Trimming is the CLI's responsibility (`flag` already handles positional args; an explicit `strings.TrimSpace` at the CLI layer is one line).
+No whitespace trimming. `Pool.ResolveID`, CLI positional parsing and
+`resolveSessionIDViaList` preserve the supplied string. Trimming requires an
+explicit caller policy; Go `flag` does not trim positional values.
 
 **Returns `SessionID`, not `*Session` / `SessionInfo`.** Smallest possible surface, symmetric with the rest of the wire/CLI flow: 1.1e-B unmarshals an id from the request, calls `ResolveID`, then routes to `Lookup` / `Activate` / `Remove` with the resolved id. Returning `*Session` would tempt callers to short-circuit the second lookup — but the second lookup is the lock-clean way to guard against a session being removed between resolve and use, and saving the second hashmap probe is not worth the sharp edge.
 

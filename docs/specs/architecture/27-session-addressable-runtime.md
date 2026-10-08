@@ -4,6 +4,14 @@
 **Status:** Draft for development
 **Locked design source:** [`docs/multi-session.md`](../../multi-session.md), [`docs/plan.md`](../../plan.md)
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 ## Context
 
 Today's `pyry` is structurally one-claude: `cmd/pyry/main.go` constructs a single `*supervisor.Supervisor` and a single `*supervisor.Bridge` (when in service mode) and hands both to the control plane. Phase 1.1 (CLI multi-session) and 1.2 (persistence + idle eviction) need a session-addressable layer they can extend additively, not bolt onto the supervisor.

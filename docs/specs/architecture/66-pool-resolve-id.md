@@ -4,6 +4,13 @@
 **Size:** XS (one method, one sentinel, one test file).
 **Scope:** `internal/sessions` only. No control plane, no CLI, no wire protocol.
 
+## Historical review (#2987)
+
+The automatic positional-whitespace trimming claim is incorrect: current CLI parsers and
+resolveSessionIDViaList preserve the supplied string, as does Pool.ResolveID. Trimming
+would require an explicit caller policy. See [current prefix
+resolver](../../knowledge/features/sessions-package-key-types-pool-resolveid-1-1e.md).
+
 ## Context
 
 Phase 1.1's per-session CLI verbs (`pyry sessions rename`, `pyry sessions rm`,

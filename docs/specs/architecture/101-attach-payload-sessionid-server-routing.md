@@ -6,6 +6,14 @@
 
 ---
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 ## Context
 
 Phase 1.1e wires multi-session attach end-to-end. #66 landed the resolver primitive (`Pool.ResolveID(arg) (SessionID, error)` + `ErrAmbiguousSessionID`). This slice is the wire + server-side half: an optional `sessionID` field on `AttachPayload`, and a `handleAttach` rewrite that routes through `Pool.ResolveID` before any bridge work.

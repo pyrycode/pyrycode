@@ -458,3 +458,110 @@ Passed: race tests for `cmd/spec-reference-inventory` and `cmd/spec-scaffolding-
 `go vet ./...`, binary build to scratch and `git diff --check`. No production package
 was modified. The verifier owns the full-module gate. No live-Claude test or
 live artifact is required. Documentation edits above remain pending.
+
+## Documentation completion (#2987)
+
+The builder's pending handoff above is satisfied by the documentation-stage edits.
+All 22 ledger notices are inserted at their exact paths, immediately before the
+first `Context` heading, with the approved wording and owning links. The three
+knowledge corrections are applied at the exact headings listed in the handoff:
+
+- [jsonl-reconciliation.md](../../knowledge/features/jsonl-reconciliation.md):
+  startup retirement, `Pool.RotateID` and current `ClaudeSessionsDir` wiring.
+- [sessions-package.md](../../knowledge/features/sessions-package.md): introduction,
+  layout, dependency direction and historical Phase 1.0b consumer qualifier.
+- [Pool.ResolveID](../../knowledge/features/sessions-package-key-types-pool-resolveid-1-1e.md):
+  current consumers and verbatim positional-whitespace policy.
+
+After notice insertion, each of the same nine approved question bodies matched
+its original reviewed body byte for byte. The refreshed full-document hashes and
+all-heading ordinals below bind the pre-removal bytes; #106 moves from ordinal 17
+to 18 and #118 from 13 to 14. The offline preview reports exactly nine intended
+removals with empty approval diagnostics. Only those selected ranges are removed;
+no corpus-wide apply is run. Original builder approvals remain historical evidence.
+
+### Documentation-stage approval array JSON
+
+```json
+[
+{"document":"docs/specs/architecture/19-stale-service-path-recovery.md","sha256":"6a01520f0c512a223fcbb570cb1eccfe16f969b794c2e04a4933a130bc927c81","heading":11},
+{"document":"docs/specs/architecture/52-cli-verbs-e2e-coverage.md","sha256":"3d96923f49625117e4f14afd2cf7fc3d016cbadc8379689319fc66c4eb61f329","heading":14},
+{"document":"docs/specs/architecture/87-control-sessions-list.md","sha256":"142f74cf16626bfc0d1cf62d65eb75e13becd7fc3d690f57561539b2363985dc","heading":15},
+{"document":"docs/specs/architecture/94-pool-remove-core.md","sha256":"2e68272c79fbea6f3a64973a49ac9bf50b35e49c7d57c7b1125026034bec4f96","heading":20},
+{"document":"docs/specs/architecture/95-pool-remove-jsonl-disposition.md","sha256":"cd86a5e46c1febba5f2aa63c06cb8c1ef7397fa0bef9beec956f309e83f297ee","heading":19},
+{"document":"docs/specs/architecture/106-e2e-restart-primitive.md","sha256":"af9a3156020dff858e0d2006f94fe59bb31efcbdfde2384341b698065053564a","heading":18},
+{"document":"docs/specs/architecture/107-e2e-restart-evicted-and-lastactiveat.md","sha256":"0e4a8cd37219f393d7ac7c3d399a7ff3bacccb7e97fbbf01826bd818c6036c94","heading":18},
+{"document":"docs/specs/architecture/111-e2e-corrupt-registry.md","sha256":"c81d2ad3c1dd7d7293da6b2fb9dec00d1c7bf7c738e6f0364a6c706f8ca1e889","heading":12},
+{"document":"docs/specs/architecture/118-rotation-symlink-resolution.md","sha256":"5ae6f88e6ee069c72c2255def9635b2883f7c3ed0a9a5860abf9204b768ad2f8","heading":14}
+]
+```
+
+### Documentation-stage batch-only preview excerpt JSON
+
+```json
+{"checkout_commit":"1fd278b108dafb5f5bc4efd8e289c8bf58883f0d","evidence_sha256":"68c4e1fe74e3c04a2f8b4a5756c86c4f270760b79f9806fb0a2d6ae36e0c3a9a","scope_commit":"bf3129a42d38d257a3085f05dde5079a275c84a6","reviewed_current_commit":"f2a41c4b5bf2e72437eb1dc97b47b8178ff86429","working_tree_state":"After the 22 ledger notices, before the nine approved removals; selected hashes bind these uncommitted bytes on checkout_commit.","evidence":{"repository":"pyrycode/pyrycode","retrieved_at":"2026-10-08T11:43:30Z","provenance":"GitHub GraphQL via gh api graphql --paginate; repository.issues(first:100); repository.pullRequests(first:100,states:MERGED).closingIssuesReferences(first:100); 17 complete issue pages / 13 complete PR pages; all nested totalCount verified; query text in plan Revisions. issues-pages.json SHA256=bee202bfd534960d60d466d9e0cd43b09c1ab9aa94a79900fd0f971f5b91fa53 pr-pages.json SHA256=e1e091f28fe71df146da5c9fa952eae439a7d18996966b724e6706051fe52933"},"evidence_path":"cmd/spec-scaffolding-prune/testdata/2929-evidence.json","evidence_file_sha256":"f66798f583c42683fa08c66c00e584cd46553d57630b24109fa7ba56809105ce","scope":"batch 01 only; regenerated offline preview, never a corpus-wide apply report","counts_batch_only":{"scanned_documents":45,"eligible_documents":43,"proposed_removal_sections":9,"deferred_question_sections":34},"approval_diagnostics":[],"documents":[
+{"document":"docs/specs/architecture/101-attach-payload-sessionid-server-routing.md","sha256":"9ac34ec85b74101d2dbcb42accd372d5996aabd8e5b742cc9b1980aad0c14bb0","ticket":101,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":12413,"end_byte":12632,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/102-attach-cli-positional.md","sha256":"54a4b605978344cb3dc28d6bcf60afe3432d2348d24a6db154deadb1a11b34aa","ticket":102,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":13672,"end_byte":14087,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/106-e2e-restart-primitive.md","sha256":"af9a3156020dff858e0d2006f94fe59bb31efcbdfde2384341b698065053564a","ticket":106,"reason":"eligible","sections":[{"heading":18,"title":"Open questions","start_byte":16622,"end_byte":16867,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/107-e2e-restart-evicted-and-lastactiveat.md","sha256":"0e4a8cd37219f393d7ac7c3d399a7ff3bacccb7e97fbbf01826bd818c6036c94","ticket":107,"reason":"eligible","sections":[{"heading":18,"title":"Open questions","start_byte":16597,"end_byte":16877,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/111-e2e-corrupt-registry.md","sha256":"c81d2ad3c1dd7d7293da6b2fb9dec00d1c7bf7c738e6f0364a6c706f8ca1e889","ticket":111,"reason":"eligible","sections":[{"heading":12,"title":"Open questions","start_byte":9795,"end_byte":9909,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/115-e2e-idle-eviction-lazy-respawn.md","sha256":"65a6d39a49f7ee7fb014791a63580c63cb106dd7030f571f308cc12d0d05eb6b","ticket":115,"reason":"eligible","sections":[{"heading":12,"title":"Open questions","start_byte":14844,"end_byte":15649,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/116-e2e-cap-eviction-and-interleave.md","sha256":"4fd16c21b827e64cb69dc4e03c10dc1ffebcac816a2d84727f41d43816108831","ticket":116,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":20463,"end_byte":21525,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/118-rotation-symlink-resolution.md","sha256":"5ae6f88e6ee069c72c2255def9635b2883f7c3ed0a9a5860abf9204b768ad2f8","ticket":118,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":9523,"end_byte":9822,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/120-e2e-clear-rotation-watcher.md","sha256":"41ddbcf3dc4218aaab4eb28cf82868b283d8be3af328ff0491c4448dcb70dd16","ticket":120,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":9738,"end_byte":12400,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/122-fake-claude-test-binary.md","sha256":"3cd7c3f47df755ff85b820e702f589acc7a5549887bf6b0e21593557b2768eec","ticket":122,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":16005,"end_byte":16667,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/123-e2e-startrotation-primitive.md","sha256":"d8693d71137ce3c83c0962e3e7427bbf5b6520ae9345d78d8a4df12890901ca2","ticket":123,"reason":"eligible","sections":[{"heading":12,"title":"Open questions","start_byte":11523,"end_byte":12724,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/125-e2e-attach-pty-harness.md","sha256":"dfd502080685bc2324cf725cde017a7eb54bfe18d3de92c2bcd5dce095045ac2","ticket":125,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":22379,"end_byte":23488,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/126-e2e-attach-handles-sigwinch.md","sha256":"08dfcd808d4a8f817abaf81452f08a620da041f7213f26026468400fcb5bf1c3","ticket":126,"reason":"eligible","sections":[{"heading":20,"title":"Open questions","start_byte":22105,"end_byte":23199,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/127-e2e-attach-detach-clean.md","sha256":"9bf0dda71bee1e61f26ce69134bd12f5f4eec84533527de9fd0c130c4e47b20d","ticket":127,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":10634,"end_byte":10828,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/128-e2e-attach-survives-claude-restart.md","sha256":"c6d5a5a02756d21bdbc17b7b3623a8ec72e903703d23208dd42fb07753a70ca9","ticket":128,"reason":"eligible","sections":[{"heading":10,"title":"Open questions","start_byte":17879,"end_byte":18223,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/133-attach-sigwinch-emitter.md","sha256":"6dde15497a54b936605442d14bb9531602510e4b8eca334275fd710c7095ab24","ticket":133,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":18062,"end_byte":19605,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/136-bridge-resize-seam.md","sha256":"ec7aee5632e5c4031b39ad04887cbbfd7e20149bc7926e377f9efc735efd4b9a","ticket":136,"reason":"eligible","sections":[{"heading":19,"title":"Open questions","start_byte":14573,"end_byte":15440,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/19-stale-service-path-recovery.md","sha256":"6a01520f0c512a223fcbb570cb1eccfe16f969b794c2e04a4933a130bc927c81","ticket":19,"reason":"eligible","sections":[{"heading":11,"title":"Open questions","start_byte":8149,"end_byte":8351,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/27-session-addressable-runtime.md","sha256":"025490f41af1cc4b29c4340a5b45095551a649a75bd9e62bce9ec13b07b7b86c","ticket":27,"reason":"closed without positive merge evidence","sections":null},
+{"document":"docs/specs/architecture/28-sessions-package.md","sha256":"8347e67ae5b11dd4063efb4a30eb25acbb2d2fe2978a598526d4fa45efb1c384","ticket":28,"reason":"eligible","sections":null},
+{"document":"docs/specs/architecture/38-startup-jsonl-reconciliation.md","sha256":"1ad20be866d020881eb770c1e2c1c5c81f544336773e847861b944a0c4835702","ticket":38,"reason":"eligible","sections":[{"heading":19,"title":"Open questions","start_byte":13857,"end_byte":15126,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/39-live-rotation-watcher.md","sha256":"3abf82bd44d6cd3596cbd3d8684f4cb2305b7897cc9f7323555bae963f2389d8","ticket":39,"reason":"eligible","sections":[{"heading":28,"title":"Open questions","start_byte":26095,"end_byte":28338,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/41-concurrent-active-cap.md","sha256":"248bbd001e62b432ed8d7ce0009adf198af4197586e3e54235402c01cc7e99b8","ticket":41,"reason":"eligible","sections":[{"heading":15,"title":"Open Questions","start_byte":14205,"end_byte":15214,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/52-cli-verbs-e2e-coverage.md","sha256":"3d96923f49625117e4f14afd2cf7fc3d016cbadc8379689319fc66c4eb61f329","ticket":52,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":9470,"end_byte":9555,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/60-pool-list-read-primitive.md","sha256":"b47bae8edb201de6eeb6125e6afeae940e24baf30f61cd275ba24c71bc65a0e8","ticket":60,"reason":"eligible","sections":[{"heading":12,"title":"Open questions","start_byte":10156,"end_byte":10639,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/62-pool-rename-write-primitive.md","sha256":"bb93e0d421a9b9182d9e1c8121cacf49e53161ca51b4c13d1125f269d59c1d14","ticket":62,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":11708,"end_byte":12663,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/66-pool-resolve-id.md","sha256":"32c7750fb4b6b57c2f9778dd8709683b0631f34c38ac6d6fe8fbcdb465646832","ticket":66,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":15474,"end_byte":16238,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/68-e2e-harness-primitive.md","sha256":"2ea42a6d62916ef55c253d6dec3393f2fe0eeeb992a00d60464722f99a602817","ticket":68,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":10544,"end_byte":11163,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/69-e2e-cli-driver.md","sha256":"1ee642e401905a4d286ad614f90dc2c435de22fe2b82a195e5bf954f7adf95c0","ticket":69,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":11680,"end_byte":12568,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/72-pool-supervise-seam.md","sha256":"20289cda4ba3c06affd3d45078d1b136de2a7bdd7eaa2ab678ec2fe21d72e9c5","ticket":72,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":10444,"end_byte":10720,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/73-pool-create-primitive.md","sha256":"3c6e2de28ba7dc096d172cb48ac0ae202ef2c591ac45d2a7cff0fd4a176925fc","ticket":73,"reason":"eligible","sections":[{"heading":21,"title":"Open questions","start_byte":20286,"end_byte":20831,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/75-control-sessions-new.md","sha256":"7d6248ef9f734fd01f215cda5cc97024bbb002a66ed18ca588c1649960ec5116","ticket":75,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":23549,"end_byte":24473,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/76-cli-sessions-new.md","sha256":"29da33c5dd0588209d00e59ba97676c2d4556d45e4b028e7cc6c5c470f71636f","ticket":76,"reason":"eligible","sections":[{"heading":19,"title":"Open questions","start_byte":18767,"end_byte":19786,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/78-foreground-stdin-reader-leak.md","sha256":"7e5b7cdbd82ccb38dfb036cd9596664fbd847045109544131821747584f15655","ticket":78,"reason":"eligible","sections":[{"heading":18,"title":"Open questions","start_byte":14401,"end_byte":14822,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/80-e2e-install-systemd-roundtrip.md","sha256":"b37327888622c92d10f889119c3ebb7ffd5b591bed68d7fcecc4a16188677730","ticket":80,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":14626,"end_byte":16119,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/81-e2e-install-launchd-roundtrip.md","sha256":"fdb930c6df426f1644bac46cbc899631108ed1a805a3b736143f4abcde074e6a","ticket":81,"reason":"eligible","sections":[{"heading":18,"title":"Open questions","start_byte":19461,"end_byte":20802,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/87-control-sessions-list.md","sha256":"142f74cf16626bfc0d1cf62d65eb75e13becd7fc3d690f57561539b2363985dc","ticket":87,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":21522,"end_byte":21861,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/88-cli-sessions-list.md","sha256":"880be1363dacbad6f62c78fdc7f52cb32d6576b635d84169af9b79cf2f364458","ticket":88,"reason":"unsupported Markdown: fence indented under a container at line 528","sections":[{"heading":2,"title":"Files to read first","start_byte":731,"end_byte":5091,"action":"retain","reason":"unsupported Markdown: fence indented under a container at line 528"},{"heading":22,"title":"Open questions","start_byte":26670,"end_byte":26972,"action":"retain","reason":"unsupported Markdown: fence indented under a container at line 528"}]},
+{"document":"docs/specs/architecture/90-control-sessions-rename.md","sha256":"03be8758d403e9be0d60f9f834ef3442965b8e29a9f110a6ceff8270e88404a8","ticket":90,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":29017,"end_byte":30491,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/92-cli-sessions-rename.md","sha256":"c810e15110c22ad4f289fe8ca4e158d78677bfa8d991862cada0d86053ac4298","ticket":92,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":24127,"end_byte":25110,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/93-cli-sessions-rename-prefix.md","sha256":"8cd6fad46ad5668b618b146f68cbc7a0ebdf628323033d6155f09ebf13f3e8fa","ticket":93,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":23732,"end_byte":24714,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/94-pool-remove-core.md","sha256":"2e68272c79fbea6f3a64973a49ac9bf50b35e49c7d57c7b1125026034bec4f96","ticket":94,"reason":"eligible","sections":[{"heading":20,"title":"Open questions","start_byte":15673,"end_byte":15861,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/95-pool-remove-jsonl-disposition.md","sha256":"cd86a5e46c1febba5f2aa63c06cb8c1ef7397fa0bef9beec956f309e83f297ee","ticket":95,"reason":"eligible","sections":[{"heading":19,"title":"Open questions","start_byte":20658,"end_byte":20863,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/98-control-sessions-rm.md","sha256":"9e2e68197b8cdcc360e18fd8a58ec9de3da2f0f8ef39a5e53088338bd2f3de82","ticket":98,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":33878,"end_byte":35344,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/99-cli-sessions-rm.md","sha256":"64dea6f318eabfb1b5ebb9f8a0e29142bf1e44639647497f7bf41a9847086c7d","ticket":99,"reason":"eligible","sections":[{"heading":18,"title":"Open questions","start_byte":32405,"end_byte":33720,"action":"retain","reason":"unapproved nontrivial question"}]}
+]}
+```
+
+### Documentation-stage validation
+
+Checked the final bytes against the reviewed originals: 22 notice insertions and
+nine approved section removals are the only changes to the 45 selected specs.
+All 34 retained question bodies and every byte outside notices/removal ranges
+are preserved. All 37 historical missing-reference pairs in 16 documents remain
+unchanged. Exactly 29 specs changed; 16 remain byte-identical. The 12 documents
+with unresolved conditional requirements retain their questions and the existing
+issue record. Counts overlap as described in the original coverage result.
+
+The regenerated preview contains 45 selected document hashes, 43 eligible
+documents, nine removal sections and 34 deferred questions, with empty approval
+diagnostics. After removal, the selected documents propose no further removals;
+#27 remains merge-ineligible and #88 remains unsupported and unapproved. The
+full corpus reports and scratch validation stay temporary. `make docs-guard` and
+`git diff --check` pass. No document was added or deleted, so CATALOG and INDEX
+need no change. Frozen archives, production code and tests are untouched.

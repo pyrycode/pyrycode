@@ -5,6 +5,14 @@ status: spec
 size: XS
 ---
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 # Context
 
 `pyry attach`'s SIGWINCH→`SendResize`→`Bridge.Resize`→child-SIGWINCH chain landed in #133 (client) and #136 + #137 (daemon-side seam + wire). Coverage is unit-only:

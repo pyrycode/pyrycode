@@ -4,6 +4,13 @@
 **Size:** S (~40–60 production lines)
 **Depends on:** [#40](https://github.com/pyrycode/pyrycode/issues/40) — Phase 1.2c-A introduces `Pool.Activate` / `Session.Evict` and the active-state bookkeeping this ticket reuses. Cannot be implemented in isolation.
 
+## Historical review (#2987)
+
+The CLI-exposure deferral is superseded: pyry supports -pyry-active-cap. The
+attached-PTY discussion is historical because #1348 removed attach. The cap and LRU
+policy remain live. See [current idle/cap
+lifecycle](../../knowledge/features/idle-eviction.md).
+
 ## Context
 
 Phase 1.2c-A (#40) gives every session an `active`/`evicted` lifecycle: an idle timer per session evicts the running claude after N minutes of inactivity, and the next message respawns it lazily. Idle eviction alone bounds *steady-state* RAM, not *peak*. A burst of activity across many sessions can spike RAM beyond what the operator wants — every session that gets a message stays active until its idle timer fires, regardless of how many other sessions are also active right now.
