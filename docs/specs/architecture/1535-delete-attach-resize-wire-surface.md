@@ -6,25 +6,6 @@
 
 ---
 
-## Files to read first
-
-The developer's turn-1 data load. Resolve every symbol with `codegraph_search` / `codegraph_node`.
-
-| File | Symbols | What to extract |
-|---|---|---|
-| `internal/control/protocol.go` | the `Verb` const block, `Request`, `AttachPayload`, `ResizePayload` | The five deletion targets and their doc comments. Note `AttachPayload`'s and `ResizePayload`'s doc comments are attached to the declarations, so they die with them — nothing to decide there. |
-| `internal/control/protocol.go` | `RekeyPayload` | **Survives.** Its doc cites `AttachPayload.SessionID, ResizePayload.SessionID` as the camelCase-tag precedent. One of the seven rewrite sites. |
-| `internal/control/client.go` | `SendResize` | The deletion target: builds a `VerbResize` request, dials, checks `resp.OK`. Doc comment goes with it. |
-| `internal/control/client.go` | `SessionsNew`, `SessionsList`, `SessionsHasID` | **Survive.** Each doc comment enumerates `Status/Logs/Stop/SendResize/…` as the shared one-shot-dial lifecycle. Three of the seven rewrite sites. Mechanical: drop one name from each list. |
-| `internal/control/server.go` | `defaultHandshakeTimeout`, `Server.handle` | The dispatch switch is the proof that nothing reads `req.Attach` / `req.Resize`: there is no `case VerbAttach`, no `case VerbResize`, and no reference to either field in any arm. Both symbols carry a rewrite site. |
-| `internal/control/server.go` | `Server.handleApprove` | The only remaining `conn.SetDeadline(time.Time{})` clearer. Read it to word `defaultHandshakeTimeout`'s replacement correctly — it clears the deadline but does **not** hand off connection ownership. **Do not edit this function or its comments**; its `(mirrors handleAttach)` cite belongs to #1537. |
-| `internal/control/server_test.go` | `TestServer_UnknownVerb`, `startServer` | AC-3's shape precedent (dial → send → assert `Response.Error` mentions the verb) and the harness helper the new test reuses: `startServer(t, resolver) (sock string, stop func())`. |
-| `internal/control/sessions_new_test.go` | `TestSessionsNew_PassesLabelOnWire` | Its doc comment contains the stale cite `TestSendResize_RoundTrip`. **This line must survive** — it is #1537's scope, and AC-4's `\b` anchors are calibrated to spare it. |
-| `CODING-STYLE.md` § "Comments — Citing Other Code" | — | The seven rewrites are comment edits on lines this branch modifies, so `make cite-guard` (part of `make check`, verified in the `Makefile`'s `check` target) checks every one. Cite by symbol name, never `file.go:NNN`, no ranges, no bare `:NNN`. |
-| `docs/knowledge/features/control-plane.md` | § "Attach: ResolveID-then-Lookup", § "Attach: CLI Surface" | Read-only, and **read it as history**: it still documents `handleAttach`, `control.Attach`, `control.AttachStdio`, and `internal/control/attach_client.go`, none of which exist in the package today. #1538 owns fixing it. Do not treat its attach prose as a live contract, and do not edit it. |
-
----
-
 ## Context
 
 #1348 deleted both terminal-driving claude paths, taking `internal/control`'s server-side attach handler with them (`attach.go` and `attach_client.go` are gone from the package; only comment references to `handleAttach` remain). The wire surface that handler served is still exported, and `client.go` still exports `SendResize` — a helper that builds a `VerbResize` request, dials the daemon, and receives `unknown verb: "resize"` on every call, because `Server.handle`'s dispatch switch has no arm for it. That is a public client API whose server half no longer exists: the shape most likely to be picked up by a future caller, or re-implemented on the assumption that a verb constant implies a verb.

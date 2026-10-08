@@ -6,21 +6,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/e2e/relay_send_message_test.go:47-83` — the **canonical** seed + pre-create-JSONL + start pattern. The other 5 "binding-only" tests are structural copies of this. Extract: the `convJSON` literal shape (lines 51-53) and the computed `sessionsDir` + pre-created `<initialUUID>.jsonl` (lines 65-75).
-- `internal/e2e/respawn_after_eviction_test.go:52-86` — eviction seed + `startEvictionHarness`; the AC#3 product-check site. Same shape as the canonical test.
-- `internal/e2e/relay_two_phone_coarse_test.go:74-99` — **the one outlier**: `sessionsDir = tmp/claude-sessions` (NOT the daemon's computed dir) and **no** pre-created JSONL. Extract: why reconciliation never fires here today.
-- `internal/e2e/relay_two_phone_structured_test.go:126-176` — coarse's sibling, already on the computed-dir + pre-create pattern (lines 141-158). Coarse should adopt exactly this shape.
-- `cmd/pyry/main.go:652-698` — `errNoBoundSession`, `sessionRouter.Route`. The empty-`CurrentSessionID` guard at line 686 fires **before** any `pool.Lookup`; line 689-690 does `Lookup(SessionID(conv.CurrentSessionID))`. This is the contract the binding satisfies.
-- `internal/relay/handlers/send_message.go:112-133` — Route-error → wire-code mapping: `ErrConversationNotFound` → `conversation.not_found` (not retryable); any other Route error (incl. `errNoBoundSession`) → retryable `server.binary_offline`. This is the failing-shape the tests observe.
-- `internal/sessions/reconcile.go:118-148` — `reconcileBootstrapOnNew`: on `Pool.New`, rotates the bootstrap entry's id to the most-recent `<uuid>.jsonl` in the computed sessions dir via `RotateID`. **This is why the bound id must equal the test's pre-created `initialUUID`** — after reconciliation `Pool.Default().ID() == initialUUID`.
-- `internal/conversations/conversation.go:44-49` — `CurrentSessionID string json:"current_session_id,omitempty"`. The field the fixture must populate; `omitempty` is why an unset field serializes to "" → `errNoBoundSession`.
-- `internal/conversations/registry.go:46-62` (`Load`) and `:126-137` (`Get`) — `Load` runs **once** at startup (`cmd/pyry/main.go:520`); `Get` reads the in-memory slice. **No reload.** This is why the binding must be on disk *before* the daemon starts.
-- `internal/e2e/harness.go:318` (`StartRotationWithRelay`) — where the new shared helper `seedBoundConversation` belongs (alongside the other e2e seed/wait helpers). No new imports (`os`, `filepath`, `testing` already present).
-
----
-
 ## Context
 
 #678 (PR #683, merged `6830e08`) changed `send_message` from writing to the per-conn bootstrap surface to resolving the conversation's **bound** session via `sessionRouter.Route(conversationID)`, and **deliberately removed the bootstrap fallback** (its AC#4). `Route` rejects an empty `CurrentSessionID` before any pool `Lookup` (`cmd/pyry/main.go:686`), returning `errNoBoundSession`, which the handler maps to a retryable `server.binary_offline` (`send_message.go:121-132`).

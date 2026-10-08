@@ -1,17 +1,5 @@
 # Spec — #395: default `--pyry-idle-timeout` to `0` (idle eviction opt-in)
 
-## Files to read first
-
-- `cmd/pyry/main.go:395-470` — `runSupervisor`: the flag-set construction at line 405 and the `sessions.Config{IdleTimeout: *idleTimeout, …}` wiring at line 462. The only production change to behaviour lives in this region.
-- `cmd/pyry/main.go:1320-1335` — long help block (`printHelp`). Contains the human-facing description of `-pyry-idle-timeout` that must be re-worded.
-- `internal/sessions/pool.go:95-105`, `pool.go:140-155`, `pool.go:360-410` — `Config.IdleTimeout` / `SessionConfig.IdleTimeout` semantics. Confirms the pool already treats `0` as "disabled" via `idleTimeoutDefault`. Read so the developer is certain no plumbing change is required downstream of `cmd/pyry`.
-- `internal/sessions/pool_test.go:1020-1054` — `TestPool_ParityWhenIdleDisabled`. Existing coverage that `IdleTimeout==0` does not schedule eviction. The new flag-default test does NOT need to re-prove this invariant; it only needs to prove the flag's default value.
-- `internal/e2e/idle_test.go:18-50` — both e2e idle-eviction tests pass `-pyry-idle-timeout=1s` explicitly. No fixture update needed.
-- `internal/sessions/session_test.go:120-135` and `internal/sessions/session_persist_test.go:25-35` — confirm package-level tests always set `IdleTimeout` explicitly on `SessionConfig`. No implicit-default dependents.
-- `docs/knowledge/features/idle-eviction.md:56` — operator-facing default mentioned as `15m`; must change.
-- `docs/knowledge/architecture/system-overview.md:225` — same.
-- `docs/knowledge/decisions/005-idle-eviction-state-machine.md:63` — the original ADR cites `15m` as a "sensible production default". ADRs are append-only — add a dated footer noting the 2026-05-15 reversal and the daemon-mode rationale; do not edit the original consequence line.
-
 ## Context
 
 `--pyry-idle-timeout` defaulted to `15m` since #40 (ADR 005). That default optimises for short-lived interactive sessions where a warm `claude` between attaches has negligible upside and amortised memory cost matters. Under `systemd --user pyry.service` / launchd daemon mode (#202, #190, install-service flows), the same default produces a silent bot outage exactly 15 minutes after every supervisor restart — the bootstrap session is evicted on schedule, and the companion respawn-on-attach bug (separate ticket) prevents recovery.

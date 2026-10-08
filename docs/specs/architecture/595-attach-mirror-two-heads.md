@@ -15,37 +15,6 @@ The one design decision to record (and the reason this is XS): **the existing at
 (`b.output`) + observer-tap (`b.outputObserver`) shape IS the intended Phase-1 two-heads model.** Attach does
 NOT re-seat onto a separate mirror seam. See § Design.
 
-## Files to read first
-
-- `internal/supervisor/bridge.go:53-75` — `Bridge` struct: the two independent output seams (`output` =
-  local attach head; `outputObserver` = phone head) and the `attached`/`ErrBridgeBusy` at-most-one guard.
-- `internal/supervisor/bridge.go:172-202` — `Write` (fans to BOTH `outputObserver` then `output`; never
-  errors) + `SetOutputObserver` (the phone tap). This is the exact fan-out the AC2 test pins.
-- `internal/supervisor/bridge.go:204-256` — `Attach` (sets `output`, starts the input pump `in.Read → b.in`)
-  and its detach cleanup (`if b.output == out { b.output = nil }`). The local-input + local-output seam.
-- `internal/supervisor/supervisor.go:432-444` — `sessionWriter` (`AttachInput → pty.Write`): the local raw-input
-  terminus.
-- `internal/supervisor/supervisor.go:474-518` — service-mode `runOnce`: `io.Copy(sessionWriter{sess}, Bridge)`
-  (local input) and `MirrorOutput() → Bridge.Write` (output). Both heads converge here.
-- `internal/supervisor/supervisor.go:199-220` — `WriteUserTurn`: stamps `currentConvID` under `convMu`,
-  captures `sess` under `sessMu`, then calls the injectable `deliverFn`. The phone-input terminus.
-- `internal/supervisor/supervisor.go:145-154, 350` — the `deliverFn` set-once seam (default
-  `deliverViaSession`). AC3 injects a fake here to script a phone turn **without** a live-claude `WaitReady`.
-- `internal/supervisor/bridge_test.go:74-199` — existing `OutputObserver_InvokedOnWrite` (observer, no attach)
-  and `OutputForwardsWhenAttached` (attach, no observer). **The gap AC2 fills: no test sets BOTH at once.**
-  Reuse the `io.Pipe()` "keep the input pump parked so `b.output` stays bound" idiom from these tests.
-- `internal/supervisor/supervisor_test.go:145-205` — `TestHelperProcess` modes, esp. **`stdin_to_file`**
-  (copies child PTY stdin to a file): AC3's turn-integrity oracle. `helperConfig(...)` builds the `Config`.
-- `cmd/pyry/assistant_turn_v2.go:68-78, 181-206` — the phone observer (`Enqueue` copies `p` then drop-on-full;
-  `startAssistantTurnBridgeV2` registers it via `SetOutputObserver`). Confirms the observer obeys the
-  "copy, don't block, don't retain p" contract the AC2 test relies on.
-- `internal/e2e/attach_pty_test.go:140-203` — `TestE2E_Attach_RoundTripsBytes` + `readUntilContains`: the AC1
-  local-attach regression oracle (already green against the #593 mirror surface; extend, don't rewrite).
-- `internal/e2e/relay_v2_daemon_test.go:285-300` — the `t.Skip("blocked on #603 …")` phone-echo oracle.
-  **Read the skip reason; it defines this spec's #603 boundary** (§ The #603 boundary).
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md` § Architecture, § Phasing — the
-  two-heads diagram, the Phase-1 gate (manual, live-claude), and the Phase-2/3 scope fence.
-
 ## Context
 
 After #593 the supervisor hosts claude through a `tuidriver.Session` and the existing `Bridge` already routes

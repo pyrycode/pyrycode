@@ -8,27 +8,6 @@
 
 ---
 
-## Files to read first
-
-The developer's turn-1 data load. Read these before writing a line.
-
-- `internal/relay/v2session.go:80-107` — `wakeKind` / `wakeSignal` / `manualRekeyReq`: the per-session timer-callback → `wake` channel → `Run` precedent this slice mirrors with a daemon-global modal channel.
-- `internal/relay/v2session.go:599-676` — `Run` select loop, `handleWake`, `armRekeyTimer` / `armRekeyReplyTimer`. **The exact shape to copy:** a `time.AfterFunc` callback does `select { case m.<chan> <- sig: case <-ctx.Done(): }`; `Run` services it on its own goroutine. The new modal-timeout arm/fire reuses this verbatim.
-- `internal/relay/v2session.go:366-393` — `ModalDismissal` + `ModalResolver` interface. You add **one** method (`ResolveTimeout`) here.
-- `internal/relay/v2session.go:1461-1575` — `handleModalCancel` + `broadcastModalDismissed`. `handleModalTimeout` is a near-copy of `handleModalCancel` (resolve → if ok, broadcast). The broadcast is **unchanged** and reused as-is.
-- `internal/relay/v2session.go:555-588` — `NewV2SessionManager`: where the new `modalTimeout` channel is allocated (mirror `wake`/`snapshot`).
-- `cmd/pyry/modal_resolve_v2.go:56-100` — `ResolveCancel`: the **template** for `ResolveTimeout` (Resolve one-shot → best-effort keystroke → audit → return dismissal). Copy its structure; swap the keystroke source/outcome.
-- `cmd/pyry/modal_resolve_v2.go:18-27` — `modalKeystroker`: already has `SendEsc`/`Answer`/`AcceptTrust`. **No interface change needed** — the ticket's note that it "currently surfaces only SendEsc" is stale (#726/#727 already widened it).
-- `cmd/pyry/interactive_modal_v2.go:30-120` — the surfacer (`interactiveModalEmitterV2.Handle`). You add the timeout-arm call after `reg.Record` and a one-method `modalTimeoutArmer` field/param.
-- `internal/audit/audit.go:27-61` — `Entry`, `OutcomeDeniedTimeout` (`"denied_timeout"`), `SourceTimeout` (`"timeout"`). The "no-device timeout ⇒ empty `DeviceHash`/`DeviceLabel`" case is documented at line 28.
-- `cmd/pyry/relay.go:297-343` — production wiring: `modalReg` daemon-singleton, `mgr.Run(ctx)` under the **daemon ctx**, resolver wired, surfacer **not** wired (deferred to #708). This is why arming off the `Run` goroutine with the daemon ctx is leak-free (§ Concurrency).
-- `internal/relay/v2session_modal_test.go:32-72, 96-200, 209-290` — `fakeModalResolver`, `openModalConn`, `waitForResolverCall`, the `modal_dismissed` assertion helper. The relay-side AC-3 test reuses all of these.
-- `cmd/pyry/modal_resolve_v2_test.go:83-103, 126-266` — `auditLogger()` / `auditRecords()` capture helpers + the `ResolveCancel` test shapes. The `ResolveTimeout` tests reuse them directly.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:55,117,137,166-182` — the deny-on-timeout policy: "unanswered prompt is answered with the SAFE default (deny / ESC) after a bounded window. Never auto-grant."
-- `docs/protocol-mobile.md:655-661` — `modal_dismissed` wire fields: `outcome` is "a producer-defined sentinel for cancel/timeout"; `source` closed set includes `timeout`.
-
----
-
 ## Context
 
 **What problem this solves.** A surfaced permission/trust modal blocks claude until resolved. The remote-modal bridge already lets a phone *answer* (#717 gated arm, deferred) or *cancel* (#727) a modal. But if **no authorized device answers** — phone offline, push missed, user asleep — the modal must not linger forever, and must **never** be silently granted. This slice is the fail-closed safety net: a bounded timeout window elapses with no resolution ⇒ the daemon **safe-denies** the modal (the deny keystroke), broadcasts `modal_dismissed{source: timeout}` to every interactive connection, and audits exactly one `denied_timeout` decision.

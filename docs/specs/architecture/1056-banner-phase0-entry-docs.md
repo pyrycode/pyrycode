@@ -4,20 +4,6 @@
 
 Status: draft (architect)
 
-## Files to read first
-
-Docs-only ticket — codegraph does not index markdown, so this list is Read/grep-derived, not `codegraph_context`-derived.
-
-- `docs/architecture.md:1-3` — current H1 + intro; the banner goes *above* line 1, content stays verbatim.
-- `docs/protocol.md:1-14` — current H1 + "Transport" preamble; confirms this doc is the **local control-socket** surface (Unix socket, `0600`), covering `status`/`stop`/`logs`/`attach`. Banner goes above line 1.
-- `docs/plan.md:1-4` — current H1; line 3 already notes the authoritative working plan lives in the Obsidian vault. Banner goes above line 1.
-- `docs/multi-session.md:1-5` — current H1 + Phase-1 pool-design intro. Banner goes above line 1.
-- `docs/knowledge/architecture/system-overview.md:75` — `internal/control/ — Control-plane server (Unix socket, JSON)`; confirms the successor genuinely carries current control-plane authority, so the redirect is not itself misleading.
-- `docs/knowledge/architecture/system-overview.md:190` — `### Session Registry (Phase 1.2a)`; the section the `multi-session.md` banner points readers to.
-- `docs/knowledge/architecture/system-overview.md:317` — `## Beyond Phase 0 — landed work and roadmap`; the section the `plan.md` banner points readers to.
-- `docs/protocol-mobile.md:1-3` — `# Mobile wire protocol — v2`; the *separate* mobile wire surface. It is a "see also" cross-reference for `protocol.md`, **not** the successor. (Its own intro already frames the control socket as "a separate concern" — mirror that framing.)
-- `docs/specs/README.md` (as edited by #1055, commit `a42b0fd`) — the house-style precedent for a "point-in-time, not current-state authority" banner. Same reviewer, same pattern, merged immediately before this ticket.
-
 ## Context
 
 The 2026-07-15 docs review flagged four top-level Phase-0 entry docs as unmarked historical layers sitting beside maintained docs with equal apparent authority. A reader landing on one is misled into treating an early design doc as the current-state reference.

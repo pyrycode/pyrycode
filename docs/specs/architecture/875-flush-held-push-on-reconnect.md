@@ -6,44 +6,6 @@
 `transportDown()` probe downstream of this change; the reconnect edge cannot itself
 cause a seal into a dead link. No wire-format change.
 
-## Files to read first
-
-- `internal/relay/v2session.go:2957-3054` — `drainOnce`: the transport-down HOLD (#874),
-  the FIFO pop, and the `more`→`drainCh` self-perpetuating re-signal. **This is the pump
-  the new wake arm feeds.** Extract: it already re-checks `transportDown()` before the pop,
-  so the reconnect arm needs only to wake it — it seals nothing itself.
-- `internal/relay/v2session.go:2917-2946` — `Push`: the canonical non-blocking, cap-1,
-  drop-on-full `drainCh` re-signal idiom (lines 2933-2936). Copy this idiom into the new
-  Run arm; it is the same 4 lines used again in `drainOnce` (3049-3053) and
-  `drainReplayOnce` (3115-3118).
-- `internal/relay/v2session.go:864-899` — `Run`: the select loop the new arm joins. Note
-  the existing `case <-m.drainCh: m.drainOnce(runCtx)` arm — the new arm re-signals that
-  channel, it does NOT call `drainOnce` directly.
-- `internal/relay/v2session.go:555-584` — `V2SessionConfig` + the #874 `Connected func() bool`
-  field doc. The new `Reconnect <-chan struct{}` field sits beside it and follows the same
-  "optional; nil ⇒ pre-change behaviour" convention.
-- `internal/relay/connection.go:254-284` — `Connection.run()`. Line 273's
-  `case <-c.client.Connected():` arm is **the sole consumer** of the transport's fresh-conn
-  edge and the exact fan-out point for the new signal.
-- `internal/relay/connection.go:100-139, 162-175` — `Connect` + `connectWithClient`: the two
-  constructors that must initialise the new `reconnected` channel.
-- `internal/relay/connection.go:198-205` — `Connection.Connected() bool` (#874): the model for
-  the new `Reconnected() <-chan struct{}` accessor (a thin passthrough over transport state).
-- `internal/transport/wssclient.go:337-364` — `Connected()` documents **"Multiple observers are
-  NOT supported"** (line 340) and `IsConnected()` is the level poll. This is *why* the manager
-  cannot observe `transport.Client.Connected()` directly (see § Design decision).
-- `internal/transport/wssclient.go:429-450` — `serve()`: `setConn(conn)` (445, sets `c.conn`
-  non-nil) runs BEFORE the `connectedCh` send (448). This ordering is what guarantees
-  `transportDown()` reads *up* when the reconnect edge fires.
-- `internal/relay/v2session_test.go:4682-4739` — `TestV2Session_Push_HeldWhileTransportDown_ReflushContiguous`
-  (the #874 test) + the `newGatedRecorder()` / `gated.up` / `gated.connected` / `driveToOpen` /
-  `assertHeldQueued` / `waitForEnvelopes` / `decryptAppFrame` fixtures the new manager-level test
-  reuses verbatim.
-- `internal/relay/connection_test.go:347-391` — `TestTransportDropPostConnect_Reconnects`: the
-  drop-post-connect→reconnect harness the new connection-level fan-out test mirrors.
-- `cmd/pyry/relay.go:445-533` — the `V2SessionConfig` literal; line 448 `Connected: conn.Connected`
-  is where `Reconnect: conn.Reconnected()` is added.
-
 ## Context
 
 #874 made the v2 push drain **hold** queued control envelopes unsealed while the relay

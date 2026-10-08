@@ -2,21 +2,6 @@
 
 **Size:** XS (confirmed; PO sized XS). One production function in one file, four test files' worth of pins, one doc sentence.
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_node` / `codegraph_search`.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/main.go` | `sanitizeName` | The whole production change lives here. Note the two exits: the `b.Len() == 0` → `"_"` guard, and the plain `b.String()` return. |
-| `cmd/pyry/main.go` | `resolveRegistryPath`, `resolveConversationsRegistryPath`, `resolveSocketPath` | The join shape. Registry-style resolvers pass the name as a **directory component**; `resolveSocketPath` concatenates a `.sock` suffix instead — that difference is why only the former four are vulnerable. |
-| `cmd/pyry/pair.go` | `resolveDevicesPath`, `resolveServerIDPath` | Same directory-component shape as `resolveRegistryPath`. No change needed; they inherit the fix. |
-| `cmd/pyry/args_test.go` | `TestSanitizeName` | The table you extend. Every existing row keeps its current `want` (AC 4). |
-| `cmd/pyry/args_test.go` | `TestResolveConversationsRegistryPath`, `TestResolveSocketPath` | The two existing idioms: non-parallel + `t.Setenv("HOME", …)` for the registry-style test, parallel + no env mutation for the socket test. This distinction is load-bearing — see § Testing strategy. |
-| `cmd/pyry/pair_test.go` | `TestResolveDevicesPath`, `TestResolveServerIDPath` | The `filepath.Rel` containment assertion that is about to be replaced by a stricter one. |
-| `internal/keys/static_key.go` | `validDaemonName` | Confirms the fix does not change any `keys.LoadOrCreate` accept/reject outcome: every byte must be in `[a-z0-9_-]`, so `.` is rejected — and `._` / `.._` still contain `.`. |
-| `docs/knowledge/features/keys-package.md` | § "Deliberately NOT shared with `cmd/pyry/main.go:sanitizeName`" | The one sentence AC 5 corrects. Read the whole section; the rationale around the example is preserved. |
-
 ## Context
 
 `sanitizeName` is the only path-traversal defence in front of five per-instance path resolvers. Its allowlist includes `.`, so the two literal names `.` and `..` survive the transform unchanged and reach `filepath.Join` as live path components.

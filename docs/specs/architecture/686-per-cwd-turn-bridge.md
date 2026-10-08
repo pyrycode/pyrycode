@@ -12,53 +12,6 @@ resolving from the startup-computed shared dir, unchanged.
 
 ---
 
-## Files to read first
-
-- `cmd/pyry/interactive_turn_stream_v2.go:222-324` — the two seams this ticket
-  edits plus the resolver they feed: **`boundHostFunc` type (230)** = the lookup
-  whose return arity grows by one (`dir`); **`resolveTarget` (251-271)** = uses
-  the returned `dir` for the bound branch, keeps the `dir` param for the bootstrap
-  branch; **`resolveBoundSessionJSONL` (292-324)** = the consumer — unchanged, it
-  already takes `(dir, sessionID)` and tails `<sessionID>.jsonl` under `dir`.
-- `cmd/pyry/main.go:618-641` — the `boundHost` closure (`convReg.Get` →
-  `CurrentSessionID` guard → `pool.Lookup` → `sess.Supervisor()`). This is where
-  the per-conversation `dir` is computed and added to the return. Note it is
-  defined inside `runSupervisor`, so it can capture `claudeSessionsDir` and the
-  bootstrap `trustedWorkdir` from scope.
-- `cmd/pyry/main.go:524-555` — `claudeSessionsDir` (527, the startup shared dir,
-  `= DefaultClaudeSessionsDir(filepath.Abs(*workdir))`) and `trustedWorkdir`
-  (551, `= trustMark(confineWorkdirToHome(*workdir))` = the bootstrap realpath).
-  These are the two values the discriminator keys on.
-- `internal/sessions/pool.go:961-981` — `buildSession`: `spawnDir != "" → workDir
-  = spawnDir`, else `workDir = tpl.WorkDir`; `workDir` becomes
-  `supervisor.Config.WorkDir`. **Proof that `sess.Supervisor().WorkDir()` is
-  byte-identical to where claude writes** — the realpath for a per-`Cwd` session,
-  `tpl.WorkDir` (= `trustedWorkdir`) for a default one.
-- `internal/supervisor/supervisor.go:85-90, 147-190` — `Config.WorkDir` field, the
-  `Supervisor.cfg` (immutable post-`New`) holder, and the `State()` accessor whose
-  shape the new `WorkDir()` accessor mirrors (but lock-free — `cfg` never mutates).
-- `internal/sessions/reconcile.go:21-49` — `encodeWorkdir` (`/` and `.` → `-`) +
-  **`DefaultClaudeSessionsDir(workdir)`** — the single source of truth for the
-  `~/.claude/projects/<encoded-cwd>/` encoding. **Call it; do not hand-roll the
-  replace rule.** Returns `""` if workdir is empty or `$HOME` is unresolvable.
-- `internal/turnbridge/producer.go:38-63` — `Target` / `TargetResolver` contract
-  (`Host`, `Resolve`, `Switch`); a resolver error is retried with backoff. The
-  ticket changes only which `dir` `Resolve` closes over.
-- `cmd/pyry/interactive_turn_stream_v2_test.go:368-473` — `resolveTarget` tests +
-  `fakeSessionHost` double + the `writeJSONL` / `uuidA`/`uuidB` fixtures. The three
-  `boundHost` fakes (387, 425, 467) gain a `dir` return; add a bound-branch
-  assertion that the by-id resolve targets the boundHost-returned dir.
-- `docs/knowledge/codebase/685.md` § "Patterns established" — the load-bearing
-  invariant this design rests on: *"The row's `Cwd` drives nothing downstream —
-  respawns read `supervisor.Config.WorkDir`, captured as the realpath at
-  `CreateIn` time, not re-derived from the row."* This ticket extends the same
-  rule to the bridge (read `WorkDir`, not the row).
-- `docs/specs/architecture/685-conversation-spawn-in-cwd.md` § Design / Open
-  questions — confirms the recorded `conv.Cwd` is the **raw** phone value (set) or
-  `defaultCwd` (null), NOT the realpath claude spawns in.
-
----
-
 ## Context
 
 After #685, `create_conversation` spawns a conversation's bound claude session in

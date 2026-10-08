@@ -1,19 +1,5 @@
 # #1796 — bound how many attachment uploads may be in flight at once
 
-## Files to read first
-
-- `internal/attachments/registry.go` → `Registry` (type doc), `insertLocked`, `insert`, `Admit`, `count`, `uploadKey` — the whole surface this ticket touches. Read the docs, not just the bodies: #1795 wrote three of them specifically to reserve the seam this slice fills, and eight sentences here mention `#1796` and have to be re-pointed.
-- `internal/attachments/admission.go` → `maxUploadBytes`, `ErrInvalidDeclaration`, `ErrUploadTooLarge`, `CheckDeclaration`, `CheckDeclaredSize` — the two landed refusals the new one must stay distinct from, the constant whose budget the new one inherits, and the doc paragraphs AC 5 corrects. Note `CheckDeclaration`'s scalars-only signature and *why*: that argument is the template for `capacityRefusal` below.
-- `internal/attachments/accumulator.go` → the package doc (its "resource bounds are owned three separate ways" paragraph) and `NewAccumulator` — the package doc's `#1778` sentence is one of AC 5's edits, and `NewAccumulator`'s no-capacity-hint rule is what keeps the work inside `Registry.mu` bounded.
-- `internal/attachments/registry_test.go` → `testConnA`, `testAttachmentID`, `testBoundTotal`, `TestRegistry_ConcurrentSamePairInsert_TellsExactlyOneItIsFresh` (fan-out mechanics to copy — **not** its single-round structure), `TestRegistry_ConcurrentMixedOperations_AreSafe` (the one existing test whose *behaviour* changes), `TestRegistry_AdmitRefusedDeclaration_StoresNothing` (the two one-fault-per-row declarations to reuse verbatim, and the never-log assertion shape to copy).
-- `internal/attachments/accumulator_test.go` → `newTestAccumulator`, `testChunk`, `testFixtureDigest`, `testTotal` — the fixtures every registry test already keys on.
-- `docs/knowledge/features/attachments-package.md` § "Per-upload byte bound (#1777)" — the code-review correction landed as text only: the daemon-wide worst-case **peak** is `2N × bound`, not `(N+1) × bound`. AC 5's last clause is that correction reaching the code.
-- `docs/knowledge/features/attachments-package.md` § "Mutation-testing lessons" — the overlay recipe AC 4's measurement runs under, including `grep -a` and the "build failed" / "declared and not used" false-green traps.
-- `docs/knowledge/features/attachments-package.md` § "In-flight upload registry (#1787, #1788, #1795)" — one-fixture-per-check discipline, and the sequencing note this ticket discharges.
-- `internal/sessions/pool.go` → `Config.ActiveCap` — read the doc: it caps concurrently *active* claude processes and **defaults to uncapped**. That is the finiteness argument for daemon-wide over per-session.
-- `internal/relay/v2session.go` → `V2SessionManager.appFrameWorker` — the "no two handlers for the same conn run concurrently" guarantee, which is per-*conn* and is why the peak is `2N × bound`.
-- `internal/protocol/codes.go` → `CodeAttachmentTooManyUploads` — the wire code the new sentinel will map to at #1744's dispatch site. This package still imports no codes; do not add the mapping here.
-
 ## Context
 
 `internal/attachments`' `Registry` holds one `*Accumulator` per `{conn, attachment_id}` pair. `attachment_id` is client-chosen, so the entry count is unbounded state: a client opens one transfer per id and finishes none. `Admit` caps the *bytes* of one admitted transfer (paired, `CheckDeclaration` + `CheckDeclaredSize` cap it at 373 chunks); nothing caps how many transfers exist at once. #1795 moved the whole admission decision under one acquisition of `Registry.mu` precisely so this slice's gate can be *part* of that decision rather than a check racing it.

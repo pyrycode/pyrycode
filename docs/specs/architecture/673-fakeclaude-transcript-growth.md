@@ -37,18 +37,6 @@ The six broken tests are **exactly** the six that (a) set `PYRY_FAKE_CLAUDE_TUI=
 | `TestRelay_Roundtrip_Appendix` | `relay_roundtrip_test.go` | `tmp/claude-sessions` | `StartRotationWithRelay` | v1 |
 | `TestTwoPhoneStructured_InteractiveReceivesStream` | `relay_two_phone_structured_test.go` | **aligned already** | `StartRotationWithRelay` | v2 |
 
-## Files to read first
-
-- `internal/e2e/internal/fakeclaude/main.go` — the **whole file** (~284 lines); the shared fix lives here. Key sites: `main()` poll loop (L107-155), `startStdinReader` (L227-260, the single stdin consumer + `spinnerEmitted` one-shot), `emitStructuredJSONLIfTriggered` (L188-201, the existing main-goroutine `f.Write` + the single-writer-of-`f` invariant documented at L187), `openSession` (L203-216, the `{}\n` write to mirror), and the `stdoutMu` / package-var idiom (L85-105).
-- `internal/supervisor/supervisor.go:284-401` — `WriteUserTurn` growth branch + `confirmViaTranscriptGrowth` + `grew`. Confirms: baseline captured **after** WaitReady and **before** deliver; growth = newer file OR larger size; poll = `transcriptConfirmPoll` (150 ms, L44), timeout = `transcriptConfirmTimeout` (10 s, L40). This is the contract the stub must satisfy — do not change it.
-- `internal/sessions/reconcile.go:37-116` — `DefaultClaudeSessionsDir`, `mostRecentJSONL`, `newTranscriptResolver`. Confirms the resolver scans the computed dir and returns `("",0,nil)` (no error) for an empty-but-present dir.
-- `internal/sessions/rotation/watcher.go:97` — the `os.MkdirAll(cfg.Dir, 0o700)` that makes the computed dir exist-but-empty (why there's no WARN).
-- `internal/e2e/relay_two_phone_structured_test.go:141-158` — **the alignment pattern to copy verbatim**: compute `sessionsDir = filepath.Join(home, ".claude", "projects", encodeWorkdir(home))`, `os.MkdirAll(…, 0o700)`, pre-create `<initialUUID>.jsonl` with `[]byte("{}\n")` **before** the daemon starts. Also note its comment on *why* pre-create-before-start avoids the cold-start offset race.
-- `internal/e2e/rotation_test.go:15-61` — `encodeWorkdir` test helper (L19; package-level, already shared by all e2e tests) and the same pre-create pattern via `StartRotation`.
-- `internal/e2e/harness.go:267-360` — `StartRotation` / `StartRotationWithRelay`. Both already `os.MkdirAll(sessionsDir, 0o700)` and pass `-pyry-workdir=home` + `PYRY_FAKE_CLAUDE_SESSIONS_DIR=sessionsDir`. The test still pre-creates the JSONL itself (so it exists before the daemon's first reconcile/resolve).
-- `internal/e2e/respawn_after_eviction_test.go:37-67, 242-265` — the one test whose start helper is local (`startEvictionHarness`); same MkdirAll + env wiring shape.
-- `internal/turnbridge/mapper.go:20-73` — confirms a line with empty/unknown `type` (i.e. `{}`) maps to `(nil, false)` → **no structured event**. This is why an inert `{}\n` growth line is safe for the v2/two-phone structured assertions.
-
 ## Design
 
 Two coordinated changes, both inside `internal/e2e/**`.

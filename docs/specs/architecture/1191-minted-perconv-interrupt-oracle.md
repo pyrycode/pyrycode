@@ -28,36 +28,6 @@ non-vacuous by mutation.
 
 ---
 
-## Files to read first
-
-Turn-1 data load. Read these before writing any code; every decision below cites one.
-
-| Path | Extract |
-|---|---|
-| `internal/e2e/relay_v2_perconv_turn_end_test.go` (whole file, 340 lines) | **The skeleton. Copy it.** #1195's minted-PTY test: `shortHome` → `RunBareIn pair` → `decodePairPayload` → `claudeSessionsDir` + pre-create `<initialUUID>.jsonl` → `trigDir` → `fakerelay.New` → `StartRotationWithRelay` + the two #1195 knobs → `readPersistedServerID` / `waitBinaryHello` → `fakephone.Dial` → `driveHandshakeToOpenDaemonInteractive` → local `sealSend` / `nextEnv` closures → all-null `create_conversation` → `boundSessionID` → `send_message` → drain. Lines 62–249 transfer almost verbatim. |
-| `internal/e2e/relay_v2_interrupt_test.go` (whole file, 363 lines) | **The behavioural sibling** (bootstrap PTY interrupt, #794). Lift: the mid-turn re-drop kicker (`:205-219`), the ordered `t.Fatal` guards (`:221-259`, `:285-321`), the sealed `interrupt` envelope (`:265-277`), the StopReason-fidelity note (`:56-61`), and `hasBareESC` (`:352-362`). Its doc comment is the voice to match. |
-| `internal/e2e/relay_v2_stream_interrupt_test.go:19-66` | The stream sibling's header — **why minting is what makes the test exercise #1121's routing at all** (`:47-56`), and the PTY-vs-stream StopReason asymmetry stated from the other side (`:64-66`). Do not copy its `StopReason == "cancelled"` assertion. |
-| `internal/e2e/internal/fakeclaude/main.go:94-118` | The `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` doc block: raw mode, bare-ESC scan, **one-shot**, coexists with `PYRY_FAKE_CLAUDE_TUI`. |
-| `internal/e2e/internal/fakeclaude/main.go:495-502` | `interruptEndTurnLine` (const at `:502`) — the canned `stop_reason:"end_turn"` line the ESC handler appends. **`package main` in an `internal/` dir: not importable. The e2e needles the wire-shape fragment, never this const.** |
-| `internal/e2e/internal/fakeclaude/main.go:717-726`, `:1022-1041` | The poll-loop ESC branch (`escEndsTurn && !escEnded && escPending.Swap(false)`) and `appendTurnGrowth` / `appendTurnEnd`. **`appendTurnGrowth` writes `{}\n`** — inert to the mapper, which is why a delivered turn cannot fabricate a turn_end. |
-| `internal/e2e/internal/fakeclaude/main.go:575-588` | Knob 1's wiring: `argvSessionID(os.Args[1:])` overrides `initU`, so the minted child's `f` **is** `<sharedDir>/<mintedID>.jsonl`. This is what makes `appendTurnEnd` land where the daemon tails. |
-| `internal/e2e/internal/fakeclaude/main.go:1186-1200` | `startStdinReader`: any stdin bytes set `turnPending`; a `containsBareESC` read additionally sets `escPending`. Confirms a bracketed-paste prompt (`0x1b 0x5b …`) contributes no bare ESC. |
-| `internal/turnbridge/mapper.go:21-31`, `:61-78` | `EventKindJsonlEndOfTurn → TurnEnd{end_turn}` (the only turn_end source, always `end_turn`), and `assistant` + non-empty text → `TextChunk` (what the mid-turn line becomes). |
-| `cmd/pyry/main.go:1312-1331` | `resolveBoundRunner` (func at `:1321`) + the `conv.CurrentSessionID == ""` guard (`:1323`). **Read the doc comment. This guard is a hard no-touch (AC4, #678).** |
-| `cmd/pyry/main.go:1277-1281`, `:1283-1311`, `:1381-1420` | The `interruptArm` constants; `interruptRunner`'s doc + arm switch (`:1301`, cases at `:1305-1306`); and `activeInterrupter.SendEsc`'s four records — `no_active_conv` (`:1385`), `no_bound_runner` (`:1393`), `no_actuator` (`:1399`), `dispatched` (`:1416`). The diagnosis vocabulary for a red run. |
-| `cmd/pyry/main.go:1015-1021` | Production wiring: `currentConv: active.CurrentConversation`, `resolveRunner` over `resolveBoundRunner(convReg, pool, …)`. The composition Phase 0 proves end-to-end, and **the closure at `:1017` is PR #1200's mutation site**. |
-| `cmd/pyry/main.go:1243-1250`, `:1691` | `sessionRouter.Route` — `r.active.set(conversationID)` at `:1248` fires on the success path **only**, so `CurrentConversation()` is `""` before any route. This is why Phase 0 must precede the first `send_message` — and why it lands on the `no_active_conv` arm. (`activeConversation.set` itself is at `:1691`.) |
-| `cmd/pyry/interrupt_routing_test.go:135-185`, `:292-311` | `TestResolveBoundRunner`/"empty CurrentSessionID is inert, never the bootstrap runner" and `TestActiveInterrupter`/"unbound/dangling resolution is inert". **Pre-existing AC4 arm-level coverage — cite by name in the PR, do not duplicate.** |
-| `internal/supervisor/modal.go:69-108` | `SendEsc` → `sendModalKey`: `ErrNoLiveSession` (wrapped) when `s.sess == nil`, otherwise one tui-driver `Session.SendEsc()`. The `keystroke_err` failure mode. |
-| `internal/sessions/pool.go:1379`, `:1414-1418` (`p.newRunner(supCfg)`), `internal/sessions/session.go:250-258` | A minted PTY session's `Runner()` is the `*supervisor.Supervisor` — it has `SendEsc`, so `interruptRunner` takes `armSendEsc`. The premise the whole test rests on. |
-| `internal/e2e/per_conversation_eviction_test.go:380-395` | `boundSessionID(t, convPath, convID) string` — reads `current_session_id` off `conversations.json` with a 2 s poll. Reuse verbatim (`convPath = <home>/.pyry/test/conversations.json`). |
-| `internal/e2e/harness.go:323-366` | `StartRotationWithRelay` — the four `PYRY_FAKE_CLAUDE_*` envs it always sets, `extraEnv` appended verbatim, and the **single shared** `PYRY_FAKE_CLAUDE_STDIN_LOG` path (`:336`) every child appends to. |
-| `docs/knowledge/codebase/929.md` (whole file) | **Mandatory.** The 500 ms subscribe-at-EOF race: a single-shot append lands below the tailed range. The re-drop kicker is the established fix, and the mid-turn kicker here is that fix. |
-| `docs/specs/architecture/1195-minted-perconv-pty-transcript-substrate.md` § Design, § Why the bootstrap child is unaffected | Why both knobs are safe to set daemon-wide, and why the bootstrap child's stem stays `<initialUUID>` by construction. |
-| `CODING-STYLE.md` | stdlib-only tests, `gofmt`, table-driven where the shape fits. |
-
----
-
 ## Context
 
 The interrupt route, re-verified hop by hop on `dec28ce`, is `handleInterrupt`

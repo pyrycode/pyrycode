@@ -19,67 +19,6 @@ no-typed-sentinel verb. The differences are:
 
 Consumer (1.3c-2's auto-attach detection) is out of scope.
 
-## Files to read first
-
-- `internal/control/protocol.go` (whole file, 267 lines) — `Verb`
-  constants block (lines 16-71), `Request` (lines 109-114) reusing
-  `SessionsPayload`, `SessionsPayload` (lines 163-168) which already
-  carries the `ID` field this verb consumes, `Response` (lines 191-199)
-  where the new `SessionsHasID` field slots in next to `SessionsList`,
-  the existing `SessionsNewResult` struct (lines 205-207) — closest
-  precedent for a small typed result payload. The new
-  `VerbSessionsHasID` and `SessionsHasIDResult` types slot in here. **No
-  new `SessionsPayload` field; no new `ErrorCode` member.**
-- `internal/control/server.go:33-149` — `Session` / `SessionResolver`
-  / `Remover` / `Renamer` / `Lister` / `Sessioner` declarations. **No
-  new sub-interface.** `Sessioner` is unchanged (`s.sessioner` is not
-  consulted by this verb). The handler reaches for `s.sessions`
-  (`SessionResolver`), which is non-nil by `NewServer` precondition.
-- `internal/control/server.go:388-421` — the `handle` switch where
-  `case VerbSessionsHasID:` slots in alongside `VerbSessionsList`.
-- `internal/control/server.go:495-524` — `handleSessionsRm` is the
-  closest precedent for the **payload boundary check** (`payload ==
-  nil || payload.ID == ""` → `"sessions.rm: missing id"`); reuse the
-  same shape with the new prefix.
-- `internal/control/server.go:563-595` — `handleSessionsList` is the
-  closest precedent for the **handler body** (no `context.WithTimeout`,
-  no typed-sentinel mapping, single Encode call). The new handler
-  mirrors its shape.
-- `internal/control/client.go:188-217` — `SessionsList` is the closest
-  precedent for the client wrapper (single result + error, no
-  typed-sentinel switch). The new `SessionsHasID` wrapper mirrors it
-  with one structural difference: the request carries a payload
-  (`SessionsPayload{ID: id}`), like `SessionsRename` (lines 168-186).
-- `internal/sessions/id.go:34-69` — `ValidID(s string) bool`. The
-  handler calls this to reject malformed UUIDs at the boundary
-  (matches AC: "malformed input returns an error"). Empty strings are
-  already rejected by the missing-id boundary check, but `ValidID("")`
-  also returns false — the validation is a strict superset.
-- `internal/sessions/pool.go:596-607` — `Pool.Lookup`'s contract. The
-  registry-read primitive this verb consumes through
-  `SessionResolver.Lookup`. Returns `(*Session, ErrSessionNotFound)`
-  for unknown IDs, `(*Session, nil)` for known ones; the empty-id →
-  bootstrap branch is gated upstream by `ValidID`.
-- `internal/control/sessions_new_test.go:18-174` — `fakeSessioner`
-  shape. **Not extended by this ticket** (no new `Sessioner`
-  sub-interface). The `TestProtocol_SessionsRoundTripBackCompat` table
-  at lines 181-233 is the back-compat regression — extend with rows
-  pinning the new `Response.SessionsHasID` omitempty (see Testing).
-- `internal/control/sessions_list_test.go` (whole file) — closest test
-  template for the new `sessions_has_id_test.go` file. Reuses
-  `startServerWithSessioner` and `fakeResolver` verbatim.
-- `docs/specs/architecture/87-control-sessions-list.md` — direct
-  precedent for "no typed sentinel, read-only verb" pattern. The
-  rationale for `time.Time` and `state` encoding from #87 does not
-  apply here (no time / enum on the wire).
-- `docs/specs/architecture/98-control-sessions-rm.md` — precedent for
-  the handler-boundary missing-id validation pattern. This verb shares
-  that shape (unlike list, which has no payload).
-- `docs/lessons.md` § "Wire-level error code over message-string
-  matching" — relevant context for why this verb introduces no new
-  `ErrorCode` (no typed sentinels propagate from the registry-read
-  path).
-
 ## Context
 
 The control plane currently exposes `status`, `stop`, `logs`, `attach`,

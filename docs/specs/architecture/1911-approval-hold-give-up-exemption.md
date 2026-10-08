@@ -3,67 +3,6 @@
 Gate `msgqueue.Config.Pending` on `streamApprovalBridge.ApprovalParked`, so the
 delivery hold's give-up bound exempts a person's deciding time and nothing else.
 
-## Files to read first
-
-Read these before writing anything. The list is the turn-1 data load; every
-symbol named here is one the change either edits or depends on.
-
-- `cmd/pyry/main.go` → `newInboundDeliver` — the delivery seam, its three-way
-  placement argument, and the exact `fmt.Errorf` wrap the hold error gets today.
-  The hold branch is the one statement this ticket edits inside it.
-- `cmd/pyry/main.go` → `streamTurnHoldTimeout` — the constant whose doc block
-  carries the "There is deliberately NO `Pending` analogue" paragraph. That
-  paragraph is false once this lands and must be rewritten in this change.
-- `cmd/pyry/main.go` → `mcpApprovalTimeout` — its "Why ten and not more"
-  paragraph names #1911 as where the abandonment is tracked. Also false after
-  this change; the constant's VALUE stays at ten (that is #1912's call).
-- `cmd/pyry/main.go` → the `msgqueue.Config` literal built by `msgqueue.New`
-  (search for `queueChanges` / `giveUps` / `blocked`, the three seams built just
-  above it) — the `Pending`-left-unset comment, and the `Deliver:` line this
-  change wraps. Note the construction order that forces late binding: `queue` is
-  built here, the `relayWiring` literal below it.
-- `internal/msgqueue/queue.go` → `PendingFunc`, `Config` (the `Pending` field),
-  and `drain` — the exemption's exact semantics: `drain` checks `ctx.Err()`,
-  then `err == nil`, then `dropped`, THEN `pending`. That ordering is what makes
-  AC-4 structural rather than new code. `PendingFunc`'s doc names
-  `supervisor.ErrTrustModalPending` as what the composition root wires; that
-  sentence becomes false here.
-- `internal/msgqueue/queue.go` → `giveUp`, `advanceLocked`, `Remove`,
-  `commitGate` — how a head is abandoned, and the `draining && !committing`
-  window the hold sits inside.
-- `cmd/pyry/stream_turn_busy.go` → `waitIdleForDelivery` — its three return
-  values (`nil`, `context.DeadlineExceeded`, `context.Canceled`) and what each
-  means. The whole design keys off which of the three can reach the exemption.
-- `cmd/pyry/modal_resolve_v2.go` → `ApprovalParked` — the report this consumes:
-  resolved on read, a conjunction, negative in PTY mode, negative once `retire`
-  runs. Read its doc block in full; AC-3 rests on it and adds no new edge.
-- `cmd/pyry/modal_resolve_v2.go` → the `toolCallInFlight` field of
-  `streamApprovalBridge` — the late-bound-after-construction shape this change
-  copies, including its written argument for why the field is set at one wiring
-  site instead of taken as a constructor parameter.
-- `cmd/pyry/relay.go` → `relayWiring` (the struct) and the `w.approvals != nil`
-  branch inside `startRelayV2` that assigns `bridge.toolCallInFlight` — the one
-  production site this change adds a line to. There is exactly one `relayWiring{}`
-  literal in the tree.
-- `cmd/pyry/inbound_deliver_test.go` → `holdTestTracker`, `endHeldTurn`,
-  `waitBacklog`, `assertNoWriteWithin`, `funcWriter`, `commitClaimingWriter`,
-  `recvStringWithin`, `inboundTestLogger` — every helper the new tests need
-  already exists here. Do not write new fixtures.
-- `cmd/pyry/inbound_deliver_test.go` → `TestInboundDeliver_StreamHold_NeverEndingTurnGivesUp`
-  and `TestInboundDeliver_StreamHold_HeldMessageIsDroppable` — the first is
-  MODIFIED by this ticket (AC-2), the second is the template for AC-4's new test.
-- `cmd/pyry/modal_resolve_v2_test.go` → `auditLogger` — the Debug-level,
-  buffer-backed logger AC-5 asserts against. Same package; reuse it rather than
-  building another. A capture above Debug would make the AC-5 assertion vacuous.
-- `docs/knowledge/features/msgqueue-package.md` § "Bounded give-up on persistent
-  delivery failure (#1000)" — why the bound is elapsed-time and per-head, and
-  why give-up exits the drain instead of skipping. The exemption has to leave all
-  of that intact.
-- `docs/knowledge/features/streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md`
-  — the hold's placement argument in prose, plus its own now-false "Deliberately
-  no `Pending`-style exemption" paragraph. **Read-only for you** — the
-  documentation phase owns it; do not edit it.
-
 ## Context
 
 A turn blocked on an unanswered approval keeps its conversation marked busy in

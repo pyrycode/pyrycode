@@ -3,15 +3,6 @@
 **Ticket:** [#919](https://github.com/pyrycode/pyrycode/issues/919)
 **Size:** XS — one Makefile prerequisite edit plus comment reword. **No Go code.**
 
-## Files to read first
-
-Codegraph does not apply here — the Makefile is not part of the Go symbol index, and there are no Go call sites. Read these two files directly:
-
-- `Makefile:33-34` — the `check:` target. The prerequisite list `check: vet test staticcheck substrate-guard` is the one-line edit point.
-- `Makefile:1-26` — header comment block. Three lines reference gate composition and need touch-ups: the `make check` line (4-7, its parenthetical enumeration), the `make e2e` line (10-14, the "Not yet part of `check`…" caveat to remove), and the `make preship` line (15-17, its `check + e2e + e2e-realclaude` enumeration).
-- `Makefile:44-57` — the `e2e`, `e2e-realclaude`, and `preship` targets. `preship: check e2e e2e-realclaude` (line 57) and its block comment (52-56) are the second edit site.
-- `CLAUDE.md:47-53` — Build Commands section. Confirmed at spec time to list raw `go` commands (no `make check`/`make e2e` enumeration). **No change** — per AC, confirm and skip.
-
 ## Context
 
 Operator decision 2026-07-10: the hermetic fake-daemon e2e suite should run in the standard build gate, not only on demand. The `make e2e` target already exists (`go test -tags e2e -race -count=1 ./internal/e2e/...`). This ticket wires it into `check` so a core-daemon regression fails the standard gate instead of sitting red on `main` — the exact failure mode of #918 (eight #839-regression tests red on `main` for two days, unnoticed).

@@ -4,55 +4,6 @@ Relay-side half only: an optional `V2SessionConfig` seam plus the connect-time s
 drains it. With the seam left nil this ticket changes no observable behaviour, which is what
 makes it independently shippable ahead of #1864 (the daemon-side producer + wiring + e2e proof).
 
-## Files to read first
-
-Everything below is named by symbol. Resolve each with `codegraph_search` / `codegraph_node`
-and read on demand — do not go looking for line numbers, and do not write any into comments
-(`make cite-guard` fails a `//`-comment citation that lands on or inside a declaration, at any
-depth, with no range exemption).
-
-**The two things to read first, in this order — the rest of the list is support:**
-
-- `internal/relay/v2session_modal.go` → `reconcileQueues` — **the template.** Gate shape,
-  batch timestamp, per-payload marshal→envelope→Push loop, both error branches, the
-  `ctx.Err()` early return, and the doc-comment structure (run-goroutine note + `SECURITY:`
-  paragraph). `reconcileModelLists` is this function with the payload type swapped.
-- `internal/relay/v2session_queuereconcile_test.go` — **the test template.** In particular
-  `reconciledQueues` (decrypt-and-key-by-id helper), `sampleQueuePayload`, and
-  `TestV2Session_QueueReconcile_ContentFreeLogging`. Read the whole file once; you are
-  re-deriving its arms in a table-driven shape, not cloning its file layout.
-
-Support:
-
-- `internal/relay/v2session_modal.go` → `reconcileModals` — the older twin. Read only its
-  doc comment, for the "why fixed envelope ID" and "pure read" phrasing.
-- `internal/relay/v2session_seams.go` → `OutstandingModals`, `OutstandingQueues` — the seam
-  doc-comment shape, including the verbatim "a closure returning `protocol.X`, not a
-  `*pkg.Y`, because `internal/relay` does not import `internal/pkg`" boundary argument. Copy
-  that reasoning; it is the reason the new seam adds no import.
-- `internal/relay/v2session_handshake.go` → `handleNoiseInit` — the success tail. The two
-  existing `m.reconcileModals(ctx, s)` / `m.reconcileQueues(ctx, s)` calls sit consecutively
-  between `armIdleTimer` and the `replayMissed` block; the new call goes third in that group.
-- `internal/protocol/interactive.go` → `ModelListPayload`, `ModelOption` — the frame's shape
-  and both `MarshalJSON` methods. Extract: the payload is closed types only, and it is
-  `reflect.DeepEqual`-able (no `time.Time` field) — that is why this ticket needs no
-  `equalQueued` counterpart.
-- `internal/protocol/codes.go` → `TypeModelList` — the wire type constant.
-- `internal/relay/v2session.go` → `Push` — the error contract the push branch's `err` field
-  depends on: it returns `ctx.Err()` or `ErrConnNotFound` and nothing else, so it can never
-  carry a payload byte into a log record.
-- `internal/relay/v2session_test.go` → `startManager`, `genV2Keypair`, `v2PairedRegistry`,
-  `silentLogger`, `waitForEnvelopes`, `waitConnOpen`, `noiseMsgsForConn`, `decryptAppFrame`,
-  `lockedBuffer` — the shared harness. All already exist; write no new harness.
-- `internal/relay/v2session_modal_test.go` → `openModalConn` — drives one conn from
-  `noise_init` to `V2StateOpen` with a chosen capability list. Every test in this ticket
-  opens conns through it.
-- `docs/protocol-mobile.md` § "Reconcile on connect" (inside § Reconnect / Backfill
-  semantics) — the Mode B contract this ticket is a third instance of. Read it; **do not edit
-  it** (see Context).
-- `docs/knowledge/features/relay-package.md` — package overview, for the V2 session-manager
-  single-owner goroutine invariant.
-
 ## Context
 
 `ModelListPayload` reaches a live interactive conn today only on the turn lane, and three

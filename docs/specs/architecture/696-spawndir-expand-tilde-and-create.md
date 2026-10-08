@@ -2,16 +2,6 @@
 
 **Ticket:** #696 (`size:s`, `security-sensitive`) — `fix(daemon): per-conversation scratch Cwd — expand ~ to $HOME and create the dir before spawn (#421 blocker)`
 
-## Files to read first
-
-- `cmd/pyry/main.go:420-503` — `confineWorkdirToHome` (strict, EvalSymlinks-both-sides confine, **left unchanged**), `withinDir` (boundary-aware containment, **reuse**), and `resolveSpawnDir` (the phone path being changed). This is the entire surface you edit on the production side.
-- `cmd/pyry/main.go:537-554` — `runSupervisor`'s daemon-bootstrap confine→trust→spawn-in-realpath sequence. The *shared* `confineWorkdirToHome` caller you must **not** regress; daemon startup keeps rejecting a non-existent / `~`-literal `-pyry-workdir` exactly as today.
-- `cmd/pyry/main.go:705-722` — `sessionMinter.Create`, the sole production caller of `resolveSpawnDir`. No change needed here; the new behaviour is entirely inside `resolveSpawnDir`.
-- `cmd/pyry/conversation_spawndir_test.go` (whole file) — the adapter test file. `installRecordingTrustMark` stub + `t.Setenv("HOME", …)` pattern (non-parallel). You add the new `~`-expansion / create / symlinked-ancestor-not-created cases here, mirroring the 5 existing cases.
-- `cmd/pyry/workdir_trust_test.go:128-173` — `TestConfineWorkdirToHome_CanonicalisesBothSides` + `_RejectsSymlinkEscapingHome`. Copy the symlinked-`$HOME` and symlink-escape construction idioms (`os.Symlink`, `filepath.EvalSymlinks` of the expected realpath) for the new tests.
-- `internal/relay/handlers/create_conversation.go:36-51,170-179` — `msgCreateConversationCwdRejected` (static phone message, never echoes the path), `ErrSpawnDirRejected` sentinel, and the `errors.Is(err, ErrSpawnDirRejected)` → non-retryable `protocol.malformed` mapping. Confirms the rejection stays content-free end-to-end; **no change here**.
-- `docs/knowledge/codebase/685.md` — the slice this reverses for the default-scratch case. § "Lessons learned" pins the confine→trust order, the "non-existent path is rejected" posture #696 deliberately relaxes, and the accepted confine→chdir TOCTOU window #696 must not widen.
-
 ## Context
 
 The mobile rung-3 live e2e (pyrycode-mobile#421) hit two daemon bugs in the per-conversation spawn-dir resolution that `create_conversation` runs at `cmd/pyry/main.go:490` (`resolveSpawnDir` → `confineWorkdirToHome`). A phone cannot know the daemon's absolute home, so it sends the default `Cwd` as `~/.pyrycode/scratch` meaning "the daemon's home". Today:

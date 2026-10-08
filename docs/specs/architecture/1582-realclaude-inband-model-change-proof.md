@@ -6,33 +6,6 @@ own per-turn `system`/`init` announcement off the `streamsup.Config.Stdout` seam
 
 ---
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`, then Read.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/dropped_line_capture_test.go` | `dropcapRecorder`, `newDropcapArgvHandler`, `dropcapWaitForChild`, and the `streamsup.New` call in `TestDroppedLineCapture` | **The precedent for everything structural here.** An `io.Writer` in `Config.Stdout`, a `slog.Handler` filtering on the `"spawning claude"` message, a poll on `Stdin()`, and an in-process `streamsup.Runner` driven from a realclaude test. Copy the shapes; do not copy the redaction/fixture machinery — none of it applies. |
-| `internal/streamsup/runner.go` | `Config` (the `Stdout` field doc), `New`, `Run`, `spawnAndWait`, `buildArgs`, `Stdin`, `WriteUserTurn`, `SetSpawnArgs` | `Stdout` is the tap; `spawnAndWait` re-sets `cmd.Stdout` on **every** spawn, which is what keeps the recorder alive across the pre-change tree's respawn. `Run` logs `"spawning claude"` at Info exactly once per spawn. `Config.onSpawn` is unexported — unusable from this package. |
-| `internal/streamsup/state.go` | `State`, `(*Runner).State` | `ChildPID` is the direct "same process" observable. Note the return type is `streamsup.State`, **not** `sessions.State` — that mismatch is why the test needs an adapter. |
-| `internal/streamsup/parser.go` | `emitSystemSubtype` | Verified 2026-08-19: four arms (`task_started`, `task_updated`, `background_tasks_changed`, `thinking_tokens`) and a `default: return false`. `init` has no arm, so it is dropped in silence. **This is why the tap must be upstream of the parser** — and why nothing in this ticket may add an arm. |
-| `internal/sessions/pool.go` | `UpdateSettings`, `inBandDeliverable`, `deliverSettingsInBand`, `New`, `saveLocked` | The entry point under test, the two traps that would silently route onto the restart path, and the fact that `saveLocked` is a no-op only when `RegistryPath` is empty (we set it, so the persist runs for real). `deliverSettingsInBand`'s model `send` is the mutation site for evidence run B. |
-| `internal/sessions/session.go` | `SessionSettings`, `SettingsUpdate`, `claudeSettingsArgs`, `spawnArgs`, `(*Session).Runner`, `(*Session).ID` | The update shape, and the recompose that decides what argv a respawn would run. `spawnArgs` = `spawnBase` + `claudeSettingsArgs(merged)` — **the reason the base argv must carry no `--model`** (see Design § "Why the base argv carries no `--model`"). |
-| `internal/sessions/runner.go` | `Runner`, `RunnerFactory` | The five-method interface the test's adapter satisfies, and the mandatory injection seam. |
-| `internal/sessions/runnerstate.go` | `RunnerConfig`, `State` | What the factory receives (`SessionID` is the pool-minted bootstrap uuid) and the `sessions.State` the adapter must return. |
-| `cmd/pyry/streamsup_runner.go` | `newStreamRunnerFactory`, `mapStreamsupConfig`, `streamRunner` | Production's version of exactly the factory + adapter the test writes. `streamRunner` is the ~10-line adapter to mirror. Note what the test deliberately does **not** copy: the turnevent `Parser` in `Stdout` (the recorder takes that slot) and `withApprovalArgs`. |
-| `cmd/pyry/session_router_test.go` | `newRouterTestPool`, `stubRunner` | The compact `sessions.New(...)` call and a minimal `sessions.Runner` implementation, both ~8 lines. |
-| `internal/e2e/realclaude/fixtures.go` | `WithWorktreeAuthenticated`, `parseInitSessionID` | The credentials guard AC 5 permits, and the package's idiom for decoding an `init` envelope (anonymous struct + `json.Unmarshal`, skip non-JSON silently). The recorder's line decode mirrors `parseInitSessionID`. |
-| `internal/e2e/realclaude/resilience_test.go` | `resolveClaudeBin` | The other permitted skip (claude absent from `PATH`). |
-| `docs/knowledge/codebase/1581.md` | § Implementation, § Testing | What the sibling proved hermetically, and the sentence naming this ticket as the live proof it deliberately did not attempt. |
-
-Two analogues for length and prose density (both zero-production-change test tickets):
-`interactive_stream_resume_after_eviction_test.go` (407 lines), `interactive_stream_multiturn_continuity_test.go`
-(278 lines). Both are daemon-subprocess tests driven over the relay; this one is **in-process**, because the
-`Stdout` seam lives inside the daemon and is unreachable from outside it.
-
----
-
 ## Context
 
 #1581 changed how a model/effort-only settings change is delivered: instead of killing the child and respawning

@@ -5,30 +5,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every one is load-bearing; the reuse mandate (AC1) and
-the no-touch mandate (AC5) both live in this list.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/background_reach_probe_test.go:873-882` | `reachScanArgv` — the live `ps -axww -o pid=,ppid=,pgid=,command=` exec. **Call it; do not re-implement.** Note it discards partial output on error. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:884-929` | `reachMatchArgvRows` — the all-rows full-argv matcher. This is *the* matcher. AC1 is discharged by calling it. Note it returns `(matches, total)` and caps `Command` **after** matching. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:159-168` | `reachProc` row type — the row shape you reuse (`PID/PPID/PGID/Command/Needles`). It carries a **slice**, so it is not `==`-comparable (see § Testing, trap 2). |
-| `internal/e2e/realclaude/background_reach_probe_test.go:945-962` | `reachCapCommand` / `reachMatchedNeedle` — the cap and the needle-membership read. Use `reachMatchedNeedle`, never re-scan `Command` (the cap may have truncated it). |
-| `internal/e2e/realclaude/background_reach_probe_test.go:1175-1295` | `TestReachMatchArgvRows` — the table shape to mirror, and the behaviour your exclusion wrapper must leave **bit-identical** for its existing caller. Do not edit this test. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:57-92` | The redaction rules (file header). Rule 1 — **never `-E`, `-e` with an env column, or BSD `eww`** — binds your new `ps -p` call too. |
-| `internal/e2e/realclaude/fifo_reader_liveness_test.go:80-254` | **The closest prior art.** `fifoLiveOutcome` + `fifoLiveRead` + `fifoLiveClassifyOpenErr`: a multi-valued instrument read with a dedicated `instrument-failed` value, a *pure* classifier split from the syscall, and a stable-name map. Mirror this structure exactly. |
-| `internal/e2e/realclaude/fifo_reader_liveness_test.go:39-59` | Two lessons you must not re-learn: prove the flip on **one subject across one lifetime**, and `Kill()` is not the synchronisation point — `Wait()` is. |
-| `internal/e2e/realclaude/fifo_reader_liveness_test.go:270-600` | The offline-test idiom in this package: real child process, no credentials, no `t.Skip`. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:863-925` | `probeProcessSnapshot` / `probeDescendantsFromPS`. **Read to confirm you must not touch them.** The `len(fields) != 3` guard at `:896-898` is why widening the snapshot is forbidden (AC5). |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:927-970` | `probeAnnotateCommands` / `probeHasCommand` — the base-name defect this ticket exists to replace. Read so you don't reproduce it; do not edit. |
-| `internal/e2e/realclaude/fixtures.go:96-107` | `WithWorktreeAuthenticated` — `t.Skipf`s without credentials. **Your tests must never reach this.** AC4 turns on it. |
-| `internal/e2e/realclaude/fixtures_test.go:348-354` | `TestMain` — does **not** gate credentials. Offline tests genuinely run; the skip risk is per-test, not suite-level. |
-| `docs/knowledge/codebase/1230.md` § Lessons learned | The error-gate placement lesson (round-1 MUST FIX) and the `reachProc`-grew-a-slice lesson. Both apply directly. |
-
----
-
 ## Context
 
 Two live probes (#1236, then #1237) need one reading: *at the instant pyry wrote its

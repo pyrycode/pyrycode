@@ -22,38 +22,6 @@ fakerelay → spawned daemon, with the production `resolveWorkspaceDir` wired at
 `cmd/pyry/relay.go:412`. It is the same gap-shape #949 (promote) and #974–#976
 (rename/delete/archive) closed for their verbs — a handler nothing exercised end-to-end.
 
-## Files to read first
-
-- `internal/e2e/relay_v2_rename_test.go` (whole file, ~309 lines) — **closest template.**
-  Same `conversation_updated` / `ConversationUpdatedPayload` reply, correlates
-  `in_reply_to`, reads the on-disk registry back. Copy its two-subtest shape
-  (pair → seed conversations.json → spawn daemon → `driveHandshakeToOpenDaemon` →
-  seal → `decryptInnerEnvelope` → assert). Each subtest owns its own spawn+seed.
-- `internal/relay/handlers/change_workspace.go:115-215` — the handler contract. Note the
-  branch order: decode → **empty-path guard** → **confine** → `Update` (lookup+mutate) →
-  `!hit` not_found. Confinement runs *before* the registry lookup (so not-found requires
-  a *valid* target). `LastUsedAt` is **not** bumped (metadata edit). All reject branches
-  reply a fixed static string; the path/id/err are never echoed.
-- `internal/protocol/conversations_write.go:91-131` — `ChangeWorkspacePayload{ConversationID, Cwd}`
-  (json `conversation_id`, `cwd`) and `ConversationUpdatedPayload{ID, IsPromoted, IsArchived, Name *string, Cwd, LastUsedAt time.Time}`.
-- `cmd/pyry/relay.go:74-84` — `resolveWorkspaceDir`: `expandTilde` → `confineWorkdirToHome`
-  → realpath; every failure wraps `handlers.ErrWorkspaceRejected`. Wired at `:412`.
-- `cmd/pyry/change_workspace_dir_test.go` (whole file) — confiner behaviors and the
-  **`filepath.EvalSymlinks` discipline** for the expected value: within-`$HOME` existing
-  dir → its realpath; outside / non-existent / symlink-escaping → reject. Reuse the
-  "create dir, `want = EvalSymlinks(dir)`" and "sibling temp dir = outside `$HOME`" idioms.
-- `internal/relay/handlers/change_workspace_test.go:142-260` — the in-process assertions
-  to mirror at the wire tier: reply `Cwd == resolved realpath`, `LastUsedAt.Equal(seed)`,
-  and the reject "state unchanged, no leak" subtest (`TestChangeWorkspace_Rejected_LeavesStateUnchangedNoLeak`).
-- `internal/e2e/harness.go:853` — `shortHome`: the spawned daemon's `$HOME` is
-  `os.MkdirTemp("", "p-301-*")`. Also the `RunBareIn` / `StartInWithEnv` /
-  `readPersistedServerID` / `waitBinaryHello` patterns the template already uses.
-- `internal/protocol/codes.go:10,22` — `CodeProtocolMalformed = "protocol.malformed"`,
-  `CodeConversationNotFound = "conversation.not_found"`.
-- `internal/protocol/handshake.go:81` — `ErrorPayload{Code, Message, Retryable, RetryAfterS}`.
-- `internal/e2e/per_conversation_eviction_test.go:338` — `createConversationViaPhone`
-  (an *alternative* seed path; see Design § Seeding for why this spec does **not** use it).
-
 ## Design
 
 One new file, build tag `e2e`, package `e2e`:

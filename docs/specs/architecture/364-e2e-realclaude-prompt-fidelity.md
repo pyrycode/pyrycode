@@ -1,26 +1,5 @@
 # Spec: e2e/realclaude prompt-fidelity regression guard (#364)
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go` — `WithWorktree`, `ReadJSONL`,
-  `RunPyryAgentRun`, `RunOpts`, `RunResult`, `JSONLEntry` (the alias to
-  `jsonl.Event`). The whole helper surface this test composes over. No
-  modifications.
-- `internal/e2e/realclaude/fixtures_test.go:55-86` — `TestReadJSONL_HappyPath`
-  and the `writeFixtureLines` helper at lines 325-347. Same package; the new
-  test can call `writeFixtureLines` if it ever needs a fixture, but it
-  shouldn't — this test runs real claude end-to-end.
-- `internal/e2e/realclaude/smoke_test.go` — only file in the package that
-  exercises a real binary; mirror its build-tag header (`//go:build
-  e2e_realclaude`).
-- `internal/agentrun/jsonl/reader.go:41-83` — `Event` struct. Two fields
-  matter for the assertion: `Kind` (string, "user" / "assistant" / ...) and
-  `Raw` (`json.RawMessage`, the verbatim line bytes with the trailing `\n`
-  stripped). `Raw` is the substring-match target.
-- `internal/agentrun/jsonl/reader.go:134-167` — `rawLine` plus the comment at
-  line 137 ("user lines have content as a string, not an array"). Documents
-  why the assertion must tolerate both shapes — `Raw` does this naturally.
-
 ## Context
 
 `pyry agent-run` was cut over to streamrunner in #391; the prompt now travels

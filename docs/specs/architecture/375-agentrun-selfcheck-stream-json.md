@@ -10,49 +10,6 @@ regressions that would let our agents call tools we never allowed.
 
 ---
 
-## Files to read first
-
-The developer's turn-1 reading list. Each entry is the minimum slice
-needed; do not pre-read more than this.
-
-- `internal/agentrun/selfcheck/selfcheck.go:1-316` — full current
-  implementation. The package shrinks: drop trust-dialog wiring,
-  system-prompt file, `--session-id` minting, `jsonl/tail` watcher,
-  `agentrun.Drive` call.
-- `internal/agentrun/selfcheck/selfcheck_test.go:1-374` — current
-  PTY-fake test harness. Wholesale replaced.
-- `cmd/pyry/agent_run_selfcheck.go:1-117` — operator-facing CLI
-  wrapper. Inputs change (no `WriteSettings`, no trust/prompt delay
-  env), output strings change (drop `defaultMode`, settings-file
-  language).
-- `cmd/pyry/agent_run_selfcheck_test.go:1-174` — CLI-level fake-claude
-  test harness. Wholesale replaced (same shape as `streamrunner`
-  helper pattern).
-- `cmd/pyry/agent_run.go:180-267` — `runAgentRun` + `buildClaudeArgs`.
-  Source of truth for the `--allowed-tools` /
-  `--dangerously-skip-permissions` / `--input-format stream-json` /
-  `--output-format stream-json --verbose` argv shape this ticket must
-  mirror. Do not invent flag combinations; copy this set.
-- `internal/agentrun/streamrunner/runner.go:1-195` — the spawning
-  primitive. Reuse `Run` and `Config` verbatim; the self-check is just
-  another caller.
-- `internal/agentrun/streamrunner/runner_test.go:36-104` plus
-  `internal/agentrun/streamrunner/helper_test.go:1-83` — the
-  re-exec-the-test-binary fake-claude pattern. Mirror this shape for
-  the new self-check fake; the wrapper script + `TestHelperProcess`
-  pair from the old self-check is no longer needed because
-  streamrunner already accepts `-test.run=...` argv directly.
-- `internal/agentrun/jsonl/reader.go:103-262` — the canonical
-  stream-json line parser already in tree. Reuse `jsonl.NewReader` /
-  `jsonl.Reader.Next`; do not write a second parser. The watcher's
-  Bash detector runs on `Event.Raw`, exactly as today.
-- `.github/workflows/self-check-daily.yml` — read only; commentary
-  there still mentions `permissions.defaultMode`. Out of scope for
-  this ticket (ops sibling, per AC); do not edit. Mentioned here so
-  the developer knows it exists and resists the urge to drift.
-
----
-
 ## Context
 
 `internal/agentrun/selfcheck/` was introduced in #336 to verify that

@@ -1,23 +1,5 @@
 # #1812 — Bound the decoded model-entry count and report the drops
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/streamsup/parser.go` → `maxTaskRosterEntries` — **the shape this ticket copies.** The cardinality-cap doc form: multiplicand × count = a stated product, the product's relation to `maxUnrecognizedRaw`, the multiple-of-observation argument, and the after-`json.Unmarshal` transient paragraph. Read it before writing a single line of the new constant's doc.
-- `internal/streamsup/parser.go` → `emitBackgroundTaskRoster` — the six lines that implement it: the count bound placed **before** the entry loop, truncation **from the tail**, `dropped` computed as the difference. The new code is this block with different names.
-- `internal/streamsup/parser.go` → `maxModelResolved` — the paragraph beginning "THE ENVELOPE ARITHMETIC IS PARTIAL". It states the 768-byte multiplicand this ticket inherits and the one constraint on the count (six observed entries must fit with room). It is also **an edit target**: it names this ticket as someone else's work.
-- `internal/streamsup/parser.go` → `emitModelList` — the four rungs, the per-entry `bound` closure, and the loop-head comment that says no count bound runs. Edit target.
-- `internal/streamsup/parser.go` → `logControlResponse`, `controlResponseMsg` — the one record this path writes, its "three attributes and NOTHING else" rule, and the content-free discipline behind it. Both docs are edit targets (see § The log record).
-- `internal/turnevent/event.go` → `BackgroundTaskRoster` (the `DroppedTasks` field doc) — the count-on-the-aggregate doc style, including why the count does not report as a name in a `TruncatedFields` list. The new field's doc is this one re-argued for models.
-- `internal/turnevent/event.go` → `ModelList` (the `Models` field doc) — carries the "COUNT is NOT bounded in this slice" statement. Edit target.
-- `internal/protocol/interactive.go` → `ModelListPayload` — `DroppedModels`' doc, the reason the count exists. Its "NOTHING COUNTS IT YET" sentence becomes false when this lands (see § Doc sweep). **No field, no marshalling, no behaviour change in this package.**
-- `internal/streamsup/parser_test.go` → `taskRosterEntriesCapFixture` (and the const block's doc above it) — why a count fixture is a **literal** and never the production constant. Also `rosterEntriesFixture` and `TestParser_BackgroundTaskRosterBounds` — the table shape the new test mirrors.
-- `internal/streamsup/parser_test.go` → `modelListLineFixture`, `modelEntryFixture`, `capturedInitializeLine`, `collectEvents` — the fixture builders already in place; the new test needs no new line-building machinery, only a multi-entry generator.
-- `internal/streamsup/parser_test.go` → `TestParser_InitializeControlResponseDecodesTheCapturedModels`, `TestParser_InitializeControlResponseRejectBranches`, `TestParser_ModelListIsLoggedContentFree` — the three existing tests this ticket amends.
-- `internal/streamsup/initialize_capture_test.go` → `capturedInitializePayload` — the in-package capture reader (#1810). No `e2e_realclaude` tag, so every criterion here is provable under `make check`. Its `#1812` mentions are a list of decodes riding the reader and stay as they are.
-- `docs/knowledge/features/streamsup-package.md` § "Decoding the initialize ack into `turnevent.ModelList` (#1811)" — carries the "entry count is not capped in this slice" claim. **Read-only. The documentation phase folds this slice's outcome in after code review; do not edit it.**
-
 ## Context
 
 `emitModelList` bounds each decoded entry's three strings (`maxModelResolved` / `maxModelValue` / `maxModelDisplayName`, 768 bytes per entry worst case) and bounds nothing about **how many** entries it keeps. A per-field text cap alone leaves the value's total size a function of a number claude chooses, which is `maxTaskRosterEntries`' doctrine stated in the tree already.

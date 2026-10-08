@@ -20,27 +20,6 @@ same `package relay`. Chained after #1023 (merged `b20eb3f`); branch from `main`
 **Pure move**: no behaviour change, no exported-API change, no call-site change. Every
 doc comment moves verbatim with its declaration.
 
-## Files to read first
-
-- `internal/relay/v2session.go:1434-1653` — **the block to move**, in place. The
-  `msgSettings*` `const` group, `handleSetSessionSettings`, `settingsReplyError`,
-  `validModel`, `validEffort`. Bounded above (1432) by `bundleInFlight` and below (1655)
-  by `SetReplaySource` — one clean cut, nothing settings-unrelated interleaved.
-- `internal/relay/v2session.go:1-20` — the current `package relay` clause + full import
-  block of the source file (context for which imports the moved code depends on).
-- `internal/relay/v2session.go:1045` — `m.handleSetSessionSettings(ctx, s, probeEnv)`,
-  the sole external call site (the interceptor inside `dispatchAppFrame`, before
-  `dispatch.Route`). **Stays put, no edit** — resolves same-package to the moved method.
-- `internal/relay/v2session.go:359` — a comment mentioning `handleSetSessionSettings`.
-  **Stays put, no edit** (comment prose, not a symbol reference).
-- `internal/relay/v2session_modal.go:1-19` — the file-header convention to mirror:
-  `package relay`, a minimal import block, then a `//` file-purpose comment naming the
-  slice, the pure-move disclaimer, and what stays in `v2session.go`.
-- `internal/relay/v2session_rekey.go:1-19` — same convention, second exemplar.
-- `internal/relay/v2session_settings_test.go` — the **already-existing** test file for this
-  handler (references `handleSetSessionSettings`, `validModel`, `validEffort`). It is in
-  `package relay`, so the move is transparent to it. **Must NOT be touched** (AC #3).
-
 ## Design
 
 ### What moves — exact manifest

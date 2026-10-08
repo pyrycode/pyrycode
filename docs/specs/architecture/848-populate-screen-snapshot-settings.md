@@ -11,23 +11,6 @@ Both leaves are currently **unwired**: `handleRequestSnapshot` marshals the payl
 
 ---
 
-## Files to read first
-
-- `internal/relay/v2session.go:1692-1757` — `handleRequestSnapshot`. The single edit site for the handler change: the `protocol.ScreenSnapshotPayload{…}` literal at :1719 is where the three new fields get populated. Note the branch order (KnownConversation reject → nil-Snapshotter offline → `!live` offline → marshal-and-forward); settings are read only on the success path, after the `live` check.
-- `internal/relay/v2session.go:544-669` — `V2SessionConfig`. The new optional seam field goes here, alongside `Snapshotter` (:614) and `KnownConversation` (:621). Read the `DebugBundler func() (archive []byte, err error)` field (:660) — the primitive-typed-closure precedent this seam copies.
-- `internal/relay/v2session.go:779-810` — `NewV2SessionManager`. The new seam is **optional** (like `Snapshotter`/`DebugBundler`) — do **not** add a validation branch here; nil is a supported value.
-- `internal/sessions/pool.go:937-945` — `Pool.DefaultSettings()`. The accessor the cmd/pyry closure wraps. Returns `(SessionSettings{}, false)` when no bootstrap exists; both fields of the false case collapse to the wire defaults.
-- `internal/sessions/session.go:70-74` — `SessionSettings{Model, Effort string; YOLO bool}`. The value type whose three fields map 1:1 onto the wire fields. Zero value = inherited daemon default (empty Model/Effort) + permissions enforced (YOLO off).
-- `internal/protocol/snapshot.go:55-62` — `ScreenSnapshotPayload`. The three target fields (`Model`, `Effort`, `YOLO`), no `omitempty`, already on the wire since #847.
-- `cmd/pyry/main.go:838-854` — the `debugBundler` closure + the `startRelay(…)` call. Build the new settings closure here (same spot, same shape) and add it as the final `startRelay` argument.
-- `cmd/pyry/main.go:933-952` — `settingsUpdaterAdapter` (#845, the write-path adapter). Context for why relay speaks primitive/relay-local types and never imports `internal/sessions`. This ticket's read seam is even simpler — a bare closure, no adapter type needed.
-- `cmd/pyry/relay.go:91-111` + `:154` — `startRelay` signature and the single `startRelayV2(…)` call site. Add the new parameter to both.
-- `cmd/pyry/relay.go:278-372` — `startRelayV2` signature and the `V2SessionConfig{…}` literal. Wire the closure into the new seam field beside `Snapshotter` (:331) / `SettingsUpdater` (:371).
-- `cmd/pyry/session_transition_v2.go:20-27` — `transitionObserverSink` doc comment. The canonical statement of the "`relay.go` must not import `internal/sessions`" discipline this ticket preserves.
-- `internal/relay/v2session_test.go:3639-3830` — `fakeSnapshotter` double + `TestV2Session_OpenState_RequestSnapshot` table. The existing relay-level snapshot test the AC-4 assertions extend. Reuse `driveToOpen` / `v2Recorder` / `sealAppFrame` / `decryptAppFrame` verbatim.
-
----
-
 ## Context
 
 The desktop Status sheet (pyrycode-desktop#156) shows the current model / reasoning-effort / permissions posture **before** offering to change it (the change path is the v2 `set_session_settings` verb, #841/#845). The persisted values live on the session (`SessionSettings`, #833). The `screen_snapshot` reply is the read channel the desktop already receives in response to `request_snapshot`; #847 added the wire fields but left them zero. This ticket makes the snapshot handler report the running session's actual settings.

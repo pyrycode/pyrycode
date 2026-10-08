@@ -2,33 +2,6 @@
 
 **Size:** S · **Labels:** `enhancement`, `security-sensitive` · Split from #1914
 
-## Files to read first
-
-Generated from `codegraph_context` + `codegraph_impact`, pruned to what this change actually needs. This is the turn-1 data load; nothing below this list needs discovering by grep.
-
-| Path | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/internal/fakeclaude/main.go` | `runStreamJSONApprove` | The read loop, the per-turn `msgID` / `toolUseID` mint, and the doc-comment sentence about "no assistant output is written mid-approval" that this change must keep true |
-| `internal/e2e/internal/fakeclaude/main.go` | `dialApproval` | Where `ToolName` / `Input` are hardcoded today — both become consts read by two paths |
-| `internal/e2e/internal/fakeclaude/main.go` | `writeVerdictResponse`, `writeAssistantEcho`, `writeJSONLine` | The existing writer chain; `writeAssistantEcho` and its three callers must end up **untouched** |
-| `internal/e2e/internal/fakeclaude/main.go` | `outAssistant`, `outAsstMessage`, `outTextBlock` | The echo's envelope shape the new line mirrors — and the shared types the new line must not modify |
-| `internal/e2e/internal/fakeclaude/main.go` | `writeInitializeAck`, `writeInterruptAck` | The file's `map[string]any`-through-`writeJSONLine` idiom, and the "escape via `json.Marshal`, never `fmt.Sprintf`" rule for anything reflected onto stdout |
-| `internal/e2e/internal/fakeclaude/approve_test.go` | `TestWriteVerdictResponse` | The house style for these tests: assert through the **real** `streamsup.Parser`, never a hand-written decoder |
-| `internal/e2e/internal/fakeclaude/stream_detect_test.go` | `parseEmitted` | The parser harness the new tests reuse verbatim |
-| `internal/streamsup/parser.go` | `emitAssistant`, `streamBlock` | Exactly which keys a `tool_use` block must carry to become `turnevent.ToolStart` — `type`, `id`, `name`, `input`; everything else on the message is ignored |
-| `internal/turnbridge/outbound.go` | `MapEvent` (the `turnevent.ToolStart` arm) | `ToolStart` → `protocol.TypeToolUse` / `ToolUsePayload{ToolUseID: e.ToolCallID, Name: e.Title}` — the frame the e2e asserts on |
-| `internal/protocol/interactive.go` | `ToolUsePayload` | Field names for the e2e assertion, and the SECURITY paragraph on what `Input` values are (display strings, never capabilities) |
-| `cmd/pyry/interactive_turn_v2.go` | `startTurnIfNeeded`, the emitter's `ToolStart` arm | Why a `ToolStart` opens the turn and the later text joins it — nothing new is needed to deliver the frame |
-| `cmd/pyry/stream_turn_drain.go` | `startStreamTurnDrainV2` | The active-session gate the frame passes because the e2e already calls `seedBoundConversation` |
-| `cmd/pyry/stream_turn_busy.go` | `toolCallDeltaFor`, `setBusy` | #1917's retention: `ToolStart` adds, the close arm sweeps — verified, so the missing `tool_result` leaks nothing |
-| `internal/e2e/relay_v2_stream_modal_test.go` | `TestRelayV2_StreamModalPermissionRoundTrip` | The three await loops and the single `nextEnv` decrypt point — the one place a new frame can be recorded without an ordering assumption |
-| `internal/control/server_test.go` | `shortTempDir` | `os.MkdirTemp("/tmp", …)` — the recipe that keeps a test's unix socket inside macOS's 104-byte `sun_path` limit |
-| `internal/control/client_test.go` | `startMisbehavingServer` | The one-connection stub-socket idiom the new ordering test copies |
-| `internal/control/protocol.go` | `Request`, `Response`, `ApprovePayload`, `ApproveResult` | What the stub server decodes and answers |
-| `docs/knowledge/features/fakeclaude-binary-stream-json-mode.md` § "Approve rider" | — | The rider's house rules: default-off, `runStreamJSON` stays byte-identical, duplicate rather than widen |
-| `docs/knowledge/features/agentrun-selfcheck-package.md` | — | The quoted permissions reference: the deny-default boundary lives *between* the `tool_use` emission and its `tool_result` — the position evidence |
-| `docs/knowledge/features/permission-protocol-spike.md` | — | Why the committed captures pin only the block's *shape*: no gate fired in any of them |
-
 ## Context
 
 `runStreamJSONApprove` originates one `control.Approve` per user turn and writes a verdict needle plus a `result` line. It emits **no** assistant `tool_use` block at all, so the daemon's parser produces no `turnevent.ToolStart`, and #1917's `turnBusyTracker` retention (`setBusy`'s in-flight map, fed via `toolCallDeltaFor`) stays empty for the whole approval.

@@ -4,48 +4,6 @@ Pin the committed `AskUserQuestion` capture with a deterministic, credential-fre
 reader: the repo, not a token-spending live run, is what proves the bytes
 downstream code parses are present, still shaped as expected, and clean.
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/e2e/realclaude/initialize_control_compare_test.go` → `initControlArmFixtureGlob`,
-  `initControlDiscoverArms` — **the idiom this file follows**: relative glob constant,
-  `filepath.Glob` error branch, zero-match `t.Fatalf`, `os.ReadFile`, decode through the
-  family's own record type. Read the glob's doc comment for why a glob beats addressing
-  the family by exact name.
-- `internal/e2e/realclaude/permission_protocol_regression_test.go` → `fixtureGlob`,
-  `TestRealClaude_PermissionProtocol_RegressionFixtures` — the original zero-match
-  "deleted fixture set must be loud" phrasing.
-- `internal/e2e/realclaude/ask_user_question_shape_test.go` → `requireAskQuestionShape`,
-  `askQuestionShapeFindings`, `askQuestionInput` — the shape assertion this file calls
-  and must not restate. Read `requireAskQuestionShape`'s doc for the never-`%+v`-the-record
-  rule, and the file header for the presence-not-truth limit on multi-select.
-- `internal/e2e/realclaude/ask_user_question_record_test.go` → `askQuestionFixtureRecord`
-  — the decode target. Four fields, no `omitempty`.
-- `internal/e2e/realclaude/ask_user_question_names_test.go` → `askQuestionFixtureName`
-  — the namer whose literal `ask_user_question_v` prefix the glob's head is derived from,
-  and the `patterns` table this file's glob must **not** be added to (see § Traps).
-- `internal/e2e/realclaude/ask_user_question_writer_test.go` → `scanAskQuestionFixture`,
-  `askQuestionPlantedPath`, `askQuestionPlantedKeyPrefix`,
-  `TestAskQuestionFixture_ScanRefusesAPlantedValue` — the write-path scan (which this
-  file must **not** call), the synthetic plants it reuses, and the inline
-  `dropcapScanner{needles: dropcapFixedNeedles()}` construction it copies.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapFixedNeedles`,
-  `dropcapScanner`, `newDropcapScanner`, `dropcapMinNeedle`, `dropcapDenyUsers`,
-  `dropcapContains` — the deny-scan. `dropcapFixedNeedles`' doc states the property this
-  slice depends on outright.
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans`,
-  `TestFinOfflineFilesReachNoExecHelper` — the ban table and the AST check that enforces
-  it. Read the `"initialize_control_compare_test.go"` and `"ask_user_question_writer_test.go"`
-  entries; this file's entry is composed from both.
-- `docs/knowledge/features/e2e-realclaude-initialize-control-compare-test-go.md`
-  — the lessons from the only other offline reader in this directory, in particular the
-  three shipped claims that adding a family glob made false.
-- `docs/knowledge/features/e2e-realclaude-ask-user-question-writer-test-go.md`
-  — the writer's deny-scan lessons.
-- `CODING-STYLE.md` § "Comments — Citing Other Code" — symbol citations only; `make cite-guard`
-  is a build gate with no depth and no range exemption.
-
 ## Context
 
 #1938's live run produced `internal/e2e/realclaude/testdata/ask_user_question_v2.1.239.json`

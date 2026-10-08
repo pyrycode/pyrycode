@@ -10,30 +10,6 @@ Blocker #619 (tui-driver **v1.3.0** bump) is **merged** — `go.mod` is at `v1.3
 
 ---
 
-## Files to read first
-
-Read these before writing code; line ranges point at the exact contract to extract.
-
-- `internal/supervisor/supervisor.go:267-289` — `ScreenSnapshot` is the **exact capture pattern** the new `Session()` accessor mirrors (lock `sessMu`, read `s.sess`, unlock, nil-check). Copy its shape.
-- `internal/supervisor/supervisor.go:120-155` — the `Supervisor` struct: `sessMu` + `sess *tuidriver.Session` + `sessReadyCh`. `Session()` reads `sess`; the producer's subscriber uses `WaitForPTY`.
-- `internal/supervisor/supervisor.go:306-346` — `setSession` / `WaitForPTY`: the readiness choreography. `WaitForPTY(ctx)` blocks until the **next** hosted session is live — the producer's subscriber calls it before each subscription.
-- `internal/turnevent/event.go` — the output model: `Event` (sealed sum type), `TextChunk`, `ThoughtChunk`, `ToolStart`, `ToolUpdate`, `TurnEnd`, `Location`. **Map INTO these verbatim; do not introduce a parallel set.**
-- `internal/turnevent/taxonomy.go` — `ToolKind` / `ToolStatus` / `TurnEndReason` enums + `Valid()`. The producer fills `ToolStart.Kind`, `ToolUpdate.Status`, `TurnEnd.Reason` from these.
-- `internal/turnevent/content.go` — `ToolContent` sum type; `TextContent` is what a `ToolUpdate` carries here. `nil` content is legal (status-only).
-- `<modcache>/github.com/pyrycode/tui-driver@v1.3.0/pkg/tuidriver/events.go:15-170` — `EventKind` (11 variants), the `Event` struct (`Kind` / `Source` / `Time` / `Modal` / `Entry`), and `Session.Events(ctx, jsonlPath, startOffset, tr *Tracker)`. **Confirm the exact `EventKind` variant names against this file** before writing the type switch (the ticket lists 11; this is the source of truth).
-- `<modcache>/.../tuidriver/jsonl.go:80-135,297-337` — `JSONLEntry` / `EntryMessage` / `ContentBlock` shapes, `AssistantText` (text-block extractor the producer reuses), `IsEndTurn`. Note `JSONLEntry.RawLine` (the verbatim line bytes `ParseToolUse`/`ParseToolResult` take).
-- `<modcache>/.../tuidriver/tool_use.go` — `ParseToolUse(snap []byte) *ToolUse` → `{ID, Name, Input map[string]any}`. Returns nil unless the line is an `assistant` envelope with a `tool_use` block.
-- `<modcache>/.../tuidriver/tool_result.go` — `ParseToolResult(snap []byte) *ToolResult` → `{ToolUseID, IsError, Content any}`. Gates on `user` envelope with a `tool_result` block.
-- `<modcache>/.../tuidriver/tracker.go:17-81` — `NewTracker(TrackerOpts{})` + `DefaultPTYQuietLimit`. `Session.Events` requires a **non-nil** `*Tracker` (nil panics); a default tracker suffices here (it only drives the dropped stall arm).
-- `<modcache>/.../tuidriver/jsonl.go:35-78` — `SessionJSONLPath` / `WaitForSessionJSONL`; the subscriber uses `WaitForSessionJSONL` to gate on the file existing before `Events`.
-- `internal/sessions/reconcile.go:50-89` — `mostRecentJSONL` + `DefaultClaudeSessionsDir`. **Reference only** — the production JSONL resolver belongs to #616, NOT this slice (see § "Open question: which JSONL"). Read it to understand the resolution the resolver will perform.
-- `cmd/substrate-guard/main.go:50-72` — the banned-literal list. The mapper's string literals (`"thinking"`, `"text"`, `"assistant"`, `"user"`, tool names) are **not** on it; the guard scans test files too, so **fixtures must avoid the banned tokens** (spinner/idle glyphs, `"Pasted text"`, `\x1b[`, …).
-- `docs/knowledge/codebase/606.md` and `607.md` — how the internal model (#606) and the wire types (#607) were built; the conventions this producer feeds.
-
-`<modcache>` = `$(go list -m -f '{{.Dir}}' github.com/pyrycode/tui-driver)` (currently `~/go/pkg/mod/github.com/pyrycode/tui-driver@v1.3.0`).
-
----
-
 ## Context
 
 ADR 025 § Phase 2 introduces structured streaming: a phone advertising the `interactive` capability should receive typed events (thinking, tool use, assistant text, turn boundaries) instead of the coarse finished-turn `message` fan-out (#589). The neutral internal model (#606) is the decoupling layer between tui-driver's event vocabulary and the v2 mobile wire vocabulary (#607). This ticket fills that model from tui-driver; #616 drains the model out to the wire.

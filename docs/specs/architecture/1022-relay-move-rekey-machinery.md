@@ -9,26 +9,6 @@
 
 It is a **pure move**, the mirror image of #1021 (which explicitly left `handleRekeyInit` and the rekey timers "for the later re-key slice" — this is that slice). No exported identifier changes; no logic changes; because every declaration stays in `package relay`, **no call site anywhere in the tree changes** — Go resolves package-level identifiers across files regardless of which file they live in. In particular, `(*V2SessionManager).Rekey`'s satisfaction of `control.Rekeyer` (consumed by `internal/control/server.go` and `cmd/pyry/rekey.go`) is a property of the method set of a type in a package, not of the file the method is defined in — moving the method file-to-file leaves it satisfied.
 
-## Files to read first
-
-- `internal/relay/v2session.go:53-77` — the three re-key duration vars (`rekeyInterval` 53–57, `rekeyReplyTimeout` 59–65, `rekeyRetryInterval` 67–77), contiguous. **Move block A.** Note lines 79+ (`modalDenyTimeout`, `idleTimeout`, the three `Err*` sentinels) begin immediately after — they STAY.
-- `internal/relay/v2session.go:104-128` — `ErrConnNotFound` / `ErrSessionNotOpen` / `ErrTransportDown`. **STAY** (ticket: leave shared sentinels in core). `Rekey`/`handleManualRekey` reference them by same-package name after the move.
-- `internal/relay/v2session.go:130-149` — `wakeKind` iota block (`wakeRekeyEmit`, `wakeRekeyReplyTimeout`, `wakeIdleTimeout`) + `wakeSignal`. **STAY.** The block contains the non-rekey `wakeIdleTimeout`; splitting it would fracture the iota ordering. Moved funcs reference the two rekey kinds by name.
-- `internal/relay/v2session.go:151-158` — `manualRekeyReq` type. **Move block B.**
-- `internal/relay/v2session.go:289-420` — `V2Session` struct + field doc comments (`rekeyTimer`, `rekeyReplyTimer`, `awaitingRekeyReply`, referenced by name in the doc at 336–363). Read-only context: struct + fields STAY (a struct cannot be split across files); the moved methods mutate these fields by name (same package). The struct doc at 293 *mentions* `handleRekeyInit` in prose — a comment reference, no compile dependency.
-- `internal/relay/v2session.go:421-457` — `rekeyComplete` (method on `*V2Session`; doc starts 421, func 442). **Move.** Methods may live in any file in the package even though `V2Session` stays in core.
-- `internal/relay/v2session.go:1085-1150` — the three arm-timer methods: `armRekeyTimer` (doc 1085), `armRekeyReplyTimer` (doc 1103), `armRekeyRetryTimer` (doc 1119, func ends 1150). **Move.**
-- `internal/relay/v2session.go:1151` — `armIdleTimer`. **STAYS** — idle-timeout, not rekey (ticket-stated). It sits immediately after `armRekeyRetryTimer`; do not carry it along.
-- `internal/relay/v2session.go:1248-1379` — `handleRekeyInit` (doc 1248, func 1276, ends before `dispatchAppFrame` at 1380). **Move.** Calls `s.rekeyComplete(m, ctx)` at 1360 (moves too).
-- `internal/relay/v2session.go:1493-1559` — `handleRekeyRequest` (doc 1493, func 1510, ends before `handleRequestSnapshot` at 1560). **Move.**
-- `internal/relay/v2session.go:2642-2732` — `emitRekeyRequest` (doc 2642, func 2670, ends before `sealError` at 2733). **Move.**
-- `internal/relay/v2session.go:2843-2875` — `Rekey` **plus** the `var _ control.Rekeyer = (*V2SessionManager)(nil)` assertion at line 2860 (doc 2843, assertion 2860, func 2862). **Move both** — the assertion is the interface-satisfaction anchor for the moved method; keep them together. (Leaving the assertion in core also compiles; moving it keeps the concern cohesive.)
-- `internal/relay/v2session.go:2877-2953` — `handleManualRekey` (doc 2877, func 2889, ends before `Push` at 2954). **Move.**
-- `internal/relay/v2session.go:995-1053` — the manager Run loop's `m.manualRekey` arm (996 → `handleManualRekey`) and `handleWake`'s `wakeRekeyEmit` arm (1042 → `armRekeyRetryTimer`, 1050 → `emitRekeyRequest`). **STAY** — the wake/dispatch infrastructure; they call the moved funcs by same-package name.
-- `internal/relay/v2session.go:1393` — the recv-loop call `m.handleRekeyRequest(...)`. **STAYS** (caller); same-package call.
-- `internal/relay/v2session_handshake.go:99,315` — this file (created by #1021) calls `handleRekeyInit` (99) and `armRekeyTimer` (315). **STAYS UNTOUCHED.** After the move those references resolve same-package to the new file. Do not edit it — AC#3.
-- `docs/specs/architecture/1021-relay-move-noise-handshake.md` — the sibling move spec; this spec mirrors its shape and conventions.
-
 ## Design
 
 ### What moves, into what

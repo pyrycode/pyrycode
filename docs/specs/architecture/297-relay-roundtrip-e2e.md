@@ -1,21 +1,5 @@
 # 297 — net/e2e: relay roundtrip (appendix-flow happy path)
 
-## Files to read first
-
-- `internal/e2e/relay_send_message_test.go` — closest existing pattern; copy the pair → seed `conversations.json` → `StartRotationWithRelay` → wait-for-binary-hello → phone dial → `hello`/`hello_ack`/`send_message`/`ack` scaffolding. Most of the new test mirrors this verbatim.
-- `internal/e2e/relay_assistant_turn_test.go` — pattern for the step-5 `message` echo: `PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER` env + `asstTrigger` write + the drain-until-marker loop that ignores TUI prelude chunks.
-- `internal/e2e/register_push_token_test.go` — pattern for the step-6 verb. Use this AC subset verbatim; don't re-check on-disk persistence here (that's already pinned on the dedicated test — this test stays an envelope-protocol test).
-- `internal/e2e/internal/fakephone/fakephone.go:66-150` — `Dial`/`Send`/`Receive(timeout)` surface and `ErrReceiveTimeout` sentinel. Receive is one-shot and bounded; no polling.
-- `internal/e2e/internal/fakerelay/fakerelay.go:150,591` — `URL()` and `LastBinaryHello(serverID)` are the two surfaces this test uses.
-- `internal/e2e/harness.go:227,317,649` — `StartInWithEnv`, `StartRotationWithRelay`, `RunBareIn`. Use `StartRotationWithRelay` because step 5 needs a fakeclaude wired so the assistant-turn bridge has something to echo.
-- `internal/protocol/handshake.go` — `HelloAckPayload`, `HelloClientPayload`, `AckPayload`.
-- `internal/protocol/messaging.go` — `SendMessagePayload`, `MessagePayload`.
-- `internal/protocol/conversations_read.go` — `ListConversationsPayload{}` (empty), `ConversationsPayload{Conversations []ConversationSummary}`.
-- `internal/relay/handlers/list_conversations.go` — confirms the binary projects all rows and orders by `LastUsedAt` then `ID`. Used to predict what the test should see.
-- `cmd/pyry/relay.go:132-148` — confirms `TypeListConversations`, `TypeRegisterPushToken`, `TypeSendMessage` are all registered on the per-conn dispatcher, and the assistant-turn bridge runs when a bridge is present (it is, via `StartRotationWithRelay`).
-- `docs/PROJECT-MEMORY.md` § "`time.Time` round-trip discipline" — JSON marshal strips the monotonic clock; compare `time.Time` via `time.Time.Equal`, never `==` / `reflect.DeepEqual`.
-- `docs/protocol-mobile.md:712-end` — the appendix the test drives.
-
 ## Context
 
 The wire-protocol stack ships in five layers: payload types (`#271–#275`), transport (`#247`), binary↔relay handshake (`#248`), inbound-token check (`#249`), per-verb handlers (`#250`, `#312`, `#319`, `#323`), and the claude→message bridge (`#311`). Three existing e2e tests each pin one slice:

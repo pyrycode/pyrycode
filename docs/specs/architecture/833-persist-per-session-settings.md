@@ -19,19 +19,6 @@ The interactive supervised-spawn path (`buildSession` / `New`) currently omits `
 - The **daemon-restart round-trip** (AC #1: save → reload → identical) is exercised end-to-end for the **bootstrap** session (write registry → `New` reads settings → applied to argv → `saveLocked` re-persists identically). For minted sessions the round-trip is at the registry-serialization layer only — a pre-existing limitation, not this ticket's concern.
 - Both spawn-config assembly sites therefore need the settings applied: **`New`** (bootstrap) and **`buildSession`** (minted). They share one small pure helper.
 
-## Files to read first
-
-- `internal/sessions/registry.go:17-29` — `registryFile` + `registryEntry`; the existing `omitempty` fields (`Bootstrap`, `LifecycleState`) are the exact pattern the three new fields follow. **What to extract:** field-tag style + the "new per-session fields can be added without breaking old pyry" contract.
-- `internal/sessions/registry.go:31-51` — `loadRegistry`: lenient `json.Unmarshal` (missing keys → zero values) **and** hard-error on malformed JSON. **What to extract:** this is the fail-loud path that satisfies AC #2's "corrupt YOLO must never silently enable bypass" — a wrong-typed `yolo` fails the whole parse; no new reject branch is needed.
-- `internal/sessions/pool.go:355-417` — `New`: the bootstrap warm-start read (`pickBootstrap`, lines 355-370) and the bootstrap `supCfg` assembly (lines 389-417). **What to extract:** where to read `entry.Model/Effort/YOLO` and where to apply the settings flags to `supCfg.ClaudeArgs`.
-- `internal/sessions/pool.go:1035-1096` — `buildSession`: `args := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))` (line 1037) and the `&Session{...}` literal. **What to extract:** the minted spawn-config site; where the settings param is applied and stored on the Session.
-- `internal/sessions/pool.go:1185-1215` — `saveLocked`: builds `registryEntry` from `*Session` fields; note the `omitempty`/`LifecycleState` discipline (only written when non-default). **What to extract:** where to copy `s.settings` into the entry.
-- `internal/sessions/get_or_create.go:58-71` — `GetOrCreateIn`: the **second** `buildSession` caller. **What to extract:** the 1-line call-site update.
-- `internal/sessions/session.go:64-108` — `Session` struct; the "Persisted metadata … immutable post-New" block (lines 70-77). **What to extract:** where the `settings` field goes and the immutability/locking discipline it inherits (read under `Pool.mu`, like `label`).
-- `internal/agentrun/ptyrunner/runner.go:595-604` — `buildArgs`: the canonical flag literals `--session-id` / `--model` / `--effort`. **Reference only — NOT a shared code path.** **What to extract:** exact flag spellings.
-- `internal/sessions/pool_spawndir_test.go:17-42` — the argv-recorder test idiom: template `ClaudeArgs` is a `sh -c SCRIPT --` whose script observes its own positional params (the appended flags) and writes a side-effect file. **What to extract:** reuse this pattern for the end-to-end spawn-argv assertion (AC #3/#4/#5).
-- `docs/specs/architecture/538-permission-mode-dontask-argv.md` — confirms `--dangerously-skip-permissions` is forbidden on the agent-run path; the interactive supervised path here is its sole legitimate user (bypass-mode reference).
-
 ## Design
 
 Three moving parts, all in `internal/sessions`:

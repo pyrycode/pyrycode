@@ -7,22 +7,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/sessions/transition.go:47-72` — `notifyTransition` (the off-lock chokepoint both reasons pass through) + `onRotate`. **The reason-branch and the new `rebindConversation` land here.**
-- `internal/conversations/registry.go:169-207` — `Update` / `Delete` conventions to mirror for the new `RebindSession`: scan-under-`r.mu`, first-match, **no Save** (caller owns persistence).
-- `internal/conversations/conversation.go:44-59` — the documented `CurrentSessionID` + `SessionHistory` field contracts. `SessionHistory` is oldest-first; "rotation appends in place (`append(SessionHistory, prevID)`)" is the contract AC#1 must satisfy.
-- `internal/sessions/pool.go:154-222` — `Pool` struct: the read-only-after-`New` fields the rebind reads — `convReg` (`*conversations.Registry`), `convRegistryPath` (string), `log` (`*slog.Logger`); plus the `transitionObserver` single-slot doc.
-- `internal/sessions/pool.go:443-480` — `RotateID`: the in-memory map re-key (`sess.id = newID`, `:470`) that **precedes** the rebind, and its `Pool.mu → Session.lcMu` / `saveLocked` lock-order invariants. The rebind runs *after* `RotateID`, off all pool locks.
-- `internal/sessions/session.go:270-306` — the **eviction** fire site: `notifyTransition` with `PreviousID = s.id`, `NewID == ""` (`:291`). This is the signal the reason-branch must **not** rebind (AC#2).
-- `cmd/pyry/session_transition_v2.go:186-223` — the #657/#659 producer that already owns the **single** observer slot (`SetTransitionObserver(emitter.Enqueue)`, `:207`). Why a second observer is impossible, and why the rebind drives from the server-side `notifyTransition`, not a new observer.
-- `cmd/pyry/main.go:909-932` — `sessionRouter.resolve`: the `CurrentSessionID == "" → errNoBoundSession` guard (`:923`) that AC#2's binding-neutrality protects (the `send_message` respawn path the ticket cites at `main.go:923`).
-- `internal/sessions/pool_conv_sweep_test.go:1-50` — `seedConvRegistry` helper + the `pool.convReg = …; pool.convRegistryPath = …` in-package test-wiring pattern to reuse for the pool-side rebind tests.
-- `internal/sessions/transition_test.go:41-102, 220-246` — `transitionRecorder` + the `onRotate` happy/unknown-id/nil-observer test shapes the rebind tests extend.
-- `internal/conversations/registry_test.go:517-572, 765-797` — `TestRegistry_Update_Hit/Miss` + `TestRegistry_Promote_DoesNotPersist` shapes to mirror for the `RebindSession` unit tests.
-
----
-
 ## Context
 
 `internal/conversations.Conversation` documents two binding fields — `CurrentSessionID` (`conversation.go:44`) and the oldest-first `SessionHistory` trail (`conversation.go:51`) — but the **rotation-case maintenance is documented and never implemented**: `Registry.Update` has no production caller, `SessionHistory` is never written, and the `/clear` rotation seam (`onRotate → RotateID`) re-keys the pool's session map but leaves the conversation registry frozen at its creation-time binding (`create_conversation.go:197`).

@@ -1,12 +1,5 @@
 # 347 — `EncodeProjectDir` helper for `~/.claude/projects/` dashed name
 
-## Files to read first
-
-- `internal/agentrun/trust.go:22-36` — `ResolveWorkdir` contract: `filepath.Abs` then `filepath.EvalSymlinks`, error wrapping format. The new helper chains this verbatim.
-- `internal/agentrun/trust.go:1-20` — package doc + import set already present (`path/filepath`, `strings` not yet imported).
-- `internal/agentrun/trust_test.go:15-68` — existing `ResolveWorkdir` test patterns: `runtime.GOOS != "darwin"` skip, `t.TempDir()`, `errors.Is(..., fs.ErrNotExist)`. The new tests mirror these shapes.
-- `docs/lessons.md:52` — "Don't trust ticket bodies on filesystem layout — observe." The ticket AC says only `/` is replaced; observation under `~/.claude/projects/` shows `.` is ALSO replaced with `-` (e.g. `/Projects/.pyrycode-worktrees/` → `-Projects--pyrycode-worktrees-`). See Open Questions.
-
 ## Context
 
 `pyry agent-run`'s JSONL watcher (#333, sibling ticket) and other future consumers need to compute the dashed directory name claude uses to store JSONL session files. That encoding rule must live in one named place — not be inlined as `strings.ReplaceAll` at each call site — so every consumer agrees on the key shape and a single test pins the rule against claude's actual on-disk layout.

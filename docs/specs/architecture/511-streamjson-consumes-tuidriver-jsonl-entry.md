@@ -2,29 +2,6 @@
 
 Confirms PO's size: **S**. Two production files (`emitter.go` + a ~10-LOC adapter in `runner.go`), one test file (`emitter_test.go`), no dependency bump (`tuidriver.JSONLEntry` + `IsEndTurn` shipped before #509's `go get`).
 
-## Files to read first
-
-- `internal/agentrun/streamjson/emitter.go` (334 LOC, full file).
-  - `Emit(ev jsonl.Event) error` at lines 171–202 — the only function whose signature changes.
-  - `usageTotals` at lines 98–103 — internal accumulator, **stays unchanged**.
-  - State-update block at lines 181–193 — five field reads that must be remapped to `tuidriver.JSONLEntry` accessors.
-  - Byte-passthrough at lines 195–196 — `append([]byte(nil), ev.Raw...) + '\n'`. Shape stays; source field changes to `entry.RawLine`.
-  - Doc comment at lines 161–170 — needs one-line update (s/`jsonl.Event`/`tuidriver.JSONLEntry`/) plus a sentence pinning the byte-passthrough source as `RawLine` (not `Raw`).
-- `internal/agentrun/streamjson/emitter_test.go` (729 LOC, full file). Every `jsonl.Event{...}` and `jsonl.UsageBlock{...}` literal becomes a `tuidriver.JSONLEntry{...}` literal. Hot spots:
-  - `TestEmit_RawPassthrough_PreservesBytesVerbatim` (lines 80–125) — three table rows, each constructs `jsonl.Event{Raw: ...}`. Rewrite to `tuidriver.JSONLEntry{RawLine: ...}`.
-  - `TestEmit_AggregatesUsage` (lines 127–176) — five-entry table, two carry `Usage`. Rewrite. **The usage entries must carry a `Message.Raw["usage"]` map** since that's where the new code reads it from.
-  - `TestEmit_NumTurnsCountsAssistantEvents` (lines 178–199) — eleven `jsonl.Event{Kind: k, Raw: ...}` literals. Rewrite (`Kind` → `Type`).
-  - `TestEmit_LastStopReasonWins` (lines 201–220) and similar small tests — each `jsonl.Event{Kind, StopReason, EndOfTurn, Raw}` literal becomes `tuidriver.JSONLEntry{Type, Message: &tuidriver.EntryMessage{StopReason: ...}, RawLine: ...}`.
-  - `TestCapturedFixture_ByteEquivalence` (lines 530–613) — currently drives the fixture through `jsonl.NewReader`. Must stop importing `jsonl`. Replacement strategy in § Testing.
-- `internal/agentrun/ptyrunner/runner.go` lines 360–399 — the watcher → emitter wiring. The `OnEvent` closure at 365–370 grows the adapter. The `watcher.OnEvent func(jsonl.Event)` Config field signature **does not change** (per AC #6 path (a)).
-- `internal/agentrun/jsonl/reader.go` lines 144–158 (`rawAssistantMessage` decode) — reference shape for the usage walk. The new `streamjson` helper does the equivalent extraction but starting from `entry.Message.Raw["usage"]` (a `map[string]any` produced by tuidriver's `parseMessage`) rather than from raw JSON bytes. Type switch is `float64 → int`, not `int`.
-- `internal/agentrun/streamjson/testdata/captured_run.jsonl` — fixture. Used by `TestCapturedFixture_ByteEquivalence` and `TestNew_InitLineKeyOrderMatchesFixture`. **Stays untouched.**
-- tuidriver module cache (`$GOMODCACHE/github.com/pyrycode/tui-driver@v0.0.0-20260523181457-c2dcd1e49992/pkg/tuidriver/jsonl.go`):
-  - `JSONLEntry` (lines 108–113) — four fields: `Type string`, `Message *EntryMessage`, `Raw map[string]any`, `RawLine []byte`. `RawLine` contract: "byte-identical to what parseEntry consumed, with the trailing `\r\n` or `\n` stripped" (lines 96–101). Same shape as `jsonl.Event.Raw` (`reader.go:66-71`).
-  - `EntryMessage` (lines 120–125) — `ID`, `StopReason`, `Content []ContentBlock`, `Raw map[string]any`. The library guarantees `Raw` is populated for every parsed message envelope.
-  - `IsEndTurn(e JSONLEntry) bool` (lines 297–305) — assistant ∧ `StopReason == "end_turn"` ∧ `AssistantText(e) != ""`. Verified semantically equivalent to `jsonl.Event.EndOfTurn` (`reader.go:62-64`).
-  - `parseMessage` (lines 251–266) — confirms `Message.Raw` is the verbatim `message` map decoded with `encoding/json`, so numeric fields surface as `float64`.
-
 ## Context
 
 After `tui-driver` #101 (CLOSED, vendored), the per-entry parser the watcher consumes from is owned by the tui-driver library. The downstream stream-json emitter is the last consumer in the runtime hot-path still typed on the local `jsonl.Event` shape. Migrating it to `tuidriver.JSONLEntry` collapses one of the two seams in this slice (the other — replacing the watcher's `jsonl.NewReader` with `tuidriver.TailJSONL` — is #512's job).

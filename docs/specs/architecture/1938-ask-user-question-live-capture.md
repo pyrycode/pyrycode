@@ -6,33 +6,6 @@
 
 ---
 
-## Files to read first
-
-This is the turn-1 data load. Read these before writing anything; each entry names the symbol and what to extract from it.
-
-| Path | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/permission_protocol_spike_test.go` | `TestRealClaude_PermissionProtocol_Spike` | The live-spawn skeleton this test mirrors: pipes, the single reader goroutine, `cmd.Wait()` then `<-readerDone`, the deadline-tripped check. **Do not copy its argv** — see § "What the spike gets wrong for this ticket". |
-| same | `captureClaudeVersion` | Returns `(raw, token)` — exactly the record's two version fields from one exec. Use it; do not re-derive. |
-| same | `versionSlug`, `packageDir` | `versionSlug` produces `ClaudeVersionSlug` from the token; `packageDir` resolves the committed `testdata/` parent. |
-| `internal/e2e/realclaude/ask_user_question_record_test.go` | `askQuestionFixtureRecord` | The four fields and their tags. `ToolInput` is `json.RawMessage` — **never** decode-and-re-marshal it. |
-| `internal/e2e/realclaude/ask_user_question_writer_test.go` | `scanAskQuestionFixture`, `writeAskQuestionFixture` | The only sanctioned route to the artifact. Note the `t.Fatalf`-from-the-test-goroutine rule in both doc comments, and the "never `%v` the record" rule. |
-| `internal/e2e/realclaude/ask_user_question_names_test.go` | `askQuestionFixtureName` | The writer mints the name from `rec.ClaudeVersionSlug`. You never call this yourself. |
-| `internal/e2e/realclaude/ask_user_question_shape_test.go` | `requireAskQuestionShape`, `askQuestionShapeFindings`, `askQuestionInput` | The eight checks the captured bytes are measured against, and the decode target that must not be widened. |
-| `internal/e2e/realclaude/dropped_line_capture_test.go` | `newDropcapScanner`, `dropcapScanner.scan`, `dropcapFixedNeedles` | The scanner constructor this run passes to the writer — the dynamic half, not `dropcapFixedNeedles()`. See § "The scanner". |
-| `internal/e2e/realclaude/fixtures.go` | `WithWorktreeAuthenticated`, `ensurePyryBuilt`, `buildEnvWithRealHome` | Credential skip + the `pyry` binary the mcp-config points at. `ensurePyryBuilt` builds under the operator's real `HOME` on purpose. |
-| `internal/e2e/realclaude/resilience_test.go` | `resolveClaudeBin` | The claude-binary skip, with the fork-bomb defence. |
-| `internal/e2e/realclaude/harness_daemon_test.go` | `shortSocketPath` | Already solves the 104-byte `sun_path` cap. Reuse it — do not write a second one. |
-| `cmd/pyry/mcp_config.go` | `renderMCPApproveConfig`, `permissionArgs`, `approveToolRef` | The exact config document and flag set to reproduce. Package `main`, so not importable — transcribe the shape. |
-| `cmd/pyry/mcp_approve.go` | `mcpServerName`, `approveToolName`, `runMCPApprove`, `approveServer.toolsCall` | The server name/tool name the prompt-tool reference is built from, and the proof that diagnostics go to **stderr** so stdout stays a clean MCP frame stream. |
-| `internal/control/protocol.go` | `ApprovePayload`, `ApproveResult`, `Request`, `Response`, `VerbMCPApprove` | What the stub socket decodes and answers. `ApprovePayload.Input` is `json.RawMessage` — this is why the bytes survive verbatim. |
-| `internal/control/client.go` | `Approve`, `requestPatient` | One fresh connection per approval, no client read deadline. The stub must therefore **accept in a loop**, not once. |
-| `internal/e2e/internal/fakeclaude/approve_test.go` | `TestRunStreamJSONApprove_ToolUsePrecedesTheDial` | The working stub-socket recipe: `json.NewDecoder(conn).Decode(&control.Request)` → `json.NewEncoder(conn).Encode(control.Response{...})`. Copy the shape, not the file (different package, different build tag). |
-| `docs/knowledge/features/e2e-realclaude-ask-user-question-shape-test-go.md` | § "Lessons that outlive this ticket" | **Required.** Carries the batch-width limitation (only `in.Questions[0]` is checked) and the "#1938 should know this property is unpinned" note. |
-| `docs/knowledge/features/e2e-realclaude-ask-user-question-writer-test-go.md` | § "Lessons that outlive this ticket" | **Required.** Carries the family's recurring defect: doc-comment claims that ship unmeasured. Applies directly to the header you are about to write. |
-
----
-
 ## Context
 
 `AskUserQuestion` is claude's clarifying-question tool. #1906 wants that question batch carried out to interactive clients; #1925 is the slice that gets its wire bytes on disk so the parser downstream is written against a measurement rather than vendor prose.

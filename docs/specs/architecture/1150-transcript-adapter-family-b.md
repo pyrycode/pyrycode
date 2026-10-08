@@ -4,22 +4,6 @@
 
 Mirror of the merged Family A migration (#1149). The outbound-stream resolver family in `cmd/pyry/interactive_turn_stream_v2.go` becomes a thin set of adapters over the `internal/transcript` leaf (#1148, merged in PR #1155). No public signature changes, no consumer cascade — a net **deletion** of duplicated logic (the local `jsonlStreamExt` const + `jsonlStemPattern` regexp go away). The two load-bearing conventions are preserved and re-pinned by test: Family B's **error-on-not-found** (subscriber retries, so every no-result returns a non-nil error, never `("", 0, nil)`) and its **per-subscription cold/warm offset rule** (`resolvedOnce` / `sawEmpty`).
 
-## Files to read first
-
-- `cmd/pyry/interactive_turn_stream_v2.go` — the only production file with logic changes. Read as five units:
-  - `jsonlStreamExt:22` (const) + `jsonlStemPattern:55` (regexp) — the two local symbols to **delete** (grep-confirmed: used only inside this file's four resolvers). Both replaced by `transcript.Ext` / `transcript.ValidStem`.
-  - `availabilityReporter:34` + `bootstrapProbeUsable:41` — **kept** (see § "What stays local" — byte-identical to Family A's retained `probeUsable`, a load-bearing branch-selector, not resolver core).
-  - `resolveLatestSessionJSONL:189` — rewrite over `transcript.Newest`; keep the cold/warm offset closure.
-  - `resolveBootstrapJSONL:269` (dispatcher) + `resolveOwnBootstrapJSONL:323` — dispatcher swaps one `MatchString` → `ValidStem`; the probe resolver adopts `CanonicalDir` + `GuardProbedPath` but keeps its per-branch pid/probe/empty/stat orchestration (§ "Why `GuardProbedPath`, not `Probed`").
-  - `resolveBoundSessionJSONL:531` — `ValidStem` branch-selector + `StatByID`; keep the cold/warm offset closure.
-  - `resolveTarget:467` — the consumer that builds these resolvers. **Read for context only; unchanged.**
-- `internal/transcript/transcript.go:36-225` — the primitives to adopt: `Ext:38`, `ValidStem:48`, `Result:77`+`Found:83`, `CanonicalDir:89`, `GuardProbedPath:111`, `StatByID:133`, `Newest:151`. **Read `Probed:204` too, but note it is deliberately NOT adopted here** — it collapses pid≤0 / empty-open / guard-reject / vanished-before-stat into one `(Result{}, nil)`, which erases the per-branch `sawEmpty` distinction Family B's offset rule depends on (§ Design).
-- `internal/sessions/reconcile.go:112-285` — the merged Family A sibling adapter to mirror in *shape*. **Divergence to internalise:** Family A uses `transcript.Probed` + swallows its error and keeps **no** cold/warm state (it needs true size every call); Family B keeps the cold/warm state and therefore composes `GuardProbedPath` directly. The `probeUsable:151` / `availabilityReporter:144` retention decision transfers verbatim.
-- `cmd/pyry/relay.go:520` — the **second** consumer of `resolveOwnBootstrapJSONL` (`usageResolve`, a separate usage-tracking tail). Signature is preserved (3 args: `dir`, `probe`, `pidFn`), so **this line is unchanged** — confirm the build still compiles it.
-- `cmd/pyry/interactive_turn_stream_v2_test.go` — the existing resolver suite + reusable helpers: `writeJSONL:59`, `dummyPidFn:274`, `fakeProbe:292` / `OpenJSONL:292`, `noopFakeProbe:310`. The AC3 pin test builds on these; the existing per-branch tests stay green unchanged.
-- `docs/specs/architecture/838-probe-prefer-transcript-resolver.md` § "Error handling" — the source of the error-on-not-found convention this ticket must preserve verbatim (Family B is the retry-on-error side of that inversion).
-- `docs/specs/architecture/1149-transcript-adapter-family-a.md` (on `main`, merged commit `e0ff90a`) — the mirror spec; read its § "What stays local" and § "Testing strategy" for the shared idiom.
-
 ## Context
 
 `internal/transcript` (#1148) owns the resolver core shared by two near-twin families: dir canonicalisation, the confidentiality guard, by-id / probe / newest-by-mtime selection, and the canonical UUID-stem regexp. #1148 created the leaf **without migrating any consumer** (its code-review pinned "0 consumer imports + 3 regexps intact" as the scope gate). Family A migrated first (#1149, merged). This ticket is the Family B migration.

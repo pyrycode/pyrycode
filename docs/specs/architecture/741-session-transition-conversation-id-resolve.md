@@ -3,18 +3,6 @@
 **Size:** XS (PO sized S; downgraded — see § Size).
 **Security-sensitive:** yes (outbound dispatch decision; mis-resolution = cross-conversation confidentiality leak). Security review appended at end.
 
-## Files to read first
-
-- `cmd/pyry/session_transition_v2.go` — the producer. `broadcast` (line 106) maps `t → payload` via `toWirePayload` (line 163), marshals once, fans to interactive conns. `newSessionTransitionEmitterV2` (line 61), `sessionTransitionEmitterV2` struct (line 46), `startSessionTransitionStreamV2` (line 200). The SECURITY comment block (lines 38–45) must be updated (it currently asserts the payload "carries no application content").
-- `cmd/pyry/relay.go:281` — `startRelayV2` already takes `convReg *conversations.Registry` as a parameter; the `startSessionTransitionStreamV2` call is at line 381, inside `startRelayV2`'s body, where `convReg` is in scope. `relay.go` already imports `internal/conversations` (line 10). This is why no `main.go`/`startRelay` threading is needed (see § Design).
-- `internal/conversations/registry.go:152` — `List()` returns a lock-guarded copy of the conversation slice; `RebindSession` (line 213) is the single-owner + empty-`oldID`-guard precedent to mirror in the read scan. There is **no** by-session-id read method — confirming the ticket's "duplicated scan here" decision.
-- `internal/conversations/conversation.go:44–59` — `CurrentSessionID string` and `SessionHistory []string` fields. `SessionHistory` is **append-only, never capped** (only writer is `RebindSession`).
-- `internal/sessions/transition.go:57` — `notifyTransition` rebinds (`rebindConversation` → `RebindSession`) **before** the observer fan-out on a `ReasonClear`; eviction is binding-neutral (no rebind, id retained). This is the structural ordering the read lookup relies on (#739, merged).
-- `internal/protocol/messaging.go:58` — `SessionTransitionPayload.ConversationID` (`conversation_id`, plain string, no `omitempty`) exists from #740; its doc comment names this ticket as the producer that binds it.
-- `cmd/pyry/session_transition_v2_test.go` — existing producer tests to update; `mixedSnapshot` (line 94), `decodeSessionTransition` (line 20).
-- `cmd/pyry/interactive_turn_v2_test.go:22–73` — `fakeInteractiveBcast` (`snapshots`, `pushErr`), `recordedPush`, `pushesFor`, `pushTypes`. `discardLogger` is in `assistant_turn_test.go:38`. The new tests reuse these.
-- `cmd/pyry/session_router_test.go:41` — precedent for constructing a `&conversations.Registry{}` + `Create(...)` in a `cmd/pyry` test (the read-scan unit test reuses this).
-
 ## Context
 
 The `session_transition` event ships today (capability-gated to `interactive` phones) but its `conversation_id` is always `""`, so `pyrycode-mobile#336` has no routing key for the boundary marker. Both prerequisites have landed: the wire field (#740) and the maintained binding across rotation (#739). This ticket resolves the transitioning session's owning conversation in the producer and stamps the key onto every emitted envelope, dropping the whole event when the binding is unresolvable.

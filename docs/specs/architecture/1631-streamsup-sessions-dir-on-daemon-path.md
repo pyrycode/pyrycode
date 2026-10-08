@@ -4,30 +4,6 @@ Arms #1630's inert by-id transcript probe on the production path, so a stream-js
 session that launched but never established a transcript respawns with
 `--session-id <id>` instead of crash-looping forever on `--resume <id>`.
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/streamsup_runner.go` | `mapStreamsupConfig` | The mapper this ticket adds one field to. Read its doc comment in full — two of its claims change (see § Design). |
-| `cmd/pyry/streamsup_runner.go` | `newStreamRunnerFactory` | Why `Stdout` / `OnChildExit` are installed *here* and not in the mapper: they are runtime objects. The new field is not one — that distinction is the whole placement argument. |
-| `cmd/pyry/main.go` | `resolveClaudeSessionsDir` | The daemon's existing startup derivation. **Do not reuse it here** — § Design says why. |
-| `cmd/pyry/main.go` | `confineWorkdirToHome`, `resolveSpawnDir` | The two producers of the workdirs that reach the pool. Both return `EvalSymlinks(Abs(w))` and neither canonicalises case — the gap § Design closes. |
-| `internal/sessions/reconcile.go` | `DefaultClaudeSessionsDir`, `encodeWorkdir` | The encoder. Note its contract: `""` for an empty workdir or unresolvable `$HOME`; `EvalSymlinks` alone, no case canonicalisation. |
-| `internal/agentrun/workdir.go` | `ResolveWorkdir`, `canonicalCase` | The resolution `streamsup.New` applies to produce `cmd.Dir`. `canonicalCase` is the delta that matters. |
-| `internal/streamsup/runner.go` | `useCreateForm`, `beginSpawn` | The consumer. Read that with a dir set, the probe decides **outright** — the latch is ignored on every spawn, including a `RestartFresh` rotation. |
-| `internal/streamsup/runner.go` | `Config` (`ClaudeSessionsDir` field doc) | The contract the supplied value must satisfy. |
-| `internal/sessions/runnerstate.go` | `RunnerConfig` | Confirm it already carries `WorkDir` and that no new field is needed. |
-| `internal/sessions/pool.go` | `buildSession` (the `workDir := tpl.WorkDir` / `spawnDir` override) | Where a per-conversation runner's workdir diverges from the bootstrap's — the divergence AC 1's test must force. |
-| `internal/e2e/internal/fakeclaude/main.go` | `argvSessionID`, `streamStdinLogPath`, `main` (the `envStreamJSON` branch) | The knob convention, the stem guard, and the exact place the new reject lands. |
-| `internal/e2e/harness.go` | `spawnWith`, `spawnOpts`, `writeStreamInteractiveConfig`, `seedBootstrapRegistry`, `ensureFakeClaudeBuilt`, `childEnv` | Everything the new e2e starter composes. `harness.go` itself is **not** modified. |
-| `internal/e2e/per_conversation_eviction_test.go` | `startPerConvHarness` | The precedent for a test-local starter that builds a `Harness` by hand. Mirror its shape. |
-| `internal/control/client.go` | `Status` | `*StatusPayload{Phase, ChildPID, RestartCount}` — the e2e's observable. |
-| `docs/knowledge/features/session-transcript-and-resume-probe.md` | § "The directory comparison" | #1655's measurement, and its closing paragraph naming the `canonicalCase` asymmetry as *"the finding the follow-up that supplies this directory on the daemon's production path needs"*. That follow-up is this ticket. |
-| `docs/knowledge/features/streamsup-package.md` | § `useCreateForm` | Why `StatByID` (not a hand-rolled join) and why no `Newest` fallback. AC 4's by-id-only clause restates this; do not weaken it. |
-| `docs/knowledge/decisions/032-bootstrap-resume-per-spawn-existence-probe.md` | § Related | Records that claude refuses `--session-id` against an existing transcript — the mirror failure a *wrong* directory would cause permanently. |
-
 ## Context
 
 `internal/streamsup`'s spawn loop decides its id flag from a `firstRun` latch that

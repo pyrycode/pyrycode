@@ -2,36 +2,6 @@
 
 Deletion-only. Zero lines added. Four files.
 
-## Files to read first
-
-Read the code, not the docs — see § Do not touch for why the knowledge base actively
-contradicts this ticket.
-
-- `internal/sessions/reconcile.go` → `newTranscriptResolver`, `availabilityReporter`,
-  `probeUsable`, `newProbePreferredTranscriptResolver` — the whole deleted block, plus its
-  import list. Also read `encodeWorkdir`, `workdirNonAlnum`, `DefaultClaudeSessionsDir`:
-  those three **survive** and sit above the cut.
-- `internal/sessions/reconcile_test.go` → `touchJSONL`, `stubProbe`, `unavailableProbe`,
-  `constPID`, `resolvedTempDir`, `mustNotProbe` — the six test doubles that die with their
-  only consumers. `TestEncodeWorkdir` (above the cut) and
-  `TestDefaultClaudeSessionsDir_ResolvesSymlinks` (below it) survive unmodified; the cut is
-  the contiguous span between them.
-- `internal/sessions/rotation/probe_darwin.go` → `noopProbe`'s `Available` method and its doc
-  comment. Extract: `noopProbe` itself, its `OpenJSONL`, and `DefaultProbe`'s no-`lsof` return
-  all stay — only the second method goes.
-- `internal/sessions/rotation/probe_darwin_test.go` → `TestNoopProbe_AvailableFalse`. Extract:
-  it is the first thing in the file after the imports; `fakeLsofCmd`, `TestHelperProcess`,
-  `TestOpenJSONL_TimeoutFiresWithinBound`, `TestOpenJSONL_Exit1IsBenign`,
-  `TestOpenJSONL_SuccessPassthrough` all survive and keep every import alive.
-- `internal/sessions/rotation/probe.go` → `Probe` — confirm the interface is single-method
-  (`OpenJSONL`) and that `Available` was never part of it. This is why removing the method is
-  not an interface change.
-- `internal/sessions/rotation/probe_linux.go` → `DefaultProbe`, `linuxProbe` — confirm the
-  Linux build declares neither `noopProbe` nor any `Available`, so nothing changes there.
-- `internal/transcript` → `CanonicalDir`, `Probed`, `StatByID`, `ValidStem`, `Newest` — the
-  shared core the deleted adapter composed. Untouched. Read only far enough to confirm the
-  deleted code is an adapter over it, not the resolution logic itself.
-
 ## Context
 
 `internal/sessions/reconcile.go` carries a 146-line block whose only reason to exist was to

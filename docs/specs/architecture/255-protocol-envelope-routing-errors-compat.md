@@ -1,17 +1,5 @@
 # 255 — `net`: protocol envelope, routing, error codes, v1-compat predicate
 
-## Files to read first
-
-- `docs/protocol-mobile.md:177-201` — § Message envelope. The wire shape that `Envelope` mirrors field-for-field. `id`, `type`, `ts`, `payload` are required; `in_reply_to`, `payload_encrypted` are optional with `omitempty`. Locks the JSON tag names — snake_case, no abbreviation.
-- `docs/protocol-mobile.md:100-122` — § Routing envelope. `RoutingEnvelope` is the relay-prepended `{conn_id, frame}` wrapper for binary↔relay direction. Phones never see it. `frame` is `json.RawMessage` so the relay can splice without parsing payloads.
-- `docs/protocol-mobile.md:525-542` — § Error codes table. Twelve dotted-string codes; this ticket exports them as `Code*` constants. Pin-for-pin; no extras, no omissions.
-- `docs/protocol-mobile.md:684-699` — § Reserved for v2. The `payload_encrypted: true` rule that drives the `IsV1Compatible` rejection. Restated here so the test fixtures match the spec wording.
-- `docs/protocol-mobile.md:203-499` — § Message types. The 16 v1 type discriminators that populate `types.go` constants. This ticket consumes only the type-name strings; payload struct shapes are #256.
-- `internal/conversations/registry.go:22-29` — sentinel-error declaration shape (`var ( ErrFoo = errors.New("conversations: foo") )`). The `IsV1Compatible` sentinels follow this idiom verbatim, swapping the package prefix.
-- `docs/PROJECT-MEMORY.md:60` — "Refusal-to-wire-code mapping is the consumer's job." Pins why this package exports sentinels (`ErrUnknownType`, `ErrUnsupported`) instead of dotted-string-returning functions: the package surface stays free of wire-format coupling, and the dispatcher (a future ticket) does the `errors.Is → CodeProtocolUnknownType` translation at the WS edge.
-- `docs/specs/architecture/243-conv-daemon-wiring.md` — most recent architect spec; structural template for "Files to read first / Context / Design / Concurrency / Error handling / Testing strategy / Out of scope" headings used here.
-- `CODING-STYLE.md` — `gofmt` non-negotiable, stdlib-only, sentinel errors via `errors.New`, table-driven tests. This spec inherits all four constraints; not restated below.
-
 ## Context
 
 Phase 3 Track C foundation. PR #188 (wire protocol v1 draft) merged 2026-05-08; spec is `docs/protocol-mobile.md`. This ticket lands the framing primitives — outer envelope, relay routing wrapper, error-code constants, type-name constants, and the v1-compatibility predicate — without any per-type payload structs and without any I/O.

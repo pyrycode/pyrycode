@@ -4,30 +4,6 @@
 **Label:** `security-sensitive` — the security-review pass (per `architect/security-review.md`) is mandatory and appended at the end of this spec.
 **Depends on:** #633 (structured-stream live wiring, CLOSED/merged) — the producer goroutine this layer protects is live on `main`.
 
-## Files to read first
-
-Turn-1 reading list. Read these before writing code; the design below references them by the same paths.
-
-- `internal/relay/v2session.go` — **the only production file you touch.** Specific regions:
-  - `Push` (1534–1573) + `handlePush` (1575–1615) — `Push` is rewritten to enqueue-and-return; `handlePush` is the existing Run-side seal→Encrypt→wrap→`m.send` body, kept and reused by the drain (rename suggested: `forwardEnvelope`).
-  - `Run` select loop (455–477) — replace the `case req := <-m.push:` arm with a `case <-m.drainCh:` drain arm.
-  - `V2SessionManager` struct (368–410) — the `push`/`manualRekey`/`snapshot` channel-field doc pattern you mirror; add `pushMu`/`queues`/`drainCh`, remove `push`.
-  - `pushReq` type (107–115) — removed (no longer a request/reply round-trip).
-  - `NewV2SessionManager` (416–444) — init `queues`/`drainCh`; drop the `push` channel init.
-  - `handleNoiseInit` success tail (841–857) — `s.state = V2StateOpen` is where the per-session queue is created.
-  - `closeWith` (1417–1446) — deletes the session from `m.sessions` + emits the terminal Frame+CloseCode via `m.send` directly; you add the symmetric queue delete. **Note the close envelope bypasses the buffer (it is terminal).**
-  - `handleRequestSnapshot` (1187–1252) + `snapshotReplyError` (1254–1286) — internal callers of `handlePush`; update the call name if you rename. They stay direct (already on Run; request/response correlated by `InReplyTo`, not part of the ordered push stream).
-  - `send` (1448–1462) — the `Outbound` wrapper, debug-drop posture; the slow leg the buffer decouples from.
-- `internal/transport/wssclient.go:282–309` (`Send`) + `491–505` (`sendPump`) — **the blocking model that motivates the whole ticket.** `sendCh` is **unbuffered** (96–97): `Send` blocks until `sendPump` finishes the previous `conn.Write` (≤ `WriteTimeout`, 497). When no conn is live, `Send` returns `ErrNotConnected` instantly (291–293) and the relay layer drops the frame. So `Outbound` blocks Run for at most one `WriteTimeout` window on a congested-but-alive relay, then fast-fails.
-- `internal/protocol/codes.go:99–106` — `TypeAssistantDelta` (the **only** droppable type) vs the control set `TypeTurnState`/`TypeToolUse`/`TypeToolResult`/`TypeTurnEnd`/`TypeStall`. No new type taxonomy.
-- `cmd/pyry/interactive_turn_v2.go:294–333` (`emit`) — the #632 producer that calls `ActiveConns` then `Push` per conn; its `Push`-error handling is debug-log-and-continue with a single `ctx.Err()` early-return (320–331). Confirms the precise error contract is **not** load-bearing. Line 191 already records "the droppable set is `assistant_delta` only (#610)".
-- `cmd/pyry/assistant_turn_v2.go:161` — the #589 coarse `message` bridge, the other `Push` caller. Same debug-log posture. `message` is never-drop under the class predicate.
-- `internal/relay/v2session_test.go` — the test harness you reuse and the existing Push tests you update:
-  - helpers: `v2Recorder` (40–63, synchronous `outbound`), `startManager` (98–114), `driveToOpen` (718–760), `waitForEnvelopes` (167–185, **polls** — already absorbs async delivery), `sealAppFrame` (833), `decryptAppFrame` (848), `buildMessageEnvelope` (2517), `wrapInnerFrame` (154), `genV2Keypair` (72), `v2PairedRegistry` (84), `silentLogger` (67).
-  - existing Push tests (2546–2948): `…InterleavedWithReply_DecryptsUnderRace`, `…ConcurrentWithReplies_NoNonceCorruption`, `…UnknownConn_ErrConnNotFound`, `…NotOpen_ReturnsErrSessionNotOpen`, `…ClosedSession_ReturnsErrConnNotFound`, `…CtxCancelled_ReturnsCtxErr`. See § Testing for which survive unchanged vs. need an update.
-- ADR 025 (`docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md`): line 128 (droppable-delta policy: `assistant_delta` drop-oldest, control never drops, phone backfills on reconnect) and line 220 (the open risk this ticket closes: *"per-session push backpressure under a slow relay must never block the daemon dispatch goroutine; the droppable-delta policy is the guard and needs a real load test"*). **Read-only.**
-- `docs/specs/architecture/609-delta-coalescing.md` — sibling Phase-2 slice; the same single-`Run`-goroutine reconciliation, opposite direction (it reduces delta volume upstream; this bounds the transport queue downstream). Coalescing means the post-#609 delta rate is per-message/~250 ms, which informs the capacity choice below.
-
 ## Context
 
 Phase 2's structured emitter (#632) fans interactive envelopes to capability-granted phones by calling `(*relay.V2SessionManager).Push` **synchronously**: the public `Push` enqueues a `pushReq` onto the unbuffered `m.push` channel and **waits for the reply**, which Run sends only *after* `handlePush` has sealed the envelope under `s.send` and forwarded it via `m.send` → `Outbound`. Because `transport.Client.Send` blocks on an unbuffered `sendCh` until the prior `conn.Write` drains (≤ `WriteTimeout`), a congested-but-alive relay blocks `Outbound` → blocks Run inside `handlePush` → blocks the `Push` caller for the full seal+send. The `Push` caller is #633's producer goroutine draining the session JSONL; wedging it is exactly the ADR-025 open risk (line 220).

@@ -2,23 +2,6 @@
 
 **Size:** s (test-only; 0 production source files, one new `*_test.go` under `internal/e2e`)
 
-## Files to read first
-
-Read these before writing anything. This list is the turn-1 data load — the design below assumes you have it.
-
-- `internal/e2e/relay_v2_stream_rate_limit_test.go` → `driveRateLimitTurn` — **the template.** Copy its pair → seed → start daemon → fake relay → dial → interactive handshake → `sealSend` → `nextEnv` sequence verbatim up to the point this spec diverges. Also copy its two local closures (`sealSend`, `nextEnv`) rather than inventing a shared helper: seven sibling specs each declare their own pair, and that duplication is the established idiom here.
-- `internal/e2e/stream_absent_transcript_respawn_test.go` → `killChild`, `waitForRunnerStatus`, `statusOrFatal` — the kill/respawn primitives. Same package, same `e2e` build tag, so call them directly. Note what its own assertions measured: a kill→respawn under `-race` lands near a second, and `RestartCount` settles at exactly 1.
-- `internal/e2e/harness.go` → `StartStreamInteractiveWithRelay`, `seedBoundConversation`, `seedBootstrapRegistry`, `shortHome`, `readPersistedServerID` — what the harness seeds for you and what it does not. Read `seedBoundConversation`'s doc for the bootstrap-id/bound-id equality invariant.
-- `internal/e2e/internal/fakephone/fakephone.go` → `ReceiveBytes` — **read the doc comment, it changes the design.** coder/websocket closes the underlying connection when the read context is cancelled, so a client that has once timed out cannot be reused. A poll loop of short-timeout receives is therefore not available; one deadline-bounded loop is.
-- `internal/e2e/internal/fakeclaude/main.go` → `runStreamJSON`, `writeInitializeAck`, `initializeModels` — the canned two-entry answer and the fact that it is answered in both modes and under no rider. `initializeModels` is the expected-value source; transcribe its two rows as literals in the test (the fake is a separate main package, same discipline as the bogus needles in `relay_v2_stream_unrecognized_test.go`).
-- `cmd/pyry/interactive_turn_v2.go` → `(*interactiveTurnEmitterV2).Handle`, specifically its `case turnevent.ModelList:` arm — the layer this e2e adds over the unit tests, and AC3's mutation point.
-- `cmd/pyry/stream_turn_drain.go` → `startStreamTurnDrainV2` — the active-session gate the whole sequencing argument turns on.
-- `cmd/pyry/relay.go` → `boundSessionIDForActive` — what the gate compares, and why it fails closed before the first route.
-- `internal/streamsup/runner.go` → `Config.RequestInitializeOnSpawn` and the ask inside `runOnce` — one ask per spawn, fired right after `cmd.Start`, error absorbed at Debug.
-- `internal/protocol/interactive.go` → `ModelListPayload`, `ModelOption`, and both `MarshalJSON` methods — the wire shape and, load-bearing for AC2, which of the two list fields is normalised and which is not.
-- `docs/knowledge/features/e2e-harness.md` § "Why the bootstrap pool id and the bound conversation id must be equal" — the one invariant a new caller of this harness gets wrong, and its symptom (an unexplained timeout, not a clean seed-time failure).
-- `docs/knowledge/features/fakeclaude-binary.md` § on the `initialize` answer — provenance of the canned rows and what the fake deliberately omits.
-
 ## Context
 
 Four tickets built the model-list path in layers: #1839 asks each spawned child to `initialize`, #1840 retains the decoded list on the session (`sessionModelHold`), #1848 maps `turnevent.ModelList` onto the wire shape (`turnbridge.MapEvent`), #1849 emits it on the live interactive turn lane (`(*interactiveTurnEmitterV2).Handle`). Each is proved at its own seam against its own doubles.

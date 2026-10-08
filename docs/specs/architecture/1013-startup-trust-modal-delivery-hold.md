@@ -60,46 +60,6 @@ the pending window. #1013 returns a retryable sentinel that #1014 keys off
 (`errors.Is`); it does **not** touch the msgqueue give-up bound. See § Interaction
 with the give-up bound.
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:339-373` — `deliverViaSession`, the two-mode
-  delivery gate. **This is where the fix lands.** Both modes call `WaitReady`; the
-  nil-mode inline at 348-360, the growth-mode via the `deliverGrowthDeps.waitReady`
-  closure at 363-366.
-- `internal/supervisor/supervisor.go:53-59` — existing sentinels `ErrNoLiveSession`
-  / `ErrTurnNotCommitted`. Add `ErrTrustModalPending` alongside, same `var … =
-  errors.New("supervisor: …")` shape.
-- `internal/supervisor/supervisor.go:382-419` — `deliverGrowthDeps` +
-  `confirmViaTranscriptGrowth`. Note it already returns **before** `deliver` when
-  `waitReady` errors (412-413) — so re-routing the `waitReady` closure through the new
-  gate gives the growth mode its hold for free.
-- `internal/supervisor/supervisor.go:600-602` — `New` sets
-  `deliverFn = s.deliverViaSession`. Context only; no change.
-- `<gomodcache>/github.com/pyrycode/tui-driver@v1.10.0/pkg/tuidriver/ready.go` —
-  `Readiness` (the `TrustModal bool` field) + `WaitReady`. Extract: trust modal is
-  a **benign nil-error** return with `TrustModal:true`; only a *non-trust*
-  unexpected startup modal returns `*UnexpectedModalError` (#173). So the driver
-  reads the flag; it must decide the policy.
-- `internal/supervisor/supervisor_test.go:1176-1240` — `TestSupervisor_ConfirmViaTranscriptGrowth`
-  and the `deliverGrowthDeps` fakes (`waitReady`/`deliver`/`resolve` scripts). Extend
-  here for the growth-mode hold. Also the `sup.deliverFn = func(…){…}` override pattern
-  (785, 807, 831, 855) — the seam the nil-mode / sentinel unit tests use.
-- `internal/msgqueue/queue.go:435-487` — `drain`: the retry-on-error loop
-  (`retry = 1s`, `giveUpAfter = 2min`). Confirms a non-nil delivery return is a
-  *retryable* failure that keeps the FIFO head — this is the "hold" mechanism. The
-  give-up bound here is #1014's surface, not this ticket's.
-- `cmd/pyry/interactive_modal_v2.go:93-139` + `interactive_modal_v2_test.go:125-140`
-  — the **pre-built** producer surfacing `ModalClassTrustFolder → TypeModalShown`
-  (AC-1). No change; read to confirm coverage.
-- `cmd/pyry/modal_resolve_v2.go:255-282` — `classifyAnswer` (`proceed→AcceptTrust`,
-  `exit→SendEsc`). The **pre-built** resolution path (AC-3). No change.
-- `internal/sessions/pool.go:1241-1288` — `buildSession`, the interactive
-  per-conversation spawn. Sets `ValidateConversation`, leaves `ResolveTranscript`
-  empty (⇒ nil-mode delivery), and does **no** trust marking. Confirm unchanged (AC-4).
-- `internal/agentrun/ptyrunner/runner.go:66-67,407` — agent-run's **own** fail-loud
-  readiness (`ErrTrustModalDetected`, distinct from this ticket's sentinel). Agent-run
-  does **not** use `deliverViaSession`. Confirm untouched (AC-4).
-
 ## Design
 
 ### The one behavioural change

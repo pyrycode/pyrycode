@@ -1,14 +1,5 @@
 # 339 — `pyry agent-run` per-spawn settings file (deny-default permission whitelist)
 
-## Files to read first
-
-- `cmd/pyry/agent_run.go:170-182` — the existing `runAgentRun` body. The new wiring slots in between `parseAgentRunArgs` returning success and the current confirmation `fmt.Println`; the marker line `settings-file: <path>` *replaces* (not augments) the scaffold's "no spawn yet" line so the dispatcher's scrape regex sees a stable single-line contract.
-- `cmd/pyry/agent_run.go:38-51` — `splitAllowedTools` and the parsed-struct field names; the helper consumes `parsed.allowedTools` ([]string, non-empty by parse-time invariant) and `parsed.workdir` (existing absolute or relative directory path).
-- `internal/devices/registry.go:63-107` — **canonical atomic-write recipe to copy.** `os.CreateTemp` in the same directory → `os.Chmod(tmp, 0o600)` → `json.Encoder.Encode` → `f.Sync()` → `f.Close()` → `os.Rename`, with `defer os.Remove(tmp)` covering the abort paths. Mirror the error-wrapping style; differ only in payload type.
-- `internal/conversations/registry.go:75-115` — second instance of the same recipe; cross-reference if anything in `devices/registry.go` is unclear.
-- `docs/PROJECT-MEMORY.md` § "Project-level conventions" → **Atomic-write recipe for on-disk registries.** The line-item this spec is enforcing.
-- `internal/agentrun/trust.go` (on branch `origin/feature/341`, PR #343 open) — **sibling work in flight.** This file owns the `package agentrun` doc comment ("Package agentrun provides helpers used by…"). When writing `settings.go`, DO NOT add a duplicate package-level doc comment. See § "Package doc-comment coordination" below.
-
 ## Context
 
 Phase A spike (#329) proved that `claude`'s interactive mode treats `--allowedTools` as additive, not exclusive — passing `--allowedTools "Read"` does NOT block `Bash`. The only mechanism that replicates the deny-default semantics natively available in `claude -p` mode is the `--settings <path>` JSON file with shape `{"permissions": {"allow": [...], "defaultMode": "deny"}}`. The dispatcher composes the deny-default permission contract by:

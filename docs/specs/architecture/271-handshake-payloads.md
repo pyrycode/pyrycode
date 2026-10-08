@@ -1,14 +1,5 @@
 # Spec: v1 handshake/control payload structs (#271)
 
-## Files to read first
-
-- `internal/protocol/envelope.go:1-95` — `Envelope` and `RoutingEnvelope` field layout, package doc comment voice, `v1TypeSet` membership map. The payload structs in this ticket are decoded *from* `Envelope.Payload (json.RawMessage)` and re-encoded *back into* it; their tag style and ordering follow this file's conventions.
-- `internal/protocol/codes.go:36-62` — `TypeHello` / `TypeHelloAck` / `TypeError` / `TypeAck` wire constants. Tests reference these by symbol, not by string literal.
-- `internal/protocol/envelope_test.go:1-125` — round-trip test shape: `readFixture` + `canonical` helpers via `os.ReadFile("testdata/...")` + `json.Compact` byte-equivalence comparison. New tests reuse these helpers verbatim, no new infrastructure.
-- `internal/protocol/testdata/envelope_full.json` and `internal/protocol/testdata/envelope_minimal.json` — canonical field order at the Envelope level (id, type, ts, payload, in_reply_to) and time-encoding shape (`2026-05-08T10:33:14.012Z`). New fixtures must use the same Envelope-level ordering, not the order the spec markdown happens to print.
-- `docs/protocol-mobile.md:205-285` — § Message types — `hello` (both roles), `hello_ack`, `error`, `ack`. The example JSON in each subsection is the golden fixture content for this ticket; the `error` field table (lines 272-277) pins optionality of `retry_after_s`.
-- `docs/PROJECT-MEMORY.md:54` — #256's Out-of-Scope memo; confirms this ticket is the handshake-and-control slice of the split payload-catalog plan.
-
 ## Context
 
 Phase 3 Track C, the handshake-and-control slice of #256. The framing primitives (`Envelope`, `RoutingEnvelope`, error-code consts, type-name consts, `IsV1Compatible`) already exist in `internal/protocol/`. This ticket adds typed structs for the four handshake/control payloads — `hello`, `hello_ack`, `error`, `ack` — so dispatch and pairing-auth handlers compose against one schema source of truth instead of decoding `json.RawMessage` ad hoc.

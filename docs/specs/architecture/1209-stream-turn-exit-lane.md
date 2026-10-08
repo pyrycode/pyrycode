@@ -9,35 +9,6 @@ amendment (`cmd/pyry/stream_turn_busy.go`). 0 new exported types, 0 new files,
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `cmd/pyry/stream_turn_drain.go:18-26` | `streamTurnEnvelope` — the struct that gains the discriminant, and the doc explaining what the `sessionID` tag means |
-| `cmd/pyry/stream_turn_drain.go:41-60` | `streamTurnSink` + `newStreamTurnSink` — the never-closed channel, the `buf <= 0` default, the nil-logger fallback |
-| `cmd/pyry/stream_turn_drain.go:62-82` | `sinkFor` — the exact shape the exit closure mirrors: closure over `sessionID`, `select`/`default` non-blocking send, content-free `Debug` drop |
-| `cmd/pyry/stream_turn_drain.go:130-153` | the drain's `select`; the `sink.ch` arm at `:134-149` is where the new arm goes, ahead of `busy.observe` at `:139` |
-| `cmd/pyry/stream_turn_busy.go:154-211` | `clearForSession` — the method the exit arm calls. Read the nil-receiver clause (`:160-167`), the synchronous-execution clause (`:169-177`), the session-id-not-conversation-id clause (`:179-184`), and the fail-closed `clear_unresolved` skip (`:194-208`). **The doc amendment below lands here.** |
-| `cmd/pyry/stream_turn_busy.go:200-206` | `clear_unresolved` — the existing event-less, content-free log AC1 says the new drop log is shaped after |
-| `cmd/pyry/stream_turn_busy.go:213-239` | `setBusy` — the close-and-replace protocol that makes `WaitIdle` wake; this is what the positive test's barrier rides |
-| `cmd/pyry/stream_turn_busy.go:262-280` | `WaitIdle` — note it returns nil **immediately** when already idle. That is the vacuity hazard in the AC2 test (see Testing strategy) |
-| `cmd/pyry/stream_turn_busy.go:27-35` | the `KNOWN GAP` block — **do not edit** (out of scope, still true after this slice) |
-| `cmd/pyry/session_transition_v2.go:266-282` | the existing (#1202) `clearForSession` caller; the exit arm becomes the second one, which is what the doc amendment records |
-| `cmd/pyry/stream_turn_drain_test.go:67-96` | `dropWatcher` — the shared handler to widen; note it filters on `event == "stream_turn.not_active"` and forwards only `kind` |
-| `cmd/pyry/stream_turn_drain_test.go:112-117` | `feedLines` — pushes through a real `streamsup.Parser`, so it can never produce an exit |
-| `cmd/pyry/stream_turn_drain_test.go:121-134`, `:153-175` | `collectEnvs`, `waitDropKind`, `assertNoPush` — the three barriers every drain test already uses |
-| `cmd/pyry/stream_turn_busy_test.go:452-488` | `TestStreamTurnDrainV2_BusyFedBeforeActiveGate` — the closest template: non-active session, observe-then-gate, `waitDropKind` barrier, `stubBusyResolve` |
-| `cmd/pyry/stream_turn_busy_test.go:417-439` | `ImportsStayMinimal` — pins `stream_turn_busy.go`'s import set to exactly four; the doc amendment must not add one |
-| `cmd/pyry/interactive_turn_v2.go:410-421` | `eventKind` — its `default: return "unknown"` is why nil-as-sentinel fails silently rather than loudly |
-| `internal/streamsup/runner.go:105-143` | `Config.OnChildExit` — the `func()` signature the exit closure must return, and the "NOT a drain barrier" clause that motivates this whole design |
-| `internal/streamsup/runner.go:480-490` | the fire site (unwired). Context only — **nothing here changes** |
-| `internal/streamsup/parser.go:231-235` | `Parser.emit` calls `p.sink` synchronously, no goroutine, no buffer — the happens-before premise the sibling slice relies on |
-| `cmd/pyry/streamsup_runner.go:105` | `sink.sinkFor(cfg.SessionID)` — where `sink.exitFor(cfg.SessionID)` will eventually be assigned (#1210, **not here**) |
-| `cmd/pyry/relay.go:730-748` | the tracker + drain construction; shows `busy` is a local and the drain is started exactly once |
-| `cmd/pyry/interactive_runner_test.go:55-75` | a test that reads `sink.ch` directly and asserts on `env.sessionID` — proof the keyed literal keeps it compiling unchanged |
-
----
-
 ## Context
 
 `turnBusyTracker` (`cmd/pyry/stream_turn_busy.go`) has two clear feeds today:

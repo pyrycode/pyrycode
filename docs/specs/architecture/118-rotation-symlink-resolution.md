@@ -1,15 +1,5 @@
 # Spec — Ticket #118: rotation watcher exact-match path comparison must tolerate symlink resolution
 
-## Files to read first
-
-- `internal/sessions/rotation/watcher.go:73-104` — `New` constructor; the natural place to capture the resolved directory once.
-- `internal/sessions/rotation/watcher.go:131-176` — `handleCreate`; the comparison gate at line 167 is the single line that needs to change shape.
-- `internal/sessions/rotation/watcher_test.go:96-128` — `TestWatcher_DetectsRotation`; the regression test mirrors its skeleton (fake probe + WriteFile + poll for OnRotate).
-- `internal/sessions/rotation/probe_darwin.go` (whole file, ~50 lines) — confirm `lsof -F fn` returns canonicalized paths, so resolving the watch dir once at startup matches what the probe emits per call.
-- `internal/sessions/pool.go:720-735` — sole caller of `rotation.New`; verifies `Config.Dir` is the only field passed for the watch path (no new field added or consumer call site touched).
-- `docs/lessons.md` § "Probing open files cross-platform" and § "Closing a fd to interrupt a goroutine's Read requires O_NONBLOCK" — context for how the probe is wired and the fsnotify race the existing retry loop already handles.
-- `docs/lessons.md` § "Claude session storage on disk" — the broader symptom this bug produces (`session UUID stops updating after /clear`) so the developer recognises the failure mode.
-
 ## Context
 
 The rotation watcher matches fsnotify CREATE events against the platform probe's report of which JSONL each tracked PID has open. The match gate at `internal/sessions/rotation/watcher.go:167` does a lexical comparison via `filepath.Clean`:

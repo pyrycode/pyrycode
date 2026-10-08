@@ -3,20 +3,6 @@
 **Ticket:** pyrycode/pyrycode#842 · **Size:** S · **Labels:** `security-sensitive`
 **Depends on:** #845 (merged — persist path + trigger point), #833/#840 (`SessionSettings` / `claudeSettingsArgs` / `Pool.UpdateSettings`).
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:570-646` — `Run` loop + `buildClaudeArgs`. The loop reads `s.cfg.ClaudeArgs` once per iteration (line 594) and passes the main `ctx` straight to `runOnce`. **This is the seam that gets swapped** (read args from a live field; derive a per-iteration ctx).
-- `internal/supervisor/supervisor.go:686-844` — `runOnce`: `exec.CommandContext(ctx, …)` is how the child is killed (ctx cancel → SIGKILL → `sess.Wait()` returns). The restart mechanism induces this exit on a *derived* ctx, not the supervisor's ctx.
-- `internal/supervisor/supervisor.go:497-537` — `setSession`/`WaitForPTY`/`sessReadyCh` choreography (the pattern the restart does **not** need to duplicate — the restart is fire-and-forget, see § Error handling).
-- `internal/sessions/pool.go:585-610` — `Pool.UpdateSettings` (the persist tail this ticket extends). Note it holds `p.mu` across merge+`saveLocked` and returns; the restart trigger is appended **after** `p.mu` is released.
-- `internal/sessions/pool.go:394-461` — `Pool.New` bootstrap supervisor build: `ClaudeArgs = clone(Bootstrap.ClaudeArgs) + claudeSettingsArgs(settings)`, `ResumeLast = cfg.Bootstrap.ResumeLast`. Store the **base** (settings-free) args here.
-- `internal/sessions/pool.go:1122-1170` — `buildSession` (minted): `args = clone(tpl.ClaudeArgs) + "--session-id" + id + claudeSettingsArgs(settings)`, `ResumeLast: false`. Store the base here too.
-- `internal/sessions/session.go:61-109` — `SessionSettings`, `SettingsUpdate`, `claudeSettingsArgs` (the **single** argv-composition helper; the YOLO fail-safe lives here — reused verbatim).
-- `internal/sessions/session.go:434-498` — `runActive` runs `s.sup.Run(subCtx)` in a goroutine and only reacts when `Run` *returns*. The in-place restart keeps `Run` running (it loops internally), so `runActive` and the `active↔evicted` state machine are untouched — the restart never drives `lcMu`.
-- `internal/supervisor/supervisor_test.go:395-409` — shutdown-return contract: the test accepts `context.Canceled`/`DeadlineExceeded`/`nil`. Preserved by returning `ctx.Err()` on the shutdown path.
-- `docs/knowledge/codebase/840.md` § "Why no race with a running supervisor" — the value-copy-at-construction argument that this ticket deliberately changes (args now re-read live under a mutex).
-- `docs/lessons.md` § lock order (`Pool.mu → Session.lcMu`) — the restart trigger must run **outside** `Pool.mu` and must not touch `lcMu`.
-
 ## Context
 
 The v2 `set_session_settings` verb (#845) persists a session's model / effort / YOLO via `Pool.UpdateSettings` and applies them **on the session's next spawn**. But the supervisor bakes its spawn argv at construction (`Config.ClaudeArgs`, read once per `Run` iteration) and never re-reads the live `SessionSettings`, so a *running* session keeps its old model/effort/YOLO until it restarts for some unrelated reason. YOLO has no live actuator and effort has no live slash command, so the one mechanism that applies all three uniformly to a running session is a **restart: kill the child, let the supervisor relaunch it with the new argv, resuming the conversation.**

@@ -7,36 +7,6 @@
 
 ---
 
-## Files to read first
-
-Read in this order. Everything is in the same package under the same `e2e_realclaude` build tag, so every symbol below is directly callable.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trail_run_rig_test.go:121-195` | `trailRigGather` — **the template**. Its doc comment already maps which contract check shapes which leg. Copy the shape; change the two hardcodings. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:26-57` | The header sections this file's header mirrors: why the finding is unreachable there, and the **failure-message content rule**. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:181-301` | `finAttributeFanOut` — signature, purity, and why `pgids` is `[]int`. This is the attribution leg. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:93-125` | `finAttributeRecord` — `Conditions` (:98) is the field a consumer branches on; `Selected` (:106-115) states the caller obligation this ticket discharges. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:61-75, :461-468` | `finAttributeNoGroups` and `finAttributeHasCondition` — AC4's two symbols. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:697-767` | `TestFinAttributeRecordCarriesNoCapturedBytes` — the shape AC5 extends, **and the flat-only key scan AC5 must not repeat** (it walks top-level keys only). |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:171-219` | `trailRunReadings` field by field. Note: **no json tags** — the marshalled keys are Go field names, which drives AC5's key-scan design. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:344-472` | `trailClassifyRun`'s contract block. C2 `:377`, C3 `:390`, C4 `:402`, C8 `:451`, C9 `:463` are AC3's five obligations. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:513-593` | Steps 2–8. Step 2 (`:523`) returning before Steps 4/5/7/8 is AC2's ordering claim. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:242-322` | `trailGate` — the three non-certifying arms, and `:302-321` where `Reason` is spliced `%q` into `Detail` on both certifying arms. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:356-485` | `trailAdmitAttribution` — the empty-`certified` contract check (`:413`), the budget arm (`:425-435`, quotes `certified`), the proof arm (`:466-476`, quotes `certified`). |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:199-208, :530-536` | `trailDetail` (reuse, do not twin) and `trailReapLine(count, pgids)` (the synthetic stderr renderer). |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:96-137` | `trailScanResult.Line` (capped, operator-review) / `.Trailer` (**`resultTrailer` has no `result` member**) and `trailObservation`'s embedding. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:164-274` | `trailScan` and `trailWaitForTrailer`. Note `trailAborted` returns **immediately** (`:264-266`) — that is what makes AC3's C4 row instant. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:276-317` | `trailFixtureTrailer`, `trailNeedle`, `trailPaddedTrailer`, `trailOverlongPad`. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:120-197, :199-275` | `pinScan`'s two counts, `pinScanArgv`'s zero-on-error contract (C9's subject), `pinStateColumns`' never-add-`command` prohibition, `pinStateOutcome`. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:112-219` | `tdnReapOutcome` (its `Line` is pyry's stderr) and `tdnClassifyReapLog`'s `heldPGID <= 1` guard (`:147`). |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:131, :722-741` | `probePollInterval`, `probeSyncBuffer` (mutex-guarded, `Bytes()` returns a copy). |
-| `internal/e2e/realclaude/background_reach_probe_test.go:117-123, :873-882, :945-950` | `reachMaxCommandBytes = 512`, `reachScanArgv`'s constant `ps` argv, `reachCapCommand`. |
-| `docs/specs/architecture/1268-trail-run-rig.md` | The rig spec this one parameterises. |
-| `docs/specs/architecture/1280-attribution-fanout.md` | Why `pgids` is `[]int` and why the empty set is a condition, not a value. |
-
----
-
 ## Context
 
 `trailRigGather` (`trail_run_rig_test.go:150`) is the correct composition wired to the wrong two inputs. It passes a **`nil` literal** as the reap-log stderr and keys the attribution on **the test process's own** process group. `tdnClassifyReapLog(nil, …)` can only reach `tdnReapNoLine`, which `trailAdmitAttribution` answers with `trailAdmitVoidNoLine`, so `trailAdmitProof` — and with it `trailOutcomeRunningAtTrailer`, the only outcome that is a finding — is **structurally unreachable**. A probe built on that gather reports a clean negative on every run, forever, with no symptom.

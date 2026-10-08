@@ -1,19 +1,5 @@
 # Spec — `e2e/realclaude`: tool output > 64 KiB scanner buffer regression test (#423)
 
-## Files to read first
-
-- `internal/e2e/realclaude/long_session_test.go` — closest peer. Same shape: `WithWorktreeAuthenticated` → `RunPyryAgentRun` with Bash → `parseResultTrailer` → `ReadJSONL` → assert + tripwire on `"bufio.Scanner: token too long"` in stderr. Mirror its diagnostic style.
-- `internal/e2e/realclaude/tool_loop_test.go:148-178` — `contentBlock` struct + `parseContentBlocks(raw)` helper. The new test reuses both verbatim (same package, no new types).
-- `internal/e2e/realclaude/tool_loop_test.go:207-223` — `parseResultTrailer`. **Default 64 KiB scanner.** With an 80 KiB user line in stdout, this function silently fails before reaching the trailer (Scanner returns false on a too-long token). The spec resolves this; see § Design.
-- `internal/e2e/realclaude/fixtures.go:80-188` — `RunOpts` / `RunPyryAgentRun` / `RunResult` contract. `Stdout`/`Stderr` are full subprocess captures; nothing scans them for you.
-- `internal/e2e/realclaude/fixtures.go:56-78` — `ReadJSONL(t, workdir, sessionID) []JSONLEntry`. JSONL parser cap is 16 MiB (`internal/agentrun/jsonl/reader.go:30`), so on-disk reads are safe.
-- `internal/e2e/realclaude/permission_protocol_spike_test.go:128-133` — the canonical defensive buffer extension pattern: `scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)`. Use this exact shape for the test's local scanners.
-- `internal/e2e/realclaude/prompt_fidelity_test.go:75-89` — `jsonlPathFor(workdir, sessionID)` (package-internal helper for diagnostics).
-- `internal/e2e/realclaude/per_agent_test.go:135-144` — `truncate([]byte) string` (1 KiB cap for failure-message embeds).
-- `internal/agentrun/streamjson/emitter.go:115-156` — `Emit` writes `ev.Raw + '\n'` verbatim to pyry's stdout. Confirms the load-bearing invariant: a JSONL line byte-equals its pyry-stdout twin (no transformation, no length-limited copy). The cross-check assertion rides on this.
-- `internal/agentrun/jsonl/reader.go:27-30` — `const maxLineBytes = 16 << 20`. The on-disk JSONL tail reader is not the regression risk.
-- `docs/knowledge/codebase/421.md` (if present — long-session regression sensor context) — sibling test's design notes.
-
 ## Context
 
 `internal/e2e/realclaude/permission_protocol_spike_test.go:133` is the only test that defensively extends `bufio.Scanner`'s buffer to 1 MiB. Four other scanners in the package rely on the stdlib's 64 KiB default. No existing test exercises a JSONL line that exceeds 64 KiB, so a regression that drops the buffer extension — or that introduces a similarly truncating scanner elsewhere in pyry's stream-json forwarding path — would surface only when a real tool produces a large block, with the symptom being silent truncation or `bufio.Scanner: token too long` in stderr.

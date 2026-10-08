@@ -4,23 +4,6 @@
 **Size:** S (confirmed — 1 production file, additive gate + helper + comment fix)
 **Labels:** `security-sensitive` (security review appended at end)
 
-## Files to read first
-
-Read these before writing code. Line ranges are the current state; the change is small and additive.
-
-- `internal/relay/v2session.go:2028-2066` — **`handleDebugBundleRequest`**, the method to modify. The gate goes in here, after the `DebugBundler == nil` check and **before** `m.cfg.DebugBundler()`.
-- `internal/relay/v2session.go:2068-2100` — **`debugBundleReplyError`**, the deterministic error reply to reuse verbatim for the busy-reject (fixed `server.binary_offline` + `msgDebugBundleUnavailable` + `Retryable: true`). Do not add a new wire code or message.
-- `internal/relay/v2session.go:144-210` — **`queuedEnv`** + **`pushQueue.enqueue`**. The soft-overflow comment (lines ~178-184, "unreachable in practice … the phone cannot drive control volume") is the AC5 target. `queuedEnv.env.Type` is what the new scan reads.
-- `internal/relay/v2session.go:231-238` — **`pushQueueCap`** comment; it also asserts the "unreachable-in-practice all-control saturated case." Correct it in the same edit for consistency (AC5).
-- `internal/relay/v2session.go:816-829` — **`pushMu` + `queues`** doc: the invariant the new scan must honour — *"Held only around map lookup + enqueue/pop … NEVER held across an Encrypt, m.send, or any channel op … always taken alone."* A pure read of `q.items` under `pushMu` satisfies this.
-- `internal/relay/v2session.go:3189-3218` — **`Push`**: how `StreamBundle`'s frames land in `q.items` (under `pushMu`), and that off-Run producers also call `Push`, which is *why* the scan needs `pushMu`.
-- `internal/relay/v2session.go:3235-3326` — **`drainOnce`**: pops one frame per Run pass; the **transport-down HOLD** (`transportDown()`, lines 3225-3249) is the mechanism the reject-on-busy test exploits to keep chunks queued.
-- `internal/relay/v2bundlestream.go:71-108` — **`StreamBundle`**: enqueues `ceil(len/48000)` `debug_bundle_chunk` frames + one `debug_bundle_done`, all control-class (never `TypeAssistantDelta`), so the drop policy never evicts them.
-- `internal/protocol/codes.go:361-362` — **`TypeDebugBundleChunk`** (`"debug_bundle_chunk"`) and **`TypeDebugBundleDone`** (`"debug_bundle_done"`), the two types the scan matches.
-- `internal/relay/v2session_debugbundle_test.go` (whole file) — where the new tests live. Reuse `fakeBundler` (call-count double), `bundleManagerFor`, `waitNoiseMsgs`, `openModalConn`, `sealAppFrameConn`, `decryptAppFrame`, `msgDebugBundleUnavailable`, `TestV2Session_DebugBundle_ErrorReplies` (the error-reply assertion shape to copy).
-- `internal/relay/v2session_test.go:4615-4680` — **`gatedRecorder`** (`up.Store(true/false)` toggles `Connected`), **`queueLen(mgr, connID)`**, `assertHeldQueued`, `assertQueueDrains` — the transport-stall + queue-depth harness the busy / recovery tests reuse. Note the manager must be built with `Connected: gated.connected` (see the `TestV2Session_Push_HeldWhileTransportDown_*` setup around line 4695) — `bundleManagerFor` does **not** wire `Connected`, so the new tests need a manager built with the gated recorder + `Connected` (and `Reconnect` if you want an immediate flush).
-- `internal/relay/v2bundlestream_test.go:239-320` — `TestStreamBundle_MultiChunk` shows `patternBlob(3*bundleChunkBytes)` producing a deterministic multi-chunk (3 + done = 4-frame) blob; feed that as the `fakeBundler.archive` so the queued bundle is visibly multi-frame.
-
 ## Context
 
 `request_debug_bundle` (#813) is answered by `handleDebugBundleRequest` → `StreamBundle` → `Push`, which enqueues `ceil(bundle/48000)` `debug_bundle_chunk` envelopes plus one `debug_bundle_done` onto the conn's per-session `pushQueue`. Every bundle frame is **control-class** (not `TypeAssistantDelta`), so `pushQueue.enqueue`'s drop policy never evicts them and admits them past `pushQueueCap` (256) as documented "soft overflow."

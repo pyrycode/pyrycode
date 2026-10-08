@@ -2,17 +2,6 @@
 
 Test-only change to `internal/transport`. No production change.
 
-## Files to read first
-
-- `internal/transport/wssclient.go` → `Client.Connect` — the reconnect loop. Extract two things: (a) the post-serve tail, where `uptime >= c.stabilityReset` chooses between `attempt = 1` and `attempt++`, is **the behaviour under test**; (b) that tail falls straight through to the next `c.dialFn` call with **no sleep**. `c.backoff` / `c.sleepCancellable` are reached only from the dial-*failure* path and from `retryFatalClose`. This asymmetry is the whole bug.
-- `internal/transport/wssclient.go` → `Client.backoff` — confirms the ladder is `reconnectInitial << (attempt-1)` capped at `reconnectMax`, ±20% jitter. Needed only to understand why the old bound was built the way it was; the new test does not call it.
-- `internal/transport/wssclient_test.go` → `TestBackoff_ResetAfterStableConnection` — the function being rewritten. Read its comment block before deleting it; AC 4 is about that block.
-- `internal/transport/wssclient_test.go` → `newClientForTest`, `testOpts` — the only supported way to shrink the cadence constants (`stabilityReset`, `reconnectInitial`, `pingInterval`, …) and to inject `dialFn`. Note each field is applied only when `> 0`.
-- `internal/transport/wssclient_test.go` → `newTestRelay`, `relayCtrl.ForceClose` — `ForceClose` calls `CloseNow` on the live conns and clears the slice; the `httptest.Server` **stays up**, which is why the redial after a healthy drop succeeds.
-- `internal/transport/wssclient_test.go` → `recordingHandler` — the existing capturing `slog.Handler`. `Handle` stores `r.Clone()` under `h.mu`, so iterating `Attrs` later is safe. It has no query helpers yet; this ticket adds them.
-- `internal/transport/wssclient_test.go` → `TestConnect_LoudOnFirstUpgradeReject` — the house idiom for *both* halves of this design: a `recordingHandler` used as the assertion surface, and a `deadline := time.Now().Add(…)` poll loop used as a liveness guard. Mirror it.
-- `docs/knowledge/features/transport-package.md` § "Cadence (locked at wire-spec level)" and § "Test surface" — the stability-reset row and the one-line description of this test. Read for context; the documentation phase owns the file.
-
 ## Context
 
 `TestBackoff_ResetAfterStableConnection` is broken in both directions, and both breakages have one cause.

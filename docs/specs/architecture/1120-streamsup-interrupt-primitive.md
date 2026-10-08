@@ -17,18 +17,6 @@ Two gaps to close, both entirely inside `internal/streamsup`:
 
 The *routing* of an inbound remote interrupt frame to the correct per-conversation runner is #1121 (blocked-by this ticket). This ticket must **not** widen the `sessions.Runner` interface (`internal/sessions/runner.go:25-31` — `State`/`WriteUserTurn`/`WaitForPTY`/`Run`/`Restart`, no `Interrupt`); `Interrupt` stays a concrete method on `*streamsup.Runner`, mirroring how `*supervisor.Supervisor` encapsulates `SendEsc` (#726) without that method being on the interface. #1121 reaches it via its own consumer-declared narrow interface or a type assertion.
 
-## Files to read first
-
-- `internal/streamsup/runner.go:117-153` — `Runner` struct fields (three leaf mutexes, `stdin`); where the interrupt correlation-id counter field is added.
-- `internal/streamsup/runner.go:198-233` — `Stdin()` accessor (returns `io.Writer`, nil between spawns) and `WriteUserTurn` (the one-line wrap of a free `envelope.go` function). `Interrupt()` mirrors this exactly.
-- `internal/streamsup/envelope.go:13-116` — `ErrNoLiveChild` sentinel (line 18, **reuse it**), `marshalTurnEnvelope` (pure, structured-encoding single-physical-line invariant, 52-68), and `WriteTurn` (free func: nil-check → sentinel, marshal, single `w.Write`, wrap error, 93-116). The interrupt marshal + write mirror these, minus the turncommit gate.
-- `internal/streamsup/parser.go:97-164` — `streamLine`/`streamMessage`/`streamBlock` decode shapes (add `Subtype` to `streamLine`) and `consumeLine` (the `case "result"` branch at 151-156 is the only behavioral edit).
-- `internal/turnevent/taxonomy.go:34-43` — `TurnEndReason` enum. `TurnEndReasonCancelled` (line 42) is the mapping target; already exists, do not add.
-- `internal/streamsup/parser_test.go:28-152` — `TestParser_LineMapping` table + `collectEvents` helper; add the `error_during_execution` row(s) here.
-- `internal/streamsup/interface_test.go:31-47` — `TestRunner_WriteUserTurn_NoLiveChild`; the exact pattern to mirror for `Interrupt` with no live child.
-- `internal/streamsup/runner_test.go:239-280` — `TestRunner_HoldsStdinOpen` (spawn a fake child, `onSpawn` signal, `waitForContains`, capture `Stdin()`); the pattern to mirror for the live-capture interrupt test.
-- `internal/streamsup/helper_test.go:56-65` — `echo_lines` fake-child mode; **reuse it** for stdin capture (it echoes each stdin line as `ECHO:<line>`), no new helper mode needed.
-
 ## Design
 
 Two independent additive seams. Neither touches `Run`, the supervise loop, `New`, or the `sessions.Runner` adapter in `cmd/pyry`.

@@ -1,29 +1,5 @@
 # 445 — `internal/relay`: v2 inner-frame handshake + token gating (no app dispatch yet)
 
-## Files to read first
-
-These are the load-bearing reads for turn 1. Each entry says **what to extract**, so the developer doesn't waste turns rediscovering context.
-
-- `docs/protocol-mobile.md:160-200` — handshake flow diagram (`noise_init` → `noise_resp`), token-validation-gating MUST clauses.
-- `docs/protocol-mobile.md:240-285` — Inner-frame discriminator table (`noise_init` / `noise_resp` / `noise_msg`) + JSON wire shapes for `InnerFrameV2`. `data` is `base64.StdEncoding` (padded). Decoded length cap is 65535 bytes (the Noise framework's per-message limit).
-- `docs/protocol-mobile.md:185` — the "token-validation gating" MUST clause: noise_msg between `handshakeComplete` and token-OK must be rejected with sealed `auth.invalid_token` + `4401`; handler chain MUST NOT be reachable from `handshakeComplete`.
-- `docs/protocol-mobile.md:430-440` — ordering rule: send `noise_resp` first, then AEAD-sealed `error`, then `4401` close.
-- `docs/protocol-mobile.md:447-460` — WS close-code table (4401 / 4421 / 4426).
-- `internal/relay/connection.go:163-210` — `Frames()` / `Send(env)` / `CloseConn(connID, code)` — the **only** surface the new manager consumes from `relay.Connection`. `Send` and `CloseConn` already exist; do **not** add new methods.
-- `internal/relay/auth.go:14-44` — `StatusUnauthorized = 4401`, `MsgInvalidToken`, exported-close-code style. Mirror this style for the two new constants.
-- `internal/relay/auth.go:85-162` — `AuthenticateFirstFrame` (v1) + `buildResponse`. Same shape (input → outcome), useful pattern. Do **not** import or call from v2 code — the wire-token mechanism is different in v2.
-- `internal/noise/noise.go:51-122` — `Responder` API: `NewResponder(staticPriv) → *Responder`, `ReadInit(initMsg) → (earlyData, err)`, `WriteResp(earlyData) → (respMsg, send, recv, err)`. **CipherStates are NOT goroutine-safe; per-conn-id serialisation is the only correctness guarantee.**
-- `internal/noise/noise.go:184-215` — `CipherState.Encrypt(plaintext)` / `Decrypt(ciphertext)` — **no AD parameter**. Empty-AD invariant is structural in the type system.
-- `internal/devices/auth.go:32-46` — `Registry.Validate(plain) → (Device, bool)` is the token-validation predicate. Empty `plain` returns `(Device{}, false)` without computing HashToken; safe to call with an empty token field.
-- `internal/protocol/envelope.go:23-67` — `Envelope` (v1 application envelope, **unchanged in v2** — rides inside `noise_msg` and inside `noise_init`/`noise_resp` early-data) + `RoutingEnvelope` (the binary↔relay leg). `RoutingEnvelope.CloseCode != 0` is already the wire mechanism for "ask the relay to close this phone WS".
-- `internal/protocol/handshake.go:14-25` — `HelloClientPayload`. Adds one optional field in this slice (see Design § Wire types).
-- `internal/protocol/codes.go:9-30` — `CodeAuthInvalidToken` / `CodeProtocolMalformed` / `CodeProtocolUnknownType`. Reuse these — do not introduce v2-specific code constants in this slice.
-- `internal/dispatch/dispatch.go:38-100` — **read for mental model only** of "per-conn-id dispatch loop". Do **not** modify. The v1 dispatcher continues to own the wire when `cmd/pyry/relay.go` is run; v2 state machine is *not* wired into that daemon path in this slice.
-- `internal/e2e/internal/fakerelay/fakerelay.go:142-148` — handler-registration site. Add one `mux.HandleFunc("/v2/server", s.handleBinary)` here (no handler-body changes — the routing-envelope wire is unchanged in v2).
-- `internal/e2e/internal/fakephone/fakephone.go:60-80` — `Dial(ctx, baseURL, serverID, token, deviceName)` and its `/v1/client` path. The phone side in tests reuses `/v1/client` unchanged (the relay-side wire is shared; v2 only changes the *inner* frame). The `token` arg becomes irrelevant for v2 (the binary ignores `RoutingEnvelope.Token` per spec) but `fakerelay` requires a non-empty header — pass any non-empty string.
-- `internal/e2e/internal/fakephone/fakephone.go:120-160` — `LastCloseStatus()` accessor + `websocket.CloseStatus` capture pattern. Tests assert on this for the 4401 / 4426 expectations.
-- `internal/e2e/relay_auth_test.go` — full e2e shape (fakerelay + fakephone + close-code assertion). This slice's e2e tests follow the same skeleton **but do not call `StartIn`**: they wire `relay.Connect` + `V2SessionManager` inline (see Design § Tests for why).
-
 ## Context
 
 Mobile Protocol v2 (#430) wraps every binary↔phone application frame in a Noise_IK AEAD channel. The outer routing envelope (`{conn_id, frame, close_code?}`) is unchanged from v1, but the inner `frame` is replaced with a `{v, type, data}` discriminator where `type ∈ {noise_init, noise_resp, noise_msg}`. This slice is the binary-side handshake responder: per-`conn_id` state machine that completes Noise_IK, validates the device-token piggybacked in the `noise_init` early-data, and refuses out-of-state inner frames at the WS-close layer.

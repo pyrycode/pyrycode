@@ -2,29 +2,6 @@
 
 Ticket: [#450](https://github.com/pyrycode/pyrycode/issues/450). Size: **S**. Security-sensitive: **yes** (touches AEAD-sealed outbound emit + close-code emission on a Noise IK session).
 
-## Files to read first
-
-- `internal/relay/v2session.go` — the entire file (~903 LOC). Same-file work: timer plumbing, emit helper, awaiting-reply state, reply-timeout branch, `rekeyComplete` method, one-line call addition inside `handleRekeyInit`, wake-channel arm in `Run`. **No other production source file is modified.**
-  - lines 22–43 — `StatusHandshakeFailure = 4426`, `StatusProtocolMismatch = 4421`, `maxNoisePayloadBytes` const. The 4426 close code this slice emits on reply-timeout is already in scope.
-  - lines 68–105 — `V2Session` struct (the three new fields land here: `rekeyTimer`, `rekeyReplyTimer`, `awaitingRekeyReply`).
-  - lines 122–215 — `V2SessionConfig` + `V2SessionManager` + `NewV2SessionManager`. The wake channel allocation lands in `NewV2SessionManager`.
-  - lines 217–232 — `Run`. The third select arm (`case w := <-m.wake`) lands here; `ctx` becomes `runCtx` via `context.WithCancel(ctx)` + `defer cancelRun()` so timer-callback goroutines unblock on Run exit.
-  - lines 509–519 — `handleNoiseInit` success branch (the initial-handshake "advance to V2StateOpen" tail). One-line addition: `s.rekeyTimer = m.armRekeyTimer(runCtx, s)`.
-  - lines 549–633 — `handleRekeyInit`. AC #2's one-line call site: `s.rekeyComplete(m, ctx)` after the `m.send(...)` on line 632.
-  - lines 818–848 — `sealError`. The emit path's AEAD-seal pattern (`json.Marshal` → `s.send.Encrypt` → `marshalInnerFrameV2(TypeNoiseMsg, ciphertext)`) is the template the new `emitRekeyRequest` follows.
-  - lines 852–862 — `marshalInnerFrameV2`. Used by `emitRekeyRequest`.
-  - lines 864–885 — `closeWith`. Add timer-stop sequence before the existing `delete(m.sessions, s.connID)`.
-- `internal/relay/v2session_test.go` lines 685–765 — `openSession`, `driveToOpen`, `sealAppFrame`, `decryptAppFrame`. Re-used unchanged.
-- `internal/relay/v2session_test.go` lines 1524–1566 — `syncLogBuffer`, `bufferLogger`, `waitForLogContains`. Re-used unchanged for AC #5's reply-timeout test.
-- `internal/relay/v2session_test.go` lines 1236–1357 — `TestV2Session_RekeyResponder_HappyPath_RoundTripUnderNewKeys` from #453. The test pattern (drive to open → construct a SECOND `noise.Initiator` reusing the SAME `initPriv` → feed fresh `noise_init` → `ReadResp` for `(initSend2, initRecv2)`) is the template the new `TestV2Session_RekeyInitiator_Emit_ReArmViaResponder` test follows for the re-arm leg.
-- `internal/relay/connection.go:39-43` — `var handshakeTimeout = 5 * time.Second` package-var lowercase pattern. The two new constants (`rekeyInterval`, `rekeyReplyTimeout`) mirror this shape exactly — same lowercase, same package-var posture, same "tests substitute via `t.Cleanup`" idiom.
-- `docs/knowledge/codebase/453.md` — `handleRekeyInit` lifecycle, the swap invariant, the unconditional-call-on-success rule for `rekeyComplete` (this slice's AC #2). The "spontaneous phone-initiated re-key still re-bases the 1-hour cadence" decision is documented there and inherited here.
-- `docs/knowledge/codebase/454.md` — `TypeRekeyRequest` constant origin + the v1/v2 partition discipline. This slice's emit path consumes `protocol.TypeRekeyRequest` (added in #454) AND `protocol.TypeNoiseMsg` (already in v1TypeSet). No new `protocol` constant.
-- `docs/knowledge/codebase/446.md` — `dispatchAppFrame` + the synchronous-handler ownership pattern. This slice's wake-channel design respects the same "single dispatch goroutine owns `s.send` / `s.recv`" invariant.
-- `docs/protocol-mobile.md:203-236` — § Re-key. `rekey_request` envelope shape `{type, payload: {reason}}`, closed reason set `{scheduled, manual, compromise}`, "no `rekey_ack` envelope; next successful AEAD round-trip under new keys is the implicit ack" rule.
-- `docs/protocol-mobile.md:442-463` — § Error codes. `noise.rekey_failed` (retryable=yes, log-only — no AEAD envelope is sealed on the timeout-close path) and `4426 Noise handshake failure` (WS close code) the timeout branch emits.
-- `docs/specs/architecture/449-v2-rekey-responder.md` on the orphan `feature/449` branch — the abandoned super-slice spec. Contains the verbatim design notes for the wake-channel shape, the rekeyComplete seam, the timer-stop sequence in closeWith, and the package-var test-substitution idiom. Same orphan-spec pattern as #452/#453/#454. **Lift design verbatim where applicable.**
-
 ## Context
 
 Mobile Protocol v2 (`docs/protocol-mobile.md` § Re-key) specifies a 1-hour scheduled re-key cadence plus an explicit `rekey_request` envelope the binary sends when it wants the phone to initiate a fresh IK handshake. The binary is always the IK responder (ADR 024); its re-key trigger is a *signal* to the phone, not a handshake. The phone reacts by sending a fresh `noise_init`, which the responder path (`handleRekeyInit`, shipped in [#453](../../knowledge/codebase/453.md)) handles to completion.

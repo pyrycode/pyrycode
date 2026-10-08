@@ -55,68 +55,6 @@ fan-out to *other* connected clients is OUT OF SCOPE**, matching #820 (rename) a
 a multi-client fan-out; other clients see the change on their next
 `list_conversations`.
 
-## Files to read first
-
-- `internal/relay/handlers/rename_conversation.go` (all, 129 lines) — **THE
-  template.** Clone its structure: decode → mutate → eager `Save` → typed
-  `conversation_updated` reply; the `msg*` static-string constants; the
-  `SECURITY:` doc-comment discipline; the "capture the reply snapshot then
-  `Reply`" shape. #881 diverges in two places (below): it snapshots via `Get`
-  (not an `Update` closure), and its malformed-branch logging follows delete's
-  hardened form.
-- `internal/relay/handlers/delete_conversation.go` (all, ~105 lines) — **the
-  security-sensitive twin.** Copy its **malformed-branch logging divergence**
-  (log `conn_id` ONLY — no `err`, no `conversation_id`) and its `SECURITY:`
-  doc-comment. #881 carries the same `security-sensitive` label for the same
-  reason.
-- `internal/conversations/registry.go:271-281` — `SetArchived(id, archived bool)
-  bool`: the #880 single-field mutator this handler calls. Flips exactly
-  `IsArchived`, atomic under `r.mu`, hit/miss, **no `Save`**. A miss (`false`)
-  becomes `conversation.not_found`.
-- `internal/conversations/registry.go:126-137` — `Get(id) (Conversation, bool)`:
-  returns a **value copy** under `r.mu`. The reply snapshot source (see
-  **Snapshot for the reply** below).
-- `internal/conversations/registry.go:72-115` — `Save(path) error`: atomic
-  temp-file → fsync → rename. The eager best-effort persist for AC #1/#2
-  restart-survival. Failure is logged, not fatal.
-- `internal/relay/handlers/list_conversations.go:37-45` — projects `conv.Name` /
-  `conv.IsArchived` **directly** into the reply payload. Precedent that reusing
-  the snapshot's `*string` `Name` and `bool` `IsArchived` in the reply is safe.
-- `internal/protocol/conversations_write.go:46-92` — `RenameConversationPayload`
-  (request shape to mirror), `DeleteConversationPayload` (the id-only value-typed
-  shape to mirror), and `ConversationUpdatedPayload` (the reply — **extend it**;
-  see Design).
-- `internal/protocol/conversations_read.go:27-39` — `ConversationSummary`, whose
-  `IsArchived bool json:"is_archived"` (**no `omitempty`**, placed right after
-  `IsPromoted`) is the exact wire-field precedent to mirror on
-  `ConversationUpdatedPayload`, including the "always serialized so the client can
-  partition active vs. archived" rationale.
-- `internal/protocol/codes.go:22,10,50-75` — `CodeConversationNotFound` (22),
-  `CodeProtocolMalformed` (10), the conversations `Type*` block, and the
-  `TypeRenameConversation` / `TypeDeleteConversation` doc-comment shape to copy.
-- `internal/protocol/envelope.go:118-138` — `v1TypeSet` map. Add two entries.
-- `internal/protocol/compat_test.go` — three type lists (lines 9-19, 100-110,
-  176-212) and the hardcoded `want := 19` count (line 111). Add both new types to
-  all three lists; bump `19 → 21`. The partition union check (line 225) stays
-  balanced because both types go into `v1TypeSet` **and** the `all` list.
-- `internal/protocol/conversations_write_test.go:125-155,215-257` — the
-  `*_RoundTrip` fixture pattern (request + `conversation_updated`) to clone/extend.
-- `internal/protocol/testdata/conversation_updated.json` — the fixture the
-  round-trip test byte-compares; **must** gain `"is_archived"` (see Design).
-- `internal/relay/handlers/rename_conversation_test.go:1-130` — the handler test
-  harness to clone: `dispatch.NewTestConn`, `conversations.Load` + `reg.Create`
-  seeding on a `t.TempDir()` path, the `recv` helper, `assertRename…EnvelopeShape`.
-- `internal/relay/handlers/register_push_token.go:128` — `replyError(ctx, c, env,
-  code, message, retryable)`, the shared package helper the reject branches call.
-- `internal/dispatch/dispatch.go:153` — `Conn.Reply(ctx, req, respType, payload)`
-  sets `InReplyTo = req.ID` + `TS`. This satisfies the `in_reply_to` correlation;
-  the handler does not build the envelope itself.
-- `internal/conversations/registry_test.go:1031-1090` — `SetArchived` tests; reuse
-  their archived-seed pattern (`reg.Create(Conversation{…, IsArchived: true})`)
-  when seeding the unarchive / idempotent-archive cases.
-- `cmd/pyry/relay.go:174-179,362-366` — the two register sites (v1 `d.Register`
-  block **and** v2 `Handlers` map). Wire **both** verbs in **both** sites.
-
 ## Design
 
 ### New protocol vocabulary (`internal/protocol`)

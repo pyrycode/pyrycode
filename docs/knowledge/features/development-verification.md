@@ -53,6 +53,34 @@ absent from the current checkout. A missing path identifies a review candidate,
 not a false current-state claim; an existing path alone does not validate the
 historical claim either. Check current code and knowledge docs before reuse.
 
+Use [scaffolding maintenance](../../specs/README.md#scaffolding-maintenance) only
+with verified merged-PR closing links and an unambiguous ticket identity. A closed
+issue can have no merged implementation, and a merged implementation can leave
+explicitly deferred questions. Require an entire trivial resolution body or an
+individual approval bound to the document hash and heading ordinal; a leading
+"None" followed by prose and repeated headings cannot safely be classified by
+title alone. Preserve historical designs and citations.
+
+Markdown deletion needs block boundaries, not just heading-shaped lines.
+Setext titles can span paragraph lines; thematic breaks, containers and reference
+definitions change those bounds. `parse` in `cmd/spec-scaffolding-prune` retains
+unsupported documents rather than guessing, and `run` prevents removal ranges
+from overlapping retained questions. Structural blanks and fence endings accept
+only spaces/tabs: Go's `TrimSpace` treats Unicode content as blank and can hide a
+boundary or close a fence early. `markdownBlank` separates those checks from
+title/resolution trimming; `markdownLines` preserves LF, CRLF and lone CR offsets.
+`TestCommonMarkStructuralWhitespace`, `TestCommonMarkWhitespaceAmbiguity` and
+`TestCommonMarkLineEndings` exercise preview, exact surviving bytes and repeated
+apply. A parser regression can otherwise erase durable design while ordinary
+LF/ASCII fixtures stay green.
+
+Reusable GitHub evidence needs completeness and consistency across the corpus.
+`gh api graphql --paginate` can stop at a nested connection while exiting zero;
+verify final outer pages and nested `totalCount` values against returned nodes.
+Validate PR identity facts across every issue association, since one PR can close
+several issues: per-issue checks alone miss contradictory merge timestamps.
+`snapshot.validate` and `TestCrossIssuePRIdentity` pin that shared-evidence boundary.
+
 Reference extraction must validate whole tokens: splitting quotes inside a path
 can turn a quoted placeholder into a root-directory citation, while stripping
 periods after a slash can turn traversal or ellipsis placeholders into accepted

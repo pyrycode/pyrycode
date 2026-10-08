@@ -1,15 +1,5 @@
 # Architecture — `pyry update` daemon-restart wiring (#190)
 
-## Files to read first
-
-- `cmd/pyry/update.go` (whole file, 159 lines) — existing `runUpdate` / `doUpdate` / `updateOptions`. New code lands here. The seam pattern (function-typed fields on `updateOptions` populated by `runUpdate`, swapped by tests) is established; copy it for the two new seams.
-- `cmd/pyry/update_test.go` (whole file, 293 lines) — the four existing tests. Two of them (`TestUpdate_Success`, `TestUpdate_PinVersion`) reach the replace step and therefore the new restart step; both need the two new seams populated. The other three short-circuit before replace and don't.
-- `internal/update/restart.go` (whole file, 36 lines) — `RestartProbe` struct (3 fields) and `DetectRestartCommand` pure function. Already merged in #181. Spec consumes it as-is; do not modify.
-- `internal/update/restart_test.go` (whole file, ~50 lines) — confirms the four DetectRestartCommand outputs (`launchd_only`, `systemd_only`, `both_present_launchd_wins`, `none`). Re-read to match exact argv shape when asserting in the new test.
-- `cmd/pyry/main.go:140-145` — `main()` calls `run()`; any error returned becomes `pyry: <err>\n` on stderr + exit 1. The shape of the restart-failure error message must read sensibly under that prefix.
-- `cmd/pyry/main.go:165-167` — dispatch into `runUpdate`. Unchanged by this ticket.
-- `internal/install/install.go:184-186` — canonical service-file paths. Match these exactly: `~/.config/systemd/user/<name>.service` and `~/Library/LaunchAgents/dev.pyrycode.<name>.plist`. The probe uses the production `pyry` name (no `--name` override flow for restart).
-
 ## Context
 
 The `pyry update` verb (#189) lands the new binary on disk via `update.AtomicReplace` and stops. Users with a managed daemon unit (launchd plist on macOS or systemd `--user` service on Linux) currently have to run `launchctl kickstart -k gui/<uid>/dev.pyrycode.pyry` or `systemctl --user restart pyry` themselves. This ticket closes that gap: after the replace step succeeds, probe for a managed unit, and if present, exec the restart command. The pure decision function (`internal/update/restart.go`, #181) is already in place; this is purely the wiring slice.

@@ -4,22 +4,6 @@ Intercept AEAD-decrypted envelopes whose `type` is `rekey_request` at the v2 dis
 
 Split from #449; sibling of #452 (peer-static accessor, landed) and #453 (re-key responder swap). Independent of #453 — both touch different functions in `internal/relay/v2session.go` and can ship in parallel.
 
-## Files to read first
-
-- `internal/relay/v2session.go:597-627` — `dispatchAppFrame`: the exact seam where the probe-and-switch lands (between `s.recv.Decrypt` and `dispatch.Route`).
-- `internal/relay/v2session.go:560-580` — `handleNoiseMsg` `V2StateOpen` branch: the caller of `dispatchAppFrame`; AEAD-failure path stays unchanged.
-- `internal/relay/v2session.go:107-159` — `V2SessionConfig`: synchronous-handler invariant doc-comment; the new `handleRekeyRequest` honours the same single-goroutine ownership.
-- `internal/protocol/codes.go:36-62` — `Type*` constant block: insertion site for `TypeRekeyRequest`.
-- `internal/protocol/envelope.go:101-118` — `v1TypeSet` map literal: the load-bearing absence — `TypeRekeyRequest` MUST NOT be added here.
-- `internal/protocol/envelope.go:80-99` — `IsV1Compatible`: the predicate `dispatch.Route` consults; pinning the asymmetry below.
-- `internal/dispatch/dispatch.go:555-585` — `Route`: the function the probe short-circuits past on a recognised `rekey_request`.
-- `internal/relay/v2session_test.go:737-905` — open-state dispatch-test scaffold from #446: `openSession`, `driveToOpen`, `sealAppFrame`, `decryptAppFrame`, `v2Recorder`, `waitForEnvelopes`, `silentLogger`. New tests reuse these unchanged.
-- `internal/relay/v2session_test.go:907-979` — `TestV2Session_OpenState_TamperedNoiseMsg_4421`: shape to mirror for the `atomic.Bool` handler-not-called pin (AC #4 sub-test "Control envelope intercepted").
-- `internal/conversations/sweep_loop_test.go:43-46` — buffer-logger pattern (`slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})`) the unknown-reason test reuses to capture the WARN line.
-- `docs/protocol-mobile.md:195-235` — § Re-key: the canonical `rekey_request` envelope shape + the three `reason` values.
-- `docs/knowledge/codebase/446.md` — `dispatchAppFrame` seam introduced; the synchronous-handler ownership pattern this slice extends. § Patterns established names the contracts the probe-and-switch slots into.
-- `docs/knowledge/decisions/024-noise-ik-mobile-e2e.md` — ADR 024: the binary is always the IK responder. Justifies "no transport action" on `rekey_request` receipt.
-
 ## Context
 
 Mobile Protocol v2 (`docs/protocol-mobile.md` § Re-key) defines `rekey_request` as a control signal either side may emit to nudge the peer toward initiating a re-key handshake. Per ADR 024 the binary is always the IK responder; an incoming `rekey_request` therefore takes no transport action — the phone re-keys by sending `noise_init` directly. But the envelope shape exists on the wire (the binary itself emits `rekey_request` to nudge the phone — sibling ticket #450), so the binary must be prepared to receive one defensively.

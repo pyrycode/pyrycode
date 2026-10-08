@@ -14,53 +14,6 @@ additive wiring (no consumer cascade), ~375 LOC total incl. tests.
 
 ---
 
-## Files to read first
-
-The producer is a near-clone of the `queue_state` producer with the confidential
-`Snapshot` path removed. Read these before writing anything:
-
-- `cmd/pyry/queue_state_v2.go:1-231` — **the template to mirror.** Copy its shape:
-  the queue-size const + never-log SECURITY doc block, the `newXEmitterV2`
-  constructor, the `xNotify` seam-builder (non-blocking drop-on-full send +
-  content-free Warn), `Run(ctx, bcast)`, `broadcast(...)`, and
-  `startXStreamV2(...)`. **Do NOT copy** `toQueueStatePayload` (no per-item
-  mapping here) or `outstandingQueues` (no connect-time reconcile — see § Design).
-- `cmd/pyry/session_transition_v2.go:47-120` — precedent for a **struct-carrying**
-  hand-off channel (`in chan sessions.SessionTransition`). Your channel carries a
-  `giveUpNotice` struct, not a bare string; this is the shape to follow.
-- `internal/protocol/messaging.go:223-251` — `SessionErrorPayload{ConversationID,
-  Code, Message}` (all `json` tags, no omitempty). The exact wire type to stamp.
-  Note the doc: "the never-log discipline for Message is #1008's concern."
-- `internal/protocol/codes.go:34` — `CodeSessionBlocked = "session.blocked"` (the
-  fixed terminal code the producer stamps). `codes.go:476` — `TypeSessionError`.
-- `internal/msgqueue/queue.go:103-114` — `GiveUpFunc func(convID, reason string)`
-  contract: MUST-NOT-BLOCK, safe for concurrent invocation, nil ⇒ disabled.
-- `internal/msgqueue/queue.go:502-532` — `giveUp`: fires `notifyGiveUp(convID,
-  reason)` **exactly once** per give-up, off-lock, after `q.mu` release; `reason`
-  is a daemon-generated `fmt.Sprintf` over elapsed+delivery-err, **never**
-  `head.text`. This is the upstream sanitiser your producer relies on.
-- `cmd/pyry/main.go:807-828` — the `queueChanges` channel create → `msgqueue.New`
-  (OnChange set) → `newQueueStateEmitterV2` build sequence. Add the parallel
-  `giveUps` channel + `OnGiveUp` set + `newSessionErrorEmitterV2` build here.
-- `cmd/pyry/main.go:862-884` — the `relayWiring{...}` literal; add `sessionErr: see`.
-- `cmd/pyry/relay.go:200-202` — the `qse` field in `relayWiring`; add the
-  parallel `sessionErr` field.
-- `cmd/pyry/relay.go:565-590` — the `startQueueStateStreamV2` start-site inside
-  `startRelayV2` (where `mgr`, the broadcaster, exists) + the cleanup block. Add
-  the parallel start + teardown here.
-- `cmd/pyry/interactive_turn_v2.go:31-34` — the `interactiveBroadcaster` interface
-  (`ActiveConns` + `Push`) your `Run`/`broadcast`/`startX` signatures take.
-- `cmd/pyry/interactive_turn_v2_test.go:52-91` — `fakeInteractiveBcast` +
-  `recordedPush` test doubles (same package, directly reusable). Your unit tests
-  drive the producer through these.
-- `cmd/pyry/queue_state_v2_test.go:270-373` — the notify-drop-on-full,
-  notify-delivers-value, run-delivers-from-channel, and cleanup-joins-on-cancel
-  tests to mirror.
-- `cmd/pyry/relay_guard_test.go:127` — `"TypeSessionError": "push"` **already
-  present** (added by #1007). Do NOT touch this file; the totality guard is green.
-
----
-
 ## Context
 
 The interactive message queue (`internal/msgqueue`) drains a conversation's

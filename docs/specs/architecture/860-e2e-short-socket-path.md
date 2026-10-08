@@ -3,18 +3,6 @@
 **Size:** S (near XS). One production file, one test file. No edit fan-out.
 **Security review:** not required — ticket is not `security-sensitive`. Test-harness plumbing, no untrusted input, no new wire surface.
 
-## Files to read first
-
-- `internal/e2e/harness.go:464-515` — `spawnWith`, the shared spawn core. Line 478 (`socket := filepath.Join(home, "pyry.sock")`) is the *only* production change. Everything downstream (`args`, the returned `socket`, `SocketPath`) is unchanged.
-- `internal/e2e/harness.go:185-221` — `Start`/`StartIn`. `Start(t)` → `StartIn(t, t.TempDir())`; `home` = long `t.TempDir()`. This is the latent path AC-1 fixes.
-- `internal/e2e/harness.go:744-766` — `teardown`. Registered via `t.Cleanup` *after* the helper's dir-cleanup, so it runs *first* (LIFO): daemon dies before the socket dir is removed. Confirm the ordering claim in § Cleanup.
-- `internal/e2e/harness.go:396-427` — `StartExpectingFailureIn`. Also routes through `spawn` → `spawnWith`, so it inherits the new derivation and its `t.Cleanup` dir-removal for free. Its own `os.Remove(socket)` stays (removes the file; dir removed by cleanup).
-- `internal/control/server_test.go:126` — `shortTempDir`: the canonical `os.MkdirTemp("/tmp", …)` + `t.Cleanup(os.RemoveAll)` recipe. Copy this shape.
-- `cmd/pyry/rekey_test.go:53` — `shortSockTempDir`: second instance of the same recipe. Confirms `/tmp` base is the established convention for a short socket dir under a longer HOME.
-- `internal/e2e/restart_test.go:31-49` — `newRegistryHome`: the *home-based* workaround (`os.MkdirTemp("", "pyry-rs-*")`). Do **not** copy this shape — it shortens HOME, which AC-1 forbids. Read it only to see why the ticket keeps HOME long and decouples the socket instead.
-- `docs/lessons.md:207-211` — the sun_path lesson (104 macOS / 108 Linux; `bind(2)` → `EINVAL` → "ready-deadline exceeded"). The failure mode this ticket removes.
-- `internal/e2e/realclaude/fixtures.go:1` + `fixtures.go:323-` — the `//go:build e2e_realclaude` boundary and the "duplicates deliberately — disjoint build tags block reuse" convention. Governs the cross-harness sharing decision (§ Cross-harness sharing).
-
 ## Context
 
 `spawnWith` derives the daemon control socket as `filepath.Join(home, "pyry.sock")` (`harness.go:478`), where `home` is `t.TempDir()` for the common `Start(t)` path. On macOS `t.TempDir()` resolves under `/var/folders/<hash>/T/<TestName>/NNN/` — a long path that embeds the sanitised test name. For a long-enough test name, `<home>/pyry.sock` exceeds macOS's 104-byte `sockaddr_un.sun_path` limit, `bind(2)` returns `EINVAL`, the daemon can't bind its control listener, and the harness reports "not ready within 5s".

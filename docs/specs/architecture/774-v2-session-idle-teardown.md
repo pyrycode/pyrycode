@@ -2,24 +2,6 @@
 
 **Ticket:** [#774](https://github.com/pyrycode/pyrycode/issues/774) · **Size:** S · **Labels:** `security-sensitive`
 
-## Files to read first
-
-Everything is in one production file and its test. Read these ranges before touching code:
-
-- `internal/relay/v2session.go:44-108` — the package-var timer idiom (`rekeyInterval`, `rekeyReplyTimeout`, `modalDenyTimeout`) + the `wakeKind` enum + `wakeSignal` struct. The new `idleTimeout` var and `wakeIdleTimeout` kind mirror these exactly.
-- `internal/relay/v2session.go:27-42` — the WS close-code const block (`StatusProtocolMismatch` 4421, `StatusHandshakeFailure` 4426). The new `StatusIdleTimeout` 4408 const goes here.
-- `internal/relay/v2session.go:238-326` — `V2Session` struct + the per-session `rekeyTimer` / `rekeyReplyTimer` field doc-comments. The two new fields (`idleTimer`, `lastActivityAt`) mirror the timer field's ownership doc.
-- `internal/relay/v2session.go:663-742` — `Run` select loop, `handleWake` (the state-guard + kind switch), `armRekeyTimer` / `armRekeyReplyTimer`. `armIdleTimer` copies `armRekeyTimer`'s callback shape; the new `wakeIdleTimeout` case joins `handleWake`'s switch.
-- `internal/relay/v2session.go:770-824` — `handleFrame` lazy-create + `V2StateClosed` early-return. The one-line `lastActivityAt` stamp lands right after the early-return.
-- `internal/relay/v2session.go:1077-1099` — `handleNoiseInit` success tail where `s.state = V2StateOpen`, the push queue is created, and `s.rekeyTimer = m.armRekeyTimer(ctx, s)`. The idle timer is armed here alongside the rekey timer.
-- `internal/relay/v2session.go:2067-2110` — `closeWith`: the full teardown (state→Closed, stop+nil `rekeyTimer`/`rekeyReplyTimer`, delete session, delete push queue, send `CloseCode` envelope). The idle-timer stop+nil joins the existing timer-stop region.
-- `internal/relay/v2session_test.go:95-114` — `startManager(t, cfg)` harness (runs `Run` on a goroutine, returns a `stop` closure).
-- `internal/relay/v2session_test.go:718-865` — `driveToOpen` / `driveToOpenCaps`: the canonical "phone handshakes to `V2StateOpen`" helper returning an `openSession`; reuse it verbatim.
-- `internal/relay/v2session_test.go:1882-1920` — `TestV2Session_RekeyInitiator_Emit_ReArmViaResponder`: the exact idiom for overriding a package-var duration (save → set sub-second → `t.Cleanup` restore) and asserting a timer-driven emit under a background `Run`. **Not `t.Parallel`** — these tests mutate package vars. The idle tests copy this shape.
-- `internal/relay/v2session_test.go:167-179` — `waitForEnvelopes(t, rec, n)` and the `v2Recorder.snapshot()` accessor for asserting emitted envelopes (including the close envelope).
-- `docs/protocol-mobile.md:708-732` — § Error codes table + the HTTP-status-echo convention (4401←401, 4404←404, 4409←409, 4429←429). Add the `4408` row here.
-- `docs/protocol-mobile.md:399` and `:872` — WS ping/pong is below the app layer (no per-phone liveness signal for the binary) and "Phone idle: close-on-background, push-to-wake … each reconnect performs a fresh Noise handshake." This is *why* the sweep exists and why a swept-then-returning phone re-handshakes cleanly (AC-3).
-
 ## Context
 
 A phone's encrypted v2 session (`V2Session`) holds two Noise `CipherState`s and an armed 1-hour `rekeyTimer`. The relay↔binary leg is a **single multiplexed WebSocket**: every phone's frames arrive on one `Connection.Frames()` channel keyed by `conn_id`, and there is **no per-connection disconnect frame**. When one phone drops (or backgrounds — the protocol says phones close-on-background), the binary receives *nothing* for that `conn_id`. The stale session lingers until its scheduled rekey fires (up to an hour later), goes unanswered, and only then times out at 4426. Under normal connect/disconnect churn these stale encrypted sessions accumulate.

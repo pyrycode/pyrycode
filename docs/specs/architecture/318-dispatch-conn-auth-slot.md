@@ -1,19 +1,5 @@
 # #318 — `dispatch`: per-conn auth slot on `*dispatch.Conn`
 
-## Files to read first
-
-- `internal/dispatch/dispatch.go:62-110` — `Conn` struct, `ConnID`, `NextID`, `Send`, `Reply`. The auth slot lives here.
-- `internal/dispatch/dispatch.go:155-181` — `FirstFrameGate` / `FirstFrameOutcome` contract. New `Device` field lands on `FirstFrameOutcome`.
-- `internal/dispatch/dispatch.go:329-402` — `routeConn`, `runConn`, `runGate`. `setAuth` call slots into `runGate`'s accept-and-continue branch (next to the existing `NextID()` advance).
-- `internal/dispatch/dispatch.go:201-214` — `connState` (`gateRun`, `closed`). Single-writer-per-conn invariant the auth slot relies on.
-- `internal/dispatch/gate_test.go:53-110` — `TestFirstFrameGate_Accept` is the template for the new "accept populates slot" test.
-- `internal/dispatch/gate_test.go:112-156` — `TestFirstFrameGate_Reject` is the template for the new "close-intent does not populate slot" test (it already exercises the close-intent path and asserts the second frame is dropped).
-- `internal/relay/auth.go:44-47` — `AuthOutcome`. New `*devices.Device` field on accept.
-- `internal/relay/auth.go:77-119` — `AuthenticateFirstFrame`. The `device, ok := reg.Validate(token)` result on line 90 is what flows into `AuthOutcome.Device` on the accept branch (lines 92-104). Reject / malformed paths leave it nil.
-- `internal/relay/auth_test.go:66-170` — existing accept/reject/malformed coverage. Must continue to pass; one new assertion on `outcome.Device` on the accept branch.
-- `cmd/pyry/relay.go:24-39` — `authGate` closure. One added field in the accept-branch literal: `Device: outcome.Device`.
-- `internal/devices/device.go:24-43` — `Device` shape (the trusted snapshot handlers will read via `Conn.Auth()`).
-
 ## Context
 
 `relay.AuthenticateFirstFrame` already validates the phone's token against `*devices.Registry` and obtains the matched `*devices.Device` on accept. Today that pointer is used to log `device_name` and is then discarded. `AuthOutcome` carries only `{Response, CloseConn}` back to the gate closure in `cmd/pyry/relay.go`, which in turn produces a `dispatch.FirstFrameOutcome` that carries `{Response, CloseConn, Code, Err}`. Verb handlers running on the per-conn goroutine cannot ask "which device authenticated this conn?" — they would have to re-call `reg.Validate(env.Token)` on the second frame, except `env.Token` is only prepended by the relay on the first frame, so re-validation isn't even possible.

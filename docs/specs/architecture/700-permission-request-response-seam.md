@@ -5,43 +5,6 @@ Sub-issue of #597 (Phase 3). Extends the neutral internal event model
 value types + a constructor; no transport, no wire, no consumers wired. Mirrors
 #606's footprint and conventions exactly.
 
-## Files to read first
-
-- `internal/turnevent/event.go:23-103` — the `Event` sealed sum type, the
-  `isTurnEvent()` unexported marker, the value-receiver marker convention, and
-  the `var _ Event = …{}` compile-time assertion block. `PermissionRequest`
-  joins this exactly as `Stall` did. Note the package doc (lines 14-18): inbound
-  commands are deferred "to a later ticket" — **this is that ticket for the
-  first inbound type.**
-- `internal/turnevent/taxonomy.go` (whole file, 95 lines) — the ACP enum
-  pattern: string-backed type, `<Type><Value>` const block, unexported
-  canonical `[]T` slice as single source of truth, `Valid()` scanning it.
-  `PermissionOptionKind` is added here as the fourth enum, same shape.
-- `internal/turnevent/taxonomy_test.go` (whole file, 122 lines) — the exactness
-  test pattern to mirror: independent raw-string `want` literal, length guard,
-  `reflect.DeepEqual(slice, want)`, every-canonical-`Valid()`, and a
-  validity table (in-taxonomy / fabricated / empty).
-- `internal/turnevent/content.go` (whole file, 34 lines) — a second worked
-  example of the sealed-sum-type idiom (`ToolContent`/`isToolContent()`); the
-  template for the new `Inbound`/`isInbound()` marker.
-- `internal/turnevent/event_test.go:46-84` — the stream type-switch test style:
-  build a heterogeneous `[]Event`, recover each kind via type switch. Reuse for
-  asserting `PermissionRequest` is an `Event` and `PermissionResponse` is an
-  `Inbound`.
-- `internal/turnevent/boundary_test.go` (whole file) — **do not modify.** It
-  auto-scans every production `.go` file in the package for non-stdlib imports.
-  The new `permission.go` must be stdlib-only (it needs **zero** imports); the
-  boundary test covers it for free.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md`
-  §"Security model — remote permission granting" (lines 134-145) and the Phase 3
-  decomposition (line 215) — confirms the gate/nonce/deny-on-timeout work is
-  **downstream**, not here. Establishes why this slice is unlabelled.
-- `docs/knowledge/features/turnevent-package.md:198-209` — the "deliberately NOT
-  in the package" list. Note: it tentatively grouped `PermissionRequest` under
-  "Non-turn / internal-only events." This ticket **reclassifies it as outbound**
-  (see Design §1). The doc is owned by the documentation phase and will be
-  reconciled there after merge — **do not edit it.**
-
 ## Context
 
 Phase 3 (epic #597) layers modals/permissions/queue onto the structured

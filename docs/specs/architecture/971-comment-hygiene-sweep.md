@@ -15,48 +15,6 @@ This is a **pure comment sweep**: every edit is a `//` comment or package doc-st
 `make check` cannot be broken by it (comments have no compilation coupling), and there is
 no cascade between sites — each edit is independent.
 
-## Files to read first
-
-The tree-wide greps below were run at architect time and are the authoritative surface —
-codegraph is not used here because every reference is a *comment* (codegraph parses code,
-not comments). Run the AC greps yourself after editing to confirm zero residue.
-
-**Item 1 — msgqueue header:**
-- `internal/msgqueue/queue.go:1-48` — the package doc-string. Lines **31–34** carry the
-  false "unwired" claim to rewrite; line **34–36** (the `#869` cap sentence) is still
-  true — keep it.
-- `cmd/pyry/main.go:807-848` — the real wiring: `queueChanges`/`giveUps` hand-off channels,
-  `msgqueue.New(...)` at **:826**, `newQueueStateEmitterV2` at **:848**. Proof the queue is wired.
-- `cmd/pyry/main.go:1116-1135` — `newInboundDeliver` builds the `msgqueue.DeliverFunc` seam.
-- `internal/relay/handlers/send_message.go:34,61` — the `send_message` handler consumes the
-  queue (`*msgqueue.Queue` satisfies its interface). Names to cite in the new header.
-
-**Item 2 — `reconcileBootstrapOnNew` ghost references (10 files, all comments):**
-- `internal/e2e/harness.go:368-395` — the two hardest sites. `:375` (`seedBoundConversation`
-  doc) and `:392` (`seedBootstrapRegistry` doc). **Read this whole block** — `:392` is written
-  in a pre-#839 anticipatory voice ("stays green pre-#839", "the prep #861 exists to do") that
-  is now historically stale, not just a symbol rename. See § Item 2 for the semantic shift.
-- `internal/sessions/pool_bootstrap_sessionid_test.go:21` — contrasts old behavior
-  ("would have rotated the bootstrap to the foreign uuid").
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go:526` — already says
-  "deterministically"; only the parenthetical `(reconcileBootstrapOnNew is a no-op…)` is stale.
-- `internal/e2e/relay_v2_queue_drain_test.go:87`, `internal/e2e/relay_v2_dequeue_test.go:66`,
-  `internal/e2e/relay_v2_queue_reconnect_test.go:118` — "reconcileBootstrapOnNew rotates the
-  bootstrap session id to initialUUID." (shape A, below).
-- `internal/e2e/relay_v2_modal_answer_test.go:60`, `internal/e2e/relay_v2_new_session_test.go:66`,
-  `internal/e2e/relay_v2_settings_test.go:75`, `internal/e2e/rotation_test.go:68` —
-  "pre-create `<initialUUID>.jsonl` … so reconcileBootstrapOnNew [does X]" (shape A, below).
-
-**Item 3 — dev-only env-flag marking:**
-- `cmd/pyry/main.go:384-403` — `tryAutoAttach` doc + the `PYRY_NO_AUTO_ATTACH` gate read at **:401**.
-- `cmd/pyry/main.go:761-762` — the `PYRY_ALLOW_INSECURE_RELAY` gate read (`allowInsecure := …`).
-- `cmd/pyry/debug_bundle_fake.go:8-30` — **already** documents the flag as "the daemon's existing
-  test/insecure marker"; file is `_fake.go`, function doc says "test-only". **Out of scope.**
-- `internal/relay/connection.go:66-71` — `AllowInsecureScheme` **already** documented as a
-  "Test-only seam". **Out of scope.**
-- `cmd/pyry/relay.go:148-155, 271` — struct-field effect comment + a runtime log line; both
-  accurate, neither is the authoritative read/definition site. **Out of scope** (see § Item 3).
-
 ## Item 1 — msgqueue package header
 
 **Problem.** `internal/msgqueue/queue.go:31-34` claims: *"This slice ships the engine unwired

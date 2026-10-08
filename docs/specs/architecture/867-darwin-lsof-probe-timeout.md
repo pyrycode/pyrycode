@@ -1,27 +1,5 @@
 # Spec: bound the darwin lsof rotation probe with a timeout (#867)
 
-## Files to read first
-
-- `internal/sessions/rotation/probe_darwin.go:42-59` — `darwinProbe.OpenJSONL`; the sole
-  production line to change. Note the current `exec.Command(...).Output()` (no ctx) and the
-  exit-code-1 benign classification (lines 48-50) that must survive verbatim.
-- `internal/agentrun/ptyrunner/reap.go:23-33` — **the precedent to mirror.** `reapPSTimeout`
-  const (2s) + the `reapDescendantGroupsFn` package-var seam pattern (test swaps non-parallel,
-  restores via `t.Cleanup`). Copy this shape.
-- `internal/agentrun/ptyrunner/reap.go:92-96` — `descendantPGIDs`: the exact
-  `exec.CommandContext(ctx, ...).Output()` idiom under a `context.WithTimeout`, no `WaitDelay`.
-  Your `OpenJSONL` construction is byte-for-byte analogous.
-- `internal/sessions/rotation/watcher.go:199-219` — `probeWithRetry`: proves AC 3. A probe
-  `error` is caught into `lastErr` and the loop continues to the next retry delay — a timeout
-  surfaces as an ordinary transient. No caller change needed.
-- `internal/sessions/rotation/probe.go:12-20` — `Probe` interface contract: "Returns error only
-  for unrecoverable probe failures … so the watcher skips and retries." A timeout is exactly such
-  a transient failure; the contract already covers it.
-- `internal/sessions/rotation/probe_darwin_test.go` — the existing darwin-only test file
-  (`//go:build darwin`); add the new tests + `TestHelperProcess` here. Note: no
-  `TestHelperProcess` exists in this package yet — you introduce the first one.
-- `CODING-STYLE.md:67-75` — the `TestHelperProcess` re-exec pattern the tests use.
-
 ## Context
 
 The darwin rotation probe (`darwinProbe.OpenJSONL`) shells out with

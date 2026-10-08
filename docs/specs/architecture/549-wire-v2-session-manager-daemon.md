@@ -1,28 +1,5 @@
 # Spec — cmd/pyry: wire `V2SessionManager` into the daemon (Mobile Protocol v2 cutover) (#549)
 
-## Files to read first
-
-Turn-1 reading list. Paths + line ranges + what to extract.
-
-- `cmd/pyry/relay.go:64-207` — `startRelay`: the single branch point. The whole v1 path (`dispatch.New` + `authGate` + `Register`×3 + assistant-turn bridge + dispatcher/forwarder/wait goroutines + cleanup) lives here. You add a v2 branch around it; the v1 path is touched only to thread one new param and to share the `waitDone` goroutine.
-- `cmd/pyry/relay.go:25-43` — `authGate`. **v1-only.** Do NOT reuse it on the v2 branch — v2 token auth happens *inside* `V2SessionManager` (via `Devices.Validate` on the hello early-data), not as a dispatcher first-frame gate.
-- `cmd/pyry/main.go:481-488` — the **sole** `startRelay` call site. Where you read the new env switch (next to `allowInsecure`) and thread it in.
-- `cmd/pyry/pair.go:60-71` — `resolveStaticKeyBaseDir()`. The daemon's v2 branch MUST call `keys.LoadOrCreate` with the **same** `(baseDir, sanitizeName(name))` pair that `pyry pair` uses, or the daemon's static private key won't match the public key the phone pinned at pairing.
-- `cmd/pyry/pair.go:183-220` — how `pyry pair` loads the static key (`keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(parsed.instanceName))`) and emits `payload.ServerStaticPubkey = base64.StdEncoding(pub[:])`. This is the producer side of the key the daemon must consume.
-- `internal/relay/v2session.go:246-372` — `V2SessionConfig` field contract + `NewV2SessionManager` validation (panics on nil `Frames`/`Logger`; returns error on missing `Outbound`/`Devices`/`ServerID` or wrong-length `StaticPriv`). This is the exact struct you fill.
-- `internal/relay/v2session.go:383-401` — `(*V2SessionManager).Run` lifecycle: returns `nil` when `Frames` closes, `ctx.Err()` on cancel. No goroutines outlive `Run`.
-- `internal/relay/v2session.go:281-298` — `V2SessionConfig.Handlers` doc: same `map[string]dispatch.Handler` shape and same handler values as v1; nil/empty → every open-state app envelope falls through to a sealed `protocol.unsupported`.
-- `internal/e2e/relay_v2_handshake_test.go:55-198` — `startV2Harness` is the **inline** wiring to *mirror* (NOT to reuse for the new test — AC#4 demands a spawned daemon). The package-level helpers in this file ARE reusable: `sendNoiseInit`, `sendNoiseMsg`, `readInnerFrame`, `buildHelloEarly`, and `driveHandshakeToOpen` (the last takes `*v2Harness`; you write a thin daemon-flavoured variant that takes `pubKey []byte` directly).
-- `internal/e2e/relay_roundtrip_test.go:31-154` — the daemon-level template: `RunBareIn "pair"` → `decodePairPayload` → seed `conversations.json` → start daemon w/ relay → wait binary hello → dial phone → `list_conversations` round-trip. Steps 1-2 are exactly what the v2 test mirrors (over the encrypted channel).
-- `internal/e2e/relay_auth_test.go:22-111` — `StartInWithEnv` daemon-spawn pattern + `readPersistedServerID` + the WS-close assertion idiom. This test already proves the v1 path rejects unpaired tokens unchanged (relevant to AC#2).
-- `internal/e2e/pair_test.go:272-290` — `decodePairPayload(t, stdout)` returns a `pair.Payload`; use `.Token` (for `Devices.Validate`) and `.ServerStaticPubkey` (base64-decode → the initiator's responder-static pubkey).
-- `internal/keys/static_key.go:57` — `(*StaticKey).PrivateKey() [32]byte`. Slice it (`priv[:]`) for `StaticPriv`; `noise.KeyLen == 32`.
-- `internal/e2e/harness.go:228-256` — `StartInWithEnv(t, home, extraEnv, extraFlags...)`: the env-injecting daemon spawn (claude = `/bin/sleep infinity`; no fake-claude needed for `list_conversations`).
-
-Docs (codegraph won't surface these):
-- `docs/knowledge/features/v2-session-manager.md` — the "not yet wired" line this ticket invalidates. Documentation phase updates it post-merge (NOT a developer deliverable — see Testing strategy).
-- `docs/knowledge/codebase/436.md` — `pyry pair preflight`'s role as the operator pre-flip safety check.
-
 ## Context
 
 Mobile Protocol v2 (Noise_IK E2E) is fully implemented and e2e-tested on the binary side (`internal/relay/v2session.go`, `internal/noise`; #430-436 / #450 / #453 / #462), but **never wired into the daemon**. `cmd/pyry/relay.go:startRelay` builds only the v1 path (`dispatch.New` + `authGate`). `relay.NewV2SessionManager` has no caller under `cmd/`. A real daemon therefore decodes a phone's `noise_init` as an unknown v1 envelope type and the phone can never complete its handshake.

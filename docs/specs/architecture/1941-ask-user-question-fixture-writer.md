@@ -6,27 +6,6 @@
 
 ---
 
-## Files to read first
-
-This is the turn-1 data load. Read these before writing anything; the design below assumes all of them.
-
-| Path | Symbols | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/initialize_control_writer_test.go` | `scanInitControlFixture`, `writeInitControlFixture` | **The shape to copy.** Scan-step returns the exact bytes, makes no filesystem call, fatals on a hit naming count + class names only; writer calls it FIRST, then `MkdirAll` → `.tmp` → `Rename`. Copy the ordering and the comment that states it. |
-| `internal/e2e/realclaude/initialize_control_writer_test.go` | `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry` | The exactly-one-entry assertion and the four hazards it covers in one check. |
-| `internal/e2e/realclaude/initialize_control_writer_test.go` | `TestInitControlFixture_ScanRefusesAPlantedCredential`, `initControlPlantedPath` | Why the refusal is asserted over the **marshalled record**, never over the writer's fatal; the two `t.Fatalf` vacuity controls; the class-names-only failure messages. |
-| `internal/e2e/realclaude/ask_user_question_record_test.go` | `askQuestionFixtureRecord`, `askQuestionFullRecord`, `askQuestionFixtureFields`, `askQuestionFixtureInput` | The four fields, the fresh-pointer fixture, the single hand-written listing this spec's round trip applies to both sides, and the input literal's two constraints (unsorted keys; no `<`, `>`, `&`). |
-| `internal/e2e/realclaude/ask_user_question_record_test.go` | `TestAskQuestionRecord_RoundTripsEveryFieldAndPreservesTheInputBytes` | The **single-site** `compactRawMessages` idiom for the one raw-JSON field — reuse it verbatim; do not clone `compactInitControlRawRows`. |
-| `internal/e2e/realclaude/ask_user_question_names_test.go` | `askQuestionFixtureName`, `askQuestionNameRow` | The namer's one-parameter contract (`versionToken` → `ask_user_question_v<slug>.json`), and the package-scope identifier already taken (see § Package-scope surface). |
-| `internal/e2e/realclaude/dropped_line_capture_test.go` | `dropcapScanner`, `dropcapFixedNeedles`, `dropcapScanner.scan`, `dropcapScanner.applied`, `dropcapMinNeedle`, `newDropcapScanner`, `dropcapContains`, `dropcapDenySkAnt`, `dropcapDenyUsers` | The offline scanner idiom `dropcapScanner{needles: dropcapFixedNeedles()}`; the five fixed classes; the `(hits, notApplied []string)` contract returning **class names, not values**; and exactly what `newDropcapScanner` reads that makes it banned here. |
-| `internal/e2e/realclaude/inband_bypass_revoke_fixture_test.go` | `compactRawMessages`, `fixtureFieldNonZero` | The two pure helpers this file may call; `compactRawMessages` takes `[]json.RawMessage` and is the reason the single field is wrapped and unwrapped at the call site. |
-| `internal/e2e/realclaude/offline_exec_ban_test.go` | `finOfflineExecBans` — the `"initialize_control_writer_test.go"` entry — and `TestFinOfflineFilesReachNoExecHelper` | The entry to copy **whole**, and the AST matcher: bare `*ast.Ident` and dotted `*ast.SelectorExpr`, parsed **without** `parser.ParseComments`, so no ban can be satisfied out of a comment. |
-| `docs/knowledge/features/e2e-realclaude-ask-user-question-record-test-go.md` | — | Three lessons this ticket inherits: a `-overlay` mutant **cannot** exercise `TestFinOfflineFilesReachNoExecHelper` (it `parser.ParseFile`s a relative name off disk); the family's comment floor does not scale with field count; and #1943 shipped a false "the mutant compiles" doc claim. |
-| `docs/knowledge/features/e2e-realclaude-ask-user-question-names-test-go.md` | — | `askQuestionNameRow` is declared at **package scope** (its own doc comment says otherwise); two doc-comment claims in that file overclaim. Distrust that file's self-description; measure before repeating any of its claims here. |
-| `CODING-STYLE.md` § "Comments — Citing Other Code" | — | Symbol cites only. `make cite-guard` is diff-scoped, has no depth exemption and no range exemption; a bare `:NNN` is the worst form. |
-
----
-
 ## Context
 
 The next slices of this family (#1942, #1938) drive a real claude to call `AskUserQuestion` and commit the call's input under `internal/e2e/realclaude/testdata/`. This slice builds the writer those runs will use and settles it **offline** — no claude, no credentials, no subprocess, no read of any committed artifact.

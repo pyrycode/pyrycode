@@ -11,23 +11,6 @@ dependency bump. The `Events` stream parses the locally-supervised claude child'
 a reviewer to audit — the internet-exposed surface lives downstream in #615 (the producer) and
 #618 (the inbound mobile handler, which carries the label). The security-review step is skipped.
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:447-509` — the single edit site and its proof of
-  correctness in one window: `tracker := tuidriver.NewTracker(cfg.WatchdogTrackerOpts)` (467),
-  the watchdog goroutine that already reads it (488–495), and the `Events` call to amend (503).
-  Confirms the watchdog `tracker` is in lexical scope at the call and already live.
-- `internal/agentrun/ptyrunner/runner.go:512-537` — the `switch ev.Kind` event loop. Note it has
-  **no `default` arm**: this is the proof that v1.3.0's additive `EventKindStallDetected` falls
-  through silently — the "no behaviour change" AC rests on this exact structure. Do not add a
-  `default` arm; adopting stall handling is explicitly out of scope (evidence-based — no agent-run
-  stall has been observed).
-- `go.mod:11` — current `github.com/pyrycode/tui-driver v1.2.0` pin to bump.
-- `go.sum` — the two `github.com/pyrycode/tui-driver v1.2.0` lines (the `h1:` zip hash and the
-  `/go.mod` hash); `go get` rewrites both to v1.3.0.
-- `docs/knowledge/codebase/513.md` — established ptyrunner as the `Session.Events` consumer and
-  enumerates the `EventKind*` constants it switches on. Context for why this is the only call site.
-
 ## Context
 
 The Phase 2 structured-streaming producer (#615, EPIC #596 / ADR-025) maps tui-driver `JSONLEntry`

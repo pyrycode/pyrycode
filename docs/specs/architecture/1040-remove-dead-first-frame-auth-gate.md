@@ -2,27 +2,6 @@
 
 **Ticket:** #1040 (split from #966) · **Size:** S · **Security-sensitive:** No
 
-## Files to read first
-
-- `internal/relay/auth.go:1-162` — the whole file. Everything except the two
-  consts (`StatusUnauthorized`, `MsgInvalidToken`, lines 16-27) and the
-  `github.com/coder/websocket` import is removed. This is the core edit.
-- `internal/relay/auth_test.go` (all 235 lines) — deleted in full; nothing is
-  re-homed (see § Coverage below).
-- `internal/relay/v2session_handshake.go:270-290`, `400-418` — the live
-  consumers of `StatusUnauthorized` / `MsgInvalidToken` on the Noise_IK v2 path.
-  Read to confirm the two consts must survive unchanged; also the hello_ack
-  comment at `:187-189` ("auth.go's buildResponse") is one of the three stale
-  citations to fix.
-- `internal/protocol/envelope.go:55-77` — the `Envelope.Token` field doc.
-  Comment at `:65-67` cites `AuthenticateFirstFrame` as "the only consumer";
-  the field is deliberately retained, the comment must be adjusted.
-- `cmd/pyry/relay_guard_test.go:91-97` — `excludedTypes` `TypeHello` entry;
-  parenthetical "(AuthenticateFirstFrame)" at `:94` is the third stale citation.
-- `internal/relay/v2session.go:22-24` — comment "4401 (StatusUnauthorized)
-  lives in auth.go and is reused unchanged." This stays valid **iff the consts
-  stay in auth.go** — a reason to keep, not relocate (see § Design).
-
 ## Context
 
 The v1 relay dispatch path that consumed `AuthenticateFirstFrame` was removed

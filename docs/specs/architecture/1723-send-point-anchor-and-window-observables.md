@@ -6,24 +6,6 @@
 
 ---
 
-## Files to read first
-
-Everything below is in `internal/e2e/realclaude/` unless noted. Every file here is behind the
-`e2e_realclaude` build tag, so `make check` never compiles it.
-
-| File | Symbols | What to extract |
-|---|---|---|
-| `initialize_control_record_test.go` | `initControlFixtureRecord`, `initControlFullRecord`, `initControlFixtureField`, `initControlFixtureFields`, `TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken` | **This is the only file you edit.** The 24-field contract and its per-field doc paragraphs; the deliberately-incoherent fully-populated fixture and its numbered list of load-bearing literal choices; the hand-written listing and why it must never be reflection-generated; the four existing subtests you extend rather than replace. |
-| `initialize_control_writer_test.go` | `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry`, `compactInitControlRawRows`, `writeInitControlFixture` | **Read, do not edit.** The round trip zips `initControlFixtureFields` over both sides, so the new rows ride for free — that is what discharges AC 4's round-trip half. Its `wantTouched` subtest is the canary the ticket names: it must stay green **and unedited**. |
-| `set_permission_mode_probe_test.go` | `setModeRecorder.add`, `probeOutcome`, `setModeTurnWindows`, `setModeProbeOutcome` | `add`'s switch is the definition of a `system`/`init` line and of a `result` line, and of the index units `turn_boundaries` records — the anchor's doc has to agree with it. `probeOutcome` is what the ticket forbids you to touch: read it to see why (it is embedded in four committed fixtures and compared by its own `equal`). |
-| `inband_bypass_revoke_fixture_test.go` | `fixtureFieldNonZero` | The kind switch the non-zero property runs on: container kinds are judged on `Len()`, everything else on `IsZero()`. That is why an empty trailer slice reads zero and why a `float64` cost of `0` reads zero. |
-| `initialize_control_probe_test.go` | `runInitControlChild`, `initControlSummarize` | **Read, do not edit.** The one live filler of this record. It builds the record with named fields, so new fields need no edit there and stay at their zero values until #1715 — which the ticket accepts explicitly. |
-| `testdata/initialize_control_v2.1.239.json` | — | The committed capture. Its one `result` line carries `num_turns` and `total_cost_usd`; its `system`/`init` line carries `subtype:"init"`. This is where the two wire key names in the new nested type come from. Do not modify or rename it. |
-| `offline_exec_ban_test.go` | `finOfflineExecBans` | Read the `initialize_control_record_test.go` entry only. **You add no name and remove none** — this slice introduces no import and no I/O in that file. |
-| `docs/knowledge/features/e2e-realclaude.md` § `initialize_control_record_test.go` | — | Three recorded lessons, two of which bind here: a duplicate listing row reddens **more** subtests than predicted (so a mutant matrix is checked by failure *message*, not by red count), and a fixture-wide property can forbid the very pair a field exists to express. **Read-only** — the documentation phase owns this file. |
-
----
-
 ## Context
 
 `initControlFixtureRecord` carries `stdout_events` verbatim and `turn_boundaries` — the index, in

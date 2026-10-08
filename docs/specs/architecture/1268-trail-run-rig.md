@@ -1,30 +1,5 @@
 # #1268 — Probe instrument: prove the trailer classifier flips inside its own rig against real processes (offline)
 
-## Files to read first
-
-Everything this rig needs already exists. Nothing below is edited — read to call.
-
-- `internal/e2e/realclaude/trail_run_outcome_test.go:177-224` — `trailRunReadings`, field by field. This is the record the rig must fill; the doc comment on each field says which values its producer can emit and which zero value is safe.
-- `internal/e2e/realclaude/trail_run_outcome_test.go:366-473` — the nine contract checks. C2, C3/C4, C6, C8/C9 all bite this rig. Read them before writing the gather helper, not after it fails.
-- `internal/e2e/realclaude/trail_run_outcome_test.go:476-596` — the eight decision steps. Step 1 (gate) short-circuits before the argv steps; step 3 (`PyryExited`) voids everything below it. Both are why the rig must stage a usable trailer and `PyryExited = true`.
-- `internal/e2e/realclaude/trail_run_outcome_test.go:641-647` — the one existing row built end to end by the real producers (`trailGate(trailScan(...))` and `trailAdmitAttribution(tdnClassifyReapLog(...), realGate.Reason)`). The gather helper is this composition, live.
-- `internal/e2e/realclaude/result_trailer_observation_test.go:206-262` — `trailWaitForTrailer`: the stamping order, `lastMiss`, and the two `BoundFrom` arms. Lines 255-262 are the exact branch AC4 exists to pin.
-- `internal/e2e/realclaude/result_trailer_observation_test.go:125-138` — `trailObservation`. Note it embeds `trailScanResult`; `obs.trailScanResult` is what you hand `trailGate`.
-- `internal/e2e/realclaude/result_trailer_observation_test.go:282-291` — `trailFixtureTrailer`, `terminal_reason: "completed"`. The line to seed the rig's stdout buffer with.
-- `internal/e2e/realclaude/trailer_admissibility_test.go:242-300` — `trailGate`'s arms, so you can predict `trailGateUsable` + `Reason: "completed"` rather than discover it.
-- `internal/e2e/realclaude/trailer_admissibility_test.go:356-452` — `trailAdmitAttribution`: the four contract checks (including the empty-`certified` one) and the `tdnReapNoLine` → `trailAdmitVoidNoLine` arm this rig lands on.
-- `internal/e2e/realclaude/teardown_liveness_test.go:144-197` — `tdnClassifyReapLog`. Two facts the rig depends on: the `heldPGID <= 1` guard returns `tdnReapInstrumentFailed`, and `LineCount == 0` returns `tdnReapNoLine`.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:191-198` — `pinScanArgv`: zero-`pinScan`-on-error, and the two counts the readings carry.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:204-219` — the four per-pid values, and why the zombie/reaped pair is never collapsed.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:275-300` and `:332-438` — `pinReadState` and `pinClassifyState`'s ten-branch order. Branch 8 (`pinIsZombie`, `state[0] == 'Z'`) and branch 5 (exit non-zero, empty stdout *and* empty stderr) are the two AC3 asserts.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:222-232` — `pinStateColumns` and its never-add-`command` prohibition. The rig does not touch this; read it so you don't try to.
-- `internal/e2e/realclaude/background_reach_probe_test.go:884-928` — `reachMatchArgvRows`: matching is against the **whole** command line and the cap is applied *after* matching. This is why a FIFO path works as a needle and why a shell wrapper matches alongside its child.
-- `internal/e2e/realclaude/background_trigger_probe_test.go:663-720` — `holdProbeFIFO`: the rendezvous channel, the persistent write end, and the cleanup that releases it. Read the cleanup carefully — its ordering constrains the rig (§ Concurrency model).
-- `internal/e2e/realclaude/background_trigger_probe_test.go:722-748` — `probeSyncBuffer`, and `probePollInterval` at `:131`.
-- `internal/e2e/realclaude/fifo_reader_liveness_test.go:125-180` — `fifoLiveRead` and its fd-direction argument; also `TestFIFOReaderLiveness_FlipsAcrossOneReaderLifetime:270-341`, which is the closest existing rig to staging A and the shape to mirror.
-- `docs/specs/architecture/1251-teardown-liveness-probe.md` — how this family stages a FIFO subject and records a before/after pair.
-- `docs/knowledge/codebase/1230.md`, `docs/knowledge/codebase/1235.md` — why a half-run instrument publishing an absence is treated as a measured defect.
-
 ## Context
 
 #1266 shipped the trailer observation and its lateness bound. #1270 shipped the two admissibility results. #1271 shipped `trailClassifyRun`, an eleven-valued pure classifier. All three are proven against fixtures and synthetic buffers, and that is the gap: **a pure classifier will happily classify inputs gathered from somewhere other than where the probe claims to gather them.** A rig wired to the wrong path emits the same positive as a rig wired to the right one.

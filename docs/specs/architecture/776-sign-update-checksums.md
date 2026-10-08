@@ -2,20 +2,6 @@
 
 **Ticket:** [#776](https://github.com/pyrycode/pyrycode/issues/776) · **Size:** S · **Label:** `security-sensitive`
 
-## Files to read first
-
-The developer's turn-1 data load. Read these before writing any code.
-
-- `cmd/pyry/update.go:111-209` — `doUpdate`, the whole flow. **The insertion point is between the checksums `FetchAsset` (L167) and `ParseChecksumsFile` (L171).** `updateOptions` struct is L70-84; `runUpdate`'s production defaults are L34-52 (this is where the baked-in key gets wired).
-- `internal/update/checksum.go:56-102` — `ParseChecksumsFile` + `VerifySHA256` + the sentinel-error shape (`ErrChecksumMismatch` etc.). **`signature.go` mirrors this file's pure-function + exported-sentinel shape exactly.**
-- `internal/update/fetch.go:57-107` — `FetchAsset` + private `get`. A 404 already returns `"GET <url>: unexpected status 404"` (L89-94); `maxAssetBytes` (L74) already caps the sig read. This is the mechanism that makes a *missing* signature fail closed — no new fetch code needed.
-- `cmd/pyry/update_test.go:54-85` — `fakeRelease` (L54-65, **stays unchanged**) + `newFakeReleaseServer` (L67-85, **gains a `.sig` route**). L307-332 `restartUpdateOptions` (shared by 5 restart tests); L216-275 `TestUpdate_PinVersion` (inline mux — needs its own `.sig` route).
-- `cmd/pyry/update_e2e_test.go:99-160` — `TestUpdate_HappyPath_E2E` fixture wiring; L499-520 `newFetchFailReleaseServer` + L581-662 the fetch/verify-failure e2e shape to mirror for a new missing-signature e2e.
-- `.goreleaser.yaml` (whole file, 100 lines) — `checksum:` block is L52-53; a new `signs:` block goes alongside `brews:`. The `HOMEBREW_TAP_TOKEN` threading in `brews:` (L90) is the secret-injection precedent.
-- `.github/workflows/release.yml:43-54` — the `goreleaser` step + how `HOMEBREW_TAP_TOKEN` reaches it. The signing key materialization slots in here.
-- `docs/knowledge/features/update-package.md` § "Types & errors" (L39-66) — sentinel-error conventions the new errors follow.
-- `docs/knowledge/features/pyry-update-command.md` § "Error contract" (L125-138) — where the new signature-error rows slot in (developer does **not** edit this doc; it's owned by the documentation phase — noted here only for context).
-
 ## Context
 
 `pyry update` today verifies the downloaded tarball's SHA-256 against a digest parsed out of `checksums.txt`, but nothing verifies `checksums.txt` itself. Integrity rests entirely on "GitHub served both files honestly." A compromised release pipeline or a stolen publishing token can serve a matching `(tarball, checksums.txt)` pair and the SHA-256 check passes against attacker-chosen bytes — arbitrary code executing over the running binary (`AtomicReplace` → restart).

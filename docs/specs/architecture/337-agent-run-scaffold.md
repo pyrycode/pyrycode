@@ -2,16 +2,6 @@
 
 # 337 — `pyry agent-run` subcommand scaffold + flag parsing
 
-## Files to read first
-
-- `cmd/pyry/main.go:161-190` — top-level verb dispatch switch (`run()`); the new `case "agent-run":` slots in here next to the existing verbs.
-- `cmd/pyry/main.go:1275-1342` — `printHelp()`; add a one-line entry for `agent-run` so `pyry help` mentions the new verb (mirrors how `update` / `pair` appear).
-- `cmd/pyry/update.go:25-53` — closest sibling pattern: a verb that does NOT use `parseClientFlags` (no control-socket dial), creates its own `flag.NewFlagSet`, and returns errors that main maps to exit 1. Copy this shape.
-- `cmd/pyry/pair.go:58-85` — example of a verb-local unexported args struct (`pairArgs`) + a `parsePairArgs` helper that returns it. Same split: parse → validate → return struct.
-- `cmd/pyry/main.go:753-768` — `parseSessionsNewArgs` shows the canonical small-helper shape: build `flag.NewFlagSet` with `flag.ContinueOnError`, `fs.SetOutput(os.Stderr)`, return parsed struct + error. Match this.
-- Parent #329 issue body — Phase A spike's "Phase B status: GREENLIT" block enumerates the eventual spawn arg list (`--settings`, `--permission-mode default`, `--model`, `--append-system-prompt-file`, `--effort`). This ticket lands ONLY the flag surface; subsequent tickets consume the parsed struct.
-- Sibling ticket bodies (the trust-merge and settings-file split-offs from #331) — they will read the parsed `agentRunArgs` struct, so keep field names stable.
-
 ## Context
 
 Phase A spike (#329) verified the path from `claude -p` to a pyry-supervised interactive claude. Before any side-effecting tickets (trust-state merge, per-spawn settings file, claude spawn, JSONL watch) land, the verb itself must exist with a complete, validated flag surface. This ticket lands ONLY:

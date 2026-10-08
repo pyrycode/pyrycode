@@ -1,20 +1,5 @@
 # #137 — Resize wire message + server applier (consumes `Bridge.Resize`)
 
-## Files to read first
-
-- `internal/control/protocol.go:11-60` — `Verb` consts, `Request`, `AttachPayload`. Add `VerbResize`, `ResizePayload`, and `Request.Resize` here. Lines 49-55 are the Phase-0 caveat being rewritten by AC#3.
-- `internal/control/server.go:283-314` — `handle` and its switch dispatch. Add a `case VerbResize` branch that delegates to a new `handleResize` method.
-- `internal/control/server.go:389-401` — the existing handshake-resize block in `handleAttach`. The new `handleResize` follows the same swap/clamp/swallow pattern; reuse the same posture (silent on `ErrAttachUnavailable`, log-and-continue on other seam errors).
-- `internal/control/server.go:432-442` — `clampUint16`. Reuse verbatim; no need to duplicate.
-- `internal/control/server_test.go:20-75` — `fakeSession` (already records `resizeCalls`) and `fakeResolver`. Both reusable as-is for the new tests; no new test infra required.
-- `internal/control/attach_test.go:286-431` — handshake-geometry tests. The new resize tests mirror their structure (server stand-up, fake session, assert against `recordedResizeCalls()`).
-- `internal/control/attach_test.go:746-864` — `TestAttach_ClientSendsSessionID` and `TestAttach_EmptySessionIDOmittedOnWire` — the pattern for asserting raw wire bytes / client-side request shape via a hand-rolled `net.Listen`. The `SendResize` round-trip test follows the same shape.
-- `internal/control/client.go` (whole file, ~100 lines) — `Status`, `Stop`, `Logs`, and the shared `request()` helper. Add `SendResize` next to them, reusing `request()`.
-- `internal/supervisor/bridge.go:242-271` — `SetPTY` / `Resize`. The seam this ticket consumes; no changes to `Bridge` itself.
-- `internal/sessions/session.go:156-169` — `Session.Resize` and the `ErrAttachUnavailable` swallow contract. The handler treats foreground sessions the same as the handshake path does.
-- `internal/control/attach_client.go:22-27` — the caveat that **stays** (it covers the client-side SIGWINCH emitter, which #133 lands).
-- `docs/specs/architecture/136-bridge-resize-seam.md` (whole spec) — the Bridge.Resize seam this ticket consumes. Reread the "Concurrency model" and "Error handling" sections; the resize-applier inherits both contracts unchanged.
-
 ## Context
 
 The `Bridge.Resize(rows, cols uint16) error` seam landed in #136 along with handshake-time application. Two pieces of the live-resize story remain:

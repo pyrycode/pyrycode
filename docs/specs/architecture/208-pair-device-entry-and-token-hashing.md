@@ -12,47 +12,6 @@ files, ≤150 prod lines, ≤5 new exported names, no consumer cascade).
 **Depends on:** nothing. The package is a leaf — no imports beyond
 stdlib (`crypto/sha256`, `crypto/subtle`, `encoding/hex`, `time`).
 
-## Files to read first
-
-The developer's turn-1 data load. Each entry is paged in deliberately —
-don't grep for them.
-
-- `internal/config/config.go` (the whole file, 46 lines) — **the
-  reference shape** for "new leaf package, stdlib-only, three exports,
-  ~40 LOC, no logger, no consumers wired in this slice." Mirror the
-  package doc-comment format (`// Package devices ...`), the
-  imports-only-stdlib discipline, the test-file co-location.
-- `internal/sessions/registry.go:17-29` — `registryEntry`'s field
-  layout. Mirror the JSON-tag style: snake_case (`json:"token_hash"`),
-  no `omitempty` on required fields, `time.Time` fields tagged the
-  same way. The sibling CRUD ticket will load/save `Device`s through
-  the same atomic-rename pattern `loadRegistry` / `saveRegistryLocked`
-  use; field tags chosen now keep that ticket trivial.
-- `docs/protocol-mobile.md:62` — the row that fixes the on-disk
-  contract: `device-token` is "256-bit random, hex-encoded ... binary
-  stores `sha256(token)` in `devices.json`, never the plaintext." This
-  is the threat-model anchor — read it before deciding "why not
-  bcrypt?".
-- `docs/protocol-mobile.md:97-98` — the runtime call site that will
-  eventually call `VerifyToken`. Auth path is "phone sends first frame
-  → binary validates device-token → on invalid, send `error` envelope
-  with `auth.invalid_token` and ask relay to close." Out of scope here;
-  read so the function signature you ship doesn't surprise that future
-  ticket.
-- `docs/protocol-mobile.md:663` — token visibility rule: "MUST never
-  display the device-token in plaintext after initial pairing." This
-  is why the package doc comment must call out "never log plain;
-  never wrap plain into error context."
-- `CODING-STYLE.md` § "Error Handling" — `fmt.Errorf("X: %w", err)`
-  shape (not used in this ticket — neither function returns an error
-  — but the discipline applies if the spec is wrong and someone adds
-  one). § "Testing" — table-driven, stdlib `testing` only,
-  `t.Parallel()`, `t.Helper()` for shared assertions, no testify.
-- The ticket body itself (#208) — four AC bullets, each maps directly
-  to one or two test cases.
-
-That's the read budget. The whole package is ~40 lines.
-
 ## Context
 
 Phase 3 (mobile + relay) needs paired devices. The flow:

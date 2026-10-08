@@ -4,17 +4,6 @@
 **Size:** S
 **Status:** Ready for implementation
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go:32-188` — `WithWorktree`, `WithWorktreeAuthenticated`, `RunPyryAgentRun`, `RunOpts`, `RunResult`. The new tests use `RunPyryAgentRun` for AC#1 and AC#4; do NOT modify this file.
-- `internal/e2e/realclaude/tool_loop_test.go:147-202` — `contentBlock`, `parseContentBlocks`, `resultTrailer`, `parseResultTrailer`. AC#1 reuses these directly; the new file imports nothing new for trailer parsing.
-- `internal/e2e/realclaude/tool_loop_test.go:27-145` — full happy-path tool-loop test. AC#1 mirrors its event-walking shape, just with a failing Bash command and an extra assertion on tool_result content.
-- `internal/e2e/realclaude/prompt_fidelity_test.go:75-89` — `jsonlPathFor` helper for failure-message diagnostics. Reuse for the JSONL-reading tests.
-- `internal/e2e/realclaude/smoke_test.go:12-24` — pattern for `exec.LookPath("claude")` plus a bounded-timeout `exec.CommandContext`. AC#2 and AC#3 mirror this shape directly.
-- `cmd/pyry/agent_run.go:207-265` — `PYRY_CLAUDE_BIN` resolution and `buildClaudeArgs`. Tests #2 and #3 mirror the same argv shape when invoking claude directly (sans pyry).
-- `internal/agentrun/streamrunner/runner.go:82-99,179-195` — `userTurn` envelope shape (`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`). AC#2 must construct one to write before closing stdin (per AC: "write the initial prompt, then close stdin").
-- `docs/lessons.md` §"Claude session storage on disk" — encoded-cwd rule (`/` AND `.` → `-`). Only matters if a test reads JSONL; the helper `ReadJSONL` handles encoding for you.
-
 ## Context
 
 The realclaude suite covers happy paths only. Production dispatch fails in four shapes that pyry must interpret as structured signals rather than silent hangs: a Bash tool returns non-zero, claude's stdin closes before processing finishes, claude receives malformed stream-json, and prompts approach the context window. This ticket adds one test per shape to lock the contract down.

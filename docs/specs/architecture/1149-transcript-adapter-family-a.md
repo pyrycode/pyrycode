@@ -4,15 +4,6 @@
 
 Pure adapter swap: the delivery-confirm resolver family in `internal/sessions/reconcile.go` becomes a thin adapter over the `internal/transcript` leaf (created by #1148, merged in PR #1155). No public signature changes, no consumer cascade — this is a net **deletion** of duplicated logic. The load-bearing `("", 0, nil)` no-baseline convention (#838) is preserved and re-pinned by test.
 
-## Files to read first
-
-- `internal/sessions/reconcile.go:112-285` — the two resolvers to rewrite (`newTranscriptResolver:120`, `newProbePreferredTranscriptResolver:224`), plus `probeUsable:151` / `availabilityReporter:144` (**kept** — see § "What stays local") and `jsonlExt:14` / `uuidStemPattern:18` / `mostRecentJSONL:78` (**deleted**). This is the only production file with logic changes.
-- `internal/transcript/transcript.go:36-225` — the primitives to adopt: `Ext:38`, `ValidStem:48`, `Result:77`+`Found:83`, `CanonicalDir:89`, `GuardProbedPath:111`, `StatByID:133`, `Newest:151`, `Probed:204`. **Critical:** `Probed` surfaces the probe-call error (`transcript.go:208-211`) — every *other* no-result collapses to `(Result{}, nil)`. The adapter **swallows** that one surfaced error (§ "The convention inversion").
-- `internal/transcript/transcript_test.go:289-366` — `TestNewest` covers newest-by-mtime, tie-break, non-uuid/wrong-ext/subdir skip, empty-dir, missing-dir. It is a **strict superset** of the six `TestMostRecentJSONL_*` cases being retired — confirm this before deleting them.
-- `internal/sessions/reconcile_test.go:172-476` — the resolver tests to keep (`TestNewTranscriptResolver_*`, `TestProbePreferredResolver_*`), `TestMostRecentJSONL_*:54-170` to delete, and `TestProbePreferredResolver_NoBaseline:327-384` to strengthen for AC3. `touchJSONL:43` / `resolvedTempDir:277` / `stubProbe:253` / `constPID:272` helpers stay.
-- `internal/sessions/pool.go:495-517` — the wiring site. **Unchanged** — `newProbePreferredTranscriptResolver(...)` keeps its 4-arg signature. Only the stale comment at `pool.go:578-583` (names `mostRecentJSONL`) needs a one-word trim.
-- `docs/specs/architecture/838-probe-prefer-transcript-resolver.md` § "Error handling — the load-bearing no-baseline convention" — the `("", 0, nil)` contract this ticket must preserve verbatim.
-
 ## Context
 
 `internal/transcript` (#1148) now owns the resolver core: dir canonicalisation, the confidentiality guard, by-id / probe / newest-by-mtime selection, and the canonical UUID-stem regexp. #1148 created the leaf **without migrating any consumer** (its code-review pinned "0 consumer imports + 3 regexps intact" as the scope gate). This ticket is the Family A migration: rewrite `reconcile.go`'s delivery-confirm resolvers as thin adapters over that leaf so the resolution logic and the UUID-stem constant have exactly one home.

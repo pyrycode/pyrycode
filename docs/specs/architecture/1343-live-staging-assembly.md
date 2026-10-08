@@ -7,37 +7,6 @@
 
 ---
 
-## Files to read first
-
-Generated from `codegraph_context` plus direct reads. **Note the codegraph gap:** the index covers
-the non-build-tagged tree well but under-reports `//go:build e2e_realclaude` test symbols — it
-returned `internal/debugbundle.Assemble` as a top entry point for this task and surfaced only 4 of
-the ~15 relevant `realclaude` symbols. Everything below was confirmed by direct read at `fde02ff`.
-If a line number has shifted under your HEAD, trust the symbol name.
-
-| Path + lines | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_staging_gate_test.go:158-186` | `finOutcomeStaging` — the eight fields, in order, and the no-json-tags rule stated at the type. This is the record you assemble. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:262-366` | `finOutcomeStagingGate` — all seven arms and their order. Read the count arm at `:343-357` closely; `\|\| s.PinWantCount < 1` is what row 3 pins. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:188-201` | `finOutcomeResult` — the two-field publishable type your assembly returns unchanged, and the Detail content rule (it **may** name the two counts; it may never name either command). |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:389-409` | `finOutcomeStagedBase()` — the gate's own fixture at `2, 2`. **Contrast only. Never call it.** Its `2` is the gate file's, with its own stated reason. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:411-515` | `finOutcomeGateCases()` — the shipped count mapping (`wrongCount` at `:438`, `zeroCounts` at `:443`). Your test must not re-assert any (counts → outcome) pair against the gate. Read `:433-436` for the house form of a *non-producible fixture stating its reason at itself* — row 4's constant follows it. |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:86-105` | `finTranscriptReading` — the three-field boundary type. Your caller-side facts type is its mirror image; copy its doc posture. |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:234-264` | `finTranscriptFill` — the signature you call, and `:260`'s `if call.Command == staged` (the second consumer of the staged string; the drift hazard). |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:266-292` | `finTranscriptTestDeadline` (10 ms) and `finTranscriptStagedID` — reuse both; declare neither. |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:298-349` | `finTranscriptBashBlock` / `finTranscriptAssistantLine` / `finTranscriptResultLine` — the three shipped builders your one transcript is made of. Grow no fourth. |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:351-363` | `finTranscriptStagedCaller` — **the fixture to contrast against, never to call.** Its `PinMatchCount: 1, PinWantCount: 1` is the poison AC1 forbids reaching the assembly. |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:538-602` | `TestFinTranscriptFill` — what is already proven, so you do not re-prove it. Note `:556-562`: the lengths-only failure-message form. |
-| `internal/e2e/realclaude/finding_live_pin_test.go:103-140` | `finLivePinWantRows = 2` and its full reason. Row values only; the identifier must not appear in the assembly's body. |
-| `internal/e2e/realclaude/finding_live_staging_test.go:118-137` | `finLiveStageCommand(fifoPath)` — the staged literal you use. Read `:131-134` for why `finOutcomeHoldCommand` is **not** it. |
-| `internal/e2e/realclaude/finding_live_staging_test.go:193-206` | `finLiveStageFixtureFIFOPath` — the synthetic path, shipped for exactly this. |
-| `internal/e2e/realclaude/finding_live_staging_test.go:1-77` | The blocker's file header — the house form for the doc header you will write. **Do not inherit its `WithWorktree` / `t.TempDir()` prohibition**; see § Prohibitions. |
-| `internal/e2e/realclaude/fixtures.go:59-64` | `WithWorktree` — `t.TempDir()` + `t.Setenv("HOME", …)`. The `t.Setenv` is why no subtest here may be `t.Parallel()`. |
-| `internal/e2e/realclaude/fixtures.go:148-167` | `ReadJSONL` — it `t.Fatalf`s on an unopenable transcript. That is the one failure path the assembly inherits; see § Error handling. |
-| `internal/e2e/realclaude/fixtures_test.go:553-572` + `:21` | `writeFixtureLines` and `testSessionID`. |
-
----
-
 ## Context
 
 A live probe of `pyry agent-run` stages one turn in which claude is asked to `cat` a FIFO that never

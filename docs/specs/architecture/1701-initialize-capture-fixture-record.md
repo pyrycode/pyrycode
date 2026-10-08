@@ -3,39 +3,6 @@
 Test-only. Two files touched, both `_test.go`, both in `internal/e2e/realclaude`. No production
 file changes.
 
-## Files to read first
-
-Cite by symbol. Resolve any name below with `codegraph_search` / `codegraph_node`.
-
-- `internal/e2e/realclaude/set_permission_mode_probe_test.go` → `setModeFixtureRecord` — the
-  eighteen shared fields. Copy their JSON tags and Go types **verbatim**; do not re-choose a type.
-  Its doc comment is also where the no-`env` rule and its reasoning originate.
-- `internal/e2e/realclaude/inband_bypass_revoke_fixture_test.go` → `poolRevokeFixtureRecord`,
-  `poolRevokeFullRecord`, `fixtureFieldNonZero`, and the "every field carries a non-zero value"
-  and "same-typed fields carry distinct values" subtests inside
-  `TestPoolRevokeFixture_RoundTripsEveryFieldIntoOneNamedEntry`. This is the machinery model for
-  everything this ticket builds — record shape, fully-populated fixture, both properties. Read its
-  file header too, for the offline-prose shape.
-- `internal/e2e/realclaude/initialize_control_names_test.go` → `initControlFixtureName` — the
-  namer whose *input* AC 4 constrains, and its `CONTRACT for #1697's writer` doc paragraph (that
-  writer is #1702; the header's ticket number is stale and is **not** yours to edit). Read this
-  file's header as the shape for yours: it is the closest sibling that performs no I/O in either
-  direction.
-- `internal/e2e/realclaude/permission_protocol_spike_test.go` → `versionSlug` and
-  `versionSlugSubst` — the exact rewrite AC 4's literal must not survive unchanged; and
-  `captureClaudeVersion`, so you know what the ban keeps out and why it is the tempting call.
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans` (specifically the
-  `initialize_control_names_test.go` entry and the doc comment above it — you copy the entry whole)
-  and `TestFinOfflineFilesReachNoExecHelper` (the AST match semantics: a dotted entry matches a
-  selector, a bare entry matches an identifier, and the parse takes no `parser.ParseComments`).
-- `docs/knowledge/features/e2e-realclaude.md` § "What's there today" → the
-  `inband_bypass_revoke_fixture_test.go` (#1662) bullet and the `initialize_control_names_test.go`
-  (#1696) bullet. Two things there that change what you write: #1662's code review corrected the
-  claim that non-zero/distinct values catch "a field decoded from the wrong tag" — only a
-  **colliding** tag is caught; a unique wrong tag round-trips green — and flagged it as worth
-  remembering for the next file in this family, which is this one. #1696's bullet carries the
-  `-overlay`-cannot-verify-an-AST-check caveat you need for verifying the ban entry.
-
 ## Context
 
 The daemon wants to publish claude's model list to connected clients. The child it already

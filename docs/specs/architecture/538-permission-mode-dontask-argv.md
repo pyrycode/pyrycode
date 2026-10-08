@@ -4,16 +4,6 @@
 
 **Ticket:** https://github.com/pyrycode/pyrycode/issues/538
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:440-456` — `buildArgs`, the single production site of the bug (literal `"default"` on line 451).
-- `internal/agentrun/ptyrunner/runner_test.go:446-482` — `TestBuildArgs`, the fixture that pins the argv shape (literal `"default"` on line 458).
-- `internal/agentrun/settings/settings.go:1-75` — confirm the settings-file half of the deny-default already writes `defaultMode: "dontAsk"` (#487 landed this); the argv fix completes the belt-and-suspenders pair.
-- `internal/agentrun/selfcheck/selfcheck.go:1-15` — package doc comment names the argv pair (`--settings <path> --permission-mode default`); update to `dontAsk` so the comment matches reality.
-- `cmd/pyry/agent_run_selfcheck.go:85-108` — operator-facing FAIL diagnostic prints the argv pair; update to `dontAsk`.
-- `cmd/pyry/agent_run_test.go:407-413` — comment on `TestBuildStreamRunnerClaudeArgs_Shape` describes the PTY argv contract by name (`--permission-mode default` MUST appear); update to `dontAsk` for accuracy.
-- Claude CLI docs (referenced from the ticket): https://code.claude.com/docs/en/cli-reference — *"The `--permission-mode` flag … overrides any `defaultMode` settings found in configuration files."* This is why the argv string shadows the settings file's `defaultMode` field today and why the literal must change.
-
 ## Context
 
 The ptyrunner production path (#470) passes `--permission-mode default` on every claude spawn. Per the CLI reference, that argv overrides any `defaultMode` in the settings file. Argv enum `default` is "prompt the user before each tool" — not a sentinel for "consult settings file." So every interactive-TUI spawn has been silently overriding the deny-default `dontAsk` mode that `internal/agentrun/settings/settings.go` writes (#487).

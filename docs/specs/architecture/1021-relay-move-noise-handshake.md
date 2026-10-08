@@ -9,18 +9,6 @@
 
 It is a **pure move**. No exported identifier changes; no logic changes; because every declaration stays in `package relay`, **no call site anywhere in the tree changes** — Go resolves package-level identifiers across files regardless of which file they live in.
 
-## Files to read first
-
-- `internal/relay/v2session.go:53-57` — `maxNoisePayloadBytes` const + doc (**Move block A**).
-- `internal/relay/v2session.go:1253-1585` — the contiguous handshake/hello block (**Move block B**): `decodeInnerFrameV2`, `InnerFrameV2Decoded`, `supportedV2Capabilities`, `negotiateCapabilities`, `handleNoiseInit`. `decodeInnerFrameV2`'s doc comment starts at line 1253; `handleNoiseInit`'s closing brace is line 1585.
-- `internal/relay/v2session.go:1587-1706` — `handleRekeyInit`. **STAYS.** This sits *between* the two move blocks; the move is therefore not one contiguous range. Do not move it — it belongs to the later re-key slice.
-- `internal/relay/v2session.go:1702-1782` — `handleNoiseMsg` (**Move block C**): doc comment starts at 1702, closing brace at 1782, immediately before `dispatchAppFrame`'s doc at ~1793.
-- `internal/relay/v2session.go:1-22` — the import block; the new file's imports are a strict subset (see § Import hygiene).
-- `internal/relay/v2session.go:305-420` — `V2Session` struct + field doc-comments referencing `handleNoiseInit`'s token-OK path (`device`, `interactive`, `peerStatic`). Read-only context: these fields STAY; the moved code mutates them by name (same package).
-- `internal/relay/auth.go:23-27` — `MsgInvalidToken` const. STAYS. `handleNoiseInit` (line 1501) and `handleNoiseMsg` (line 1747) reference it by name; same package, no import, no edit.
-- `internal/relay/v2bundlestream.go` — references `maxNoisePayloadBytes`. STAYS UNTOUCHED. See § "Do not touch v2bundlestream.go".
-- `CODING-STYLE.md` § Git Conventions — "One concern per commit"; this is a single move commit.
-
 ## Design
 
 ### What moves, into what

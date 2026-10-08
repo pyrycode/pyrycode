@@ -3,19 +3,6 @@
 **Size:** S (confirmed — 3 production files, ~250 total LOC, no signature changes → no edit fan-out)
 **Security-sensitive:** No. Mirrors the operator-shipped, un-gated agent-run compat fix (`d10ce87`); the settings content is pyry-fixed, no untrusted input is parsed, and the spawn runs in the operator's own pre-trusted workspace. (See "MCP-consent context" below — noted for awareness, not a gate.)
 
-## Files to read first
-
-- `internal/sessions/session.go:91-122` — `claudeSettingsArgs` + `spawnArgs`. **The recompose seam.** `spawnArgs` = `spawnBase + claudeSettingsArgs(settings)`; this is why `--settings` must live in `spawnBase`, NOT in `claudeSettingsArgs`.
-- `internal/sessions/session.go:145-161` — the `settings` and `spawnBase` field docs. `spawnBase` is the immutable "settings-free argv"; it already carries the `--session-id` resume suffix for minted sessions. `--settings <path>` is the new member of that base. Add the sibling field `settingsPath` here.
-- `internal/sessions/pool.go:394-401` — bootstrap base composition (`Pool.New`). Injection point #1.
-- `internal/sessions/pool.go:1202-1270` — `buildSession` minted base composition + the returned `Session` literal. Injection point #2 + where `settingsPath` is set on the minted session.
-- `internal/sessions/pool.go:745-781` — `Pool.Remove`. Cleanup hook for minted sessions (after `Evict` returns).
-- `internal/sessions/pool.go:1009-1028` — `Pool.Run` head. Captures `bootstrap := p.sessions[p.bootstrap]` (line 1011) and already has a `defer` block (1020-1024). Bootstrap file cleanup goes here.
-- `internal/sessions/get_or_create.go:70` and `internal/sessions/pool.go:1150` — the two `buildSession` callers. **Confirm they stay unchanged** — the write happens inside `buildSession`, so its signature does not change and there is no call-site cascade.
-- `internal/agentrun/settings/settings.go:35-123` — the agent-run writer to **mirror the shape/discipline of, but NOT reuse.** Note `settingsFile.Permissions` is non-omitempty and byte-order-load-bearing, and `writeSettings` always stamps `defaultMode:"dontAsk"` and requires non-empty `allowedTools` — all three forbidden by AC #2. Copy the tempfile + best-effort-remove-on-error discipline only.
-- `internal/agentrun/ptyrunner/runner.go:610-620` — the exact flag form claude expects: `"--settings", <path>` as two argv elements. The session-pool path appends the identical pair.
-- Twin fix for context: `git show d10ce87` (`fix(agent-run): enable project MCP servers in per-spawn settings`) — the un-gated operator commit this ticket mirrors onto the session-pool path.
-
 ## Context
 
 The mobile/desktop remote-head daemon spawns its per-conversation claude through `internal/sessions`. Every spawn-argv is composed as `base + claudeSettingsArgs(settings)`, and `claudeSettingsArgs` only emits `--model` / `--effort` / `--dangerously-skip-permissions`. There is no `--settings` flag and no settings file anywhere under `internal/sessions`.

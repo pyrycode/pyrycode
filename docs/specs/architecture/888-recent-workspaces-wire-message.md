@@ -6,24 +6,6 @@
 
 ---
 
-## Files to read first
-
-The developer's turn-1 reading list. Read these before writing code; each line says what to extract.
-
-- `internal/relay/handlers/list_conversations.go` (whole, ~60 lines) — **THE template.** Clone its shape verbatim at the coarse level: a consumer-defined narrow reader interface (`ConversationLister`), then `read → project → sort (the `!Equal`-guard + order + tie-break comparator) → marshal → `c.Reply(...)`` (`c.Reply` stamps `id`/`ts`/`in_reply_to`). **Diverge in three ways** (see §Design): fold the rows into a `map[Cwd]maxLastUsedAt` (dedupe) instead of a 1:1 projection; sort **descending** (`.After`, most-recent-first) not ascending; reply a **new** `recent_workspaces_list` type, not `conversations`.
-- `internal/relay/handlers/list_conversations_test.go:16-107` — the dispatcher-harness helpers (`runListConvDispatcher`, `makeListConversationsFrame`, `recvOutbound`, `decodeConversationsResponse`) and `TestListConversations_EmptyRegistry`. Mirror these for the new handler test, especially the **empty-registry byte assertion** (`{"conversations":[]}` → your `{"workspaces":[]}`), the `InReplyTo`/`ID==1`/`TS non-zero` checks, and the non-nil-empty-slice requirement.
-- `internal/conversations/conversation.go:40-46, 72-88` — the three fields the derivation reads: `Cwd` (always-present absolute path), `IsArchived` (durable `omitempty` flag), `LastUsedAt` (always-present — the ordering key). Read the `Cwd` doc: it is the `$HOME`-confined realpath, "always present."
-- `internal/conversations/registry.go:139-172` — `List(filter ...ListFilter) []Conversation` + `ListFilter{IsPromoted, IsArchived}`. Two load-bearing facts: **`List` returns a copy** (line 148-150 doc — safe to sort/mutate the result), and the `IsArchived *bool` filter is the lever design-decision (a) deliberately does **not** pull (§Design decisions). Call `reg.List()` with **no filter**.
-- `internal/protocol/conversations_read.go` (whole, 39 lines) — the read-verb payload precedent: `ListConversationsPayload struct{}` (empty request body "so the dispatcher decodes a concrete value") and `ConversationsPayload`/`ConversationSummary` (reply body + entry). Extract the serialization discipline: reply slices are **non-nil** (`make(..., 0, n)`) so an empty result marshals as `[]` not `null`, and reply-side fields carry no `omitempty` (client reads them on every row).
-- `internal/protocol/workspace.go` (whole, 28 lines) — where the new `RecentWorkspaces*` payloads land (**append here**, do not create a new protocol file: #887 created `workspace.go` for workspace wire messages; recent-workspaces is the same domain). Mirror its doc-comment style + `docs/protocol-mobile.md §` references.
-- `internal/protocol/workspace_test.go` (whole) + `internal/protocol/testdata/create_workspace_folder.json`, `internal/protocol/testdata/workspace_folder_created.json` — the `readFixture` round-trip test pattern and fixture shape to mirror for the two new fixtures.
-- `internal/protocol/codes.go:50-70` — the `// Conversations.` `Type*` block through `TypeWorkspaceFolderCreated`. Add the two new consts here (request + reply), following #887's placement (a `// Workspace.` sub-group or immediately after `TypeWorkspaceFolderCreated`).
-- `internal/protocol/envelope.go:118-143` — `v1TypeSet`. Add **both** new consts (after line 138 `TypeWorkspaceFolderCreated`). Both are v1 application types (request reaches `dispatch.Route`; reply is a normal outbound record an old phone may receive) — **not** v2-control frames, so they belong in `v1TypeSet`, mirroring the `TypeListConversations`/`TypeConversations` pair.
-- `internal/protocol/compat_test.go:9-24, 103-120, 182-234` — three enumerations (`allTypes`, `all`, `all`) plus the hardcoded `len(all) == 24` at **line 117**. Add both consts to all three lists and bump `24 → 26`. The partition test (`len(v1TypeSet) == len(all)`) stays balanced because both go into `v1TypeSet`.
-- `cmd/pyry/relay.go:261-270` (v1 `d.Register` block) and `:452-462` (v2 `Handlers` map) — the **two wiring sites** (AC #6). Register the handler at both, mirroring `TypeListConversations` at `:261`/`:453`: a read verb takes the registry **directly** (`handlers.RecentWorkspaces(convReg)`) — **no `cmd/pyry` adapter** (unlike `create_workspace_folder`'s `resolveWorkspaceFolder`). Only the **request** type is registered; the reply type is outbound-only.
-
----
-
 ## Context
 
 Mobile's "Recent workspaces" list is silently always empty because the daemon

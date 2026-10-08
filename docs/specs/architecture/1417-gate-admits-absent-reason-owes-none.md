@@ -10,41 +10,6 @@ Everything here runs offline: no live claude, no credentials, no daemon, no `t.S
 
 ---
 
-## Files to read first
-
-Read these before editing. Every line range below was opened and confirmed at `93b2018`.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trailer_admissibility_test.go:104-131` | The gate's five values and the `gate-` prefix argument. `:124-129` is the out-of-contract doc whose "six sub-cases" count this ticket makes **five**. |
-| `…:386-491` | `trailGate`'s empty-reason block. `:408-452` is the absence branch: the key-name membership read, the three-site switch on `trailReasonAgainstPath`'s answer, and the byte-budget paragraph. `:463-471` is the **one site whose value changes**. |
-| `…:400-401`, `:438-446`, `:449-451` | Three inline claims this ticket falsifies: "no closed set grows and no consumer gains an arm", the append-vs-rewrite budget note, and "All three still answer out of contract; flipping one is a different ticket's decision". |
-| `…:686-693` | `trailIsGateValue` — the membership predicate to extend. |
-| `…:808-906` | `trailGateCases()`. Read `:814-823` (the uniform-path premise) — **D3 keeps it true and unedited**. |
-| `…:910-1038` | `TestTrailAdmissibilityConstantsAreClosed`. `:917` says "twenty-nine" and the map holds **thirty-five**; `:920` says "eleven"; `:952` says "three answers and eight named voids". |
-| `…:1069-1163` | `TestTrailGate`'s "out-of-contract details name their own sub-case". Its four probes all use `trailRunnerUnread()` → unchanged behaviour; only the counts at `:1070-1077` move. |
-| `…:1166-1176` | `trailGateAbsenceCaseMarkers()` — **unchanged**, still three markers. |
-| `…:1178-1343` | `TestTrailGateNamesWhichAbsenceCaseFired` — the driver AC2 amends. `:1184-1188` is the "six arms … `got.Value` says nothing about WHICH one ran" doc to correct; `:1200-1215` is the M1–M4 matrix to extend; `:1290-1300` is the precondition that becomes R2's discriminator. |
-| `…:1372-1570` | `TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm`. `:1413-1417` argues the value comparison "keeps running on the exempted row" — **this ticket makes that false**; `:1488-1500` is the code, `:1519-1569` the companion. |
-| `…:1720-1771` | `TestTrailGateThenAdmit` — `:1741-1747` is the non-certifying switch that gains a fourth value. |
-| `…:1852-1919` | The key-name leak sweep AC5 extends. Two rows today, both at `trailRunnerUnread()`. `:1894` says "six of trailGate's ten return sites". |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:100-169` | The eleven run outcomes. `:102` and `:136-138` (`trailOutcomeVoidNoTrailer`'s doc — the value the ticket forbids reusing, because a trailer *was* written). |
-| `…:252-268` | `trailIsRunOutcome`. `:254` says "eleven". |
-| `…:364-472` | Contract checks C1–C9. `:369-375` is C1's **published Detail** that both counts and enumerates all five gate values. `:402-422` is C4/C5 — the pair that makes an `Admit`-carrying test of the new arm impossible. |
-| `…:474-511` | Step 1's switch, no default arm. `:476-483` states the hazard as "fall through to step 2"; § D5 re-derives it against what is *reachable*. |
-| `…:596-632`, `:636-650` | `trailRunWellFormed()` / `trailRunProofReadings()` and `trailRunCases()`' producer-built row — the shapes the new fixture mirrors. |
-| `…:914-975` | `TestTrailClassifyRun`. **`:970-974` iterates `trailRunOutcomeValues()` and errors on any outcome no row reaches** — a twelfth outcome without a `trailRunCases()` row is RED here. The ticket does not name this site; § D6 does. |
-| `…:1074-1131` | `TestTrailRunComposesWithGateCases`. `:1126-1130` goes red on a `want` entry no fixture produced — which is why § D3 adds none. |
-| `…:1191-1234` | `trailRunOutcomeValues()` and the `len != 11` pin. |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:80-126` | The six `reason-` values; `:83` is `trailReasonAbsentOwesNone`, the answer the new gate arm keys on. |
-| `…:48-56` | The `# Scope` paragraph — already stale at HEAD and further falsified here. See § D7. |
-| `…:196-272` | `trailReasonAgainstPath`'s two steps and its fixed-prose Detail guarantee — the reason the gate may safely embed `against.Detail`. |
-| `internal/agentrun/streamrunner/runner.go:177-179` | The passthrough (`// Tee-parse stdout … bytes pass through unchanged` + `parser := newStreamParser(cfg.Stdout, nil)`). **Verified: 177-179, not the 170-176 two shipped comments cite.** |
-| `internal/agentrun/streamrunner/runner.go:250-253` | The watchdog-only synthesis (`if wd.hasFired() { if !parser.hasSeenResult() { writeIdleStallResult(…)`). Verified. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:123`, `:945-950` | `reachMaxCommandBytes = 512`; `reachCapCommand` **truncates and marks**, never fails. |
-
----
-
 ## Context
 
 `trailGate` answers `trailGateOutOfContract` for every trailer whose `terminal_reason` key is off the line, on every runner path. On the headless `PYRY_USE_STREAMJSON=1` path that shape is the *documented healthy* one: `streamrunner.Run` tees claude's stdout for the watchdog and passes the bytes through unchanged (`runner.go:177-179`), synthesising a trailer only when the idle-stall watchdog fired **and** claude emitted no result (`:250-253`). So a healthy stream run's trailer is claude's own `result` line and owes no `terminal_reason`.

@@ -35,10 +35,6 @@ Since #1348 the only production writer into the modal registry is `streamApprova
 
 `docs/knowledge/features/modalbridge-package.md`: keep the sentence describing a trust `deny` yielding `session_error{session.blocked, "folder not trusted"}` as modalbridge's wire contract, and add that `cmd/pyry` no longer has a producer for it (#1545). Do not delete the sentence.
 
-## Open questions
-
-None.
-
 ## Revisions
 
 - **2026-09-23 (verifier finding, rework 2):** the ticket carries `security-sensitive`, and the plan committed before the code had no `## Security review` section. The pass below was run against the plan and the shipped diff; its verdict is PASS and it changes no design decision. The same rework fixes the verifier's NIT: `modalKeystroker`'s doc said `*supervisor.Supervisor` satisfies "all three" methods, but the interface now has two.

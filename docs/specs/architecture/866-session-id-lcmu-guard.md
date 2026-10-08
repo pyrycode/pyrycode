@@ -3,18 +3,6 @@
 **Ticket:** [#866](https://github.com/pyrycode/pyrycode/issues/866) — data race on `Session.id`: live `/clear` rotation (`RotateID`) vs unlocked lifecycle-goroutine readers.
 **Size:** S (2 production files, ~15–20 production lines + one `-race` test). Not security-sensitive (no `security-sensitive` label; id lock-hygiene is a correctness fix, not a trust surface).
 
-## Files to read first
-
-- `internal/sessions/pool.go:549-569` — `RotateID`. The `sess.id = newID` write (559) currently sits **outside** the `lcMu` section (560-562); the fix moves it inside. This is the only post-construction writer of `sess.id`.
-- `internal/sessions/pool.go:540-548` — the stale `RotateID` invariant comment ("no concurrent reader exists"). AC #2 requires correcting it.
-- `internal/sessions/pool.go:980-995` — `BootstrapID`. The in-repo precedent for reading id-related state race-cleanly against `RotateID`. **Its comment (986-990) also references the now-stale "no concurrent reader of sess.id" invariant and must be updated** (see § Design → Comment corrections).
-- `internal/sessions/session.go:124-191` — the `Session` struct + `ID()` accessor. Field `id` (128) carries no lock-discipline comment, unlike its siblings `label` (135-137), `settings` (142-147), `lastActiveAt` (187, guarded by `lcMu` per 178-180). Add one. Note the `lcMu` block (178-188) — `id` will join the fields it guards.
-- `internal/sessions/session.go:400-411` — reader site #1: `PreviousID: s.id` in the eviction-transition `notifyTransition` (unguarded, lifecycle goroutine).
-- `internal/sessions/session.go:505-524` — reader site #2: `"session_id", string(s.id)` in the idle-eviction warn log (unguarded, lifecycle goroutine). Note the pre-existing `lcMu` acquire/release just above (506-508) for `s.attached`.
-- `internal/sessions/pool.go:296-316` — `List`: reads `s.id` (313) under `Pool.mu` (RLock). The exemplar of a **`Pool.mu`-holding** reader that stays untouched (already race-clean via `Pool.mu`). Do **not** convert it.
-- `internal/sessions/pool_test.go:319-358` — `TestPool_RotateID_HappyPath` + `helperPoolPersistent` (147-163). The new race test reuses this exact setup (`helperPoolPersistent` → `pool.Default()`).
-- `CODING-STYLE.md` § Concurrency + Testing — `go test -race` is mandatory; table/loop tests, stdlib only, `t.Parallel()`.
-
 ## Context
 
 `Pool.RotateID` mutates `sess.id = newID` under `Pool.mu` only. Its comment claims callers run "before any lifecycle goroutine begins observing the id" — **stale since #839** wired `RotateID` into the live fsnotify rotation watcher (`Pool.Run` → `OnRotate` (`pool.go:1042`) → `onRotate` (`transition.go:95`) → `RotateID`). `OnRotate` fires on every `/clear`, and the watcher goroutine runs concurrently with the per-session lifecycle goroutines.

@@ -1,33 +1,5 @@
 # 446 — `internal/relay`: v2 `noise_msg` application dispatch + tampered-frame teardown
 
-## Files to read first
-
-Each entry says **what to extract**, so the developer's turn-1 data load is complete.
-
-- `docs/specs/architecture/445-v2-inner-frame-handshake.md` — predecessor spec. The transition table is the contract for the cells we leave alone; only the `noise_msg`-in-`open` cell changes here. Reuse the same close codes, log policy, atomicity rule.
-- `docs/knowledge/features/v2-session-manager.md:101-107` — current transition table. The `open` row's `noise_msg, decrypt succeeds → drop (open-state dispatch deferred)` cell is what this slice fills; the `noise_msg, decrypt fails → drop` cell becomes `close(4421), → closed`.
-- `internal/relay/v2session.go:445-510` — `handleNoiseMsg`. Two existing branches stay unchanged (`V2StateAwaitingInit`, `V2StateHandshakeComplete`); only `V2StateOpen` is expanded. Note line 503-508 is the current "drop" stub.
-- `internal/relay/v2session.go:557-595` — `closeWith` and `send` helpers. `closeWith` already deletes the session from `m.sessions` (line 569), so AC #3 (local cleanup after AEAD-failure close) is satisfied **structurally** by reusing `closeWith`; the developer must verify and pin this with a test, not add a parallel cleanup path.
-- `internal/relay/v2session.go:63-69` — `V2Session` struct. Add one field: `device *devices.Device` (matched device snapshot, set in `handleNoiseInit`'s token-accept branch, read by handler dispatch in this slice).
-- `internal/relay/v2session.go:410-443` — `handleNoiseInit` token-accept branch. One edit: capture `device` into `s.device = &device` right before `s.state = V2StateOpen` (line 442).
-- `internal/relay/v2session.go:86-111` — `V2SessionConfig`. Add one optional field: `Handlers map[string]dispatch.Handler`. `nil` is acceptable (means "no app handlers registered"; every open-state app envelope falls through to a sealed `protocol.unsupported` reply). Constructor validation needs no new check.
-- `internal/dispatch/dispatch.go:59` — `Handler` signature: `func(ctx, *Conn, protocol.Envelope) error`. Unchanged in this slice. Handlers reply via `c.Reply` / `c.Send` which push onto `c.outbound`.
-- `internal/dispatch/dispatch.go:108-110` — existing `NewTestConn`. Doc says "test fixtures only — do not call from production code". Sibling `NewConn` (this slice adds it) shares the implementation; the test-only restriction stays on `NewTestConn`.
-- `internal/dispatch/dispatch.go:523-554` — `handleOne`. The body becomes the new `Route` function. The 1-line `runConn` caller updates to `Route(ctx, d.cfg.Logger, c, d.handlers, routing.Frame)`.
-- `internal/dispatch/dispatch.go:556-579` — `sendError`. Extract to a package-private free function `sendError(ctx, logger, conn, inReplyTo, code, message)` so the new `Route` (also in `package dispatch`) calls it. Mechanical; preserves behaviour.
-- `internal/protocol/envelope.go:76-91` — `ErrUnknownType` / `ErrUnsupported` sentinels + `IsV1Compatible`. Route reuses these unchanged — v1 and v2 share the same compat-check; the spec deliberately does not introduce v2-specific error semantics here.
-- `internal/protocol/codes.go:9-31` — error code constants. `CodeProtocolMalformed` / `CodeProtocolUnsupported` / `CodeProtocolUnknownType` are the only codes Route emits in this slice. No new codes.
-- `internal/relay/handlers/send_message.go` — example handler shape. Synchronous reply via `c.Reply(ctx, env, type, payload)` or `replyError(...)`; the handler returns after the reply. No long-lived goroutines spawned from inside the handler. This is the synchronous-handler assumption the open-state dispatch design rests on.
-- `internal/relay/handlers/list_conversations.go` — second example handler shape. Same synchronous-reply pattern.
-- `internal/relay/v2session_test.go:108-205` — test harness helpers (`buildHelloEarlyData`, `wrapInnerFrame`, `decodeRespFrame`, `decodeNoiseMsg`, `v2Recorder`, `startManager`). Reuse for new tests; do not duplicate.
-- `internal/relay/v2session_test.go:212-288` — `TestV2Session_HappyPath`. Pattern for "drive handshake to open", reused as the setup for new open-state tests.
-- `internal/e2e/relay_v2_handshake_test.go:36-113` — `v2Harness` + `startV2Harness`. E2E pattern this slice extends with a stub-handler registration and a phone-side encrypted-envelope round-trip.
-- `internal/e2e/relay_v2_handshake_test.go:117-188` — `dialPhone`, `sendNoiseInit`, `readInnerFrame`, `buildHelloEarly` helpers. Reuse.
-- `internal/devices/auth.go:32-46` — `Registry.Validate(plain) → (Device, bool)`. The `Device` value returned on hit is what we capture into `s.device`. Take its address into a fresh local so `s.device` is a stable pointer (don't point into the returned value's storage if it goes out of scope — but in Go a local taken-address always escapes safely).
-- `docs/protocol-mobile.md:436-440` — atomicity ordering MUST: sealed frame before close on the wire. Already enforced by `closeWith`'s single-envelope emit; this slice's new branches reuse it.
-- `docs/protocol-mobile.md:447-460` — close-code table; 4421 is the only code this slice emits new.
-- `docs/lessons.md` § "AEAD decryption errors" (search) — if present, captures any prior gotchas around CipherState nonce monotonicity on decrypt failure. flynn/noise increments the receive-side counter only on success; a failed `Decrypt` leaves the counter unchanged, so close-then-cleanup IS the only safe response (you cannot "skip and retry" a tampered frame).
-
 ## Context
 
 #445 landed the per-conn v2 state machine through `handshakeComplete` → `open` with CipherStates live and the matched device. The `noise_msg` row in the `open` cell is the only behaviour deferred — frames there are currently dropped silently (`v2session.go:503-508`).

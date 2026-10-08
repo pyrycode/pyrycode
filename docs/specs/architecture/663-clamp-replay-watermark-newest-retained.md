@@ -7,22 +7,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/relay/v2session.go:1459-1506` — **`replayMissed`**: the defect is the unconditional `s.replayThrough = afterID` at **:1484**, reached even in the caught-up (`events == nil`) branch. The loop's per-frame `s.replayThrough = ev.ID` (:1504) is the *correct* precedent — the watermark should track real ids, never the raw remote cursor.
-- `internal/relay/v2session.go:1938-1961` — **`forwardEnvelope`**: the paired guard `if env.EventID != nil && *env.EventID <= s.replayThrough { return nil }`. The fix must not change this; it must only stop the watermark being set above a real id. Note `EventID == nil` control frames (snapshot/error/rekey/resync) are never dropped.
-- `internal/relay/v2session.go:1831-1860` — **`Push`**: the live-stream entry the regression tests drive. `Push` → `drainCh` → `drainOnce` → `forwardEnvelope`, so a live frame **does** pass the watermark guard. This is how the test asserts *delivery* of a live frame after a caught-up reconnect.
-- `internal/eventring/ring.go:140-183` — **`After`**: the 3-way classifier. `latestID := c.nextID - 1` (:168) is exactly the value the new accessor surfaces; the unknown/empty-conversation handling (:160-166) is the shape `NewestID` mirrors.
-- `internal/eventring/ring.go:60-124` — **`Ring`/`convRing`/`Append`**: `nextID` semantics (starts at 1, strictly increasing, advances on every `Append` independent of retention) and the eviction rule (the **newest event is never evicted** — oldest goes first). This is why `nextID - 1` is a sound "newest retained id".
-- `internal/eventring/ring_test.go:101-117` (`TestAfter_CaughtUp`) and `:158-172` (`TestAfter_UnknownConversation`) — the table style + assertions the new `NewestID` tests mirror.
-- `internal/relay/v2session_replay_test.go:25-136` — replay harness: `buildHelloEarlyDataReplay`, `appendRingEvents`, `reconnectScenario`, `waitConnOpen`. Drives a real Noise handshake whose hello carries `last_event_id`.
-- `internal/relay/v2session_replay_test.go:330-388` — `TestV2Session_Reconnect_OtherConnsUnaffected`: the **inline-manager + `mgr.Push` + per-conn frame counting** pattern the live-delivery regression tests follow (the existing `reconnectScenario` discards the manager, so the new tests build the manager inline to push a live frame afterward).
-- `internal/relay/v2session_replay_test.go:395-468` — `TestV2Session_ForwardEnvelope_ReplayWatermarkGuard`: shows injecting `replayThrough` into a session and asserting `forwardEnvelope` drop/forward directly — the dedup-preserved (AC-4) assertion can reuse this style.
-- `internal/relay/v2session_test.go:169-184` (`waitForEnvelopes`) and `:848-…` (`decryptAppFrame`) — the helpers the live-delivery assertion reuses to wait for and decrypt the pushed live frame.
-- `docs/knowledge/codebase/647.md` § "⚠️ Known issue" + § "Testing → Coverage gap that let the defect through" — the canonical defect description and the exact statement of the missing coverage: *assert subsequent live DELIVERY, not merely the absence of replay frames.*
-
----
-
 ## Context
 
 #647 (PR #651, merged 2026-06-08) shipped the mid-turn reconnect replay path with a **MUST FIX still outstanding** — documented in `docs/knowledge/codebase/647.md` and present on `main`. `replayMissed` sets the per-connection dedup watermark `s.replayThrough` directly from the **untrusted** remote `afterID` even when the ring reports caught-up (no events to replay). Paired with the `forwardEnvelope` guard that drops any live frame with `EventID <= replayThrough`, this lets a `last_event_id` outside the current conversation's id space turn into a remote-triggerable mute switch on the connection's own live stream:

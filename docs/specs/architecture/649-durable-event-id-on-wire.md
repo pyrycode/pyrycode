@@ -4,18 +4,6 @@
 
 **Not `security-sensitive`** — outbound, additive wire surface carrying a non-secret monotonic id. No inbound trust boundary, no dispatch policy, does not touch the Noise send-nonce invariant (per the ticket body; the inbound `last_event_id` consumer is sibling #647, which carries the label).
 
-## Files to read first
-
-- `cmd/pyry/interactive_turn_v2.go:306-356` — `emit()`: the one place envelopes reach the wire. Line 319-328 already calls `e.ring.Append(...)` and **discards** the returned id; line 325 comment misattributes the wire surface to `#647`. Lines 336-342 build the per-conn `protocol.Envelope`. This is the only production edit site.
-- `internal/protocol/envelope.go:19-30` — `Envelope` struct. The new field slots in next to `InReplyTo *uint64 \`json:"in_reply_to,omitempty"\`` (line 28) — the exact precedent to mirror (optional pointer, omitempty).
-- `internal/eventring/ring.go:106-127` — `Append` returns `uint64` (the durable per-conversation id, `>= 1`, strictly increasing per conv, never reset). No change here; this is the id source.
-- `internal/eventring/ring.go:50-57` — `Event.ID` doc: "durable per-conversation event id (>= 1, strictly increasing within a conversation)". Confirms the id is always ≥1, so a present `event_id` is never the zero value.
-- `internal/protocol/envelope_test.go:29-94, 127-184` — `TestEnvelope_RoundTrip_Full/_Minimal` (already prove byte-identical round-trip; will pass unchanged with the nil-pointer field) and `TestRoutingEnvelope_TokenOmitempty` / `_CloseCodeOmitempty` (the omitempty-unit-test template to copy for `event_id`).
-- `cmd/pyry/interactive_turn_v2_test.go:19-130` — `recordedPush` captures the pushed `protocol.Envelope`; `ringEventIDs` / `ringEventTypes` / `e.ring.After(convID, 0)` read the ring. These are exactly the hooks the new wire-id assertions need.
-- `cmd/pyry/interactive_turn_v2_test.go:814-916` — the existing `// --- #646 durable event ring ---` test block. The new #649 wire-id tests extend this region and reuse the same scripted-event setup.
-- `internal/protocol/testdata/envelope_full.json` / `envelope_minimal.json` — the fixtures AC-4 requires to round-trip byte-identically; no change needed (the nil pointer is omitted).
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:128` — § Backpressure / replay: "the phone sends `hello` with `last_event_id`; the binary replays from a bounded per-conversation event ring." This slice is the producer that gives the phone a `last_event_id` to advertise.
-
 ## Context
 
 EPIC #596 Phase 2 structured streaming. #646 (merged) built the per-conversation event ring: every structured event the interactive emitter fans out is recorded under a durable, connection-independent id (`eventring.Ring.Append` returns it). That id is **not yet on the wire** — `emit()` computes it and discards it.

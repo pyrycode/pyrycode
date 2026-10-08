@@ -5,18 +5,6 @@ status: spec
 size: XS
 ---
 
-# Files to read first
-
-- `internal/e2e/attach_pty.go` — full file (~233 lines). The PTY harness from #125 you extend. Pay particular attention to:
-  - L28-53 — `AttachHarness` struct shape; you add two methods, no new fields.
-  - L66-142 — `StartAttach` body. The `attachCmd` and `attachDone` channel are already wired. `attachDone` closes when the attach client's `Wait()` returns; you call into this to assert clean detach.
-  - L209-232 — `teardown`. `killSpawned` is idempotent; if the attach client has already exited cleanly, teardown becomes a no-op for that side. No teardown changes needed.
-- `internal/e2e/harness.go:475-505` — `Harness.Run`. The body you mirror for `AttachHarness.Run`. Note `binPath` is a package var populated by `ensurePyryBuilt` (L106-141); both harnesses share the cache.
-- `internal/e2e/harness.go:421-435` — `childEnv`. AttachHarness already calls this for daemon + attach spawn (`attach_pty.go:115`); the new `Run` method calls it the same way for the post-detach `pyry status`.
-- `internal/e2e/idle_test.go:31-37, 88-92` — the `Phase:         running` substring assertion you mirror. Note the multi-space gap (column-aligned status output); `bytes.Contains` against `[]byte("Phase:         running")` matches the literal.
-- `internal/e2e/attach_pty_test.go` — the round-trip test from #125 in the same package. Look at how `StartAttach(t, "")` is called and how `Master.Write` drives bytes into the PTY. The new test follows the same shape but writes the detach sequence instead of a payload.
-- `cmd/pyry/main.go:440-474` — `runAttach`. Confirms `Ctrl-B d` is consumed by the attach client (specifically, by `control.Attach` underneath) and that on clean detach the function returns nil → exit 0. No production-code changes; this read is to confirm the contract the test asserts.
-
 # Context
 
 Today the only e2e coverage of `pyry attach` is `TestE2E_Attach_RoundTripsBytes` (#125) — bytes flow terminal → daemon → child → back. There is no test asserting that the documented `Ctrl-B d` detach sequence cleanly disconnects the attach client without taking down the daemon or its supervised child.

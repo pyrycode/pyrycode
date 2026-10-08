@@ -6,24 +6,6 @@ Every line reference below was measured against that commit.
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1-92` | The file header's doctrine. The probe's question — *was a backgrounded command still running when pyry declared the turn finished?* — is the declared-finished instant, stated in prose before any constant names it. |
-| `…/trail_run_outcome_test.go:114-220` | The thirteen-value space. `:130-135` is the budget-fired carve-out, `:136-138` / `:164-182` / `:183-214` the four docs this ticket amends or leaves as the model. |
-| `…/trail_run_outcome_test.go:358-373` | `trailClassifyRun`'s ordering argument. Shape-A site `:361`. |
-| `…/trail_run_outcome_test.go:530-600` | Step 1's switch: the in-body comment (`:531-532`, shape A), the three Details this ticket exchanges (`:556-557`, `:573-574`, `:588-589`), the two in-arm comments (`:568`, `:582`, shape B), and the two statements that are already correct and must not move (`:548`, `:598`). |
-| `…/trail_run_outcome_test.go:1074-1135` | `TestTrailClassifyRun` — AC4's per-row truncation-marker check at `:1098`, and the coverage loop. **Read it to confirm it needs no edit**, not to edit it. |
-| `…/trail_run_outcome_test.go:1652-1678` | The file's last declaration. Line `1655` is the highest line any other file cites; the new constant is appended after `1678`. |
-| `internal/e2e/realclaude/trail_sighting_liveness_test.go:203-216` | `trailSightingInstantClause` — the shape to mirror: fixed prose, no interpolation, a stated byte cost, and a doc that says sharing alone does not make the rule true. |
-| `internal/e2e/realclaude/trail_sighting_liveness_test.go:576-585` | #1440's clause assertion. The shape to mirror *and to deviate from* — that one is unconditional over every row; this ticket's must be conditional on the arm. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:352-354` | `trailDetail` = `reachCapCommand(fmt.Sprintf(...))`. Nothing is prepended, so a rendered Detail's byte count is exactly the formatted string. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:117-124, :945-950` | `reachMaxCommandBytes = 512`, `reachTruncationMarker`, and `reachCapCommand`'s silent truncation — unchanged at exactly 512, marker only past it. |
-| `internal/e2e/realclaude/trail_ptyrunner_composition_test.go:180-251` | AC5's regression pin. Its headroom check at `:219-226` measures the `run-running-at-trailer` arm, which this ticket does not touch. |
-
----
-
 ## Size check
 
 **S, one grade below no override needed.** Red lines, measured rather than judged:

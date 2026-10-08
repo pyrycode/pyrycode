@@ -1,26 +1,5 @@
 # Spec: server-id type + generation (#206)
 
-## Files to read first
-
-- `internal/sessions/id.go:1-69` — the established pattern for a UUIDv4-shaped
-  string newtype with `crypto/rand` generation + canonical-shape validation
-  (`SessionID`, `NewID`, `ValidID`). Mirror this pattern almost verbatim;
-  divergences below are deliberate.
-- `internal/sessions/id_test.go:1-46` — the format + uniqueness test pair.
-  Reuse the structure (`uuidPattern` regexp, 1000-iteration uniqueness loop).
-- `docs/protocol-mobile.md:61` — wire contract: server-id is "UUIDv4
-  (canonical hex form)" minted by the binary on first run, surfaced in QR
-  codes and unencrypted on WS upgrade. The relay treats it as the routing
-  key; first-claim-wins is the entire authorization model. Reading this row
-  fixes the canonicalization rule (lowercase hex, version-4 nibble, RFC 4122
-  variant) for the binary side.
-- `docs/protocol-mobile.md:575-583` — security framing: server-ids carry ~122
-  bits of entropy and unguessability is the security model. `crypto/rand` is
-  not optional. **Never** fall back to `math/rand`.
-- `CODING-STYLE.md` (root) — naming, error wrapping, package layout
-  conventions. The new package is internal; no exports leak outside the
-  module.
-
 ## Context
 
 Phase 3 introduces the relay-routed mobile protocol. The server-id is the

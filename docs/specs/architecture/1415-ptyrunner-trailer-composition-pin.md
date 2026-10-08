@@ -6,29 +6,6 @@ Add one offline test that drives `trailGate` → `trailAdmitAttribution` → `tr
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1065-1131` | `TestTrailRunComposesWithGateCases` — **the shape to copy.** A correct consumer: call the attribution predicate when and only when the gate certified a reason. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:523-531` | `trailClassifyRun`'s proof arm. The Detail format string mutations 2, 6 and 9 edit; the ordering sentence assertion A8 keys on. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:344-362` | The `out` initializer (`Gate:`, `Admit:` provenance) + the `decide` closure. Mutations 7 and 8 edit here. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:605-631` | `trailRunWellFormed()` / `trailRunProofReadings()` — what they supply (counts, `Liveness`, `PyryExited`, `BoundFrom`, `ClaudeState`) and what must be overwritten (`Gate`, `Admit`). |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:911-960` | `TestTrailClassifyRun` — already asserts `got.Gate`/`got.Admit` provenance on every row (`:945-950`) and no-truncation (`:938`). This is the collateral surface for mutations 7, 8 and 9. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:393-402` | `trailGate`'s usable arm. Mutations 1 and 4 edit here; assertion A6 keys on its closing clause. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:546-556` | `trailAdmitAttribution`'s proof arm. Mutation 5 edits here; A7 keys on its ordering sentence. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:264-266` | `trailDetail` = `reachCapCommand(fmt.Sprintf(...))`. **Every Detail in this chain is capped.** |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:301-314` | The gate's "the runner path is CARRIED, never read" doctrine, and clause B's requirement that `RunnerPath` arrive intact — why the needle sweep is over `Detail` alone and never the marshalled record. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:904-1031` | `trailGateRunnerReadings` + `TestTrailGateIgnoresTheRunnerPath` — the drive-the-shipped-reader rule this ticket inherits, and the test mutation 1 reddens as collateral. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:1033-1044` | `TestTrailAdmitAttribution`'s fixture premise — the `tdnClassifyReapLog` recipe and the reason it is classified rather than typed. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:772-790` | `tdnRunnerFromArgv` — the five constant answers. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:891-906` | `tdnFixturePtyArgv` — the shipped ptyrunner argv. |
-| `internal/e2e/realclaude/finding_run_record_test.go:256-272` | `finRecordRunnerLabel` — the leading-token reduction the ptyrunner premise uses. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:303-338` | `trailFixtureTrailer` (**use this**) vs `trailPaddedTrailer` (**max_turns — do not use**). |
-| `internal/e2e/realclaude/background_reach_probe_test.go:120-125, 945-950` | `reachMaxCommandBytes = 512`, `reachTruncationMarker`, `reachCapCommand`. |
-
----
-
 ## Context
 
 The live exit-path probe reached `run-running-at-trailer` on `admit-proof` on 2026-08-06 under `PYRY_USE_STREAMJSON=0` — the ptyrunner path. The three pure functions that produced that reading are all driveable offline, but nothing pins their composition **under a ptyrunner reading**:

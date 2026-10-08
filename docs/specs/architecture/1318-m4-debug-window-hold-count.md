@@ -2,28 +2,6 @@
 
 **Ticket:** [#1318](https://github.com/pyrycode/pyrycode/issues/1318) · **Size:** S (confirmed, not downgraded) · **Labels:** `bug`, `security-sensitive`
 
-## Files to read first
-
-Read these before writing anything. Line ranges are the part that matters; the one-liner is what to extract.
-
-| File | What to extract |
-|---|---|
-| `internal/e2e/relay_v2_stream_new_session_test.go:461-481` | M4's `t.Fatalf` — the record whose header and "how to read that window" prose this ticket changes. Note the argument order: `daemonLogWindow(...)` is the `%s` before the final `log=%q`. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:504-521` | `daemonLogBudget` + `msgqueueRetryWarn` — the constant whose sizing arithmetic goes stale, and the precedent block the new marker constant copies (duplicate-verbatim rationale + the "0 beside a visibly-populated excerpt" drift guard). |
-| `internal/e2e/relay_v2_stream_new_session_test.go:523-571` | `daemonLogWindow` — the four arms and the header `fmt.Sprintf` the new count joins. Note the header is built AFTER the two sentinel arms return. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:573-687` | `TestDaemonLogWindow` — the table you extend. Note the `notWant` lists on the sentinel arms; they are the boundary pin the new count must inherit. |
-| `internal/e2e/harness.go:368-442` | `StartStreamInteractiveWithRelay` — the `extraFlags` literal at `:419-422` is the single edit site. Signature stays as-is. |
-| `internal/e2e/harness.go:621-671` | `spawnWith` — argv assembly: pyry flags, then `extraFlags`, then `--`, then claude args. Confirms `-pyry-verbose` lands on pyry's side of the separator. |
-| `cmd/pyry/main.go:685-746` | `-pyry-verbose` → `slog.LevelDebug` → the stderr `TextHandler`. Read far enough to see the flag's ONLY effect is the level (the `logRing` tee is unconditional). |
-| `internal/msgqueue/queue.go:577-611` | The two drain arms side by side: the `Debug` hold line at `:589` (the new marker, copy it verbatim) and the `Warn` retry line at `:607`. Read the comment at `:583-586` for why `Debug` is deliberate. |
-| `cmd/pyry/main.go:923-932` | `msgqueue.New`'s `Pending:` closure — `errors.Is(err, supervisor.ErrTrustModalPending)`. This is the single gate on the hold arm and the load-bearing fact behind the prose correction below. |
-| `cmd/pyry/main.go:1625-1653` | `newInboundDeliver` — the four steps and which of them can error. Confirms nothing on this path produces `ErrTrustModalPending`. |
-| `internal/streamsup/runner.go:272-285` | `(*streamsup.Runner).WriteUserTurn` — returns `ErrNoLiveChild` / `turncommit.ErrDropped` / nil. The stream path's whole error vocabulary. |
-| `internal/supervisor/supervisor.go:440-455` | `ErrTrustModalPending`'s only production producer — the PTY delivery gate. Not on the stream path. |
-| `cmd/pyry/stream_turn_busy.go:354-396` | `waitIdleForDelivery` → `WaitIdle` — logs nothing at any level. One half of AC-5's residue. |
-| `cmd/pyry/stream_turn_drain.go:220-234` | The active-session gate's `Debug` drop. This is the Debug record the AC-1 guard relies on, and the drop the test header at `:62-72` already documents. |
-| `cmd/pyry/main.go:1524`, `:1552`; `internal/msgqueue/queue.go:69`, `:85` | The four timing constants the prose names: 30 s, 15 m, 1 s, 2 m. All four verified current — do not re-derive, do not change. |
-
 ## Context
 
 M4's failure record gained a daemon-log window at `183de2f` (#1296). Its first live capture (2026-08-04, during QA of PR #1317) rendered `<empty: the daemon logged nothing between ack #2 and expiry>`. #1298 had pre-assigned that emptiness a meaning — "silence ⟹ the park hypothesis leads" — but M4's own prose immediately contradicts it: at the daemon's default `LevelInfo` several states are silent, and the record cannot tell them apart. The headline discriminator is not a discriminator.

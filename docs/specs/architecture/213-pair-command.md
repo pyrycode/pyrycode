@@ -6,56 +6,6 @@ persists a `Device{TokenHash,…}` to `devices.json`, prints the QR + paste
 payload to stdout. No new types, no new packages, no daemon dependency —
 this is a one-shot CLI verb that touches the on-disk registry directly.
 
-## Files to read first
-
-- `cmd/pyry/main.go:140-174` — top-level `run()` switch on `os.Args[1]`;
-  add the new `case "pair":` line here next to the existing verbs.
-- `cmd/pyry/main.go:451-459` (`parseClientFlags`) — pattern for peeling
-  the shared `-pyry-name` / `-pyry-socket` flags. The pair verb does NOT
-  dial the socket, so we don't reuse `parseClientFlags` directly, but the
-  flag-set shape mirrors it: `-pyry-name` resolution via `defaultName()`.
-- `cmd/pyry/main.go:663-694` — `parseSessionsNewArgs` + `runSessionsNew`
-  pair: the canonical "extract a flag-only arg parser, then a thin
-  runner" pattern this ticket follows.
-- `cmd/pyry/main.go:1178-1236` (`printHelp`) — append one usage line and
-  add a one-line entry to the verb list comment at the top of the file
-  (line 22 — the reserved control-verbs section).
-- `internal/config/config.go` (whole file, ≤47 lines) — `Load(path)` and
-  `DefaultConfig()`. Note `Load` returns `DefaultConfig()` filled in for
-  absent fields; `RelayURL` defaults to `wss://relay.pyrycode.dev`.
-- `internal/identity/store.go:37-47` — `LoadOrCreate(path)` semantics
-  (cold-start mints + persists; warm-start reads + validates; never
-  overwrites on the existing-file path).
-- `internal/devices/registry.go:25-115` — `Load(path)`, `Add(d)`,
-  `Save(path)` contract. Save is atomic (temp + rename, mode 0600).
-  `Add` does NOT validate uniqueness — wiring is responsible if that
-  ever matters; this ticket does not need uniqueness.
-- `internal/devices/device.go:24-39` — `Device{TokenHash,Name,PairedAt,LastSeenAt}`
-  shape and `HashToken(plain)` (lowercase SHA-256 hex, 64 chars).
-- `internal/pair/payload.go:39-66` — `Payload{Server,Relay,Token}` and
-  `Encode(p)`. Encode does not validate; we construct from validated
-  inputs.
-- `internal/pair/render.go:31-39` — `Render(p, w)` writes QR + blank +
-  encoded string + one-line instruction to `w`. Returns first write
-  error; does NOT log or persist.
-- `docs/protocol-mobile.md:60-65` — token format: 256-bit random,
-  hex-encoded; the binary stores `sha256(token)` in `devices.json`,
-  never the plaintext.
-- `docs/specs/architecture/209-pair-devices-registry-crud.md:97-106`
-  ("Path note") — devices.json lives at `~/.pyry/<name>/devices.json`
-  per the per-instance-subdirectory convention `internal/sessions`
-  already uses.
-- `cmd/pyry/main.go:88-96` (`resolveRegistryPath`) — the existing
-  `~/.pyry/<sanitized-name>/sessions.json` resolver. The pair command
-  resolves devices.json + server-id by the same construction.
-- `internal/e2e/harness.go:526-560` (`RunBare`) — drives the binary with
-  no daemon and no HOME isolation. The pair e2e test needs HOME isolation
-  (so it can read the resulting devices.json), so add a small
-  `RunBareIn(t, home, args...)` helper alongside `RunBare`, modelled on
-  `Run` minus the harness-injected `-pyry-socket` flag.
-- `internal/e2e/cli_verbs_test.go:97-108` — `TestVersion_E2E` is the
-  closest analogue: a no-daemon verb tested via `RunBare`.
-
 ## Context
 
 Phase 3 wiring ticket. Every primitive is already in the repo and

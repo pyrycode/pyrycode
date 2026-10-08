@@ -10,35 +10,6 @@ construction sites. **This ticket does not wire the factory into production** �
 selection that picks it is #1081. Everything downstream (turn-event draining #1098, interrupt/new-session
 #1099/#1100, snapshot-offline #1101) builds on the runner this delivers.
 
-## Files to read first
-
-- `cmd/pyry/streamsup_runner.go` (whole file, 55 lines) — the `streamRunner{ r *streamsup.Runner }`
-  adapter (#1097) you extend. Its doc comment (lines 20–22) is the stale `#1081's scope` comment you must
-  correct. `mapStreamState` here is the sibling pattern for a small pure mapper.
-- `internal/sessions/runner.go:38-46` — `RunnerFactory` type: **`func(cfg supervisor.Config) (Runner, error)`**.
-  Your factory must have exactly this signature so `cfg.RunnerFactory = streamRunnerFactory` type-checks.
-  Lines 25–31 are the `Runner` interface `streamRunner` already satisfies.
-- `internal/streamsup/runner.go:60-113` — `streamsup.Config`: the target shape. Note the field name
-  **`Args`** (not `ClaudeArgs`), and `Stdout`/`Stderr`/`Env` (leave all nil).
-- `internal/streamsup/runner.go:158-196` — `streamsup.New`: validates `ClaudeBin`/`WorkDir`/`SessionID`
-  non-empty, `exec.LookPath`s the binary, `agentrun.ResolveWorkdir`s the dir. **These are the loud-failure
-  paths the factory must propagate.**
-- `internal/streamsup/runner.go:476-498` — `buildArgs`: proves streamsup **re-injects** `--session-id <id>`
-  (first spawn) / `--resume <id>` (respawn) from `Config.SessionID`. This is *why* the incoming argv's id
-  flags must be stripped — otherwise double-injection.
-- `internal/sessions/pool.go:444-517` — `Pool.New` bootstrap site: builds `supervisor.Config` with
-  `SessionID: string(bootstrapID)` (#1108, line 462) and `ClaudeArgs: bootstrapArgs` that **do not** carry
-  `--session-id` (resolved via the PTY-only `ResolveSessionID` closure). Strip is a **no-op** here.
-- `internal/sessions/pool.go:1275-1330` — `Pool.buildSession` per-session site: `SessionID: string(id)`
-  (#1108, line 1310) **and** `ClaudeArgs: args` where `args` bakes `--session-id <id>` (line 1291). Strip is
-  **required** here.
-- `internal/supervisor/supervisor.go:92-185` — `supervisor.Config`: the incoming shape. Confirm it has **no**
-  `Stderr`/`Env` field (so those map to nil) and which fields have no streamsup analogue (below).
-- `cmd/pyry/streamsup_runner_test.go` — existing `TestMapStreamState`; the same package/style your new tests
-  join. `t.Parallel()`, table-driven, stdlib only.
-- `docs/knowledge/features/streamsup-package.md` § "Out of scope (follow-on slices)" — confirms this is the
-  `#1081` factory arm being pulled forward into #1109; § "`buildArgs`" for the id-flag inversion.
-
 ## Context
 
 `sessions.Config.RunnerFactory` (`func(cfg supervisor.Config) (sessions.Runner, error)`; nil ⇒

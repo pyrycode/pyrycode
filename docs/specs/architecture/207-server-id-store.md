@@ -1,29 +1,5 @@
 # Spec: server-id persistence + first-run bootstrap (#207)
 
-## Files to read first
-
-- `internal/identity/server_id.go:1-83` — the `ServerID` type, `NewServerID`,
-  `ParseServerID`, and `ErrInvalidServerID` from #206. The loader sits on top
-  of these; do not modify them.
-- `internal/identity/server_id_test.go:1-95` — established test style for the
-  package (table-driven, `t.Parallel()`, `errors.Is` for sentinel matching).
-  Mirror it.
-- `internal/sessions/registry.go:53-92` — the canonical atomic-write recipe in
-  this codebase: `MkdirAll(dir, 0o700)` → `CreateTemp(dir, ".prefix-*.tmp")` →
-  `Chmod(0o600)` → write → `Sync` → `Close` → `Rename`. The new loader's write
-  path is structurally identical, just for a 37-byte payload instead of JSON.
-- `internal/sessions/registry.go:30-51` (`loadRegistry`) — the read-side
-  pattern: `os.ReadFile`, distinguishing `fs.ErrNotExist` from other I/O
-  errors, wrapping with `fmt.Errorf("registry: ...: %w", err)`. The new
-  loader's read path follows the same shape.
-- `docs/lessons.md` § "Atomic on-disk writes" — the load-bearing invariants
-  (`os.Rename` is the commit point, same-directory rename only, `defer
-  os.Remove(tmp)` after `CreateTemp`, no parent-dir fsync). All apply here.
-- `docs/specs/architecture/206-server-id-type-and-generation.md:34-52` — the
-  rationale for placing identity types in their own package and not in
-  `internal/sessions`. Same rationale extends to keeping the loader here.
-- `CODING-STYLE.md` (root) — error wrapping and naming conventions.
-
 ## Context
 
 #206 landed the pure type + generator + parser for `ServerID` in a new

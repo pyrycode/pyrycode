@@ -5,24 +5,6 @@
 
 ---
 
-## Files to read first
-
-| Path + lines | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go:270-345` | `finSighting`'s doc block. Holds sites A (`:273-282`), B (`:311`) and C (`:341-342`). Note the section headings — they are all still correct and none of them move. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:427-453` | The carrier fill. Site D is `:445-446` only; `:443-444` stays verbatim. **This whole block is cited by line from a forbidden file.** |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1369-1394` | `TestFinGatherSightingCarriesTheDecodedScalars`' doc. Site E is `:1384-1387`. Read `:1379-1382` — the file's own reason for symbol-only cites, which this ticket generalises. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1455-1463` | Site F: the `CarriesTrailer` `t.Fatalf`. Four lines, must stay compiling and `gofmt`-clean. |
-| `internal/e2e/realclaude/finding_run_record_test.go:42-58` | Site G: the "Two properties, and only one of them is structural" block. **`THE BUILDER` at `:54` means `finRecordBuild`, not `finTrailerBuild`.** |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:174-241` (read-only) | `finTrailerBuild`'s current doc + signature. `:183-190` is the "TRAP-FREE BY CONSTRUCTION … held BY THE SHAPE OF THE INPUT" passage site G must re-point at. `:216-223` delegates the ordering argument to site D. `:241` is the signature: `(outcome string, sighting finSighting)`. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:256-266` (read-only) | The guard as shipped: `if !sighting.CarriesTrailer`. One bool. This is the fact sites B and F must be re-stated against. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:292-328` (read-only) | `finTrailerSighting` — its doc's "THE AGREEMENT OBLIGATION LANDS HERE" paragraph and its body. This is the second computation site D must name. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:583-603` (read-only) | Where "a pairing NO SCAN PRODUCES" actually lives (`:588-589`) and the test that owns it (`:603`). **The ticket cites `:572-575` for this; that is wrong — see § Corrections.** |
-
-Nothing outside these two edited files is written. `docs/knowledge/features/e2e-realclaude.md` was brought current by #1320 and is not touched.
-
----
-
 ## Context
 
 `finTrailerBuild` took a `trailObservation` until #1320 moved it onto the gather's scalar-only `finSighting` carrier. Two files that #1320 never opened still reason about the builder's old posture in order to justify their own. Nine prose claims — eight comments and one failure string — are now false, stale, or forward-looking about work that has landed.

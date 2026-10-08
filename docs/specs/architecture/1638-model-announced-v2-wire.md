@@ -1,19 +1,5 @@
 # #1638 — Map claude's announced model onto the v2 wire and emit it to an interactive client
 
-## Files to read first
-
-Read these before writing anything. The two production edits are one `case` arm each; almost all of the work is in matching the shape of the analogue exactly, and the analogue is in these files.
-
-- `internal/turnbridge/outbound.go` → `MapEvent`, and specifically its `turnevent.RateLimited` arm (the last arm before `default:`). **The insertion template.** Extract: the "conversation identity only — `tc.TurnID` and `tc.Seq` are ignored" framing every conversation-scoped variant repeats, and the house habit of explaining in the arm's comment *what the mapping deliberately does not do*.
-- `internal/protocol/interactive.go` → `ModelAnnouncedPayload`. Extract: the three wire fields and their JSON tags, that it has **no** `MarshalJSON`, and the `SECURITY:` paragraph — it already states the posture this mapping must not violate (no sanitization, no re-cap, no charset check, report-never-a-control-input).
-- `internal/turnevent/event.go` → `ModelAnnounced`. Extract: the source field names (`Model`, `Truncated`), that `Model` is verbatim and never empty, and that the producer already bounded it at construction.
-- `internal/streamsup/parser.go` → `maxModelField`. Extract: the value (256). It is the number the AC-1 over-cap row has to beat; do not re-declare it in `turnbridge`.
-- `cmd/pyry/interactive_turn_v2.go` → `Handle`'s `case turnevent.RateLimited:` (**the body template**); `emit` (where the interactive-capability gate actually lives — read it so you do not write a second gate in the new arm); `eventKind`'s `turnevent.ModelAnnounced` arm (the comment AC-4 corrects).
-- `internal/turnbridge/outbound_test.go` → `TestMapEventOutbound`. Extract: the shared `tc`, the row struct, and the four `RateLimited` rows as the row template. Also read `TestMapEventRateLimitedTruncatedFieldsOnTheWire` **only** to confirm you are not writing a counterpart — see § Non-goals.
-- `cmd/pyry/interactive_turn_v2_test.go` → `TestInteractiveTurnEmitterV2_RateLimitedNoLifecycleMutation` and `TestInteractiveTurnEmitterV2_RateLimitedMidTurnDoesNotDisturbOpenTurn` (the two AC-2 templates, copy the shape); `TestInteractiveTurnEmitterV2_NoAppOutputLogLeak` (the AC-3 extension site — note its `secret*` const block, its failing-push fake, and its `if logs == ""` Fatal); `fakeInteractiveBcast` (`ActiveConns` clamps to the last snapshot in steady state, and `Push` records the attempt *before* returning its error — both matter, see § Testing strategy); `TestInteractiveTurnEmitterV2_ModelAnnouncedEventKindNamesTheVariant` (prose corrected, assertions/fixture/cursor untouched).
-- `cmd/pyry/stream_turn_busy_test.go` → `TestTurnMarkFor_TotalOverEveryVariant`. **Read-only, do not edit.** Its `ModelAnnounced → turnMarkNone` row and its `PermissionRequest` row are the evidence AC-4's new wording rests on.
-- `docs/knowledge/features/turnbridge-package.md` § "`MapEvent` — the outbound type switch". Read for the per-variant table your arm joins, so the arm's comment does not contradict it. **Read-only** — the documentation phase owns that file and adds the row.
-
 ## Context
 
 `turnevent.ModelAnnounced` has existed since #1600 and its wire shape since #1616, but nothing joins them: `MapEvent`'s `default` returns `ok == false`, so `protocol.TypeModelAnnounced` is a declared frame no daemon ever sends. This ticket adds the two arms that close the gap — one in the pure adapter, one in the interactive v2 emitter — so every interactive v2 client inherits the capability rather than each one reimplementing it.

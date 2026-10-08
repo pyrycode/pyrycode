@@ -4,28 +4,6 @@
 (`internal/streamsup/parser_test.go`). No new exported symbol, no event field, no wire field, no
 new constant, no cap.
 
-## Files to read first
-
-Read these before writing anything. Every entry names a **symbol**, not a line — resolve each with
-`codegraph_node` / `codegraph_search` and read the declaration.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/parser.go` | `controlResponseLine` | The double-nested decode target you widen. Its doc's **"other thirteen top-level keys"** sentence — that number goes to **twelve** when `commands` is declared. |
-| `internal/streamsup/parser.go` | `modelOptionLine` | The element-struct this slice's new type mirrors: the JSON-null carve-out paragraph, the "the decode is all-or-nothing at the LINE" paragraph, and the house doc register. Copy the *arguments*, not the prose. |
-| `internal/streamsup/parser.go` | `emitModelList` | The four-rung classification you leave alone, and the exact statement order the count is inserted into (after the success gate, before the ack early return). |
-| `internal/streamsup/parser.go` | `logControlResponse` | The record you widen. **Two** statements say the set is five — "Five attributes and NOTHING else" and "The attribute set is FIXED at five on every rung". Both are current and both need the edit. Read the `dropped` and `levels_dropped` justification paragraphs; the new attribute needs the same shape of argument. |
-| `internal/streamsup/parser.go` | `systemInitLine` | The struct you must **not** touch. Its "twenty-one deliberately absent keys" doc is why `slash_commands` is not the shortcut. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseRejectBranches` | The table the new reject rows join, and one of the five `wantAttrs` maps. |
-| `internal/streamsup/parser_test.go` | `TestParser_ControlResponseAckIsConsumedSilently` | The second non-model-list `wantAttrs` map. It sits hundreds of lines from the model-list block — the #1812 miss the package overview records. |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListEntryCountIsBounded`, `TestParser_ModelListEffortLevelCountIsBounded`, `TestParser_ModelListIsLoggedContentFree` | The other three `wantAttrs` maps. All five compare with `reflect.DeepEqual`; all five go red without the new key. |
-| `internal/streamsup/parser_test.go` | `modelListLineFixture`, `modelEntryFixture`, `modelEntryWithFixture` | The fixture idiom. `modelListLineFixture` hard-codes an inner response of exactly `{"models": …}` — that is the one thing this slice has to generalise. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseDecodesTheCapturedModels`, `capturedModelEntries`, `capturedModelString` | The capture-pin idiom you copy for `commands`: decode the expectation with **literal key strings**, never through the production target, and guard the capture's own shape with a `Fatalf` before using it as an expectation. |
-| `internal/streamsup/parser_test.go` | `capturedInitializeLine` | How a captured `control_response` is replayed through `Parser.Write`. |
-| `internal/streamsup/initialize_capture_test.go` | `capturedInitializePayload`, `initCaptureArms`, `initCaptureArmNoRequest` | The arm vocabulary and the payload-required wrapper. `initCaptureArmNoRequest` recorded no `control_response` and must be skipped, exactly as the models test skips it. |
-| `docs/knowledge/features/streamsup-package.md` § "Decoding the initialize ack into `turnevent.ModelList` (#1811)" | — | The two lessons that bind this slice: **(a)** any new attribute on `logControlResponse` needs *every* `wantAttrs` map in the file, not only the ones naming the feature that grew it — #1812 learned this at its first green run; **(b)** a capture reader must not itself check the invariant its own test exists to pin. |
-| `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` | — | The bytes. Three responding arms, byte-identical 51-entry `commands`, four-key vocabulary, nine entries carrying `aliases`. |
-
 ## Context
 
 `emitModelList` already decodes claude's initialize payload out of a `control_response` line and

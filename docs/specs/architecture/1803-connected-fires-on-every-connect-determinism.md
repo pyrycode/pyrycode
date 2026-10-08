@@ -5,20 +5,6 @@ production change, ~20 written lines. The cost that earns `s` is the acceptance
 work, and § Testing strategy below prices it at ~40 seconds.)
 **Security-sensitive:** no (label absent; diff is test-only, § 3 pass skipped).
 
-## Files to read first
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/transport/wssclient_test.go` | `TestConnected_FiresOnEveryConnect` | The test being fixed. Note it gates on `<-c.Connected()` and then calls `relay.ForceClose()` with nothing ordering the relay side. |
-| `internal/transport/wssclient_test.go` | `newTestRelay` | The handler appends to `relayCtrl.conns` and signals `relayCtrl.connectedCh` *after* `websocket.Accept` returns. This is the whole bug. |
-| `internal/transport/wssclient_test.go` | `relayCtrl.ForceClose` | Iterates `relayCtrl.conns`. On an empty slice it is a silent no-op — no error, no panic, nothing dropped. |
-| `internal/transport/wssclient_test.go` | `TestConnected_DropsWhenObserverSlow` | The next test in the file, already written correctly: it waits on `relay.connectedCh` before every `ForceClose()`. Copy its ordering, not its loop. |
-| `internal/transport/wssclient_test.go` | `TestBackoff_ResetAfterStableConnection` | #1802's rewrite. Its comment above the `relay.connectedCh` wait states the rule outright; the fix here is the same rule applied to a second site. |
-| `internal/transport/wssclient.go` | `Client.serve` | Where the connect signal is emitted: `setConn(conn)` then a buffer-1 drop-on-full push to `connectedCh`. This is the mutation point for AC 2. |
-| `internal/transport/wssclient.go` | `Client.Connected` | The contract the test's name claims — "emits a value on every successful underlying conn", single observer, drop-on-full. |
-| `internal/transport/wssclient.go` | `Client.Connect` | Confirms the post-`serve` path redials **immediately**; the backoff sleep sits only on the dial-failure path. So a 2s deadline on the reconnect is generous, and lengthening it was never the fix. |
-| `docs/knowledge/features/transport-package.md` | § "Test surface", the `newTestRelay` bullet | The registration-ordering rule is **already written down** there. This ticket is that documented rule being violated at one remaining call site. |
-
 ## Context
 
 `TestConnected_FiresOnEveryConnect` reddens ~2 runs in 40 under 4-way-concurrent

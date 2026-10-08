@@ -1,15 +1,5 @@
 # #218 — `conversations.Registry.Promote`
 
-## Files to read first
-
-- `internal/conversations/registry.go:108-179` — `Create`, `Get`, `List`, `Update` shapes; the in-memory mutate-under-lock pattern this method joins. `Update`'s linear scan + `r.mu` discipline is the template.
-- `internal/conversations/conversation.go:29-72` — `Conversation` field shapes; specifically `Name *string` (nil = "never named", non-nil pointer to `""` = "explicitly empty") and `IsPromoted bool`.
-- `internal/conversations/registry_test.go:75-193` — `TestRegistry_CreateSaveLoadRoundTrip` and `TestRegistry_Get` patterns; the existing `ptrTo[T any]` helper at line 14 and the `mustParseTime` helper at line 16 are reused as-is.
-- `docs/knowledge/decisions/022-conversations-update-callback-under-lock.md` — locks in the "every mutation goes through `r.mu`" invariant. Name-uniqueness scanning must happen under that same lock, otherwise two concurrent `Promote` calls with the same name both see "free" and both succeed.
-- `docs/knowledge/features/conversations-registry.md` — registry surface doc; this ticket appends a `Promote` subsection and four exported sentinels under "CRUD". Naming/style for new exports follows what's there.
-- `internal/sessions/pool.go:32-49` and `internal/update/checksum.go:13-25` — repo-wide sentinel idiom: `var ErrFoo = errors.New("pkg: short lower-case sentence")`. Match this exactly.
-- `docs/protocol-mobile.md` § "Errors and acks" — wire codes `conversation.not_found` and `conversation.already_promoted`. The primitive does not emit those strings; the wire-protocol layer (later ticket) does the mapping. The primitive's job is to surface a `errors.Is`-distinguishable sentinel per refusal case.
-
 ## Context
 
 Phase 3 ships promotion as the user-visible action that turns a throwaway discussion (ephemeral, auto-archive-eligible) into a named channel (long-lived, exempt from auto-archive). This ticket lands the in-memory primitive on `*conversations.Registry`. CLI (`pyry conv promote`) and wire-protocol (`promote_conversation` frame) bindings come in later tickets and call this primitive.

@@ -3,20 +3,6 @@
 **Size:** XS (confirmed; PO's `size:xs` stands). One production file, one new test file.
 **Security-sensitive:** no label, so no § Security review pass.
 
-## Files to read first
-
-| Read | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/main.go` | `run` | The whole dispatch switch. This is the function being split; note that every arm returns and that there is **no `default`** — that absence is AC 4 and must survive. |
-| `cmd/pyry/main.go` | `runSupervisor` | Read only as far as `trustMark`. It calls `confineWorkdirToHome` then `trustMark` **before** the control socket, the relay, or any claude spawn. This is the side-effect chain AC 1 forbids, and the ordering the new test's red-state guard relies on. |
-| `cmd/pyry/main.go` | `printHelp` | The raw string literal, in full. You will extract it and delete three regions of it. |
-| `cmd/pyry/main.go` | `selectInteractiveRunner` | The `case "pty"` arm — the exact message shape this ticket mirrors: `<thing> was removed in #1348: <what is gone>. <what to do instead>`. |
-| `cmd/pyry/interactive_runner_test.go` | `TestSelectInteractiveRunner`, subtest `"pty is rejected, and the error says it was removed"` | The assertion set to mirror: error is non-nil, message carries `#1348`, and a **negative** assertion that the message does not hand the removed thing back as usable. |
-| `cmd/pyry/sessions_test.go` | `TestRunSessions_UnknownVerb` | The house style for a verb-level error test (`strings.Contains` on `err.Error()`, one `t.Errorf` per fragment). Its "verified structurally" note is what this ticket deliberately upgrades — see § Why the seam. |
-| `cmd/pyry/main.go` | `confineWorkdirToHome` | Its `$HOME` containment reject. Why `t.Setenv("HOME", t.TempDir())` makes the AC-5 red state harmless. |
-| `cmd/pyry/jsonrpc_stdio.go` | `serveJSONRPCStdio` | Its doc comment's #1348 paragraph — the record of what the `acp` verb's deletion actually removed, and the source of the `acp` message's wording. |
-| `README.md` | the paragraph beginning "The supervised `claude` has no terminal of its own" | The repo's own already-correct answer for what replaced `attach` — it ends "Watch a live session from the desktop or mobile client instead." The `attach` message reuses that. |
-
 ## Context
 
 #1348 deleted the `attach` and `acp` verbs. It did not delete the advertising: the

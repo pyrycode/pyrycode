@@ -4,17 +4,6 @@
 
 This is the **foundation slice**: it ships a new leaf package with internal tests and **wires no consumer**. The two resolver families (Family A `internal/sessions`, Family B `cmd/pyry`) and the rotation watcher stay byte-identical; they migrate onto this package in the sibling tickets (blocked by this one). Per the "new package AND its first consumer" always-split rule, the first consumer is out of scope here.
 
-## Files to read first
-
-- `internal/sessions/reconcile.go:13-285` — **Family A** (the mechanics to extract; **untouched by this ticket**). `jsonlExt` (13), `uuidStemPattern` (18), `mostRecentJSONL` (78) = the newest-by-mtime scan with lexicographic tie-break, `newProbePreferredTranscriptResolver` (224) = pinned→probe dispatch + the AC4 guard + `(path, size)` return with the `("",0,nil)` not-found convention. This is the reference behaviour the core must preserve; the *convention* (nil-empty) is A's, NOT the core's.
-- `cmd/pyry/interactive_turn_stream_v2.go:189-563` — **Family B** (**untouched by this ticket**). `resolveLatestSessionJSONL` (189) = mtime + `resolvedOnce/sawEmpty` cold/warm offset, `resolveBootstrapJSONL` (269) = pinned-vs-probe dispatch (note: **different order** from A), `resolveOwnBootstrapJSONL` (323) = probe + guard, `resolveBoundSessionJSONL` (531) = by-id + cold/warm. Shows the divergent not-found (**error**) + offset (**cold/warm**) conventions that stay in the adapter, never the core.
-- `cmd/pyry/interactive_turn_stream_v2.go:48-55` — `jsonlStemPattern`, the 2nd of the three byte-identical duplicate regexps.
-- `internal/sessions/rotation/watcher.go:17-19` — `uuidStemPattern`, the 3rd duplicate. The rotation package is already a leaf (imports no `internal/sessions`); it later imports `internal/transcript` for the constant with no back-edge.
-- `internal/sessions/rotation/probe.go:12-20` — `Probe interface { OpenJSONL(pid int) (string, error) }`. The shape the new `transcript.Probe` mirrors. **Do NOT import `rotation`** — redeclare the one-method interface locally so the new package stays a leaf (AC3); rotation's `*Probe` values satisfy it structurally.
-- `internal/sessions/reconcile_test.go:43,177-269` — Family A test idiom: `touchJSONL` (43), `t.TempDir()`, `TestNewTranscriptResolver_*` (177-247), scriptable probes `stubProbe`/`unavailableProbe`/`mustNotProbe` (250-424). Mirror this idiom.
-- `cmd/pyry/interactive_turn_stream_v2_test.go:59,277-292,317-430` — Family B test idiom: `writeJSONL` (59), `probeResult` (277), `fakeProbe{results, pids}` (286) with a **call-count field** (`pids`) for the "probe not called on pid≤0" assertion, `TestResolveOwnBootstrapJSONL_*` (317-430) — the exact #838 scenario matrix to replicate against the new core.
-- `docs/specs/architecture/838-probe-prefer-transcript-resolver.md` — the AC4 confidentiality guard rationale, the load-bearing **inverted** not-found conventions, and the deliberately-dropped cold/warm state. The core carries the guard faithfully and excludes the convention + offset on purpose.
-
 ## Context
 
 Transcript resolution exists today as two near-duplicate families plus a triplicated constant (regexp byte-identical across all three sites, verified):

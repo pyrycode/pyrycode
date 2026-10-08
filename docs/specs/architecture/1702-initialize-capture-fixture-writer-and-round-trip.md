@@ -5,29 +5,6 @@
 
 ---
 
-## Files to read first
-
-Everything below is behind the `e2e_realclaude` build tag; `make check` never
-compiles it. Symbols resolve with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-| --- | --- | --- |
-| `internal/e2e/realclaude/inband_bypass_revoke_fixture_test.go` | `writePoolRevokeFixture` | **The writer shape to mirror exactly**: caller-supplied `dir`, cap applied to a local copy, `MarshalIndent`, `.tmp` write, `os.Rename`, and failure messages naming one identifying field and nothing else. |
-| ″ | `capFixtureCapture` | Call it. Already generic over the string, already bounded at `stderrFixtureCap`, already handles the mid-rune split. Do not rewrite. |
-| ″ | `compactRawMessages` | Call it. Note its `t.Fatalf` text — it names `control_responses` explicitly, which matters for the mutation table below. |
-| ″ | `TestPoolRevokeFixture_RoundTripsEveryFieldIntoOneNamedEntry` | The round-trip and exactly-one-entry shape. Its rows are **restated inline**; that is the one thing this ticket does differently (it zips #1701's listing instead). |
-| ″ | `TestPoolRevokeFixture_WriterCapsChildOutputCapture` | Read only to see where the cap and no-mutation assertions live in the sibling — they are **not** this ticket's, they are #1700's. |
-| `internal/e2e/realclaude/initialize_control_record_test.go` | `initControlFixtureRecord`, `initControlFullRecord`, `initControlFixtureField`, `initControlFixtureFields` | The record written, the fresh-pointer-per-call fixture, and the single listing this ticket applies to **both** sides. |
-| ″ | `TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken` | Its final subtest ("the version token does not survive slugging") is what carries AC 2's redness. Read its failure message before touching any literal. |
-| `internal/e2e/realclaude/initialize_control_names_test.go` | `initControlFixtureName` | The namer, its single-clean-path-component contract, and the explicit statement that the guarantee is **lexical** and says nothing about `dir`. |
-| `internal/e2e/realclaude/permission_protocol_spike_test.go` | `versionSlug`, `stderrFixtureCap`, `truncateString` | The slug rewrite rule (`[^a-z0-9._-]+` → `_`, lowercased first, clamped at 32) and the cap constant. |
-| ″ | `packageDir`, `writeFixture`, `captureClaudeVersion` | The three banned helpers whose names go in the ban entry — read what each actually does, since the entry's comment has to say why. |
-| `internal/e2e/realclaude/offline_exec_ban_test.go` | `finOfflineExecBans`, `TestFinOfflineFilesReachNoExecHelper` | The map to extend and the AST check. Read the `inband_bypass_revoke_fixture_test.go` entry's comment (the "deliberately absent" half this entry copies) and the `initialize_control_record_test.go` entry's (the two additions it copies). |
-| `docs/knowledge/features/e2e-realclaude.md` | § the `inband_bypass_revoke_fixture_test.go` (#1662) entry | The `MarshalIndent`-reflow lesson and the "a reused helper's own guard can make the new wrapper's guard unpinnable" lesson. |
-| ″ | § the `initialize_control_record_test.go` (#1701) entry | **The lesson that binds this ticket's mutation testing:** check a mutant table by failure *message*, not by which subtest went red. Two subtests firing where one was predicted is invisible if you only read red/green. |
-
----
-
 ## Context
 
 #1688 will spend live tokens capturing claude's `initialize` control response —

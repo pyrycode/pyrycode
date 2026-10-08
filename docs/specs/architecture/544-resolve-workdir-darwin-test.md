@@ -2,13 +2,6 @@
 
 **Ticket:** #544 · **Size:** XS · **Scope:** test-only, single file (`internal/agentrun/workdir_test.go`)
 
-## Files to read first
-
-- `internal/agentrun/workdir_test.go:11-24` — `TestResolveWorkdir_DarwinRealpath`, the test to rewrite. The offending line is `const want = "/private/var/"` (line 20) and the prefix check (lines 21-23).
-- `internal/agentrun/workdir_test.go:26-40` — `TestResolveWorkdir_AlreadyResolved`, the sibling that already asserts the canonical-form property `got == filepath.EvalSymlinks(input)`. The fix adopts the same property; mirror its structure.
-- `internal/agentrun/workdir.go:23-33` — `ResolveWorkdir`. Confirms the exact contract: `filepath.Abs(workdir)` → `filepath.EvalSymlinks(abs)`. Because `t.TempDir()` is already absolute, `filepath.EvalSymlinks(wd)` in the test reproduces the function's output exactly (no `Abs` mismatch to worry about).
-- `docs/lessons.md:219-223` — "fsnotify reports as-watched, kernel probes report canonicalised" / "two sources of paths, one canonical and one not." Confirms the macOS `/var → /private/var` default symlink that `t.TempDir()` exercises, and that `/tmp → /private/tmp` resolves the same way. This is the behaviour-class the darwin test exists to guard.
-
 ## Context
 
 `TestResolveWorkdir_DarwinRealpath` hardcodes the assertion `got` has prefix `/private/var/`. That literal holds only when `$TMPDIR` is unset/default on macOS, where `t.TempDir()` lands under `/var/folders/...` which canonicalises to `/private/var/folders/...`.

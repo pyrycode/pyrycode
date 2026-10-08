@@ -2,20 +2,6 @@
 
 **Size:** S · **Security-sensitive:** no · **Production code:** none (one new `_test.go`)
 
-## Files to read first
-
-Read these before writing a line. Line ranges are the exact seams this spec composes.
-
-- `internal/e2e/realclaude/interactive_stream_running_turn_test.go` (whole file, ~356 lines) — **the #1172 reusable seam.** Lift `startStreamRunningTurnHarness` (`:132-199`), `driveRunningTurn` (`:208-214`), `runningTurnPrompt` (`:225-230`), `drainForResponding` (`:242-290`), and the constants `runningTurnHold`/`runningTurnLoopSlack` (`:97-100`). The header doc (`:5-50`) explains *why a Bash loop holds `responding`* — that mechanism is what puts a genuine live turn in flight for you to interrupt. You compose these verbatim; you add ONE new drain helper + one test fn on top.
-- `internal/e2e/relay_v2_stream_interrupt_test.go` (whole file, ~299 lines) — **the fakeclaude behaviour reference.** The M1→interrupt→M2 shape (`:221-298`), the payload-less interrupt send (`:258-262`), and the vacuous-pass guard (`:59-66`, `:288-296`: assert `turn_end.StopReason == "cancelled"`; a spontaneous end is `"end_turn"`). Your real-claude test mirrors the *guard*, not the fake's "no result on the user turn" causality (real claude WILL end naturally at ~40s if the interrupt no-ops — the reason check catches that).
-- `internal/e2e/realclaude/interactive_stream_liveness_test.go:181-260` — `drainForCompletedTurn(t, phone, cs, convID, timeout)`: the two-milestone drain (non-empty `assistant_delta` M1 → terminal `turn_state{idle}` M2). **Reuse it verbatim for AC4** (the post-interrupt health turn). Model your new turn_end drain on its in-order-decrypt structure.
-- `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go:81-85` (`perTurnReplyBudget = 120s`), `:140-158` (`type perConvHarness` fields: `phone`, `initSend`, `initRecv`, `home`, `workdir`), `:259-280` (`sealEnvelope(t, phone, cs, env)` — seals+sends a raw envelope; this is how you fire the interrupt).
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go:160` — `sealSendMessage(t, phone, cs, id, convID, msgID, text)` signature (used indirectly via `driveRunningTurn`; no direct call needed).
-- `internal/protocol/interactive.go:73-78` — `TurnEndPayload{ConversationID, TurnID, StopReason}`; `internal/protocol/codes.go:185` — `TypeTurnEnd = "turn_end"`. `StopReason` carries the `turnevent.TurnEndReason` string verbatim; `"cancelled"` is the interrupt outcome.
-- `internal/streamsup/parser.go:154-178` — `error_during_execution → TurnEndReasonCancelled`; every other subtype → `end_turn`. This is the production classification your live test proves against real claude.
-- `cmd/pyry/interactive_turn_v2.go:208-217` — the `TurnEnd` emitter arm: emits `turn_end{StopReason}` **then** `turn_state{idle}` **then** `endTurn()` (resets `inTurn`/`currentState`). The state reset is why AC4's subsequent turn is healthy. (Read-only context — do not touch.)
-- `internal/protocol/messaging.go` / `codes.go` — `TypeInterrupt` constant (the interrupt envelope Type). Grep it; it is the same constant the fakeclaude analog sends.
-
 ## Context
 
 Interrupt-stops-a-running-turn is covered end-to-end only against a scripted fakeclaude (`TestRelayV2_StreamInterruptStopsRunningTurn`, #1136). The production pieces are shipped and unit-tested independently — the `streamsup.Runner.Interrupt()` primitive (#1120), per-conversation routing via `activeInterrupter → resolveBoundRunner` (#1121), and the parser's `error_during_execution → cancelled` classification (#1120) — but whether an interrupt envelope actually stops a **real** claude turn mid-stream, with the parser classifying real claude's interrupt-terminated result as `cancelled`, is unproven live. This is the recurring fake-green/real-red risk (#949) applied to the interrupt path.

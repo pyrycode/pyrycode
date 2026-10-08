@@ -6,22 +6,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trail_ptyrunner_composition_test.go:19-26` | **The canonical paragraph.** Verified verbatim this run. It states both gathers fill the field with `trailRunnerUnread()` by construction, cites all three fill sites, and gives the reason. All three new comments cite this instead of restating it. Note its prohibition clause says "that gather's scan" — **singular**, scoped to the finding gather. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:791-814` | Edit site 1 is `:805-810`. Read the whole doc comment: `:796-799` already states `tdnClaudeCommand`'s `""` rule, so site 1 must lean on it rather than restate it. `:812-813` and the `func` at `:814` must not move. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:537-552` | Edit site 2 is `:546-550`. The fill call is at `:551-552`; `:552` is cited from three other files. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:150-200` | Edit site 3 is `:157-160`. The fill call is at `:161-162`. `:196-197` states "no pyry runs here" / "no claude runs here". |
-| `internal/e2e/realclaude/trail_run_rig_test.go:26-47` | **The rig's own reason.** `:30` "This rig stages no reap line and MUST NOT GROW ONE". `:40` "This rig runs no pyry and no claude, so PyryExited and ClaudeState have no producer to be gathered from." Both above the edit point, so both are stable cite targets. |
-| `internal/e2e/realclaude/finding_exit_path_probe_test.go:264-272` | The finding gather's prohibition: FIFO path alone, no `tdnClaudeNeedle`, because the gather has no `finLivePinReduce`. Governs **site 2 only** — see § "The rig does not share the gathers' reason". |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:557-575` | `tdnClaudeCommand` — returns `""` unless exactly one row carries the claude needle. The func body is `:561-575`, which is the range the canonical paragraph cites. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:139-143` | **Out of scope, already correct.** Carries the same claim without "UNOWNED". Do not edit. Its cites to `finding_run_gather_test.go:552, :789` and `trail_run_rig_test.go:162` are among those the neutrality constraint protects. |
-| `internal/e2e/realclaude/finding_stage_held_group_test.go:70`, `:576` | Both cite `trail_run_rig_test.go:159-171`. `:576` is **inside a `t.Fatalf` format string** — the constraint that forces the design (§ "Why neutrality is forced, not preferred"). |
-
----
-
 ## Context
 
 Three shipped comments describe the gathers' runner-path reading as `UNOWNED — no ticket holds it`. The statement is *true* — no ticket does hold it — but it misframes a property the design maintains deliberately and whose closure is forbidden with a stated reason one file away. A reader meeting "UNOWNED" reasonably concludes there is a gap worth filing.

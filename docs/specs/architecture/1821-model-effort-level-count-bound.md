@@ -6,35 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every entry names a **symbol**; resolve it with
-`codegraph_search` / `codegraph_node` rather than a line number.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/parser.go` | `maxTaskRosterEntries` | Where the 8192 number ACTUALLY comes from: it is this constant's PRODUCT (8 × 1024), which its doc *noticed* lands on half of `maxUnrecognizedRaw`. Read the four-bullet arithmetic block — it is the template every derivation in this family follows, and § Decision reuses its shape verbatim |
-| `internal/streamsup/parser.go` | `maxUnrecognizedRaw` | The whole-line UNKNOWN budget (`16 << 10`) and the ordering rule stated against it. This is the ceiling § Decision re-anchors on |
-| `internal/streamsup/parser.go` | `maxModelResolved` | The per-entry multiplicand (768) and the "ENVELOPE ARITHMETIC IS NO LONGER COMPLETE" paragraph — gap site 1 of 6 |
-| `internal/streamsup/parser.go` | `maxModelEffortLevel` | The per-ELEMENT 32-byte cap, why it is 32, and why it is NOT sized to `validEffort` — gap site 2 of 6. **This constant does not move** |
-| `internal/streamsup/parser.go` | `maxModelListEntries` | The full derivation, the `N ≤ 1.6` arithmetic, the "NOT 8" paragraph and the "NOT a power of two" paragraph — gap site 3 of 6, and the largest single rewrite in this ticket. **This constant does not move either**; its DOC does |
-| `internal/streamsup/parser.go` | `emitModelList` | The four-rung classification, the entry-count cap's placement argument, and the doc paragraph describing the level list's cap and report |
-| `internal/streamsup/parser.go` | `boundEach` (closure inside `emitModelList`) | The three load-bearing properties, the zero-length arm (#1828's collapse), and the sentence naming #1821 — gap site 4 of 6 and the only production behaviour change |
-| `internal/streamsup/parser.go` | `truncateField` | The `<=` boundary convention the count bound mirrors |
-| `internal/streamsup/parser.go` | `logControlResponse` | The FIXED four-attribute set, the admission rule (daemon-computed integers in, claude's bytes out), and `dropped`'s "the only observable the cap has" argument — § Decision extends this to five |
-| `internal/turnevent/event.go` | `ModelOption.EffortLevels` | Six paragraphs; two need work — the "EACH ELEMENT IS BOUNDED AND THE COUNT IS NOT" paragraph (gap site 5 of 6) and the "A CUT LEVEL IS NOT A LEVEL CLAUDE PUBLISHED" paragraph, which gains the drop case |
-| `internal/turnevent/event.go` | `ModelOption.TruncatedFields` | The convention, and the `"effort_levels"` paragraph whose "however many were CUT" now has to cover a shortened list too |
-| `internal/turnevent/event.go` | `ModelList.Models` | The "THREE DIMENSIONS SINCE #1827 AND ONLY TWO OF THEM ARE BOUNDED" paragraph — gap site 6 of 6 |
-| `internal/turnevent/event.go` | `ModelList.DroppedModels` | Why the entry-count dimension reports as a COUNT and at the LIST level — the asymmetry § Decision has to justify departing from |
-| `internal/streamsup/parser_test.go` | `modelListEntriesCapFixture` and the const block's doc | The literal-fixture rule and its stated reason. The new count fixture goes here |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListEntryCountIsBounded` | The shape the new test follows: a row table plus a record subtest, the tail-truncation pin, the "exactly at the cap" row's equivalent-mutant comment, and the "empty and absent are deliberately NOT rows here" exclusion |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListFieldsAreCapped` | The per-element level rows and the aggregation pin ("THREE over-long levels … name effort_levels ONCE") |
-| `internal/streamsup/parser_test.go` | `modelEntryFixture`, `modelEntryWithFixture`, `modelEntriesFixture`, `modelListLineFixture` | The fixture builders. A level-list fixture is the one new helper |
-| `internal/streamsup/parser_test.go` | `TestParser_ControlResponseAckIsConsumedSilently`, `TestParser_InitializeControlResponseRejectBranches`, `TestParser_ModelListIsLoggedContentFree` | The three OTHER `reflect.DeepEqual(attrs, wantAttrs)` sites that must gain the fifth attribute |
-| `docs/knowledge/features/streamsup-package.md` | § "The per-entry byte budget is a floor, not a total, since #1827" | Carries the same gap statement and the same `N ≤ 1.6` arithmetic. **Read it; do NOT edit it** — the documentation phase owns that file |
-
----
-
 ## Context
 
 `emitModelList` decodes claude's `initialize` reply into a `turnevent.ModelList`. Three

@@ -12,18 +12,6 @@ Sub-issue of #329. Builds on closed #339 (settings-file emit) and #342 (workspac
 
 This ticket adds the spawn + PTY-drive sequence that the Phase A spike (`/tmp/agent-run-spike/pty_drive.py`) demonstrated. The product behaviour: from `runAgentRun`, after the settings file is emitted, spawn interactive `claude` in a PTY, drive a single user-turn (dismiss the trust dialog defensively, then type the prompt), background-drain PTY output, and tear down cleanly on `SIGTERM` to pyry. No JSONL parsing, no end-of-turn detection — that lands in #333.
 
-## Files to read first
-
-- `cmd/pyry/agent_run.go:1-195` — current `runAgentRun`; this ticket adds the spawn block after the `settings-file:` print, plus a new `buildClaudeArgs` helper.
-- `cmd/pyry/agent_run_test.go:1-30` and `newValidArgsFixture` — the existing fixture that drives `runAgentRun`; the new tests reuse it.
-- `internal/supervisor/supervisor.go:301-431` (`runOnce`) — the canonical PTY-spawn shape (`exec.CommandContext` + `pty.Start`); the new `SpawnPTY` helper extracts that shape verbatim. Lines 396-449 (`openTTYInput`, `stdinFallback`) are NOT relevant — agent-run never bridges to a controlling terminal.
-- `internal/supervisor/supervisor.go:54-104` — `Config` for the existing supervisor; the new `SpawnConfig` mirrors the subset relevant to one-shot spawn (`ClaudeBin`, `WorkDir`, `Logger`, `helperEnv`-style env tail).
-- `internal/agentrun/settings.go:46-82` — `WriteSettings` return path is the value passed to `--settings`. Confirms the path policy.
-- `internal/agentrun/trust.go` — `MarkWorkdirTrusted` is the upstream guard; the spec's "trust dialog defensive Enter" is a belt-and-suspenders write, not a substitute.
-- `/tmp/agent-run-spike/pty_drive.py:25-67` — exact drive timings and teardown shape the Go port mirrors. Note the spike uses `--permission-mode acceptEdits` for the experiment; this ticket switches to `default` (see § Security).
-- `docs/lessons.md:13-27` ("PTY Testing") and `docs/lessons.md:225-260` ("PTY master fds on darwin do not support SetReadDeadline") — constrain the unit-test strategy (no PTY deadlines on macOS; bridge tests use `TestHelperProcess`, not a real PTY).
-- `docs/knowledge/codebase/339.md` § "Stdout marker contract" — `settings-file:` is the sole stdout contract today; this ticket does NOT add a second stdout line on success.
-
 ## Design
 
 ### Seam: a thin `SpawnPTY` primitive in `internal/supervisor`

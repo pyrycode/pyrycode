@@ -13,26 +13,6 @@
 
 ---
 
-## Files to read first
-
-Every edit site lives in `internal/protocol` (leaf data package), one guard test in `cmd/pyry`, and one doc. There is no call graph (dead code has zero callers) — the deterministic surface is the token grep, not codegraph.
-
-| Path / lines | What to extract |
-|---|---|
-| `internal/protocol/codes.go:141-144` | The `// Backfill.` block: three `Type*` const declarations to delete. |
-| `internal/protocol/messaging.go:26-34, 67-81` | The three payload structs + doc comments to delete (`BackfillSincePayload`, `MessageChunkPayload`, `BackfillDonePayload`). |
-| `internal/protocol/messaging.go:52-53` | `SessionTransitionPayload.WorkspaceCwd` comment — **cites `BackfillSincePayload.ConversationID`** as its `*string`-no-omitempty precedent; a stale ref after deletion (see § Comment cross-refs). |
-| `internal/protocol/envelope.go:118-145` | `v1TypeSet` map literal — three entries (`TypeBackfillSince`/`TypeMessageChunk`/`TypeBackfillDone` at 141-143) to delete. Note the package doc contract: v1TypeSet is the closed accept-set. |
-| `internal/protocol/settings.go:22-31` | `SetSessionSettingsPayload` comment — its sibling-precedent parenthetical **names `BackfillSincePayload`** (AC #2 site 1). |
-| `internal/protocol/handshake.go:26-27, 55` | `HelloClientPayload.LastSeenTS` comment cites `§ Backfill semantics` (AC #2 site 2). **`LastSeenTS` (`:55`) is a LIVE field — keep it**; only re-cite the section. |
-| `internal/protocol/messaging_test.go:82-118, 204, 212-~275` | Three round-trip test funcs to delete; the `:204` comment (in the *surviving* `TestSessionTransitionPayload_RoundTrip`) says `mirrors backfill_since's guard` — a stale ref (see § Comment cross-refs). |
-| `internal/protocol/compat_test.go:21, 119, 122, 202` | Three lists each carry `TypeBackfillSince, TypeMessageChunk, TypeBackfillDone,`; **line 122 hard-codes the count `26`** (must become `23`). |
-| `cmd/pyry/relay_guard_test.go:60-135` | The completeness guard `TestEveryInboundV2TypeHasHandler`. The three types are in `excludedTypes` "v1-legacy" (`:129-134`) — the **2nd totality guard** (Assertion #3 inverse); see § Guard. |
-| `docs/protocol-mobile.md:29, 421-423, 602, 853-870` | Type list (29), descriptor rows (421-423), deferred-handler note (602), the `## Reconnect / Backfill semantics` section + Mode-A bullet (853/859). **Keep the section heading** (anchor). |
-| `internal/protocol/testdata/{backfill_since,message_chunk,backfill_done}.json` | Three fixtures to delete. |
-
----
-
 ## Design — deletion inventory
 
 Pure deletion + four comment rewords. No new types, no logic, no goroutines, no error paths. Organized by file.

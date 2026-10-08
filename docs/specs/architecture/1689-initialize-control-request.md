@@ -6,25 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. This is the turn-1 data load; everything the
-design needs is in it.
-
-| Path | Symbols | What to extract |
-|---|---|---|
-| `internal/streamsup/envelope.go` | `marshalBypassRevocationEnvelope`, `WriteBypassRevocation` | **The shape to mirror field for field.** Nil-check-first ordering, the `fmt.Errorf("streamsup: <verb> <name>: %w", err)` wrapping, exactly one `Write`, never close `w`. |
-| `internal/streamsup/envelope.go` | `controlRequest`, `controlRequestInner` | The two structs the new marshaller reuses **unchanged**. Read the `omitempty` paragraph on `controlRequestInner` — it explains why the `initialize` line comes out clean with no new field. |
-| `internal/streamsup/runner.go` | `RevokeBypass`, `Interrupt`, `nextControlID`, `Stdin` | The three-line method body, the shared atomic counter, and the fact that `Stdin` releases `r.mu` **before** returning (so the blocking write never holds it) and returns nil between spawns. |
-| `internal/streamsup/envelope_test.go` | `TestMarshalBypassRevocationEnvelope`, `decodedControlRequest`, `errWriter` | The byte-exact test pattern: `const want` with a fixed id, newline count, terminator check, round-trip decode. `decodedControlRequest` and `errWriter` are **reused, not re-declared.** |
-| `internal/streamsup/envelope_test.go` | `TestWriteBypassRevocation_NilRefusal`, `TestWriteBypassRevocation_WritesEnvelope`, `TestWriteBypassRevocation_WriteError` | The three writer tests to mirror one-for-one. |
-| `internal/streamsup/interface_test.go` | `TestRunner_RevokeBypass_NoLiveChild`, `TestRunner_RevokeBypass_LiveChildDelivers` | The live-child harness (`helperRunCfg` with the `echo_lines` child, `runInBackground`, `waitForContains`, `safeBuffer`, `findEchoedLines`) **and the distinct-`request_id` assertion** — that assertion is load-bearing here, see § Testing strategy M2. |
-| `internal/streamsup/envelope_test.go` | `TestMarshalInterruptEnvelope` | AC 4's first guard. Read it so you know what must **not** change. |
-| `docs/knowledge/features/streamsup-package.md` | § "Bypass revocation send primitive (#1603)" | The interface-placement rule (`Interrupt` off `sessions.Runner`, `RevokeBypass` on it, and *why*) and the one-shared-counter rationale. This is where the prior slice's reasoning lives. |
-| `internal/e2e/realclaude/testdata/initialize_control_v2.1.239_before_first_turn.json` | the `control_request_sent` object | The recorded capture. **Read it once, transcribe the literal into a comment, and never reference this path from a `streamsup` test** — see § Design, "The capture is copied, not read". |
-
----
-
 ## Context
 
 `internal/streamsup` writes two `control_request` subtypes onto the live child's

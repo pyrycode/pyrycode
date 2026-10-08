@@ -6,20 +6,6 @@
 
 **Strategy chosen: RESUME (not rotate).** The architect owns this decision (ticket Technical Notes). Rationale in § Design decision.
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:104-131` — `Config.ResumeLast` + `ResolveSessionID` + `SessionID` field docs. `ResolveSessionID`'s type widens here; the `ResumeLast`/`--continue` history at 104-110 is the exact "bare `--resume` opens a picker" concern this spec must not re-trip (we always pass `--resume <id>`, never bare).
-- `internal/supervisor/supervisor.go:742-811` — `Run` loop; **747-751** is the provider-read + `buildClaudeArgs` call site to update. `liveArgs()` at 703-707.
-- `internal/supervisor/supervisor.go:825-840` — `buildClaudeArgs`, the pure function to extend with a `resume bool` and a `--resume` branch. Its test is `internal/supervisor/args_test.go`.
-- `internal/sessions/pool.go:440-512` — bootstrap `supCfg` wiring. **455** (`ResolveSessionID` closure to widen), **496-512** (`ClaudeSessionsDir != ""` gate + the `newProbePreferredTranscriptResolver(... , supCfg.ResolveSessionID)` at **511**, whose `pinnedID func() string` arg must be re-sourced when the field's type changes).
-- `internal/transcript/transcript.go:126-143` — `StatByID(dir, id) (Result, error)`: validates the stem via `ValidStem` **before** any `filepath.Join`, stats exactly `<dir>/<id>.jsonl`, returns the raw `os.Stat` error on absent/unreadable. This is the by-id existence probe the resume decision rides — **not** a dir scan (AC-3).
-- `internal/streamsup/runner.go:583-605` — `buildArgs`: the sibling stream-json runner's **first-spawn `--session-id` / respawn `--resume`** pattern. Precedent that `--resume <id>` (with id) is the established reattach form. Note it keys off `firstRun`, which this spec improves on (§ Design decision).
-- `internal/sessions/pool_settings_test.go:17-90` — `argvRecorderScript` + `helperPoolArgvRecorder` + `waitArgvRaw`: a real `/bin/sh` child that records the **exact spawned argv**. The canonical AC-5 seam (observe `--resume` vs `--session-id` end-to-end, no live claude).
-- `internal/sessions/pool_bootstrap_sessionid_test.go` — the #839 `Pool.New`/`BootstrapID` direct-drive tests + `helperPoolReconciling(t, regPath, claudeDir)`. The new resume tests live beside these.
-- `internal/supervisor/restart_test.go:131-163` — `TestSupervisor_Run_IgnoresSessionIDField`: sets `cfg.ResolveSessionID` and asserts recorded argv via `waitForSpawns`/`recorderConfig`. **Must update** the closure to the new signature (`return resolvedID, false`); its `--session-id` assertion stays valid under `resume=false`. This file is also the supervisor-side argv harness the new `--resume` supervisor test reuses.
-- `docs/specs/architecture/839-deterministic-bootstrap-session-id.md` — the pull-provider seam this extends; § "Seam choice" and § Concurrency are the invariants to preserve.
-- `docs/lessons.md:54` — "`/clear` rotates claude's session UUID **even with `--resume <uuid>`**" — confirms `--resume <uuid>` is a real, used spawn form (not the bare-`--resume` picker case).
-
 ## Context
 
 #839 made the bootstrap claude spawn with `--session-id <bootstrapID>` on **every** spawn, resolved fresh from the daemon's own persisted id via the `ResolveSessionID func() string` provider (pull seam). This is deterministic and closes the confused-deputy isolation gap.

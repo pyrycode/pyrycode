@@ -4,52 +4,6 @@ One new test file, `internal/e2e/realclaude/ask_user_question_shape_test.go`, pl
 entry rebased into `finOfflineExecBans`. No production file is touched. Everything
 settles offline: no claude binary, no credentials, no capture file, no directory.
 
-## Files to read first
-
-Read these before the first edit. This list is the turn-1 data load — the design
-below assumes you have it.
-
-- `internal/e2e/realclaude/ask_user_question_record_test.go` → `askQuestionFixtureRecord`,
-  `askQuestionFullRecord`, `askQuestionFixtureInput` — the four-field record this
-  assertion takes as a parameter, the fully-populated instance that is the positive
-  control, and the synthetic input literal. **Read the doc comments, not just the
-  code**: they state the two constraints on that literal (unsorted keys at two
-  levels; no `<`, `>` or `&`) that later slices must not "tidy".
-- `internal/e2e/realclaude/ask_user_question_record_test.go` → `askQuestionFixtureFields`
-  — read it once so you can confirm you do **not** need it. This slice zips no
-  marshalled record against its decode; the field listing has no use here.
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans` — the
-  `"ask_user_question_record_test.go"` entry (the seventeen names to copy) and the
-  `"ask_user_question_writer_test.go"` entry beside it (the fourteen-name trap this
-  slice must **not** copy). Also `TestFinOfflineFilesReachNoExecHelper` — the check
-  is a per-file AST identifier match with no `parser.ParseComments`, which is why
-  the entry must list wrappers as well as the thing they wrap.
-- `internal/e2e/realclaude/ask_user_question_writer_test.go` → `scanAskQuestionFixture`
-  — the family's fatal-helper convention: `t.Helper()`, a direct call from the test
-  goroutine, and a `t.Fatalf` that names counts and class names and nothing else.
-  Copy the discipline; this slice's wrapper is the same shape over a different
-  returned value.
-- `internal/e2e/realclaude/ask_user_question_writer_test.go` → `askQuestionPlantedInput`
-  — read it so you recognise it and leave it alone. It is the package's only other
-  `AskUserQuestion`-shaped input helper and so the obvious thing to borrow, but every
-  call site hands it a credential-shaped plant, and this file's defining property is
-  carrying none. Write local literals.
-- `internal/e2e/realclaude/initialize_control_writer_test.go` →
-  `TestInitControlFixture_ScanRefusesAPlantedCredential` — reads for the problem
-  statement in its doc comment (a helper that fatals takes the calling subtest down
-  with it; `testing.TB` cannot be implemented outside `testing`), **and for how this
-  slice differs**: that test sidesteps the fatal by calling the pure `scan`
-  directly and says so. Here the pure function is the deliverable, not a sidestep.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapScanner.scan` — the
-  in-package precedent for a check that *returns* a slice of class names instead of
-  fataling. Read the return shape only; do not construct a scanner here.
-- `docs/knowledge/features/e2e-realclaude-ask-user-question-record-test-go.md` — #1943's
-  lessons. Two bind here: an overlay mutant cannot prove a `finOfflineExecBans` entry
-  non-vacuous (the check reads the file off disk, and a build overlay does not
-  intercept `parser.ParseFile`), and this family's comment density does not scale down
-  with the size of the thing under test.
-- `CODING-STYLE.md` — table-driven tests, stdlib `testing` only, no assertion library.
-
 ## Context
 
 Two later slices must decide whether a captured `AskUserQuestion` payload is

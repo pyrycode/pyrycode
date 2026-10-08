@@ -1,17 +1,5 @@
 # 242 — `conv`: `RunSweepLoop` ticker helper
 
-## Files to read first
-
-- `internal/conversations/sweep.go` — `Sweep(reg *Registry, now time.Time) int`. The pure primitive this ticket wraps. The loop calls it once per tick with `time.Now()`; nothing else changes about its contract.
-- `internal/conversations/registry.go:72-116` — `(*Registry).Save(path string) error`. The atomic-write recipe and the error-wrap shape (`registry: <step>: %w`) the ERROR-log assertion will see. Save can fail at MkdirAll / CreateTemp / Chmod / Encode / Sync / Close / Rename — any wrapped error counts as a "Save error" for the non-fatal path.
-- `internal/conversations/archive.go:1-25` — `archiveIdleThreshold = 30 * 24 * time.Hour` plus the `ShouldArchive` predicate. `SweepInterval = time.Hour` is justified relative to this threshold (one missed tick is harmless; the entry archives an hour later).
-- `internal/conversations/sweep_test.go:11-29` — the `seedSpec`/`mk` test fixture pattern (`time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)` literal `now`, formatted-int UUIDs `%08d-2222-...`, `idleDays`+`isPromoted`+`Cwd` fields). Loop tests reuse this idiom directly — **do not invent a new fixture style.**
-- `internal/sessions/rotation/watcher.go:117-140` — `Watcher.Run(ctx) error` is the canonical "blocking ticker-shaped goroutine" in the project. Same `for { select { case <-ctx.Done(): ...; case <-... } }` skeleton applies here. The one delta: this AC says *return nil on ctx cancellation*, where the watcher returns `ctx.Err()`. Honour this AC's wording — see § Concurrency model below for why.
-- `internal/sessions/rotation/watcher.go:142-194` — `handleCreate`: a single-tick handler factored out from the loop body so it's unit-testable without driving the loop. Same factoring rationale applies to `sweepOnce` here.
-- `internal/sessions/pool.go:707-760` — `(*Pool).Run` and how it composes `g, gctx := errgroup.WithContext(ctx)` + `g.Go(func() error { return w.Run(gctx) })`. This is exactly the call site sibling #243 will mirror for `RunSweepLoop`.
-- `internal/sessions/session_test.go:130-135`, `internal/sessions/pool_test.go:31-37` — the `slog.New(slog.NewTextHandler(io.Discard, nil))` test-logger pattern. Reuse it (or a `bytes.Buffer` handler when a test asserts on emitted records).
-- `docs/specs/architecture/237-conv-sweep-primitive.md` — the immediate predecessor spec; pins what `Sweep` does and does not do (no Save, no logging, no clock). This ticket layers exactly the missing pieces above it.
-
 ## Context
 
 Phase 3 auto-archive ships in three slices: predicate (#219, landed), pure primitive (#237, landed — `Sweep` + `Registry.Delete`), and **the I/O wrapper** (this ticket plus sibling #243).

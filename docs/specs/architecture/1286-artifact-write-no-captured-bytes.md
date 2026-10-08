@@ -5,38 +5,6 @@
 
 ---
 
-## Files to read first
-
-The whole design lives in one Go package (`internal/e2e/realclaude`, build tag `e2e_realclaude`), so every
-symbol below is file-local and directly callable. Read these before writing anything — the design is almost
-entirely *reuse*, and each entry names the one thing to extract.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_run_record_test.go:1-80` | The file header this ticket's header must mirror: the offline discipline, and — critically — the **forbidden exec routes named by file:line rather than by symbol**, so the forbidden-symbol grep reports on code and cannot be defeated by prose. |
-| `internal/e2e/realclaude/finding_run_record_test.go:113-199` | `finRecordProc` (three ints) and `finRecordRun` (ten fields, four of them struct- or slice-valued). This is the type the census walks. |
-| `internal/e2e/realclaude/finding_run_record_test.go:222-242` | `finRecordInputs` — the eight named fields the fixture fills. Note `Rows` and `ClaudeCommand` are the two argv-bearing inputs. |
-| `internal/e2e/realclaude/finding_run_record_test.go:360-392` | `finRecordBuild` — the two argv reduction points (`:372-374`, `:379`) and the Detail format. **M1's mutation goes inside this Detail format.** |
-| `internal/e2e/realclaude/finding_run_record_test.go:400-494` | Shipped fixtures: `finRecordMatchedRows(suffix)`, `finRecordEnvDelta()`, `finRecordProofAttribution()`, `finRecordSeenTrailer()`, the four pid constants. |
-| `internal/e2e/realclaude/finding_run_record_test.go:731-756` | `finRecordInputReaches` — the shipped recursive **type** walker. Reused verbatim by AC4's structural check; do not write a second one. |
-| `internal/e2e/realclaude/finding_run_record_test.go:919-1061` | `TestFinRecordCarriesNoCapturedBytes` — the sweep this ticket extends. Copy its non-vacuity precondition, its per-row headroom assertion and its per-channel naming. Its comment at `:926-927` and `:934-944` scopes exactly what is left here. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:820-855` | `writeReachArtifacts` — the shape AC1 asks for, **and the anti-pattern**: it writes `rec.rawPS` to a second file. That sidecar is the leak this ticket exists to prevent. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:117-126, :945-950` | `reachMaxCommandBytes = 512` and `reachCapCommand`. Single-sourced; never restate 512. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:98-121` | `trailScanResult` — `Line` is the capped verbatim line (**dropped** by `finTrailerBuild`); `Trailer` is the decode of the **full** line. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:295-315` | `trailNeedle` (42 bytes) and `trailPaddedTrailer(pad)`. **The comment on `trailNeedle` says "placed PAST the cap" — against `trailPaddedTrailer(0)` that is not what happens.** See § The trailer plant. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:142-155, :203-233` | `finTrailerRecord` (ten scalars, no `Line`) and `finTrailerBuild`. Confirms the trailer line is dropped, not capped. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:623-697` | `TestFinTrailerRecordCarriesNoCapturedBytes` — the non-vacuity precondition idiom (`:632-640`) and the **flat** key scan (`:684-696`) AC3 generalises. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:430-470` | `TestFinTrailerRecordReadsTheDecodedTrailer`'s "the four fields survive a cap that destroys terminal_reason in the line" subtest. **Already merged — AC4 references it and must not restate it.** |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:79-125` | `finAttributeEntry` / `finAttributeRecord` — the five keys the census expects, and which of them are `omitempty`. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:209-296` | `finAttributeFanOut` — Step 2 (`pgid <= 1` → `Unreportable` + `finAttributeGroupUnreportable`) is what lets one call fill every `omitempty` field. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:729-767` | `TestFinAttributeRecordCarriesNoCapturedBytes` — the reap-stderr plant (`trailReapLine(1, "[7788] "+trailNeedle)`) reused verbatim, and the second flat key scan (`:758`). |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:239-253` | `pinStateOutcome` — seven fields, three of them `omitempty`. The census fixture must fill all seven. |
-| `internal/e2e/realclaude/tool_loop_test.go:194-203` | `resultTrailer` — **no `result` member**. AC4's structural check walks this type. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:199-208, :531-537` | `trailAdmitResult` (two fields) and `trailReapLine(count, pgids)`. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:113-127` | `tdnReapOutcome.Line` — pyry's own captured stderr, the fourth plant channel, dropped by the fan-out. |
-
----
-
 ## Context
 
 #1291 shipped `finRecordRun`: one probe run's publishable record. It is built, it is tested, and it is

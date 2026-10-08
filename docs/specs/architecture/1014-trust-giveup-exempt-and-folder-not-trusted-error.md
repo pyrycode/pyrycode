@@ -70,50 +70,6 @@ no trust decision and marks nothing trusted.
 - The retryable sentinel `supervisor.ErrTrustModalPending` (`internal/supervisor/supervisor.go:67`)
   — #1013. This ticket keys AC-1 off it via `errors.Is`.
 
-## Files to read first
-
-- `internal/msgqueue/queue.go:435-500` — `drain`, the retry-on-error loop with the drain-local
-  `firstFailedAt` latch. **AC-1 lands in the `if err != nil` block (455-487).** Note the reset
-  at 497 (`firstFailedAt = time.Time{}`) on a confirmed delivery — the exemption reuses this
-  exact "reset the streak" semantics.
-- `internal/msgqueue/queue.go:116-140` — `Config` (add the `Pending` field beside `OnGiveUp`)
-  and `queue.go:83-114` — the `DeliverFunc`/`ChangeFunc`/`GiveUpFunc` injected-seam doc style
-  to mirror. `queue.go:194-224` — `New` (thread the new field into the struct like `onGiveUp`).
-- `internal/msgqueue/queue.go:502-532` — `giveUp` (the real-failure branch that must stay
-  unchanged for non-pending errors).
-- `cmd/pyry/modal_resolve_v2.go:43-54` — `modalResolverV2` struct + `newModalResolverV2` (add
-  two **nil-default fields**, do NOT change the constructor signature — see Design §3).
-- `cmd/pyry/modal_resolve_v2.go:120-150` — `ResolveTimeout` (emit on trust class after the
-  successful `Resolve`) and `166-235` — `ResolveAnswer` (emit on trust class + `OutcomeDeny`
-  after `auditAnswer`). `250-282` — `optProceed`/`optExit` local-const duplication pattern +
-  `classifyAnswer` (returns `outcome devices.RemotePermissionOutcome`).
-- `cmd/pyry/session_error_v2.go:31,99-181` — `giveUpNotice{convID, reason}`,
-  `sessionErrorNotify` (the closure to reuse), and `broadcast` (stamps `CodeSessionBlocked` +
-  `SessionErrorPayload`). Confirms the reason rides as `Message`, is never logged, and the
-  producer holds no queue handle (the AC-3 no-queued-text guarantee).
-- `cmd/pyry/main.go:812-844` — `giveUps` channel + `msgqueue.New(Config{... OnGiveUp:
-  sessionErrorNotify(giveUps, logger) ...})` + `newSessionErrorEmitterV2(giveUps, ...)`. Wire
-  the `Pending` classifier here and build the shared blocked-notify closure here.
-- `cmd/pyry/relay.go:166-216` — `relayWiring` fields (`active`, `sup`, `queue`, `sessionErr`
-  already present; add `blockedNotify`). `relay.go:479` — the single production
-  `newModalResolverV2(modalReg, w.sup, logger)` call site (set the two new fields here).
-- `cmd/pyry/main.go:1131-1195` — `activeConversation` (`CurrentConversation() string`, mu-guarded,
-  safe from any goroutine) — the convID source, the same follow-active cursor the turn/modal
-  producers use via `resolveTarget`.
-- `internal/protocol/messaging.go:247` — `SessionErrorPayload{ConversationID, Code, Message}`;
-  `internal/protocol/codes.go:34` — `CodeSessionBlocked` ("terminal give-up; NOT a retry hint").
-- `internal/modalbridge/modal.go:34-35,75-82` — `classTrust = "trust"` (the wire class string,
-  unexported; duplicate a local `classTrust` const in `modal_resolve_v2.go` like `optExit`) and
-  `Outstanding` (carries `Class`, **no convID** — the reason AC-2's convID comes from `active`).
-- `docs/knowledge/codebase/1013.md` — the sentinel + retryable-not-park decision this builds on;
-  its "Related" note: *"Do not touch `giveUpAfter` or `drain`'s give-up branch here — that's
-  #1014's surface."* This ticket is that surface.
-- **Coexistence with in-flight PR #935 (issue #934):** #935 is an open, **test-only** flaky-fix
-  touching `internal/msgqueue/queue_test.go` inside `TestQueue_SnapshotAll_RaceWithEnqueueAndDrain`
-  (lines ~713-759). **Do NOT modify `queue_test.go`.** Put the new msgqueue tests in a NEW file
-  `internal/msgqueue/giveup_exempt_test.go` (package `msgqueue`). Different files never merge-conflict,
-  so this dissolves the overlap structurally (see § Concurrency / integration).
-
 ## Design
 
 ### 1. AC-1 — give-up exemption via an injected `Pending` classifier (`internal/msgqueue`)

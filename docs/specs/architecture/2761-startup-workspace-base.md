@@ -40,10 +40,6 @@ Every unusable startup resolution emits one static warning event `workspace_base
 - Seed tests restart with a different base and prove existing rows and labels remain intact, both marked and unmarked. Existing empty-root tests prove no channel/marker; a production source guard pins explicit empty-base forwarding and single startup resolution.
 - Run race tests for `cmd/pyry` and the targeted tagged e2e regression, existing relay handshake security tests, `go vet ./...` and `go build` for `cmd/pyry` with output outside the worktree. The verifier owns the full-module gate.
 
-## Open questions
-
-None.
-
 ## Documentation handoff
 
 Pending for the documentation stage:

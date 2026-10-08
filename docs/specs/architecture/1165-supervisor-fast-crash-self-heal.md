@@ -4,42 +4,6 @@
 identifier is a UUIDv4, not key material; no untrusted input reaches the new
 code) · **Split from:** #1163 · **Sibling root fix:** #1164 (merged, PR #1166)
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:731-815` — `Run` loop. The backoff path
-  (`uptime := time.Since(start)`, the two parent-ctx / `drainRestart` guards,
-  `bo.next(uptime)`). This is the **only** insertion point for the fast-crash
-  accounting + self-heal call.
-- `internal/supervisor/supervisor.go:100-189` — `Config` struct. `ResolveSessionID`
-  (the #839 pull-callback the fresh id flows back through) and the backoff-param
-  block are the models for the three new fields.
-- `internal/supervisor/supervisor.go:637-656` — `New` default-application block
-  (`if cfg.BackoffInitial == 0 { … }`). Mirror it for the two new duration/int
-  fields.
-- `internal/supervisor/supervisor.go:781-785` — the `err != nil` ("claude exited")
-  vs `else` ("claude exited cleanly") log branch. Confirms `runOnce`'s error is
-  non-nil **iff** the child exited abnormally/non-zero — the AC1 "exits non-zero"
-  signal.
-- `internal/supervisor/backoff.go:1-45` — `backoffTimer`. Self-heal is **orthogonal**
-  to backoff: extract `uptime` the same way, but do NOT change this file.
-- `internal/sessions/pool.go:625-656` — `RotateID` + `rekeyLocked`. The shared
-  re-key-under-`p.mu` seam the new pool method is modelled on.
-- `internal/sessions/pool.go:449-535` — bootstrap `supCfg` wiring (where
-  `ResolveSessionID` / `ResolveTranscript` are set). The `SelfHeal` closure is
-  added here; `p` is late-bound exactly like `resolveID`.
-- `internal/sessions/pool.go:1076-1091` — `BootstrapID()` (current pinned id read
-  under RLock).
-- `internal/sessions/transition.go:90-140` — `RotateForNewSession`. The mint+rekey
-  precedent. **Read the differences carefully** (§ Design decision 3): self-heal
-  does NOT register the skip-set and does NOT fire a client transition.
-- `internal/sessions/rotation/watcher.go:138-190` — `handleCreate`. The
-  `ref.ID == stem` guard at **lines 161-165** (comment: "the bootstrap entry was
-  rotated by another path") is *why* self-heal needs no skip-set registration.
-- `internal/sessions/id.go:20-32` — `NewID()` (fresh UUIDv4 via crypto/rand).
-- `internal/supervisor/supervisor_test.go:170-318` — `TestHelperProcess` fake-child
-  + `helperConfig` harness. The self-heal supervisor test reuses this; add one new
-  helper mode (§ Testing strategy).
-
 ## Context
 
 When the bootstrap child exits non-zero deterministically, the supervisor's

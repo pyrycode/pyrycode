@@ -1,16 +1,5 @@
 # Spec: `internal/update` extract pyry binary from .tar.gz (#186)
 
-## Files to read first
-
-- `internal/update/checksum.go:1-54` — sibling pure-function shape (`AssetName`): package-level placement, sentinel-error idiom (`errors.New(...)` plus `fmt.Errorf("…: %w", sentinel)` wrapping), exported-symbol doc-comment voice. Mirror tone exactly.
-- `internal/update/version.go:1-13` — package doc-comment lives at the top of `version.go`. Don't duplicate the `// Package update ...` block in `install.go`; one package comment per package.
-- `internal/update/checksum_test.go:1-220` — table-driven test pattern with `t.Parallel()`, `tests := []struct{...}` shape, `wantErr error` + `errors.Is(err, tc.wantErr)` matching, error-message-shape sub-tests. Mirror this for `install_test.go`.
-- `CODING-STYLE.md` — `gofmt` non-negotiable, doc-comment-on-every-exported-symbol, stdlib-only.
-- Issue #186 body — acceptance criteria are the contract (three test cases enumerated verbatim).
-- `docs/lessons.md` — "Atomic on-disk writes" section is *not* in scope here (atomic replace was carved off into a future wiring ticket; see "Out of scope" below). Skim only to confirm this slice does not touch `os.Rename` / `os.CreateTemp`.
-
-No prior knowledge doc on tar/gzip extraction exists; this is the fourth pure-function slice in `internal/update` (after #179 version compare, parent #183's checksum split into #180, and #181's restart-detect).
-
 ## Context
 
 `pyry update` downloads a GoReleaser tarball (`pyry_<version>_<Os>_<Arch>.tar.gz`) and needs the `pyry` binary's bytes out of it before the wiring ticket can perform the on-disk replacement. The tarball also contains `LICENSE`, `README.md`, `docs/*.md`, and the systemd / launchd unit templates — all documentation that ships for tarball-direct downloaders. The runtime update flow only cares about the binary.

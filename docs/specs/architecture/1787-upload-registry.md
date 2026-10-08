@@ -1,20 +1,5 @@
 # #1787 — a conn-keyed registry of in-flight attachment uploads
 
-## Files to read first
-
-- `internal/attachments/accumulator.go` → package doc — the "resource bounds are owned three separate ways" paragraph; this slice owns none of them.
-- `internal/attachments/accumulator.go` → `Accumulator` (type doc) — the exact sentence AC 4 rewrites, and the mutex-free contract the registry must not widen.
-- `internal/attachments/accumulator.go` → `NewAccumulator`, `Add`, `Assemble` — the signatures the registry stores and hands back. It calls none of them.
-- `internal/attachments/accumulator_test.go` → `newTestAccumulator`, `testChunk`, `testParts`, `testTotal`, `testFixture` — reuse these; tests are in-package, so `registry_test.go` gets them for free. Do not build a second fixture.
-- `internal/permbridge/permbridge.go` → `Registry`, `Registry.Register` — the nearest in-repo shape for this whole slice: `mu sync.Mutex` + map, a leaf-lock doc note, and one critical section spanning check-then-write. Mirror the locking shape; the contract differs (see § Design).
-- `internal/modalbridge/modal.go` → `Registry` — second instance of the same house shape, including the "carries a sync.Mutex because two real goroutines touch it" doc framing.
-- `internal/sessions/pool.go` → `Pool.capMu` — the precedent the ticket names: a lock whose doc states *the sequence it serializes* and its lock order, which is what let a later caller re-use it rather than wrap it.
-- `internal/relay/v2session.go` → `V2SessionManager.appFrameWorker` — "no two handlers for one conn are handled concurrently", the per-conn guarantee that makes off-lock feeding sound.
-- `internal/protocol/envelope.go` → `RoutingEnvelope` — `ConnID` is where #1744's conn identity comes from. This package never imports it; read it only to see the shape of the string being passed in.
-- `docs/knowledge/features/attachments-package.md` § "Sentinels and discard semantics" — the "presence comes from map-key membership, never from the stored value" lesson, which decides `Lookup`'s signature.
-- `docs/knowledge/features/attachments-package.md` § "Blocked family (not landed)" — sketches this registry as `attachment_id → *Accumulator`. That half is superseded by the ticket; the "needs its own lock" half is not. Do not correct the doc — that is the documentation phase's.
-- `docs/protocol-mobile.md` § Attachments, the `attachment_id` row — "**Not a capability**", the premise the conn-in-the-key decision rests on.
-
 ## Context
 
 `internal/attachments` can build an `Accumulator` per transfer and has nowhere to put one. `NewAccumulator` returns a value the package never stores and no production code calls, so every chunk after the first has nothing to find. This slice ships the container: a map of in-flight uploads that synchronises itself, with an insert that never displaces a live transfer, a lookup, a release and a count.

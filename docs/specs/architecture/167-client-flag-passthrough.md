@@ -1,21 +1,5 @@
 # 167 — `parseClientFlags` must pass through verb-specific flags
 
-## Files to read first
-
-- `cmd/pyry/main.go:469-482` — current `parseClientFlags`; the `flag.FlagSet` it builds is what rejects `--stdio` before `parseAttachArgs` gets a chance to see it.
-- `cmd/pyry/main.go:537-583` — `parseAttachArgs` and `attachSelectorFromArgs`; both already work in isolation. Do NOT touch them — the bug is upstream.
-- `cmd/pyry/main.go:598-616` — `runAttach` arg path, the dispatch site this ticket exists to unblock. Composes `parseClientFlags` → `parseAttachArgs` → `control.AttachStdio`.
-- `cmd/pyry/main.go:222-262` — existing `splitArgs` for the top-level CLI's pyry/claude split. The new `splitClientFlags` mirrors its shape (walk left-to-right, stop at first non-recognised token, support `=`-glued and space-separated values, both `-` and `--` prefixes).
-- `cmd/pyry/main.go:331-340` — `parseFlagSyntax`. Reuse it; do not re-implement the dash/= parsing.
-- `cmd/pyry/main.go:484-535` — `runStatus` and `runLogs` (currently discard `rest`; must reject non-empty `rest` post-fix or unknown flags would be silently swallowed).
-- `cmd/pyry/main.go:1066-1083` — `runStop` (same shape as runStatus/runLogs).
-- `cmd/pyry/main.go:649-680` — `runSessions` (already handles `rest`; verifies that the new contract fits the existing split).
-- `cmd/pyry/args_test.go:10-105` — `TestParseClientFlags` and `TestParseClientFlags_ReturnsRest`. The `unknown flag returns error` subtest at lines 60-65 encodes the OLD contract and must be updated. `TestParseClientFlags_ReturnsRest` is extended with new cases.
-- `cmd/pyry/args_test.go:145-197` — `TestParseAttachArgs`. Untouched; pinned as the in-isolation contract for `parseAttachArgs`.
-- `cmd/pyry/args_test.go:199-312` — `TestSplitArgs`. The new `TestSplitClientFlags` mirrors its table-driven shape.
-- `internal/e2e/attach_stdio_test.go:26-56` — the e2e test currently `t.Skip`'d. Skip line at 31 is removed; harness body is untouched.
-- `docs/specs/architecture/154-attach-stdio-mode.md` — original `attach --stdio` design; line 122 documents the invocation shape this ticket restores.
-
 ## Context
 
 `pyry attach --stdio <id>` fails with `flag provided but not defined: -stdio` before `parseAttachArgs` runs. The cause is `parseClientFlags` (`cmd/pyry/main.go:474-482`): it builds a `flag.FlagSet` registering only `-pyry-name` / `-pyry-socket` and calls `fs.Parse(args)`, so any unknown flag (`--stdio`, `--create-if-missing`, the future `pyry sessions new --name`, etc.) is rejected at the wrong layer.

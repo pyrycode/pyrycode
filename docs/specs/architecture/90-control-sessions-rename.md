@@ -23,65 +23,6 @@ introduced.** This is the win from #98's wire-error infrastructure
 landing first: subsequent verbs reuse the envelope at zero
 incremental wire cost.
 
-## Files to read first
-
-- `internal/control/protocol.go` (whole file, 193 lines) — `Verb`
-  constants, `SessionsPayload` (which already carries `Label`/`ID`/
-  `JSONLPolicy` from prior phases), `ErrorCode` enum + sentinels,
-  `Response.ErrorCode` field. The new `VerbSessionsRename` constant and
-  the new `NewLabel` field on `SessionsPayload` slot in here. **No new
-  enum members.**
-- `internal/control/server.go:33-91` — `Session` / `SessionResolver` /
-  `Remover` / `Sessioner` declarations. The new `Renamer` interface
-  lives next to `Remover`; `Sessioner` gains `Renamer` as a second
-  embedded interface (alongside the existing `Remover` embed).
-  `NewServer` signature is **unchanged**.
-- `internal/control/server.go:329-358` — the `handle` switch where
-  `case VerbSessionsRename:` slots in alongside `VerbSessionsRm`.
-- `internal/control/server.go:417-461` — `handleSessionsRm` is the
-  handler `handleSessionsRename` mirrors. Note the differences called
-  out below: no JSONL policy, no `context.WithTimeout` (Pool.Rename's
-  signature does not take ctx).
-- `internal/control/client.go:123-154` — `SessionsRm` is the model for
-  the new `SessionsRename` client wrapper. Same `request()` lifecycle,
-  same `Response.ErrorCode` → sentinel mapping (only one sentinel to
-  map this time).
-- `internal/control/sessions_new_test.go` (whole file, 356 lines) — the
-  template for `sessions_rename_test.go`. The shared `fakeSessioner`
-  (lines 21-60) gains a `Rename` method + `recordedRenames`; the
-  `TestProtocol_SessionsRoundTripBackCompat` table (lines 98-140) gains
-  one row asserting that the new `NewLabel` omitempty tag holds. The
-  `startServerWithSessioner` harness is reused as-is.
-- `internal/sessions/pool.go:31-32` — the `ErrSessionNotFound` sentinel
-  definition. `Pool.Rename` returns this **bare** (no wrap), so
-  `err.Error()` equals the sentinel's `Error()` — same shape as
-  `Pool.Remove`, so the client wrapper returns the bare sentinel
-  rather than `fmt.Errorf("%s: %w", resp.Error, sentinel)` (the
-  same rationale documented in #98's "Why return the bare sentinel"
-  subsection applies verbatim).
-- `internal/sessions/pool.go:393-429` — `Pool.Rename(id, newLabel)`
-  signature, contract, and concurrency notes. The `Renamer` interface
-  mirrors this signature **exactly**: no ctx, two args, `error`
-  return.
-- `docs/specs/architecture/98-control-sessions-rm.md` (whole file, 827
-  lines) — the precedent. Sections "Wire surface (protocol.go)",
-  "Remover interface (server.go)", "Server constructor (server.go)",
-  "Server dispatch (server.go)", "Client wrapper (client.go)",
-  "Concurrency", and "Testing strategy" all have direct analogues
-  here. The "Why embed Remover in Sessioner instead of adding a new
-  constructor parameter" rationale applies identically and is **not**
-  re-litigated below — the embedding pattern is now the established
-  shape for `sessions.<verb>` seams.
-- `docs/specs/architecture/75-control-sessions-new.md` § "Naming
-  rationale" — the verb-family-payload pattern (one typed payload
-  struct per namespace, omitempty fields per verb). `NewLabel` is the
-  next field to land on the same struct, continuing the pattern.
-- `docs/knowledge/features/control-plane.md:615` — the start of the
-  "Sessions: removal seam (1.1d-B1)" subsection. A "Sessions: rename
-  seam (1.1c-B1)" companion goes immediately after it (or before it
-  if Phase order is preferred — same-day decision; see Documentation
-  below).
-
 ## Context
 
 The control plane currently exposes `status`, `stop`, `logs`, `attach`,

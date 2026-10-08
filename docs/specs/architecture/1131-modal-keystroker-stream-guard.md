@@ -13,22 +13,6 @@ This is the **fourth and final** typed-nil `w.sup` reader in `relay.NewV2Session
 | new_session (#1125) | `activeSessionStarter` | re-routed off `w.sup` to the **bound runner** (main.go) |
 | **modal cancel/timeout (#1131)** | **`modalKeystrokerOrNoop`** (this spec) | nil `*supervisor.Supervisor` → **non-nil no-op** keystroker |
 
-## Files to read first
-
-- `cmd/pyry/relay.go:386-401` — `screenSnapshotterOrNil`: the established typed-nil guard to mirror. Note it takes the **concrete** `*supervisor.Supervisor` (so `== nil` works before boxing) and returns a **genuine nil** interface. This spec's helper takes the same concrete arg but returns a **non-nil no-op** value — see § Design for why the return shape differs.
-- `cmd/pyry/relay.go:442-456` — the construction site: `modalReg := modalbridge.New()` then `modalResolver := newModalResolverV2(modalReg, w.sup, logger)`. This is the **only** line that changes in production wiring.
-- `cmd/pyry/relay.go:564-569` — the `ModalResolver:` field comment ("`sup (*supervisor.Supervisor)` satisfies `modalKeystroker`…"); update it to note the nil-safe wrap.
-- `cmd/pyry/relay.go:192-195` — `relayWiring.sup` is `*supervisor.Supervisor`; typed-nil on the stream-json bootstrap path (#1077).
-- `cmd/pyry/modal_resolve_v2.go:24-33` — the `modalKeystroker` interface (`SendEsc`/`Answer`/`AcceptTrust`). The no-op type implements all three.
-- `cmd/pyry/modal_resolve_v2.go:126-170` — `ResolveCancel`: consumes the modal via `r.reg.Resolve`, then calls `r.kb.SendEsc()` **unconditionally** as best-effort (a keystroke error is Warn-logged and tolerated). This is why the guard must be a non-nil no-op, not nil.
-- `cmd/pyry/modal_resolve_v2.go:172-228` — `ResolveTimeout`: same shape, `denied_timeout`/`timeout` classification; the reachable-in-stream-mode deny-on-timeout path.
-- `cmd/pyry/modal_resolve_v2.go:230-332` — `ResolveAnswer`: the **untouched** verdict/keystroke arm. The stream verdict is routed via `streamApprovals.ResolveStream` (relay.go), **not** the keystroker. Read this to confirm the no-op keystroker cannot reach the allow path.
-- `cmd/pyry/modal_resolve_v2.go:527-555` — `streamApprovalBridge.ResolveStream`: the **only** path that resolves a permbridge completer to **allow** (and only for `allow==true` from a gated device). Confirms the cancel/timeout paths cannot allow.
-- `cmd/pyry/modal_resolve_v2.go:557-599` — `streamApprovalBridge.retire`: the deny-on-timeout backstop. On `modal.Resolve` miss (already consumed by `ResolveCancel`) it returns early — no double-dismissal; the permbridge completer's own #1103 timer is the fail-closed deny.
-- `internal/supervisor/modal.go:57-71` — `AcceptTrust`/`Answer`/`SendEsc` all delegate to `sendModalKey`, which dereferences `s` (the PTY driver state). A nil `*Supervisor` receiver panics here — the crash this ticket prevents.
-- `cmd/pyry/modal_resolve_v2_test.go:22-124` — existing test scaffolding to reuse: `fakeKeystroker`, `recordPermissionModal`, `recordTrustModal`, `auditLogger`, `auditRecords`. The guard test appends here.
-- `cmd/pyry/modal_resolve_v2_test.go:126-260` — `TestModalResolverV2_Cancel_HappyPath` / `_KeystrokeError`: the PTY-path reference behaviour that must stay byte-identical; the guard test mirrors their shape with a typed-nil supervisor.
-
 ## Context
 
 The daemon builds one of two interactive runners as its bootstrap session: the terminal-driven `*supervisor.Supervisor` (PTY mode) or the stream-json runner (`internal/streamsup`). In stream mode `Session.Supervisor()` returns a **typed-nil** `*supervisor.Supervisor` (#1077, `internal/sessions/session.go`), and every relay seam that reads `w.sup` as an interface must be typed-nil-safe or it panics on a nil-receiver dereference. Three sibling seams were guarded as their verbs landed; the inbound modal-resolution keystroker is the last one.

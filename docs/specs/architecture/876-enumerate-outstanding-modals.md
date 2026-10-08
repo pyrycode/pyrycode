@@ -3,15 +3,6 @@
 **Ticket:** [#876](https://github.com/pyrycode/pyrycode/issues/876) · **Size:** XS · **Security-sensitive:** no
 **Consumer follow-up:** #877 (connect-time reconnect producer) — out of scope here.
 
-## Files to read first
-
-- `internal/modalbridge/modal.go:75-93` — `Outstanding` struct + `Registry` struct. The load-bearing fact: `Outstanding` holds **exactly** the six `ModalShownPayload` fields (`ModalID, Class, Title, Prompt, Options, DefaultOptionID`).
-- `internal/modalbridge/modal.go:145-164` — `Record`. Note it stores `Outstanding` from the *already-built* payload `p` (`p.Class`, `p.Title`, … , `slices.Clone(p.Options)`, plus the minted id). The stored `Outstanding` is a flattened snapshot of the payload — this is why enumeration is a direct field-copy, not a re-derivation.
-- `internal/modalbridge/modal.go:166-205` — `Lookup` / `Resolve` (the leaf-lock read/consume idiom to mirror) and `buildPayload` (what the technical note calls the "inverse" — but see Design: you do **not** call it).
-- `internal/protocol/messaging.go:95-125` — `ModalOption` and `ModalShownPayload` field/JSON contract (the return type).
-- `internal/modalbridge/modal_test.go:13-39` — existing test helpers `optionIDs`, `slicesEqual` to reuse; `conversations.ValidID` usage at :117 is the id-shape check pattern.
-- `internal/modalbridge/modal_test.go:103-139, 276-299` — `TestRecord_MintsAndStores` and `TestResolve`: the record→read and record→resolve→miss flows the new tests build on.
-
 ## Context
 
 The reconnect direction (#829, ADR 025) reconciles a client to **current control truth** on every (re)connection instead of replaying history: a still-pending modal is re-sent under its original stable id so a reconnecting client can match-and-replace rather than duplicate; an already-resolved modal is silently absent.

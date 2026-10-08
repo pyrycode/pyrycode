@@ -4,18 +4,6 @@
 
 **Blocked by (both landed):** #769 (the pure `turnevent.Event → session/update` mapper, `internal/acpbridge`, merged `e5216fa`/`0ff7e27`) · #761 (`session/new` over the embedded ACP pool, closed).
 
-## Files to read first
-
-| Path · lines | Extract |
-|---|---|
-| `internal/acpbridge/outbound.go` (whole, 214 L) | `MapUpdate(ev) (update any, msgID string, ok bool)` — the mapper this ticket **consumes**. Payload structs (`AgentMessageChunk`, `ToolCall`, …), `MethodSessionUpdate = "session/update"`, and the two `ok == false` events (`TurnEnd`, `Stall`). The `{sessionId, update}` params wrapper is explicitly **this** ticket's (see its doc, lines 38-41, 110-128). |
-| `internal/acp/acp.go:274-305` (`Call`) + `:397-405` (`writeMessage`) | The exact shape `Notify` mirrors: marshal params first, then one `writeMessage` under `writeMu`. `Notify` is `Call` **minus** the id / pending-channel machinery. `writeMu` is a leaf lock serialising every outbound write. |
-| `internal/acp/jsonrpc.go:78-88` (`request`) | The wire-struct pattern the new `notification` struct mirrors (note: `request.ID` is non-omitempty `uint64`, so `request` **cannot** be reused for a no-id notification — hence a distinct `notification` type). |
-| `cmd/pyry/interactive_turn_v2.go:130-211` (`Handle`) + `:366-383` (`eventKind`) | The mobile emitter template. **Most of it is N/A for ACP** (no coalescing, no `turn_state`, no capability fan-out, no replay ring, no conversation cursor). Reuse the existing package-`main` `eventKind` helper for content-free log discriminants — do **not** redefine it. |
-| `cmd/pyry/acp.go:74-145` (`serveACPWithPool`, `register`, `newSessionHandler`) | Where a later ticket (#751/T7) will construct this adapter and start the producer. The transport, pool, and stderr `logger` all exist here. The adapter takes these as constructor args. |
-| `internal/turnevent/event.go:23-103` + `taxonomy.go:34-42` | The sealed six-variant `Event`; `TurnEnd.Reason` and `Stall{}`. `TurnEndReason` is `string`-backed and its values ARE the ACP `stopReason` strings — `string(reason)` is the stopReason, no table. |
-| `docs/knowledge/decisions/027-acp-mapping.md` § Outbound table + Divergences 1 & 3 | The authoritative contract: `TurnEnd` → the `stopReason` **return** of `session/prompt` (not a notification); `Stall` → dropped by ACP, surfaced on **stderr**. |
-
 ## Context
 
 Epic #600 makes `pyry acp` a thin adapter over the neutral `turnevent` core. #769 shipped the **pure** value-to-value mapper (`acpbridge.MapUpdate`). This ticket is the **streaming consumer**: it turns each mapped payload into a JSON-RPC `session/update` **notification** on the ACP transport, signals turn-end out-of-band, and drops `Stall` to stderr. It is the ACP analogue of the mobile head's `interactiveTurnEmitterV2`, but far thinner — ACP's host owns the spinner and the turn pacing, so none of the mobile emitter's stateful machinery applies.

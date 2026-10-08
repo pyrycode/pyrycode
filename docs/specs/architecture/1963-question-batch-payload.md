@@ -2,22 +2,6 @@
 
 Wire vocabulary only. Three exported types, two `MarshalJSON` normalisers, no producer, no parse, no fixtures.
 
-## Files to read first
-
-| Read | Symbol | What to extract |
-|---|---|---|
-| `internal/protocol/codes.go` | `TypeQuestionShown` and its doc block | The frame-family security argument, the nesting fact, the declare-ahead-of-producer precedents, and the naming trap. **Cite this block; do not restate it.** #1962 landed it and it is the single source for all four. |
-| `internal/protocol/interactive.go` | `SlashCommandListPayload`, `SlashCommand`, and both their `MarshalJSON` methods | The closest structural analogue: a nested list payload declared ahead of its producer. Take the doc-block *shape*, the value-receiver + type-alias marshaller idiom, and the "cannot be folded into the payload's" paragraph. |
-| `internal/protocol/interactive.go` | `SlashCommand`'s SECURITY paragraph | The exact shape this slice's SECURITY paragraph follows — inert text, never an HTML sink, bound decided by the producer, sanitization owed by the client. |
-| `internal/protocol/messaging.go` | `ModalShownPayload` | The two paragraphs to cite for `ConversationID` (#1065 outbound scoping) and for the correlation nonce (`ModalID`). Also the "No field carries omitempty" discipline sentence above `ModalOption`. |
-| `internal/protocol/interactive.go` | `ModelOption.MarshalJSON` | The counter-example that makes AC 3 checkable: two normalisers in one family with *different* reasons, each stating its own. Read it to see what a manufactured distinction would look like, then don't write one. |
-| `internal/protocol/interactive_test.go` | `roundTripEnvelope`, `TestSlashCommandListPayload_NilCommandsNormalises`, `TestSlashCommand_NilSliceEncodings` | The test idiom to reuse verbatim. `roundTripEnvelope` takes `raw []byte`, so it works against an inline literal exactly as it works against a fixture. |
-| `internal/protocol/envelope_test.go` | `canonical` | Whitespace-normalises both sides of the byte comparison, so the inline golden may be indented. |
-| `internal/protocol/interactive_test.go` | `TestModelListPayload_ZeroValue_RoundTrip` | Why a zero-value payload carries one all-zero entry: it is the only route to the nested types' wire keys. Same reasoning applies at two levels here. |
-| `internal/e2e/realclaude/testdata/ask_user_question_v2.1.239.json` | — | The committed capture. One question, two options, `"multiSelect": false`, header `"Write strategy"`. It is the *evidence*, not a test input — nothing in this slice reads it. |
-| `internal/e2e/realclaude/ask_user_question_shape_test.go` | `TestAskQuestionShape_ReportsEachMissedCheckAndSkipsAfterAnUndecodableInput` | Where the capture's shape is already asserted. Read only if you doubt the nesting; it is behind `e2e_realclaude` and `make check` never compiles it. |
-| `docs/knowledge/features/protocol-package-slash-command-list-payload.md` | — | The #1727 retrospective. Two lessons apply directly: a "which test reddens this mutant" claim must be *run*, not predicted; and an unscoped `sed` on `return json.Marshal(alias(p))` hits every marshaller sharing a file. |
-
 ## Context
 
 `question_shown` is the frame that closes a live defect: claude's clarifying-question tool call reaches a remote client today as a modal titled "Permission required" whose body reads `AskUserQuestion`. #1962 landed the wire type and its guard classification. This slice lands the payload shape so pyrycode-desktop#849 can be written against it, ahead of the parse (#1965) and the producer (#1927) — the same sequencing as #1405→#1410, #1616→#1638, #1704→#1848 and #1726→#1727.

@@ -1,18 +1,5 @@
 # Architecture spec — `pyry pair list` (ticket #214)
 
-## Files to read first
-
-- `cmd/pyry/pair.go` (entire file, ~165 lines) — current `runPair` shape, helpers (`resolveDevicesPath`, `parsePairArgs`, exit-2 conventions), and the `os.Exit(2)` pattern for usage failures.
-- `cmd/pyry/main.go:155-177` — top-level verb switch; the dispatcher entry for `pair` is unchanged.
-- `cmd/pyry/main.go:629-660` — `runSessions` shape (the verb dispatcher to mirror): `parseClientFlags` + first-positional switch + per-verb `runSessions<Verb>` helpers + `errSessionsUsage` for unknown verbs.
-- `cmd/pyry/main.go:616-627` — `sessionsVerbList` constant + `errSessionsUsage` formatter; reuse the same shape for a per-pair verb list.
-- `cmd/pyry/main.go:1192-1214` — usage block; the `pyry pair` line needs a sub-verb addendum.
-- `internal/devices/registry.go` (entire file) — `Load` returns `*Registry, nil` on missing/zero-byte file (cold start is not an error); `List()` returns a copy of the device slice; on-disk sort key is `(PairedAt, Name)` ascending.
-- `internal/devices/device.go` — `Device` fields (`TokenHash`, `Name`, `PairedAt`, `LastSeenAt`); `TokenHash` is 64 lowercase hex chars; plain token is never on disk.
-- `cmd/pyry/pair_test.go` (entire file) — table-driven flag-parse tests + `t.Setenv("HOME", …)` pattern for resolver tests; reuse the same shape.
-- `internal/e2e/pair_test.go` (entire file) — `RunBareIn(t, home, "pair", …)` pattern + the `~/.pyry/pyry/devices.json` path convention used by the default instance name.
-- `internal/e2e/harness.go` — `RunBareIn` signature (already exists from #213; do not modify).
-
 ## Context
 
 Ticket #213 shipped `pyry pair` as a one-shot CLI verb whose `runPair` is a single bare action: parse flags → load registry → mint token → write QR. Phase 3 has two sibling read/write verbs queued — `pair list` (#214, this ticket) and `pair revoke` (#215) — so `pyry pair` must become a verb family. This spec restructures `runPair` into a verb dispatcher and adds the `list` sub-verb. The bare invocation (`pyry pair` with no positional) keeps its existing behavior.

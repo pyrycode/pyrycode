@@ -2,26 +2,6 @@
 
 **Size:** S (confirmed, not overridden). One new file, three small edits elsewhere. See § Size check.
 
-## Files to read first
-
-| path | what to extract |
-|---|---|
-| `internal/e2e/realclaude/trailer_key_names_test.go:1-59` | The file-header shape this ticket's new file copies: the offline declaration, the `go test -race -tags e2e_realclaude -run '^TestTrail'` line, and the "what the fixed decode cannot answer" argument. Do not re-derive that argument — cite it. |
-| `internal/e2e/realclaude/trailer_key_names_test.go:72-106` | `trailKeyNames`' contract: sorted, top-level only, **no value crosses**. The `[]string` signature is why this predicate can take key names without inheriting a leak obligation. |
-| `internal/e2e/realclaude/trailer_key_names_test.go:158-170` | `trailKeyNamesNoTerminalReason()` / `trailKeyNamesEmptyTerminalReason()` — AC2's absent/present-empty pair. Both carry `"type":"result"`, so `trailScan` matches them. |
-| `internal/e2e/realclaude/trailer_key_names_test.go:243-291` | `TestTrailKeyNamesSeparatesAbsenceFromZeroValue` — the shape AC2's new test mirrors one layer up, including its non-vacuity fatals (`State == trailSeen`, `Trailer != nil`) before it reads through the pointer. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:98-137` | `trailScanResult`: `KeyNames` is the presence reading; `Trailer` is the nil-unless-seen pointer trap. This predicate takes **neither the record nor the pointer** — see § Design, "Three scalars, never the record". |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:303-338` | `trailFixtureTrailer` (eleven keys, `"terminal_reason":"completed"` — the present-and-non-empty shape) and `trailNeedle`. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:87-208` | The three things this file copies: the `gate-`-style value-space prefix argument, the two-field result record, and `trailDetail` (the capped Detail formatter). |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:487-512` | `trailIsGateValue` / `trailIsAdmitValue` — the membership-helper shape `trailIsReasonValue` copies verbatim. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:597-656` | `TestTrailAdmissibilityConstantsAreClosed` — the union map this ticket extends, and its own comment that it catches a **colliding** value and never an **unhandled** one. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:973-1028` | `TestTrailAdmissibilityRecordsCarryNoCapturedBytes` — the exact shape AC5's sweep copies (non-vacuity fatal, `json.Marshal`, `bytes.Contains`). |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:772-790` | `tdnRunnerFromArgv` — all five constant answers, including the **three distinct** `indeterminate (...)` variants. The table's path readings are produced by calling this, never hand-typed. |
-| `internal/e2e/realclaude/finding_run_record_test.go:256-313` | `finRecordRunnerLabel` (the shipped reduction, AC3) and `finRecordRunnerAgreement`'s doc — the paragraph that says prefix-matching **two unknowns** is wrong and that a reduced label against a **known-expected** one is fine. This predicate is the allowed case. |
-| `internal/e2e/realclaude/finding_run_record_test.go:231-242` | `finRecordInputs.ClaudeCommand`'s rule: the argv is reduced to a constant answer and never retained. AC5's admissibility argument for taking the reading is this rule, one layer up. |
-| `internal/e2e/realclaude/finding_live_staging_test.go:485`, `:498`, `:576`, `:597`, `finding_run_record_test.go:823` | The five shipped `finRecordRunnerLabel(…) != "ptyrunner"`-shaped comparison sites. Bare string literals, no constants for the two runner labels — the switch in § Design follows this. |
-| `internal/agentrun/streamrunner/runner.go:170-176` | The passthrough. Cited **at V2's doc comment** as the reason claude can produce the same reading, per AC5. Read it so the cite is true. |
-
 ## Context
 
 `resultTrailer.TerminalReason` is a plain `omitempty` string, so after the fixed decode an absent `terminal_reason` and one emitted as `""` are the same value. #1357 landed the reading that separates them — `trailScanResult.KeyNames`, read off the full line before the 512-byte cap. Nothing consumes it.

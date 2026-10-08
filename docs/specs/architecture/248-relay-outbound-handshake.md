@@ -1,22 +1,5 @@
 # 248 — `net`: outbound dial with server-id handshake
 
-## Files to read first
-
-- `docs/protocol-mobile.md:67-83` — § Authentication / Binary → relay. Header set (`x-pyrycode-server`, `x-pyrycode-version`, `user-agent`), first-claim-wins semantics, close code `4409` on conflict, the 30s grace window. The spec headers and the fatal-close behaviour both derive from this section verbatim.
-- `docs/protocol-mobile.md:124-141` — § Connection lifecycle / Binary. The four-step handshake: open → send `hello` → await `hello_ack` ≤ 5s → hold open. The 5-second deadline is a wire-spec constant, not architect-tunable.
-- `docs/protocol-mobile.md:155-175` — § Heartbeat + § Reconnect. The reconnect cadence (1/2/4/8/16/30s ± 20%, reset on ≥60s up) lives in `internal/transport`; this ticket inherits it untouched. Close codes `1011`/`1006` are observed by the transport's recv pump as a `Read` error; on each new conn, this ticket re-runs `hello`.
-- `docs/protocol-mobile.md:205-250` — § Message types / `hello` + `hello_ack`. Wire shape of the binary's `hello` payload (`role: "server"`, `server_id`, `binary_version`, `protocol_versions: ["v1"]`) and the relay's `hello_ack` response (`protocol_version`, `server_id`, `conn_id`). Reference shapes for the JSON marshal/unmarshal pair.
-- `docs/protocol-mobile.md:715-735` — § Worked example. Concrete byte-shape of the binary→relay frames. Note line 721: `hello_ack` arrives wrapped in `RoutingEnvelope` with `conn_id: "-"` — relay-to-binary direction is ALWAYS wrapped, even for handshake responses. The handshake decoder must unwrap before checking `Type`.
-- `internal/transport/wssclient.go:1-244` — the entire generic WSS client. `Connect(ctx)` is the blocking lifecycle the relay package consumes via a goroutine; `Send([]byte)` / `Receive(ctx)` are the byte-level I/O the handshake state machine uses. Read the package doc-comment (lines 1-13) for the explicit "knows nothing about handshake or close codes" contract — this ticket is the layer that adds both.
-- `internal/protocol/envelope.go:23-44` — `Envelope` and `RoutingEnvelope` shapes. `Frame json.RawMessage` is the deferred-decode seam this spec exploits for two-pass unmarshal at the handshake boundary.
-- `internal/protocol/handshake.go:8-34` — `HelloServerPayload` (we marshal this) and `HelloAckPayload` (we don't currently decode the body — only `Envelope.Type` matters for accept/reject — but it's the schema downstream wiring will reach for).
-- `internal/protocol/codes.go:14,38-39` — `TypeHello`, `TypeHelloAck` constants; `CodeRelayServerIDConflict` already defined for future error-payload mapping (not used at the WS-close layer in this ticket).
-- `internal/identity/server_id.go` — `ServerID` typed newtype. `Config.ServerID` is `identity.ServerID`; the caller (supervisor wiring in a future ticket) is responsible for `LoadOrCreate`-ing it before constructing `Config`.
-- `docs/specs/architecture/247-wssclient-with-auto-reconnect-backoff.md:488-495` — the "Connected-channel — deferred decision" note. This ticket lands what was deferred: the explicit signal so the handshake layer knows when to resend `hello`.
-- `docs/lessons.md:290` (and `internal/transport/wssclient.go:264-283` for the in-code mirror) — "pump goroutines installed before the conn is observable" pattern. The `Connected` signal this ticket adds fires AFTER `setConn` for the same reason: a relay caller waking on Connected must find `Send` / `Receive` already wired against the live conn.
-- `docs/protocol-mobile.md:554-633` — § Security model. Threat #2 ("Server-id race") is the directly load-bearing one for this ticket. The handshake design here is the layer where first-claim-wins enforcement actually surfaces to the binary.
-- `CODING-STYLE.md` — `gofmt`, stdlib-first, `log/slog` injected, table-driven tests, `context` everywhere, errors-not-panics. Inherited verbatim.
-
 ## Context
 
 Phase 3 Track C — composes the v1 envelope/payload types (#246, #255, #256, #271), the generic WSS client with backoff (#247), and the server-id store (A2 / #207). This ticket is where the binary actually announces itself to the relay and starts the long-lived connection that all phone traffic flows through.

@@ -4,20 +4,6 @@
 
 **Security-sensitive:** No (no `security-sensitive` label). This is a test-timing fix; the design surface is unchanged. Skip the security-review pass.
 
-## Files to read first
-
-- `docs/knowledge/codebase/523.md` — **start here.** The parent ticket. Read § "Matrix-C residual flake at the 15s budget is filed, not chased" and § "A production-side knob that doesn't move the failure rate when ratcheted is not the bottleneck". Two facts drive this spec: (a) #933 is the deferred *deeper* shape (`Connect returned context deadline exceeded`, not `did not return before ctx deadline`); (b) bumping `closeFrameGrace` (50 → 250 → 500 ms) did **not** move this shape's rate.
-- `docs/knowledge/codebase/290.md` — the `coder/websocket` `prepareRead.done()` clobber mechanism (§ "Lessons learned") and "Order B′" (recvPump never surfaces a close status within grace → close status lost). This is the loss mechanism #933 hits under heavier load.
-- `internal/transport/wssclient_test.go:937-1038` — `TestFatalCloseCodes_HaltsReconnect_RacingSendError`. The **only file the fix modifies.** The operative surface is the busy-Send loop (L994-1006) and the result-check select (L1015-1030). The failing assertion is L1025-1027 (`errors.Is(err, ErrFatalClose)`); the observed value is `context deadline exceeded`.
-- `internal/transport/wssclient_test.go:863-935` — `racingCloseRelay`: single-shot accept, echo-drains client writes, rejects every reconnect dial with HTTP 410 (`http.StatusGone`). Read this to understand why a *lost* close status is fatal to the test: Connect then reconnect-loops against a 410 relay until the ctx deadline.
-- `internal/transport/wssclient.go:443-479` — `serve`: `awaitCloseStatus(errCh, grace)` → `cancel()` → drain remaining slots → preference loop → **`return errs[0]` (L479)**. L479 is the AC2 regression target: reverting the preference loop to unconditional `return errs[0]` must still fail the test. **Read-only — do not modify.**
-- `internal/transport/wssclient.go:482-513` — `awaitCloseStatus` + its docstring (the `prepareRead.done()` rationale). **Read-only.**
-- `internal/transport/wssclient.go:203-289` — `Connect`'s dial/serve/backoff loop. Trace the path a *non-fatal* `serve` return takes: redial → 410 → `backoff` → redial → … until `ctx.Err()` at L280-282. This is the source of the `context deadline exceeded` return value.
-- `internal/transport/wssclient.go:296-323` — `Send`: returns `ErrNotConnected` / `ErrDisconnected` the moment the live conn drops. The busy-Send loop (`for { if err := c.Send(...); err != nil { return } }`) therefore self-terminates shortly after the close — it does **not** spin for the full 15 s. The operative contention window is the *grace window inside `serve`*, during which the loop is still hot.
-- `internal/transport/wssclient_test.go:1040-1123` — `TestAwaitCloseStatus_GraceBranchPreservesCloseError` (sibling pin, orderings A/B/B′). Must stay green at `-race -count=10`.
-- `internal/transport/wssclient_test.go:786-817` — `TestFatalCloseCodes_HaltsReconnect` (sibling pin). Must stay green at `-race -count=10`.
-- `internal/transport/wssclient_test.go:32-68` — `testOpts` + `newClientForTest`. `closeFrameGrace` is overridable via `opts.closeFrameGrace > 0` — needed only for the Phase-1 baseline that *re-confirms* grace bumps don't move this shape's rate before the developer abandons that lever.
-
 ## Context
 
 Under a full `go test -race ./...` on a loaded machine, `TestFatalCloseCodes_HaltsReconnect_RacingSendError` intermittently fails with:

@@ -5,22 +5,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/e2e/harness.go:362-381` — `seedBoundConversation`: the **exact idiom the new helper mirrors** (raw-JSON `os.WriteFile` into `<home>/.pyry/test/`, fixed timestamp literal). Same file, same build tag.
-- `internal/e2e/harness.go:253-360` — `StartRotation` + `StartRotationWithRelay`: the two shared constructors that set `PYRY_FAKE_CLAUDE_INITIAL_UUID` and receive `home`+`initialUUID`. Seed call goes here.
-- `internal/e2e/harness.go:1` — build tag is `//go:build e2e || e2e_install`. **Load-bearing constraint** (see § Build-tag hazard).
-- `internal/e2e/restart_test.go:13-49,117-126` — `registryFile`/`registryEntry`/`writeRegistry`/`newRegistryHome`: the canonical warm-seed-`sessions.json` precedent. Note its build tag is `//go:build e2e` **only** — these types are **not** available to `harness.go` under `e2e_install`.
-- `internal/sessions/pool.go:329-384` — `Pool.New` warm-start branch: `pickBootstrap(reg)` → `bootstrapID = entry.ID`. This is what a seeded registry drives.
-- `internal/sessions/reconcile.go:255-277` — `reconcileBootstrapOnNew`: the adopt-by-mtime path that **stays in production**. The `if mostRecent == current { return nil }` guard is why seeding makes it a confirming no-op.
-- `internal/sessions/session.go:457-470` — `runActive` arms `time.NewTimer(idleTimeout)` fresh; eviction timing does **not** read the persisted `last_active_at`. This is why a fixed-literal seed timestamp is inert (no startup-eviction hazard in the idle=2s tests).
-- `internal/e2e/rotation_test.go:41-90` — representative migrated body; its `post.LastActiveAt.After(pre.LastActiveAt)` assertion is the one timestamp-sensitive check (satisfied by a fixed-past seed value).
-- `internal/e2e/per_conversation_eviction_test.go:234-270` — `startPerConvHarness` local harness (sets `INITIAL_UUID` at :261).
-- `internal/e2e/respawn_after_eviction_test.go:246-270` — `startEvictionHarness` local harness (sets `INITIAL_UUID` at :268).
-- `internal/e2e/relay_v2_dequeue_test.go:48-87` — the **one** inline site: `/bin/sleep` child + inline `<initialUUID>.jsonl` pre-create + `StartInWithEnv`. No shared constructor, so it needs an explicit seed call.
-
----
-
 ## Context
 
 Roughly 15 e2e tests establish the daemon's bootstrap session id by (a) pre-creating `<initialUUID>.jsonl` in the daemon's computed sessions dir and (b) relying on `reconcileBootstrapOnNew` (adopt-by-mtime) to rotate the freshly-minted cold bootstrap id to `initialUUID` at startup. #839 removes adopt-by-mtime and spawns the bootstrap with a deterministic `--session-id`, which would break all of them at once — interleaved with the behavior change and a red-suite triage loop, that is what timed out the developer stage on 2026-07-08.

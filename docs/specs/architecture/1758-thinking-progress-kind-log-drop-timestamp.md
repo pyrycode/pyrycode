@@ -2,18 +2,6 @@
 
 **Ticket:** [#1758](https://github.com/pyrycode/pyrycode/issues/1758) · **Size:** XS · **Labels:** `bug`, `security-sensitive`
 
-## Files to read first
-
-| Where | Symbol / section | What to extract |
-|---|---|---|
-| `cmd/pyry/interactive_turn_v2_test.go` | `TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant` | The only test that changes. Note its capture setup (a local `bytes.Buffer` behind its own `slog.NewTextHandler`, **no** `ReplaceAttr`) and its readings loop over `{"184", "37"}`. |
-| `cmd/pyry/interactive_turn_v2_test.go` | `TestInteractiveTurnEmitterV2_RateLimitedEventKindNamesTheVariant` | The `ReplaceAttr` closure to copy **verbatim**, and the measurement comment above it — the repo's only record of the collision. One clause of that comment is corrected (see § Design). |
-| `cmd/pyry/interactive_turn_v2_test.go` | `TestInteractiveTurnEmitterV2_ModelAnnouncedEventKindNamesTheVariant` | The second existing copy of the same closure — confirms the shape is settled idiom, not a one-off. **Not modified by this ticket.** |
-| `cmd/pyry/interactive_turn_v2.go` | `interactiveTurnEmitterV2.Handle` | The empty-cursor Debug drop that produces the captured record: `msg` + `event=interactive_turn.no_cursor` + `kind=eventKind(ev)`. Confirm for yourself that none of those three carries a digit — that fact is what makes the fix complete. |
-| `cmd/pyry/interactive_turn_v2.go` | `eventKind` (the `turnevent.ThinkingProgress` arm) | The mutation target for AC 2 and AC 3. Its comment records why the arm is content-free ("both fields are ints, and neither is returned") and why it exists for the ACP call sites rather than this lane's default. |
-| `docs/knowledge/features/turnbridge-package.md` | § bullet *"A 'value never reaches a log' test needs a positive control that the value traversed the path at all"* | Why the `kind=thinking_progress` positive assertion must stay. Without it, an arm that silently dropped the event would pass the negatives for the wrong reason. |
-| `CODING-STYLE.md` | § "Comments — Citing Other Code" | You are writing new comment lines. `make cite-guard` is diff-scoped, so **your** new lines are checked: name symbols, never `file.go:NNN`, never a bare `:NNN`, no range exemption. |
-
 ## Context
 
 `TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant` goes red on roughly 5% of runs, and on 100% of runs whose log instant lands in any minute `:37` or any second `:37`. The cause is deterministic and is **not** the order-dependence originally hypothesised on PR #1757:

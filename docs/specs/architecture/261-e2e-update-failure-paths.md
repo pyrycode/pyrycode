@@ -1,23 +1,5 @@
 # #261 — e2e: `pyry update` failure paths (fetch / verify / broken binary)
 
-## Files to read first
-
-- `cmd/pyry/update_e2e_test.go:36-44` — the `e2eUpd*` constants (`e2eUpdReadyDeadline`, `e2eUpdRunTimeout`, etc.). New tests reuse all of them; no new constants required.
-- `cmd/pyry/update_e2e_test.go:46-50` — `runResult` struct. Reuse verbatim.
-- `cmd/pyry/update_e2e_test.go:198-258` — `buildPyryBinE2E`, `copyFileE2E`, `inodeOfE2E`, `childEnvE2E`. The new `buildBrokenPyryBinE2E` mirrors `buildPyryBinE2E` exactly (one-line target swap + env-var rename).
-- `cmd/pyry/update_e2e_test.go:260-337` — `spawnDaemonE2E`, `waitForSocketE2E`, `stopDaemonE2E`. The broken-binary test reuses `spawnDaemonE2E` for its kill-respawn closure; the wait-goroutine + doneCh pattern is what surfaces the broken child's early exit as `"daemon exited before ready"`.
-- `cmd/pyry/update_e2e_test.go:57-196` — `TestUpdate_HappyPath_E2E`. The pre-update install + daemon-spawn + inode/PID capture block (lines 57–91) is the boilerplate the three new tests share via a small helper. The `runRestart` closure (lines 109–125) is the structural twin of the broken-binary test's closure.
-- `cmd/pyry/update_test.go:23-85` — `buildTarGzForTest`, `fakeRelease`, `newFakeReleaseServer`. Reused as-is by the verify-failure test (pass a deliberately-wrong checksums body). Not used by the fetch-failure test — see § Fetch failure.
-- `cmd/pyry/update_test.go:90-143` — `TestUpdate_Success`. The shape of the zero-`RestartProbe` + fatal-`runRestart` pair (lines 112–116) is what the fetch-failure and verify-failure tests copy verbatim.
-- `cmd/pyry/update_test.go:438-460` — `TestUpdate_RestartFailure`. Pins the exact error-message substrings (`"binary replaced to v…"` + `"daemon restart failed"`) and the no-success-line assertion the broken-binary test mirrors end-to-end.
-- `cmd/pyry/update.go:111-209` — `doUpdate`. Lines 161–179 are the fetch + verify path that returns before AtomicReplace. Lines 188–204 are the replace + restart path where the broken-binary case fails. Line 202's error format (`"update: binary replaced to %s, but daemon restart failed: %w"`) is what AC#4's substring assertion targets.
-- `internal/update/replace.go:27-64` — `AtomicReplace`. The temp-file pattern (`.<base>.*.tmp` created in `filepath.Dir(targetPath)`) and the defer-remove-on-error contract — confirms the "no stragglers" assertion is structurally guaranteed when AtomicReplace is reached, and trivially true when fetch/verify fail before AtomicReplace runs.
-- `internal/update/fetch.go` — `FetchAsset` returns an error on non-2xx HTTP responses. That error becomes `"update: download tarball: …"` per `update.go:163-165`, which is what the fetch-failure test asserts a non-nil return from `doUpdate` for. (Read once to confirm the error shape; the test doesn't assert the message text.)
-- `internal/update/checksum.go` — `ParseChecksumsFile` + `VerifySHA256`. The verify-failure path returns `update.ErrChecksumMismatch` (wrapped as `"update: verify checksum: …"`). Test asserts non-nil error only — no substring pin.
-- `docs/knowledge/features/pyry-update-command.md` — the no-rollback design is documented here. The broken-binary test's inline comment cites this doc as the recovery-path reference.
-- `docs/specs/architecture/187-update-atomic-replace.md` — the same no-rollback principle from the AtomicReplace design side.
-- `docs/lessons.md` § "Reject hidden env vars added 'just for the test'" — load-bearing for the brokenpyry helper's `PYRY_E2E_BROKEN_BIN` env-var: it short-circuits a `go build` in CI, never alters production behaviour.
-
 ## Context
 
 #260 landed the happy-path e2e test plus the reusable scaffolding (`spawnDaemonE2E`, `waitForSocketE2E`, `stopDaemonE2E`, `runVerbE2E`, `buildPyryBinE2E`, `inodeOfE2E`, `copyFileE2E`, `childEnvE2E`, the `runResult` struct, and the `e2eUpd*` timing constants). With those helpers in place, the three failure-path tests in this ticket are mostly an exercise in wiring: each test reuses #260's spawn/dial/teardown machinery to set up a pre-update daemon, drives `doUpdate` against a server tailored to inject one failure, and asserts a small set of structural properties.

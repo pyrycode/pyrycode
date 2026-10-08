@@ -5,65 +5,6 @@ mode) — **merged**. This ticket is the glue: a harness helper that opts a daem
 into `interactive_runner: "stream-json"`, plus one integrated spec proving a
 single `send_message` turn drains end-to-end through a live relay round-trip.
 
-## Files to read first
-
-Read these before writing anything. Each line says what to extract.
-
-- `internal/e2e/harness.go:309-366` — `StartRotationWithRelay`: the relay-leg
-  template (insecure-relay env, `-pyry-relay` flag, `seedBootstrapRegistry`,
-  `spawnWith`). The new helper mirrors this **minus** the sessions-dir / trigger
-  / stdin-log machinery.
-- `internal/e2e/harness.go:389-414` — `seedBootstrapRegistry`: raw-JSON registry
-  seed that pins the bootstrap pool id to `initialUUID`. Note the doc comment
-  explaining why it uses a raw string, not `restart_test.go`'s helper — the file
-  compiles under `e2e || e2e_install`, so it may only reference symbols visible
-  in **both** builds. Your new helper lives here and inherits that constraint.
-- `internal/e2e/harness.go:541-595` — `spawnWith` / `spawnOpts`: how `claudeBin`,
-  `claudeArgs`, `extraFlags`, `extraEnv` are threaded to the child. `childEnv`
-  (620-633) already sets `HOME=home`.
-- `internal/e2e/relay_v2_new_session_test.go:61-180` — the closest spec template:
-  pair → `seedBoundConversation` → handshake-interactive → drive one
-  `send_message` → await sealed `Ack`. Lift the pairing + handshake + send +
-  ack-await verbatim; **replace** the on-disk rotation assertion with the
-  event-drain assertion (below).
-- `internal/e2e/relay_v2_interrupt_test.go:220-320` — the ordered event-drain
-  loop shape (`ReceiveBytes` → `InnerFrameV2` → `decryptInnerEnvelope` →
-  type-switch on `env.Type`, two ordered `t.Fatal` milestones). Your drain reuses
-  this shape for `assistant_delta` then `turn_state{idle}`.
-- `cmd/pyry/main.go:651-677` — `selectInteractiveRunner`: the production toggle
-  the helper drives via config. `"stream-json"` → the stream runner factory + the
-  turn-event sink; `""`/`"pty"` → nil (PTY, byte-identical). This is why the
-  helper writes `config.json` rather than passing a flag.
-- `cmd/pyry/pair.go:50-58` — `resolveConfigPath` → `<home>/.pyry/config.json`
-  (per-user, not per-instance). This is the file the helper writes.
-- `internal/config/config.go:15-35, 46-64` — `Config.InteractiveRunner` field +
-  `Load` overlay semantics: a partial `config.json` with only `interactive_runner`
-  keeps every other field at its default. The `-pyry-relay` flag overrides the
-  config's `relay_url`, so the helper need only write the one field.
-- `internal/e2e/internal/fakeclaude/main.go:434-444, 1117-1205` — the merged
-  stream mode: gate above `mustEnv` (binds no sessions dir), `runStreamJSON` reads
-  `{"type":"user",…}` and emits one assistant text line (echoing the prompt) +
-  one `result{subtype:"success"}` line per turn.
-- `cmd/pyry/interactive_turn_v2.go:140-234, 281-305` — the emitter's per-event
-  mapping. `TextChunk` → `turn_state{responding}` + a coalesced `assistant_delta`;
-  `TurnEnd` → `turn_end` + `turn_state{idle}`. This fixes the exact observable
-  wire order (see § Data flow).
-- `cmd/pyry/stream_turn_drain.go:112-143` — `startStreamTurnDrainV2`: the
-  relay-leg drain that gates each event on `activeSession()`. Wired in production
-  by #1081 (merged). Read only to understand why the bootstrap pool id must equal
-  the bound session id — you don't touch it.
-- `internal/streamsup/envelope.go:43-68` — `marshalTurnEnvelope`: the daemon's
-  outbound user envelope. Byte-for-byte the shape `fakeclaude.userTurnText`
-  decodes — confirming the phone→daemon→fakeclaude leg is symmetric by
-  construction (proven at unit level by #1140).
-- Shared helpers to reuse (do **not** re-implement): `decodePairPayload`
-  (`pair_test.go:277`), `driveHandshakeToOpenDaemonInteractive`
-  (`relay_two_phone_structured_test.go:501`), `waitBinaryHello` /
-  `decryptInnerEnvelope` (`relay_v2_daemon_test.go:77,378`), `readInnerFrame` /
-  `sendNoiseMsg` (`relay_v2_handshake_test.go:166,341`), `readPersistedServerID`
-  (`harness.go:863`), `claudeSessionsDir` (`rotation_test.go:36`, **e2e-only** —
-  callable from the test, not from harness.go).
-
 ## Context
 
 The stream interactive runner is fully wired and unit-tested on the daemon side:

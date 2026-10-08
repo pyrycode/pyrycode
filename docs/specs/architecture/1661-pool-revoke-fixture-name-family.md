@@ -6,29 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every entry names a symbol, not a line — resolve each with
-`codegraph_search` / `codegraph_node`, or open the file and search for the name.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `TestRealClaude_SetPermissionMode_FixtureNamesAvoidRegressionGlobs` | **The precedent to copy.** Its adversarial token list, its glob loop, its containment assertion. Copy the shape; do **not** copy its use of `setModeFixturePath` — see § "The one thing not to copy from the precedent". |
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `setModeFixtureName` | The namer this ticket must differ from. Pure (`versionSlug` + `fmt.Sprintf`), safe to call. Its output is AC 3's family control. |
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `setModeArms` | #1595's four-row table. Ranged **read-only**, in exactly one place: AC 3's family control. Not the arm table this ticket iterates. |
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `setModeFixturePath`, `writeSetModeFixture` | The two `packageDir` wrappers. Read them to see *why* they are banned here, then never call them. |
-| `internal/e2e/realclaude/inband_bypass_revoke_arms_test.go` | `poolRevokeArms`, `poolRevokeArm` | The arm table this ticket ranges. **Read the header comment above `poolRevokeArms`** — it is marked read-only, ranged from `t.Parallel()` tests in several files, and it already names this file. Never append, never reassign. |
-| `internal/e2e/realclaude/inband_bypass_revoke_arms_test.go` | the file header comment (top of file) | The house style for an offline file in this package: what the header must claim, and the `go test -tags e2e_realclaude -run …` invocation it prints. Mirror it. |
-| `internal/e2e/realclaude/permission_protocol_spike_test.go` | `versionSlug`, `versionSlugSubst` | The normaliser this ticket's namer reuses. `[^a-z0-9._-]+` → `_`, lowercased, truncated at 32. Note what it leaves intact: `.` and `-`. |
-| `internal/e2e/realclaude/permission_protocol_spike_test.go` | `packageDir` | Resolves the package's real source dir via `os.Getwd`. AC 5 bans it here. |
-| `internal/e2e/realclaude/permission_protocol_regression_test.go` | `fixtureGlob` | One of the two testdata globs. Carries a `testdata/` prefix — that is the anchoring fact. |
-| `internal/e2e/realclaude/dropped_line_capture_test.go` | `dropcapFixtureGlob` | The other testdata glob. Also `testdata/`-prefixed. |
-| `internal/e2e/realclaude/offline_exec_ban_test.go` | `finOfflineExecBans`, `TestFinOfflineFilesReachNoExecHelper` | Where AC 5's entry goes, and the AST checker that reads it. Note it parses **without** `parser.ParseComments`, and that it flags both bare idents and dotted selectors. The `inband_bypass_revoke_arms_test.go` entry is the shape to copy. |
-| `docs/knowledge/features/set-permission-mode-inband-probe.md` | § the fixture record | #1595's committed record — the artifact family this ticket fences off. Skim only; nothing here modifies it. |
-| `CODING-STYLE.md` | § "Comments — Citing Other Code" | `make cite-guard` is a build gate. Cite symbols, never `file.go:NNN`, never a range, never a bare `:NNN`. This file will be comment-heavy; the gate is diff-scoped and will see every line you add. |
-
----
-
 ## Context
 
 #1595 proved live that a `set_permission_mode` control request carrying `mode: "default"` drops a running

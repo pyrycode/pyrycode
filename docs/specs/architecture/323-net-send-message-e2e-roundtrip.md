@@ -1,24 +1,5 @@
 # Spec — net/e2e: send_message roundtrip with fakeclaude observation (#323)
 
-## Files to read first
-
-- `internal/relay/handlers/send_message.go:1-77` — the handler under exercise. Already calls `TurnWriter.WriteUserTurn(p.ConversationID, []byte(p.Text))` and emits `ack` / `error{code=conversations.not_found}` / wrapped error. The e2e exercises the success path.
-- `internal/relay/handlers/send_message_test.go:1-220` — unit-test patterns the e2e does NOT need to repeat (per-branch coverage already lives here). The e2e covers the wire path only.
-- `internal/sessions/session.go:109-113` — `(*Session).WriteUserTurn` is the production `TurnWriter`; delegates to `Supervisor.WriteUserTurn`. PTY write happens after `ValidateConversation`; hence the test's seeded conversation_id MUST be present in `conversations.json`.
-- `internal/sessions/pool.go:355-362` — `ValidateConversation` closure: returns `conversations.ErrConversationNotFound` on miss. With `convReg == nil` the validator is skipped; the prod daemon always passes a registry, so the e2e MUST pre-seed the registry file.
-- `cmd/pyry/relay.go:129-137` — wiring: `dispatch.Register(protocol.TypeSendMessage, handlers.SendMessage(sess, logger))` where `sess = pool.Default()`. Confirms the e2e drives the production path verbatim — no fakes inserted between the handler and the supervisor.
-- `cmd/pyry/main.go:410-477` — the conversations.Registry is loaded from `<home>/.pyry/<name>/conversations.json` via `resolveConversationsRegistryPath(*name)` and is passed to both `sessions.New` (for `ValidateConversation`) and ultimately to `pool.Default()` as the `TurnWriter` for the handler. Pre-seeding the file before daemon spawn is sufficient.
-- `internal/e2e/harness.go:266-301` — `StartRotation` is the existing fakeclaude composer. Does NOT set the relay flag/env. The new helper composes its env+flags shape with `StartInWithEnv`'s relay shape.
-- `internal/e2e/harness.go:380-424` — `spawnWith` is the shared core. The new helper assembles `spawnOpts` directly rather than wrapping `StartRotation` (which has positional args and no `extraFlags`).
-- `internal/e2e/relay_auth_test.go:1-120` — closest sibling test (phone → relay → binary path). Reuse: `shortHome`, `readPersistedServerID`, `relayTestLogger`, `mustJSON`, the `LastBinaryHello` poll loop.
-- `internal/e2e/register_push_token_test.go:1-154` — closest sibling test for the pair → hello → ack pattern. Reuse: `RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")`, `decodePairPayload`, the hello → hello_ack handshake.
-- `internal/e2e/internal/fakeclaude/main.go:1-92` — current fakeclaude. Must be extended **additively**: when `PYRY_FAKE_CLAUDE_STDIN_LOG` is unset, behaviour is byte-identical to today (rotation tests must remain green).
-- `internal/e2e/internal/fakeclaude/main_test.go:1-126` — pattern the additive edit's unit test should mirror: build the binary into a tmpdir, exec, drive the env, assert observable side-effects, signal SIGTERM.
-- `internal/e2e/internal/fakephone/fakephone.go:1-176` — the phone client surface (`Dial`, `Send`, `Receive(timeout)`, `Close`). No changes needed.
-- `internal/protocol/messaging.go:5-11` — `SendMessagePayload{ConversationID, MessageID, Text}`. `Text` is the byte-for-byte payload that traverses to the PTY.
-- `internal/protocol/codes.go` — `TypeSendMessage`, `TypeAck`. The e2e asserts on these constants, not string literals.
-- `internal/conversations/registry.go:15-62` — registry on-disk envelope is `{"conversations":[…]}`. Pre-seeding is a single `os.WriteFile` of a JSON object containing one `Conversation{ID, Cwd}` record.
-
 ## Context
 
 #322 landed the production `send_message` handler + dispatcher registration. Unit tests cover all four refusal/success branches in `internal/relay/handlers/send_message_test.go` against a `stubTurnWriter`. What's still untested under `-race` is the **wire path**: phone WS frame → fakerelay → binary → dispatcher → handler → `Supervisor.WriteUserTurn` → PTY → fakeclaude stdin. This slice closes that gap with exactly one e2e test, plus the fakeclaude observability needed to make it deterministic.

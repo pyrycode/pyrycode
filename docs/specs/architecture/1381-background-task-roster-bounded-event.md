@@ -6,37 +6,6 @@ Third and last child of #1378, after #1380 (`task_started`, merged) and #1382 (`
 
 ---
 
-## Files to read first
-
-This list is the turn-1 data load. Everything the design references is here with a line range and what to take from it. Line numbers are read off `9bbc540` and were re-verified by reading the tree on 2026-08-08; re-check before trusting any of them.
-
-| Path | What to extract |
-|---|---|
-| `internal/streamsup/parser.go:21-106` | The four existing cap constants and — more important — the **comment shape** for a cap: observed size, the multiple, envelope arithmetic against 65519, the escaping note, the ordering against `maxUnrecognizedRaw`. `maxTaskPatch:68-106` is the closest model. Note its family-doctrine sentence at `:89-92`; § 2 below is the decision that qualifies it. |
-| `internal/streamsup/parser.go:108-160` | `ignoredLineTypes`' doc. `:132-137` is the `CORRECTED 2026-08-07 (#1380)` block; `:135`'s *"two siblings extend it (#1381, #1382)"* is comment-obligation site 3. `:147-150`'s still-dropped statement stays true — no edit. |
-| `internal/streamsup/parser.go:294-338` | `systemTaskStartedLine` and `systemTaskUpdatedLine` — the two decode targets this ticket's mirrors. Take the "field set is exactly what the capture shows and nothing invented" doc rule and the named structural drops. |
-| `internal/streamsup/parser.go:386-434` | `consumeLine`'s `default:` arm — the `sl.Type == "system"` guard and the `emitSystemSubtype` call. **No edit here.** |
-| `internal/streamsup/parser.go:436-460` | `emitSystemSubtype` — the ONE enumeration of the mapped set. This ticket adds exactly one `case`, and that addition is what discharges AC5's enumeration clause. |
-| `internal/streamsup/parser.go:521-580` | `emitBackgroundTaskUpdated` — the function to mirror. Take: the top-level-`line` decode argument and *why*, the undecodable path's content-free `Debug` + `return true`, the `bound` closure, the sequential-statement ordering rationale. |
-| `internal/streamsup/parser.go:582-609` | `truncateField` — reused unchanged. Note the `<=` boundary and the **empty** replacement (a mid-rune cut *deletes* the partial rune, so a cut value can land 1–3 bytes under the cap). Its `CORRECTED (#1382)` `json.RawMessage` exception does **not** apply here — every field on these entries decodes into a Go `string`. |
-| `internal/turnevent/event.go:75-126` | `BackgroundTaskStarted` — the three carried fields this ticket's entry mirrors, the deliberate-drops list, `TruncatedFields`' contract (declaration order, daemon snake_case names, nil never empty). |
-| `internal/turnevent/event.go:128-197` | `BackgroundTaskUpdated` — the doc structure to mirror and the render-never-execute warning on `Patch`, which this ticket's `Description` inherits. |
-| `internal/turnevent/event.go:23-31, 288-312` | The `Event` interface doc (lists the variants — needs the new name) and the two marker blocks (`isTurnEvent()` at `:288-298`, `_ Event = …` at `:301-311`). |
-| `internal/streamsup/capture_test.go` (whole file, 83 lines) | `capturedSystemLine(t, subtype)` — **reuse, do not write a second reader.** Its doc at `:47-52` is comment-obligation site 2. |
-| `internal/streamsup/parser_test.go:498-543` | `TestParser_IgnoredLineTypesStaySilent`. `:535` is the `background_tasks_changed` row that MOVES; `:529-534` is comment-obligation site 1. |
-| `internal/streamsup/parser_test.go:545-559` | `taskStartedCapCheat` — the LITERAL cap fixtures and the rule behind them. Two more literals are added here. |
-| `internal/streamsup/parser_test.go:561-595` | `taskStartedLineFixture` / `taskStartedEvent` — the fixture-builder and one-event-extractor shapes to mirror. |
-| `internal/streamsup/parser_test.go:597-680` | `TestParser_TaskStartedMapsFromCapture` — the derive-don't-pin rule and the reflection drop sweep at `:657-679`. `:651-653` is comment-obligation site 4. |
-| `internal/streamsup/parser_test.go:944-1052` | `TestParser_TaskUpdatedMapsFromCapture` — the destination shape, the provenance note at `:948-950` to mirror, and the **literal sweep floor** at `:1041-1051` with the reasoning that replaced `len(routes)*2`. |
-| `internal/streamsup/parser_test.go:1054-…` | `TestParser_TaskUpdatedCarriesPatchWhole` — the precedent for a synthesized-input test that AC1's build-from-the-capture rule permits, and the paragraph justifying it. |
-| `internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json` | The capture. The one `background_tasks_changed` record is `dropped_lines[12]` (its own `index` field reads 14). Reach it through `capturedSystemLine`, never by copying the payload into a fixture. |
-| `docs/protocol-mobile.md:304` | The v2 application-envelope cap: 65519 bytes. The denominator in every arithmetic below. |
-| `docs/knowledge/codebase/1380.md`, `docs/knowledge/codebase/1382.md` | The two predecessors' decisions — the deliberate key drops, why the drop proof is a reflection sweep, and #1382's floor-literal correction. |
-
-*Codegraph note:* `codegraph_context` resolved `Parser`, `truncateField`, `emitSystemSubtype`, `emitBackgroundTaskStarted`, `emitBackgroundTaskUpdated`, `BackgroundTaskStarted` and `BackgroundTaskUpdated` — the index is current through `9bbc540`. The table above adds the test-side and docs-side entries codegraph does not carry.
-
----
-
 ## Sizing note
 
 **S, kept, not re-sliced** — and the raw line count is the one red line worth stating openly rather than discounting. Projected total written work is ~750–850 raw lines across four files, which is *above* the ~600 guideline. The decision rests on measured outcomes of the two nearest analogues rather than on re-counting those lines as "really" fewer:

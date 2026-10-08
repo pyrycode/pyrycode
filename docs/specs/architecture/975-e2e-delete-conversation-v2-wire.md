@@ -7,22 +7,6 @@
 
 ---
 
-## Files to read first
-
-The whole job is: copy the freshly-merged #974 rename test, apply the delete divergences in the table below. Read in this order.
-
-- `internal/e2e/relay_v2_rename_test.go` (full, 308 lines) — **the primary template.** Copy its two-subtest shape verbatim: `pair → seed → spawn → handshake → seal → decrypt reply → read registry back`. Both the happy-path decode and the not-found error decode (`TypeError` + `InReplyTo` + `ErrorPayload.Code == CodeConversationNotFound`, lines 267–281) are already spelled out inline here — no need to hunt `relay_v2_daemon_test.go`.
-- `internal/e2e/relay_v2_promote_test.go` (full, 168 lines) — the original single-verb precedent (#949). Read only if the rename test leaves a harness question; otherwise skip.
-- `internal/relay/handlers/delete_conversation.go` (full, 105 lines) — the handler under test. Confirms: `Delete(id) bool` → hit ⇒ eager `Save` then reply `conversation_deleted{id}`; miss ⇒ `conversation.not_found` error with **no Save** (registry untouched). The reply carries only the id — no name/cwd/last_used_at (the record is gone).
-- `internal/protocol/conversations_write.go:59–78` — `DeleteConversationPayload{ConversationID string}` (id only — **no `Name`, no `Cwd`**) and `ConversationDeletedPayload{ID string}` (json tag `id`).
-- `internal/protocol/codes.go:22,63–75` — `CodeConversationNotFound = "conversation.not_found"`, `TypeDeleteConversation = "delete_conversation"`, `TypeConversationDeleted = "conversation_deleted"`.
-- `cmd/pyry/relay.go:409` — the `protocol.TypeDeleteConversation: handlers.DeleteConversation(...)` registration. The RED-on-main guard: strip this line and the happy-path `want conversation_deleted` assertion fails (verb falls through to `protocol.unsupported`).
-- `internal/conversations/registry.go:254` — `Delete(id) bool` semantics (returns false on a miss; hard-removes the row on a hit — no flag).
-
-Harness primitives already exist; **do not extract a shared session helper** (Tech Notes): `RunBareIn`, `StartInWithEnv`, `driveHandshakeToOpenDaemon`, `decryptInnerEnvelope`, `readInnerFrame`, `sendNoiseMsg`, `shortHome`, `decodePairPayload`, `readPersistedServerID`, `waitBinaryHello`, `relayTestLogger`, `mustJSON`, plus `fakephone.Dial`, `fakerelay.New`.
-
----
-
 ## Context
 
 A 2026-07-15 full-repo review found eleven client-sendable v2 verbs whose only coverage is package-level unit tests — no e2e at any tier. This is the #949 `promote_conversation` failure shape (surface exists, nothing exercises it end-to-end). `delete_conversation` is the hard-delete conversation-lifecycle verb in that gap. It is distinct from rename/promote in one wire-visible way: its success reply is `conversation_deleted` (carrying only the deleted id), not `conversation_updated`.

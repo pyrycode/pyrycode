@@ -2,17 +2,6 @@
 
 **Ticket:** [#865](https://github.com/pyrycode/pyrycode/issues/865) · **Size:** XS · **Security-sensitive:** no (local Unix control socket; deadline/timing plumbing only, no auth/token/crypto/untrusted-input surface)
 
-## Files to read first
-
-- `internal/control/server.go:447-518` — `handshakeTimeout` const + `handle` dispatch. `handle` sets the 5s handshake deadline (line 470) and calls the two session handlers (lines 504, 506). This is the only place the const is consumed and the only two call sites of the handlers (confirmed via `codegraph_impact`).
-- `internal/control/server.go:546-621` — `handleSessionsNew` (558) and `handleSessionsRm` (592): the two handlers to fix. Note `handleSessionsNew`'s comment at 549-552 ("Reusing the conn's handshake deadline would race the 5s handshake timer") — now stale; must be updated.
-- `internal/control/server.go:795-860` — `handleAttach`: the shape to mirror. It receives `conn net.Conn`, then at line 854 does `_ = conn.SetDeadline(time.Time{})` before its long-running op. We follow the same "thread conn, reset the deadline before the long op" pattern, but **extend** (not clear) the deadline — see Design.
-- `internal/control/server.go:198-278` — `Server` struct + `NewServer`. Note NewServer's signature is frozen across a ~34-call-site fan-out (the `SetRekeyer` doc-comment at 279-303 explains why post-construction overrides are used instead of new constructor params). The injectable-handshake seam (below) uses a per-`Server` field defaulted in NewServer, not a new param.
-- `internal/control/client.go:282-303` — `request`: client sets its conn deadline from `ctx.Deadline()` (the 30s ctx), falling back to `DialTimeout` (5s) **only** when ctx has no deadline. Since `runSessionsNew`/`runSessionsRm` pass a 30s ctx, the client waits ~30s. **Confirms server-only:** the client is not the one dropping the response. No client change.
-- `cmd/pyry/main.go:1416-1431` (`runSessionsNew`) and `1553-1575` (`runSessionsRm`) — client passes a 30s ctx. Read-only context; do not modify.
-- `internal/control/sessions_new_test.go:18-174` — `fakeSessioner` double (`Create`/`Remove` ignore ctx today) and `startServerWithSessioner` helper. Both are extended by this ticket (add an op-delay to the fake; add a handshake-override helper variant).
-- `internal/control/attach_create_if_missing_test.go:42-97` — `startServerWithResolverAndSessioner`: precedent for a helper that threads a sessioner and returns `(sock, stop)`.
-
 ## Context
 
 `pyry sessions new` and `pyry sessions rm` report failure for a mutation that actually succeeded. The control server (`handle`) applies a 5s handshake deadline to every conn via `conn.SetDeadline(...)`. The two session handlers widen an **internal** 30s ctx for the `Pool.Create` / `Pool.Remove` call (documented claude-spawn latency is 2–15s) but never touch the conn deadline that the final `enc.Encode(Response{...})` response write rides on.

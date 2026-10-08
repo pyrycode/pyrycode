@@ -23,17 +23,6 @@ So for a turn that runs one Bash loop of `L` seconds, the wire sequence is: (opt
 
 Because we do NOT want a permission modal to block the Bash call, the daemon is spawned via **`spawnBootstrapDaemon`** (which passes `--dangerously-skip-permissions`, `interactive_bootstrap_liveness_test.go:398`), NOT `spawnPermissionDaemon`. This mirrors `interactive_stream_liveness` and is the opposite posture from the modal specs (#1030/#1154), which deliberately drop the flag to raise a modal.
 
-## Files to read first
-
-- `internal/e2e/realclaude/interactive_stream_liveness_test.go` (#1153) — **the template.** Transcribe its `TestInteractiveStreamLiveness` setup body (pair → seed → spawn → dial → handshake) into the new harness. Reuse `writeStreamInteractiveConfig` (`:155`) and `drainForCompletedTurn` shape (`:181`) as the drain templates.
-- `internal/e2e/realclaude/interactive_turn_state_liveness_test.go:70-126` — `drainForTurnState`. The new `drainForResponding` **mirrors** this (in-order decrypt discipline, non-noise_msg skip-without-decrypt), narrowed to `state == "responding"` and returning the observation time.
-- `internal/e2e/realclaude/interactive_stream_modal_resolution_test.go:120-200` — `startStreamModalResolutionHarness`. Copy its shape for the new harness; swap `spawnPermissionDaemon`→`spawnBootstrapDaemon` and drop `--allow-remote-permissions` from the pair (no answer path here).
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go` — helper defs reused verbatim: `sealSendMessage` (`:160`), `driveHandshakeInteractive` (`:247`, returns `(initSend, initRecv *noise.CipherState)`), `spawnBootstrapDaemon` (`:383`, note the `--dangerously-skip-permissions` at `:398`), `seedBootstrapRegistry` (`:529`), `seedBoundConversation` (`:546`).
-- `internal/e2e/realclaude/interactive_modal_resolution_test.go:181-213` — `writeFileTrigger` / `raiseRealPermissionModal`: the prompt-crafting idiom to mirror for the busy-loop trigger prompt (per-run nonce, "reply with a single short word" tail).
-- `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go:85,140-146` — `perTurnReplyBudget = 120*time.Second` (reuse for the responding-wait phase) and the `perConvHarness` struct (`{phone, initSend, initRecv, home, workdir}`) the new harness returns.
-- `cmd/pyry/interactive_turn_v2.go:162-216` — the `ToolStart→responding` / `TurnEnd→idle` state machine (the load-bearing mechanism above). Read-only; do not touch.
-- `internal/protocol/interactive.go:22-25` — `TurnStatePayload{ConversationID, State string}` — the envelope the drains decode.
-
 ## Design
 
 **One new file:** `internal/e2e/realclaude/interactive_stream_running_turn_test.go` (build tag `//go:build e2e_realclaude`, package `realclaude`). Placement alone wires the smoke into `make e2e-realclaude` via the build tag + package glob — no Makefile change (AC4), mirroring `interactive_stream_liveness`.

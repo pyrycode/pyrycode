@@ -2,28 +2,6 @@
 
 Ticket: [#1202](https://github.com/pyrycode/pyrycode/issues/1202) · size `s` · `security-sensitive` · split from #1198 (siblings: #1201 landed, #1203 outstanding)
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `cmd/pyry/stream_turn_busy.go:11-48` | The type doc: the `KNOWN GAP` register this slice half-closes and corrects (`:27-41`), and the `SECURITY: content-free` posture (`:43-48`) the new method must inherit. |
-| `cmd/pyry/stream_turn_busy.go:102-163` | `observe` — the exact three-step shape the clear reuses: resolve **outside** `t.mu` (`:122-130`), unresolved → Debug-and-skip (`:131-143`), then mutate + close-and-replace `t.changed` under **one** acquisition (`:145-162`). Also the nil-receiver guard at `:103-105`. |
-| `cmd/pyry/stream_turn_busy_test.go:319-341` | `TestTurnBusyTracker_ImportsStayMinimal` — a **closed** import set (`context`, `turnevent`, `log/slog`, `sync`). This is a hard design constraint, not a preference: the clear must not drag `internal/sessions` into this file. |
-| `cmd/pyry/stream_turn_busy_test.go:19-44` | `stubBusyResolve` and `requireWaitIdle` — the two helpers the new tracker-tier tests reuse verbatim. |
-| `cmd/pyry/session_transition_v2.go:180-252` | `toWirePayload` (the closed reason switch + the "`NewSessionID` is the live binding id for both reasons" semantics) and `startSessionTransitionStreamV2` (the single install site + its install-before-`Pool.Run` doc). |
-| `cmd/pyry/session_transition_v2.go:120-141` | `broadcast`'s resolve step — the precedent for "resolve once, off the per-conn loop, drop on unresolvable" and the `conversation_id`-is-never-logged rule. |
-| `cmd/pyry/relay.go:697-740` | The `var (...)` cleanup block (`:697-701`) that gains the hoisted declaration, the `w.streamSink != nil` gate (`:702`), and the tracker construction + comment to amend (`:726-740`). |
-| `cmd/pyry/relay.go:756-770` | The **unconditional** transition install — the asymmetry that makes the nil tracker reachable in PTY mode. |
-| `cmd/pyry/relay.go:813-840` | `conversationForSession` — the empty-`sid` guard (`:831-833`) and the `CurrentSessionID` **or** `SessionHistory` match (`:835`). |
-| `internal/sessions/transition.go:30-64` | The `TransitionObserver` contract (synchronous, no lock held, MUST NOT block) and `notifyTransition`'s rebind-**before**-fan-out ordering. |
-| `internal/sessions/session.go:665-699` | `beginEvict` — the eviction fire site. Note it calls `notifyTransition` **before** `s.lcMu.Lock()` and before the `stateEvicted` flip. |
-| `internal/conversations/registry.go:79-90` | `Save` releases `r.mu` **before** any file I/O — so a concurrent `List()` never blocks behind an fsync. Load-bearing for the synchronous-clear decision. |
-| `internal/conversations/registry.go:232-246` | `RebindSession` — the single production writer of `SessionHistory`. |
-| `cmd/pyry/streamsup_runner.go:101-110` | `scfg.Stdout = streamsup.NewParser(sink.sinkFor(cfg.SessionID), …)` — the producer tag is fixed at **runner construction**. This is the derivation behind the comment correction in AC#5. |
-| `cmd/pyry/interactive_turn_v2_test.go:45-91` | `discardLogger`, and `fakeInteractiveBcast` — read its doc comment closely: **it has no mutex** because "the emitter spawns no goroutine". That assumption is false for this slice's tests. See § Testing strategy. |
-| `cmd/pyry/session_transition_v2_test.go:100-150` | `mixedSnapshot` / `TestSessionTransitionBroadcast_Clear` — the assertion idiom the new wiring test mirrors. |
-| `internal/sessions/transition_test.go:500-540` | `TestPool_Eviction_BindingNeutral` — the proof that an evicted id is still `CurrentSessionID` at observer time. Read it; **do not extend it** (see § Testing strategy). |
-
 ## Context
 
 `turnBusyTracker` (#1201) closes a turn only when its `TurnEnd` arrives on the stream-json fan-in. A session torn down mid-turn produces no `result` line, so the conversation stays reported busy forever. Two teardowns reach that state and `internal/sessions` already observes both — a `/clear` rotation (`ReasonClear`) and an eviction (`ReasonEviction`) — surfaced through the pool's single `TransitionObserver` slot.

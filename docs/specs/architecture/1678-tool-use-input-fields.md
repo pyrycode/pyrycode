@@ -1,26 +1,5 @@
 # #1678 — send the tool input as capped fields on `tool_use`
 
-## Files to read first
-
-| Path | Symbol | What to extract |
-|---|---|---|
-| `internal/turnbridge/outbound.go` | `MapEvent` (the `turnevent.ToolStart` arm) | The one production edit site. Note the per-arm comment style — every arm explains what crosses verbatim and why. |
-| `internal/turnbridge/outbound.go` | `inputSummary`, `truncate`, `maxSummaryLen` | `inputSummary` is the sibling the new helper sits beside and must not disturb; `truncate` is the rune-safe cut AC 2 mandates; `maxSummaryLen`'s doc comment is the "phone-display bound, not a wire constraint" framing the new constants deliberately invert. |
-| `internal/turnbridge/outbound.go` | the package doc comment on `package turnbridge` | "pure value-to-value adapter — no I/O". This is the hard constraint behind the no-logging rule below. |
-| `internal/protocol/interactive.go` | `ToolUsePayload` | The struct that gains one field. Also read the file-level comment above `TurnStatePayload` — the no-`omitempty` rule for this whole stream. |
-| `internal/protocol/interactive.go` | `BackgroundTaskRosterPayload.MarshalJSON` | The exact precedent for the nil→empty normalisation AC 4 needs, including why a doc comment would not have been enough. Copy its shape (value receiver, `type alias`). |
-| `internal/protocol/interactive_test.go` | `TestBackgroundTaskPayloads_FitV2EnvelopeCap` | The shape AC 3 names: `'<'` fill, mirrored producer caps as test-local constants, worst-case envelope, `t.Logf` of the percentage. |
-| `internal/protocol/interactive_test.go` | `TestToolUsePayload_RoundTrip`, `roundTripEnvelope`, `readFixture` | The golden round-trip that must be extended, and the byte-comparison harness that forces `testdata/tool_use.json` to gain the new key. |
-| `internal/protocol/interactive_test.go` | `TestBackgroundTaskRosterPayload_NilTasksNormalises` | The direct-marshal polarity test AC 4's protocol-side rung mirrors. |
-| `internal/turnbridge/outbound_test.go` | `TestMapEventOutbound`, `TestInputSummary` | The first has one `ToolStart` row to update and compares with `reflect.DeepEqual` (so a map field is safe — do not "fix" it to `==`). The second must pass **unmodified** (AC 1). |
-| `internal/turnbridge/outbound_test.go` | `TestMapEventBackgroundTaskRosterEmptyTasksOnTheWire` | The bridge-side bytes assertion AC 4's turnbridge rung mirrors, including why it asserts on what `MapEvent` **returned** rather than on a test-built payload. |
-| `cmd/pyry/interactive_turn_v2.go` | `maxDeltaTextBytes` | The house form for a wire-cap constant: escaped arithmetic in the doc comment, "if that ever fails, LOWER this constant — never raise it", belt-and-suspenders framing. The new constants inherit all three. |
-| `internal/streamsup/parser.go` | the `"tool_use"` case inside `emitAssistant`'s block loop, and `rawInput` | Proof of what the producer does and does not bound: `Title` and `ToolCallID` cross verbatim with **no cap**, and `rawInput` only nils an empty blob. This is why the cap test fills those fields hostilely and why the § Open questions entry exists. |
-| `internal/protocol/testdata/tool_use.json` | — | One-line fixture; gains `"input":{…}`. |
-| `docs/protocol-mobile.md` | § `tool_use` (and § Application-envelope size cap) | The table AC 5 extends, and the 65519-byte number every piece of arithmetic below refers to. |
-| `docs/knowledge/features/turnbridge-package.md` | § "Summary derivation" and § "What the outbound adapter does NOT do (the seam)" | Where the existing helpers are described and where the seam is drawn. Read-only — the documentation phase owns this file. |
-| `docs/knowledge/features/protocol-package.md` | the "Per-field caps don't compose into an envelope guarantee" bullet | The measured percentages of the existing cap tests, for calibrating the new one. Read-only. |
-
 ## Context
 
 A tool row in a client shows the tool name plus `input_summary` — the whole tool input compacted to one line and cut at 200 runes. For an `Edit` that is mostly replaced text with the file path buried inside it, so the one thing an operator wants to see is the one thing that gets cut. The fix is to send the input's own fields, each capped on its own, and let the client pick what to show collapsed and what to list expanded.

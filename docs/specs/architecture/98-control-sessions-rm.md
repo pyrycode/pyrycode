@@ -18,62 +18,6 @@ convention #75 locked in. The two notable additions over #75 are:
    / "purge") sitting in `internal/control` next to the existing
    primitives. The duplicate-vs-import choice is documented below.
 
-## Files to read first
-
-- `internal/control/protocol.go` (whole file, 144 lines) — Verb
-  constants, Request/Response shape, `SessionsPayload`/`AttachPayload`/
-  `ResizePayload` `omitempty` precedent. The new `VerbSessionsRm`
-  constant, the new fields on `SessionsPayload` (`ID`, `JSONLPolicy`),
-  the new `JSONLPolicy` wire enum, the new `ErrorCode` wire enum, and
-  the new `Response.ErrorCode` field all slot into this file.
-- `internal/control/server.go:33-142` — existing `Session` /
-  `SessionResolver` / `Sessioner` interface declarations and `NewServer`
-  shape. The new `Remover` interface lives next to them; `Sessioner`
-  embeds it (rationale below). `NewServer` signature is **unchanged**.
-- `internal/control/server.go:293-338` — the `handle` switch where
-  `case VerbSessionsRm:` slots in alongside `VerbSessionsNew`.
-- `internal/control/server.go:366-395` — `handleSessionsNew` is the
-  single-purpose handler the new `handleSessionsRm` mirrors (encode-
-  error-or-OK, fresh 30s background ctx, no streaming).
-- `internal/control/client.go` (whole file, 158 lines) — `Status` /
-  `Logs` / `Stop` / `SendResize` / `SessionsNew` are the model for the
-  new `SessionsRm` client. All reuse `request()` (one-shot dial →
-  encode → decode → close).
-- `internal/control/sessions_new_test.go` (whole file, 304 lines) — the
-  template for `sessions_rm_test.go`. The new file follows the same
-  `fakeSessioner`/`startServerWithSessioner` shape; **the existing
-  `fakeSessioner` gains a `Remove` method** (one method on one struct,
-  not a new file) so `*fakeSessioner` continues to satisfy `Sessioner`.
-- `internal/control/sessions_new_test.go:77-88` —
-  `TestProtocol_SessionsRoundTripBackCompat` is the byte-equality
-  precedent the new test extends to assert that the new `ID`/
-  `JSONLPolicy`/`ErrorCode` fields don't perturb existing-verb output.
-- `internal/sessions/pool.go:31-38` — the `ErrSessionNotFound` and
-  `ErrCannotRemoveBootstrap` sentinel definitions. `Pool.Remove`
-  returns these **bare** (no wrap), so `err.Error()` equals the
-  sentinel's `Error()` — relevant to the client wire-error mapping
-  decision (return the sentinel directly; no wrap dup).
-- `internal/sessions/pool.go:431-521` — `JSONLPolicy` enum, `JSONLLeave`/
-  `JSONLArchive`/`JSONLPurge` constants, `RemoveOptions` struct, and
-  `Pool.Remove(ctx, id, opts) error` signature. The `Remover` interface
-  mirrors this signature verbatim.
-- `docs/specs/architecture/75-control-sessions-new.md` (whole file) —
-  the precedent spec. Sections "Wire surface (protocol.go)",
-  "Sessioner interface (server.go)", "Server constructor (server.go)",
-  "Server dispatch (server.go)", "Client wrapper (client.go)" all have
-  direct analogues here. The "Naming rationale" subsection's argument
-  for verb-family request payloads + per-verb response payloads
-  applies to `sessions.rm` identically (request reuses
-  `SessionsPayload`; response uses `OK`/`Error`/`ErrorCode` envelope —
-  no typed result needed).
-- `docs/knowledge/features/control-plane.md` § "Sessions: creation
-  seam (1.1a-B1)" — the subsection to extend with a "Sessions: removal
-  seam (1.1d-B1)" companion. Same template, new method/payload/result.
-- `docs/lessons.md` § "Interface adapters for covariant returns"
-  (lines 22-24) — confirms `Pool.Remove` returns plain `error` (no
-  covariant return), so `*sessions.Pool` satisfies `Remover` directly,
-  no adapter (mirrors `Pool.Create` / `Sessioner`).
-
 ## Context
 
 The control plane currently exposes `status`, `stop`, `logs`, `attach`,

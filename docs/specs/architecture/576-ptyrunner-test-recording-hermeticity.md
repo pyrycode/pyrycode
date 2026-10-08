@@ -2,16 +2,6 @@
 
 **Size:** XS (overrides PO's `s` — downward override is allowed). Test-only; one `os.Unsetenv` call plus a comment inside the package's existing `TestMain`. No production code, no new files, no new types.
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/helper_test.go:16-29` — the **existing** package `TestMain`. This is the only file you edit. The unset goes in the non-helper (parent) branch, immediately before `os.Exit(m.Run())`. `os` is already imported (line 6) — no new import.
-- `internal/agentrun/ptyrunner/runner.go:316-344` — the recording gate. The decision `if dir := os.Getenv("PYRY_RECORD_DIR"); dir != ""` runs in **`Run()` inside the test process** (the parent), not in the fake-claude child. This is *why* unsetting the var in the parent `TestMain` disables recording for every non-opt-in test.
-- `internal/agentrun/ptyrunner/runner.go:585-596` — `recordingPath`; the `<stamp>-<sessionID>.cast` scheme. AC #4 requires this stays byte-identical. You do not touch it.
-- `internal/agentrun/ptyrunner/runner_test.go:40` — `const testSessionID`. Stays as-is (shared constant is fine once the ambient leak is closed — see "Why not the other levers").
-- `internal/agentrun/ptyrunner/runner_test.go:50-77` — `helperRunCfg`, the shared `Config` builder every `TestRun_*` uses. It does **not** set `PYRY_RECORD_DIR`; the non-recording tests therefore inherit the ambient value today. After the fix the ambient value is gone, so they record nothing.
-- `internal/agentrun/ptyrunner/runner_test.go:720-756` — the recording-test section header documenting the serial-vs-parallel split (`t.Setenv` users must not be parallel) and `castOkNameRe`. Read so you understand why the fix doesn't break that ordering. `castOkNameRe` stays as-is.
-- `internal/agentrun/ptyrunner/runner_test.go:758-1018` — the six recording tests. Each opts in with its own `recDir := t.TempDir()` + `t.Setenv("PYRY_RECORD_DIR", recDir)` and runs serially (no `t.Parallel()`). Confirm: every one uses a **distinct** temp dir. This is what keeps their recording paths unique without any session-id change.
-
 ## Context
 
 `make check` is non-deterministically red in `internal/agentrun/ptyrunner`. Root cause (per the ticket and QA's PR #575 baseline analysis):

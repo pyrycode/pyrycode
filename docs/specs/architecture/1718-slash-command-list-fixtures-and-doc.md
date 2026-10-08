@@ -3,20 +3,6 @@
 **Size:** `s` (confirmed against the written spec — see § Size re-check).
 **Shape to mirror:** #1705 (`e2e046d`, *"test(protocol): pin the model-list encoding with fixtures and publish it"*, 5 files, 284 insertions / 3 deletions). This slice is the same changeset shape for the command list.
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_node` / `codegraph_search`.
-
-- `internal/protocol/interactive.go` → `SlashCommandListPayload`, `SlashCommand` and **both** their `MarshalJSON` methods — the struct doc comments already carry every measurement this ticket publishes (51 entries, 42/9 key-set split, 33 empty hints, 11 aliases, the `reset` case, the newline case). Read them before writing prose; the doc section is those comments turned outward, not a new derivation.
-- `internal/protocol/interactive.go` → `ModelListPayload`, `ModelOption` and their `MarshalJSON` — the sibling whose three-way list-encoding split this shape repeats.
-- `internal/protocol/interactive_test.go` → `TestModelListPayload_RoundTrip`, `TestModelListPayload_Empty_RoundTrip`, `TestModelListPayload_ZeroValue_RoundTrip` — **the three tests to mirror**, including the byte-guard device and the "chosen rather than captured" comment register. Copy the scaffolding; the content differs.
-- `internal/protocol/interactive_test.go` → `TestSlashCommandListPayload_NilCommandsNormalises`, `TestSlashCommand_NilSliceEncodings`, `TestSlashCommandListType_IsNotClaudesVocabulary` — #1727's three tests. Two of their doc comments go stale the moment fixtures exist; see § Deliverable 5.
-- `internal/protocol/envelope_test.go` → `readFixture`, `canonical`, and `internal/protocol/interactive_test.go` → `roundTripEnvelope` — the shared helpers. Note that `canonical` is `json.Compact` only: it does **not** re-encode through the struct, which is why an `omitempty` mutant reddens the round-trip byte comparison as well as the byte guards.
-- `internal/protocol/testdata/model_list.json`, `model_list_empty.json`, `model_list_zero.json` — the three files to imitate byte-for-byte in structure: one line, compact, envelope-wrapped.
-- `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` → the array at `control_responses[0].response.response.commands` — **the authority for every fixture string**. Extract programmatically; do not retype.
-- `docs/protocol-mobile.md` → § `model_list` (the section to mirror and to cross-reference), § `model_announced` (how #1705 wired a bidirectional cross-reference), § Application message types (the registry table), § Changelog (the `2026-08-22` entry, which explains why every choice in § `model_list` was made — read it before writing the new one).
-- `docs/knowledge/features/protocol-package.md` § *Slash-command-list payload* — #1727's recorded lessons, including the two mutation-testing gotchas this ticket's § Deliverable 3 procedure is built to defeat.
-
 ## Context
 
 `TypeSlashCommandList` landed in #1726; `SlashCommandListPayload` / `SlashCommand` and their two `MarshalJSON` normalisers landed in #1727. The shape is therefore fully declared and **completely unpinned by bytes**: the package has no `slash_command_list*` fixture and `docs/protocol-mobile.md` has no § `slash_command_list`. A client author writing a decoder today reads Go structs, which is exactly the gap #1704 left and #1705 closed for `model_list`.

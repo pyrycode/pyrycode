@@ -50,31 +50,6 @@ trusted:
 issue, and let a human decide — do not merge-resolve it silently. Nothing in the sweep run for this
 spec found one, and #1504 is a stall-watchdog change that never names this variant.
 
-## Files to read first
-
-Symbols and sections, not line numbers — the body's own line cites are already one commit-set stale
-in one place, and yours will be too.
-
-- `internal/turnbridge/outbound.go` → the `case turnevent.ModelAnnounced:` arm of `MapEvent` — **the
-  fact that falsifies all twelve claims.** Read what it actually returns before writing a word.
-- `cmd/pyry/interactive_turn_v2.go` → `Handle`'s `turnevent.ModelAnnounced` case, and `eventKind`'s
-  `ModelAnnounced` arm. **The `eventKind` arm's comment is #1638's corrected voice on a Go
-  comment** — the closest template in the repo for rows 1–6. Note how it keeps the #833 log bar
-  intact while retiring the client-absence half.
-- `cmd/pyry/relay_guard_test.go` → the `"TypeRateLimited": "push"` comment block. It sits **directly
-  above** row 3 and is the same sentence already corrected once, after #1410 shipped. Row 3's
-  correction is that block's shape with the numbers changed.
-- `docs/knowledge/features/streamsup-package.md` → the `rate_limited` paragraph's sentence beginning
-  `` `turnbridge.MapEvent` no longer drops it `` — the template for row 11, in the same file, ~30
-  lines above it.
-- `docs/protocol-mobile.md` → § `rate_limited`'s producer sentence (`#1410 wired the producer —
-  internal/turnbridge's MapEvent`) — the template for row 9's § **Declared, not emitted.**
-- `docs/knowledge/features/turnbridge-package.md` → the `MapEvent` table's `ModelAnnounced` row —
-  **read-only, do not touch.** Confirm it is there exactly once.
-- `docs/knowledge/INDEX.md` → the `turnbridge-package.md` row — **read-only.** Confirm it already
-  reads correctly so the sweep does not tempt an edit.
-- `CODING-STYLE.md` § "Comments — Citing Other Code" — the citation rule the build enforces.
-
 ## Context
 
 #1600 taught the parser to translate claude's `system`/`init` line into `turnevent.ModelAnnounced`.

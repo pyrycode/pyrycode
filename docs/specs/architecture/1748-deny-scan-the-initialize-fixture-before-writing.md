@@ -3,36 +3,6 @@
 Test-only. Three files, all `_test.go`, all in `internal/e2e/realclaude`. No production
 file changes, no new record field, no new exported symbol.
 
-## Files to read first
-
-Everything below is named by symbol. Resolve each with `codegraph_search` / `codegraph_node`
-and read the declaration — this package's doc comments carry most of the design, and several
-of them move rather than get rewritten.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/initialize_control_writer_test.go` | `writeInitControlFixture` | The function this slice re-shapes. Today's order is copy → cap → `os.MkdirAll` → mint name → marshal → write `.tmp` → rename. Note which doc paragraphs describe the COPY and the CAP: those move onto the new step, they are not rewritten. |
-| same | `TestInitControlFixture_WriterCapsStderrCapture` | The two over-cap rows AC 2's assertion rides in, plus its "# Why two rows, and why neither is dead weight" doc — the sole-red discipline every new claim in this file has to state. Also its no-mutation check and its "# Do not print the capture" rule. |
-| same | `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry` | Offline call site 1, and the exactly-one-entry assertion that already covers the clean path's `.tmp`/stray-file hazard. |
-| same | `TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes` | Offline call site 2. |
-| same | `TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne` | Offline call site 3 — the writer is called from inside a `write := func(rec)` closure, so the scanner is built once above it and captured. |
-| same | `TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne` | Offline call site 4 — same closure shape. |
-| `internal/e2e/realclaude/dropped_line_capture_test.go` | `dropcapWriteRecord` | **The exemplar. Read it before writing anything.** Scanner as a parameter, marshal → scan → `t.Fatalf` naming the class → only then write; and the doc paragraph on why no excerpt is printed. Its "NOTHING was written" wording is the wording to follow. |
-| same | `dropcapScanner`, `scan` | The contract: `scan(b []byte) (hits, notApplied []string)`, value receiver, allocates its own results, safe to share. |
-| same | `dropcapFixedNeedles`, `dropcapMinNeedle`, `dropcapNeedle` | The five fixed needles are NOT `dynamic`, so `dropcapMinNeedle` never skips them — that is why the offline construction is armed identically on every machine. |
-| same | `dropcapDenyUsers`, `dropcapDenySkAnt`, `dropcapDenyHome`, `dropcapDenyVarF`, `dropcapDenyPVarF` | The class identifiers the refusal names and the planted row asserts on. |
-| same | `dropcapContains` | The hits-membership helper the planted row asserts with. |
-| same | `newDropcapScanner` | Read it ONLY to confirm what it reads on its own — `os.Getenv` twice and `realHome`. It must never be called from the writer file; see § The parameter, and its cascade. |
-| `internal/e2e/realclaude/inband_bypass_revoke_fixture_test.go` | `capFixtureCapture` | The cap that moves inside the new step. Read `stderrFixtureCap` and `truncateString` with it — the bound is a BYTE bound with a rune-boundary trim. |
-| `internal/e2e/realclaude/initialize_control_probe_test.go` | `runInitControlChild` | The live call site. Its signature already carries `scanner dropcapScanner` (since #1747), so the change is one argument. Its doc's **"THE SCANNER VALUE IS CREDENTIAL-BEARING: NEVER FORMAT IT"** paragraph binds every line this slice adds. |
-| same | `TestRealClaude_InitializeControl_Capture` | Where the live scanner is constructed — `newDropcapScanner(home, "", workdir)`, artifact-dir slot deliberately empty. |
-| same | `initControlScanApplied` | Why the record's arming census already exists, so the new step discards `scan`'s `notApplied` return. |
-| `internal/e2e/realclaude/initialize_control_record_test.go` | `initControlFullRecord` | The path-free fixture all five offline callers write. Note 7 and note 8 on its doc explain why `Redaction` and `CredentialScanApplied` carry no path. The planted row copies it and mutates one field. |
-| `internal/e2e/realclaude/offline_exec_ban_test.go` | `finOfflineExecBans` | The map. Its `"initialize_control_writer_test.go"` entry gains two names; its `"initialize_control_redaction_test.go"` entry (#1732) is the precedent — it added `realHome`/`os.TempDir` for exactly this reason. |
-| same | `TestFinOfflineFilesReachNoExecHelper` | The check is an **AST identifier match**, matching a bare `*ast.Ident` as well as a dotted selector — which is why a bare `realHome` reference is caught and why banning `os.Getenv` alone does not close the wrapper. |
-| `internal/e2e/realclaude/fixtures.go` | `realHome` | A package-level `var` read at load. Confirms the ban name resolves to a declaration. |
-| `docs/knowledge/features/e2e-realclaude.md` | § "A credential guard scoped to the surface named in the design is not the same as a credential guard scoped to the surface the ticket commits" | Why this slice exists, and the re-measurement of 2026-08-24 against the committed fixture. |
-
 ## Context
 
 `initControlScrubbed` (#1688) guards the child's stderr. Every byte this family

@@ -6,29 +6,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go:1242-1367` | `TestFinGatherSightingReportsTheMissBound` — **the idiom to mirror in full**: inline `finGatherInputs`, goroutine, 500 ms sleep, one `Write`, `<-done`, second `trailWaitForTrailer(...).BoundFrom` read off the call. Its doc's four headings are the shape the new doc should take. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:137-151` | `finGatherTrailerWait`'s wall-clock accounting. The `:144-147` bullet is AC3's first correction target. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:105-122` | The file header's failure-message licence — what a `t.Fatalf` here MAY and MAY NEVER name. Read before writing any message. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:270-345` | `finSighting` and its `# What it deliberately does not carry`. The `NO Bounded` bullet at `:286-290` carries AC3's second correction target (`:287`). |
-| `internal/e2e/realclaude/finding_run_gather_test.go:422-505` | `finGatherReadings` — the three returns, and the carrier fill at `:442-453` the new row's first record comes out of. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:577-580` | `finGatherNeedles(t)` — calls `t.TempDir()`, hence "inputs built on the TEST goroutine". |
-| `internal/e2e/realclaude/finding_run_gather_test.go:870-881` | `finGatherNegativeInputs` — the base fixture the new row copies field-for-field **except** the seed. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:241-272` | `finTrailerBuild` — the builder under test. `Bounded` is derived at `:247-253`; that range is AC3's third correction target. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:292-328` | `finTrailerSighting(scan, staleness, boundFrom)` — the shipped derivation the **second** record's carrier must come through. Its doc states why it takes a scan and not a `trailObservation`. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:330-449` | `TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator` — the tier this row joins to. Note it asserts only `rec.Detail != ""`, so a Detail-content check here is new, not a restatement. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:100-106` and `:184-190` | The two `(finding_run_gather_test.go:1696)` cites that this row's insertion point shifts. See § Cite maintenance. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:73-90` | The three `trailBoundFrom*` constants and their doc — `trailBoundFromStart` "BOUNDS NOTHING". |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:242-274` | `trailWaitForTrailer` — the `lastMiss.IsZero()` branch at `:256-262` is the whole mechanism. Stamping order at `:216-228`. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:131` and `:722-742` | `probePollInterval = 200ms`; `probeSyncBuffer` mutex-guarded, append-only, `Bytes()` returns a copy. |
-
-Everything the row needs is already imported by `finding_run_gather_test.go` (`fmt`, `strings`, `testing`, `time`). **No import change.**
-
----
-
 ## Context
 
 `finTrailerBuild` derives `Bounded` from `BoundFrom == trailBoundFromMiss` and nothing else. Since #1320 that builder takes the gather's `finSighting`, so one poll drives both the classified outcome and the published record — but that is a *structural* argument from the input type, and it is the only thing standing behind `lateness_bounded` today.

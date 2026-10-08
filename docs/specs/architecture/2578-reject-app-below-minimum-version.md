@@ -74,10 +74,6 @@ No new goroutine or lock. `m.minClientVersions` is written once in `NewV2Session
 - Log: the reject line carries the event and reason and not the raw version string.
 - `NewV2SessionManager` rejects `"1.0"`, `"01.0.0"`, `"1.0.0-rc"`, and a malformed app key; accepts an empty value; accepts `ShippedMinClientVersions()` — the check that fails `make check` if a shipped constant is malformed. A second assertion parses each non-empty shipped value with `protocol.ParseVersion`.
 
-## Open questions
-
-None.
-
 ## Documentation handoff (pending — documentation stage)
 
 - `docs/protocol-mobile.md`: remove "reserved, not yet sent" from the `client.update_required` row, the 4412 row and the 4412 paragraph under § Error codes. In § Compatibility, say the minimums are build constants carried by each daemon release, not operator configuration. Correct the claim that the relay's 4429 phone cap bounds an old build's re-dial loop: per #2576's decision-8 revision, 4429 is not a rate limit; the old build's own reconnect backoff bounds the loop, at the same cost a revoked device's 4401 loop has.

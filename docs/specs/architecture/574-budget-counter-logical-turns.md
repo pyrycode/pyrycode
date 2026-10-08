@@ -4,19 +4,6 @@
 
 Split from #567. The **enforcement** sibling of #573 (the **reporting** path), which has landed. #573 fixed the identical double-count in `streamjson/emitter.go`'s `num_turns`; this ticket applies the same predicate to the `budget.Counter` so the reported `num_turns` and the enforced budget agree on what a turn is.
 
-## Files to read first
-
-- `internal/agentrun/budget/budget.go:75-83` — `Counter` struct fields. Add one field (`lastAssistantMsgID string`) alongside `count`, under the existing `mu`.
-- `internal/agentrun/budget/budget.go:106-151` — `OnEvent`. **The only production change site.** The `entry.Type != "assistant"` early-return at :116 and the unconditional `c.count++` at :120 are what change; the `fired` short-circuit, the `count < MaxTurns` gate, the `AfterFunc` timer arm, and the `Terminate()` call below them stay byte-for-byte unchanged.
-- `internal/agentrun/streamjson/emitter.go:80-98` — `Emitter` struct: it already carries `lastAssistantMsgID string` (#573). This is the reference state field; budget mirrors it.
-- `internal/agentrun/streamjson/emitter.go:179-225` — `Emit`. The `if entry.Type == "assistant"` block at :189-225 holds #573's inline predicate (:200-207). **Refactor target:** replace the inline `if id == "" || id != e.lastAssistantMsgID` boundary test (:204) with a call to the new shared helper. Everything else in `Emit` (raw passthrough, usage aggregation, `lastStopReason`/`lastAssistantText` capture, sticky-`writeErr`) stays unchanged. emitter's 21 existing tests pin this refactor as behaviour-preserving.
-- `internal/agentrun/exitclass.go` — `package agentrun`, the shared home. Lives one level above both `budget` and `streamjson`. `budget` already imports it (`agentrun.ExitErrIsBenign`); `agentrun` imports neither subpackage, so adding `streamjson → agentrun` introduces no cycle. New file `internal/agentrun/turncount.go` joins it.
-- `internal/agentrun/budget/budget_test.go:56-58` — `assistantEntry()` helper (returns `Type:"assistant"` with **empty** `Message.ID`). Existing tests use it; under the empty-id floor each empty-id entry is its own turn, so all current budget tests stay green unchanged. Add an `assistantEntryID(id string)` sibling for the new cases.
-- `internal/agentrun/budget/budget_test.go:94-150` — `TestOnEvent_NonAssistantKindsDoNotCount` + `TestOnEvent_SIGTERMFiresExactlyAtBudget`. The established table-driven, stdlib-only, `signalRecorder`-based idiom the new cases follow.
-- `docs/specs/architecture/573-ptyrunner-num-turns-logical-turn-count.md` — the predicate's empirical basis (the 2.1.158 capture: 3 assistant entries, 2 distinct `message.id`s, native `num_turns: 2`), the empty-id-floor rationale, and the no-interleaving (no `A,B,A`) invariant. The rule this ticket mirrors verbatim. Its "Open questions" § explicitly hands the extract-vs-replicate decision to this ticket.
-- `docs/knowledge/codebase/573.md` — the landed implementation summary of the predicate and the "count logical turns by `message.id`" pattern.
-- `$(go list -m -f '{{.Dir}}' github.com/pyrycode/tui-driver)/pkg/tuidriver/jsonl.go:108-135` — `JSONLEntry{Type, Message *EntryMessage, ...}` + `EntryMessage{ID string, ...}`. Confirms `entry.Message.ID` reachability (nil `Message` on synthetic entries → the `id := ""` guard). No tuidriver change needed.
-
 ## Context
 
 ptyrunner enforces `--max-turns` itself because interactive `claude` (unlike `claude -p`) does not stop natively at the cap. `budget.Counter.OnEvent` increments `c.count` for **every** assistant JSONL entry and fires SIGTERM (then SIGKILL after the grace window) when `count` reaches `MaxTurns`.

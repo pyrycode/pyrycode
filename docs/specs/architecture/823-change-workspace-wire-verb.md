@@ -6,27 +6,6 @@
 
 ---
 
-## Files to read first
-
-The developer's turn-1 reading list. Read these before writing code; each line says what to extract.
-
-- `internal/relay/handlers/rename_conversation.go` — **the closest template.** Clone its shape: decode → guard → `Registry.Update` closure that mutates one field **and snapshots the `ConversationUpdatedPayload` under the lock** → eager best-effort `Save` → `c.Reply(TypeConversationUpdated, …)`. Note lines 85–96: the snapshot is captured *inside* the closure to avoid a find-then-read TOCTOU; `LastUsedAt` is **not** bumped (a metadata edit is not a "use").
-- `internal/relay/handlers/delete_conversation.go:58–104` — **the security-divergence template.** Its malformed branch logs `conn_id` ONLY (no `err`, no `conversation_id`). Copy that discipline; §"Error handling" below extends it with a second divergence unique to this verb.
-- `internal/relay/handlers/create_conversation.go:44–190` — the **injected-validator pattern**: `SessionCreator` interface consumed by the handler, `ErrSpawnDirRejected` sentinel (line 51), and the `errors.Is(err, ErrSpawnDirRejected)` → non-retryable `protocol.malformed` mapping (lines 172–179). This verb mirrors that with a `WorkspaceResolver` func + `ErrWorkspaceRejected`. **Beware line 177:** create logs the wrapped `err` on rejection — this verb must NOT (it names the path). See §"Error handling".
-- `cmd/pyry/main.go:442–476` — `confineWorkdirToHome` (strict, **non-creating**) + `withinDir`. The confiner to reuse verbatim. Returns the symlink-resolved realpath, or an error naming the offending path when it escapes `$HOME` or is unresolvable.
-- `cmd/pyry/main.go:492–514` — `expandTilde`. Must run **before** confine: the phone can't know the daemon's `$HOME`, so a client may send `~/…`. `confineWorkdirToHome` does `filepath.Abs` (no tilde handling), so a raw `~/…` fed straight in mis-resolves.
-- `cmd/pyry/main.go:602–644` — `resolveSpawnDir`: the create-path adapter (`expandTilde → confineWorkdirToHomeCreating → trustMark`). This verb's adapter is a **trimmed** variant — see §"The confine adapter" for the two deliberate omissions (creating-variant, trustMark).
-- `cmd/pyry/relay.go:174–181` (v1 `d.Register` block) and `:363–372` (v2 `Handlers` map) — the **two wiring sites**. Register the new handler at both, mirroring rename/delete/archive.
-- `internal/protocol/conversations_write.go:40–89` — payload-struct patterns (`Promote`/`Rename`/`Delete`/`Archive`). New payload slots in here.
-- `internal/protocol/codes.go:50–90` — the `// Conversations.` `Type*` block. `TypeChangeWorkspace` goes after `TypeUnarchiveConversation` (line 90). No new `Code*` constant is needed (§"Protocol vocabulary").
-- `internal/protocol/envelope.go:118–140` — `v1TypeSet`. Add one entry.
-- `internal/protocol/compat_test.go` — three enumerations (lines 9–20, 101–112, 178–215) + the hardcoded count `21` (line 113). All bump by one.
-- `internal/conversations/conversation.go:40–42` — the `Cwd` field. Its doc comment currently claims *"never updated after creation"* — this verb makes that false; fix the comment (§"Stale-comment fix").
-- `internal/conversations/registry.go:184–198` — `Update(id, fn) bool` semantics (mutate-under-lock, `false` on miss).
-- `internal/relay/handlers/delete_conversation_test.go` — the **test template**: reload-survival, static-message no-echo, and the malformed no-leak assertions (`findLogRecord` → assert no `err`/`conversation_id` field). Reuse its helpers.
-
----
-
 ## Context
 
 A paired client (desktop Workspace Picker sheet; later mobile) needs to move a

@@ -2,21 +2,6 @@
 
 Confirms PO's size: **XS**. One production file, one test file, signature unchanged.
 
-## Files to read first
-
-- `internal/agentrun/workdir.go` (full file, 44 LOC) — current encoder. Lines 15 (`projectDirReplacer`), 33–43 (`EncodeProjectDir` body + doc comment) are the surface to change. `ResolveWorkdir` is reused unchanged.
-- `internal/agentrun/workdir_test.go` (full file, 124 LOC) — all four `TestEncodeProjectDir_*` cases live here. Pay attention to:
-  - `TestEncodeProjectDir_LiteralSubstitution` (lines 82–97) — its oracle is the **old** narrow replacer; this is the test whose oracle must flip to `tuidriver.EncodeCwd`.
-  - `TestEncodeProjectDir_DarwinRealpath` (lines 67–80) — passes either encoder (alnum + `/` only).
-  - `TestEncodeProjectDir_DotInPathSegment` (lines 99–112) — passes either encoder (`/.hidden` → `--hidden` under both rules).
-  - `TestEncodeProjectDir_MissingPath` (lines 114–124) — error path; unchanged.
-- `github.com/pyrycode/tui-driver/pkg/tuidriver/cwd.go` (in module cache, 25 LOC) — the encoder we're delegating to. Confirms exported signature `func EncodeCwd(cwd string) string` and the per-byte rule (every byte outside `[a-zA-Z0-9]` → `-`, no run collapse). Idempotent on already-encoded strings because `-` itself is non-alnum and maps to `-`.
-- `github.com/pyrycode/tui-driver/pkg/tuidriver/cwd_test.go` (in module cache) — upstream's own table tests, including the loop-2 B-4 reference case and `unicode bytes mapped per-byte to hyphen`. We do **not** duplicate these cases; we add only the differential cases (where old vs. new encoder diverge).
-- `internal/agentrun/ptyrunner/runner.go` and `internal/agentrun/ptyrunner/watchdog.go` (imports only, no edits) — confirm `tui-driver/pkg/tuidriver` is already imported by sibling files in `internal/agentrun/`, so the new dependency on it from `workdir.go` adds no module-graph surface.
-- Ticket #501 body — empirical evidence that the wedge in real-claude tests is the 30s PTY-quiet watchdog firing because ptyrunner tails the wrong file. Not strictly needed to write the code, but it pins **why** this fix is the root cause and frames the third AC.
-
-No QMD / docs reading required — the encoder rule itself is fully captured in `tui-driver/pkg/tuidriver/cwd.go`'s doc comment.
-
 ## Context
 
 `internal/agentrun/workdir.go:15` defines `projectDirReplacer = strings.NewReplacer("/", "-", ".", "-")`, which only maps `/` and `.` to `-`. Claude's real encoder maps **every non-alphanumeric byte** to `-` (per-byte, no run collapse). The two encoders diverge on `_`, ` `, and other special bytes — so for any workdir containing those (e.g. `t.TempDir()` on a test named with underscores), ptyrunner's JSONL tail watches the pyry-encoded path while claude writes JSONL at the per-byte-encoded path. Result: PTY-quiet watchdog at 30s, 55s wall before SIGTERM, `error_during_execution num_turns:0` on every real-claude test with `_` in the test name.
@@ -87,10 +72,6 @@ Each case constructs the workdir with `filepath.Join(t.TempDir(), <literal>)` + 
 **Out-of-process verification (third AC, no new test):** `make e2e-realclaude` is the regression gate. Developer is not required to add a new e2e assertion — the existing real-claude tests in `internal/e2e/realclaude/` (which call `agentrun.EncodeProjectDir` via fixtures.go) already encode their `t.TempDir()` workdirs through `_`-bearing test names, so the moment the encoder is right the on-disk JSONL tail finds the file claude is writing. Per AC #3, remaining failures of *other* root causes are out of scope; the goal is to remove the `54-55s error_during_execution num_turns:0` failure mode.
 
 `go test -race ./...` and `go vet ./...` are the standard gates (AC #4). No staticcheck-relevant changes.
-
-## Open questions
-
-None.
 
 ## Acceptance criteria mapping
 

@@ -1,20 +1,5 @@
 # Spec — internal/noise: flynn/noise IK wrapper for handshake + AEAD transport (#433)
 
-## Files to read first
-
-The developer's turn-1 reading list. Lift these into context before writing any code.
-
-- `internal/keys/static_key.go:43-65` — the `StaticKey` accessor contract that the responder side will consume. `PrivateKey()` returns `[32]byte` by value; convert to `[]byte` slice with `priv[:]` when handing to flynn's `DHKey{Private: ...}`. **The keys package is a hard dependency; do not re-implement key generation here.** The doc comment forbids logging the private bytes — that contract propagates to this wrapper (the package emits zero logs and the error paths must never include key bytes).
-- `internal/keys/store.go:18-22` — the on-disk constants and naming (`algorithmName = "Noise_25519"`, `schemaVersion = 1`). Reference only — the wrapper does no I/O and consumes the raw 32-byte bytes returned by `StaticKey.PrivateKey()`.
-- `internal/identity/server_id.go:1-85` — package-layout precedent for a small primitive package: pure type + small surface area in one file, no I/O sprawl. The wrapper follows this shape (one production file).
-- `internal/pair/payload.go` — `internal/pair`'s package-doc cipher-suite naming style (see how the `Noise_25519` algorithm constant is named and documented). Mirror the same naming discipline in this package's doc comment.
-- `docs/protocol-mobile.md:84-91` — § *Cipher suite*: `Noise_IK_25519_ChaChaPoly_BLAKE2s` named explicitly. **This is the only suite the package must support; reject any expansion.** The package-doc cipher-suite line in `internal/noise/noise.go` mirrors this verbatim.
-- `docs/protocol-mobile.md:155-198` — § *Handshake* and § *Transport*: the IK message ordering (initiator writes IK msg 1 carrying early-data `hello`; responder reads, writes IK msg 2 carrying early-data `hello_ack`; both sides switch to transport mode). § *Transport* lines 195-201 are load-bearing for this wrapper's empty-AD design choice; mirror them in the package comment.
-- `docs/protocol-mobile.md:280-298` — § *Wire shapes*: `data` field uses `base64.StdEncoding`. The wrapper itself does NOT do base64 (that lives in #434 at the routing-envelope layer); the wrapper consumes and produces raw bytes. Documented here so the developer doesn't accidentally pull base64 into the primitive.
-- `docs/protocol-mobile.md:197` — *"Implementations MUST NOT pass a non-empty AD without a corresponding spec amendment."* This is enforced at the wrapper API: `CipherState.Encrypt(plaintext)` takes no AD parameter; there is no way to pass one without modifying the wrapper. The wrapper IS the enforcement point for this spec rule.
-- `docs/knowledge/decisions/024-noise-ik-mobile-e2e.md` § *Why this cipher suite* and § *Why per-binary, not per-phone, static keys on the binary side* — the rationale anchors. ADR-024 names `flynn/noise` as the chosen Go library and gives the threat model the wrapper sits inside.
-- `go.mod` (top) — confirm the only new direct dependency added by this ticket is `github.com/flynn/noise`. No transitive deps from flynn outside the stdlib (flynn pulls in `golang.org/x/crypto` which is already an indirect dep here for the ChaCha20-Poly1305 / BLAKE2s impls; verify `go mod tidy` produces no surprises).
-
 ## Context
 
 Mobile Protocol v2 (ADR-024, #430) replaces v1's plaintext-inside-WSS with end-to-end Noise_IK between phone and binary. Three siblings have already landed:

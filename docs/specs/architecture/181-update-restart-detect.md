@@ -1,15 +1,5 @@
 # Spec: `internal/update` restart-command detection (#181)
 
-## Files to read first
-
-- `internal/update/version.go:1-58` — package doc-comment voice, sentinel-error idiom (`ErrMalformedRelease`), exported-symbol comment style. Mirror the tone exactly.
-- `internal/update/checksum.go:27-54` — `AssetName` is the closest sibling: pure function, takes plain inputs, table-driven body. Same shape applies here.
-- `internal/update/version_test.go:1-60` — table-driven test pattern with `t.Parallel()`, named cases, `wantErr` (not used here — no errors — but case naming + `tests := []struct{...}` shape carries over).
-- `CODING-STYLE.md` — package-level conventions; in particular doc-comment-on-every-exported-symbol and `gofmt` non-negotiable.
-- Issue #181 body — acceptance criteria are the contract; tie-breaker rule (launchd wins) must appear verbatim in the doc comment.
-
-No prior knowledge doc on this slice exists — sister tickets (#178, #179, #180) covered version compare, asset-name, checksum verify. This is the third pure-function slice.
-
 ## Context
 
 `pyry update` swaps the binary on disk; the running daemon is still the old version until something kicks it. The decision of *which* command kicks it is platform-dependent (launchctl vs systemctl), but the *probing* of the local environment (does the plist exist? does the unit exist? what's the uid?) is I/O. We split the two so the decision is exhaustively unit-testable without filesystem fixtures or `runtime.GOOS` shims.

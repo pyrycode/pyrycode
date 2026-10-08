@@ -1,25 +1,5 @@
 # 498 — ptyrunner: emit `system/init` envelope to match streamrunner wire shape
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go:79-163` — `Config` (the type that grows one field) + field-required validation pattern (`MaxTurns required`, etc.) to mirror.
-- `internal/agentrun/ptyrunner/runner.go:308-318` — the `streamjson.New` call site (the one production caller; gets new fields populated).
-- `internal/agentrun/ptyrunner/runner.go:395-404` — `buildArgs` (interactive-TUI argv; explains why `--allowed-tools` is absent from argv and why ptyrunner has no `AllowedTools` field today — the deny-default settings file is the runtime gate, but the wire-shape envelope needs the human-readable list).
-- `internal/agentrun/streamjson/emitter.go:43-113` — `Config` + `New` + `Emitter` state (the symmetric site to the new init synthesis; mirror trailer's `Close` shape).
-- `internal/agentrun/streamjson/emitter.go:204-273` — `trailer` struct + `wireFields`. The trailer's tagged field order is the load-bearing JSON key-order convention to mirror for the init struct.
-- `internal/agentrun/streamjson/testdata/captured_run.jsonl:1` — wire-shape reference for the init line. Six required fields in this exact key order: `type`, `subtype`, `cwd`, `tools`, `model`, `session_id`.
-- `internal/agentrun/streamjson/emitter_test.go:18-46` — `newTestEmitter` (the helper that every existing streamjson test funnels through; receives three new field values).
-- `internal/agentrun/jsonl/reader.go:160-213` — `knownKinds` whitelist (explains how `permission-mode` / `file-history-snapshot` / `ai-title` reach stdout today: `Reader.Next` surfaces every well-formed line as an `Event` with `Kind=""` for unrecognised types, then `Emitter.Emit` writes `ev.Raw` verbatim).
-- `internal/agentrun/ptyrunner/runner_test.go:30-60` — `helperRunCfg` (the test-side `Config` constructor; one edit adds the new field to every test).
-- `internal/agentrun/ptyrunner/runner_test.go:102-146` — `TestRun_HappyPath_EmitsAndEndOfTurn` (the `bytes.HasPrefix(got, []byte(happyPathBody))` assertion is the load-bearing test that must move past the new leading line).
-- `internal/agentrun/ptyrunner/runner_test.go:478-525` — `TestRun_MissingRequiredFields` (table to extend for the new nil-`AllowedTools` row).
-- `cmd/pyry/agent_run.go:288-322` — `runAgentRunPty` (single new line: pass `parsed.allowedTools` into the new `ptyrunner.Config.AllowedTools`).
-- `cmd/pyry/agent_run_test.go:733-758` — `TestRunAgentRun_DispatchesToPtyRunnerByDefault` (extend the captured-Config zero-check).
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:84-145` — `envelopeShape` + `extractShapes` + the comment block explaining the leading-envelope "normalization" gap (comment block trimmed; `extractShapes` itself stays type+subtype-only).
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:264-280` — the ptyrunner.Run call site (add `AllowedTools: allowedTools`).
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:373-397` — `checkInitModel` (the existing field-level init invariant; extended to also assert cwd / tools / session_id).
-- `internal/e2e/realclaude/fixtures.go:342-358` — `parseInitSessionID` (AC pins: do NOT modify; the new producer-side init line must make this return non-empty unchanged).
-
 ## Context
 
 `pyry agent-run`'s default path (`runAgentRunPty` → `ptyrunner.Run`) spawns interactive claude under a PTY and tails the per-session JSONL file under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl`, re-emitting each line verbatim through `streamjson.Emitter` and composing a trailing `type:"result"` line. The on-disk JSONL starts with non-system events — `permission-mode`, `file-history-snapshot`, `user`, … — because the `system/init` envelope is emitted only by the `-p` (non-interactive) shape of claude that streamrunner drives, not by the interactive TUI.

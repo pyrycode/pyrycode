@@ -1,18 +1,5 @@
 # #136 — Bridge.Resize seam + apply handshake Cols/Rows
 
-## Files to read first
-
-- `internal/control/protocol.go:39-64` — `AttachPayload` struct + the Phase-0 caveat that explains why `Cols/Rows` are dropped today. The "handshake" half of that caveat is the line being deleted; the "live SIGWINCH" half stays.
-- `internal/supervisor/supervisor.go:236-280` — service-mode block in `runOnce`: where `ptmx` is allocated, where `BeginIteration`/`EndIteration` already bracket the iteration, and the lines 248-250 caveat to be rewritten.
-- `internal/supervisor/bridge.go:45-140` — `Bridge` struct + iteration-scoped fields/methods (`iterCancel`, `BeginIteration`, `EndIteration`). The new PTY field and `SetPTY/Resize` methods follow the same `cancelMu`-style locking pattern.
-- `internal/supervisor/winsize.go:40-57` — the existing `pty.Setsize` callsite. Reuse the same call shape (`pty.Setsize(f, &pty.Winsize{...})`) in the new `Bridge.Resize`.
-- `internal/control/server.go:35-54` — the `Session` and `SessionResolver` interfaces. The `Session` interface gets one new method; `SessionResolver` is unchanged.
-- `internal/control/server.go:347-411` — `handleAttach`. The new resize call lands between `Activate` (after PTY exists) and `Attach` (before bridge handoff), guarded by the zero-value check.
-- `internal/control/server_test.go:20-76` — `fakeSession` and `fakeResolver`. `fakeSession` gets one new field (recorded resize calls) and a new method.
-- `internal/control/attach_test.go:286-333` — `TestServer_AttachIgnoresGeometryToday`. Rename + rewrite to assert the spy seam IS invoked; add a sibling test for the zero-value no-op path.
-- `internal/sessions/session.go:62-154` — `Session` struct + `Attach` method. The new `Resize` method mirrors `Attach`'s "delegate to bridge if non-nil, return sentinel otherwise" shape; reuse `ErrAttachUnavailable` rather than minting a new error.
-- `internal/supervisor/bridge_test.go:1-100` — existing bridge tests. The new supervisor-side `Resize` test follows the same `NewBridge(nil)` + direct method-call pattern; uses `pty.Open()` like `internal/e2e/attach_pty.go:63-73`.
-
 ## Context
 
 Today `internal/control` accepts `Cols`/`Rows` in `AttachPayload` but the supervisor has no API to apply them. Three places document the gap (`protocol.go`, `supervisor.go`, `attach_test.go`'s `TestServer_AttachIgnoresGeometryToday`). This ticket adds a typed resize seam — `Bridge.Resize(rows, cols uint16) error` — and uses it from the control server's attach handler to honor handshake geometry. The wire-protocol resize message and the live-resize applier are deferred to #137; the client-side SIGWINCH handler is deferred to #133.

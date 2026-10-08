@@ -3,26 +3,6 @@
 **Size:** XS (confirmed; PO's label unchanged)
 **Scope:** `go.mod`, one line moved. No `.go` file changes.
 
-## Files to read first
-
-This ticket has no code surface — the deliverable is the module manifest — so the
-reading list is short by nature. Read these three, in order, and nothing else:
-
-- `go.mod` — the two `require` blocks. The first (direct) currently holds
-  `github.com/creack/pty v1.1.24`; the second (indirect) is where it belongs.
-  This is the whole edit surface.
-- The ticket body's **Technical Notes** — specifically the `git grep` form and
-  the `.claude/worktrees/` trap. Both are load-bearing; see § Verification traps.
-- `CODING-STYLE.md` § "Dependencies" — read it to confirm you are **not** editing
-  it. It still lists `creack/pty` under "Current justified deps" with a
-  direct-PTY-allocation rationale. That line is stale, and it stays stale in this
-  ticket; see § Context.
-
-Do **not** open `internal/e2e/realclaude/finding_live_run_test.go`. Its sole
-`creack/pty` mention is prose inside the comment block in `finLiveRunStage`,
-explaining which fd claude inherits on each runner path. It is a comment, it does
-not hold the direct requirement open, and rewriting it is #1554's job.
-
 ## Context
 
 `go.mod` lists `github.com/creack/pty v1.1.24` in the direct `require` block. After

@@ -2,23 +2,6 @@
 
 **Size:** s (one new test file, zero production files). **Label:** `security-sensitive` — see § Security review.
 
-## Files to read first
-
-Symbol-anchored on purpose: `make cite-guard` runs in `make check`, scans `.go` files, and fails on any `//`-comment citation that resolves to a declaration — at any depth, ranges included, `internal/e2e` not exempt. Resolve each name with `codegraph_search` / `codegraph_node`.
-
-- `internal/e2e/relay_v2_stream_model_list_test.go` → `driveModelListRespawn`, `TestRelayV2_StreamModelListReachesConnectedPhone`, and the `modelList*` const block + `modelListWantEffortLevels`. **The template.** Copy its shape (pair → seed → start → fake relay → dial → interactive handshake → sealed send → ordered decrypt loop) and its header discipline. Its constants are REUSED by the new file (same package) — read their doc comment for why the fake's table is transcribed as literals.
-- `internal/e2e/relay_v2_stream_interrupt_test.go` → `TestRelayV2_StreamInterruptStopsRunningTurn`. **The mint half.** It starts the same harness, mints an all-null conversation over the wire inline, drives a `send_message` to it and observes frames for the minted conversation. Extract: the `create_conversation` → drain-to-`conversation_created` loop and the "No seedBoundConversation" reasoning.
-- `internal/e2e/handshake_interactive_helpers_test.go` → `driveHandshakeToOpenDaemonInteractive`, `buildHelloEarlyInteractive`. What drives a conn to interactive-open, and that it consumes exactly the `noise_resp` inner frame and nothing after it.
-- `internal/e2e/harness.go` → `StartStreamInteractiveWithRelay`, `writeStreamInteractiveConfig`, `seedBootstrapRegistry`, `shortHome`, `readPersistedServerID`, `mustJSON`. What the harness already does for you; note `seedBootstrapRegistry` runs inside the Start call, so the bootstrap UUID is the only seed this test needs.
-- `internal/e2e/relay_v2_daemon_test.go` → `waitBinaryHello`, `decryptInnerEnvelope`; `internal/e2e/relay_v2_handshake_test.go` → `sendNoiseMsg`, `sendNoiseInit`; `internal/e2e/pair_test.go` → `decodePairPayload` and `TestPairRevoke_E2E`'s "removes one of two" subtest, which is the precedent that two `pyry pair` runs into one home produce two usable devices.
-- `internal/relay/v2session_handshake.go` → the success tail of `handleNoiseInit` (where `s.interactive` is recorded, the push queue is created, then `reconcileModals` → `reconcileQueues` → `reconcileModelLists` fire). **This is the seam under test**, and the ordering — `noise_resp` sent BEFORE the reconcile pushes — is what makes the phone-side decrypt order deterministic.
-- `internal/relay/v2session_modelreconcile.go` → `reconcileModelLists`. The two early returns (`!s.interactive`, nil `RetainedModelLists`); the nil one is AC 3's mutant target.
-- `cmd/pyry/relay.go` → the `RetainedModelLists:` assignment inside `startRelayV2`, and the `retainedModelLists` field doc on the relay wiring struct. **AC 3's one-line mutant lives at that assignment.**
-- `cmd/pyry/session_model_list.go` → `retainedModelLists`, `resolveBoundModelList`. Why the bootstrap session contributes NOTHING (it has no conversation record) and why a conversation must therefore be minted before anything can be reconciled.
-- `cmd/pyry/session_model_hold.go` → `sessionModelHold.Sink`. **Load-bearing for this test's synchronisation**: the retention is written BEFORE the event is forwarded downstream.
-- `internal/e2e/internal/fakeclaude/main.go` → `runStreamJSON`, `initializeModels`, `writeInitializeAck`, `writeStreamResponse`. The single-goroutine read-line/write-line loop that gives this test its happens-before, and the two canned rows AC 2 branches on.
-- `docs/knowledge/features/e2e-harness.md`, `docs/knowledge/features/fakeclaude-binary.md` — the harness/fake conventions this test rides; read before adding anything new to either (it must not need to).
-
 ## Context
 
 The model-list chain was built in layers — the ask on spawn (#1839), per-session retention (#1840), the wire mapping (#1848), the conversation-keyed resolver (#1857), the connect-time reconcile (#1863), and the enumeration that fills its seam (#1867). Each is proved at its own seam against its own doubles. Nothing proves the chain across process boundaries for the client the reconcile exists for: one that was **not** connected when the daemon obtained the list.

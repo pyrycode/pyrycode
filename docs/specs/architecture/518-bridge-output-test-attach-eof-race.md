@@ -4,14 +4,6 @@
 
 **Scope:** `internal/supervisor/bridge_test.go` only. No production change.
 
-## Files to read first
-
-- `internal/supervisor/bridge_test.go:97-125` — `TestBridge_OutputObserver_NilSkipped` as it stands today (the flaky test).
-- `internal/supervisor/bridge_test.go:143-168` — `TestBridge_OutputForwardsWhenAttached`: identical shape (sibling that the audit AC asks us to fix too).
-- `internal/supervisor/bridge.go:168-184` — `Bridge.Write` body. **Synchronous.** Acquires `b.mu`, snapshots `out := b.output`, releases, then writes to `out`. There is no async "output copy goroutine" to wait for.
-- `internal/supervisor/bridge.go:209-252` — `Bridge.Attach`. Sets `b.output = out` synchronously, then spawns an input-pump goroutine that on input EOF acquires `b.mu` and clears `b.output = nil`. This is the goroutine the test races against.
-- `internal/supervisor/bridge_test.go:30-57` — `TestBridge_WriteSwallowsAttachedWriteErrors` already uses the `io.Pipe()` pattern that this spec adopts; the new code mirrors it for consistency.
-
 ## Context
 
 PR #517's QA flagged one failure of `TestBridge_OutputObserver_NilSkipped` (`bridge_test.go:117`, `got "", want "hi"`) that did not reproduce on retry. PR #517 touched none of `internal/supervisor/*`, so this is a pre-existing flake exposed by QA's single-sample comparison, not a regression. Filed against `main` to keep the QA gate honest.

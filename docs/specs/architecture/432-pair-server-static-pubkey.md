@@ -1,23 +1,5 @@
 # Spec — `pyry pair`: add `server_static_pubkey` + fingerprint to QR payload (#432)
 
-## Files to read first
-
-The developer's turn-1 reading list. Lift these into context before writing any code.
-
-- `internal/pair/payload.go:1-108` — current `Payload` shape (`server`, `relay`, `token`), `Encode`/`Decode` contract, `ErrInvalidPayload` sentinel, the "decode-error-text never contains input bytes" discipline you must preserve when adding the new field.
-- `internal/pair/payload_test.go:1-166` — table-driven `TestDecode_Errors` (the existing missing/empty cases are the template for the new pubkey cases) and `TestEncode_DecodeRoundTrip` (extend with the new field; do NOT introduce a new test file for one field).
-- `internal/pair/render.go:1-59` — `Render(Payload, io.Writer)`'s QR + paste-fallback + instruction-line shape, the `errTrackingWriter` short-circuit, and the doc-comment SECURITY block about the one-time-display surface (the new fingerprint line falls under the same writer; do NOT add a separate sink).
-- `internal/pair/render_test.go:1-159` — pattern for asserting QR substring + encoded payload + instruction line. Extend with assertions for the fingerprint line; reuse `samplePayload()`.
-- `cmd/pyry/pair.go:143-203` — `runPairDefault`: the single producer of `pair.Payload`. This is the only call site you wire `keys.LoadOrCreate` into.
-- `cmd/pyry/main.go:133-154` — `sanitizeName`. **Used to derive the on-disk path component for `~/.pyry/<sanitized-name>/`.** Pass `sanitizeName(parsed.instanceName)` as the `daemonName` argument to `keys.LoadOrCreate` so the static-key file co-locates with `devices.json` / `server-id`. (Spec #438 explicitly warns that `sanitizeName` is more permissive than `keys.validDaemonName`; that mismatch is intentional and is handled here by surfacing `ErrInvalidDaemonName` as a `pair: ...` wrapped error — no auto-rewrite, no silent fallback.)
-- `internal/keys/store.go:34-95` — `keys.LoadOrCreate(baseDir, daemonName) (*StaticKey, error)`. The two-arg constructor; the keys package owns the `<baseDir>/<daemonName>/static_key.json` path mapping.
-- `internal/keys/static_key.go:43-65` — `StaticKey.PublicKey() [32]byte` is the raw 32-byte X25519 public point you copy into `Payload.ServerStaticPubkey`. `PrivateKey()` is forbidden output; never touch it from `cmd/pyry/pair.go`.
-- `docs/protocol-mobile.md:135-150` — § *Pairing flow*: canonical QR JSON shape including `server_static_pubkey`. Field naming and order locked here.
-- `docs/protocol-mobile.md:635-654` — § *Appendix: example flow*: the byte-exact desktop output the CLI must produce (`==> Static-key fp:       aa:bb:cc:dd:ee:ff:11:22`). The eight bytes / seven colons / lowercase-hex form is fixed.
-- `docs/protocol-mobile.md:540-547` — § *UX implications*: the requirement that the desktop print the fingerprint immediately under the QR with a "verify on your phone" hint.
-- `docs/protocol-mobile.md:720-724` — § *Security review*: explicit FIXED entry pinning 64-bit fingerprint (not 32-bit). The test vector MUST encode this; a 4-byte vector is a spec violation.
-- `internal/e2e/pair_test.go:271-284` — `decodePairPayload` helper; the existing e2e flow already round-trips through `pair.Decode`, so once `Decode` enforces the new field the e2e tests fail until the producer in `cmd/pyry/pair.go` is wired. Add one non-empty-pubkey assertion (≤2 lines) so failure mode is loud.
-
 ## Context
 
 Mobile Protocol v2 (#430) requires the phone to authenticate the binary via its X25519 static public key, learned out-of-band at pair time (`Noise_IK` initiator step needs the responder's static key before the first message). The v1 QR payload (`{server, relay, token}`) carries no such anchor; v2 grows the same envelope to `{server, relay, token, server_static_pubkey}` per `docs/protocol-mobile.md` § *Pairing flow*, with the binary's persistent keypair sourced from `internal/keys.LoadOrCreate` (#438 core, #439 hardening — both merged).

@@ -13,28 +13,6 @@ wiring slice.
 
 ---
 
-## Files to read first
-
-| Read | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/watchdog.go` | `newStallTracker` | The defect: `awaiting: true` in the literal, and the doc sentence AC5 retires. |
-| `internal/streamsup/watchdog.go` | `consumeLine` | The **only** existing writer of `awaiting`. The two new signals mirror its transition arms; read the `assistant`/`user`/`result` arms and the trailing comment naming the activity-only types. |
-| `internal/streamsup/watchdog.go` | `stallTracker`, `snapshot` | The lock discipline: `mu` is a leaf, taken by the forwarder goroutine's `Write` and the poll goroutine's `snapshot`. Both new methods join that set; neither introduces a new lock. |
-| `internal/streamsup/watchdog.go` | `shouldFire` | The pure predicate. **It does not change.** Everything in this slice moves its two inputs, not its logic. |
-| `internal/streamsup/watchdog.go` | `Watchdog`, `Start` | Where the two exported methods land. `Watchdog`'s type doc carries the `DIVERGENCE from streamrunner` paragraph AC5 wants a second one written alongside. `Start`'s doc describes the edge-trigger latch the new signals interact with. |
-| `internal/streamsup/watchdog_test.go` | `fakeClock`, `recvStall` | The two helpers every new test reuses. `fakeClock` is currently used only by tracker unit tests; this slice also uses it at the `Watchdog` level (see Testing strategy). |
-| `internal/streamsup/watchdog_test.go` | `TestStallTracker_AwaitingTransitions`, `TestStallTracker_LineBuffering`, `TestWatchdog_GenuineIdleFires`, `TestWatchdog_PendingPermission_EmitNotKill`, `TestWatchdog_LatchReArms` | The five tests the ticket lists. Each needs a specific re-anchor, tabulated below — do not just delete assertions. |
-| `internal/streamsup/runner.go` | `WriteUserTurn` | The send-side signal's future caller. Its error contract — `ErrNoLiveChild` (no live child, or a `BeginRotation` gate) and `turncommit.ErrDropped` (gate deny, zero bytes) — is what the new method's contract must name. |
-| `internal/streamsup/runner.go` | `Run`, `spawnAndWait`, `takeStdin` | The exit side, and the evidence for the one-watchdog-per-runner decision below: `Config.Stdout` is fixed at `New` and the loop never re-wires it. |
-| `internal/streamsup/parser_test.go` | `discardLogger` | The package's shared logger double — reuse it, don't mint a second. |
-| `internal/agentrun/streamrunner/watchdog.go` | `newStreamParser` | The lifted original. Read it to see the premise being diverged from, so the new doc comment describes the divergence accurately rather than deleting the sentence. |
-| `docs/knowledge/features/streamsup-package.md` | § "Idle/stall watchdog — receive-side, emit-not-kill (#1094)" | The evergreen description of the component. Also read, in the § "Two tiers" measurement list, the bullet recording that claude does **not** echo the delivered prompt back as a `user`/`text` line on this surface — that measurement is why a send-side signal is mandatory rather than optional. |
-
-Do not edit `docs/knowledge/features/streamsup-package.md` or `docs/knowledge/codebase/1504.md`; the
-documentation phase owns both.
-
----
-
 ## Context
 
 `newStallTracker` starts `awaiting: true`. On the interactive surface the child spawns on

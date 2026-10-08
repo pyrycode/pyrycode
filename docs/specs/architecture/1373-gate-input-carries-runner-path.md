@@ -10,31 +10,6 @@ go test -tags e2e_realclaude -run '^(TestTrail|TestFin|TestTdn)' ./internal/e2e/
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Each entry says what to extract; between them they are the whole surface this slice touches.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trailer_admissibility_test.go:164-188` | `trailGateResult`'s doc + the three fields. The doc's rule *"a future field added here must not be a copy of an input's captured bytes"* is the one this slice has to answer to. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:210-322` | `trailGate`'s doc and its **seven** `return trailGateResult{…}` sites (`:246`, `:258`, `:266`, `:280`, `:291`, `:303`, `:314`). Every one of the seven gets one new line. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:516-593` | `trailGateCase` (four fields: `name`, `in`, `want`, `reason`) and the eight rows of `trailGateCases()`. `in` is the field being retyped; the eight rows are one contiguous 50-line block. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:727-781` | `TestTrailGate` and, at `:756-780`, AC3's sub-test — the three call sites at `:760`, `:765`, `:775` that must keep asserting `"nil trailer"` / `"terminal_reason is empty"` / `"NO LIVE REPRO EXISTS"` / the quoted state. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:984-1039` | `TestTrailAdmissibilityRecordsCarryNoCapturedBytes`. The `bytes` and `encoding/json` imports it already uses are the ones the new test reuses — **no new imports for the sweep**. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:757-790` | `tdnRunnerFromArgv` — the shipped reader. Read all **five** returned strings and the doc's reason for refusing `reachRunnerPathFromArgv`. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:891-962` | `tdnFixturePtyArgv` (`:897`), `tdnFixtureStreamArgv` (`:902`) and `TestTdnRunnerFromArgv`'s six rows — including the `--append-system-prompt-file`-only argv at `:929`. Four of the five driving argvs come straight from here. |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:160-260` | `trailReasonAgainstPath` (#1366) — the sibling predicate over exactly this pair, **not consumed by this slice**. Its § *"No input byte interpolates into the output, at all"* (`:201-214`) is the doctrine AC4 is measured against. |
-| `internal/e2e/realclaude/finding_run_record_test.go:231-238` | `finRecordInputs.ClaudeCommand`'s rule — *"READ, reduced … and NEVER RETAINED"*. The field doc this slice writes is that rule's mirror image at the gate's tier. |
-| `internal/e2e/realclaude/finding_run_record_test.go:720-812` | `finRecordInputReaches` (the family's reflect walker) and the pin asserting `trailScanResult` is unreachable from `finRecordInputs` / `finRecordRun`. This is the pin Constraint 1 protects. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:537-546` | `finGatherReadings`' trailer leg — call site 1 of 2 in this file. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:765-788` | `finGatherAssertContract`'s C2 check — the **only whole-struct** `trailGateResult` comparison in the tree (`readings.Gate != want`, `:778`) and the stale-prose landing site at `:775`. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:120-195` | `trailRigGather` — call site at `:157`, and the doc explaining why nothing here hand-types a `trailGateResult`. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:171-219` | `trailRunReadings` — read the doctrine *"nothing here is a value from which trailScanResult's trailer pointer is reachable"*. It gains **no field** in this slice. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:474-511` | `trailClassifyRun`'s step-1 switch and its landmine comment. **Untouched** (AC5). |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:633-648, 1064-1130` | `trailRunCases`' `realGate` call site (`:641`) and `TestTrailRunComposesWithGateCases` (`:1091`, `:1117`) — the latter two are the sites that must end up with **zero diff**. |
-
----
-
 ## Context
 
 `trailGate` (`trailer_admissibility_test.go:242`) is pure over one input, `trailScanResult`, and that input says nothing about which runner produced the line. It needs to, because `terminal_reason` is pyry's invention and the two runner paths owe it differently — the same trailer shape is a healthy run on the stream path and a broken record on the pty path. #1366 shipped `trailReasonAgainstPath`, the pure predicate over exactly that pair, and it has no decision-path caller because the gate it belongs in cannot see a path.

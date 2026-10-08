@@ -4,28 +4,6 @@ Wire vocabulary only: one envelope type constant, one payload struct, and the tw
 structural guard classifications that keep `make check` green. No fixtures, no cap
 constant, no dispatch, no reassembly, no storage.
 
-## Files to read first
-
-Read these before writing anything. Each entry names the symbol and what to take
-from it — resolve symbols with `codegraph_search` / `codegraph_node`, not by
-scrolling.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/protocol/messaging.go` | `DebugBundleChunkPayload` | The nearest shape precedent. `Data []byte` auto-encodes as standard base64 through `encoding/json`; its doc block states the "content-bearing, never logged" line and puts the receiver's ordering contract **on the type**, not in the receiver. Copy that form, not its fields. |
-| `internal/protocol/messaging.go` | `DebugBundleDonePayload` | Why this ticket declares no peer of it. Read `Total`'s doc sentence — truncation detection is the job it does, and `TotalChunks` here does it from the first chunk instead. |
-| `internal/protocol/interactive.go` | `ToolUsePayload` | The house form for a `SECURITY:` doc block that says a field is a claim rather than a fact, stated on the type. AC 3's enumeration follows this shape. |
-| `internal/protocol/messaging.go` | `SessionErrorPayload` | The no-`omitempty` convention and its stated reason ("all three are always present so the golden fixture pins the full shape"). Every field on the new payload follows it. |
-| `internal/protocol/codes.go` | `TypeSlashCommandList`, `TypeModelList` | The two most recent declare-only const blocks. Their doc blocks are the length and structure to match: what the frame is, the v1/v2 classification sentence, the guard classification sentence, and the declaring-ticket-vs-producer-ticket sequencing paragraph. |
-| `internal/protocol/codes.go` | `TypeRequestDebugBundle` | The **bare control frame** precedent: "no payload, no `conversation_id`, no field an attacker could use to select another session's data — mirroring `TypeInterrupt`". This is the reasoning that decides § Design's no-conversation-id call. |
-| `internal/protocol/envelope.go` | `Envelope`, `inboundAppTypeSet` | Confirm for yourself that `Envelope` carries **no** conversation id, and that `inboundAppTypeSet` is the v1 set the new constant must stay out of. No production edit lands in this file. |
-| `internal/protocol/compat_test.go` | `TestIsKnownAppType`, `v2OnlyTypes`, `TestTypeConstants_V1V2Partition` | Three of the four cascade sites. Note `TestTypeConstants_V1V2Partition`'s closing size assertion: adding to both `v2OnlyTypes` and its `all` list keeps it balanced. |
-| `internal/protocol/compat_test.go` | `TestInboundAppTypeSet_CoversAllExportedTypeConstants` | The one test in this file you must **not** touch. Its hardcoded `want` of 23 counts v1 application types only; a v2 constant never enters it. |
-| `cmd/pyry/relay_guard_test.go` | `excludedTypes`, `TestEveryInboundV2TypeHasHandler` | The fourth cascade site, in another package. Read Assertion #1 and Assertion #3 in the test body before choosing where the entry goes — § Design explains why the obvious choice is wrong. |
-| `cmd/pyry/relay_guard_test.go` | the `"TypeHello": "handshake"` entry | The precedent to copy for the new entry's comment: a borderline phone → binary type deliberately not filed inbound, carrying its own label and an explanation. The seven `"push"` neighbours are **not** the precedent here. |
-| `internal/devices/device.go` | `HashToken` | The house representation of a sha256 in this repo: lowercase hex, "always 64 hex characters (`sha256.Size * 2`)". Fixes the `SHA256` field's wire form. |
-| `internal/relay/v2bundlestream.go` | `bundleChunkBytes`, `StreamBundle` | Read only to confirm you are **not** touching it. The per-chunk cap is #1753; this ticket declares no constant of that kind. |
-
 ## Context
 
 Attachments have been designed since 2026-05-16 and refined 2026-07-03, and

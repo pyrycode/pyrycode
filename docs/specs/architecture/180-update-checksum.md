@@ -1,15 +1,5 @@
 # Spec: `internal/update` — asset-name templating + SHA-256 checksum verification (#180)
 
-## Files to read first
-
-- `internal/update/version.go` — sister file in the same package (landed in #179). Read it whole; this ticket adds a new file alongside it. Confirms the package doc comment, error-sentinel pattern (`ErrMalformedRelease`, `ErrInvalidVersion` — both `errors.New(...)` wrapped at the return site with `fmt.Errorf("…: %w", sentinel)`), and the table-driven test layout this ticket must mirror.
-- `internal/update/version_test.go` — table-driven test layout convention (`t.Parallel()` per subtest, inline assertions, no helpers, `errors.Is` for sentinel-error assertions). Mirror exactly.
-- `.goreleaser.yaml:24-46` — build matrix (`goos: [linux, darwin]`, `goarch: [amd64, arm64]`) and `archives.name_template`. The four-combo support set and the OS-capitalisation/arch-rewriting rules come from here verbatim.
-- `cmd/pyry/main.go:53-54` — `var Version = "dev"`. Same module-level variable that #179's comparator already sees; the wiring ticket will pass `Version` through `AssetName` after stripping the `dev` sentinel via `CompareVersions`'s error path.
-- `CODING-STYLE.md` §§ Naming, Error Handling, Testing — confirms the conventions already followed in `version.go`. Nothing new here; cited so a fresh reader doesn't have to re-derive them.
-
-(QMD search on `pyrycode-docs` for "checksum" / "asset name" / "goreleaser" returns no prior decisions; greenfield within the package.)
-
 ## Context
 
 Second pure-function slice of `pyry update`. The HTTP fetcher (sister ticket) needs to:

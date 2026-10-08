@@ -12,27 +12,6 @@ classification's prose.**
 
 ---
 
-## Files to read first
-
-| Read | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/parser.go` | `emitModelList` | The whole doc and body. `FIVE RUNGS`, `THE DISCRIMINANT`, the header sentence, rung 4's inline `Still no event` comment, and rung 5's `THE SECOND GATE` / `THE ORDER IS DELIBERATE` — this is most of the change. |
-| `internal/streamsup/parser.go` | `emitSlashCommandList` | The emitter you call. Read `THE GATE IS THIS EMITTER'S PRECONDITION`, `IT LOGS NOTHING`, `SUPPRESSION RATHER THAN AN EMPTY EMIT`, `WHERE THE CONSTRUCTED LIST GOES`. **You point at these; you do not copy or re-decide them.** |
-| `internal/streamsup/parser.go` | `logControlResponse` | Its `commands` paragraph, plus the two sentences that partition rungs by the words *non-emitting rung* / *the non-emitting ones*. |
-| `internal/streamsup/parser.go` | `controlResponseMsg` | The keyword `const` block above it: `WHAT DECIDES THE NEW KEYWORD'S NAME`, and `controlResponseCommandsOnly`'s trailing one-line gloss. |
-| `internal/streamsup/parser.go` | `commandEntryLine` | Its sink enumeration and `A PER-FIELD CAP DOES EXIST`. **Verify, then leave alone** — see § Checked non-items. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseAckReportsTheCommandCount` | AC 4's home. Doc, three rows, and the table-wide `len(events) != 0`. Renamed and restructured here. |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListIsLoggedContentFree` | Its `lines` slice, the `FIVE:` assertion, and the `leaks` sweep. |
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandListIsSuppressed` | Its opening paragraph and `THE COMMANDS-ONLY RUNG IS THIS TABLE'S SIXTH ROW AND IT LIVES ELSEWHERE`. |
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandFieldsAreCapped` | The `models array is carried by every row` paragraph only. Rows untouched. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseRejectBranches` | Read to confirm it needs nothing — see § Checked non-items. |
-| `internal/streamsup/parser_test.go` | `TestParser_ControlResponseAckIsConsumedSilently` | Same: read to confirm, change nothing. |
-| `cmd/pyry/interactive_turn_v2.go` | `eventKind` | Its `turnevent.SlashCommandList` arm, `A PRODUCTION PRODUCER NOW EMITS THE VARIANT` paragraph. |
-| `internal/turnevent/event.go` | `SlashCommandList` | Read `THE PRODUCER HAS SINCE ARRIVED` to confirm it already says *"more than one call site reaches it"*. It does. Change nothing. |
-| `docs/knowledge/features/streamsup-package.md` | § *The commands-only success gets its own keyword (#1890)* | The lesson that drives § The sweep you must run: an arity claim rots by its **class word**, not by the rung's name. |
-
----
-
 ## Context
 
 `emitModelList` reads two independent arrays off one line but decides both from one

@@ -1,28 +1,5 @@
 # #378 — Refresh self-check-daily workflow header comment
 
-## Files to read first
-
-- `.github/workflows/self-check-daily.yml` (whole file, ~35 lines) — the only file
-  edited. Lines 3–12 are the stale header comment to be rewritten; the rest of
-  the file is the load-bearing workflow definition and must stay untouched
-  unless `workflow_dispatch` (see § Verification) reveals a real mismatch.
-- `cmd/pyry/agent_run_selfcheck.go` (lines 16–24, 71–89) — the operator-facing
-  prose the new comment must align with. In particular: the FAIL message
-  identifies the contract as `--allowed-tools "Read"
-  --dangerously-skip-permissions` in stream-json mode (line 75), and
-  references read `#329 (Phase A spike), #336 (predecessor, superseded), #375
-  (this rewrite)` (lines 87–88). The new workflow comment should use the same
-  reference shape.
-- `internal/agentrun/selfcheck/selfcheck.go` (lines 1–13, 22–28, 59–69) —
-  the package-level contract statement and the two sentinels (`ErrBashInvoked`,
-  `ErrTimeout`) that drive the exit-code mapping. Confirms the verified
-  property is "no `tool_use` event with name==\"Bash\" appears in claude's
-  stream-json stdout".
-
-No QMD / lessons / decisions lookup needed — this is a stale-prose fix scoped
-to one comment block. The reference state lives entirely in the three files
-above.
-
 ## Context
 
 `.github/workflows/self-check-daily.yml` runs `pyry agent-run --self-check` on

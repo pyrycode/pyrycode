@@ -5,25 +5,6 @@ status: spec
 size: XS
 ---
 
-# Files to read first
-
-- `internal/e2e/attach_pty_test.go` — full file (~120 lines). The home of `TestHelperProcess` (the "stub-claude" the ticket asks us to extend) and the round-trip test from #125 you mirror. Extract:
-  - L18-49 — `TestHelperProcess` + the `echo` mode body. **You extend this in place** — emit a startup marker, scan for `__EXIT__\n`, exit non-zero on the trigger.
-  - L51-68 — `TestE2E_Attach_RoundTripsBytes`. Shape of the new test mirrors this one: `StartAttach(t, "")`, `Master.Write`, `readUntilContains`.
-  - L70-119 — `tinyNonce` and `readUntilContains`. Both reused verbatim by the new test. `readUntilContains` is the right primitive for "wait for these bytes back" with a deadline; the startup-marker reader follows the same shape with regex matching instead of literal contains.
-- `internal/e2e/attach_pty.go` — full file (~265 lines). The harness from #125 (extended in #127). You add **no new fields, no new methods** — the new test consumes existing surface (`a.Master`, `a.attachDone`, `a.attachCmd`) directly. Worth re-reading:
-  - L28-53 — `AttachHarness` struct shape; the test reaches into `attachDone` / `attachCmd` for the liveness assertion (same package, no exports needed).
-  - L66-142 — `StartAttach`. Confirms the helper inherits `GO_TEST_HELPER_PROCESS=1` + `GO_TEST_HELPER_MODE=echo` via `spawnAttachableDaemon`'s helper-env wiring; the supervised child re-execs the test binary on every spawn → every respawn re-runs `TestHelperProcess`'s `echo` arm afresh, getting a new PID and a fresh emit of the startup marker.
-  - L209-229 — `WaitDetach`. Pattern for "block on `attachDone` with timeout"; the inverse "non-blocking is-attach-alive check" the new test does inline.
-- `internal/supervisor/supervisor.go:148-213` — `Run` loop. Confirms the respawn semantics: after `runOnce` returns (child exited), the loop transitions to `PhaseBackoff`, sleeps `delay`, then re-enters `runOnce` with a fresh `pty.Start` and a new child PID. Bridge mode (L246-268) re-runs the two `io.Copy` goroutines on the new ptmx; `s.cfg.Bridge` persists across iterations.
-- `internal/supervisor/supervisor.go:226-268` — `runOnce` bridge path. Confirms `cmd.Env = append(os.Environ(), s.cfg.helperEnv...)` re-applies on every iteration, so the supervised helper sees `GO_TEST_HELPER_PROCESS=1` again on respawn (no re-wiring needed in the test).
-- `internal/supervisor/backoff.go` — full file (46 lines). `BackoffInitial = 500ms` default; `next` doubles per iteration. The first respawn delay is exactly 500ms — the AC#2 budget of ≥5s is one order of magnitude of headroom.
-- `internal/supervisor/bridge.go:27-82` — `Bridge` shape. Single `io.Pipe` persists across child restarts. Writes from the attach client during the backoff window block on `pipeR` until the next `runOnce` resumes the `io.Copy(ptmx, bridge)` goroutine — no data loss, no special handling needed in the test.
-- `docs/lessons.md` — re-read these three sections; they shape constraints in the design:
-  - § "Daemon env flows through to the supervised child via supervisor.runOnce" — explains why bridge mode is NOT raw-mode and why the helper must `MakeRaw` itself (the existing `echo` arm already does).
-  - § "PTY master fds on darwin do not support SetReadDeadline" — the new startup-marker reader cannot use `SetReadDeadline`; reuse `readUntilContains`'s caller-side timeout pattern.
-  - § "PTY master backpressure stalls slave-side process exit" — irrelevant to this ticket because the supervisor's bridge keeps draining the master throughout (the `io.Copy(bridge, ptmx)` goroutine on the daemon side is the drain). Noted to confirm we are not re-introducing the #127 footgun.
-
 # Context
 
 Today the e2e suite has one test exercising `pyry attach` end-to-end: `TestE2E_Attach_RoundTripsBytes` (#125), which proves a single round-trip of bytes from the user's terminal to claude and back. There is no test asserting the *load-bearing* property of the supervisor's restart loop: when the supervised child exits and the supervisor respawns it, the attach client survives and the user's terminal session keeps working.

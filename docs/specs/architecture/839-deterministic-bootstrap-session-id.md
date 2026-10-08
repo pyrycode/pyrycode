@@ -4,23 +4,6 @@
 
 **Label:** `security-sensitive` → the architect security-review pass is at the end of this spec (verdict: PASS).
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:82-101` — `Config.ResumeLast` doc (the `--continue` rationale this ticket supersedes for the bootstrap); the new field lives beside it.
-- `internal/supervisor/supervisor.go:672-737` — `Run` loop; line 677 is the single arg-build call site (`buildClaudeArgs(s.liveArgs(), firstRun, s.cfg.ResumeLast)`). `liveArgs()` at 630-637.
-- `internal/supervisor/supervisor.go:751-760` — `buildClaudeArgs`, the pure function to extend; its test is `internal/supervisor/args_test.go`.
-- `internal/sessions/pool.go:394-453` — bootstrap `supervisor.Config` wiring (`supCfg`), incl. the existing **late-bind** pattern (`var bootstrapSup`; assigned after `supervisor.New`, closed over by `pidFn`) — mirror it for the id provider.
-- `internal/sessions/pool.go:486-515` — `p := &Pool{...}` construction + the `reconcileBootstrapOnNew` call at **512** to remove.
-- `internal/sessions/pool.go:535-555` — `RotateID`: the load-bearing `/clear` seam. Note the docstring invariant "mutates `session.id` without `lcMu`; no concurrent reader" — § Concurrency preserves it.
-- `internal/sessions/pool.go:930-964` — `Default()` / `DefaultSettings()`: the exact RLock accessor pattern `BootstrapID()` mirrors (read `p.bootstrap` fresh, "correct across a session-id rotation").
-- `internal/sessions/reconcile.go:247-277` — `reconcileBootstrapOnNew` to delete; `mostRecentJSONL` (59-98) and the resolvers (100-245) **stay** (still back `newTranscriptResolver`, #838).
-- `internal/sessions/rotation/watcher.go:144-193` — `handleCreate`; the **165-169** guard (`ref.ID == stem` → early return) is what suppresses a misfire on claude's first `<bootstrapID>.jsonl` CREATE. No `RegisterAllocatedUUID` needed (§ Watcher).
-- `internal/sessions/registry.go:17-28` — on-disk registry JSON schema (`id`, `bootstrap`, `lifecycle_state`, timestamps) for the e2e warm-start seed.
-- `internal/sessions/pool.go:1167-1195` — `buildSession`: the existing per-caller `--session-id` spawn shape (`append(..., "--session-id", string(id))`, `ResumeLast: false`) the bootstrap now matches.
-- `internal/e2e/harness.go:267-360` + `:399` — `StartRotation` / `StartRotationWithRelay`, which **already call** `seedBootstrapRegistry` (defined at `:399`, added by the merged #861) before spawn. Confirms the e2e warm-start seeding is in the tree; the developer verifies it, does **not** build it (§ E2e alignment).
-- `internal/e2e/restart_test.go:17-131` — e2e-local `registryFile`/`registryEntry`/`writeRegistry`/`newRegistryHome` (the `~/.pyry/test/sessions.json` path convention).
-- `internal/e2e/internal/fakeclaude/main.go:273-338` — fakeclaude keys its jsonl off `PYRY_FAKE_CLAUDE_INITIAL_UUID` (env), **not** `--session-id` argv; on the trigger it mints a fresh uuid (the `/clear` sim). Why warm-start seeding aligns.
-
 ## Context
 
 The interactive **bootstrap** claude is spawned with `--continue` (via `supervisor.Config.ResumeLast`, forwarded through the bootstrap `SessionConfig` at `pool.go:405`). `--continue` resumes the **most-recent** session in the working directory. When a second claude writes more recently into the shared `~/.claude/projects/<encoded-cwd>/` dir, a supervisor restart resumes the **wrong** conversation. The same root cause drives `reconcileBootstrapOnNew` (`pool.go:512`): with no deterministic id, on startup the daemon **adopts** a session id from the shared dir by mtime and can adopt a foreign transcript.

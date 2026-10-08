@@ -17,53 +17,6 @@ ship-the-primitive-ahead-of-its-consumer pattern as #571/#607.
 
 ---
 
-## Files to read first
-
-- `internal/relay/v2session.go:625-809` — `handleNoiseInit`. The hello_ack is
-  built at **712-732** (the literal to extend with `Capabilities`); the token
-  check is at **772**; the token-OK tail (`s.device = &device` → `s.state =
-  V2StateOpen`) is at **798-808** (where the `interactive` flag is recorded,
-  *before* line 807). **Extract:** the ack is sealed via `WriteResp` *before* the
-  token check, so the intersection must be computed before line 712 and is echoed
-  on every handshake; the flag is recorded only on the authenticated token-OK
-  branch.
-- `internal/relay/v2session.go:156-223` — `V2Session` struct. **Extract:** the
-  set-once / single-owner-goroutine field discipline (`device`, `peerStatic`) the
-  new `interactive bool` mirrors; re-key (`handleRekeyInit`) preserves these
-  fields by never touching them.
-- `internal/relay/v2session.go:116-123, 391-398, 444-466, 1599-1634` —
-  `snapshotReq`, the `m.snapshot` field, the `Run` select arms, `ActiveConnIDs`,
-  `handleActiveConnIDs`. **Extract:** the snapshot funnel this slice widens from
-  `[]string` to `[]ActiveConn`; `ActiveConnIDs` becomes a thin projection over the
-  richer reply.
-- `internal/protocol/handshake.go:40-65` — `HelloClientPayload.Capabilities`
-  (phone's advertisement, input) and `HelloAckPayload.Capabilities`
-  (`omitempty`, the echo, output) + `CapabilityInteractive = "interactive"`.
-  **Extract:** both fields + the constant already exist (#607); this slice only
-  *populates* the ack field and *reads* the client field. The `omitempty` on the
-  ack field is the AC#5 byte-stability lever (nil/empty → key absent).
-- `internal/relay/v2session_test.go:116-140` — `buildHelloEarlyData(t, token)`
-  builds a **no-capabilities** hello (5 callers — **do not change its
-  signature**; add a capabilities-bearing variant instead). `:707-744` —
-  `driveToOpen` (30 callers — **do not change its signature**) **discards** the
-  hello_ack early-data: `_, initSend, initRecv, err := initiator.ReadResp(...)`.
-  Capability tests must capture that early-data to decode `HelloAckPayload`.
-- `internal/noise/noise.go:194` — `Initiator.ReadResp(respMsg) (earlyData []byte,
-  send, recv *CipherState, err error)`. **Extract:** the hello_ack envelope is
-  `earlyData`; a capability test recovers it here, then unmarshals
-  `Envelope`→`HelloAckPayload` to assert `.Capabilities`.
-- `cmd/pyry/assistant_turn_v2.go:14-22, 139-161` — the `v2Broadcaster` interface
-  (`ActiveConnIDs(ctx) []string` + `Push`) and the #589 coarse fan-out loop.
-  **Extract:** this consumer must stay compiling untouched (AC#5) — the new
-  `ActiveConns` is additive; `ActiveConnIDs` keeps its `[]string` signature.
-- `docs/knowledge/codebase/607.md` — the wire vocabulary this consumes, and the
-  explicit "intersection/enforcement is the consumer's job" deferral this closes.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md`
-  § "Wire-protocol extension (v2-additive, capability-negotiated)" — the
-  authoritative negotiation contract.
-
----
-
 ## Context
 
 ADR 025 § Phase 2 chose v2-additive + capability negotiation. #607 landed the wire

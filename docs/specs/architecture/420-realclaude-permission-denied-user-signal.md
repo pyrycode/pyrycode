@@ -1,16 +1,5 @@
 # Spec: e2e/realclaude permission-denied user-facing signal (#420)
 
-## Files to read first
-
-- `internal/e2e/realclaude/allowed_tools_enforcement_test.go:1-94` — the test being extended. Mirror its build-tag header, four-phase shape (worktree → run → run-level assert → JSONL walk), failure-message style, and the `bashInvokedInRaw` inline-detector pattern. The new assertion lives AFTER the existing gate-held loop, gated on the existing loop completing without fatal.
-- `internal/e2e/realclaude/fixtures.go:80-188` — `RunOpts` shape (no changes needed), `RunResult.Stdout` (the stream-json stdout the new structured-signal detector parses), `RunPyryAgentRun` (no changes). The new test uses only the existing `Stdout` field; no new helpers required.
-- `internal/e2e/realclaude/fixtures.go:276-296` — `parseInitSessionID`. Pattern to copy for scanning stdout line-by-line into a narrow JSON-decoded struct with the "non-JSON line → skip silently" policy. The new structured-signal detector follows the same idiom.
-- `internal/agentrun/jsonl/reader.go:45-83` — `Event` struct. The two fields the new text-channel detector touches: `Kind` (filter `"assistant"`) and `Raw` (decode `message.content[i].type=="text"` for `.text` string).
-- `internal/e2e/realclaude/permission_protocol_regression_test.go:96-161` — pattern for narrow-struct unmarshal walking an events list (the `system/init` / `result/success` walk). The structured-signal detector uses the same minimal-struct-per-pass technique.
-- `internal/e2e/realclaude/testdata/permission_protocol_v2.1.143_default.json:304-372` — concrete shape of a `result` envelope: top-level `type:"result"`, `subtype:"success"`, `is_error:false`, `permission_denials:[]`. Confirms where the structured-signal fields live in stream-json stdout.
-- `internal/agentrun/selfcheck/selfcheck.go:217-219` — security comment about not logging raw assistant bytes. Same discipline applies to the new failure message: cite JSONL path, never echo `Raw` bytes or text-block content (even though the test prompt is synthetic).
-- `internal/agentrun/streamjson/testdata/captured_run.jsonl` — additional confirmation that `permission_denials` on a `result` line is the canonical channel and is present even when empty.
-
 ## Context
 
 `internal/e2e/realclaude/allowed_tools_enforcement_test.go:56-70` asserts the gate held — no Bash `tool_use` in JSONL — but says nothing about whether the user perceived the denial. A regression that silently no-ops on a denied call (no assistant turn, no structured event, no diagnostic) would pass the existing test while leaving the operator staring at a hung-looking session.

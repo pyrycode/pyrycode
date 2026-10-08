@@ -4,21 +4,6 @@
 **Label:** not `security-sensitive` (re-affirmed at refinement — coalescing sits *upstream* of the capability gate / per-conn fan-out, makes no routing or trust decision, accepts no untrusted input). No security-review pass required.
 **Depends on:** #633 (live producer wiring, merged) — the structured stream this layer coalesces is live on `main`.
 
-## Files to read first
-
-Turn-1 reading list. Read these before writing code; the design below references them by the same paths.
-
-- `cmd/pyry/interactive_turn_v2.go` (whole file, ~266 lines) — **the primary edit target.** The passive `interactiveTurnEmitterV2`: the `Handle` type-switch, the `TextChunk` arm (`transitionTo` → `emitMapped` → `seq++`), the non-text arms, `emitMapped`/`emit`, and the "all lifecycle fields are plain — no atomic, no mutex — `Handle` runs only on the producer's single Run goroutine" contract (struct doc, lines 27-64). Coalescing is a buffer + flush layer added here.
-- `internal/turnbridge/producer.go:81-118` — `Producer.Run` outer loop + `drain` select (`ctx.Done` / `<-ch`). The ~250 ms timer becomes a **third arm** of this select; `Config`/`Producer` gain the seam (lines 38-73). This is the only file in `internal/` you touch.
-- `internal/turnbridge/producer_test.go:48-100` — `&Producer{onEvent:…, log:…}` direct-construction idiom + `collector`. Your producer-level timer test mirrors this; existing tests must still compile (additive zero-value fields).
-- `internal/turnbridge/outbound.go:62-104` — `MapEvent`: `turnevent.TextChunk` → `protocol.TypeAssistantDelta` + `AssistantDeltaPayload{ConversationID, TurnID, Seq, Text}`. The flush reconstructs a synthetic `TextChunk{MessageID, Text: concatenated}` and reuses `emitMapped`; **no new payload-construction path.**
-- `internal/turnevent/event.go:30-34` — `TextChunk{MessageID string; Text string}`. `MessageID` is the coalescing key (#606).
-- `cmd/pyry/interactive_turn_stream_v2.go:45-82` — #633 wiring (`startInteractiveTurnStreamV2`). The `OnEvent: func(ev){ emitter.Handle(ctx, ev) }` closure captures the relay lifecycle ctx; you add the symmetric `FlushSignal`/`OnFlush` wiring here. This is where the ~250 ms window constant is plumbed.
-- `cmd/pyry/interactive_turn_v2_test.go` (whole file) — `fakeInteractiveBcast` (records `recordedPush`, per-conn `Push` error, scripted `ActiveConns`), `stubCursor`/`.set(id)`, `testConvID`, `discardLogger`, and the helpers `assistantDeltas(t, pushes)`, `pushTypes`, `pushesFor`, `turnStateValues`. **The existing 10 scenarios must be re-verified against coalescing (see § Testing) — this is real work, not a rubber stamp.**
-- `docs/knowledge/codebase/632.md` — the emitter's design, the single-Run-goroutine assumption, the no-app-output-log contract, the envelope-ID policy. Inherited verbatim.
-- `docs/protocol-mobile.md:478-485` — `assistant_delta` wire fields. **Already documents `text` as "coalesced (not per token)"** — the wire contract is unchanged; this ticket makes the daemon honor it. **Do not edit this doc.**
-- ADR 025 § Phase 2 (`docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md`) — `"AssistantText → coalesced assistant_delta (per JSONL message or ~250 ms, not per token)"`.
-
 ## Context
 
 The #632 emitter maps **every** `turnevent.TextChunk` to its own `assistant_delta` envelope (`Handle`'s `TextChunk` arm → `emitMapped` → `seq++`). The #615 producer (live-wired by #633) yields one `TextChunk` per JSONL `assistant` line, and a single streamed assistant message can surface as several same-`MessageID` lines — so the phone receives a burst of tiny deltas for one logical message. ADR 025 § Phase 2 specifies the fix: coalesce deltas per JSONL message **or** ~250 ms, whichever comes first.

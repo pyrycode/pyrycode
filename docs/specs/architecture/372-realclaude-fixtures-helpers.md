@@ -3,16 +3,6 @@
 Ticket: [#372](https://github.com/pyrycode/pyrycode/issues/372)
 Size: S (one tagged source file ~55 LoC + one tagged test file)
 
-## Files to read first
-
-- `internal/e2e/realclaude/smoke_test.go:1-23` — scaffold that landed in #361. Mirror its `//go:build e2e_realclaude` header, package declaration (`package realclaude`, not `_test`), and overall file layout.
-- `internal/agentrun/trust.go:23-52` — `projectDirReplacer`, `ResolveWorkdir`, `EncodeProjectDir`. `EncodeProjectDir` is the function `ReadJSONL` calls; both `/` AND `.` map to `-` (the encoding rule documented in `docs/lessons.md` § "Claude session storage on disk").
-- `internal/agentrun/jsonl/reader.go:45-103` — `Event`, `UsageBlock`, `Config`, `Reader`, `NewReader`. `JSONLEntry` is a type alias for `Event`; `ReadJSONL` constructs a `Reader` with a zero-value `Config` and loops `Next()` until `io.EOF`.
-- `internal/agentrun/jsonl/reader.go:188-260` — `Next` contract: returns `Event, error`; surfaces `io.EOF` as the end sentinel; non-EOF errors are wrapped as `jsonl: read at offset %d: %w`. Empty file → first `Next()` returns `io.EOF`. Malformed lines are skipped internally (logged at Warn), so the helper never has to filter them.
-- `internal/agentrun/jsonl/reader_test.go` (first 80 lines) — table fixture style: assistant entries are written as raw JSON objects with `type`, `message.stop_reason`, `message.content[].text`. Reuse this exact shape for the `fixtures_test.go` happy-path lines.
-- `docs/lessons.md` § "Claude session storage on disk" — encoded-cwd rule (`/` AND `.` → `-`). Confirms the helper must defer to `agentrun.EncodeProjectDir` rather than re-implement.
-- `Makefile` — `e2e-realclaude` target landed in #361. No change here; build-tag gating handles `make test` exclusion.
-
 ## Context
 
 The `internal/e2e/realclaude/` suite (scaffold from #361) needs two file-system primitives shared by every downstream test (#364–#368): a HOME-isolated workdir and a typed reader for the session JSONL the run produces. Both are pure file-system helpers — no `exec`, no subprocess wiring. The subprocess invocation helper (`RunPyryAgentRun`) is the sibling #373; it owns the build-cache + exec + trailer-parse machinery and is independent of this work — downstream tests will compose all three but no compile-time dep links the two specs.

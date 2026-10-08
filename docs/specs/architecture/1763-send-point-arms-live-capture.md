@@ -8,33 +8,6 @@ generates under `internal/e2e/realclaude/testdata/`. **No production file change
 
 ---
 
-## Files to read first
-
-Symbols, not lines. Resolve each with `codegraph_search` / `codegraph_node`, then Read what you need.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/initialize_control_probe_test.go` | `runInitControlChild` | The driver being parameterised. Its doc carries three rules this slice must obey verbatim: a **fresh redactor per arm** (unlocked counters, a shared one races and misattributes), a **shared scanner is safe** (append-only during construction, read-only after), and **never format the scanner** (it holds two live credentials). Read all three before touching the signature. |
-| same file | `initControlChildBudget`, `initControlTurnBudget`, `initControlControlBudget` | The three constants AC 3's assertion derives both sides from. One of them changes value; the other two do not. |
-| same file | `initControlPrompt`, `initControlMaxTurns`, `initControlRequestID`, `initControlModel`, `initControlWorkdirName` | The prompt constant becomes a pair; the other four are unchanged and their docs say why. |
-| same file | `TestRealClaude_InitializeControl_Capture` | **Deleted.** Read its `len(rec.ControlResponses) == 0` fatal — AC 2 deliberately overrides it. |
-| same file | `TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm` | **Deleted** with its subject. |
-| same file | `TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath`, `TestInitControlSummarize_ReadsAllThreePlacements` | The two offline tests that stay, and the shape (`t.Parallel`, no spawn, no disk) the new offline budget test copies. |
-| `internal/e2e/realclaude/initialize_control_names_test.go` | `initControlArm`, `initControlArms` | The table gaining two columns. Its doc names itself as the growth point for per-arm drive-sequence behaviour and bans a second table keyed by these ids. |
-| same file | `initControlProbedArm` | **Deleted.** Its own doc and the `probed` field's doc both say they should not survive this work. |
-| same file | `initControlArmFixtureName` | Mints the per-arm path. AC 5's write-set assertion compares against exactly this namer. Unchanged. |
-| same file | `TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained` | Ranges `initControlArms` for its `arms` slice and its distinctness subtest. Already green; must stay green — the field additions must not disturb it. |
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `runSetModeChild` | **The model for this slice's driver.** The two-turn sequence, the conditional control write on a control arm, the `baseline := rec.resultCount()` idiom for turn 2's wait, and why turn 2 is driven unconditionally on control arms. |
-| same file | `TestRealClaude_SetPermissionMode_InBandProbe` | The sequential per-arm `t.Run` loop and the `missing` guard that refuses to compute a cross-arm claim from a partial run. |
-| same file | `setModePromptOne`, `setModePromptTwo` | Why the two prompts must differ from each other. |
-| same file | `setModeWaitFor`, `setModeTurnLine`, `setModeRecorder`, `setModeResponseIDMatches`, `setModeScanMax` | Reused verbatim; none of them changes. |
-| `internal/e2e/realclaude/initialize_control_window_test.go` | `initControlReadWindow` | The window read. Unchanged. Its precondition paragraph (`0 <= anchor <= len(lines)`, both edges legitimate) is what makes anchor 0 correct for `before_first_turn`. |
-| `internal/e2e/realclaude/initialize_control_record_test.go` | `initControlFixtureRecord` | **Read-only in this slice.** Its `SendPointIndex` paragraph and its `control_no_request` paragraph state the contract AC 4 asks you to implement. Its "DO NOT ADD A PRESENCE FLAG BESIDE THIS ANCHOR" instruction applies here. |
-| `internal/e2e/realclaude/initialize_control_writer_test.go` | `writeInitControlFixture`, `scanInitControlFixture` | Unchanged. Read the deny-scan-before-the-first-filesystem-call ordering and the fact that the writer returns the path it minted — AC 5 consumes that return value. |
-| `docs/knowledge/features/e2e-realclaude.md` | § "What's there today" → the `initialize_control_*_test.go` entries | The family's history in one place: why the arm dimension was collapsed and then restored, and what each committed artifact holds. |
-
----
-
 ## Context
 
 The daemon will ask its supervised child for claude's model list by writing a `control_request` with

@@ -2,20 +2,6 @@
 
 One new test file. No production change. Size **S**.
 
-## Files to read first
-
-| Path | Symbols | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/harness_daemon_test.go` | `spawnBootstrapDaemon`, `driveHandshakeInteractive`, `seedBootstrapRegistry`, `seedBoundConversation`, `sealSendMessage`, `drainForAssistantReply`, `runPyry`, `decodePairPayload`, `readPersistedServerID`, `waitBinaryHello`, `relayTestLogger`, `mustJSON` | The whole harness. Every helper this test needs is here or in the two files below. **Do not roll a new one.** |
-| `internal/e2e/realclaude/interactive_stream_liveness_test.go` | `TestInteractiveStreamLiveness`, `drainForCompletedTurn`, `writeStreamInteractiveConfig` | The one-daemon / one-seeded-bound-conversation spine to copy. `drainForCompletedTurn` is the turn-1 drain. `writeStreamInteractiveConfig` is the one thing **not** to copy — see § Design. |
-| `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go` | `sealEnvelope`, `drainForReply`, `perTurnReplyBudget` | The generic control-verb seal + correlated-reply drain, and the real-turn budget constant. |
-| `internal/e2e/realclaude/interactive_conversation_lifecycle_test.go` | `metaVerbReplyBudget`, `readConversationIDsOnDisk`, `assertConversationUpdated` | The quiescent-verb budget, and the on-disk read-back shape the new cwd reader mirrors. Its header's *ordering rationale* paragraph is the model for this file's. |
-| `internal/relay/handlers/change_workspace.go` | `ChangeWorkspace` | What the handler actually does: confine → store the **resolved** realpath → eager `Save` → reply `conversation_updated`. Note it never touches `CurrentSessionID`. |
-| `cmd/pyry/relay.go` | `resolveWorkspaceDir` | The injected resolver: `expandTilde` then `confineWorkdirToHome`. **Strict, non-creating** — the target directory must already exist. |
-| `cmd/pyry/main.go` | `expandTilde`, `confineWorkdirToHome`, `selectInteractiveRunner` | `expandTilde` is why the request may be sent as `~/…`. `confineWorkdirToHome` is `EvalSymlinks` on both sides — the source of the realpath the reply must carry. `selectInteractiveRunner` is why no config write is needed. |
-| `internal/e2e/relay_v2_change_workspace_test.go` | `TestRelayV2_ChangeWorkspace` and siblings | The fake tier that already owns the shape and the reject paths. Read it to know what **not** to re-assert here. |
-| `internal/e2e/realclaude/fixtures.go` | `WithWorktreeAuthenticated`, `WithWorktree` | The credential skip and the `t.Setenv("HOME", …)` that makes `$HOME` the tempdir — which is why `t.Parallel` is banned. |
-
 ## Context
 
 Per the 2026-07-08 operator policy, every operator-facing happy-path flow needs a

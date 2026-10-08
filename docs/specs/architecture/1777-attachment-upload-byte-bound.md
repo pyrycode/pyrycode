@@ -1,23 +1,5 @@
 # #1777 — bound the bytes one attachment upload may accumulate
 
-## Files to read first
-
-| Read | Symbol | What to extract |
-|---|---|---|
-| `internal/attachments/admission.go` | `CheckDeclaration` | The shape the new sibling mirrors: two scalars in, one wrapped sentinel out, pure and stateless. Also its `WHAT IS NOT CHECKED IS MAGNITUDE` block — that paragraph is the hole this ticket fills, and it is one of the sweep sites. |
-| `internal/attachments/admission.go` | `ErrInvalidDeclaration` | The neighbour the new sentinel must stay distinguishable from, and the doc line "One sentinel covers every refusal below" that this slice makes false unless reworded. |
-| `internal/attachments/accumulator.go` | `Add` | Its documented fixed check order, and the no-copy PRECONDITION whose stated justification names this ticket's bound. |
-| `internal/attachments/accumulator.go` | `reject` | The existing latch: records the refusal, drops the map. AC 2's "holds no bytes afterwards, and stays refused" is already built — **do not modify this function.** |
-| `internal/attachments/accumulator.go` | `Assemble` | Why it sizes from the sum of arrived chunk lengths rather than any counter, and why the two integrity checks read the assembled slice and not a proxy. The new running total must not be substituted into either place. |
-| `internal/attachments/accumulator.go` | `Accumulator` | Field-doc density and house tone; where the new running-total field goes. |
-| `internal/attachments/accumulator_test.go` | `testFixture`, `testChunk`, `newTestAccumulator`, `testFixtureDigest` | The fixture conventions the new bound-sized fixtures follow — in particular that a declared digest is a **written-out literal** with its reproducing `shasum` command in the comment, never computed by a helper. `testFixture`'s own comment is a sweep site. |
-| `internal/attachments/accumulator_test.go` | `TestAccumulator_IntegrityFaults_RejectAndDiscard` | The reject-row body: how "the transfer is discarded" is asserted (map nil, later `Add` and `Assemble` return the identical error value). The new crossing test reuses this shape. |
-| `internal/attachments/admission_test.go` | `TestCheckDeclaration` | The table idiom, and the `math.MaxInt64` / 204963823041218 row whose comment is a sweep site. **No existing row's expectation changes in this ticket** — see § The fork. |
-| `internal/protocol/attachments.go` | `MaxAttachmentChunkBytes` | 45000 raw bytes per chunk, the unit the bound converts into a chunk count. Its `NEVER ALLOCATE FROM A CLAIM` neighbour ends "and both must be within the receiver's own limits" — the clause this slice satisfies and **must not edit**. |
-| `internal/relay/v2session_modal.go` | `pushQueueByteCeiling` | The repo's shape precedent for a retained-bytes ceiling: a `Derivation.` paragraph doing explicit arithmetic, plus a paragraph on what the ceiling legitimately refuses. Copy the doc discipline, not the number. |
-| `docs/protocol-mobile.md` § Error codes | — | The published rows for `attachment.too_large` (permanent, "declared `size` on the first chunk **or** accumulated bytes later") and `attachment.too_many_uploads` (transient). Both rungs are already contracted; this slice builds them. |
-| `docs/knowledge/features/attachments-package.md` § "Mutation-testing lessons" | — | Two traps that bite this ticket: a shared-constant mutant reddens every row whose arithmetic reads the constant (not just rows placed at it), and a presence/threshold assertion needs a fixture at the value that is indistinguishable from the wrong answer. |
-
 ## Context
 
 `docs/protocol-mobile.md` § Error codes already publishes `attachment.too_large` as detected "either from the declared `size` on the first chunk **or from accumulated bytes later**", permanent for that file. Both rungs are contracted; neither exists. `CheckDeclaration` (#1776) deliberately admits an arithmetically conforming but enormous declaration, and `Accumulator` stores whatever arrives, so today one client can make the daemon hold an arbitrarily large file in memory.

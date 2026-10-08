@@ -9,51 +9,6 @@
 Ticket: #657 · Size: **S** · Blocked-by #659 (CLOSED, merged via PR #660) ·
 Wire type from #656 · `security-sensitive`.
 
-## Files to read first
-
-- `internal/sessions/transition.go` (whole, 73 lines) — **the contract you consume.**
-  `TransitionObserver func(SessionTransition)`, the `SessionTransition` fields,
-  `ReasonClear`/`ReasonEviction`, and the **MUST-NOT-BLOCK** observer rule
-  ("hand the signal off to a buffered channel and return"). `SetTransitionObserver`
-  must be called **before** `Pool.Run`; the field is read-only after.
-- `internal/sessions/session.go:285-296` — eviction-side `notifyTransition`:
-  `PreviousID = s.id` (evicted), `NewID` left zero (`""`), `Reason = ReasonEviction`,
-  `OccurredAt` stamped. `reason == ""` (spontaneous exit) signals nothing — so the
-  only reasons reaching you are `ReasonClear` and `ReasonEviction`.
-- `cmd/pyry/assistant_turn_v2.go` (whole, 217 lines) — **the structural template.**
-  Your emitter is a near-verbatim mirror: buffered `in` channel, non-blocking
-  `Enqueue` (drop-on-full), `Run(ctx)` drain loop, `broadcast` (marshal → fresh
-  `ActiveConns` snapshot → capability filter → `Push` per conn), and
-  `startAssistantTurnBridgeV2` wiring + cleanup. Copy the shape; change the input
-  type, the payload, and **invert the capability filter** (interactive-only).
-- `cmd/pyry/interactive_turn_v2.go:31-34, 302-362` — `interactiveBroadcaster`
-  interface (`ActiveConns` + `Push`) — **reuse it, don't declare a third copy** —
-  and `emit`'s capability gate (`if !c.Interactive { continue }`), the exact
-  filter you want. Note `EventID`/ring is **out of scope** here (no replay AC).
-- `internal/protocol/messaging.go:36-58` — `SessionTransitionPayload` (the struct
-  you build). `WorkspaceCwd *string`, **no omitempty** → renders literal JSON
-  `null` for non-`workspace_change`. `Reason` is a plain string over the closed
-  set `{clear, idle_evict, workspace_change}` (no exported reason constants — use
-  literals matching this doc).
-- `internal/protocol/testdata/session_transition.json` — golden shape of the wire
-  envelope (`reason:"idle_evict"`, `workspace_cwd:null`). Your test's expected
-  payload mirrors this.
-- `cmd/pyry/relay.go:268-359` — `startRelayV2`: where `mgr` is built (287), where
-  `startInteractiveTurnStreamV2` is wired (340), and the `drain` cleanup ordering
-  (346-358). You add a wiring call + cleanup here.
-- `cmd/pyry/relay.go:88-152` — `startRelay`: the v1/v2 dispatcher you thread the
-  new observer-sink param through (one call site → `startRelayV2` at 142).
-- `cmd/pyry/main.go:460-493` — `pool` construction (460), the `startRelay(...)`
-  call (489), and `pool.Run(ctx)` (514, further down). Confirms the install-before-Run
-  ordering holds: `startRelay` runs at 489, `pool.Run` at 514.
-- `internal/relay/v2session.go:1831-1860` (`Push` — non-blocking enqueue+wake) and
-  `:1986-2025` (`ActiveConns` — **blocks** on a Run-goroutine round-trip). Read
-  these to understand *why* the observer cannot call `ActiveConns` directly (it
-  blocks → violates #659's contract) and why the buffered hand-off is mandatory.
-- `cmd/pyry/interactive_turn_v2_test.go:33-127` and `cmd/pyry/assistant_turn_test.go:22-45`
-  — reusable test doubles: `fakeInteractiveBcast` (snapshots + recorded pushes),
-  `recordedPush`, `pushTypes`, `pushesFor`, `discardLogger`. Reuse; don't re-author.
-
 ## Context
 
 The `session_transition` wire type (constant `protocol.TypeSessionTransition` +

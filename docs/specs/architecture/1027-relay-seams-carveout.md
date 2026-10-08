@@ -8,23 +8,6 @@ verbatim with the struct; it introduces no new surface.
 This is the **final** #964 carve-out. Snapshot/replay (#1026, PR #1048) already merged; `main`'s
 `v2session.go` is the post-#1026 state (1558 lines). Branch from `main`.
 
-## Files to read first
-
-- `internal/relay/v2session.go:287-652` — **the exact contiguous block to move.** Starts at the
-  `ScreenSnapshotter` doc comment (287), ends at the closing `}` of `V2SessionConfig` (652). Every
-  in-scope decl lives inside this single span; nothing else does.
-- `internal/relay/v2session.go:1-21` — import block. Line 9 (`"log/slog"`) is the **one import that
-  must be removed** after the cut (see § The crux).
-- `internal/relay/v2session.go:80,90` — `ErrSessionNotOpen` / `ErrTransportDown` use `errors.New`;
-  proof `errors` stays used in the residual (do **not** remove it).
-- `internal/relay/v2session_replay.go:1-22` — the most recent sibling carve-out (#1026). Mirror its
-  shape exactly: `package relay` → grouped import block → a leading file-level comment naming what was
-  carved out and citing this ticket → the moved decls.
-- `internal/relay/v2session_settings.go:1-10` — a sibling whose import group already includes
-  `errors` + `protocol`; closest template for the new file's import set.
-- `CODING-STYLE.md` — "define interfaces where they are consumed" (the convention the moved seam
-  doc comments already cite; no change, just context).
-
 ## Context
 
 `v2session.go` was flagged in the 2026-07-15 full-repo review as the largest readability liability.

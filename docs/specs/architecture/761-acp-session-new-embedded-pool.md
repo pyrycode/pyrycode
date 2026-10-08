@@ -2,26 +2,6 @@
 
 Epic #600 — `pyry acp` as a thin adapter over the shared remote-head core.
 
-## Files to read first
-
-Turn-1 data load. Read these before writing any code.
-
-- `cmd/pyry/acp.go` (whole, 96 lines) — the composition root you extend. `runACP` (the subcommand entry, registers no handlers today) and `serveACP` (the io.Pipe stdin bridge + ctx-cancel/EOF shutdown machinery). You add the pool standup to `runACP` and a handler-registration seam to `serveACP`; **do not** disturb the io.Pipe/closer/bridge shutdown logic.
-- `internal/acp/acp.go:53-59` — `Handler` type (the contract your `session/new` handler satisfies: `func(ctx, json.RawMessage) (result any, err error)`; a returned `*acp.Error` controls the wire code, any other error → `CodeInternalError` with the detail logged not leaked).
-- `internal/acp/acp.go:118-129` — `Register(method, h)` (must be called **before** `Serve`; panics on duplicate or post-Serve).
-- `internal/acp/acp.go:221-244` — `dispatchRequest` (what happens to your handler's return value; `writeSuccess` marshals `result any` into the JSON-RPC `result`).
-- `internal/sessions/pool.go:299-441` — `New` + the bootstrap-construction block. This is where `BootstrapEvicted` branches (the `lcState`/`activeCh`/`evictedCh` init at :405-411) and where `readyCh` is created.
-- `internal/sessions/pool.go:786-847` — `Run` (where `runGroup` is set at :802-804 and where you close `readyCh` after `supervise(bootstrap)`).
-- `internal/sessions/pool.go:859-950` — `supervise` (`ErrPoolNotRunning` seam) + `Create`/`CreateIn` (the mint→persist→supervise→Activate sequence; **read Create's docstring** — an `ErrPoolNotRunning` return leaves a non-empty id for an unrecoverable stuck session; that is why the readiness gate is mandatory).
-- `internal/sessions/pool.go:966-1026` — `buildSession` (the `if tpl.Bridge != nil { bridge = supervisor.NewBridge }` line — this is why setting `Bootstrap.Bridge` puts Created sessions in service mode; and the `--session-id <uuid>` args that make the spawn interactive with no `-p`).
-- `internal/sessions/session.go:270-404` — `Run` / `runActive` / `runEvicted`. Confirm an **evicted** bootstrap parks in `runEvicted` and spawns no supervisor (no claude).
-- `internal/supervisor/supervisor.go:656-796` — `runOnce`. **Load-bearing:** the foreground path (`Bridge == nil`) writes `sess.MirrorOutput()` chunks to `os.Stdout` at **:771-775**; the service path (`Bridge != nil`) writes them to the Bridge at :701-706. ACP owns stdout for JSON-RPC — service mode is mandatory.
-- `cmd/pyry/main.go:631-733` — `runSupervisor`, the standup you trim (config/path/trust → `sessions.New` → `pool.Run`). Lift only the trust + `sessions.New` + `pool.Run` spine; drop relay/control/conversations/queue.
-- `cmd/pyry/main.go:438-459` — `confineWorkdirToHome` (`""` → `filepath.Abs` → process cwd, confined to `$HOME`; the workdir realpath you thread into `Bootstrap.WorkDir`).
-- `cmd/pyry/agent_run.go:28` — `trustMark` package var (`= trust.MarkWorkdirTrusted`, test-overridable). Same-package (`main`), so `runACP` calls it directly.
-- `internal/sessions/pool_test.go:304` (`helperPoolReconciling`) and `cmd/pyry/session_router_test.go:18` (`newRouterTestPool`) — pool test-construction patterns (`sessions.New` with `ClaudeBin: "/bin/sleep"` / `os.Args[0]`).
-- `CODING-STYLE.md` § Testing — table-driven, stdlib `testing` only, `TestHelperProcess` re-exec pattern (used for the fake claude that records argv).
-
 ## Context
 
 `pyry acp` (#756) is today a bare JSON-RPC stdio transport: it registers no handlers and drives no claude. #757 added the outbound `Call` primitive. This ticket delivers the **first ACP method that does real work** (`session/new`) plus the **composition root** it needs: an embedded `internal/sessions` pool, trimmed to what ACP needs (no relay, control socket, conversations registry, or message queue).

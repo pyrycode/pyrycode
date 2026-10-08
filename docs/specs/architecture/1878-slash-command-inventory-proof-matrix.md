@@ -1,32 +1,5 @@
 # 1878 — Pin the emitted slash-command inventory: cap boundary, committed capture, and the unchanged record
 
-## Files to read first
-
-This is the turn-1 data load. Every entry names a **symbol**, never a line — resolve
-each with `codegraph_search` / `codegraph_node`, and read the symbol's whole doc block.
-Four of the five test symbols below are *extended* rather than written fresh, and each
-one's doc comment already states which claim it owns; over-writing a claim a
-neighbouring test already pins is the failure mode this list exists to prevent.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/parser.go` | `emitModelList` | The four-rung classification, and specifically **where** the `SlashCommandList` block sits: below `logControlResponse`, below the `ModelList` emit, below rung 3's return. Every suppression row in this ticket is a fixture that would disagree if that block moved. Nothing in this function changes. |
-| `internal/streamsup/parser.go` | `truncateField` | The exact behaviour every AC 1 row asserts: `<=` boundary, byte cut, and `strings.ToValidUTF8(…, "")` — a **deletion**, not a replacement. This is why a mid-rune cut comes back short. |
-| `internal/streamsup/parser.go` | `maxSlashCommandName` | The production constant. Read it to understand the bound; **never build a fixture from it** — see § Reading the cap. |
-| `internal/streamsup/parser.go` | `logControlResponse` | The six attributes, their types, and the closed reason set. AC 4's `wantAttrs` maps are unchanged; read this to confirm that rather than to change it. |
-| `internal/turnevent/event.go` | `SlashCommand` | The two fields, and `TruncatedFields`' nil-not-empty convention — the distinction every AC 1 row asserts with `reflect.DeepEqual` rather than a length check. |
-| `internal/turnevent/event.go` | `SlashCommandList` | Its `Commands` doc, which states that suppression is the producer's decision and that this field never carries zero entries. AC 3 is that statement's proof. |
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandFieldsAreCapped` | **AC 1's home.** Read its doc block whole: it names exactly which rows it already carries and which ones it left to this ticket. |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListFieldsAreCapped` | The table idiom for a cap test in this package, and its `twoByteRune` mid-rune row — the shape AC 1's mid-rune rows copy one array over. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseCountsTheCapturedCommands` | **AC 2's home.** Its capture-shape guards run first and name the arm; its `wantAttrs` map stays untouched. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseDecodesTheCapturedModels` | Read it, change **nothing**. Its per-entry byte-for-byte model comparison is AC 2's "model list unchanged" half — do not re-copy it and do not extend it. |
-| `internal/streamsup/parser_test.go` | `TestParser_ModelListIsLoggedContentFree` | **AC 4's home.** Its five parallel structures (`lines`, `wantReasons`, `wantCounts`, `wantCommandCounts`, `leaks`) all grow together; getting them out of step is the realistic way this edit goes wrong. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseAckReportsTheCommandCount` | Read it, change **nothing**. Its `commands and no models` row is AC 3's ack pin — see § AC 3 for why the new table does not restate it. |
-| `internal/streamsup/parser_test.go` | `commandEntryFixture`, `initializeLineFixture`, `modelEntryFixture`, `collectEvents` | The four builders every new row composes. `commandEntryFixture` takes an `any`, so the JSON-`null` name row needs no new helper. **No new fixture builder is needed anywhere in this ticket.** |
-| `internal/streamsup/parser_test.go` | `slashCommandNameCapFixture` and the const block it lives in | The hand-written cap literal and the comment stating why it must stay one. |
-| `internal/streamsup/parser_test.go` | `capturedCommandEntries`, `capturedCommandString`, `commandNameIsPlainSlug`, `capturedInitializeLine` | The capture readers AC 2 and AC 4 use. `commandNameIsPlainSlug` is #1853's anonymous charset guard — AC 2 adds a named pin beside it rather than replacing it. |
-| `docs/knowledge/features/streamsup-package.md` | the **"Declaring `commands` alongside `models` (#1853)"** and **"Producing `turnevent.SlashCommandList` (#1877)"** blocks, both inside § `Turn I/O — envelope write + stdout parser (#1088)` | Two lessons this ticket must apply rather than rediscover: the *gate-placement* testing lesson (a suppression fixture must make the two placements disagree) and the corrected *sink-reachability* enumeration. Read-only: the documentation phase owns this file. |
-
 ## Context
 
 #1877 merged (PR #1879). `emitModelList` is now a producer: on rung 4 — `subtype ==

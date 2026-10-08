@@ -7,23 +7,6 @@
 
 ---
 
-## Files to read first
-
-Generated from `codegraph_context` + the reads done during this spec; off-topic hits pruned. Every addition mirrors an existing precedent in these exact files — copy the precedent, don't invent.
-
-- `internal/devices/device.go:24-43` — the `Device` struct + the `Platform`/`PushToken` `omitempty` precedent (the exact shape the new `AllowRemotePermissions bool` field follows) and the **package SECURITY contract** (lines 4-10): never log/serialize the plain token. The new code touches no token — confirm compliance.
-- `internal/devices/auth.go` (whole file, 47 lines) — the existing device-authorization home (`Registry.Validate`, the WS-perimeter auth predicate) and its **SECURITY doc voice** (never log plain/hash/name; the returned bool is the only signal). The new eligibility predicate + fail-closed decision land here, beside `Validate`, in this voice.
-- `internal/devices/device_test.go:102-173` — three test templates to mirror: `TestDevice_PopulatedRoundTrip` (true-case JSON round-trip), `TestDevice_LegacyOmitsPushFields` (encoded form omits an empty `omitempty` key), `TestDevice_DecodeLegacyDiskShape` (a pre-field on-disk record decodes the new field to its zero value). The last is the **exact AC4 "pre-field → OFF" template**.
-- `internal/devices/registry.go:37-107` — `Load` / `Save` (atomic temp+rename, 0600/0700). The field rides this unchanged; the AC4 registry round-trip test drives `Save`→`Load`.
-- `internal/devices/registry_test.go:160-240` — the registry round-trip + table-driven `wantOK` patterns to mirror for the AC4 Save→Load persistence test.
-- `cmd/pyry/pair.go:73-100` — `pairArgs` struct + `parsePairArgs` flagset (where the `--allow-remote-permissions` bool flag registers). `cmd/pyry/pair.go:158-225` — `runPairDefault` + the `devices.Device{...}` literal (~205) to thread the bit into; the usage string (~163) to extend.
-- `cmd/pyry/pair_test.go:22-64` — `TestParsePairArgs` table (add the flag cases here). `cmd/pyry/pair_test.go:615-660` — `TestRunPairDefault_PopulatesStaticPubkey` + `decodeRenderedPayload` (the HOME=tmp `runPairDefault` integration harness the AC1/AC4 end-to-end test reuses; load the resulting `devices.json` and assert the bit).
-- `internal/relay/v2session.go:245-262` — **read-only context.** The per-session `device *devices.Device` snapshot and the `interactive bool` field whose doc states "the zero value (false) is the fail-closed default for every other path." This is the design precedent for the gate (zero value = safe default) **and** shows how #703 reaches the bit. The bit is also surfaced per-conn via `dispatch.Conn.Auth() *devices.Device` (`internal/dispatch/dispatch.go:82-93`). **You do not edit either file** — #703 consumes the primitive there.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md` § "Security model — remote permission granting" (lines 134-145) — the canonical model this ticket implements: per-device opt-in (default OFF), deny-on-timeout, only *answering* is gated. Decision 3 (line 55) is the load-bearing accepted decision.
-- `docs/specs/architecture/701-modal-wire-types.md` § "Producer obligations" (line 248) — confirms #701 explicitly defers the per-device answer gate (item d) to #702; the wire carries no capability field, so the gate is a **stored authorization**, not a wire bit.
-
----
-
 ## Context
 
 Phase 3 of epic #597 (ADR 025). Answering a permission / trust / destructive modal from a phone is the highest-trust action the mobile head can take, so it is gated separately from everything else a paired phone does (view the stream, snapshot, send, interrupt, dequeue — all ungated, per ADR 025 lines 142-143).

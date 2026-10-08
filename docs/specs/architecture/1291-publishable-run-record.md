@@ -7,35 +7,6 @@ New file: `internal/e2e/realclaude/finding_run_record_test.go`. Everything is of
 
 ---
 
-## Files to read first
-
-Everything below is in `package realclaude` under the `e2e_realclaude` build tag, so every symbol is directly callable from the new file. Line refs verified at `1b673b6`; read, don't grep.
-
-| Path | Extract |
-|---|---|
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:1-30` | The file-header shape this family uses, including the exact `go test -run` line and the standing "no live claude, no credentials, … no `t.Skip`" clause AC5 asks for. |
-| `…/finding_trailer_evidence_test.go:142-155` | `finTrailerRecord` — the sub-record embedded **whole** here. Ten scalars, flat. |
-| `…/finding_trailer_evidence_test.go:203-215` | `finTrailerBuild(outcome string, obs trailObservation)` — the builder contract this file mirrors (pure, no `*testing.T`, never fails a test). Note its comment says it is **not** trap-free by construction; §"Two properties, and only one is structural" below explains why this builder is in the same position. |
-| `…/finding_trailer_evidence_test.go:623-700` | `TestFinTrailerRecordCarriesNoCapturedBytes` — **the template for AC4**: the non-vacuity precondition, the per-row headroom assertion, the named-per-channel failures. Read the closing comment at `:686-692` carefully — its top-level key scan is valid only because that record is flat. This one is not. See §"AC4 — what to copy and what not to". |
-| `…/finding_trailer_evidence_test.go:472-478` | `finTrailerOutcomeValues()` — the precedent for a fixture helper that returns a closed value set by calling shipped lists. `finRecordLivenessValues()` mirrors its shape. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:80-95` | `finAttributeEntry` — the "trap-free **by construction** rather than by an ordering discipline a later edit can break" argument, and how it is worded on the type. `finRecordProc` is the same move. |
-| `…/finding_attribution_fanout_test.go:95-130` | `finAttributeRecord` — the second sub-record embedded whole. Its `Detail` content rule at `:116-124` (esp. "Quoting `Selected.Detail` is the likeliest slip") is the direct model for this record's. |
-| `…/finding_attribution_fanout_test.go:209` | `finAttributeFanOut(stderr []byte, pgids []int, certified string) finAttributeRecord` — pure, no exec, no clock. Call it; do not rebuild an attribution and do not re-parse pyry's stderr. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:203-236` | The four `pinState*` values and **why they are never collapsed**; `pinStateColumns` and its never-add-`command`/`args`/`comm` prohibition; `pinExitStatusUnknown = -1` at `:236`. |
-| `…/process_pin_liveness_test.go:245-253` | `pinStateOutcome` — carried whole as an input. It already has `PID` and `PPID`, which is why AC1's "which row it belongs to" needs no new field. |
-| `…/process_pin_liveness_test.go:275-300`, `:332`, `:1088-1099` | `pinReadState` execs `ps` (`:293`); `pinClassifyState` is pure but its `pinStateNoSuchProcess` arm needs a real `*exec.ExitError`; `pinExit1` execs `false` to borrow one. **All three are off this file's path** — see §"Hand-built liveness". |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:756-790` | `tdnRunnerFromArgv` — the argv read, its two discriminating markers, and the recorded reason `reachRunnerPathFromArgv` is not reused. Every arm returns a **constant** string; no input bytes cross into the return. |
-| `…/teardown_liveness_probe_test.go:895-965` | `tdnFixturePtyArgv`, `tdnFixtureStreamArgv`, and `TestTdnRunnerFromArgv` — AC3's fixtures are already written. Note the assertion is `strings.HasPrefix` at `:951` plus a "has a parenthesised reason" check at `:957`. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:1095-1123` | `reachRunnerPathFromEnv` (`:1102`) — reads ambient `os.Getenv` **first**, delta second (`:1103-1108`); returns `"ptyrunner (interactive TUI, the agent-run default)"` / `"streamrunner (headless stream-json)"`. `reachRunnerPathFromArgv` at `:1118` — the helper AC3 forbids. |
-| `…/background_reach_probe_test.go:115-125`, `:162-168`, `:945-951` | `reachMaxCommandBytes = 512` and the threat model at `:117-122` that AC4's sweep serves; `reachProc` (carries `Command` + `Needles` alongside the three integers); `reachCapCommand`. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:199-208`, `:533-538` | `trailDetail` = `fmt.Sprintf` + `reachCapCommand`, the **only** detail formatter this file may use; `trailReapLine(count int, pgids string)` — `pgids` is a **string**. |
-| `…/trailer_admissibility_test.go:538-542` | `trailGateCases`' stated rule: shipped producer for what it can emit, hand-built for what it cannot. That is the licence for §"Hand-built liveness". |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:294-302` | `trailNeedle` (42 bytes) — the plant for AC4. |
-| `…/result_trailer_observation_test.go:108-125` | The discriminated optional: `trailScanResult.Trailer` is nil unless `State == trailSeen` and a consumer dereferencing it panics loudly. This record never reaches it — AC2's whole point. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:193-214`, `:225-241` | The three shipped comments this record answers to: `MatchCount` "carried instead of its `Matches` slice, which holds verbatim argv"; `Liveness` "`pinStateOutcome` carries no command column by construction"; `BoundFrom` "would promote that pointer back into reach"; and `trailRunOutcome.Detail`'s content rule. |
-
----
-
 ## Context
 
 A probe on the **ptyrunner default** path measures whether `pyry agent-run` reaches its normal exit path while a command it launched is still executing. This ticket builds the record that probe publishes — process evidence, liveness verdicts, reap-log attribution, and the runner path — and proves it offline, before a live turn is spent.

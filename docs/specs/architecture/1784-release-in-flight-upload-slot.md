@@ -3,51 +3,6 @@
 `internal/attachments`. Adds one exported sentinel and one routing method to
 `Registry`. No disk, no wire codes, no logging, no new production consumer.
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/attachments/registry.go` → `Registry` (type doc), `Lookup`, `Release`,
-  `Admit`, `insertLocked`, `uploadKey` — the lock posture this slice inherits
-  verbatim, the two primitives it drives, and the gate order AC 1 defends.
-  `Lookup`'s and `Release`'s doc blocks both name this ticket by number and both
-  need that replaced with the symbol that now does the work.
-- `internal/attachments/accumulator.go` → `Add`, `Assemble`, `reject`,
-  `Accumulator` (field docs) — the three outcomes `Deliver` routes on, and the
-  latch/discard semantics `reject` already provides. Read `Add`'s fixed check
-  order and its "AttachmentID is not checked because the caller looks this
-  accumulator up BY it" paragraph: this slice makes that sentence structurally
-  true rather than a caller obligation.
-- `internal/attachments/admission.go` → `ErrTooManyUploads`, `capacityRefusal`,
-  `maxInFlightUploads`, `maxUploadBytes` — the sentinel-doc house style the new
-  sentinel copies, and why a new sentinel is a sibling rather than a widening of
-  a neighbour. Also `CheckDeclaration`, and read it **before writing a single
-  fixture**: every declaration a `Deliver` test uses has to pass it, because
-  `Admit` is the only way to get an entry into the registry, and the rule is
-  `totalChunks == max(1, ceil(size / protocol.MaxAttachmentChunkBytes))` with
-  that constant at 45000. `newTestAccumulator`'s `(testTotal, len(testFixture))`
-  is **not** admissible — `testParts` splits 24 bytes into three chunks, which
-  only `NewAccumulator` accepts, never `Admit`. See § "The one admissible
-  multi-chunk declaration".
-- `internal/attachments/registry_test.go` → `fillRegistry`, `testConnA`,
-  `testConnB`, `testAttachmentID`, `testBoundTotal`, `boundChunk`,
-  `TestRegistry_AdmitAtTheBound_ReleaseReturnsTheSlot` — every fixture and
-  assertion idiom the new tests reuse. `fillRegistry` is the "fill to the bound"
-  helper all of AC 1/2/3 needs; do not write a second one.
-- `internal/attachments/accumulator_test.go` → `testChunk`, `newTestAccumulator`,
-  `testFixture`, `testParts`, `testTotal`, `testFixtureDigest`,
-  `testEmptyDigest`, `testBoundFixture`, `testBoundFixtureDigest` — the shared
-  fixtures. Note `testChunk` deliberately leaves `AttachmentID` zero; see
-  § "One new test helper".
-- `internal/protocol/attachments.go` → `AttachmentChunkPayload`,
-  `MaxAttachmentChunkBytes` — the eight wire fields, and the SECURITY block
-  naming the four strings that must never enter an error or a log
-  (`AttachmentID`, `Filename`, `SHA256`, `Data`).
-- `docs/knowledge/features/attachments-package.md` § "In-flight upload registry",
-  § "Sentinels and discard semantics", § "Mutation-testing lessons" — the parked
-  #1796 SHOULD FIX this ticket discharges, the family table AC 3 sweeps, and the
-  overlay-mutant recipe with its build-failure traps.
-
 ## Context
 
 `Registry` bounds how many uploads may be in flight (`maxInFlightUploads`, gated

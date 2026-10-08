@@ -9,31 +9,6 @@
 
 ---
 
-## Files to read first
-
-Turn-1 data load. Read these before writing anything; each line says what to extract.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go:206-270` | `finGatherInputs` header doc + the six fields. The zero-polarity argument at `:226-238` is the template the seventh field must match. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:537-640` | `finGatherReadings` body. The gate call is `:551-552`; its comment `:546-550` is the first stale claim. `:622-637` is the "carried WHOLE, no fill-in-if-unset" doctrine you must *distinguish* from, not follow. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:775-799` | `finGatherAssertContract`'s C2 block. `:785-787` is stale; `:788-789` is the whole-struct equality that must move to the row's own reading. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1247-1332` | `TestFinGatherReturnsNoCapturedBytes` — the existing three-return sweep. AC4's new plant extends this shape (premise → marshal → `bytes.Contains`). |
-| `internal/e2e/realclaude/finding_exit_path_probe_test.go:259-284` | `finExitRunProbe`'s gather call. `:264-272` is the needle prohibition — **untouched by this ticket**. `:313-322` is where `h.Pin.ClaudeCommand` already reaches `finRecordBuild`. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:307-333` | `trailGateResult.RunnerPath` — `json:"runner_path,omitempty"` and the "an unfilled reading reads as `""` here" paragraph. This is why the gather, not the gate, owns the normalisation. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:504-608` | The gate's absence branch: three return sites, and the two Detail markers (`the observed path owes one` / `the reading names no runner`) that discriminate the two rows sharing `gate-out-of-contract`. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:969-992` | `trailRunnerUnread()` = `tdnRunnerFromArgv("")`. Its doc carries **two** stale paragraphs (`:979-981`, `:983-988`) and a wrong cite (`:980` says `:778`; the equality is at `:788-789`). |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:208-279` | `trailReasonAgainstPath` — the fall-through at `:272-278` that ignores presence, and the `:208-221` statement that no arm's Detail interpolates the reading. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:757-790` | `tdnRunnerFromArgv` — the only admissible reader. Five constant answers, echoes no argv. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:891-906` | `tdnFixturePtyArgv` / `tdnFixtureStreamArgv` — the two argv fixtures the new rows reduce from. |
-| `internal/e2e/realclaude/trailer_key_names_test.go:158-165` | `trailKeyNamesNoTerminalReason()` — the absence *line* (carries `"type":"result"`, no `terminal_reason` key). This is the new rows' stdout seed. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:648-690` | `TestPinScanArgv_ExcludesTheInstrumentsOwnProcess` — the shipped self-matching-needle idiom (`os.Args[0]`, empty guard, membership-not-count). AC2's population test copies its shape and its warning. |
-| `internal/e2e/realclaude/finding_run_record_test.go:256-272` | `finRecordRunnerLabel` — returns `""` for `""`, which is why an unfilled reading *routes* rather than misroutes. |
-| `internal/e2e/realclaude/finding_stage_held_group_test.go:409-454` | `finStageRun` — the shipped caller that supplies nothing. It must keep working untouched. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:150-180` | `trailRigGather` — runs no claude (`:40`), so it has no producer. Its `:157-160` comment delegates its reason to a paragraph this ticket falsifies. |
-
----
-
 ## Context
 
 `finGatherReadings` types `trailRunnerUnread()` into the gate's `RunnerPath` at

@@ -7,30 +7,6 @@ no credentials, no daemon, no turn, no `t.Skip`.
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Each line says what to extract; do not read the whole file.
-
-| Path | Extract |
-|---|---|
-| `internal/e2e/realclaude/finding_staging_gate_test.go:138-186` | `finOutcomeStaging`'s eight fields, which three are transcript-side, and the NO-json-tags rule the new carrier type must mirror and cite. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:246-320` | Arm order (identity before behaviour) and arms 1–3 — the three verdicts every row in this ticket lands on, plus the `\|\| StagedCommand == ""` clause. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:621-647` | `TestFinOutcomeStagingGate`'s table + `reached` coverage-map idiom. The new table copies this shape. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:759-816` | Both shipped waiters. `probeWaitForBashToolUse` returns the **first** Bash `tool_use` (the defect); `probeWaitForToolResult` matches a **given** id (why the id is the load-bearing return). |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:818-852` | `probeToolUseInput` — the two-stage projection that yields `input` for a **named** block id. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:116-134` | `probeToolUseDeadline` (30 s), `probeToolResultDeadline` (45 s), `probePollInterval` (200 ms). The live values the fill's deadline parameters take; the rows pass a short one instead. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:425-452` | #1230's caller-side content guard — the shape this ticket generalises, and the comment saying why the shared rig is not edited. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:1039-1087` | `reachBackgroundHandle` (the `timedOutAfterMs` projection) and `reachToolUseCommand` (`input.command`). |
-| `internal/e2e/realclaude/background_reach_probe_test.go:1402-1446` | `TestReachBackgroundHandle`'s fixture lines — the exact `toolUseResult`-as-sibling-of-`message` shape the new result-line builder must emit. |
-| `internal/e2e/realclaude/tool_loop_test.go:152-183` | `contentBlock` (no `input` member) and `parseContentBlocks` (blocks returned **in order**). |
-| `internal/e2e/realclaude/fixtures.go:56-64`, `:145-167` | `WithWorktree` (pins `HOME` to `t.TempDir()`), `ReadJSONL` (parses, `t.Fatalf`s on a bad line). |
-| `internal/e2e/realclaude/fixtures_test.go:21`, `:253-273`, `:553-571` | `testSessionID`, the fixture-line idiom, and `writeFixtureLines` — the shipped writer at the session's own path. |
-| `internal/e2e/realclaude/prompt_fidelity_test.go:78-84` | `jsonlPathFor` — how both waiters resolve the path. |
-| `docs/knowledge/codebase/1223.md:81-95` | The two backgrounding paths; `timedOutAfterMs` is the only separator, and `run_in_background: true` only *corroborates* — the reason it must not become a second trigger signal. |
-| `docs/knowledge/codebase/1223.md:160-172` | The shipped-unfixed first-match SHOULD FIX, in the reviewer's own words. |
-
----
-
 ## Context
 
 `finOutcomeStagingGate` (`finding_staging_gate_test.go:262`) already decides all seven staging

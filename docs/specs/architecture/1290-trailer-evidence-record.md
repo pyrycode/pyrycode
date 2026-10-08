@@ -6,32 +6,6 @@
 
 ---
 
-## Files to read first
-
-Everything below is in `package realclaude` under the `e2e_realclaude` build tag, so every symbol is directly callable from the new file. Read in this order; do not grep for these, the line refs are verified at `3582765`.
-
-| Path | Extract |
-|---|---|
-| `internal/e2e/realclaude/result_trailer_observation_test.go:98-137` | `trailScanResult` and `trailObservation` — the input types. Note `Line` is capped and `Trailer` is a pointer that is nil unless `State == trailSeen`. |
-| `…/result_trailer_observation_test.go:57-90` | The two closed spaces: `trailSeen` / `trailAbsent` / `trailAborted`, and `trailBoundFromMiss` / `trailBoundFromStart` / `trailBoundNone`. Call these constants; never restate the sets. |
-| `…/result_trailer_observation_test.go:164-208` | `trailScan` — the only way to build a real scan result. `Line: reachCapCommand(...)` at `:182`, decode against the **full** line. |
-| `…/result_trailer_observation_test.go:242-274` | `trailWaitForTrailer` — where each `BoundFrom` value comes from. The two `trailBoundNone` return sites (the `trailAborted` arm at `:264-265` and the deadline arm at `:270`) leave `Staleness` zero; that fact is load-bearing for AC1's synthetic row. |
-| `…/result_trailer_observation_test.go:282-317` | Fixtures: `trailFixtureTrailer` (342 B), `trailFixtureNoTrailer`, `trailNeedle`, `trailPaddedTrailer(pad)`, `trailOverlongPad`. |
-| `…/result_trailer_observation_test.go:477-525` | The already-shipped padded-trailer subtest. **Do not restate it** — this ticket's AC2 test pins the four fields on the *built record*, not on the scan result. |
-| `internal/e2e/realclaude/tool_loop_test.go:194-210` | `resultTrailer` — the four fields to copy, their Go types (`IsError` is a `bool` at `:200`), and the absence of a `result` member. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:221-250` | `trailRunOutcome` — the record shape to mirror. `Bounded` at `:242-246` is the exact rule AC1 repeats; the Detail content rule at `:225-232` is the model for this record's. |
-| `…/trail_run_outcome_test.go:254-268`, `:1189-1210` | `trailIsRunOutcome` and `trailRunOutcomeValues` — call both; never re-derive the eleven. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:198-232` | `finOutcomeResult` (a value and a detail and nothing else), `finOutcomeIsValue`, `finOutcomeValues` — the staging tier's seven. |
-| `…/finding_staging_gate_test.go:1-40`, `:60-81` | The file-header shape this family uses, and the settled reason `trailDetail` is reused instead of a `finDetail` twin. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:76-92` | `finAttributeEntry` — the "trap-free by construction" argument, and how it is worded on the type. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:199-208` | `trailDetail` — `fmt.Sprintf` + `reachCapCommand`. The only Detail formatter this file may use. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:115-125`, `:945-951` | `reachMaxCommandBytes = 512`, `reachTruncationMarker`, `reachCapCommand`. The comment at `:117-122` is the threat model this record's needle sweep serves. |
-| `internal/agentrun/streamjson/emitter.go:428-437` | `wireFields` — one `ExitReason` renders `subtype`, `terminal_reason` and `is_error`. Note the `default` arm (`:434-435`) returns `terminal_reason == ""` on a **seen** trailer. |
-| `internal/agentrun/streamjson/emitter.go:456-468` | The pinned wire order: `result` sixth, `terminal_reason` last. |
-| `internal/agentrun/streamjson/emitter.go:205-225` | `e.lastStopReason = entry.Message.StopReason` at `:210` — `stop_reason` is forwarded from the model's own message, unvalidated. |
-
----
-
 ## Context
 
 The probe measures whether `pyry agent-run` on the ptyrunner default path reaches its normal exit while a command it launched is still running. This ticket builds **one half of that probe's published record**: the run's outcome value together with the trailer evidence behind it. #1291 embeds this record whole into the run record; #1286 owns the artifact writer and its multi-input no-captured-bytes sweep.

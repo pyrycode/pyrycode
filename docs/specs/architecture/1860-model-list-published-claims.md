@@ -6,30 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these in order. The first two are the whole job; the rest are the evidence you need so the replacement prose is true rather than merely different.
-
-**The file being edited**
-
-- `docs/protocol-mobile.md` § `model_list` (the `#### model_list` heading through the `**SECURITY.**` paragraph) — the section you are correcting. Read all of it: the two paragraphs below the field tables are the load-bearing edits, and the four numbered client-facing properties below them must survive untouched.
-- `docs/protocol-mobile.md` § Changelog — the `2026-08-27` (#1848), `2026-08-24` (#1718) and `2026-08-22` (#1705) entries. Extract the **supersede-by-annotation convention**: the `2026-08-22` entry already opens with `**Superseded by the \`2026-08-27\` entry above** in its two inbound-validator claims — …  The rest of this entry still holds: …`. That two-clause shape — name which claims went false, then affirm what still holds — is the convention every annotation in this ticket copies.
-- `docs/protocol-mobile.md` § Reconnect / Backfill semantics, the **Mode B** bullet list — read it to confirm it names only the modal (#877) and queue (#878) reconciles, and **leave it exactly as it is**. See § Non-goals.
-- `docs/protocol-mobile.md` § Application message types, the `model_list` row — the summary-table row carrying the same claim.
-
-**The code that falsified the claims** (read for truth, cite nothing by line)
-
-- `cmd/pyry/interactive_turn_v2.go` → `Handle`, its `turnevent.ModelList` arm — #1849's emit. The arm's own comment is the single best source for this ticket's delivery-window paragraph: it states the droppable classification, the two-queues-two-answers split, and the once-per-`initialize`-exchange cadence in the daemon's own words. Read the whole comment block, not the code under it.
-- `cmd/pyry/stream_turn_busy.go` → `turnMarkFor`, `turnMarkNone` — the classification that makes the frame droppable at the fan-in.
-- `cmd/pyry/stream_turn_drain.go` → `droppableCap` — the high-water mark a droppable envelope may not cross. Extract only that it exists and refuses under load; the arithmetic is not client-facing.
-- `internal/turnevent/event.go` → `ModelList.Models`, `ModelList.DroppedModels` — extract three facts for the `dropped_models` rewrite: the entry count is bounded by `maxModelListEntries`, the list is **truncated from the tail**, and the true size **is** recoverable as `len(Models) + DroppedModels`.
-- `internal/streamsup/parser.go` → `maxModelListEntries` — the cap constant. Its value is **10**; the ticket asks for that number in the prose.
-- `internal/turnbridge/outbound.go` → `MapEvent`, its `turnevent.ModelList` arm — #1848's carry. Extract that `DroppedModels` is **carried verbatim, never recomputed from `len(models)`** — that is what makes the wire number trustworthy.
-- `internal/e2e/relay_v2_stream_model_list_test.go` — #1845's end-to-end proof that the frame reaches a connected client. You need only that it exists and what it proves.
-- `internal/relay/v2session_seams.go` → `V2SessionConfig.RetainedModelLists`, and `internal/relay/v2session_modelreconcile.go` → `reconcileModelLists` — #1863's connect-time seam. Extract the decisive fact: **the seam is nil in production today**, so nothing observable reaches a client through it. This is what keeps "no connect-time snapshot today" true. See § The #1863 correction.
-
----
-
 ## Context
 
 `docs/protocol-mobile.md` is the client-facing wire contract. A client author reading only § `model_list` is the audience these sentences were written for, and three of its statements are false at `c7940541`:

@@ -2,30 +2,6 @@
 
 **Ticket:** [#1243](https://github.com/pyrycode/pyrycode/issues/1243) · **Size:** S · **Labels:** `bug`, `security-sensitive`, `needs-real-claude`
 
-## Files to read first
-
-| Path | What to extract |
-| --- | --- |
-| `internal/turnbridge/mapper.go:56-91` | `mapEntry` — `case "user"` is the **single production edit site**. Note the branch order: `ParseToolResult` matches first, which is what keeps AC2 true for free. |
-| `internal/turnbridge/mapper.go:21-31` | `mapEvent`'s `EventKindJsonlEndOfTurn` → `TurnEnd{end_turn}` — today's only turn-end source. **Untouched** by this change; that is AC4. |
-| `internal/turnbridge/mapper.go:103-122` | `thinkingText` — the exact shape the new text extractor mirrors (nil-`Message` guard, block loop, `c.Raw["…"].(string)` read). Do **not** refactor it; see § Declined alternatives. |
-| `internal/turnbridge/mapper_test.go:12-47` | `entry()` — marshals only `{type, message}` and leaves `Raw` nil. It **cannot** express a top-level sibling; a second builder is needed, not a change to this one. |
-| `internal/turnbridge/mapper_test.go:66-219` | `TestMapEvent` table — where the new rows go. Row at `:195-197` ("drop user text (no tool_result)") stays as-is and still drops. |
-| `internal/turnevent/taxonomy.go:37-43` | `TurnEndReasonCancelled` already exists. **No taxonomy change.** |
-| `internal/turnevent/taxonomy_test.go:87-95` | The exactness assertion (`len == 5`, `reflect.DeepEqual`) that a new reason would break. |
-| `internal/turnevent/event.go:65-72` | `TurnEnd` carries `Reason` and nothing else — no marker text reaches the wire. |
-| `internal/turnbridge/outbound.go:87-91` | `StopReason: string(e.Reason)` — verbatim pass-through, no allowlist. Nothing downstream needs changing for `cancelled`. |
-| `internal/streamsup/parser.go:281-292` | `resultTurnEndReason` — the peer mapping this must agree with (`error_during_execution` → `cancelled`). |
-| `cmd/pyry/interactive_turn_v2.go:207-216` | The `inTurn` guard that absorbs an out-of-turn `TurnEnd` (`interactive_turn.turn_end_no_turn`). Bounds the blast radius of a false positive fired while idle. |
-| `internal/agentrun/jsonl/testdata/no_end_turn.jsonl:53` | **The only real interruption marker line in the repo** (547 bytes). AC5 arm (a) source. |
-| `internal/agentrun/jsonl/testdata/no_end_turn.jsonl:50` | Real `tool_result` user entry (1280 bytes; `is_error:false`, `toolUseResult.interrupted:false`). Base for the AC2 and the tool-output-forge fixtures. |
-| `internal/agentrun/jsonl/testdata/no_end_turn.jsonl:3` | Real prompt entry — **34,400 bytes; do not embed it whole.** Only its top-level envelope (incl. `permissionMode`) is needed, for the AC3 forge. |
-| `internal/agentrun/ptyrunner/runner_test.go:81-86` | Precedent for a verbatim raw-JSONL line as a test `const` backtick string. |
-| tui-driver `pkg/tuidriver/jsonl.go:426-466` | `parseEntry` / `parseMessage` — the population contract the new test builder must mirror: `Raw` **and** `RawLine` always set; `Message.Content` populated **only** when `message.content` is a JSON array (a string content yields nil `Content`). |
-| tui-driver `pkg/tuidriver/jsonl.go:78-115` | `JSONLEntry` doc: *"Consumers requiring presence-vs-absence semantics check `_, ok := e.Raw["message"]` directly."* — the blessed idiom for the authorship gate. |
-| `docs/specs/architecture/1191-minted-perconv-interrupt-oracle.md` | Prior art: documents that `EventKindJsonlEndOfTurn` can only ever say `end_turn`, so #1191's oracle deliberately could not assert `cancelled`. |
-| `docs/protocol-mobile.md:1023-1030` | Threat #1 (prompt injection) — the frame for AC3 and § Security review. |
-
 ## Context
 
 On the PTY/JSONL path an interrupt genuinely stops the turn (claude cancels in ~65 ms and records it) but nothing turns that into a `turn_end`. The client's Stop affordance stays mounted until its own 120 s timeout. `turn_end` on this path has exactly one source — `mapEvent`'s `EventKindJsonlEndOfTurn` case — and that event only fires on `assistant` + `stop_reason=="end_turn"` + non-empty text, none of which an interrupted turn produces. The stream-json runner already reports the same user action as `cancelled` (`internal/streamsup/parser.go:281-292`); the two surfaces disagree.

@@ -1,18 +1,5 @@
 # Spec — internal/keys: X25519 static keypair primitive (#438)
 
-## Files to read first
-
-The developer's turn-1 reading list. Lift these into context before writing any code.
-
-- `internal/identity/store.go:1-97` — **the shape to clone.** Atomic-write recipe with chmod-tmp-before-write umask defence, fsync-then-rename commit, ENOENT branch detection. Same package's `LoadOrCreate(path)` is the one-arg cousin of this ticket's two-arg `LoadOrCreate(baseDir, daemonName)`.
-- `internal/identity/store_test.go:10-200` — the test shapes to mirror: fresh-create asserts mode `0700`/`0600` via `os.Stat`, existing-file path asserts mtime unchanged (no rewrite), corrupt-file table uses `errors.Is` against the sentinel, `ReadFileError` catch-all uses "directory-where-a-file-should-be" trap.
-- `internal/identity/server_id.go:1-85` — package-layout precedent: pure type + validator predicate in one file (`server_id.go`), I/O wrapper in another (`store.go`). Doc-comment shape for `NewServerID`'s panic-on-rng-fail discipline (clone for `crypto/rand.Read` here).
-- `docs/protocol-mobile.md:93-112` — § *Static keys — binary side*: on-disk JSON schema (the five fields), algorithm name (`Noise_25519`), daemon-name allowlist rationale, `0600` file + `0700` parent invariant. **Note the invariant lines about mode enforcement and `O_NOFOLLOW` belong to the sibling ticket #439, not this one.**
-- `docs/knowledge/decisions/024-noise-ik-mobile-e2e.md` — ADR-024 § *Static keys — binary side* and § *Why per-binary, not per-phone, static keys on the binary side*. Anchors the threat model the daemon-name allowlist defends against.
-- `docs/PROJECT-MEMORY.md:22` — § Project-level conventions: the canonical *atomic-write recipe* statement (CreateTemp → encode → Sync → Close → Rename, in the same dir). The keys package is the fifth registry against this recipe but per the same memo line, "duplicated until a fifth registry forces extraction" is one-after, so duplication stays here.
-- `cmd/pyry/main.go:133-154` — existing `sanitizeName`. **Do NOT clone it.** `sanitizeName` is a transformer that replaces bad chars with `_` and permits `.` and uppercase; the keys package's validator REJECTS instead of transforming, and is stricter on charset. Reusing `sanitizeName` here would silently defeat the path-traversal defence the spec mandates. This callout exists because grep-driven exploration will surface `sanitizeName` and the developer might reach for it.
-- `internal/devices/registry.go` — second example of the per-daemon `~/.pyry/<name>/<file>.json` atomic-write pattern (writes `devices.json`). Skim for the `0o600`/`0o700` mode constants and the temp-file naming convention; not load-bearing here, but confirms the pattern is uniform.
-
 ## Context
 
 Mobile Protocol v2 (#430) introduces `Noise_IK_25519_ChaChaPoly_BLAKE2s` E2E encryption between phone and binary. The binary owns one persistent X25519 static keypair per daemon, shared across all paired phones for that server-id, persisted under `~/.pyry/<daemon-name>/static_key.json`. The QR pairing payload (#432) emits the public half, and the Noise wrapper (#433) consumes both halves.

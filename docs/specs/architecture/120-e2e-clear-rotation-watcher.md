@@ -24,21 +24,6 @@ one rotation against the real probe. Production code is untouched; the harness
 primitive `StartRotation` (delivered by #123) and the `fakeclaude` test binary
 (delivered by #122) are consumed as-is.
 
-## Files to read first
-
-- `internal/sessions/pool.go:371-391` — `RotateID` semantics and error contract; the production path the watcher invokes via `OnRotate`. Save under `Pool.mu`, `lastActiveAt` advanced under `Session.lcMu`.
-- `internal/sessions/rotation/watcher.go:142-188` — `handleCreate`: the exact-match probe gate at line 178-180 is why fake-claude must close OLD before opening NEW; also where `IsAllocated(stem)` short-circuits already-tracked ids (matters for the initial-jsonl CREATE event).
-- `internal/sessions/rotation/watcher.go:21-24` — `probeRetryDelays = {0, 50ms, 200ms}`; ~250ms worst case before the gate fires. Sets the headroom for the 5s test deadline.
-- `internal/sessions/reconcile.go:91-121` — `reconcileBootstrapOnNew` runs synchronously inside `Pool.New`; if `<initialUUID>.jsonl` is the most-recent jsonl in the watched dir at startup, the bootstrap session's id is rotated to `initialUUID` and persisted before the harness's readiness gate releases. The test's "poll until id == initialUUID" should be near-instant.
-- `internal/sessions/reconcile.go:20-48` — `encodeWorkdir` (replaces BOTH `/` and `.` with `-`) and `DefaultClaudeSessionsDir`. Production helper is unexported; copy `encodeWorkdir` verbatim into the new test file as a one-liner. Don't reach into the package.
-- `internal/e2e/harness.go:222-271` — `StartRotation(t, home, sessionsDir, initialUUID, trigger)`: builds pyry + fakeclaude, mkdirs `sessionsDir` 0o700, sets `-pyry-workdir=home`, env-injects the three `PYRY_FAKE_CLAUDE_*` vars, gates on socket readiness, registers teardown. Ready when it returns.
-- `internal/e2e/internal/fakeclaude/main.go` — full file; close-OLD-before-open-NEW is in `main()` and the order is load-bearing. Reads only — don't change.
-- `internal/e2e/restart_test.go:13-49` — `registryEntry`, `registryFile`, `newRegistryHome`, `readRegistry`, `mustReadFile`. Reuse all four; do not redefine.
-- `internal/e2e/restart_test.go:211-275` — `TestE2E_Restart_LastActiveAtSurvives`: shows the "marshal/unmarshal trip strips monotonic clock state" pattern; relevant for any `time.Time` comparison the new test does on values read from disk.
-- `cmd/pyry/main.go:92-108` — `resolveClaudeSessionsDir`: `home` from `-pyry-workdir` flows through `filepath.Abs` → `sessions.DefaultClaudeSessionsDir` → `<home>/.claude/projects/<encoded(home)>`. The test computes the same path locally and pre-creates `<initialUUID>.jsonl` there.
-- `docs/lessons.md` § "Claude session storage on disk" — encoded-cwd rule (`/` AND `.` → `-`); `<encoded-cwd>/` directly contains the jsonls (no `sessions/` subdir).
-- `docs/lessons.md` § fsnotify+symlink (line 197) — `EvalSymlinks` is applied watcher-side (#118 fix); on macOS `/var → /private/var` makes this load-bearing. Test does not need to compensate; the production fix already does.
-
 ## Acceptance Criteria (from ticket)
 
 1. New test under `//go:build e2e` at `internal/e2e/rotation_test.go` named `TestE2E_RotationWatcher_DetectsClear`. Pre-create `<initialUUID>.jsonl` in the encoded sessions dir, call `StartRotation`, poll the registry until it reflects `initialUUID`, drop the trigger, then poll until the registry's tracked id changes — within a 5s deadline.

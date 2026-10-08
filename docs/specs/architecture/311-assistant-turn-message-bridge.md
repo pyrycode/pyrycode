@@ -22,62 +22,6 @@ PTY → `message` → phone (#311).
 > `connState` field, add the second flag, split the assignment site
 > inside `runConn`, and add a gate-enabled regression test.
 
-## Files to read first
-
-- `internal/supervisor/bridge.go:49-179` — `Bridge` type; existing
-  `Write` (PTY → attached writer) is the existing seam; new observer
-  hook is a 3-line tee inside it.
-- `internal/supervisor/supervisor.go:140-194` — `WriteUserTurn` /
-  `CurrentConversation` / `setPTY`; #312 mutex discipline (`convMu` /
-  `ptmxMu` both leaf-only).
-- `internal/supervisor/supervisor.go:321-364` — service-mode
-  `io.Copy(s.cfg.Bridge, ptmx)` is the load-bearing PTY-drain
-  goroutine; do NOT block it.
-- `internal/dispatch/dispatch.go:63-152` — `Conn` API (`ConnID`,
-  `NextID`, `Send`, `Reply`); per-conn ID monotonic via
-  `atomic.Uint64`. New `ActiveConns()` reads `d.conns` under `d.mu`.
-- `internal/dispatch/dispatch.go:249-264` — `connState` /
-  `gateRun` / `closed` flags; the demux's `routeConn` already drops
-  frames for closed conns. Broadcast can safely race conn-close. This
-  ticket renames `gateRun` → `gateStarted` and adds a NEW
-  `gateCompleted` flag — see §"Component 2" for the rationale.
-- `internal/dispatch/dispatch.go:431-457` — `runConn` loop body;
-  this is the file where the `gateStarted` / `gateCompleted` split
-  lands. The accept-path and gate-disabled-tail flag writes are the
-  load-bearing edits.
-- `internal/dispatch/dispatch.go:459-494` — `runGate`; note the
-  `_ = st.conn.NextID()` advance at the tail of the accept path
-  (line ~491). `gateCompleted` MUST be set AFTER this returns —
-  i.e. in the caller (`runConn`), not inside `runGate`.
-- `internal/dispatch/dispatch.go:118-135` — `Conn.Send` is the
-  canonical outbound seam; the broadcast loop calls it per-conn.
-- `cmd/pyry/relay.go:86-189` — `startRelay` builds the dispatcher,
-  registers handlers, owns the forwarder goroutine. New wiring lands
-  here.
-- `internal/relay/handlers/send_message.go:46-76` — sibling
-  handler shape (inbound user-turn); the outbound bridge mirrors
-  this in reverse.
-- `internal/protocol/messaging.go:13-24` —
-  `MessagePayload{ConversationID, MessageID, Role, Text}`; this
-  ticket emits `Role: "assistant"`.
-- `internal/protocol/codes.go:45` — `TypeMessage = "message"`.
-- `internal/conversations/id.go` — `NewID()` / `ValidID()`; reused
-  for `MessageID` generation (UUIDv4, `crypto/rand`).
-- `internal/e2e/internal/fakeclaude/main.go` — extend with a
-  scripted-stdout trigger mechanism (parallel to the existing
-  `PYRY_FAKE_CLAUDE_TRIGGER` for rotation).
-- `internal/e2e/relay_send_message_test.go` — sibling e2e shape;
-  the assistant-turn e2e mirrors it through `Receive`.
-- `internal/e2e/harness.go` — `StartRotationWithRelay` (#323) is
-  reused as-is; no new harness helper needed.
-- `docs/knowledge/codebase/312.md` — `WriteUserTurn` / cursor
-  invariants; `CurrentConversation()` survives child restarts.
-- `docs/knowledge/codebase/322.md` — inbound `send_message` shape;
-  patterns reinforced (handler-owned interface, per-conn ID).
-- `docs/knowledge/codebase/323.md` — fakeclaude observability
-  pattern (`PYRY_FAKE_CLAUDE_STDIN_LOG`); use the same
-  additive-by-env-var posture.
-
 ## Context
 
 The dispatcher (#307) wires inbound phone frames to handlers; #322 wired the

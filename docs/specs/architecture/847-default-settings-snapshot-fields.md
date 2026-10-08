@@ -2,20 +2,6 @@
 
 **Size:** S · **Not** `security-sensitive` (read-only reflection of existing, non-secret session config). Split A of #835; ships **unwired** — B (#848) wires both leaves into the snapshot handler.
 
-## Files to read first
-
-- `internal/sessions/pool.go:885-892` — `Pool.Default()`: the exact accessor pattern to mirror (RLock, resolve `p.sessions[p.bootstrap]` fresh, no `lcMu`). New accessor is this plus a value read and an existence bool.
-- `internal/sessions/pool.go:585-612` — `Pool.UpdateSettings`: documents that `sess.settings` is guarded by **`p.mu`** (not `lcMu`); the only other reader is `saveLocked`. Confirms reading `settings` under `RLock` is race-free.
-- `internal/sessions/pool.go:511-528` — `RotateID` flips `p.bootstrap = newID` under the write lock. Resolving `p.sessions[p.bootstrap]` fresh each call is what makes the accessor rotation-safe (AC-1).
-- `internal/sessions/session.go:61-73` — `SessionSettings` struct (`Model`, `Effort`, `YOLO`); a pure value type (no pointers/slices) → returning it by value is a clean snapshot. Zero value = inherit template / permissions enforced.
-- `internal/sessions/pool_update_settings_test.go:21-69` — `helperPoolWithSettings` + `diskSettings` test helpers. `helperPoolWithSettings(t, regPath, settings)` warm-starts a pool whose bootstrap carries the given settings — the exact fixture for the AC-2 test (see `pool.Default().ID()` usage at line 95).
-- `internal/protocol/snapshot.go:36-50` — `ScreenSnapshotPayload` struct + the file's documented "no field carries omitempty / every field always present" invariant the three new fields must honour.
-- `internal/protocol/snapshot_test.go:33-113` — `TestScreenSnapshotPayload_RoundTrip` (extend for the 3 fields) and `TestSnapshotPayloads_EmptyConversationID` (the boundary-pin style to copy for the zero-value assertions).
-- `internal/protocol/interactive_test.go:14-28` — `roundTripEnvelope`: it compares `canonical(out)` vs `canonical(raw)`.
-- `internal/protocol/envelope_test.go:11-18` — **`canonical` is `json.Compact` — it does NOT sort keys.** Therefore fixture payload field order must exactly match struct declaration order. This is the single sharpest constraint in the ticket (see Design § Fixture).
-- `internal/protocol/testdata/screen_snapshot.json` — the one-line fixture to regenerate.
-- `docs/protocol-mobile.md:617-625` — the `screen_snapshot` field table (3 rows today) to extend with 3 rows.
-
 ## Context
 
 The desktop Status sheet (pyrycode-desktop#156) renders the current model / reasoning-effort / YOLO setting before offering to change them. Those values live as `SessionSettings{Model, Effort, YOLO}` on the bootstrap session (private field, shipped #833) and need to reach the paired client via the existing `screen_snapshot` reply. #835 was split at the architect gate (5 prod files) into two children; **this ticket ships the two zero-dependency leaves** that a later ticket (#848) consumes:

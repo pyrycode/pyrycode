@@ -4,26 +4,6 @@ Ticket: [#462](https://github.com/pyrycode/pyrycode/issues/462). Size: **S**. Se
 
 Slice B1 of the split of #460 (split from #451). Slice A (#459, merged) shipped the wire contract and the `control.Rekeyer` interface; this slice ships the manager-side implementer that the wire dispatcher will call. Sibling slice B2 ships the `pyry rekey <conn_id>` operator verb in `cmd/pyry`.
 
-## Files to read first
-
-Required reading before any code change:
-
-- `internal/relay/v2session.go:45-86` — package-level rekey constants (`rekeyInterval`, `rekeyReplyTimeout`, `wakeBufferSize`) and the `wakeKind` enum the manual path piggybacks on.
-- `internal/relay/v2session.go:111-178` — `V2Session` struct fields (`state`, `rekeyTimer`, `rekeyReplyTimer`, `awaitingRekeyReply`) — the load-bearing state the manual path reads and mutates.
-- `internal/relay/v2session.go:186-217` — `V2Session.rekeyComplete`; the seam that re-arms `rekeyTimer` after a successful responder cycle (the manual path's natural "timer rebase" propagator).
-- `internal/relay/v2session.go:273-335` — `V2SessionManager` struct, `V2SessionConfig`, `NewV2SessionManager`. The new `manualRekey` channel field is added here; the constructor wires its make().
-- `internal/relay/v2session.go:337-417` — `Run`, `handleWake`, `armRekeyTimer`, `armRekeyReplyTimer`. The new `Run` select arm and the manual-rekey dispatch site live next to these.
-- `internal/relay/v2session.go:1005-1083` — existing `emitRekeyRequest`; the function the refactor targets. Read the entire body — the AEAD-seal failure log lines and the awaiting-defensive skip both stay.
-- `internal/relay/v2session.go:1131-1166` — `closeWith`; reuse-pattern for "stop session timers on teardown". Inform the manual path's stop-timer logic by analogy, not by call.
-- `internal/control/server.go:25-35` — `control.ErrConnNotFound` sentinel definition + the contract comment ("slice B's *relay.V2SessionManager wraps its internal not-found condition with %w against this sentinel"). The relay-side `ErrConnNotFound` must wrap this so the dispatcher's `errors.Is` continues to fire.
-- `internal/control/server.go:136-164` — the `Rekeyer` interface definition; method shape is `Rekey(ctx context.Context, connID string) error`. Note the AC's "TriggerRekey" naming is informal — see § "Naming divergence" below.
-- `internal/control/server.go:704-742` — `handleRekey`; the dispatcher that calls into the Rekeyer. Confirms `errors.Is(err, ErrConnNotFound)` is the wire-mapping seam (no relay-side change needed for that mapping when relay's sentinel wraps `control.ErrConnNotFound`).
-- `internal/relay/v2session_test.go:684-741` — `openSession` struct and `driveToOpen` helper. All four new tests reuse this helper verbatim.
-- `internal/relay/v2session_test.go:1787-1911` — `TestV2Session_RekeyInitiator_Emit_ReArmViaResponder`. The reference shape for "drive to open → wait for emit → run responder cycle → wait for re-armed emit". The timer-rebase test mirrors this with a manual trigger inserted before the first scheduled boundary.
-- `internal/relay/v2session_test.go:1913-1995` — `TestV2Session_RekeyInitiator_ReplyTimeout_4426`. Reference for the rekey-failure log discipline (no `err=` field, no flynn-noise text); the manual path inherits the same posture because it reuses `emitRekeyRequest` + the existing reply-timeout branch.
-- `docs/protocol-mobile.md` § Re-key, line 234 — `payload.reason = "manual"` is *"operator-triggered via `pyry rekey <conn_id>`"*. The literal `"manual"` value is wire-pinned.
-- `docs/knowledge/codebase/450.md` — the scheduled-emit slice's notes; the manual path inherits its concurrency posture, log discipline, and AEAD posture verbatim.
-
 ## Context
 
 Slice A (#459) shipped the control-socket wire contract: `VerbRekey`, the `Rekeyer` interface (in `internal/control`), the server dispatcher (`handleRekey`), the `control.Rekey` client helper, and the `control.ErrConnNotFound` sentinel. Until a Rekeyer is installed via `Server.SetRekeyer`, `handleRekey` replies `"rekey: no rekeyer configured"`.

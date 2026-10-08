@@ -2,15 +2,6 @@
 
 **Size:** XS · **Package:** `cmd/substrate-guard` · **Security-sensitive:** yes (see § Security review)
 
-## Files to read first
-
-- `cmd/substrate-guard/main.go` → the package doc comment, `allowlist`, `isAllowlisted`, `pattern`, `patterns`, `main`. The whole file is the change surface; read it end to end before editing. Extract: the doc block's factual claims, the three allowlist entries, and the shape of `main`'s walk closure.
-- `cmd/cite-guard/main.go` → `newIndex`, `main`, `allowlist`, `isAllowlisted`. **The sibling guard, and the decisive precedent for this ticket**: it was born with `.claude` already in its skip switch, in both of its walks. Extract the exact spelling of its skip `case` list and copy it verbatim — the two guards' walks should stay byte-comparable.
-- `cmd/cite-guard/main_test.go` → `TestAllowlistCoversThisTest`. The house shape for asserting allowlist membership directly. Extract the shape, **not** the policy: cite-guard allowlists its own `main_test.go` and says so in its `allowlist` doc comment; substrate-guard must not (AC 1).
-- `Makefile` → the `substrate-guard` target and the comment block above it. Extract: the target is `$(GO) run ./cmd/substrate-guard`, so cwd is always the repo root; and the comment makes no allowlist-count or CI claim, so nothing there needs to stay in sync. **The Makefile is outside your mutable surface — read only.**
-- `docs/knowledge/features/fakeclaude-binary.md` → the sections that mention "the `cmd/substrate-guard` allowlist". Extract: the fakeclaude entry is load-bearing and repeatedly relied on by that doc, and every one of those references stays true after this change (they name the entry, never a count). Read-only; the documentation phase owns it.
-- `CODING-STYLE.md` § Testing and § Comments — Citing Other Code. Extract: table-driven, stdlib `testing` only, `t.Parallel()`, `t.Helper()`; and the cite-by-symbol rule that `make cite-guard` enforces on every comment the new test file adds.
-
 ## Context
 
 `cmd/substrate-guard` is the different-fabric second check behind the tui-driver compiler seal: it fails the build when a claude-TUI substrate literal appears in a pyrycode `.go` file outside an explicit allowlist. Two defects, entangled, are the reason this is one ticket:

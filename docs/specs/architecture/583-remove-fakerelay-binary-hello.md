@@ -2,19 +2,6 @@
 
 **Size:** XS (deletion-only). One production file (`fakerelay.go`) + one test file. ~90 lines removed from production, ~49 from tests, 0 new exported types, 0 new behaviour. No consumer cascade — every reference is inside the two files being edited.
 
-## Files to read first
-
-- `internal/e2e/internal/fakerelay/fakerelay.go:27-39` — package-doc deviation bullets; the binary-direct-hello bullet (the last one) is dead doc to remove.
-- `internal/e2e/internal/fakerelay/fakerelay.go:82-88` — `lastBinaryHello` field + its doc comment (remove).
-- `internal/e2e/internal/fakerelay/fakerelay.go:136-141` — `New` constructor; remove the `lastBinaryHello: make(...)` init line.
-- `internal/e2e/internal/fakerelay/fakerelay.go:391-448` — `binaryRecvPump`; the `if env.ConnID == ""` dispatch branch (409-421) calls `handleBinaryDirect` and is the binary-direct entry point to remove. Note the existing unknown-conn_id Debug-drop (425-428) — it becomes the catch-all for any stray no-conn_id frame.
-- `internal/e2e/internal/fakerelay/fakerelay.go:450-505` — `handleBinaryDirect` (remove entirely).
-- `internal/e2e/internal/fakerelay/fakerelay.go:602-611` — `LastBinaryHello` accessor (remove).
-- `internal/e2e/internal/fakerelay/fakerelay.go:613-642` — `WaitBinary`; the header-based readiness sync that **stays** and keeps `time` imported.
-- `internal/e2e/internal/fakerelay/fakerelay_test.go:393-441` — `TestBinaryHello_GetsHelloAck`, the only test exercising the hello-ack synthesis + `LastBinaryHello` (remove the whole function).
-- `internal/e2e/internal/fakerelay/fakerelay_test.go:201-300` — `TestPhoneToBinary_FrameWrappedWithConnID`, `TestBinaryToPhone_FrameUnwrapped`, `TestConnIDIncrementsPerPhone`; these route frames whose *content* is `{"id":1,"type":"hello"}` **with a conn_id** through the phone-leg path — they are NOT binary-direct hellos and MUST stay. They are the AC-3 "binary↔relay leg still reaches frame-forwarding" coverage. They also keep `protocol.RoutingEnvelope` (and thus the `protocol` import) live in the test file.
-- `internal/relay/connection.go:1-16` — package doc confirming the dead-code premise: after #582 "there is no relay-originated hello/hello_ack handshake on this leg"; server-id is registered from the `x-pyrycode-server` header on WS upgrade.
-
 ## Context
 
 Ticket #582 retired the binary↔relay `hello`/`hello_ack` handshake: the binary's outbound relay connection is now content-blind on that leg — the relay claims the server-id slot from the `x-pyrycode-server` upgrade header, no hello is exchanged. The fakerelay e2e harness still carries the *receiving* half of that retired handshake:

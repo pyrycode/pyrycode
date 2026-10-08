@@ -1,22 +1,5 @@
 # Spec — #263: e2e test for the conversations sweep loop
 
-## Files to read first
-
-- `internal/e2e/restart_test.go:31-49` — `newRegistryHome(t)`. Creates a short-named temp HOME (sun_path-safe), mkdirs `<home>/.pyry/test/`, registers cleanup, returns `(home, regPath)` where `regPath = <home>/.pyry/test/sessions.json`. Reuse verbatim — the parent dir is exactly where `conversations.json` also belongs.
-- `internal/e2e/restart_test.go:117-148` — `writeRegistry` / `readRegistry` / `mustReadFile` helpers. The `mustReadFile(t, path)` failure-message helper is what to attach to the polling-timeout error message; the `writeRegistry` shape is **not** reused (this test seeds via the canonical `conversations.Registry` writer, not raw JSON).
-- `internal/e2e/harness.go:184-220` — `StartIn(t, home, extraFlags...)`. Extra pyry-flags are appended after the standard set and before the `--` claude-arg sentinel; last-wins semantics. This is the seam for `-pyry-conv-sweep-interval=100ms`. The harness auto-injects `-pyry-name=test`, `-pyry-claude=/bin/sleep`, `-pyry-idle-timeout=0` — leave those alone.
-- `internal/e2e/harness.go:601-628` — `Stop` / `teardown`. SIGTERM → 3s grace → SIGKILL → 1s grace. Stop returns once `doneCh` fires (or after the full escalation with a `t.Logf` warning). The 4s upper bound comfortably satisfies AC#4's ~5s budget; no custom shutdown helper needed.
-- `internal/e2e/harness_test.go:124-132` — `processAlive(pid)`. Zero-signal POSIX probe; reuse for the post-Stop "daemon is gone" assertion.
-- `internal/e2e/cli_verbs_test.go:60-72` — the panic/`runtime/`/`goroutine ` stderr scan pattern. Lift verbatim for AC#4's "no panic" half.
-- `internal/sessions/pool_conv_sweep_test.go:19-51` — `seedConvRegistry` shape. Cannot import (in-package test); recipe is the same: build a `*conversations.Registry`, `reg.Create(...)`, `reg.Save(path)`, with `LastUsedAt = time.Now().UTC().Add(-60 * 24 * time.Hour)` for archive-eligible entries. The 8-digit-prefix UUID literal style (`"11111111-1111-4111-8111-111111111111"`) is the project convention; keep it.
-- `internal/conversations/conversation.go` — `Conversation` field shape. All exported. `Name` is `*string` (nil = never named); promoted entries set it to a non-nil pointer. `IsPromoted` is a plain bool. `Cwd` is required.
-- `internal/conversations/registry.go:46-62` — `Load(path)`. Missing file → `&Registry{}, nil` (cold start). Zero-byte → `&Registry{}, nil`. Malformed JSON → wrapped error, nil registry. The poll loop calls Load on every tick; intermediate atomic-rename writes by the daemon are race-clean (rename is the commit point).
-- `internal/conversations/sweep_loop.go:9-48` — `RunSweepLoop` tick semantics. `time.NewTicker` does NOT fire immediately — first tick is at +interval. At 100ms interval the first sweep happens ~100ms after `Pool.Run` registers the goroutine, well inside AC#2's 5s budget. Save is called only on non-zero archive count; zero-count ticks do not touch disk. No final on-shutdown sweep.
-- `internal/conversations/archive.go` — `archiveIdleThreshold = 30 * 24 * time.Hour`; `ShouldArchive` returns false unconditionally for promoted entries. The seeded promoted entry persists by virtue of `IsPromoted: true`; its 60-day-past `LastUsedAt` is irrelevant.
-- `cmd/pyry/main.go:401-455` — flag declaration + path resolution + `Load` + `Config` wiring. Confirms `-pyry-name=test` produces `<home>/.pyry/test/conversations.json` (same parent dir `newRegistryHome` already creates for sessions.json). Confirms the flag's zero-value default = production interval.
-- `docs/specs/architecture/262-pyry-conv-sweep-interval-flag.md` § "CLI flag" — pins `-pyry-conv-sweep-interval=100ms` as the production-shipped flag. The flag is the only available out-of-process seam; the in-package `withConvSweepInterval` helper was deleted in #262.
-- `internal/sessions/pool_conv_sweep_test.go:53-110` — `TestPool_Run_RegistersSweepLoop_HappyPath`. The in-package counterpart of this e2e. Same poll-on-disk strategy, same 5ms-vs-100ms tick choice scaled up for an out-of-process test. This e2e closes the gap that test cannot reach: `cmd/pyry/main.go`'s Config-construction wiring + the full process lifecycle including signal-driven shutdown.
-
 ## Context
 
 `internal/sessions/pool_conv_sweep_test.go` already drives `Pool.Run` directly with a 5ms interval and asserts that archive-eligible conversations are removed on tick. That covers the in-package wiring (Pool.Run's `if p.convReg != nil` branch). It does NOT cover:

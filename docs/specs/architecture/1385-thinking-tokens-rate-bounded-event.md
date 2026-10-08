@@ -8,41 +8,6 @@ It also has a consequence the ticket body does not name: adding the subtype to t
 
 ---
 
-## Files to read first
-
-This is the turn-1 data load. Everything the design references is here with a line range and what to take from it.
-
-| Path | What to extract |
-|---|---|
-| `internal/streamsup/parser.go:284-327` | `Parser`'s doc and struct. The **turn-stateless** paragraph (`:291-295`) is the claim this ticket amends, and the single-writer invariant (`:297-303`) is what licenses an unlocked field. |
-| `internal/streamsup/parser.go:488-536` | `consumeLine`. Two edits land here: the `result` arm (`:505-510`) gains the accumulator reset, and the drop comment (`:521-528`) is corrected (AC4). |
-| `internal/streamsup/parser.go:538-564` | `emitSystemSubtype` — the ONE enumeration site of the mapped set. This ticket adds exactly one `case`. |
-| `internal/streamsup/parser.go:566-623` | `emitBackgroundTaskStarted` — the emit function to mirror structurally: top-level-`line` decode argument, undecodable path's content-free `Debug` + `return true`. **Do not** mirror the `bound`/`truncateField` apparatus; two integers need no caps. |
-| `internal/streamsup/parser.go:366-381` | `systemTaskStartedLine` — the per-subtype decode-target doc shape, including "the field set is exactly what the capture shows and nothing invented" and the two named drops (`uuid`, `session_id`). AC5 is discharged by mirroring this. |
-| `internal/streamsup/parser.go:38-66` | `maxTaskFieldID` / `maxTaskDescription` — the **comment style** for a bound: observed number, multiple, the argument for the multiple. `minThinkingTokensPerEvent`'s comment matches this shape, but its arithmetic is against the burst data, not the envelope (§ 3). |
-| `internal/streamsup/parser.go:179-250` | `ignoredLineTypes` and its doc. The list itself is **unchanged**. The `CORRECTED 2026-08-07 (#1380)` block at `:203-209` carries a count this ticket falsifies — see § Comment obligations. The 2026-07-27 measurement block at `:186-195` stays. |
-| `internal/streamsup/parser.go:686-715` | `emitBackgroundTaskRoster`'s doc. Its last paragraph (`:711-715`) makes "the parser holds no cross-line state" the *enforcement mechanism* for refusing to synthesize a task-finish event. This ticket falsifies the literal claim and must re-scope it without weakening the refusal. |
-| `internal/turnevent/event.go:23-32` | The `Event` interface doc — it lists the variants and needs the new name. |
-| `internal/turnevent/event.go:129-198` | `BackgroundTaskUpdated` — the doc structure to mirror: name-is-the-daemon's rationale, the deliberate-drops list, the per-field contract paragraphs. Nearest sibling. |
-| `internal/turnevent/event.go:379-404` | The two marker blocks (`isTurnEvent()` + `_ Event = …`). Two lines each. |
-| `internal/streamsup/capture_test.go` (whole file, 85 lines) | `capturedSystemLine` — the provenance-at-the-reader rule (`is_capture`, `payload_encoding`, exactly-one). This ticket extracts a **plural** reader from it; see § 5. |
-| `internal/streamsup/parser_test.go:140-150` | The main table's `system thinking_tokens tolerated` row. Its line uses `"tokens":42` — not the capture's key — so it stays silent under the new arm, but for a new reason. Moves; see § Comment obligations. |
-| `internal/streamsup/parser_test.go:499-542` | `TestParser_IgnoredLineTypesStaySilent` — the silence table. Its `thinking_tokens` row moves out (family precedent), and its doc carries two sentences this ticket falsifies. |
-| `internal/streamsup/parser_test.go:544-565` | `taskStartedCapCheat` — the **literal-fixture rule**: a fixture built from the constant it validates asserts nothing. AC3 is this rule applied to a count instead of a byte length. |
-| `internal/streamsup/parser_test.go:589-620` | `taskStartedEvent` — the one-line-in, one-event-out extractor shape. The new tests need a multi-line variant (§ 5). |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:69-123` | `expectedStreamRunnerOnly` / `expectedPtyRunnerOnly` — the one-sided tables, **keyed by top-level type**, which also govern the SET check via `additiveDriftViolations`. § 6 turns on why `system` cannot go in either. |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:131-207` | `parserIgnoredTypes`, `parserMappedSubtypes`, `parserDropsShape`. The mapped set gains `thinking_tokens`. Read `:159-170` — it is the argument § 6 has to work around. |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:246-307` | `envelopeShape`, `shapeFilterDrops`, `extractShapes`. **`shapeFilterDrops` is where § 6's fix lands.** Note it consults the one-sided tables by type alone and `parserDropsShape` with the subtype. |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:977-1023` | `TestExtractShapes_FiltersParserIgnoredTypes` — its fixture already carries two `thinking_tokens` lines and its `want` excludes them. With § 6's fix this test stays **green and unchanged**; without it, RED. |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:1049-1074` | `parserIgnoredTypeFixtures` and the bare-fixture convention comment. One fixture line changes and the comment gains the exception. |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:1095-1183` | `TestParserIgnoredTypesMatchesStreamsupParser` + `parseOne`. **`parseOne` writes ONE line to a fresh parser** — which is why the mapped fixture must cross the bound on its own. |
-| `internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json` | The capture. 33 `thinking_tokens` records at stream indices 2–10, 17–24, 27–32, 36–45. Read it through the plural reader, never by hand-copying a payload. |
-| `docs/knowledge/codebase/1380.md`, `1382.md` | The two predecessors' decisions: why `uuid`/`session_id` are dropped, why the drop proof is a reflection sweep, why the undecodable path is content-free. |
-
-*Codegraph note:* `codegraph_context` returned only `emitSystemSubtype` for this task — #1381/#1382's symbols merged within the last two days and are not in the index yet. The table above was completed by reading. Do not conclude from a thin codegraph result that those symbols are absent.
-
----
-
 ## Context
 
 `internal/streamsup`'s parser maps three `system` subtypes and drops the rest. `thinking_tokens` is the highest-rate of the dropped ones and the only mid-turn proof of life claude puts on this surface: during a long assistant turn nothing else crosses stdout, so a client showing "thinking" cannot separate a slow answer from a wedge.

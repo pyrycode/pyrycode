@@ -2,17 +2,6 @@
 
 Ties the path-encoding helper (`agentrun.EncodeProjectDir`, #347) and the JSONL line reader (`jsonl.Reader`, #348) together behind a single fsnotify-driven watcher. The watcher waits for `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` to appear, opens it, and feeds appended bytes into the line reader until the deterministic end-of-turn signal fires (or the caller cancels).
 
-## Files to read first
-
-- `internal/agentrun/jsonl/reader.go:60-99` — `Config` + `Reader` constructor; note that `Reader` is pull-based and EOF is **non-sticky** (the same `*os.File` can return more bytes on a later read once new data is appended).
-- `internal/agentrun/jsonl/reader.go:120-192` — `Next()` / `Offset()` contract: returns `io.EOF` only when both the current read produced 0 bytes AND the source signalled EOF; `Offset()` advances past every consumed line including silently-skipped non-assistant ones.
-- `internal/agentrun/trust.go:41-51` — `EncodeProjectDir(workdir)` contract: chains `ResolveWorkdir` (resolves symlinks; macOS `/var` → `/private/var`) then maps `/` and `.` to `-`. Returns the dashed name WITHOUT the `~/.claude/projects/` prefix.
-- `internal/sessions/rotation/watcher.go:1-220` — the pattern reference: fsnotify `NewWatcher` + `Add(dir)`, single Run goroutine with `select { ctx.Done / fsw.Events / fsw.Errors }`, CREATE-event matching, bounded-retry probe for the "CREATE fires before claude has the file ready" race. **Do not import this package**; copy the loop shape, not the rotation-specific match logic.
-- `internal/sessions/rotation/watcher_test.go:60-91` — the `startWatcher` helper pattern (Run in a goroutine, `t.Cleanup` cancels + waits for goroutine exit with timeout). Reuse this shape.
-- `internal/sessions/rotation/watcher_test.go:96-131` — assertion pattern: poll a thread-safe recorder with a deadline rather than `time.Sleep`.
-- `internal/agentrun/jsonl/testdata/clean.jsonl` — real fixture used by `reader_test.go`; reuse for the integration test by reading it line-by-line and re-emitting into a tempdir-hosted fake JSONL.
-- `docs/lessons.md` § "Don't trust ticket bodies on filesystem layout — observe" (line 52) — files live **directly** in `<encoded-cwd>/`, no `sessions/` subdir. Pinned for the integration test path construction.
-
 ## Context
 
 The agent-run verb (#338, not yet wired) needs to observe the assistant's entire turn from outside the claude process. Claude writes its per-session JSONL to `~/.claude/projects/<encoded-cwd>/<sid>.jsonl`; this file does not exist when claude spawns and is appended-to line by line.

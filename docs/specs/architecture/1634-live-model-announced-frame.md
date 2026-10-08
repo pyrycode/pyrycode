@@ -3,31 +3,6 @@
 **Size:** S (PO's label, not overridden). One new test file under `internal/e2e/realclaude`.
 **Production source files created or modified: 0.** **Shared test files edited: 0.**
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`, then Read the
-enclosing declaration.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/harness_daemon_test.go` | `spawnBootstrapDaemon` | The exact argv, env, stderr tee and `waitForReady` sequence your verbose variant transcribes. Note `--model haiku` and `-pyry-idle-timeout=0` in the args block. |
-| `internal/e2e/realclaude/harness_daemon_test.go` | `bootstrapDaemon`, `lockedBuffer` | The daemon handle and the mutex-guarded stderr buffer AC-4 reads. Both are reused as-is. |
-| `internal/e2e/realclaude/harness_daemon_test.go` | `seedBootstrapRegistry`, `seedBoundConversation`, `readPersistedServerID`, `waitBinaryHello`, `runPyry`, `decodePairPayload`, `driveHandshakeInteractive`, `sealSendMessage`, `relayTestLogger` | Every rig helper this test needs already exists here. Write none of them again. |
-| `internal/e2e/realclaude/interactive_stream_liveness_test.go` | `TestInteractiveStreamLiveness` | The end-to-end drive sequence to copy: pair → seed → fakerelay → spawn → serverID → `waitBinaryHello` → `fakephone.Dial` → handshake → `sealSendMessage` → drain. |
-| `internal/e2e/realclaude/interactive_stream_liveness_test.go` | `drainForCompletedTurn`, `writeStreamInteractiveConfig` | The M1/M2 milestone drain shape and its in-order noise-decrypt discipline; the runner pin. |
-| `internal/e2e/realclaude/interactive_stream_resume_after_eviction_test.go` | `spawnBootstrapDaemonWithIdle` | **The precedent this spec follows for the spawner.** Read its doc comment — it states why a self-contained near-copy beats a signature change to the shared spawner. |
-| `internal/e2e/realclaude/interactive_stream_resume_after_eviction_test.go` | `drainForResumedTurnText` | The house idiom for forking `drainForCompletedTurn`: it drops the two sentinel arms. Yours does too. |
-| `internal/e2e/realclaude/interactive_stream_inband_model_test.go` | `inbandModelTargets`, `inbandModelTarget` | AC-2's equality comparand. Its doc comment already states what a red means and that the row must be updated rather than weakened — your failure message restates that, it does not invent it. |
-| `internal/e2e/realclaude/interactive_stream_liveness_test.go` | `drainForCompletedTurn`'s `TypeUnrecognizedMessage` and `TypeRateLimited` arms | The prose style AC-2 asks both failure messages to match: name the legitimate non-daemon cause before blaming the daemon. |
-| `internal/e2e/realclaude/fixtures.go` | `ensurePyryBuilt` | **Load-bearing for AC-3.** It runs a plain `go build`; it honours `PYRY_E2E_BIN`. See § Mutation route. |
-| `internal/e2e/realclaude/resilience_test.go` | `resolveClaudeBin` | The `t.Skip`-on-absent-binary guard (`interactive_stream_inband_model_test.go` uses it; the liveness test open-codes `exec.LookPath`). Either is fine; prefer this one. |
-| `internal/protocol/interactive.go` | `ModelAnnouncedPayload` | Three fields: `ConversationID`, `Model`, `Truncated`. |
-| `internal/protocol/codes.go` | `TypeModelAnnounced` | The envelope type to switch on. |
-| `internal/turnbridge/outbound.go` | `MapEvent`'s `turnevent.ModelAnnounced` case | Mutant 1's target. Read the arm so you delete exactly it. |
-| `cmd/pyry/interactive_turn_v2.go` | `interactiveTurnEmitterV2.Handle`'s `turnevent.ModelAnnounced` case | Mutant 2's target. **Not** `eventKind`'s same-named case in the same file — that one stays. |
-| `cmd/pyry/main.go` | `selectInteractiveRunner` | Confirms the empty config default selects the stream runner since #1348. |
-| `docs/knowledge/features/e2e-realclaude.md` | § on `interactive_stream_resume_after_eviction_test.go` (#1177) | Documents the zero-shared-file-merge-surface discipline and the ticket-encoded-UUID convention this file follows. |
-
 ## Context
 
 `turnevent.ModelAnnounced` now has a complete path to a client: the parser mints it

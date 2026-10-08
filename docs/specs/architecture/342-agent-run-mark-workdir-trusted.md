@@ -1,17 +1,5 @@
 # 342 — `pyry agent-run`: invoke `MarkWorkdirTrusted` after flag parse
 
-## Files to read first
-
-- `cmd/pyry/agent_run.go:177-188` — `runAgentRun` body. The new wiring slots **between** the `parseAgentRunArgs` success and the `agentrun.WriteSettings` call. Mark trust first → settings second → print marker. Rationale in § "Ordering" below.
-- `cmd/pyry/agent_run.go:84-92` — `agentRunArgs.workdir` is the trimmed, existence-validated absolute-or-relative path. Pass it through verbatim; `MarkWorkdirTrusted` calls `ResolveWorkdir` internally (which does `filepath.Abs` + `filepath.EvalSymlinks`).
-- `internal/agentrun/trust.go:38-44` — `MarkWorkdirTrusted(homeDir, workdir)` signature + invariants (idempotent, atomic on-disk, file-locked, never logs file contents). Note `homeDir` is *explicit* — the caller resolves `os.UserHomeDir()` and passes it in.
-- `cmd/pyry/main.go:85-90` — `resolveSocketPath` is the canonical `os.UserHomeDir()` call site in this package. Match its `err != nil || home == ""` posture? **No** — see § "Error contract" below; we treat `UserHomeDir()` failure as fatal, not fall-through, because mark-trust has no sensible fallback.
-- `cmd/pyry/main.go:1203-1210` — `runInstallService` is the closest precedent: it calls `os.UserHomeDir()` and returns `fmt.Errorf("install-service: home dir: %w", err)` on failure. Mirror this exact shape (`agent-run: `-prefixed wrap, no fall-through).
-- `cmd/pyry/agent_run_test.go:23-55` — `newValidArgsFixture` is shared by every `runAgentRun` test. The HOME-redirection (`t.Setenv("HOME", t.TempDir())`) belongs here so every test that calls `runAgentRun` gets HOME isolation for free — see § "Testing".
-- `cmd/pyry/agent_run_test.go:283-320` — `TestRunAgentRun_EmitsSettingsFile`. This existing test calls `runAgentRun`; once #342 lands, `runAgentRun` writes to `~/.claude.json`. Without the fixture change, the test would mutate the developer's real `~/.claude.json`. **This is a correctness requirement, not a stylistic one.**
-- Sibling spec `docs/specs/architecture/341-agentrun-trust-helper.md` § "`MarkWorkdirTrusted` — body shape" — the helper's read-modify-write contract (file lock, json.Number, atomic rename). #342 is the first consumer; nothing in this spec re-specifies that contract.
-- Sibling spec `docs/specs/architecture/339-agent-run-settings-file.md` § "Context" — confirms `agent-run` runs as the per-spawn wrapper that #332 will exec. The dispatcher's stdout-scrape contract is the `settings-file: <path>` marker line; that contract must remain intact after #342.
-
 ## Context
 
 `pyry agent-run` will, in #332, spawn a supervised `claude` headlessly. Without `projects[<realpath(workdir)>].hasTrustDialogAccepted = true` pre-written into `~/.claude.json`, that supervised claude blocks at startup on the workspace-trust TUI dialog — fragile under PTY timing. Spike #329 established the side-step; #341 shipped the helper (`internal/agentrun.MarkWorkdirTrusted`) with full lock + atomic-write semantics. #342 is the consumer wire-up: one call site in `cmd/pyry/agent_run.go`, one error path, one integration test.

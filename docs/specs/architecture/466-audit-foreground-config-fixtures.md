@@ -1,23 +1,5 @@
 # Spec — #466: audit + migrate remaining foreground-mode Config fixtures to Bridge mode
 
-## Files to read first
-
-The developer's turn-1 read list. Each entry names the file, the relevant range, and what to extract.
-
-- `internal/sessions/pool_test.go:19-44` — `helperPool` doc-comment + conditional Bridge wiring. The intent-locking pattern (doc-comment says "tests don't call Run") that the audit treats as already satisfying AC#3.
-- `internal/sessions/pool_test.go:46-79` — `helperPoolWithSleepArgs`, the canonical Bridge-mode fixture. The 11-line doc-comment block (`pool_test.go:46-56`) is the rationale that this spec's other Bridge-additions are aligning with — copy its shape, not its verbatim text.
-- `internal/sessions/pool_test.go:147-163` — `helperPoolPersistent` doc-comment, the "tests don't call Run" shape; same pattern applies to `helperPoolReconciling` (`pool_test.go:302-315`).
-- `internal/sessions/pool_test.go:803-872` — `TestPool_Run_StartsWatcher` end-to-end (cfg literal, Bridge omission, `go func() { done <- pool.Run(ctx) }`). One of two `pool_test.go` Run-reaching sites that needs Bridge.
-- `internal/sessions/pool_test.go:967-983` — `TestPool_Resurrect_*` cfg with Bridge correctly set, including the inline rationale comment. Reference shape for the in-place style when the cfg sits inside a `New(...)` call.
-- `internal/sessions/pool_test.go:1086-1109` — `helperDummySession` using `supervisor.Config{}` (out of scope here — listed only so the developer doesn't accidentally edit it).
-- `internal/sessions/pool_cap_test.go:16-50` — `helperPoolCap`, the two-paragraph doc-comment shape used when the helper extracts a `logger` to share with `NewBridge`. Use this as the layout template for the new Bridge insertions.
-- `internal/sessions/pool_create_test.go:18-52` — `helperPoolCreate`, a second example of the logger-extraction pattern.
-- `internal/sessions/session_test.go:192-209` — `TestSession_IdleEvictionDeferredWhileAttached`, the inline-test style with `logger := …; bridge := supervisor.NewBridge(logger); cfg := Config{… Bridge: bridge …}`. Pattern for inline tests; matches the existing imports.
-- `internal/sessions/session_persist_test.go:1-10` — current import block. Adding Bridge requires importing `github.com/pyrycode/pyrycode/internal/supervisor`.
-- `internal/supervisor/supervisor.go:81` and `:444-448` — foreground-mode mechanism (`Bridge == nil` wires PTY to `os.Stdin`/`os.Stdout`) and `/dev/tty` fallback. Background context only; do not modify.
-- `internal/supervisor/supervisor_test.go` — `TestSupervisor_Foreground_NoStdinReaderLeak`. Out of scope — guards the production foreground path itself.
-- `docs/lessons.md` — search for the 2026-05-02 entry "Bridge fixtures shipped, OS-level flake class identified" for the canonical narrative.
-
 ## Context
 
 #41 surfaced a deadlock class in test fixtures that run the supervisor in foreground mode at scale. In foreground mode (`SessionConfig.Bridge == nil`) the supervisor wires the child PTY directly to `os.Stdin` / `os.Stdout`. Every `Run()` cycle spawns an `io.Copy(ptmx, os.Stdin)` goroutine; `os.Stdin` has an internal `fdMutex` that strands these goroutines with no return path, deadlocking teardown when many supervisors run concurrently (e.g. `TestPool_Supervise_ConcurrentCalls_RaceClean`'s 33-way fan-out).

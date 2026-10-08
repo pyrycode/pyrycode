@@ -6,27 +6,6 @@ Zero production behaviour changes. The diff is e2e wiring plus two stale comment
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Each entry names the symbol and what to extract.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/per_conversation_eviction_test.go` | `TestE2E_PerConversation_IdleEvictsAndReactivates`, `TestE2E_PerConversation_CapEvictsCrossDiscussion`, `startPerConvHarness`, `dialHelloPhone`, `createConversationViaPhone` | The whole file is the work surface. Note the file header comment block above the first test — it carries the stale TUI rationale. |
-| `internal/e2e/relay_v2_stream_send_test.go` | `TestRelayV2_StreamSendMessageDrainsTurn` | **The reference implementation for everything new here.** The interactive handshake, the ack-then-drain shape, the M1/M2 milestone loop, the `noise_msg`-only frame filter, and the doc comment explaining why the ack is not the turn. Transcribe its drain structure; do not invent a new one. |
-| `internal/e2e/harness.go` | `StartStreamInteractiveWithRelay` | The `config.json` write (the production `interactive_runner` toggle) and the stream child env set. Its doc comment states why stream mode sets **none** of `SESSIONS_DIR` / `INITIAL_UUID` / `TRIGGER` / `STDIN_LOG`. Also read `seedBootstrapRegistry` and `spawnWith` (flag last-wins semantics). |
-| `internal/e2e/handshake_interactive_helpers_test.go` | `driveHandshakeToOpenDaemonInteractive` | The interactive grant the structured stream requires. Compare with the non-interactive `driveHandshakeToOpenDaemon` that `dialHelloPhone` uses today. |
-| `internal/e2e/internal/fakeclaude/main.go` | `main` (the `envStreamJSON` short-circuit at the top) | Why stream mode binds no sessions dir and opens no transcript — this is what makes the idle test's `sessionsDir` / pre-created `<uuid>.jsonl` plumbing dead weight. |
-| `cmd/pyry/stream_turn_drain.go` | `startStreamTurnDrainV2` | The active-session gate — forwards only when `env.sessionID == active`. This is the invariant AC#2 depends on and the seam AC#3 mutates. |
-| `cmd/pyry/streamsup_runner.go` | `newStreamRunnerFactory` | `sink.sinkFor(cfg.SessionID)` — the per-runner sink tag, re-bound on **every** respawn. This is the mutation site for AC#3. |
-| `internal/sessions/session.go` | `runActive` | **Load-bearing, non-obvious:** the idle timer is armed once on entering active and is reset only while `attached > 0`. Turn activity does **not** reset it. See § "The reactivation window is the idle timeout". |
-| `internal/msgqueue/queue.go` | `defaultRetryInterval` | `1 * time.Second`. The other half of the same arithmetic. |
-| `internal/e2e/cap_test.go` | `waitForBootstrap`, `waitForSessionState`, `assertActive` | The registry-polling helpers both tests already use; unchanged by this ticket. |
-| `internal/e2e/realclaude/interactive_stream_resume_after_eviction_test.go` | `waitForIdleEvictionWARN` | Its doc comment carries the second stale `respawn_after_eviction_test.go` cite. Comment-only edit. |
-| `docs/knowledge/features/idle-eviction.md` | the `internal/e2e/per_conversation_eviction_test.go` paragraph | **Read only.** It carries the third stale cite and the now-false TUI rationale. Do **not** edit it — see § "Doc split". |
-
----
-
 ## Context
 
 `internal/e2e/per_conversation_eviction_test.go` starts its supervised child with `PYRY_FAKE_CLAUDE_TUI=1` while the daemon it starts runs the **stream-json** interactive runner (`selectInteractiveRunner`'s empty-string arm returns the stream factory). The defect is one-sided: the daemon speaks stream-json, the child was told to be a TUI.

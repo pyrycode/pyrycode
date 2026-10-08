@@ -3,23 +3,6 @@
 **Ticket:** [#1762](https://github.com/pyrycode/pyrycode/issues/1762) · size `s` · `security-sensitive`
 **Split from:** #1715 · sibling: #1763 (commits one arm's artifact)
 
-## Files to read first
-
-Symbol names, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/e2e/realclaude/initialize_control_record_test.go` → `initControlResultTrailer` — the exact struct the reader emits. Extract: the two field names mirror claude's own spellings (`num_turns`, `total_cost_usd`), and `TotalCostUSDPresent` is populated **from raw bytes and never derived from `TotalCostUSD`**. Its doc names this ticket as where that mutant first becomes reachable.
-- same file → `initControlFixtureRecord` — the `SendPointIndex` / `AfterSendPointSystemInitCount` / `AfterSendPointResultTrailers` paragraph group. Extract the four standing constraints: one anchor, window is `stdout_events[anchor:]`, both edges legitimate with no presence flag, and no count gets a field of its own. **This is also the paragraph this slice retargets** (see § Design, step 4).
-- same file → `initControlTrailerFields` — the hand-written per-field listing for the nested trailer type. Extract: it exists because `reflect.TypeOf(initControlFixtureRecord{}).NumField()` cannot see a nested type. This slice adds no field to either type, so this listing is **unchanged**; read it to confirm that, not to edit it.
-- `internal/e2e/realclaude/initialize_control_probe_test.go` → `initControlSummarize` and `initControlSummary` — the shape precedent this slice copies: a package-private struct-returning pure read over recorded raw bytes, deciding presence on the bytes rather than on a decoded value, skipping a line it cannot decode rather than aborting.
-- same file → `TestInitControlSummarize_ReadsAllThreePlacements` — the offline table-test idiom: `t.Parallel` on parent and subtest, `reflect.DeepEqual` against a `want` struct, one `t.Errorf` that says what the field feeds downstream.
-- same file → `runInitControlChild` — the fill site. Extract three positions: the `writeLine("control request", …)` call, the post-join `lines := rec.snapshotLines()`, and the `initControlFixtureRecord` literal where the three fields get assigned.
-- same file → `TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm` and `TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath` — the two precedents for an offline test living in the exec-ing file, and (in the second one's doc) the stated reason a test belongs in a **banned** file when it can.
-- `internal/e2e/realclaude/set_permission_mode_probe_test.go` → `setModeRecorder`, its `add` method, and `snapshotLines` — the `"type":"system"` + `"subtype":"init"` switch that **is** the count's definition, the fact that a non-JSON line is retained as a JSON *string*, and the only accessor the anchor can be read through.
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans` and `TestFinOfflineFilesReachNoExecHelper` — the map is keyed by **file name**; the entry to copy whole is `initialize_control_record_test.go`'s seventeen names; the matcher handles a bare `*ast.Ident` and a dotted selector as separate rules and is deliberately built without `parser.ParseComments`.
-- `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` — **read by hand only, never from the test.** Twelve lines; `system`/`init` at index 0; five `system`/`thinking_tokens`; the single `result` at index 9 carrying `num_turns: 1` and `total_cost_usd: 0.0219814`; `control_response` at 10; `system`/`background_tasks_changed` at 11. It predates #1723 and carries none of the three keys.
-- `docs/knowledge/features/e2e-realclaude.md` § `initialize_control_record_test.go` (#1701, extended #1722, #1723, #1731) — the field group's history, including the "until #1715 fills them … an unpopulated field" claim this slice makes stale. Read-only; the documentation phase owns this file.
-- `CODING-STYLE.md` — the documented ignored-error idiom, `_ = ptmx.Close() // best-effort cleanup, child already exited`. The per-field decode below is the same shape and needs the same comment.
-
 ## Context
 
 #1723 added three fields to `initControlFixtureRecord` and deliberately left them unpopulated. A live re-run today writes `send_point_index: 0` and leaves the other two at their zero values, and the record's own doc says that reading is an **unpopulated field**, not a `before_first_turn` capture. This slice fills all three for the one send point the driver has: the control line written after a completed turn.

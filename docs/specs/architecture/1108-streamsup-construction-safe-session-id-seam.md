@@ -32,20 +32,6 @@ This section, plus the doc comment the developer writes on the new field (see AC
 
 ---
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:91-174` — `Config` struct; add the new field near `ResolveSessionID` (lines 112-120). Read that field's doc comment — the new one mirrors its "resolved fresh each spawn / nil preserves --continue" framing but states the inverse (eager, construction-fixed, PTY-ignored).
-- `internal/supervisor/supervisor.go:736-740` — the *only* place the PTY spawn path resolves its id (`ResolveSessionID()` → `buildClaudeArgs`). Confirm the new field is **not** wired in here — that disconnect is the byte-identical guarantee.
-- `internal/sessions/pool.go:443-463` — bootstrap `supCfg` literal in `Pool.New`; add `SessionID: string(bootstrapID)`. `bootstrapID` (declared 375, set at 383 warm / 407 cold) is fully resolved and non-empty before this literal.
-- `internal/sessions/pool.go:504-510` — `newRunner(supCfg)` bootstrap call site; the new field must be set on `supCfg` before this line.
-- `internal/sessions/pool.go:1284-1319` — `buildSession`: `--session-id <id>` is already baked into `ClaudeArgs` (1284); add `SessionID: string(id)` to the `supCfg` literal (1297-1307). This is the second construction site; `id` is the parameter.
-- `internal/sessions/runner.go:38-46` — `RunnerFactory func(cfg supervisor.Config) (Runner, error)`; the future consumer reads `cfg.SessionID`. No change here — just the contract this seam feeds.
-- `internal/sessions/runner_test.go:1-79` — existing `fakeRunner` + `TestRunnerFactory_InvokedAtEveryConstructionSite`. The factory closure already receives `cfg supervisor.Config`; AC-4 extends it to capture and assert `cfg.SessionID` at each site.
-- `internal/supervisor/args_test.go:1-107` — golden `TestBuildClaudeArgs` table + the input-mutation guard. AC-2's guard test lives alongside these; `buildClaudeArgs`'s signature (no `SessionID` param) is the structural half of the proof.
-- `docs/knowledge/features/streamsup-package.md` § "Public API" + § "`buildArgs`" — proves `streamsup.Config.SessionID` is eager/required and the id is `--resume`d verbatim (no rotation). Grounds the `/clear` decision.
-
----
-
 ## Design
 
 ### Change 1 — `supervisor.Config`: add `SessionID string` (ignored by the supervisor)

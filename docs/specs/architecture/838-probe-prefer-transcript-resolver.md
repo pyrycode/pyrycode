@@ -2,19 +2,6 @@
 
 **Ticket:** [#838](https://github.com/pyrycode/pyrycode/issues/838) · split from #828 · size **S** · `security-sensitive`
 
-## Files to read first
-
-- `internal/sessions/reconcile.go:57-122` — `mostRecentJSONL` + `newTranscriptResolver` (the mtime baseline this ticket replaces on the probe path and **keeps** as the AC5 no-lsof fallback) + `uuidStemPattern`/`jsonlExt` (reused by the new guard). New code lands in this file.
-- `internal/sessions/pool.go:422-434` — the wiring site: `supCfg.ResolveTranscript = newTranscriptResolver(cfg.ClaudeSessionsDir)` at `429`, `supervisor.New(supCfg)` at `431`. `supCfg` is copied **by value** into the supervisor before the bootstrap `Session`/`Pool` exist — the root of the late-bound-PID subtlety.
-- `internal/sessions/pool.go:30` — `newProbe = rotation.DefaultProbe` (the probe factory, already present; reused to construct the resolver's probe).
-- `cmd/pyry/interactive_turn_stream_v2.go:250-367` — the shipped sibling `resolveOwnBootstrapJSONL` (#827). **Copy the guard *shape*, invert the not-found *convention*** (see § Error handling). Note it also carries `resolvedOnce`/`sawEmpty` cold/warm offset state we deliberately drop.
-- `cmd/pyry/interactive_turn_stream_v2.go:33-46` — `availabilityReporter` interface + `bootstrapProbeUsable`. Mirror these unexported into `internal/sessions` (same duplication direction the sibling already took for `jsonlStemPattern`).
-- `cmd/pyry/relay.go:413-422` — the sibling's live-PID wiring `pidFn := func() int { return sup.State().ChildPID }`. Our `New` must reproduce this **without** a constructed `sup` in scope yet.
-- `internal/supervisor/supervisor.go:352-455` — `confirmViaTranscriptGrowth` (the consumer). Line `409` baseline-resolve, line `410-423` the **stochastic Committed-chip fallback a non-nil error diverts to**, `grew()` at `453`. This is why AC3's `("", 0, nil)` convention is load-bearing.
-- `internal/sessions/rotation/probe.go:18-20` + `probe_darwin.go:17-38` — `Probe` interface (`OpenJSONL(pid) (string, error)`) and `noopProbe.Available() == false` (no-lsof fallback signal). `DefaultProbe` on Linux always returns a usable `linuxProbe{}`.
-- `internal/sessions/reconcile_test.go:177-246` — the `newTranscriptResolver` test idiom (`touchJSONL`, `t.TempDir()`, direct constructor invocation) the new tests mirror.
-- `internal/sessions/pool_test.go:799-801` — the `newProbe` package-var override pattern (available if a live-pool wiring test is added; the resolver's own tests inject a fake probe directly instead).
-
 ## Context
 
 PR #827 (`88b2e1e`) made the **interactive turn/modal stream** resolver probe-preferred: it tails the `<uuid>.jsonl` the daemon's own claude child actually holds open (via `rotation.Probe` + the child PID) instead of the newest file by mtime, so a second interactive claude in the same shared `~/.claude/projects/<encoded-cwd>/` folder can't redirect the tail. It deliberately deferred the **other** live-child bootstrap-transcript consumer:

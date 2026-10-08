@@ -3,21 +3,6 @@
 **Ticket:** #782 · **Size:** S · **Labels:** `security-sensitive`
 **Chosen mechanism:** (a) read-through reload at handshake time — self-contained in the daemon, no coupling of `pyry pair` to a running daemon.
 
-## Files to read first
-
-- `internal/devices/registry.go:37-53` — `Load`'s ENOENT/empty/malformed contract. **`Reload` mirrors it exactly** (ENOENT & zero-byte → empty set, no error; malformed/other-read-error → error). Extract a shared `readDevicesFile(path) ([]Device, error)` helper if it reads cleanly; otherwise duplicate the branch logic.
-- `internal/devices/registry.go:63-107` — `Save`: atomic temp+rename, sorts by (PairedAt, Name). Reconcile need **not** sort — Save re-sorts on write.
-- `internal/devices/registry.go:109-179` — `Add`/`Remove`/`List`/`FindByTokenHash`/`UpdatePushRegistration`: the in-memory model + the `r.mu` discipline `Reload` must join.
-- `internal/devices/auth.go:32-46` — `Validate`: the security contract (empty-token short-circuit; never logs/returns token, hash, or name). `Reload` runs **before** `Validate`, **never inside it** — do not add I/O to `Validate`.
-- `internal/relay/v2session.go:1169` — the sole production `Devices.Validate(...)` call site. Insert the reload immediately before it (post-IK, pre-Validate, on the manager Run goroutine).
-- `internal/relay/v2session.go:510-583` — `V2SessionConfig`: add the optional `DevicesPath string` field after `Devices` (line 526), following the "Optional: when empty …" doc idiom already used by `Handlers`/`Snapshotter`.
-- `internal/relay/v2session.go:689-693` — `NewV2SessionManager`: `DevicesPath` is **optional**, so do **not** add it to the required-field validation/panic list.
-- `internal/relay/handlers/register_push_token.go:80-95` — `UpdatePushRegistration` → `Save`. Insert `reg.Reload(registryPath)` (best-effort) immediately before the `Save`. Handler signature already carries `registryPath`; unchanged.
-- `cmd/pyry/relay.go:123` — startup `devices.Load(resolveDevicesPath(instanceName))`; and `:308-347` — `V2SessionConfig{...}` construction: add `DevicesPath: resolveDevicesPath(instanceName)`.
-- `internal/e2e/relay_v2_handshake_test.go:55-118` — `startV2Harness` + `dialPhone`; `:198-250` — `testV2HappyPath` to mirror for the new reload e2e subtests. Package helpers (`sendNoiseInit`, `readInnerFrame`, `buildHelloEarly`, `driveHandshakeToOpen`) are reusable.
-- `internal/devices/registry_test.go` — existing table + concurrent-readwrite race probe to mirror for `TestReload`.
-- `internal/relay/handlers/register_push_token_test.go:120-170` — existing handler-test scaffold to mirror for the clobber-regression test.
-
 ## Context
 
 `pyry pair` runs as a **separate process**: `Load(devices.json)` → `Add` → `Save` (atomic rename). The daemon `devices.Load`s the registry **once at startup** (`cmd/pyry/relay.go:123`) and validates every handshake against that in-memory snapshot (`internal/relay/v2session.go:1169` → `Registry.Validate`). A device paired after the daemon started is on disk but absent from memory → its hello is rejected until the service restarts. Affects every relay client (mobile now, desktop next; both speak Mobile Protocol v2).

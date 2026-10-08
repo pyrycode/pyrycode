@@ -5,19 +5,6 @@ status: spec
 size: S
 ---
 
-# Files to read first
-
-- `internal/e2e/harness.go` — full file (~460 lines). The `Start`/`StartIn`/`spawn`/`childEnv`/`ensurePyryBuilt`/`Harness` shape that the new primitive mirrors and extends. Pay particular attention to:
-  - L77-99 — `Harness` struct (you add one field)
-  - L101-132 — `ensurePyryBuilt` pattern: `sync.Once` + `PYRY_E2E_BIN` env short-circuit. `ensureFakeClaudeBuilt` is a near-clone with a different env var name and a different `go build` target.
-  - L237-269 — `spawn`'s body. This is what gets factored into `spawnWith` (or sibling `spawnRotation`); the existing two callers (`StartIn` L164, `StartExpectingFailureIn` L195) must continue to compile and behave identically.
-  - L294-307 — `childEnv`. The new primitive layers the three `PYRY_FAKE_CLAUDE_*` vars on top of this.
-- `internal/supervisor/supervisor.go:230-234` — `cmd.Env = append(os.Environ(), s.cfg.helperEnv...)`. The supervised child inherits pyry's env, which is how the harness-set `PYRY_FAKE_CLAUDE_*` vars reach fake-claude. No supervisor changes needed.
-- `internal/e2e/internal/fakeclaude/main.go` — full file (~90 lines). Already landed (#122). The env-var contract this ticket wires up: `PYRY_FAKE_CLAUDE_SESSIONS_DIR`, `PYRY_FAKE_CLAUDE_INITIAL_UUID`, `PYRY_FAKE_CLAUDE_TRIGGER`. The binary's import path is `github.com/pyrycode/pyrycode/internal/e2e/internal/fakeclaude`.
-- `docs/specs/architecture/122-fake-claude-test-binary.md` — sibling slice's spec. Section "End-to-end trajectory" describes the binary's externally-observable timeline; this ticket's test polls against the same trajectory but spawns it via pyry instead of `exec`'ing it directly.
-- `cmd/pyry/main.go:174-180, 251-257` — confirms `-pyry-claude`, `-pyry-workdir`, `-pyry-idle-timeout` flag names. No changes; just the surface the new constructor pokes at.
-- `docs/lessons.md` § "Claude session storage on disk" — encoded-cwd rule. **Not** load-bearing for this ticket: the harness hands fake-claude a sessions directory directly via env (`PYRY_FAKE_CLAUDE_SESSIONS_DIR`), so neither the harness nor the binary encodes a path. Read so you understand why we bypass the encoding entirely here — the next ticket (rotation watcher driver) will care, this one does not.
-
 # Context
 
 Today the e2e harness hardcodes the supervised child to `/bin/sleep 99999` (`harness.go:248-252`). That child opens no JSONLs, so production code that observes filesystem behaviour of the supervised child — notably `internal/sessions/rotation` — cannot be exercised end-to-end through pyry.

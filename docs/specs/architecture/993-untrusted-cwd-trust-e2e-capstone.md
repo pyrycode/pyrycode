@@ -2,18 +2,6 @@
 
 **Size:** S · **Security-sensitive:** yes · Split from #988 · Capstone over the shipped #1013 + #1014 seams.
 
-## Files to read first
-
-- `internal/e2e/relay_v2_modal_answer_test.go` — **the harness to copy.** `bringUpModalHarness` (pair with `--allow-remote-permissions`, align sessions dir, pre-create `<initialUUID>.jsonl`, `StartRotationWithRelay` + `PYRY_MOBILE_V2=1`, dial, `driveHandshakeToOpenDaemonInteractive`, `sealSend`/`nextEnv` helpers), `awaitModalShown` (drop trigger → read `TypeModalShown` off the wire non-vacuously), and the two test bodies (answer via `TypeModalAnswer`, assert on the decrypted stream + stdin log). Copy the structure verbatim; swap the permission trigger for the trust trigger and the assertions for this ticket's.
-- `internal/e2e/relay_v2_queue_drain_test.go:60-132, 280-345` — `seedBoundConversation` usage (binds a conversation to the bootstrap session so `send_message` resolves — this is AC-1's "creates a conversation"), the busy→free release pattern, and how **drain is observed**: `queue_state` shrinks to empty only on a **confirmed commit** (transcript growth), and the delivered prompt then appears in the stdin log. Both are the AC-3 "the turn ran" signals.
-- `internal/e2e/internal/fakeclaude/main.go:207-261` (`modalScreen`, `modalClearScrollRows`, `modalClearScreen` — the permission-modal fixture + clear machinery to mirror for trust), `:321-460` (`main` loop: startup idle glyph gate, raw-mode gate, stdin-reader gate, the one-shot trigger gates, `turnPending`→`appendTurnGrowth`), `:640-720` (`containsBareESC`, `appendTurnGrowth`, `appendTurnEnd`). The trust simulation is a sibling of the existing modal-trigger + clear-on-answer machinery.
-- `internal/e2e/internal/fakeclaude/modal_detect_test.go` — the **untagged fast de-risk** pattern (imports `tui-driver`, renders the fixture through `DetectModalClass`, asserts the class). Mirror it for the trust fixture and the trust-clear fixture.
-- `cmd/pyry/modal_resolve_v2.go:82-198, 214-338` — the shipped deny/timeout emit: `emitFolderNotTrusted` → `notifyBlocked(activeConv(), "folder not trusted")`; `ResolveTimeout` emits when `out.Class == classTrust`; `ResolveAnswer` emits when `out.Class == classTrust && outcome == OutcomeDeny` (`optExit`); trust `optProceed` → `AcceptTrust` (no emit). Read-only — do not modify.
-- `cmd/pyry/session_error_v2.go:116-171` — the `session_error` broadcast: fans `TypeSessionError{ConversationID, Code: CodeSessionBlocked, Message}` to every **interactive** conn. Confirms the harness's interactive phone receives it.
-- `internal/protocol/messaging.go:247-251` (`SessionErrorPayload`), `internal/protocol/codes.go:34` (`CodeSessionBlocked = "session.blocked"`), `:476` (`TypeSessionError = "session_error"`), `:275` (`TypeModalShown = "modal_shown"`) — the wire types to decode and assert.
-- tui-driver (module cache, pinned `v1.10.0`): `pkg/tuidriver/trust.go` (`gridHasTrustDialog`: header `"Quick safety check"` + a `❯`-marked numbered option row within 3 rows below), `pkg/tuidriver/permission.go:45` (`modalOptionRe`), `:54` (`anchorTrustHeaderSpaced`), `pkg/tuidriver/ready.go:115` (`Readiness.TrustModal = gridHasTrustDialog(g)`). This is the single screen shape that makes **both** `WaitReady` hold the turn **and** `DetectModalClass` classify trust.
-- `docs/knowledge/codebase/1013.md`, `docs/knowledge/codebase/1014.md` — the two shipped tickets this capstone certifies (hold-while-pending; give-up exemption + typed error). Read for the exact seams and the "no auto-trust" property under test.
-
 ## Context
 
 #988 forbids auto-trusting a remote-driven interactive session's cwd: claude's startup "Quick

@@ -3,14 +3,6 @@
 Ticket: [#361](https://github.com/pyrycode/pyrycode/issues/361)
 Size: XS (pure plumbing)
 
-## Files to read first
-
-- `internal/e2e/fakeclaude_test.go:1-10` — example of an `//go:build e2e` file in the existing e2e package; mirror the build-tag header style.
-- `internal/e2e/harness.go:1-10` — confirms the existing tag form is `//go:build e2e || e2e_install`. The new tag is a sibling, not an alias.
-- `Makefile:18-30` — existing `.PHONY: test` target and the surrounding section where the new `e2e-realclaude` target slots in.
-
-(No codegraph context entries: there are no existing symbols in `internal/e2e/realclaude` to look up. This ticket creates the directory.)
-
 ## Context
 
 Phase C on 2026-05-14 broke because `internal/agentrun/drive_e2e_test.go` uses `TestHelperProcess` fakes that skip the trust boundary with the real `claude` binary (the `/doctor` prompt-poisoning class of bug). Subsequent tickets (#362, #363) will add real-`claude` integration tests, but they need a build-tag-gated home that does NOT run in `make test`.

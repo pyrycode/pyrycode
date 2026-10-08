@@ -1,18 +1,5 @@
 # #1929 — stop the `mcp-approve` client cutting short an approval the daemon is still holding
 
-## Files to read first
-
-- `cmd/pyry/mcp_approve.go` → `approveServer`, `newMCPApproveServer`, `toolsCall`, `mcpApproveClientMargin` — the whole surface this ticket edits. `toolsCall`'s `cctx` block is the one behavioural change here; everything else in the file is doc.
-- `internal/control/client.go` → `Approve`, `request`, `DialTimeout` — `Approve`'s doc comment is a *contract* that has to change, not be reworded. `request` is shared by ten sub-second verbs and must keep its bound.
-- `internal/control/dial.go` → `dial`, `dialWithRetry`, `dialRetryBudget` — read this to confirm the dial's bound is independent of the ctx deadline (`dialWithRetry` wraps an undeadlined ctx with `DialTimeout` *for the dial only*). This is what keeps AC 3's first half reachable after the read goes deadline-free.
-- `internal/control/server.go` → `handleApprove`, `watchApproveConn` — the daemon half. `handleApprove` clears its own conn deadline before `Await`; `watchApproveConn` maps a client disconnect to a deny. Read these to see why a client-side give-up *terminates* the approval rather than merely losing a message.
-- `cmd/pyry/mcp_approve_test.go` → `startApprovePeer`, `replyPeer`, `holdPeer`, `newApproveServer`, `invokeToolsCall`, `assertVerdict`, `TestMCPApproveServer_ClientDeadline`, `TestControlApprove_UndeadlinedCtxReturns` — the fake-peer kit to build on, and the two tests whose premises this ticket invalidates.
-- `cmd/pyry/approval_timeout_test.go` → `TestApprovalTimeout` — confirm for yourself that the numeric default-window pin lives here (`approvalTimeout() != 10*time.Minute`) before retiring the table in `mcp_approve_test.go`. Nothing may be kept alive in that table merely to host that pin.
-- `cmd/pyry/main.go` → `approvalTimeout`, `mcpApprovalTimeout`, `envApprovalTimeout` — the accessor keeps its daemon-side caller (`SetApprovalRegistry` in the composition root). This ticket removes only the *client's* use of it.
-- `internal/e2e/internal/fakeclaude/main.go` → `approveDialTimeout` — its doc comment asserts `control.Approve` *requires* a ctx deadline ≥ the daemon window. That clause becomes false; correct it.
-- `docs/knowledge/features/pyry-mcp-approve-command.md` § "The fail-closed core" and § "`internal/control.Approve` client helper" — the written statement of the coupling being removed. **Read-only for you**; the documentation phase folds this ticket in.
-- `docs/knowledge/features/control-plane-approve-mcp-approve-verb-forward-to-permbridge.md` § "`handleApprove`: guard order, then block" — the daemon's fail-closed structure (allow is reachable only through the trusted in-process resolver). The security argument in this spec rests on it.
-
 ## Context
 
 `pyry mcp-approve` is the `--permission-prompt-tool` MCP server claude blocks on for every non-allowlisted tool use. Each `tools/call` becomes one control-socket `mcp.approve` request; the daemon parks it in `permbridge`, and the daemon's verdict becomes the tool result.

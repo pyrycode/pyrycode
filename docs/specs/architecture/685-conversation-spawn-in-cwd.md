@@ -13,23 +13,6 @@ stops being inert stored metadata and becomes a validated spawn input.
 
 ---
 
-## Files to read first
-
-- `internal/relay/handlers/create_conversation.go:46-180` — the handler this ticket edits. **`SessionCreator` interface (57-59)** = the seam to widen; **cwd resolution (101-104)** = where null→`defaultCwd`; **call site (124)** = `creator.Create(mintCtx, string(id))`; **error mapping (126-137)** = all-failures→retryable `server.binary_offline`; **SECURITY comment (74-85)** = the deferral text this ticket must rewrite.
-- `cmd/pyry/main.go:660-669` — `sessionMinter` adapter (the `SessionCreator` impl to extend). Note the `poolResolver`/`sessionRouter` precedent for type-narrowing seams that live here.
-- `cmd/pyry/main.go:420-468` — `confineWorkdirToHome` + `withinDir`: canonicalises candidate **and** `$HOME` via `EvalSymlinks`, boundary-checks with `filepath.Rel`, returns the realpath. **Reuse verbatim.**
-- `cmd/pyry/main.go:502-519` — the daemon bootstrap's `confineWorkdirToHome → trustMark → spawn-in-realpath` sequence. **This slice mirrors it for the per-conversation `Cwd`.**
-- `cmd/pyry/agent_run.go:24-32` — `trustMark` (= `trust.MarkWorkdirTrusted`), the overridable test-seam `var`. Reuse; tests override it.
-- `internal/sessions/pool.go:904-950` — `Pool.CreateIn(ctx, label, spawnDir)` (#684). `spawnDir==""` → shared `tpl.WorkDir` (today's behaviour); non-empty → used **verbatim**, NOT validated. Callers pass a pre-resolved realpath.
-- `internal/agentrun/trust/trust.go:28-46` — `MarkWorkdirTrusted` contract: idempotent, atomic, **returns the resolved realpath** (`agentrun.ResolveWorkdir` = `Abs`+`EvalSymlinks`). Best-effort, no file lock.
-- `internal/conversations/conversation.go:40-42` — `Cwd` field: absolute, captured at create time, never updated, phone-influenceable.
-- `internal/protocol/codes.go:7-31` — error codes. `CodeProtocolMalformed` (non-retryable in this handler's existing usage) vs `CodeServerBinaryOffline` (retryable).
-- `cmd/pyry/workdir_trust_test.go` — the exact test pattern for confine+trust (under-home accept, outside-home reject, symlinked-HOME accept, escaping-symlink reject). **Mirror it for the new helper.**
-- `internal/relay/handlers/create_conversation_test.go:16-60` — `stubSessionCreator` (extend to record `spawnDir` + return a configurable rejection) and `newCreateConvConn` helper.
-- `docs/protocol-mobile.md:612-633` — error-code table; application codes are **"unchanged from v1"** (the constraint behind reusing `protocol.malformed` rather than minting a new code).
-
----
-
 ## Context
 
 `create_conversation` already mints and binds a dedicated session per

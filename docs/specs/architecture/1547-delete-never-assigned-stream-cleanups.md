@@ -5,26 +5,6 @@
 
 ---
 
-## Files to read first
-
-All of these are in `cmd/pyry`. Resolve every symbol with `codegraph_search` / `codegraph_node` — the line
-numbers in the ticket body were measured at `main` 2e33ffe and the file has since drifted by roughly ninety
-lines, so **do not navigate by them**.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/relay.go` | `startRelayV2` | The whole function. It is the only file the diff may touch. Four comment blocks inside it and one `var` block are the work. |
-| `cmd/pyry/relay.go` | `relayWiring` | The **live** field list. `streamSink`, `approvals`, `claudeSessionsDir`, `active`, `busy` exist; **`sup` and `bridge` do not** — that matters for site 3 below. |
-| `cmd/pyry/relay.go` | `startStreamTurnDrainV2` call inside `startRelayV2` | The sole assigner of `streamDrainCleanup`, sitting under the `w.streamSink != nil` guard. This is why AC2's nil-guard stays. |
-| `cmd/pyry/stream_turn_drain.go` | `startStreamTurnDrainV2` | Its doc comment already states the true contract ("cleanup blocks until the goroutine exits"). Mirror that vocabulary when rewriting site 2. **Its own body carries residue mentions of `startInteractiveTurnStreamV2` — out of scope, leave them.** |
-| `cmd/pyry/modal_resolve_v2.go` | `streamApprovalBridge.Surface` | The **only live producer** of `modalReg` entries (it calls `modalbridge.Registry.Record`). Site 1's rewrite names this instead of the deleted modal stream. |
-| `cmd/pyry/modal_resolve_v2.go` | `newStreamApprovalBridge` | Constructed inside `startRelayV2` **after** `modalReg` and before `mgr.Run` — so a forward "below" reference retargeted at it is still accurate. |
-| `cmd/pyry/relay.go` | `newModalResolverV2` call + the `OutstandingModals` field of the `V2SessionConfig` literal | The two live **consumers** of `modalReg` (inbound resolve / deny-on-timeout, and reconnect replay via `modalReg.Snapshot`). Site 1 must describe producer→consumer truthfully. |
-| `CODING-STYLE.md` | § "Comments — Citing Other Code" | The citation rule the rewritten comments are graded against. `make cite-guard` runs inside `make check` (see `Makefile`'s `check` target). |
-| `docs/knowledge/features/relay-package.md` | § dispatch / reconnect-state accessors | Confirms `startRelayV2` is the sole v2 composition root. It names **neither** deleted starter and **neither** deleted variable — verified against a control, so no evergreen doc is owed an update. |
-
----
-
 ## Context
 
 `startRelayV2` declares three cleanup funcs in one `var` block. Only `streamDrainCleanup` is ever assigned;

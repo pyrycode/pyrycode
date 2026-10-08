@@ -7,37 +7,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trailer_admissibility_test.go:102-160` | The two shipped value spaces verbatim — five `gate-*`, seven `admit-*`. Your eleven values must be pairwise-distinct from all twelve, and AC5's closure test asserts it. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:164-197` | `trailGateResult` and `trailAdmitResult`. Both are documented trap-free by construction — that is why this ticket's input record may hold them whole. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:242-320` | `trailGate`'s decision order. **The shape to mirror**: the out-of-contract value is a guard at the top, never a switch default. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:356-465` | `trailAdmitAttribution` — its two ordering arguments, and the exact preconditions of the proof arm (`Killed` + `LineCount == 1` + reason not `max_turns`). § Composition below depends on these. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:473-492` | `trailIsGateValue` / `trailIsAdmitValue`. AC1's out-of-contract arm **calls** these; it does not re-derive membership. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:518-573` | `trailGateCases()` — eight shipped gate fixtures. Reuse them for the composition rows rather than hand-building gate results. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:586-656` | `TestTrailAdmissibilityConstantsAreClosed` — **the test AC5 says to extend**, not to copy. Its union map, its zero-record pin, and why one map beats a third one-space-at-a-time call. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:856-904` | `TestTrailGateThenAdmit` — the composition precedent, including the "invoked exactly twice" assertion. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:915-961` | `TestTrailAdmissibilityRecordsCarryNoCapturedBytes` — the marshal-and-search shape AC2 requires, and the `trailNeedle` reuse. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:73-90` | The three `trailBoundFrom*` values and why `trailBoundFromStart` bounds nothing. AC3's discriminator. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:98-137` | `trailScanResult` and — at `:125-126` — `trailObservation`'s **embedding**. This is why corroboration takes `BoundFrom` as a plain value and never the observation. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:300` | `trailNeedle`. Reuse it; do not mint a second needle. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:120-135` | `pinScan` — `Matches` (verbatim argv), `MatchCount`, `RowsScanned`. Take the two counts; never the slice. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:178-197` | `pinScanArgv`'s **zero-`pinScan`-on-error** contract, and its own note that a consumer's error gate must not cross-assign with the per-pid verdict. AC4 is that obligation landing on this classifier. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:204-232` | The four `pinState*` values, and `pinStateColumns`' never-add-`command` prohibition that AC2 mirrors onto this outcome record. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:245-253` | `pinStateOutcome` — carries no command column **by construction**. That is what makes it admissible as an input here. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:1142-1149` | `pinIsVerdict` — the shipped membership predicate over the four states. **The ticket's reuse inventory missed it**; call it, do not write a fresh `switch`. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:623-753` | `tdnDecideAfter` — the classifier this one must **not** be. Nine `tdnDispositionSkipped` returns in one body (verified: 9 in this function, 20 in the file). |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:858-868` | `tdnVerdictSummary` — renders `pid=N verdict` and nothing else. Reuse for the corroboration summary. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:404-438` | The real producer of the pyry-exit observation: the SIGTERM, then `probePyryExitGrace`, then "any after-reading would be about a live pyry". |
-| `internal/e2e/realclaude/teardown_liveness_test.go:112-127` | `tdnReapOutcome` — `LineCount` is what makes the proof arm's "exactly one anchored line" precondition checkable. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:111-125, :945-950` | `reachMaxCommandBytes`, `reachCapCommand`. Every `Detail` goes through `trailDetail`, which wraps this. |
-
-Not code, read before writing prose: `docs/knowledge/codebase/1270.md` (**especially § Lessons learned** — the parked SHOULD FIX this ticket inherits), `docs/specs/architecture/1270-trailer-and-attribution-admissibility.md` § Design and § Security review, and `docs/knowledge/codebase/1266.md`.
-
----
-
 ## Size decision — recorded, because two red lines trip
 
 Projected: **~900–950 lines in one new file**, plus **~25 lines edited** in `trailer_admissibility_test.go` for AC5's closure test. Eleven outcomes and nine contract sub-cases give **twenty** reject branches. Both the ~600-line red line and the ~10-branch red line trip.

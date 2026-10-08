@@ -8,28 +8,6 @@ The reconnect **consumer** of mid-turn replay. A phone advertises where it left 
 
 ---
 
-## Files to read first
-
-| Path / range | Extract |
-|---|---|
-| `internal/eventring/ring.go:140-183` | `Ring.After(convID, afterID) (events, gap)` — the **3-way classification** this slice consumes: caught-up `(nil,false)` / gap `(nil,true)` / replay `(events,false)`. `Event{ID,Type,Payload,TS}` at `:53`. Replay reads this; nothing in the ring changes. |
-| `internal/relay/v2session.go:734-948` | `handleNoiseInit` — the reconnect handshake. The hello is decoded at `:815-824` (`helloPayload`); the success tail (`:925-947`) sends `noise_resp`, sets `V2StateOpen`, creates the push queue under `pushMu`. **The replay hook goes at the tail of this success path.** |
-| `internal/relay/v2session.go:1262-1379` | `handleRequestSnapshot` / `snapshotReplyError` — the established **inline control-reply via `forwardEnvelope`** pattern (seal immediately on the Run goroutine, bypass the buffered push stream). The replay + resync emit mirror this exactly. |
-| `internal/relay/v2session.go:1754-1799` | `forwardEnvelope` — the single seal-and-forward path. The `V2StateOpen` gate is here; the **replay-watermark guard** is added here. |
-| `internal/relay/v2session.go:1213-1252` | `handleRekeyRequest` + `emitRekeyRequest` (`:1400-1456`) — the **payload-less / inline-anonymous-struct control envelope** precedent (`TypeRekeyRequest` has no named payload struct). The resync marker mirrors this — no new `protocol` payload type. |
-| `internal/relay/v2session.go:463-528` | `pushMu` doc + `NewV2SessionManager` — `pushMu` is the leaf lock that lets an off-Run goroutine reach manager state without touching Run-owned `m.sessions`. The replay-source setter reuses it. |
-| `internal/protocol/handshake.go:24-48` | `HelloClientPayload` + the `LastSeenTS`/`Capabilities` `omitempty` precedent the new `LastEventID` field mirrors (key absent → byte-identical round-trip). |
-| `internal/protocol/codes.go:64-125` | The v2-only `Type*` const blocks (`TypeRekeyRequest`, `TypeRequestSnapshot`/`TypeScreenSnapshot`) + the **"MUST NOT appear in v1TypeSet; partitioned in compat_test.go's `v2OnlyTypes`"** discipline `TypeResync` must follow. |
-| `internal/protocol/compat_test.go:84-145` | `v2OnlyTypes` (test-local) — `TypeResync` must be added here or the disjoint-partition drift detector fails. |
-| `cmd/pyry/interactive_turn_v2.go:67-117` | The emitter — `ring *eventring.Ring` (`:93`) is **emitter-owned, unexported, no accessor**; created in the constructor (`:115`). `cursorReader.CurrentConversation()` keys ring appends (`Handle`, `:131`). This is the ring the manager must read. |
-| `cmd/pyry/interactive_turn_stream_v2.go:45-52` | `startInteractiveTurnStreamV2(... mgr *relay.V2SessionManager ...)`; `emitter := newInteractiveTurnEmitterV2(sup, mgr, logger)`. **The one-line `SetReplaySource` wiring goes immediately after `:52`.** `mgr` is concrete; `emitter.ring` is same-package. |
-| `internal/supervisor/supervisor.go:261` | `func (s *Supervisor) CurrentConversation() string` — the cursor (#312). `sup.CurrentConversation` (method value, `func() string`) is the conversation-resolution seam. **No new supervisor plumbing.** |
-| `docs/knowledge/codebase/646.md` (§ Concurrency, § Patterns) | Why `After` is callable off the emitter goroutine (the ring's own mutex), and why durable `event_id` ≠ per-conn `env.ID`. |
-| `docs/knowledge/codebase/649.md` (§ Patterns) | `Envelope.EventID *uint64 json:"event_id,omitempty"` — the durable cursor the phone learned outbound and now advertises back. |
-| `internal/relay/v2session_test.go` (esp. `startManager`, the handshake/initiator helpers, frame-decrypt helpers) | The harness the replay tests reuse: drive a real Noise handshake with a hello carrying `last_event_id`, decrypt the forwarded frames, assert. |
-
----
-
 ## Context
 
 ADR 025 § Backpressure / replay specifies the reconnect contract: the daemon keeps a bounded per-conversation event ring; a phone records the latest durable `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id`; the daemon replays the missed tail or signals a resync if the position fell off the bounded window. #646 built the ring + `After`. #649 surfaced `event_id` on the live outbound wire so a phone *has* a position to advertise. This slice closes the loop: accept `last_event_id` inbound and act on it.

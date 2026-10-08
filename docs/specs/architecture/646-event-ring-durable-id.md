@@ -2,18 +2,6 @@
 
 **Ticket:** [#646](https://github.com/pyrycode/pyrycode/issues/646) · split from #611 · EPIC #596 (Phase 2 structured streaming) · **size: S** (confirmed) · **not** `security-sensitive`
 
-## Files to read first
-
-- `cmd/pyry/interactive_turn_v2.go:66-105` — `interactiveTurnEmitterV2` struct + `newInteractiveTurnEmitterV2`. The emitter is the single owner of the new ring; the constructor creates it. Note the unguarded-counter / single-`Run`-goroutine contract in the struct doc (lines 35-65).
-- `cmd/pyry/interactive_turn_v2.go:290-333` — `emit()`, the **one** place envelopes reach the wire. This is the single append site: the durable id is assigned once here, *before* the per-conn fan-out loop. Note `TS: time.Now().UTC()` is currently computed per-conn inside the loop.
-- `internal/protocol/codes.go:99-106` — the six v2 wire-type constants (`TypeTurnState`, `TypeAssistantDelta`, `TypeToolUse`, `TypeToolResult`, `TypeTurnEnd`, `TypeStall`). `TypeAssistantDelta` is the sole droppable class; the ring classifies by `typ == protocol.TypeAssistantDelta`.
-- `internal/protocol/envelope.go` — `protocol.Envelope` shape (`ID uint64`, `Type string`, `TS time.Time`, `Payload json.RawMessage`). The ring stores everything an envelope needs *except* the per-conn `ID` (which is meaningless for replay across conns — see § Durable id vs envelope id).
-- `cmd/pyry/interactive_turn_v2_test.go:18-112` — existing test doubles (`fakeInteractiveBcast`, `recordedPush`, `pushTypes`, `pushesFor`) and the `package main` helpers `stubCursor`/`testConvID`/`discardLogger` (the latter in `assistant_turn_test.go:38`). Reuse these; the new emitter-integration tests are **added**, the existing ones are unchanged.
-- `docs/knowledge/codebase/632.md` § Concurrency model — the emitter's named single-`Run`-goroutine, no-mutex invariant this slice must preserve.
-- `docs/knowledge/codebase/633.md` § "single-writer for emitter state" — confirms the emitter instance persists across the producer's re-subscriptions and child restarts (created once in `startInteractiveTurnStreamV2`). This is what makes a ring **owned by the emitter** daemon-resident (AC-1 durability).
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:128` — § Backpressure / replay: "the binary replays from a bounded per-conversation event ring, or emits a resync marker." This spec builds that ring; the resync wiring is #647.
-- `internal/conversations/registry.go` + `devices/registry.go` — the project's mutex-guarded-struct idiom (`sync.Mutex` + map). The ring follows the same shape (`internal/conversations` is the closest analogue: a `sync.Mutex` over a per-id map).
-
 ## Context
 
 The goal one level up is: *a phone that reconnects mid-turn catches up without a gap.* That requires a daemon-resident store of recent structured events keyed by an id stable enough to replay from. This slice is **only the storage primitive** — it ships with tests and **no reconnect wiring**. The per-conn `last_event_id` tracking and the on-reconnect replay are #647 (`security-sensitive`), which *consumes* this ring.

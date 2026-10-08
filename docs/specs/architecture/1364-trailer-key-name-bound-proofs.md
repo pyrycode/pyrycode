@@ -3,23 +3,6 @@
 **Size:** S (PO's `size:s` confirmed — one new test file, no production file touched, no consumer call site changed)
 **Verification gate:** `go test -race -tags e2e_realclaude -run '^TestFin|^TestTrail' ./internal/e2e/realclaude/` plus `go vet -tags e2e_realclaude ./internal/e2e/realclaude/...`. `make check` never compiles this diff — every file here carries the `e2e_realclaude` build tag, so a green standard gate says nothing about it.
 
-## Files to read first
-
-| path | what to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go:418-471` | The two constants and `finBoundKeyNames`' five-clause doc comment. **This is the contract every assertion below pins.** Clause 4 (truncate-and-mark) is why `len(name) <= finTrailerMaxKeyNameBytes` is the wrong assertion. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:386-417` | Why 32 and 64, and the scanner-ceiling argument that makes the fixture-size preconditions load-bearing. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:391-402` | `finTrailerSighting` — the fixture-side fill site that applies the bound. This is the first hand the new tests drive. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:303-339` | `finTrailerBuild`, and the plain slice assignment at `:333` whose comment names clause 5 as its reason for being safe. |
-| `internal/e2e/realclaude/finding_run_record_test.go:1059-1165` | `TestFinRecordPublishesTheTrailerKeyNamesTheReaderRead` — the UNDER-bounds complement of this ticket. **Mirror its idiom**: fatal non-vacuity preconditions first, expectation derived from a shipped producer rather than hand-written, one `reflect.DeepEqual`. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:301-342` | `trailFixtureTrailer`, `trailPaddedTrailer`, `trailNeedle`, `trailOverlongPad` — the fixture renderers the new ones build on. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:157-233` | `trailScan`: the match return that fills `KeyNames` from the whole line, and the ABORT arm past 64 KiB that makes a naive hostile fixture green by breakage. |
-| `internal/e2e/realclaude/trailer_key_names_test.go:1-60` | The build tag and the file-header shape to copy (measured fixture table, the "runs offline: no live claude, no credentials, no exec, no clock" paragraph, the `go test` line). |
-| `internal/e2e/realclaude/trailer_key_names_test.go:70-123` | `trailKeyNames` (the unbounded reader) and `trailExpectedKeyNames()` — the eleven envelope names that serve as AC1's "short names unchanged" expectation. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:117-124` | `reachMaxCommandBytes` = 512 and `reachTruncationMarker` (29 bytes) — the marker clause 4 appends. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:175-215` | What the bound does to a reader (the alphabetic-prefix consequence AC2's fixture makes observable), and the Detail prohibition that is **#1362's**, not this ticket's. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:604-610` | Why every slice-returning fixture is a function and never a package-level var: `go test -race` runs this package in parallel. |
-
 ## Context
 
 #1363 shipped `finBoundKeyNames` and stated five clauses in its doc comment. None of the five is pinned. The artifact's standing safety sentence (`finding_artifact_write_test.go:98-118`) now describes the key-name field as bounded, so "bounded" is a claim an operator relies on and nothing fails when it stops being true.

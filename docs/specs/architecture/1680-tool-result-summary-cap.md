@@ -1,20 +1,5 @@
 # #1680 — Give the tool result summary its own cap at 10000 runes
 
-## Files to read first
-
-| File | Symbols | What to extract |
-|---|---|---|
-| `internal/turnbridge/outbound.go` | `resultSummary`, `truncate`, `maxSummaryLen` | The three arms this ticket edits; `truncate`'s rune-safe cut and its `…`; `maxSummaryLen`'s doc comment, whose "input/result précis" wording becomes wrong here and must be corrected to input-only. |
-| `internal/turnbridge/outbound.go` | the `maxInputValueRunes` … `maxInputTotalRunes` const block (#1678) | **The template for the new constant's doc comment.** It already carries the six-bytes-per-rune arithmetic for a RUNE cut, the never-raise rule, the enforcing-test pointer, and the eventring memory paragraph. The new comment is that shape with this ticket's numbers — do not re-derive the escaping argument from scratch. |
-| `cmd/pyry/interactive_turn_v2.go` | `maxDeltaTextBytes` | The other free-text field on a v2 envelope, already at 10000, with the standing rule *"if that ever fails, LOWER this constant — never raise it."* This ticket adopts the same number deliberately. |
-| `internal/protocol/interactive_test.go` | `TestToolUsePayload_FitV2EnvelopeCap`, `TestBackgroundTaskPayloads_FitV2EnvelopeCap`, `maxV2AppEnvelope` | The measurement technique AC 4 names: `'<'` fill, worst-case `Envelope` (max-uint64 `ID`, populated `EventID`), `t.Logf` the percentage, then assert `< maxV2AppEnvelope`. Copy the technique; see § Where the envelope test lives for why the new test does **not** live in this file. |
-| `internal/protocol/interactive.go` | `ToolResultPayload` | The five fields the envelope carries. Its doc comment gains no `SECURITY:` paragraph here — see § What this ticket does not touch. |
-| `internal/turnbridge/outbound_test.go` | `TestResultSummary`, `TestMapEvent`'s `ToolUpdate` rows, `TestInputSummary` | The `"text truncated"` row that pins the old bound and must move; the `MapEvent` table where AC 3's `is_error` row belongs; `TestInputSummary`, which AC 2 requires to pass **unmodified**. |
-| `internal/streamsup/parser.go` | `toolResultContent`, `toolResultText`, and the `ToolUpdate` emit site in `emitUser` | Proof that the live producer applies **no** cap to result text and passes `block.ToolUseID` through verbatim. `resultSummary` is therefore the only bound on this field — which is why the new constant is a wire constraint, not a display bound. |
-| `docs/knowledge/features/turnbridge-package.md` | § "Per-field input extraction (`inputFields` / `inputValue`, #1678)" | The recorded lesson that decides § Where the envelope test lives: `maxInputFields` "shipped correct but with no test standing on it" because the cap test lives in `protocol`, hand-builds its payload, and cannot call the unexported producer at all. |
-| `internal/eventring/ring.go` | package doc, `MaxEventsPerConversation`, `Event` | `tool_result` is control-class and preferentially **retained**, 1024 per conversation, storing the marshalled payload bytes. This makes the new cap a memory knob as well as a wire knob. |
-| `docs/protocol-mobile.md` | § `tool_use` (the **Bounds.** paragraph), § `tool_result` | The prose shape AC 5's new paragraph mirrors, and the section it lands in. |
-
 ## Context
 
 `resultSummary` caps a tool result at `maxSummaryLen` — 200 runes, the same constant that bounds the tool *input* précis. Measured across 11379 tool results from local claude transcripts (2026-08-21): mean 2959 characters, median 721, **only 22% survive a 200-rune cap whole**. The desktop client is about to render the result in an expanded tool row, so the text is going on screen for the first time and will show 200-character stubs until this lands.

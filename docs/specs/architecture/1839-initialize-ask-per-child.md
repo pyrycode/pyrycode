@@ -1,59 +1,5 @@
 # #1839 — Ask each live claude child for its initialize reply, once per child
 
-## Files to read first
-
-Production surface:
-
-- `internal/streamsup/runner.go` → `Config` — the struct the new field joins; read `OnChildExit`'s doc for the
-  house contract a spawn-time hook inherits (must not block, must not panic, no `recover`), and `onSpawn`'s
-  doc for the unexported test seam this design fires beside.
-- `internal/streamsup/runner.go` → `spawnAndWait` — **the one call site**. Read the ordering
-  `cmd.Start` → `setStdin` → `updateState` → `onSpawn` → `cmd.Wait`, and the `takeStdin` + best-effort close
-  below `cmd.Wait`. The `(started bool, waitErr error)` return is what the ask's error must never become.
-- `internal/streamsup/runner.go` → `RequestInitialize` — the method to call; its doc argues both placements
-  this spec chooses between, and states that it reads `Stdin()` rather than the rotation-gated `turnTarget`.
-- `internal/streamsup/runner.go` → `setStdin` — why nothing is logged inside it, and its explicit note that a
-  spawn-path diagnostic belongs **above** the acquisition, in `spawnAndWait`.
-- `internal/streamsup/envelope.go` → `WriteInitialize` — the error contract already pinned:
-  `ErrNoLiveChild` on a nil writer (nothing written), a wrapped error on marshal/write failure, never
-  mis-reported as `ErrNoLiveChild`. This spec adds **no** new error semantics; it only decides who absorbs them.
-- `cmd/pyry/streamsup_runner.go` → `mapStreamsupConfig` — the pure mapper that sets every plain-value
-  `streamsup.Config` field, and `newStreamRunnerFactory` above it, which installs the runtime objects
-  (`Stdout`, `OnChildExit`). Read the mapper's doc paragraph on what does and does not cross that line.
-- `internal/streamsup/parser.go` → `emitModelList` — the reply half. Read its four rungs and
-  `logControlResponse` beneath it (the five fixed attributes, and why no string of claude's is admitted).
-  This spec starts the first production traffic through it but changes not a byte of it.
-- `internal/streamsup/parser.go` → `maxModelListEntries` — the entry cap and its written-out derivation;
-  needed for the security section's amplification argument, not for the implementation.
-- `cmd/pyry/interactive_turn_v2.go` → `Handle`, `eventKind` — `turnevent.ModelList` has no case arm, so it
-  lands on `Handle`'s `default:` and produces one Debug record and no frame. This is the structural proof of
-  AC 4; read it rather than re-deriving it.
-- `internal/turnbridge/outbound.go` → `MapEvent` — the `default:` arm returning `("", nil, false)`.
-
-Test surface:
-
-- `internal/streamsup/interface_test.go` → `TestRunner_RequestInitialize_LiveChildDelivers` — **the pattern to
-  copy verbatim**: `helperRunCfg(t, "echo_lines", …)`, an `onSpawn` signal channel, `runInBackground`, and the
-  `ECHO:<line>` round-trip that proves the exact envelope reached the child. The new tests are this test plus
-  a count.
-- `internal/streamsup/runner_test.go` → `safeBuffer`, `helperRunCfg`, `runInBackground`, `waitForContains` —
-  where those helpers actually live (same package, different file). `helperRunCfg` takes `extraEnv ...string`.
-- `internal/streamsup/helper_test.go` → `helperChild` — read its mode list. `echo_lines` (echo every stdin
-  line as `ECHO:<line>`, never self-exit) and `crash` (exit 1 after a short delay, forcing a respawn) are the
-  two modes this spec's tests need. The mode is selected by env, not argv.
-- `internal/streamsup/runner.go` → `Restart`, `RestartFresh` — both kill the live child and let the loop
-  relaunch. `Restart` swaps the base argv **verbatim**, so a test must re-install the same `Config.Args`
-  rather than pass nil, which would clear them.
-- `cmd/pyry/streamsup_runner_test.go` → `TestMapStreamsupConfig_Bootstrap`, `TestMapStreamsupConfig_PerSession`
-  — the existing field-by-field mapper assertions the one-line wiring extends.
-- `docs/knowledge/features/streamsup-package.md` § "Per-child-exit seam (#1206)" — the nearest shipped
-  analogue in this exact file. Read the cardinality-is-per-iteration paragraph and the "ships unwired, with
-  zero `cmd/pyry` diff" note: **every `streamsup.Config` literal tree-wide is named-field**, which is what
-  makes a new field default-off everywhere without editing a single other construction site.
-- `docs/knowledge/features/fakeclaude-binary.md` § "Initialize control request answer (#1692)" — the fake
-  answers an `initialize` request **unconditionally, in both stream modes, under no env flag**. Nothing needs
-  adding to the fake for this ticket.
-
 ## Context
 
 `(*streamsup.Runner).RequestInitialize` writes the request; `(*streamsup.Parser).emitModelList` decodes the

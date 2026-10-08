@@ -2,30 +2,6 @@
 
 **Size:** S (confirmed — 3 files, all `*_test.go`; 0 production source files; 1 call site; 0 new exported types; 0 reject branches)
 
-## Files to read first
-
-Generated from `codegraph_context` on the ticket title + AC paraphrase, then pruned and extended by hand with the production-side files codegraph does not surface for a test-only change.
-
-| File / range | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_live_run_test.go:1-71` | The file header. Its first sentence names "the ptyrunner default" and is one of the prose sites AC4 invalidates. |
-| `internal/e2e/realclaude/finding_live_run_test.go:199-271` | The driver's doc comment — every paragraph AC4 makes you classify. Especially `:206-213` (NO PARAMETERS BEYOND t), `:248-254` (turn headroom), `:256-264` (no budget-fired run), `:266-270` (the skip-guard conclusion). |
-| `internal/e2e/realclaude/finding_live_run_test.go:271-292` | The body's opening: the composite literal whose `EnvDelta:` field is the one line AC3 changes. |
-| `internal/e2e/realclaude/finding_live_run_test.go:344-366` | The `cmd.Wait` goroutine and its PTY argument at `:349-352` — the load-bearing finding. |
-| `internal/e2e/realclaude/finding_live_run_test.go:462-467` | The `scan.MatchCount` is-3-on-a-healthy-run claim. A fifth prose site, not named by the ticket. |
-| `internal/e2e/realclaude/finding_live_staging_test.go:163-191` | `finLiveStageEnvDelta` and its doc — the shape the new sibling copies, and the text that must stay unchanged. |
-| `internal/e2e/realclaude/finding_live_staging_test.go:404-489` | `TestFinLiveStageEnvDeltaNamesTheRunner` and `finLiveStageDeltaHas`. The new trap is a sibling of this, NOT a copy — read `:415-427` closely, it is the comment AC2 forbids copying. |
-| `internal/e2e/realclaude/finding_exit_path_probe_test.go:209-220` | The one call site. `h := finLiveRunStage(t)` at `:216`. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:1091-1113` | `reachRunnerPathFromEnv` — ambient-first read, exact-`"1"` truthiness, and the full-string return the label truncator consumes. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:621-646` | `spawnProbePyry` — `cmd.Env = append(os.Environ(), extraEnv...)` and the two non-`*os.File` output buffers. No `WaitDelay` is set. |
-| `internal/e2e/realclaude/finding_run_record_test.go:260-272`, `:430-440` | `finRecordRunnerLabel` (the `" ("` truncator the trap compares through) and `finRecordEnvDelta()` (the `=0` sibling). |
-| `internal/agentrun/streamrunner/runner.go:170-205`, `:229-251` | `cmd.Stdout = parser` (`:176`), `cmd.Stderr = cfg.Stderr` (`:177`), `cmd.WaitDelay = killGrace` (`:204`), and `waitErr` flowing out at `:231`/`:250`. `killGrace = 5 * time.Second` at `:44`. |
-| `internal/agentrun/ptyrunner/runner.go:294-320`, `:611-625` | `cmd.Stderr = cfg.Stderr` set BEFORE the PTY spawn (`:296`), and `buildArgs` — which omits `--max-turns` and `--allowed-tools`. |
-| `cmd/pyry/agent_run.go:258-293`, `:295-333`, `:363-377` | The `PYRY_USE_STREAMJSON == "1"` dispatch, the error→exit mapping at `:271-277`, `Stderr: os.Stderr` on BOTH paths (`:291`, `:328`), and `buildStreamRunnerClaudeArgs` — which DOES emit `--append-system-prompt-file` (`:372`). |
-| `$(go env GOMODCACHE)/github.com/creack/pty@v1.1.24/run.go:38-50` | `StartWithAttrs` fills stdin/stdout/stderr with the tty **only when nil**. This is why the PTY does not detach claude's stderr from pyry's. |
-
-Not in codegraph and worth one look each: `docs/knowledge/codebase/1342.md` (why the delta names the variable rather than leaving it unset) and `docs/knowledge/codebase/1337.md` (the 2026-08-06 live run this spec treats as evidence).
-
 ## Context
 
 `finLiveRunStage` stages one live `pyry agent-run` turn and hands back a handle. It has one caller, the #1337 exit-path probe, which ran green live against claude 2.1.220 on 2026-08-06. The environment it stages with is hardcoded: the driver reads `finLiveStageEnvDelta()` at `finding_live_run_test.go:290`, and that delta names `PYRY_USE_STREAMJSON=0`.

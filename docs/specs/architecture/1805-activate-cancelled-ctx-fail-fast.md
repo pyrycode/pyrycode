@@ -3,55 +3,6 @@
 **Size:** `s` — one production file (`internal/sessions/session.go`), one test file
 (`internal/sessions/session_test.go`), no new exported types, no consumer migration.
 
-## Files to read first
-
-Production:
-
-- `internal/sessions/session.go` → `Activate` — **the defect site.** Two things happen in the
-  wrong order: the `activateCh` signal is sent before the context is ever consulted, and the
-  context is then consulted in a `select` whose other arm is already ready.
-- `internal/sessions/session.go` → `runEvicted`, `Run`, `transitionTo` — establishes that the
-  `activateCh` signal is the **sole** trigger that takes a session out of `stateEvicted` and
-  starts a supervisor. This is what makes "no signal was sent" a sound proxy for "no child
-  spawned" in the test below.
-- `internal/sessions/session.go` → `closedChan` — the warm-start closed `activeCh`. This is the
-  state the "already active, transition complete" fixture reproduces by construction.
-- `internal/sessions/session.go` → `Evict` — identical `select` shape, identical latent coin
-  flip. **Explicitly out of scope** (ticket § Out of scope). Do not touch it.
-- `internal/streamsup/runner.go` → `(*Runner).WaitForPTY` — returns `nil` unconditionally, by
-  design (no PTY on the stream-json path). Read it to understand *why* the single `select` in
-  `Activate` decides everything on the production path, and why the test fixture must mirror
-  this rather than re-check the context.
-- `internal/sessions/pool.go` → `(*Pool).Activate` — the only production caller of
-  `Session.Activate`. Confirms no signature change and no call-site migration.
-- `cmd/pyry/main.go` → `newInboundDeliver` — the one caller that derives the Activate context
-  (`context.WithTimeout`) from a parent that can already be cancelled during drain. Read it to
-  confirm the behaviour change is desirable there (it is; see § Consumer impact).
-
-Tests / fixtures:
-
-- `internal/sessions/runner_test.go` → `fakeRunner` — `WaitForPTY` returns `nil`
-  unconditionally, exactly like the production runner. **This is the runner the new tests
-  use.**
-- `internal/sessions/runner_test.go` → `lifecycleRunner` — its `WaitForPTY` is a *second*
-  `select` on `ctx.Done()`. **Do not use it in the new tests.** See § The fixture trap.
-- `internal/sessions/session_test.go` → `TestSession_Run_RemovedCh_ExitsClean` — its
-  `newEvictedSession` closure is the bare-`Session`-literal fixture pattern to copy: an evicted
-  session with no pool, no lifecycle goroutine, no child.
-- `internal/sessions/session_test.go` → `TestSession_ActivateNoOpWhenActive`,
-  `TestSession_ActivateCtxCancellation` — the existing `Activate` tests: naming shape, and the
-  assertion this ticket makes deterministic. `TestSession_ActivateCtxCancellation` stays as-is.
-- `internal/sessions/pool_test.go` and `internal/sessions/pool_list_test.go` — each contains an
-  *active* bare-`Session` literal (`lcState: stateActive`, `activeCh: closedChan()`,
-  `evictedCh: make(chan struct{})`, both signal channels buffered 1). Copy that field set for
-  the active-session fixture.
-
-Docs (read-only; the documentation phase owns them):
-
-- `docs/knowledge/features/sessions-package.md` § "Pool.Create (1.1a-A2)" → the
-  **"ctx cancellation race"** paragraph, and § "`Session`" → the `Activate(ctx)` bullet. Both
-  make claims this ticket narrows. See § Documentation follow-up — **do not edit them.**
-
 ## Context
 
 `Session.Activate` consults its context in exactly one place: the `select` that waits on

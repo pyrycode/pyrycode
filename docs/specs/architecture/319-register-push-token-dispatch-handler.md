@@ -2,23 +2,6 @@
 
 **Sibling of #313** (which rewired `list_conversations`). Split from #305. Depends on slice A (#318 — per-conn auth slot, landed).
 
-## Files to read first
-
-- `internal/dispatch/dispatch.go:54-134` — the `Handler` alias, `Conn.ConnID/Auth/NextID/Send/Reply` surface. `Reply` (lines 124–134) is load-bearing: it stamps `id`, `in_reply_to`, `ts` so handlers never touch them.
-- `internal/dispatch/dispatch.go:382-472` — `runConn`/`runGate`/`handleOne`. Pins (a) `setAuth` runs before the first handler dispatch on accept, (b) the gate advances `NextID` past `hello_ack`'s id=1 so the first handler reply lands at id=2 (lines 431–437), (c) the dispatcher already does `IsV1Compatible` and envelope-decode upstream of the handler.
-- `internal/relay/handlers/register_push_token.go` (full file) — the existing pure handler; what gets rewritten. Keep the logging strings, the dedupe/write/save/error branching, and the `msgUnauthorized` / `msgBinaryBusy` constants. Drop `wrap()` and `ErrMalformedFrame`.
-- `internal/relay/handlers/list_conversations.go` (full file) — the factory shape (`func ListConversations(reg ConversationLister) dispatch.Handler`) and `c.Reply(ctx, env, type, payloadJSON)` idiom this spec mirrors. Same package, identical signature shape.
-- `internal/relay/handlers/register_push_token_test.go` (full file) — current unit coverage to preserve. The test plumbing (`testConnID`, `testRequestID`, `testNextID`, `assertEnvelopeShape`, `makeRegisterRouting`, `freshRegistryWithDevice`) is the seam to rewrite. Coverage to retain: dedupe (no disk touch), write+ack, mid-conn-removed race → `auth.invalid_token`, save-fail → `server.binary_busy`, nil-device → `auth.invalid_token` (no disk touch). Drop the `TestHandle_MalformedFrame_ReturnsSentinel` case — payload-decode failure now flows through `c.Reply` with `protocol.malformed`.
-- `cmd/pyry/relay.go:128-134` — `dispatch.New(...)` site and the `d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))` line; add the new register call immediately after.
-- `cmd/pyry/relay.go:104-108` — where `registry` (the `*devices.Registry`) is loaded; the same value is what the new factory needs. The registry on-disk path is `resolveDevicesPath(instanceName)` — call it once and pass the resolved string into the factory alongside `registry`.
-- `internal/protocol/push.go` — `RegisterPushTokenPayload{Platform, Token, DeviceName}` shape.
-- `internal/protocol/codes.go:41-61` — `TypeAck`, `TypeError`, `TypeRegisterPushToken`, `CodeAuthInvalidToken`, `CodeServerBinaryBusy`, `CodeProtocolMalformed`.
-- `internal/devices/devices.go` — `Registry.UpdatePushRegistration(tokenHash, platform, token, deviceName) bool`, `Registry.Save(path) error`, `Device{Platform, PushToken, Name, TokenHash}`.
-- `internal/e2e/relay_auth_test.go` (full file) — the closest existing template: spawn a daemon, point it at a `fakerelay`, dial a `fakephone`, send `hello`, assert reply. The new e2e differs in two ways: (a) pair a device first so the gate accepts (use `RunBareIn(t, home, "pair", "--name=...")` and `decodePairPayload` to capture the plaintext token, mirroring `pair_test.go:30-53`), (b) after `hello_ack` send `register_push_token` and assert the `ack`.
-- `internal/e2e/internal/fakephone/fakephone.go` — `Dial`, `Send`, `Receive` surface the test will drive.
-- `internal/e2e/pair_test.go:27-60` — pairs a phone via the CLI, decodes the payload's plaintext token via `decodePairPayload`, and loads the registry off disk. The new e2e uses the same shape to obtain a valid token.
-- `docs/PROJECT-MEMORY.md` § "Project-level conventions" — atomic-write recipe for registries (already obeyed by `devices.Registry.Save`); refusal-mapping-at-consumer rule (this handler is the consumer that maps the registry's behaviour to `auth.invalid_token` / `server.binary_busy` wire codes).
-
 ## Context
 
 The pure handler at `internal/relay/handlers/register_push_token.go` is well-tested but signature-incompatible with `dispatch.Handler`:

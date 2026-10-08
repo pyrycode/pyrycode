@@ -9,23 +9,6 @@ It follows the #847/#848 pattern exactly (additive payload fields with no `omite
 
 ---
 
-## Files to read first
-
-- `internal/protocol/snapshot.go:36-62` — `ScreenSnapshotPayload` + its doc comment. The two new fields go after `YOLO` (:61); extend the doc comment's "no omitempty / distinguishable from unset" paragraph to cover them. This is the single edit site for the payload change.
-- `internal/protocol/snapshot_test.go:86-101` — `TestScreenSnapshotPayload_ZeroSettingsFieldsPresent`. The marshal test the AC-1 assertion extends (add `"used_tokens":0` / `"window_tokens":0` to the always-present list). Note the `bytes.Contains(out, …)` style.
-- `internal/relay/v2session.go:623-638` — `SnapshotSettings` field on `V2SessionConfig`. The new seam goes directly after it, same shape (optional, primitive-typed closure). Copy the "primitive-typed so internal/relay imports neither internal/sessions nor …" rationale.
-- `internal/relay/v2session.go:1709-1770` — `handleRequestSnapshot`. Read the branch order (KnownConversation reject → nil-Snapshotter offline → `!live` offline → read settings → marshal-and-forward). The new usage read sits beside the `SnapshotSettings` block (:1740-1743), on the success path only, before the `json.Marshal` at :1746. The `ScreenSnapshotPayload{…}` literal at :1746 gains the two new fields.
-- `internal/relay/v2session_test.go:3710-3859` — `TestV2Session_OpenState_RequestSnapshot` table: the struct fields (`settings`, `wantModel`/`wantEffort`/`wantYOLO`), the `customSettings` / `defaultSettings` / nil rows (:3720-3806), the `SnapshotSettings: tt.settings` wiring (:3816), and the `TypeScreenSnapshot` assertion block (:3840-3859). Reuse `driveToOpen` / `v2Recorder` / `sealAppFrame` / `decryptAppFrame` verbatim; add `usage`/`wantUsed`/`wantWindow` alongside the settings columns.
-- `cmd/pyry/relay.go:280-302` — `startRelayV2` signature (params `sup`, `claudeSessionsDir`, `logger`, `ctx` are all in scope before the config literal).
-- `cmd/pyry/relay.go:315-387` — the `NewV2SessionManager(V2SessionConfig{…})` literal, incl. `SnapshotSettings: snapshotSettings` (:350). The new `SnapshotUsage:` field is wired here; the closure is **built in the lines just above the literal** (see Design §4), not threaded from `main.go`.
-- `cmd/pyry/relay.go:415-424` — the turn-stream gate: `if bridge != nil && claudeSessionsDir != "" { probe := newBootstrapProbe(logger); pidFn := func() int { return sup.State().ChildPID }; … }`. This is the exact probe/pidFn construction the usage closure mirrors (with its own dedicated instance).
-- `cmd/pyry/interactive_turn_stream_v2.go:250-367` — `resolveOwnBootstrapJSONL(dir, probe, pidFn)`, the probe-preferred bootstrap transcript resolver the usage closure calls. Note: (a) it returns the transcript the daemon's **own** child holds open (confinement-guarded), (b) it returns a non-nil **error** for every not-yet/transient case (pid down, no fd, raced), and (c) it is **stateful** (`resolvedOnce`/`sawEmpty`) and "must NOT be called from multiple goroutines." The usage closure collapses (b) and is unaffected by (c) — see Design §4 and Concurrency.
-- `cmd/pyry/interactive_turn_stream_v2.go:28` — `newBootstrapProbe = rotation.DefaultProbe`; `:41 bootstrapProbeUsable`. On a no-lsof host the resolver delegates to `resolveLatestSessionJSONL` (newest-by-mtime) — the same fallback the turn stream accepts.
-- `internal/contextwindow/usage.go:29-93` — `Usage{UsedTokens, WindowTokens int}` and `Read`. Key contracts the closure relies on: `Read("")` returns `Usage{WindowTokens: 200_000}` with **nil** error (the fresh/no-transcript report); a non-empty path that fails to open returns a wrapped error with a **zero** `Usage`; last-usage-wins gives the post-compaction shrink for free.
-- `docs/specs/architecture/848-populate-screen-snapshot-settings.md` — the sibling wire spec this mirrors. Same handler, same test table, same "no omitempty / nil-seam-preserves-prior-shape" discipline.
-
----
-
 ## Context
 
 `screen_snapshot` is the always-available, parser-independent v2 reply (ADR-025 floor) that already answers a `request_snapshot` with the bootstrap session's rendered text plus its model / effort / YOLO (#847/#848). The desktop Run-configuration sheet already fetches all of that through this one snapshot request; the context-window usage gauge (pyrycode-desktop#182) needs the same snapshot to also carry usage, so the client's fetch stays single and rides the floor that survives any screen-parser break.

@@ -2,18 +2,6 @@
 
 Sub-issue of [#329](https://github.com/pyrycode/pyrycode/issues/329) (tracking). Split from #468. Siblings: #469, #470, #472.
 
-## Files to read first
-
-- `internal/agentrun/streamrunner/runner.go` — package doc + Config struct + `Run` shape this slice mirrors (package-doc style, "Required" / "Optional" field comments, named-return error contract). Read in full (~196 lines).
-- `internal/agentrun/streamrunner/runner_test.go` — table-light test layout (one `helperRunCfg` builder + one test per scenario). Mirror the `t.Parallel()` + `context.WithTimeout` shape.
-- `internal/agentrun/streamrunner/helper_test.go` — `TestStreamRunnerHelperProcess` pattern (env-keyed mode switch, `GO_*_HELPER=1` gate, modes return via `os.Exit`). The ptyrunner helper is structurally identical but writes its bytes such that the parent's `tuidriver.IsIdle` (and modal/banner detectors) react.
-- `cmd/pyry/agent_run.go:233-282` — current streamrunner argv shape (`buildClaudeArgs`). Reference for which flags the PTY path strips (`--input-format`, `--output-format`, `--verbose`, `--dangerously-skip-permissions`, `--max-turns`) versus keeps (`--append-system-prompt-file`, `--model`, `--effort`).
-- `docs/knowledge/codebase/392.md` — last package-level surgery on agentrun (dead-code removal of legacy `Drive` after stream-json migration); read for the "Pre-flight grep every export" lesson and to see the `internal/agentrun/workdir.go` post-#392 layout.
-- `docs/knowledge/codebase/463.md` — knowledge-doc format reference (one-paragraph header, Implementation bullets, Files, Patterns established, Lessons learned, Related). The 471 knowledge doc must mirror this shape.
-- **External read (GitHub)** — `pkg/tuidriver/session.go` at SHA `b09fe70e60a73d6d52c24707a16802bc1483d532` for the `Session` / `Spawn` / `WritePrompt` / `Close` contracts. Quote the doc-comments verbatim in the package doc where useful — they explain why naive `Write(prompt + "\r")` doesn't commit a long prompt.
-
-The dependency is `github.com/pyrycode/tui-driver` (singular `driver`). Pin to SHA `b09fe70e60a73d6d52c24707a16802bc1483d532` — the first `main` commit after PR #43 (`WritePrompt`) merged on 2026-05-19. Use `go get github.com/pyrycode/tui-driver@b09fe70e60a73d6d52c24707a16802bc1483d532` to install; `go mod tidy` will populate `go.sum` for the transitive `github.com/hinshun/vt10x` and `github.com/google/uuid` deps tui-driver pulls in.
-
 ## Context
 
 The current `pyry agent-run` drives claude as a stream-json subprocess via `internal/agentrun/streamrunner` (no PTY). Anthropic's 2026-06-15 billing policy article enumerates "Interactive Claude Code in the terminal or IDE" as subscription-eligible but does NOT explicitly name stream-json subprocess mode — leaving it in the "classification unknown" zone. Juhana's strategic decision (2026-05-19) is to pivot proactively to interactive-TUI claude driven via PTY (the explicitly-named subscription surface) before 2026-06-15.

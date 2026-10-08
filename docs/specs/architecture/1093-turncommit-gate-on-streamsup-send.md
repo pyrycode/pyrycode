@@ -1,13 +1,5 @@
 # Spec: turncommit gate on streamsup turn send (#1093)
 
-## Files to read first
-
-- `internal/streamsup/envelope.go:67-92` — `WriteTurn(w io.Writer, prompt []byte) error`, the send site to gate. Its doc comment describes the nil-writer / write-error contract this spec extends; keep that prose accurate after the signature change.
-- `internal/supervisor/supervisor.go:356-379` — `deliverViaSession`: the **exact idiom to mirror**. The inner `deliver` closure claims the gate with `if gate := turncommit.From(ctx); gate != nil && !gate() { return false, turncommit.ErrDropped }` after `WaitReady`, before the write. Copy this shape verbatim (minus the `bool`).
-- `internal/turncommit/turncommit.go` (whole file, 57 lines) — `Gate` (`func() bool`), `ErrDropped`, `From(ctx) Gate` (nil when no gate), `With(ctx, gate)` (nil gate → ctx unchanged). `With` is the test-injection entry point.
-- `internal/streamsup/envelope_test.go:79-124` — the three existing `WriteTurn` unit tests to update (signature) plus the reusable sinks: `bytes.Buffer` (observe bytes written) and `errWriter` (failing writer). Reuse both for the new gate tests.
-- `internal/streamsup/roundtrip_test.go:53-65` — the multi-turn integration call site (`WriteTurn(w, []byte(marker))`) that also needs the new `ctx` argument.
-
 ## Context
 
 The turn-I/O slice (#1088, merged) landed `streamsup.WriteTurn` — the stream-json user-envelope writer on the child's held-open stdin. It writes unconditionally today. When turns are queued by `internal/msgqueue`, the head can be **dropped during the wait for claude to become ready**; delivering a dropped head would inject a stale or cancelled turn into the live session.

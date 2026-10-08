@@ -14,68 +14,6 @@ from #208 are imported, not re-defined).
 other consumers (the `pyry pair` command, revoke command, and auth handler are
 follow-up tickets).
 
-## Files to read first
-
-The developer's turn-1 data load. Each entry is paged in deliberately —
-don't grep for them.
-
-- `internal/devices/device.go` (the whole file, 50 lines) — the `Device`
-  struct shape, JSON tags, and the SECURITY package doc comment that this
-  ticket extends. The new file lives in the same package; the package doc
-  comment is already written and does not need updating.
-- `internal/sessions/registry.go` (the whole file, 122 lines) — **the
-  reference implementation**. Mirror:
-  - The atomic-rename pattern in `saveRegistryLocked` (lines 60-92):
-    `os.MkdirAll(dir, 0o700)` → `os.CreateTemp(dir, ".devices-*.json.tmp")`
-    → `defer os.Remove(tmp)` → `os.Chmod(tmp, 0o600)` → encode → `f.Sync()`
-    → `f.Close()` → `os.Rename(tmp, path)`. Wrap each error with
-    `fmt.Errorf("registry: <op> %s: %w", path, err)`.
-  - The load semantics in `loadRegistry` (lines 35-51): missing file →
-    `(nil, nil)` (here: empty `*Registry`); empty file → `(nil, nil)` (here:
-    empty `*Registry`); malformed JSON → wrapped error.
-  - The stable-sort discipline in `sortEntriesByCreatedAt` (lines 114-121).
-- `internal/sessions/registry_test.go` (the whole file, 357 lines) — **the
-  reference test layout**. Mirror table-driven AC coverage:
-  - `TestSaveLoad_RoundTrip` — add → save → load → all-fields-preserved.
-  - `TestLoad_MissingFile` — load of nonexistent path → empty registry, nil
-    error.
-  - `TestLoad_EmptyFile` — load of zero-byte file → empty registry, nil
-    error.
-  - `TestLoad_MalformedJSON` — load of `{not json` → error wrapped with
-    `registry: parse`.
-  - `TestSave_FilePermissions` — saved file mode is `0o600`, parent dir mode
-    is `0o700`. Skip on `runtime.GOOS == "windows"`.
-  - `TestSave_StableOrdering` — same content saved in different in-memory
-    order produces byte-identical files.
-  - `TestSave_AtomicRenamePreservesOldFile` — chmod-the-dir-readonly trick
-    proves the pre-existing file survives a failed save unchanged.
-- `docs/lessons.md` § "Atomic on-disk writes" (lines 32-37) — **the rules
-  this ticket enforces**: rename is the commit point; same-fs temp dir;
-  `defer os.Remove(tmp)`; no parent-dir fsync; sort before serialize for
-  byte-deterministic output. Re-read before writing `Save`.
-- `docs/lessons.md` § "JSON roundtrip strips monotonic-clock state from
-  `time.Time`" (lines 196-200) — `Device.PairedAt` and `LastSeenAt` are
-  `time.Time`. Round-trip tests must compare with `time.Time.Equal`, never
-  `==` or `reflect.DeepEqual`.
-- `docs/specs/architecture/208-pair-device-entry-and-token-hashing.md` —
-  the SECURITY contract this ticket inherits. Section "Why no bcrypt or
-  salt" and "Security review" already establish the threat model;
-  re-reference, don't relitigate.
-- `docs/protocol-mobile.md:62` — protocol-level commitment that
-  `devices.json` stores the hash, never the plaintext. The on-disk file
-  this ticket creates is the named artefact.
-- `docs/protocol-mobile.md:618` — security review note flags TOCTOU on
-  `devices.json` writes. The atomic-rename pattern this ticket inherits
-  is the structural defense — name it explicitly in the design.
-- `CODING-STYLE.md` § "Error Handling" (lines 27-33) — `fmt.Errorf("X: %w",
-  err)` shape, no panics, no silent error swallowing. § "Concurrency"
-  (lines 54-59) — `sync.Mutex` for state, `t.Parallel()`, race detector
-  always on.
-- The ticket body itself (#209) — five AC bullets. The mapping to test
-  cases is one-to-one with one exception: the AC says "Add(d Device)"
-  with no return value; this ticket implements it as `Add(d Device)`
-  returning nothing (caller owns uniqueness).
-
 ## Context
 
 #208 delivered `Device` and the token hashing primitives (`HashToken`,

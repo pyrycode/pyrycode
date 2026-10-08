@@ -1,17 +1,5 @@
 # #253 — e2e: bootstrap warm-start ignores persisted lifecycle_state
 
-## Files to read first
-
-- `internal/e2e/restart_test.go` — the closest pattern. `newRegistryHome`, `writeRegistry`, `readRegistry`, `mustReadFile` are the helpers this new test reuses verbatim. `TestE2E_Restart_PreservesEvictedSessions` (lines 150-209) is the structural twin: pre-write a registry, `StartIn → Stop → StartIn`, assert post-restart state. The bootstrap test is the same shape with one extra clause (`lifecycle_state: "evicted"` on the bootstrap entry, then status-must-be-running).
-- `internal/e2e/idle_test.go:99-125` — `waitForBootstrapState`. Reuse it for the non-bootstrap-evicted case (poll the registry until the daemon has finished its warm-load reconciliation pass). Optionally reuse for the bootstrap-active assertion too.
-- `internal/e2e/idle_test.go:18-38` — `TestE2E_IdleEviction_EvictsBootstrap`. Same `pyry status` stdout-grep pattern (`Phase:         running`) the new test uses on the positive side.
-- `internal/e2e/harness.go:33-50, 184-220` — `StartIn` package docstring and signature. The "stop / mutate / start" recipe in the docstring is exactly what AC#1 needs; `StartIn(t, home)` returns a daemon and `h.Stop(t)` is documented as idempotent with the t.Cleanup teardown so the same `home` can be re-driven by a second `StartIn`.
-- `cmd/pyry/main.go:530-562` — `runStatus`. Confirms the stdout shape: `Phase:         %s`, `Started at:    %s` (RFC3339 UTC), `Uptime:        %s`. Tests grep stdout for these labels with their exact whitespace.
-- `internal/control/server.go:823-839` — `buildStatus`. `StartedAt` is rendered as `st.StartedAt.UTC().Format(time.RFC3339)`; the zero-time renders as `0001-01-01T00:00:00Z`. The post-fix assertion negates that string.
-- `docs/knowledge/decisions/016-bootstrap-ignores-persisted-lifecycle-state.md` — the ADR this test pins to CI. The "non-bootstrap sessions retain persisted state" carve-out boundary is what AC#1's second case asserts.
-- `docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md` — the production-side fix's spec. Re-reading the diagnosis section grounds why these specific assertions matter; in particular §"Status command's zero-time tell" explains the `Started at: 0001-01-01T00:00:00Z` and `Uptime: 2562047h47m16.854775807s` signature the test inverts.
-- `docs/lessons.md:303` — the "persisted waiting-for-X across a process boundary" lesson. The test docstring should reference it so a future reader of the test file lands on the lesson without grepping.
-
 ## Context
 
 PR #204 patched `internal/sessions/pool.go:New` to ignore persisted `lifecycle_state` on the bootstrap session: warm-loaded bootstraps are always loaded as `active`, regardless of the on-disk value. The fix shipped with a unit-level regression test (`TestPool_BootstrapEvictedOnDisk_StartsClaudeOnWarmStart` in `internal/sessions/pool_test.go:943`) that exercises `Pool.New` directly with a hand-rolled `Bridge` and a `/bin/sleep` child.
