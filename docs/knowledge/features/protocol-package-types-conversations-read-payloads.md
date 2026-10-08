@@ -62,7 +62,7 @@ const (
   uses the same query for `max(held, min(up_to, latest))`, so reading the last
   displayable entry clears unread despite trailing statuses, while existing
   higher marks never decrease. Status entries remain stored and served in the
-  same durable ID space; see [history watermark recovery](history-package.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
+  same durable ID space; see [history watermark recovery](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
   Both fields are `uint64` without `omitempty`: clients read explicit zero,
   rather than interpreting a missing key as unknown. A lookup failure on any
   surviving row fails the whole correlated reply with retryable

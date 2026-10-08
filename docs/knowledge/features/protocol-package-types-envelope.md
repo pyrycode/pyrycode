@@ -50,7 +50,7 @@ The three direct live producers attach the successful `Store.Append` result:
 `newOperatorMessageHistory`'s commit handed to `operatorMessageEmitterV2.broadcast`
 (#2861). The result is shared across recipients alongside the stored payload and
 timestamp. Session transitions have no ring id; an operator push with no ring
-still carries its history id. See [history producers](history-package.md#producers-2114-2115)
+still carries its history id. See [history producers](history-package-producers.md#producers-2114-2115)
 for append placement and the operator handoff.
 
 History-backed interactive-turn and operator-message ring events retain the

@@ -9,7 +9,7 @@ streams, or just after the turn's last tool result, opens a **second** turn
 of its own. Since #2730 the interactive spawn runs with
 `--replay-user-messages`, and claude does echo the write back through the
 fan-in — but only to `sendNowPlacement` ([history-package.md §
-Producers](history-package.md#producers-2114-2115)), which uses the echo to
+Producers](history-package-producers.md#producers-2114-2115)), which uses the echo to
 place the operator-message push, never to this tracker. `turnBusyTracker`
 stays echo-blind by design: `openForSendNow`'s carry and
 `scheduleCarryRelease`'s grace below are what keep the conversation read

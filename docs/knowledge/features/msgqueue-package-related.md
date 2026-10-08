@@ -77,7 +77,7 @@ Part of [`internal/msgqueue`](msgqueue-package.md).
   could not have worked from its payload argument, which contains composed `delivery` rather than
   `text`. `DeliveryMessage` now supplies the safe projection there for stream placement. See
   [Delivered notification](msgqueue-package-lifecycle.md#delivered-notification-2115) and
-  [history-package.md § Producers](history-package.md#producers-2114-2115).
+  [history-package.md § Producers](history-package-producers.md#producers-2114-2115).
   **#2699 added a second `OnDelivered` consumer on the same call, `operatorMessageEmitterV2`, needing
   no new engine guarantee.** The msgqueue tests already pinned `OnDelivered`'s once-per-delivery,
   never-on-give-up, never-on-removed-head semantics (`TestQueue_OnDelivered_FiresOnceAcrossRetries`,

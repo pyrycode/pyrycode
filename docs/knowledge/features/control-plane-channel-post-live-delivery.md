@@ -142,7 +142,7 @@ retry reconciles the same identity without duplicating durable chunks/completion
 The narrow `channelDeliveryHistory` interface uses `AppendWithMetadata` and
 raw `Page`. Each new delta stores explicit `shown: true`; the normal host-post
 completion stores `shown: false`, through the shared
-[history producer classifier](history-package.md#legacy-eligibility-and-explicit-visibility-2965).
+[history producer classifier](history-package-producers.md#legacy-eligibility-and-explicit-visibility-2965).
 Both types remain eligible for legacy history, replay and live delivery;
 visibility metadata changes unread accounting without changing their payloads.
 

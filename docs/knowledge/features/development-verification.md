@@ -221,7 +221,7 @@ Sequential ring appends cannot expose a reply overtaking an asynchronous user
 push. When withholding `OnDelivered`, await a callback-completed signal after
 the recording call before asserting that release added nothing: a barrier on
 the stream drain proves only that drain's progress, not the queue goroutine's.
-See [history producers](history-package.md#producers-2114-2115) and
+See [history producers](history-package-producers.md#producers-2114-2115) and
 `TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation`; its foreign-conversation
 barrier alone leaves this late-callback assertion under-synchronized (#2820).
 

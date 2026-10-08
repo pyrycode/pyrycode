@@ -289,7 +289,7 @@ where no conversations registry exists.
   editing a returned history id cannot mutate retention. Payload bytes remain
   shared and immutable. `TestAppendWithHistoryID_RetainsSnapshot` checks pointer
   mutation after append, copied reads and retention, including nil/zero metadata.
-  See [history producers](history-package.md#producers-2114-2115).
+  See [history producers](history-package-producers.md#producers-2114-2115).
 - **Accepted benign race on `Drop` (#1502):** an emitter `Append` for the
   just-dropped conversation can be in flight (a turn still streaming at the
   moment of deletion) and land after `Drop` releases the lock, recreating a small

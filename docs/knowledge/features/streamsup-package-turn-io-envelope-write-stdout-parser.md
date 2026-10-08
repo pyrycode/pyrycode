@@ -341,7 +341,7 @@ mid-turn by [`send_queued_now`](../../protocol-mobile.md#send_queued_now).
 The #2728 capture ([e2e-realclaude-mid-turn-user-capture-test-go.md](e2e-realclaude-mid-turn-user-capture-test-go.md))
 is what shows the echo lands right after the `tool_result` a mid-turn write
 interrupted, which is the signal [history-package.md §
-Producers](history-package.md#producers-2114-2115) uses to place a send-now
+Producers](history-package-producers.md#producers-2114-2115) uses to place a send-now
 message's push and history entry. The echo's content is a **block array**
 (`{"type":"user","message":{"role":"user","content":[{"type":"text",…}]},…,"isReplay":true}`),
 not the string content `dropHarnessProseLine` already filters — so turning

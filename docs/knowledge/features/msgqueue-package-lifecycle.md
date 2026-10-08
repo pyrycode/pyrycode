@@ -6,7 +6,7 @@ Part of [`internal/msgqueue`](msgqueue-package.md).
 
 An optional seam beside `OnChange`/`OnGiveUp`/`Pending`, added so the
 operator's own typed message could get a producer into the durable
-per-conversation log ([history-package.md § Producers](history-package.md#producers-2114-2115))
+per-conversation log ([history-package.md § Producers](history-package-producers.md#producers-2114-2115))
 without touching `DeliverFunc`. `DeliveredFunc(convID string, msg QueuedMessage)`
 fires after `q.mu` is released, once per **confirmed**
 delivery — unconditional on `advanced`, unlike the neighbouring `q.notify`:
@@ -74,7 +74,7 @@ register final composed bytes privately while preparing client/history content
 from this projection. `OnDelivered` is still a confirmation notification, not
 a stream-order barrier: placed Claude entries acknowledge it without committing
 again. Codex/no-stream recording retains confirmation-at-write timing. See
-[history producers](history-package.md#producers-2114-2115).
+[history producers](history-package-producers.md#producers-2114-2115).
 
 **A negative-only test proves nothing until its fire site exists.** Built RED
 in two steps (declare the seam, then wire the fire site), the give-up and
