@@ -400,8 +400,8 @@ Wait receipt. Successful result text is trimmed, then `validReplyFallback` requi
 nonblank single-line valid UTF-8, no remaining control characters or U+2028/
 U+2029 separators, at most 240 Unicode code points and 1024 UTF-8 bytes.
 Oversized or otherwise invalid output is rejected rather than truncated.
-Exchange text, generated text, credentials and raw child output/errors are
-never logged. `TestReplyFallbackProcess` and
+Exchange text, generated text, raw stdout and raw errors are never logged;
+stderr has the destination-specific exception below. `TestReplyFallbackProcess` and
 `TestReplyFallbackProcessCancellation` exercise isolation, fresh account reads,
 refusal, output validation and process termination; `TestReplyFallbackLifecycle`
 covers final-message selection, native priority, late delivery and stale results.
@@ -431,6 +431,35 @@ observations and their age become unknown while independent fields stay known.
 A decoded result without wire publication proves neither forwarding loss nor
 publication eligibility; see
 [the snapshot and consumer contract](e2e-realclaude-test-infrastructure.md#test-infrastructure).
+
+Every started helper logs its available stderr tail on success, failed exit or
+bounded cancellation return. `replyFallbackStderrTail` keeps the last 1024
+bytes, trims trailing CR/LF, then keeps the last five newline-delimited lines.
+These raw bytes may contain credentials or other sensitive values. Only the
+primary local daemon handler receives them: `replyFallbackDaemonOnly` follows
+`daemonLogOnly.MarshalText` so the text handler quotes/escapes the attribute as
+needed, and `LogDaemonOnly` makes `control.SlogTee` substitute the fixed
+`(daemon log only)` in the ring. No tail, excerpt, hash or text-derived category
+belongs in `pyry logs`, phone/debug bundles, reports, specs or knowledge docs.
+See [the log destination contract](control-plane.md#keeping-a-value-out-of-the-log-ring-logdaemononly-2723).
+
+Pipe setup failure preserves launch/return behavior with `stderr_observed=false`
+and unknown reader predicates; no content or raw setup error is logged. Available
+empty capture differs from unavailable capture and from a nonempty local tail.
+`stderr_reader_done` means the reader was joined, not that it reached EOF:
+`stderr_eof` is independently observed, and forced close, read failure or
+unfinished drainage produces `stderr_partial=true`, even with an empty tail.
+Wait receipt alone cannot establish EOF; EOF cannot establish child completion
+or a complete error report. Unobserved Wait leaves exit/completion unknown.
+
+An exec-owned stderr copier would let a descendant holding the pipe delay Wait
+and alter classification. `captureReplyFallbackStderr` instead gives the child
+a private file pipe. After normal Wait, `finish` allows at most 100 ms of drainage
+within the attempt context; cancellation adds no drain grace after its 100-ms
+Wait grace, especially not streamsup's 250 ms. Cleanup closes and joins every
+started reader, including when Wait remains unobserved; failed Start closes both
+parent descriptors. This joined return-time stderr snapshot is distinct from
+the immutable stdout progress frozen before the first cancellation signal.
 
 The [#3024 counted batch](../../specs/architecture/3024-fallback-stream-observation.md#six-run-results)
 retains E/P/F/S **6/2/4/0**, with runs **1, 2, 4 and 6 FAIL**. Run 1 froze a

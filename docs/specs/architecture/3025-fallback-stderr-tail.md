@@ -45,7 +45,7 @@ Write synthetic tests first and observe their failure. Drive actual fallback cap
 None. The local exception is explicit; stderr EOF and Wait receipt are separate observations, not a complete child error report.
 
 ## Documentation handoff
-Pending for documentation stage:
+Satisfied by the documentation stage:
 - `docs/knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md`, “One isolated Haiku attempt”.
 - `docs/knowledge/features/control-plane.md`, “Keeping a value out of the log ring”.
 - `docs/knowledge/features/e2e-realclaude-test-infrastructure.md`, “A suggestion frame alone cannot prove its source”, linked from `e2e-realclaude.md`.
