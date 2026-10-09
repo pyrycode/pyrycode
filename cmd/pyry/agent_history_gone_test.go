@@ -328,7 +328,7 @@ func TestAgentHistory_GoneSealedLifetime(t *testing.T) {
 						t.Fatal("sealed predecessor lost call evidence")
 					}
 				}
-				if oldLifetime == nextLifetime || byLifetime[oldLifetime] != 1-testBoolInt(ended) || byLifetime[nextLifetime] != 1 || len(byLifetime) != 2-testBoolInt(ended) {
+				if oldLifetime == nextLifetime || byLifetime[oldLifetime] != 0 || byLifetime[nextLifetime] != 1 || len(byLifetime) != 1 {
 					t.Fatalf("sealed evidence changed or leaked to successor: %v", byLifetime)
 				}
 			}

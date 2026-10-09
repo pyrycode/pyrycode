@@ -78,3 +78,7 @@ Pending documentation stage: update linked `history-package-producers-legacy-com
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-09
+
+## Revisions
+
+- 2026-10-09: Startup uses a second raw-page read of compact attribution projections, completed before any writes, instead of adding projection state to `readStartupMainWork`. This preserves the existing main-turn reader's interface and error behavior. `closeStartupAgentWork` runs immediately after main closure and before the divider. Existing startup and sealed-gone assertions now include agent endings and prohibit gone after a saved session ending. `TestAgentSessionEndings_DrainOrdering`, `TestAgentSessionEndings_ReceiptValidation` and `TestAgentSessionEndings_ReportedRecovery` add ordering, malformed-receipt and saved-closure/late-report proofs.
