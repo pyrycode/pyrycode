@@ -51,8 +51,8 @@ tool inputs or prompts. Live-state readings still do not become thread items.
 `trackRuntimeTool` retains unfinished ordinary main-thread tools by their existing
 tool call ID and name. Successful/failed results and denied calls retire them;
 an ordinary turn end retires the turn. Agent/Task launchers and child tools are
-excluded from this closure vocabulary; their lifecycle and background-task
-endings remain [#2969](https://github.com/pyrycode/pyrycode/issues/2969).
+excluded from ordinary main-tool interruption; Claude agent/background work uses
+[its own session-ending fact](#unfinished-agenttask-session-endings-3032).
 
 The drain's `closeRuntimeSource` flushes buffered predecessor text, writes shown
 `main_tool_interrupted` for each unfinished ordinary main call, then writes one
@@ -66,6 +66,39 @@ exits, including reservations made before replacement output. Rotation retains
 the retiring source for the exit callback: reading only the current routing tag
 or last output source can instead identify the successor.
 
+### Unfinished agent/task session endings (#3032)
+
+`closeRuntimeSource` calls `closeAgentHistory` after ordinary main-work closure,
+even when no main turn remains open, and before attribution retirement or the
+divider. `endTurn` retains the agent lifetime, calls, task links and outcomes:
+main-turn completion does not establish a background outcome. Each identifiable
+unfinished Claude work item gets one shown `agent_ended_with_session` with
+`conversation_id`, actual boundary `cause` and `occurred_at`, available
+`tool_call_id`, `task_id`, `parent_tool_call_id` and tool name, plus the retained
+`lifetime_id` and dying source metadata. It records an inferred session ending,
+not success/failure, and adds no app content or agent-specific turn-state change.
+Codex receives no agent lifecycle facts.
+
+`endAgentWork` closes tasks in task-ID order before remaining calls in call-ID
+order. A usable task-to-call link is one work item; its fact retains both
+identities and marks both closed. Without a usable link, a known call and task
+remain independently identifiable and can each receive an ending. A linked tool
+result is a launch report, even if the link arrives after the result. Foreground
+completed/failed results, denials, reported nonempty task statuses, gone and saved
+session endings suppress further endings. Status-empty updates, summary/patch-only
+reports, progress, main-turn end and join housekeeping do not close background
+work. Terminal markers survive repeated boundaries and late reports within that
+lifetime.
+
+Runtime causes are the captured boundary causes in the divider table above;
+a same-session child exit uses `child_exit` without a divider. Existing epoch
+and incarnation selection prevents a stale exit from closing replacement work.
+Unsealed exit closes the selected agent work before retiring attribution; sealed
+closure retains terminal evidence for late predecessor reports. The existing
+drain/publication gate orders buffered predecessor text, main interruptions,
+agent endings, divider and successor traffic by durable entry ID, including work
+that outlived its main turn. No new lock or goroutine owns this evidence.
+
 ### Publication ordering
 
 Ordinary callbacks capture and retain boundaries under the short
@@ -76,9 +109,9 @@ captured owners. Evictions also wait for the matching consumed producer stop,
 including late parsed tails, so closure retains the eviction cause rather than
 falling back to `child_exit`. Interactive output, confirmation-only operator
 placement and channel posts share drain/publication coordination: old buffered
-text precedes interruption, interruption precedes the divider, and successor
-entries follow it in durable entry-ID order. Confirmation placement retains its
-whole-queue fence. Never wait for the drain while holding the post gate.
+text precedes main interruption and agent endings, closures precede the divider,
+and successor entries follow it in durable entry-ID order. Confirmation placement
+retains its whole-queue fence. Never wait for the drain while holding the post gate.
 
 A pending channel hold lasts until boundary publication finishes, even after
 the boundary leaves its pending queue; releasing it at dequeue lets a post pass
@@ -109,7 +142,7 @@ retains chunk bounds and sequence progression. Other conversations stay untouche
 
 ### Legacy exclusion and write failures
 
-All four runtime types remain raw history facts; their payloads never enter
+Runtime and agent/task types remain raw history facts; their payloads never enter
 legacy transports. Validated facts instead project to nonvisual info-banner
 receipts in history and, when recorded while running, live/replay (#3026).
 See [legacy eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
@@ -132,11 +165,11 @@ logs. Missing and empty logs receive no divider; discovery creates no empty
 history directories. Conversations created after this snapshot receive none.
 No Claude transcript or second durable log supplies recovery evidence.
 
-`readStartupMainWork` walks newest-first across raw pages and segments, passing
-opaque cursors unchanged and terminating only on `AtStart`. It completes each
-conversation's read before appending to that conversation, retaining identities
-and outcomes rather than historical text or tool inputs. Legacy receipts omit
-the opening and interruption identities needed for reconstruction.
+`readStartupMainWork` and the separate `readStartupAgentWork` walk newest-first
+across raw pages and segments, passing opaque cursors unchanged and terminating
+only on `AtStart`. Both reads finish before any reconciliation write for that
+conversation, retaining identities and outcomes rather than historical text or
+tool inputs. Legacy receipts omit the identities needed for reconstruction.
 
 For each unfinished main turn, `closeStartupMainWork` appends shown
 `main_tool_interrupted` facts for unfinished ordinary calls, then exactly one
@@ -145,21 +178,23 @@ by their earliest recorded opening evidence and tools by tool ID. Thinking-only
 openings count. Successful/failed results, denials and recorded tool interruptions
 retire calls; normal/interrupted turn endings close the turn even if later facts
 survive. Parent-attributed child work is excluded. Agent/Task launchers can
-identify the main turn but receive no ordinary-tool interruption; agent and
-background-task session-ending inference remains
-[#3032](https://github.com/pyrycode/pyrycode/issues/3032). Explicit reported endings
-are retained by [the agent/task observer](#agenttask-attribution-and-reported-endings-3030).
+identify the main turn but receive no ordinary-tool interruption.
+`closeStartupAgentWork` then closes unfinished agent/background work independently
+of main-turn state, using the same `endAgentWork` deduplication as runtime and
+cause `daemon_restart`. Explicit reported endings are retained by
+[the agent/task observer](#agenttask-attribution-and-reported-endings-3030).
 
 After closure, every surviving nonempty raw log receives one `session_divider`
 per startup, even when all its work already ended. It has cause `daemon_restart`,
 explicit `shown: false`, and daemon-authored session metadata `kind: none`.
 All startup facts share the captured startup occurrence time as `occurred_at`
 and entry timestamp. Their durable entry-ID order places tool closures before
-turn closure, then the divider, then new traffic. `closeStartupMainWork` is the
-composable startup closure-before-divider point, alongside `closeRuntimeSource`
-at runtime. Legacy history projects these facts as nonvisual receipts; startup
-does not backfill the in-memory replay ring or publish live frames. The restart
-divider intentionally has no predecessor/successor session IDs. Receipt validation
+turn closure, then agent endings, then the divider, then new traffic.
+`closeStartupMainWork` and `closeStartupAgentWork` run before the restart divider,
+alongside `closeRuntimeSource` at runtime. Legacy history projects these facts as
+nonvisual receipts; startup does not backfill the in-memory replay ring or publish
+live frames. The restart divider intentionally has no predecessor/successor
+session IDs. Receipt validation
 accepts its captured conversation and occurrence identity; requiring a predecessor
 would leave a restart read hole that running-turn tests cannot detect.
 
@@ -184,12 +219,46 @@ closures across starts and late facts cannot reopen the interrupted turn; each
 start still adds its own divider. A saved tool-only interruption also prevents
 repeating that tool's closure when the turn interruption did not survive.
 
-A read failure skips both closure and divider for that conversation: partial
-evidence cannot establish unfinished work. Append failures remain best effort.
-Neither blocks startup nor reconciliation of other conversations. Failure logs
+A failure in either raw read skips all closure and the divider for that
+conversation: partial evidence cannot establish unfinished work. Append failures
+remain best effort. Neither blocks startup nor reconciliation of other conversations. Failure logs
 contain only event, validated canonical conversation ID when available, and
 content-free classifiers; payloads, cursors, source IDs and filesystem error text
 stay out. Invalid registry IDs are rejected without logging their value.
+
+### Recover agent/task work and original identities (#3032)
+
+`readStartupAgentWork` folds its compact evidence oldest-first. Modern durable
+facts establish the active lifetime for their recorded source; their mapped
+reports are duplicates and are not folded again. Where durable lifetime facts
+are unavailable, legacy `Agent`/`Task` tool calls and background start, update,
+progress and roster reports supply known identities, links, parents and outcomes.
+An incomplete task identity is rejected independently of its call identity;
+an unavailable/truncated call link cannot join otherwise usable task work.
+Main-turn ends do not retire this evidence. Recorded Codex or other non-Claude
+sources supply no agent endings.
+
+Groups belong to the original conversation and recorded source, using the durable
+child lifetime when available or the legacy session scope when it is absent.
+Legacy session transitions and non-restart dividers bound those scopes; restart dividers
+do not. Recovery retains available source/lifetime/parent attribution and leaves
+unavailable values absent. It never substitutes the registry's current binding
+or mints missing IDs. Reported foreground results remain separate from task
+endings so a later usable link can still identify a launch report.
+
+**A saved ending must identify the work within its original observation.**
+Recovery facts carry available `call_observed_entry_id` and
+`task_observed_entry_id`, with the corresponding call/task IDs. Separate saved
+call and task indexes match observation ID, identity, source and lifetime; the
+observation fixes the original legacy scope regardless of where recovery was
+appended. Matching append-time scope could repeat an old ending or suppress a
+reused ID after a delimiter. Matching observation ID alone is also insufficient:
+one legacy roster entry can establish several independent tasks. If only one
+ending survives a partial reconciliation, its sibling must still close. A linked
+ending suppresses both identities of that one work item, not other roster rows.
+Surviving endings suppress repeats across reopened stores and later restart
+dividers; late reports cannot reopen closed work in that lifetime. Each startup
+still appends its own divider after successful reads.
 
 ## Agent/task attribution and reported endings (#3030)
 
@@ -221,7 +290,7 @@ retain evidence within the same lifetime rather than minting a new identity.
 
 ### Join within a durable producer lifetime
 
-Every fact carries `conversation_id`, `lifetime_id` and `occurred_at`; entry
+Runtime observations carry `conversation_id`, `lifetime_id` and `occurred_at`; entry
 metadata retains the captured Claude source. Join call/task IDs only within that
 conversation and producer lifetime, with the recorded source. The emitter retains
 one minted `conversations.NewID` lifetime in its conversation/source/incarnation
@@ -272,13 +341,13 @@ into a permanent task ending would lose this distinction. Denial remains
 independent terminal evidence, including when a failed result also arrives.
 Status-empty updates, summary/patch-only reports, progress and main-turn end
 supply no background ending. Only a later complete roster can establish
-[gone](#gone-requires-a-later-complete-roster-3031); session-ending inference
-remains [#3032](https://github.com/pyrycode/pyrycode/issues/3032).
+[gone](#gone-requires-a-later-complete-roster-3031); runtime/restart closure uses
+[ended-with-session](#unfinished-agenttask-session-endings-3032).
 
 Identity/link facts are explicitly hidden; results, denials, task outcomes and
-gone facts are explicitly shown. Neither value grants foreground presentation
-or raw legacy transport eligibility. Successful validated facts use nonvisual receipts at
-their original durable IDs/timestamps, counted toward the legacy unread target
+gone and ended-with-session facts are explicitly shown. Neither value grants
+foreground presentation or raw legacy transport eligibility. Successful validated
+facts use nonvisual receipts at their original durable IDs/timestamps, counted toward the legacy unread target
 independently of raw visibility under #3029. Receipt-only traffic does not confer
 sight or advance a read mark by itself. See
 [receipt validation and visibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
@@ -324,6 +393,7 @@ pruning the cache does not discard already observed links. Only forwarded fresh
 roster events reach inference, after the hold releases its leaf mutex. Inference
 and its state remain owned by the single drain, including captured late rosters
 for sealed predecessors; other conversations, sources and lifetimes remain
-unaffected. Codex and unknown producers infer nothing. No extra live refresh,
-session-ending inference or second durable log is introduced. See
+unaffected. Codex and unknown producers infer nothing. Session boundaries use
+[separate closure evidence](#unfinished-agenttask-session-endings-3032), not roster
+absence. No extra live refresh or second durable log supplies gone evidence. See
 [the roster contract](../../specs/architecture/3031-agent-roster-gone.md).
