@@ -199,6 +199,7 @@ func TestInteractiveStreamQuestionAnswer(t *testing.T) {
 
 	// AC 4's second half: the continuation shows claude read the answers.
 	requireContinuationNamesChoice(t, text, choice)
+	requirePromptAnswerHistory(t, h, convID, batch.QuestionBatchID, "answer", false)
 
 	// A fresh application turn proves the parked-question update changed the
 	// child's model rather than merely persisting it and reporting success.

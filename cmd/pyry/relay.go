@@ -1586,6 +1586,8 @@ func startRelayV2(
 		// the tree does, and there a question surfaces as the permission modal it did
 		// before this slice. Set before mgr.Run's goroutine starts below, like
 		// streamApprovals — no data race on the field.
+		bridge.hist = w.hist
+		bridge.sessionHarness = w.sessionHarness
 		bridge.questions = questionReg
 		bridge.waker = waker
 		// Stamp each prompt with the conversation of the session that parked it,
