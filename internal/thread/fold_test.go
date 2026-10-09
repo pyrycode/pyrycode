@@ -93,7 +93,7 @@ func sourceName(p *history.SessionProvenance) string {
 
 func TestExcludedAndMalformed(t *testing.T) {
 	t.Parallel()
-	types := []string{"permission_request", "modal_shown", "question_shown", "turn_state", "stall", "api_retry", "compacting", "tool_progress", "thinking_progress", "background_task_roster", "background_task_progress", "rate_limited", "context_usage", "model_announced", "session_facts", "mcp_status", "model_list", "slash_command_list", "reply_suggestion", "session_error", "assistant_delta", "tool_use", "tool_result", "tool_denied", "turn_end", "main_turn_opened", "main_tool_interrupted", "main_turn_interrupted", "send_accepted", "send_delivered", "send_dropped", "send_lost", "agent_observed", "agent_result", "agent_denied", "task_observed", "task_linked", "task_outcome", "task_gone", "agent_session_ended", "future_kind"}
+	types := []string{"permission_request", "modal_shown", "question_shown", "turn_state", "stall", "api_retry", "compacting", "tool_progress", "thinking_progress", "background_task_roster", "background_task_progress", "rate_limited", "context_usage", "model_announced", "session_facts", "mcp_status", "model_list", "slash_command_list", "reply_suggestion", "session_error", "assistant_delta", "tool_use", "tool_result", "tool_denied", "turn_end", "main_turn_opened", "main_tool_interrupted", "main_turn_interrupted", "send_delivered", "send_dropped", "send_lost", "agent_observed", "agent_result", "agent_denied", "task_observed", "task_linked", "task_outcome", "task_gone", "agent_session_ended", "future_kind"}
 	f := New("a")
 	shown := true
 	for i, typ := range types {

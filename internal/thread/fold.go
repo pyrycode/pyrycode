@@ -38,6 +38,7 @@ type Fold struct {
 	pending                   map[boundaryKey][]uint64
 	turns                     map[mainKey]*mainTurn
 	openings                  map[uint64]*mainTurn
+	accepted, messages        map[uint64]int
 }
 
 // New creates an independent fold for a caller-established conversation owner.
@@ -47,6 +48,8 @@ func New(conversationID string) *Fold {
 		pending:        make(map[boundaryKey][]uint64),
 		turns:          make(map[mainKey]*mainTurn),
 		openings:       make(map[uint64]*mainTurn),
+		accepted:       make(map[uint64]int),
+		messages:       make(map[uint64]int),
 	}
 }
 
@@ -68,6 +71,9 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		if f.mainWork(e) {
 			continue
 		}
+		if f.sendFact(e) {
+			continue
+		}
 		item := Item{ID: e.ID, Order: e.ID, Rev: e.ID, Status: "done", Shown: true}
 		if e.Type == "session_divider" || e.Type == protocol.TypeSessionTransition {
 			if !f.boundary(e, &item) {
@@ -81,7 +87,10 @@ func (f *Fold) Feed(entries []history.Entry) error {
 				f.closeText(st, e.ID)
 			}
 		}
-		f.addItem(e, item)
+		index := f.addItem(e, item)
+		if item.Kind == "user_message" {
+			f.messages[e.ID] = index
+		}
 	}
 	return nil
 }
@@ -112,11 +121,16 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 // Version is the newest consumed valid history entry ID.
 func (f *Fold) Version() uint64 { return f.version }
 
-// Items returns an ordered snapshot that callers may mutate independently.
+// Items returns a creation-ID-ordered snapshot that callers may mutate independently.
+// Claimed delivery rows are represented by their permanent acceptance item.
 func (f *Fold) Items() []Item {
-	result := append([]Item(nil), f.items...)
-	for i := range result {
-		result[i].Content = append(json.RawMessage(nil), result[i].Content...)
+	var result []Item
+	for _, item := range f.items {
+		if index, ok := f.messages[item.ID]; ok && index < 0 {
+			continue
+		}
+		item.Content = append(json.RawMessage(nil), item.Content...)
+		result = append(result, item)
 	}
 	return result
 }
