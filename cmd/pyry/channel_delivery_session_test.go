@@ -325,12 +325,14 @@ func TestChannelDelivery_SessionDaemonWiring(t *testing.T) {
 	const name = "provenance-wiring"
 	reg, _ := newChannelTestRegistry(t, home)
 	id := addConversation(t, reg, "posts", true, false)
+	old := addConversation(t, reg, "old-history", true, false)
 	boot, dormant := testPostID(t), testPostID(t)
 	reg.Update(id, func(c *conversations.Conversation) { c.CurrentSessionID = dormant })
 	instance := resolveInstanceDirPath(name)
 	if err := os.MkdirAll(instance, 0700); err != nil {
 		t.Fatal(err)
 	}
+	testShadowAppend(t, history.New(instance), old)
 	if err := reg.Save(resolveConversationsRegistryPath(name)); err != nil {
 		t.Fatal(err)
 	}
@@ -378,6 +380,14 @@ func TestChannelDelivery_SessionDaemonWiring(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	testShadowWait(t, func() bool {
+		raw, err := os.ReadFile(filepath.Join(instance, "conversations", string(old), "history", "thread-cache.json"))
+		var cache struct {
+			Version  uint64
+			Complete bool
+		}
+		return err == nil && json.Unmarshal(raw, &cache) == nil && cache.Version == 2 && cache.Complete
+	})
 	if err := control.ChannelPost(ctx, socket, "posts", "accepted by daemon"); err != nil {
 		t.Fatal(err)
 	}

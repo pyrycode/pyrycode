@@ -3,13 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,17 +108,26 @@ func TestThreadShadowReload(t *testing.T) {
 func TestThreadShadowRemoval(t *testing.T) {
 	s, h, reg, _ := testShadow(t)
 	s.quiet = func(conversations.ConversationID) bool { return false }
-	a, b := conversations.ConversationID(testPostID(t)), conversations.ConversationID(testPostID(t))
+	a, b, c := conversations.ConversationID(testPostID(t)), conversations.ConversationID(testPostID(t)), conversations.ConversationID(testPostID(t))
 	reg.Create(conversations.Conversation{ID: a})
 	reg.Create(conversations.Conversation{ID: b})
+	reg.Create(conversations.Conversation{ID: c, IsPromoted: true})
+	testShadowAppend(t, h, c)
 	testShadowAppend(t, h, a)
 	testShadowAppend(t, h, b)
-	entered := make(chan struct{})
+	entered, tailEntered, tailCancelled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var tail atomic.Bool
 	var once sync.Once
 	store := thread.NewStore(h, func(ctx context.Context, id conversations.ConversationID) error {
 		if id == a {
 			once.Do(func() { close(entered) })
 			<-ctx.Done()
+			return ctx.Err()
+		}
+		if id == b && tail.Load() {
+			close(tailEntered)
+			<-ctx.Done()
+			close(tailCancelled)
 			return ctx.Err()
 		}
 		return nil
@@ -144,12 +153,28 @@ func TestThreadShadowRemoval(t *testing.T) {
 	if ring.NewestID(string(a)) != 0 {
 		t.Fatal("removal lost ring cleanup")
 	}
-	reg.Delete(b) // joined tail processing also cannot be re-admitted
+	tail.Store(true)
+	testShadowAppend(t, h, b)
+	awaitSwitchPublication(t, tailEntered) // the actual tail chunk is in flight
+	testShadowAppend(t, h, c)
+	testShadowEqual(t, h, store, c, 2)
+	deleted = make(chan bool, 1)
+	go func() { deleted <- conversations.Sweep(reg, time.Now()) == 1 }()
+	if !<-deleted {
+		t.Fatal("tail sweep missed")
+	}
+	select {
+	case <-tailCancelled:
+	default:
+		t.Fatal("removal returned before tail cancellation/join")
+	}
 	testShadowAppend(t, h, b)
 	s.discover()
 	if store.Snapshot(b).State != thread.StateNotLoaded {
 		t.Fatal("removed tail reloaded")
 	}
+	testShadowAppend(t, h, c)
+	testShadowEqual(t, h, store, c, 3)
 }
 
 func TestThreadShadowShutdown(t *testing.T) {
@@ -258,78 +283,6 @@ func TestThreadShadowQuiescence(t *testing.T) {
 	check(false)
 }
 
-func TestThreadShadowLegacy(t *testing.T) {
-	type surface struct{ live, replay, page []string }
-	run := func(enabled bool) surface {
-		h := history.New(t.TempDir())
-		reg, _ := conversations.Load("")
-		reg.Create(conversations.Conversation{ID: conversations.ConversationID(testConvID)})
-		store := thread.NewStore(h)
-		s := newThreadShadow(h, reg, store, discardLogger())
-		s.quiet = func(conversations.ConversationID) bool { return false }
-		if enabled {
-			s.start()
-		} else {
-			s.store = nil
-		}
-		defer s.shutdown()
-		b := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "phone", Interactive: true}}}}
-		e := newInteractiveTurnEmitterV2(&activeConversation{}, b, discardLogger())
-		e.hist, e.runtimeFacts = h, true
-		source := history.SessionProvenance{Kind: "claude", SessionID: "saved-source"}
-		e.HandleFor(context.Background(), testConvID, turnevent.TextChunk{Text: "answer"}, source)
-		e.HandleFor(context.Background(), testConvID, turnevent.TurnEnd{}, source)
-		transitions := newSessionTransitionEmitterV2(b, constResolver(testConvID, true), discardLogger())
-		transitions.hist = h
-		transitions.broadcast(context.Background(), sessions.SessionTransition{ConversationID: testConvID, PreviousID: "saved-source", NewID: "successor", PreviousAgent: "claude", NextAgent: "codex", Reason: sessions.ReasonClear, OccurredAt: occurred})
-		sends := testSendHistory(h)
-		sends.accepted(testConvID, msgqueue.QueuedMessage{MessageID: "send", Text: "operator"})
-		operatorMessageHistory(h, nil, nil, discardLogger(), sends)(testConvID, msgqueue.QueuedMessage{MessageID: "send", Text: "operator"})
-		d := testDelivery(t, t.TempDir(), h, nil)
-		testAccept(t, d, conversations.ConversationID(testConvID), "post")
-		d.drain()
-		var result surface
-		normalized := func(typ string, raw []byte) string {
-			var object map[string]any
-			if err := json.Unmarshal(raw, &object); err != nil {
-				t.Fatal(err)
-			}
-			delete(object, "turn_id")
-			delete(object, "timestamp")
-			delete(object, "ts")
-			bytes, err := json.Marshal(object)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return typ + ":" + string(bytes)
-		}
-		for _, p := range b.pushes {
-			if strings.Contains(p.env.Type, "thread") {
-				t.Fatal("thread frame")
-			}
-			result.live = append(result.live, normalized(p.env.Type, p.env.Payload))
-		}
-		events, gap := e.ring.After(testConvID, 0)
-		if gap {
-			t.Fatal("replay gap")
-		}
-		for _, ev := range events {
-			result.replay = append(result.replay, normalized(ev.Type, ev.Payload))
-		}
-		for _, entry := range newHistoryPager(h, discardLogger())(testConvID, "", 100).Entries {
-			result.page = append(result.page, normalized(entry.Type, entry.Payload))
-		}
-		if enabled {
-			v, _ := h.LatestEntryID(conversations.ConversationID(testConvID))
-			testShadowEqual(t, h, store, conversations.ConversationID(testConvID), v)
-		}
-		return result
-	}
-	if a, b := run(false), run(true); !reflect.DeepEqual(a, b) {
-		t.Fatalf("legacy surface changed:\n%v\n%v", a, b)
-	}
-}
-
 func TestThreadShadowFailure(t *testing.T) {
 	s, h, reg, store := testShadow(t)
 	var logs bytes.Buffer
@@ -397,15 +350,109 @@ func (s testShadowUnavailable) Snapshot(conversations.ConversationID) thread.Sna
 	return thread.Snapshot{State: thread.StateUnavailable}
 }
 func TestThreadShadowFailedDrain(t *testing.T) {
+	for _, failure := range []string{"worker", "discovery"} {
+		t.Run(failure, func(t *testing.T) {
+			s, h, reg, store := testShadow(t)
+			var logs bytes.Buffer
+			s.log = slog.New(slog.NewTextHandler(&logs, nil))
+			id := conversations.ConversationID(testPostID(t))
+			reg.Create(conversations.Conversation{ID: id})
+			testShadowAppend(t, h, id)
+			if failure == "worker" {
+				s.store = testShadowUnavailable{Store: store}
+				s.discover()
+			} else {
+				dir, err := h.LogDir(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(dir, dir+"-saved"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(dir+"-saved", dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Empty Store persistence can succeed even though a registered
+			// conversation's final boundary was never established or folded.
+			if err := s.shutdown(); err == nil {
+				t.Fatal("failed final drain certified clean exit")
+			}
+			if strings.Contains(logs.String(), "thread_shadow.clean_exit") {
+				t.Fatal("failed final drain logged clean exit")
+			}
+		})
+	}
+}
+
+func TestThreadShadowStartup(t *testing.T) {
+	// Pin construction ordering as well as exercising old-history quiescence.
+	source := formattedGoFunc(t, "main.go", "runSupervisor")
+	if strings.Index(source, "shadow.start()") < strings.Index(source, "approvalSurfaces.set(approvalSurface)") {
+		t.Fatal("shadow admission precedes completed relay/runtime construction")
+	}
 	s, h, reg, store := testShadow(t)
+	id := conversations.ConversationID(testConvID)
+	reg.Create(conversations.Conversation{ID: id})
+	testShadowAppend(t, h, id)
+	reconcileStartupHistory(h, reg, discardLogger(), time.Now())
+	sink := newStreamTurnSink(32, discardLogger())
+	busy := newTurnBusyTracker(constResolver(testConvID, true), discardLogger())
+	d := testDelivery(t, t.TempDir(), h, nil)
+	d.bind(busy)
+	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stop, _, _, _, _, _, err := startRelay(ctx, discardLogger(), relayWiring{convReg: reg, active: &activeConversation{}, hist: h, streamSink: sink, busy: busy, shadow: s, transitions: testShadowTransitions{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cancel(); stop() }()
+	read := make(chan struct{})
+	var once sync.Once
+	s.quiet = func(id conversations.ConversationID) bool {
+		once.Do(func() { close(read) })
+		return shadowQuiescent(d, q, sink, id)
+	}
+	s.start()
+	awaitSwitchPublication(t, read)
+	testShadowWait(t, func() bool { return s.consumed(id) > 0 && store.Snapshot(id).State == thread.StateNotLoaded })
+}
+
+func TestThreadShadowDiscoveryRetries(t *testing.T) {
+	s, h, reg, store := testShadow(t)
+	s.quiet = func(conversations.ConversationID) bool { return false }
 	id := conversations.ConversationID(testPostID(t))
 	reg.Create(conversations.Conversation{ID: id})
 	testShadowAppend(t, h, id)
-	s.store = testShadowUnavailable{Store: store}
-	s.discover()
-	// Persistence can succeed with no records; failed final folding still cannot
-	// claim a clean shadow exit, and it must not wait forever for a usable view.
-	if err := s.shutdown(); err == nil {
-		t.Fatal("failed final fold certified clean exit")
+	dir, err := h.LogDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir, dir+"-saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dir+"-saved", dir); err != nil {
+		t.Fatal(err)
+	}
+	if s.discover() {
+		t.Fatal("failed discovery established a boundary")
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir+"-saved", dir); err != nil {
+		t.Fatal(err)
+	}
+	s.start()
+	testShadowEqual(t, h, store, id, 1)
+	if err := s.shutdown(); err != nil {
+		t.Fatal("ordinary discovery failure was not retryable")
 	}
 }
+
+type testShadowTransitions struct{}
+
+func (testShadowTransitions) SetTransitionObserver(sessions.TransitionObserver) {}

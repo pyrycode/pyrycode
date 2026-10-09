@@ -681,7 +681,6 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	shadow.quiet = func(id conversations.ConversationID) bool {
 		return shadowQuiescent(postDelivery, queue, streamSink, id)
 	}
-	shadow.start()
 	qDone := make(chan error, 1)
 	go func() { qDone <- queue.Run(ctx) }()
 	queueJoined := false
@@ -890,6 +889,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		return fmt.Errorf("relay start: %w", err)
 	}
 	approvalSurfaces.set(approvalSurface)
+	// Runtime history construction precedes shadow quiescence readers.
+	shadow.start()
 	// Delivery runs even when startRelay returned without a relay URL.
 	postDelivery.announce = announcePost
 	postDeliveryDone := make(chan struct{})

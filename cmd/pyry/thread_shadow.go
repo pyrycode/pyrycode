@@ -72,10 +72,11 @@ func (s *threadShadow) start() {
 		}()
 	})
 }
-func (s *threadShadow) discover() {
+func (s *threadShadow) discover() bool {
 	if s.store == nil || s.history == nil || s.registry == nil {
-		return
+		return true
 	}
+	complete := true
 	for _, c := range s.registry.List() {
 		if !conversations.ValidID(string(c.ID)) {
 			continue
@@ -83,6 +84,9 @@ func (s *threadShadow) discover() {
 		v, err := s.history.LatestEntryID(c.ID)
 		if err != nil {
 			s.failure(c.ID, "history")
+			if _, exists := s.registry.Get(c.ID); exists {
+				complete = false
+			}
 			continue
 		}
 		if v == 0 {
@@ -103,6 +107,7 @@ func (s *threadShadow) discover() {
 		}
 		s.mu.Unlock()
 	}
+	return complete
 }
 func (s *threadShadow) consumed(id conversations.ConversationID) uint64 {
 	s.mu.Lock()
@@ -217,7 +222,7 @@ func (s *threadShadow) shutdown() error {
 	s.shutdownOnce.Do(func() {
 		s.start()
 		// Discover final new conversations before sealing background admission.
-		s.discover()
+		complete := s.discover()
 		close(s.finish)
 		<-s.done
 		s.mu.Lock()
@@ -226,7 +231,6 @@ func (s *threadShadow) shutdown() error {
 			workers = append(workers, w)
 		}
 		s.mu.Unlock()
-		complete := true
 		for _, w := range workers {
 			<-w.done
 			complete = complete && w.complete
