@@ -122,6 +122,7 @@ func (e *interactiveTurnEmitterV2) closeRuntimeSource(ctx context.Context, convI
 			e.transitionTo(ctx, convID, turnbridge.StateIdle)
 			e.endTurn()
 		}
+		e.closeAgentHistory(ctx, cause, at)
 		e.childLanes, e.childToolTurns = nil, nil
 		if !seal {
 			e.launcherTurns = nil

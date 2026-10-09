@@ -12,34 +12,40 @@ import (
 )
 
 const (
-	historyAgentObserved = "agent_call_observed"
-	historyAgentResult   = "agent_call_result"
-	historyAgentDenied   = "agent_call_denied"
-	historyTaskObserved  = "background_task_observed"
-	historyTaskLinked    = "background_task_linked"
-	historyTaskOutcome   = "background_task_outcome"
-	historyTaskGone      = "background_task_gone"
+	historyAgentObserved     = "agent_call_observed"
+	historyAgentResult       = "agent_call_result"
+	historyAgentDenied       = "agent_call_denied"
+	historyTaskObserved      = "background_task_observed"
+	historyTaskLinked        = "background_task_linked"
+	historyTaskOutcome       = "background_task_outcome"
+	historyTaskGone          = "background_task_gone"
+	historyAgentSessionEnded = "agent_ended_with_session"
 )
 
 // agentHistoryFact supplies joins for the existing mapped reports, without
 // copying their prose. IDs join only within a conversation and minted producer
 // lifetime; daemon-local incarnation counters are not durable identities.
+// Recovery without a lifetime references the original durable observations.
 type agentHistoryFact struct {
-	ConversationID   string    `json:"conversation_id"`
-	LifetimeID       string    `json:"lifetime_id"`
-	ToolCallID       string    `json:"tool_call_id,omitempty"`
-	ParentToolCallID string    `json:"parent_tool_call_id,omitempty"`
-	Tool             string    `json:"tool,omitempty"`
-	TaskID           string    `json:"task_id,omitempty"`
-	Status           string    `json:"status,omitempty"`
-	OccurredAt       time.Time `json:"occurred_at"`
+	ConversationID      string    `json:"conversation_id"`
+	LifetimeID          string    `json:"lifetime_id,omitempty"`
+	ToolCallID          string    `json:"tool_call_id,omitempty"`
+	ParentToolCallID    string    `json:"parent_tool_call_id,omitempty"`
+	Tool                string    `json:"tool,omitempty"`
+	TaskID              string    `json:"task_id,omitempty"`
+	Status              string    `json:"status,omitempty"`
+	Cause               string    `json:"cause,omitempty"`
+	CallObservedEntryID uint64    `json:"call_observed_entry_id,omitempty"`
+	TaskObservedEntryID uint64    `json:"task_observed_entry_id,omitempty"`
+	OccurredAt          time.Time `json:"occurred_at"`
 }
 
 // agentTaskHistory retains terminal evidence even before a usable call link.
 // Repeated links and late reports never clear an ending in this lifetime.
 type agentTaskHistory struct {
-	callID string
-	ended  bool
+	callID     string
+	observedID uint64
+	ended      bool
 }
 
 // retireAgentHistory clears the lifetime and its inference evidence together.
@@ -51,7 +57,7 @@ func (st *convTurnState) retireAgentHistory() {
 func agentHistoryType(typ string) bool {
 	switch typ {
 	case historyAgentObserved, historyAgentResult, historyAgentDenied,
-		historyTaskObserved, historyTaskLinked, historyTaskOutcome, historyTaskGone:
+		historyTaskObserved, historyTaskLinked, historyTaskOutcome, historyTaskGone, historyAgentSessionEnded:
 		return true
 	default:
 		return false
@@ -61,7 +67,15 @@ func agentHistoryType(typ string) bool {
 func validAgentHistoryFact(convID, typ string, raw json.RawMessage) bool {
 	var p agentHistoryFact
 	if json.Unmarshal(raw, &p) != nil || p.ConversationID != convID ||
-		!conversations.ValidID(p.LifetimeID) || p.OccurredAt.IsZero() {
+		(p.LifetimeID != "" && !conversations.ValidID(p.LifetimeID)) || p.OccurredAt.IsZero() {
+		return false
+	}
+	if typ == historyAgentSessionEnded {
+		return p.Cause != "" && (p.ToolCallID != "" || p.TaskID != "") &&
+			(p.CallObservedEntryID == 0 || p.ToolCallID != "") && (p.TaskObservedEntryID == 0 || p.TaskID != "") &&
+			(p.LifetimeID != "" || p.CallObservedEntryID != 0 || p.TaskObservedEntryID != 0)
+	}
+	if p.LifetimeID == "" {
 		return false
 	}
 	switch typ {
@@ -129,17 +143,21 @@ func (e *interactiveTurnEmitterV2) observeAgentHistory(ctx context.Context, ev t
 		if previous := e.agentCalls[v.ToolCallID]; p.ParentToolCallID == "" {
 			p.ParentToolCallID = previous.ParentToolCallID
 		}
+		p.Status = e.agentCalls[v.ToolCallID].Status
 		e.agentCalls[v.ToolCallID] = p
+		p.Status = ""
 		e.recordAgentFact(ctx, historyAgentObserved, p)
 	case turnevent.ToolUpdate:
 		if _, observed := e.launcherTurns[v.ToolCallID]; !observed || (v.Status != turnevent.ToolStatusCompleted && v.Status != turnevent.ToolStatusFailed) {
 			return
 		}
 		p := agentHistoryFact{ToolCallID: v.ToolCallID, ParentToolCallID: v.ParentToolCallID, Status: string(v.Status)}
-		if call := e.agentCalls[v.ToolCallID]; call.ParentToolCallID == "" && v.ParentToolCallID != "" {
+		call := e.agentCalls[v.ToolCallID]
+		if call.ParentToolCallID == "" {
 			call.ParentToolCallID = v.ParentToolCallID
-			e.agentCalls[v.ToolCallID] = call
 		}
+		call.Status = p.Status
+		e.agentCalls[v.ToolCallID] = call
 		e.recordAgentFact(ctx, historyAgentResult, p)
 	case turnevent.ToolCallDenied:
 		if v.ToolCallID == "" || slices.Contains(v.DroppedFields, "tool_call_id") || slices.Contains(v.TruncatedFields, "tool_call_id") {

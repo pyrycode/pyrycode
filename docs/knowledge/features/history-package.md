@@ -143,9 +143,10 @@ wired at `cmd/pyry/relay.go`. The adapter projects exactly one bounded raw
 `Store.Page` result; it never scans ahead to fill a page. `legacyHistoryType`
 preserves eligible legacy events regardless of `Entry.Shown`, with their original
 durable ID, timestamp and payload bytes, newest-first. `legacyRuntimeReceipt`
-projects only validated `main_turn_opened`, `main_tool_interrupted`,
-`main_turn_interrupted` and `session_divider` into nonvisual `banner` receipts
-(#3026). Their payload is `{conversation_id, level:"info", text:"",
+projects only validated runtime/startup and agent/task facts, including
+`agent_ended_with_session`, into nonvisual `banner` receipts (#3026, #3032).
+The [receipt vocabulary and validation](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)
+define their eligibility. Their payload is `{conversation_id, level:"info", text:"",
 truncated:false, stops_turn:false}` with all five fields present; ID and timestamp
 remain those of the raw fact. Raw facts and metadata are unchanged, and neither
 metadata field nor runtime payload is forwarded to the legacy wire.
