@@ -22,7 +22,11 @@ const DialTimeout = 5 * time.Second
 // by an earlier caller deadline. Cancellation wakes parked I/O but does not
 // retract work accepted by the provider. Every failure returns a nil result.
 func UpdateWhenIdle(ctx context.Context, socketPath string) (*UpdateWhenIdleResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, updateWhenIdleTimeout)
+	return updateWhenIdle(ctx, socketPath, updateWhenIdleTimeout)
+}
+
+func updateWhenIdle(ctx context.Context, socketPath string, timeout time.Duration) (*UpdateWhenIdleResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	conn, err := dial(ctx, socketPath)
 	if err != nil {

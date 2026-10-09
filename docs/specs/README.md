@@ -63,8 +63,8 @@ From the repository root, preview using a previously verified GitHub snapshot,
 then apply explicitly after reviewing the JSON report:
 
 ```sh
-go run ./cmd/spec-scaffolding-prune -evidence cmd/spec-scaffolding-prune/testdata/2929-evidence.json > /tmp/scaffolding-preview.json
-go run ./cmd/spec-scaffolding-prune -evidence cmd/spec-scaffolding-prune/testdata/2929-evidence.json -apply > /tmp/scaffolding-apply.json
+./scripts/agent-tool.sh spec-scaffolding-prune -evidence ../pyrycode-agents/tools/pyrycode/cmd/spec-scaffolding-prune/testdata/2929-evidence.json > /tmp/scaffolding-preview.json
+./scripts/agent-tool.sh spec-scaffolding-prune -evidence ../pyrycode-agents/tools/pyrycode/cmd/spec-scaffolding-prune/testdata/2929-evidence.json -apply > /tmp/scaffolding-apply.json
 ```
 
 The shipped command is offline and scans only directly contained regular

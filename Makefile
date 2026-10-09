@@ -46,7 +46,7 @@ BIN         ?= ./pyry
 DIST        ?= ./dist
 
 .PHONY: check
-check: vet test staticcheck substrate-guard cite-guard docs-guard e2e
+check: vet test staticcheck substrate-guard e2e
 
 .PHONY: vet
 vet:
@@ -55,6 +55,11 @@ vet:
 .PHONY: test
 test:
 	$(GO) test -race ./...
+
+# Full production-duration proofs, separate from ordinary unit runs.
+.PHONY: test-slow
+test-slow:
+	PYRY_SLOW_TESTS=1 $(GO) test -race -count=1 -run '^(TestUpdateWhenIdle_SilentPeerCeiling|TestAccountTokenReadDeadline)$$' ./internal/control ./internal/streamsup
 
 .PHONY: e2e
 e2e:
@@ -110,7 +115,7 @@ e2e-update:
 # operator must never be the first real-stack execution, and trimming for speed
 # is a fix-when-it-hurts decision, not a default.
 .PHONY: preship
-preship: check e2e-realclaude e2e-liverelay
+preship: check test-slow e2e-realclaude e2e-liverelay
 
 .PHONY: staticcheck
 staticcheck:
@@ -128,26 +133,17 @@ staticcheck:
 substrate-guard:
 	$(GO) run ./cmd/substrate-guard
 
-# Bans a comment citation by file and line where a symbol name would do —
-# see cmd/cite-guard. Line numbers rot on every insertion and nothing
-# maintained them; codegraph resolves a symbol on demand. Same fabric-of-a-
-# different-kind argument as substrate-guard above: a style-guide rule cannot
-# police a style-guide rule. Fast (a file walk); no network or install needed.
+# Pipeline comment guard, owned by pyrycode-agents. The verifier runs it
+# before the product gate; this target remains a compatibility command.
 .PHONY: cite-guard
 cite-guard:
-	$(GO) run ./cmd/cite-guard
+	./scripts/agent-tool.sh cite-guard
 
-# Bounds a package overview's size and bans a line that parses as a heading
-# only because a wrapped paragraph put a ticket reference first — see
-# cmd/docs-guard. Search chunks markdown by byte count with no heading
-# awareness, so an overview past the cap stops being retrievable at all and a
-# lesson folded into it is a lesson lost. Same fabric-of-a-different-kind
-# argument as the two guards above: the documentation agent already carries a
-# prose rule for both, and a prose rule cannot police a prose rule. Fast (a
-# file walk); no network or install needed.
+# Pipeline document guard, owned by pyrycode-agents. The verifier runs it
+# before the product gate; this target remains a compatibility command.
 .PHONY: docs-guard
 docs-guard:
-	$(GO) run ./cmd/docs-guard
+	./scripts/agent-tool.sh docs-guard
 
 # Lists the cmd/ and internal/ paths cited by docs/specs/architecture/*.md and
 # whether each still exists, see cmd/spec-reference-inventory (#2928). Read
@@ -155,7 +151,7 @@ docs-guard:
 # not a failure. The inventory goes to stdout, so the recipe echoes nothing.
 .PHONY: spec-reference-inventory
 spec-reference-inventory:
-	@$(GO) run ./cmd/spec-reference-inventory
+	@./scripts/agent-tool.sh spec-reference-inventory
 
 .PHONY: build
 build:
