@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -57,13 +58,9 @@ type sessionTransitionEmitterV2 struct {
 	// resolveAgent is an exact-session lookup used only at handoff, never drain.
 	resolveAgent func(string) (string, bool)
 
-	// hist is the durable conversation log (#2114). This producer deliberately
-	// skips the #647 replay ring, so the log is the ONLY place a session
-	// boundary is retained — it is what makes a /clear routed through pyry
-	// visible in served history. nil means no durable log and broadcast behaves
-	// exactly as it did before this field existed. Concrete pointer for the same
-	// reason busy is one, one guard down in startSessionTransitionStreamV2: a
-	// typed-nil inside an interface is non-nil at the interface level.
+	// hist records raw dividers and legacy boundaries once. Legacy boundaries
+	// skip replay; runtime divider receipts share the installed runtime ring.
+	// Nil or failed storage leaves eligible boundary delivery available.
 	hist *history.Store
 
 	// switched publishes the committed row after the transition fanout.
@@ -74,10 +71,8 @@ type sessionTransitionEmitterV2 struct {
 	// its conversation's reset exclusion until publication and sealing finish.
 	switches chan switchTransitionPublication
 
-	// nextID is the per-conn envelope-ID counter (mirrors assistantTurnEmitterV2).
-	// Read/written only on the single Run goroutine (broadcast is serial) — no
-	// atomic needed. EventID is left nil: this producer does not append to the
-	// #647 replay ring (no replay AC).
+	// nextID is confined to the publication lane. Runtime receipts carry replay
+	// IDs; legacy session_transition envelopes retain their absent EventID.
 	nextID uint64
 }
 
@@ -234,7 +229,14 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 			if source.Kind != "claude" && source.Kind != "codex" {
 				source = history.SessionProvenance{}
 			}
-			appendConversationHistory(e.hist, e.logger, "session_divider.history_append_err", t.ConversationID, historySessionDivider, raw, t.OccurredAt, source)
+			id := appendConversationHistory(e.hist, e.logger, "session_divider.history_append_err", t.ConversationID, historySessionDivider, raw, t.OccurredAt, source)
+			if payload, ok := legacyRuntimeReceipt(t.ConversationID, historySessionDivider, raw, id, t.OccurredAt); ok {
+				var ring *eventring.Ring
+				if e.runtimeSink != nil {
+					ring = e.runtimeSink.runtimeReplayRing
+				}
+				publishLegacyHistory(ctx, e.bcast, ring, e.logger, &e.nextID, t.ConversationID, protocol.TypeBanner, payload, t.OccurredAt, id)
+			}
 		}
 	}
 	payload, ok := toWirePayload(t)

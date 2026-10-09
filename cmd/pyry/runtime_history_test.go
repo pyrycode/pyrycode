@@ -40,8 +40,8 @@ func TestRuntimeHistoryDividerMapping(t *testing.T) {
 			if err := json.Unmarshal(entries[0].Payload, &p); err != nil || p.Cause != string(cause) || p.PreviousSessionID != "old" || p.NewSessionID != "new" || !p.OccurredAt.Equal(fact.OccurredAt) {
 				t.Fatalf("fact: %+v, %v", p, err)
 			}
-			if len(newHistoryPager(store, discardLogger())(testConvID, "", 128).Entries) != 0 {
-				t.Fatal("divider entered legacy history")
+			if page := newHistoryPager(store, discardLogger())(testConvID, "", 128); len(page.Entries) != 1 || page.Entries[0].Type != protocol.TypeBanner {
+				t.Fatal("divider missing legacy receipt")
 			}
 		})
 	}

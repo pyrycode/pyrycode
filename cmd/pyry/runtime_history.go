@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -55,13 +56,16 @@ func runtimeDivider(t sessions.SessionTransition) (runtimeHistoryFact, bool) {
 	return p, true
 }
 
-func (e *interactiveTurnEmitterV2) recordRuntimeFact(typ string, p runtimeHistoryFact) {
+func (e *interactiveTurnEmitterV2) recordRuntimeFact(ctx context.Context, typ string, p runtimeHistoryFact) {
 	raw, err := json.Marshal(p)
 	if err != nil {
 		e.logger.Warn("history: runtime fact marshal failed", "event", "runtime_history.marshal_err")
 		return
 	}
-	appendConversationHistory(e.hist, e.logger, "runtime_history.append_err", p.ConversationID, typ, raw, p.OccurredAt, e.source)
+	id := appendConversationHistory(e.hist, e.logger, "runtime_history.append_err", p.ConversationID, typ, raw, p.OccurredAt, e.source)
+	if payload, ok := legacyRuntimeReceipt(p.ConversationID, typ, raw, id, p.OccurredAt); ok {
+		publishLegacyHistory(ctx, e.bcast, e.ring, e.logger, &e.nextID, p.ConversationID, protocol.TypeBanner, payload, p.OccurredAt, id)
+	}
 }
 
 func runtimeSourceKey(convID, sessionID string, incarnation uint64) string {
@@ -112,9 +116,9 @@ func (e *interactiveTurnEmitterV2) closeRuntimeSource(ctx context.Context, convI
 			}
 			slices.Sort(ids)
 			for _, id := range ids {
-				e.recordRuntimeFact(historyToolInterrupted, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, ToolCallID: id, Tool: e.runtimeTools[id], Cause: cause, OccurredAt: at})
+				e.recordRuntimeFact(ctx, historyToolInterrupted, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, ToolCallID: id, Tool: e.runtimeTools[id], Cause: cause, OccurredAt: at})
 			}
-			e.recordRuntimeFact(historyTurnInterrupted, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, Cause: cause, OccurredAt: at})
+			e.recordRuntimeFact(ctx, historyTurnInterrupted, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, Cause: cause, OccurredAt: at})
 			e.transitionTo(ctx, convID, turnbridge.StateIdle)
 			e.endTurn()
 		}

@@ -1139,7 +1139,7 @@ func startRelayV2(
 		// This release's minimum app versions, both unset today (#2578).
 		MinClientVersions: relay.ShippedMinClientVersions(),
 		Handlers: map[string]dispatch.Handler{
-			protocol.TypeListConversations:  handlers.ListConversationsWithAgents(w.convReg, w.sessionHarness, w.hist),
+			protocol.TypeListConversations:  handlers.ListConversationsWithAgents(w.convReg, w.sessionHarness, legacyHistoryReader{store: w.hist}),
 			protocol.TypeCreateConversation: handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger),
 			protocol.TypeRenameConversation: handlers.RenameConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			// rename_workspace is the workspace-keyed sibling of the line above
@@ -1169,7 +1169,7 @@ func startRelayV2(
 			// mark_conversation_read (#2780) likewise takes no session surface. It
 			// clamps to w.hist's newest entry and fans out only an actual advance,
 			// through the same hook.
-			protocol.TypeMarkConversationRead: handlers.MarkConversationRead(w.convReg, w.hist, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
+			protocol.TypeMarkConversationRead: handlers.MarkConversationRead(w.convReg, legacyHistoryReader{store: w.hist}, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
 			protocol.TypeChangeWorkspace:      handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
 			// set_system_prompt takes no session surface (#2151): the value's route
 			// to a running child is the registry, re-read at the pool's own spawn

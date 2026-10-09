@@ -81,19 +81,17 @@ func newHistoryPager(store *history.Store, logger *slog.Logger) relay.HistoryPag
 		// the rule protocol.RequestHistoryPayload.Limit states in as many words.
 		entries := make([]protocol.HistoryEntry, 0, len(page.Entries))
 		for _, e := range page.Entries {
-			if !legacyHistoryType(e.Type) {
-				continue
+			typ, payload := e.Type, e.Payload
+			if !legacyHistoryType(typ) {
+				var ok bool
+				payload, ok = legacyRuntimeReceipt(convID, typ, payload, &e.ID, e.TS)
+				if !ok {
+					continue
+				}
+				typ = protocol.TypeBanner
 			}
-			// Key for key, and the PAYLOAD BYTES ARE COPIED BY REFERENCE, UNCHANGED:
-			// not re-decoded, not re-encoded, not sanitised. That is what makes a
-			// served page reducible through the client's existing live-lane reducer,
-			// and § Security model's threat 1 lands on the client exactly as it does
-			// on the live lane.
 			entries = append(entries, protocol.HistoryEntry{
-				ID:      e.ID,
-				Type:    e.Type,
-				Payload: e.Payload,
-				TS:      e.TS,
+				ID: e.ID, Type: typ, Payload: payload, TS: e.TS,
 			})
 		}
 		return relay.HistoryPageResult{

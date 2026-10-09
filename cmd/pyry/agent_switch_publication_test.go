@@ -154,10 +154,13 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	if got := adapter.SwitchAgent(ctx, protocol.SwitchAgentPayload{ConversationID: switchConvID, Agent: "claude", Model: "opus"}); got.State != relay.AgentSwitchCommitted {
 		t.Fatalf("return outcome=%+v", got)
 	}
-	for i, typ := range []string{protocol.TypeSessionTransition, protocol.TypeConversationUpdated, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeSessionTransition, protocol.TypeConversationUpdated} {
+	for i, typ := range []string{protocol.TypeBanner, protocol.TypeSessionTransition, protocol.TypeConversationUpdated, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeBanner, protocol.TypeSessionTransition, protocol.TypeConversationUpdated} {
 		_, e := w.read()
 		if e.Type != typ {
 			t.Fatalf("frame %d=%s, want %s", i, e.Type, typ)
+		}
+		if typ == protocol.TypeBanner {
+			testLegacyReceiptEnvelope(t, e, string(switchConvID))
 		}
 		if typ == protocol.TypeConversationUpdated {
 			var p protocol.ConversationUpdatedPayload
@@ -165,14 +168,14 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := "codex"
-			if i == 6 {
+			if i == 8 {
 				want = "claude"
 			}
 			if p.Agent != want {
 				t.Fatalf("frame %d agent=%s, want %s", i, p.Agent, want)
 			}
 		}
-		if i == 0 {
+		if i == 1 {
 			p := decodeSessionTransition(t, e)
 			if p.NewSessionID != codexID || p.PreviousSessionID != dormantWriteTargetID {
 				t.Fatalf("wrong committed delimiter: %+v", p)
@@ -237,9 +240,10 @@ func TestRelayAgentSwitchPublicationQueuePressure(t *testing.T) {
 	}
 	cancel()
 	awaitSwitchPublication(t, done)
-	if len(bcast.pushes) != 2 || bcast.pushes[0].env.Type != protocol.TypeSessionTransition || bcast.pushes[1].env.Type != protocol.TypeConversationUpdated {
+	if len(bcast.pushes) != 3 || bcast.pushes[0].env.Type != protocol.TypeBanner || bcast.pushes[1].env.Type != protocol.TypeSessionTransition || bcast.pushes[2].env.Type != protocol.TypeConversationUpdated {
 		t.Fatalf("missing ordered outcome: %+v", bcast.pushes)
 	}
+	testLegacyReceiptEnvelope(t, bcast.pushes[0].env, string(switchConvID))
 	page, err := e.hist.Page(switchConvID, "", 100)
 	page.Entries = slices.DeleteFunc(page.Entries, func(e history.Entry) bool { return !legacyHistoryType(e.Type) })
 	if err != nil || len(page.Entries) != 1 {

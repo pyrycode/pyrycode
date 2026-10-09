@@ -9,6 +9,7 @@
 - `cmd/pyry/session_transition_v2.go` → `broadcast`: dividers bypass emit and legacy transitions skip replay.
 - `cmd/pyry/runtime_boundary.go`, `cmd/pyry/stream_turn_drain.go` → `installRuntimeHistory`, `streamTurnSink`: installation and serial boundary lane.
 - `cmd/pyry/relay.go` → `startRelayV2`: shared list/read reader wiring and replay installation.
+- `cmd/pyry/startup_history.go` → `reconcileStartupHistory`: restart dividers have occurrence/conversation identity without a predecessor session.
 - `internal/history/log.go` → `Page`, `displayableEntry`: absent visibility fallback, durable IDs and cursor contract.
 - `internal/relay/handlers/list_conversations.go`, `mark_conversation_read.go` → `historyLatestReader`, `MarkConversationRead`: narrow reader seam and persistent monotonic clamp.
 - `docs/knowledge/features/history-package.md` § Reader, `history-package-producers.md` § Legacy eligibility and explicit visibility, `history-package-watermarks.md` § Unread state: bounded projection and raw metadata contracts.
@@ -41,6 +42,7 @@ No new goroutine or lock. Interactive publication stays on the existing drain; r
 | Runtime-disabled/enabled normal text and completion | `TestLegacyRuntimeReceipts_CompletedTurn` |
 | Repeated and overlapping history receipts, facts at edges/middle | `TestLegacyRuntimeReceipts_BoundedPages` |
 | Runtime opening, tool/turn interruption, divider and replay overlap | `TestLegacyRuntimeReceipts_LiveReplay` |
+| Startup reconciliation and restart divider without session identity | `TestLegacyRuntimeReceipts_StartupDivider` |
 | Reopen store, append after watermark lookup | `TestLegacyRuntimeReceipts_Watermark` |
 | Confirmed mark already above lower watermark, repeated mark and host/conversation isolation | `TestLegacyRuntimeReceipts_ReadMarks` |
 | Nil/failed storage while eligible events still deliver | `TestLegacyRuntimeReceipts_StorageFailure` |
@@ -85,3 +87,7 @@ Pending documentation stage:
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-09
+
+## Revisions
+
+2026-10-09: The merged `reconcileStartupHistory` emits a `daemon_restart` divider without predecessor/successor session IDs. Accept that captured occurrence and conversation identity in `legacyRuntimeReceipt`; other divider causes still require a predecessor. `TestLegacyRuntimeReceipts_StartupDivider` covers the real startup writer and reopened pager. The unchanged mobile checkpoint rules are modeled in Go; the actual mobile full live proof remains pending.
