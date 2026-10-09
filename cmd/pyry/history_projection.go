@@ -38,6 +38,10 @@ func historyVisibilityMetadata(typ string, raw json.RawMessage) history.Metadata
 
 func historyEntryShown(typ string, raw json.RawMessage) bool {
 	switch typ {
+	case historySendDropped:
+		return false
+	case historySendAccepted, historySendDelivered, historySendLost:
+		return true
 	case historyTurnOpened, historyAgentObserved, historyTaskObserved, historyTaskLinked:
 		return false
 	case historyToolInterrupted, historyTurnInterrupted, historyAgentResult, historyAgentDenied, historyTaskOutcome, historyTaskGone, historyAgentSessionEnded:

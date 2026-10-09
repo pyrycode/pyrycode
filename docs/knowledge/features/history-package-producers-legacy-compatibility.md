@@ -110,6 +110,7 @@ recipient gates keep their original meaning.
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
 | Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; validated nonvisual receipts count toward legacy latest. |
 | Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Raw payloads stay off legacy transports; validated receipts count toward legacy latest for either visibility value and confer no foreground presentation. |
+| [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. All four stay excluded from legacy pages, live traffic, replay and receipts. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -311,6 +312,12 @@ again:**
   continued reconciliation of a healthy conversation. An invalid registry ID
   can produce a safe warning before touching storage; absence of sensitive
   content alone would leave the intended read/write failure untested.
+  To prove complete startup reads precede loss inference, keep a valid newer
+  appendable segment with an unresolved acceptance and more than one raw page,
+  then corrupt an older segment reached on a later page. Assert no loss or
+  divider anywhere. `TestQueuedSendHistoryFailures` corrupts the active segment,
+  which also prevents appends: unchanged bytes alone cannot distinguish the
+  complete-read guard from storage refusing an incorrectly attempted closure.
 - **Rotate before successor output and reactivate the same routing ID.**
   `TestRuntimeHistoryRotationBeforeOutput` delays B across A→B→C;
   `TestRuntimeHistoryEvictionBeforeOutput` supplies late parsed tails and both

@@ -4,14 +4,15 @@ Part of [the history package overview](history-package.md).
 
 ## Producers (#2114, #2115)
 
-Interactive output, session transitions, runtime/startup and agent/task facts, and
-delivered operator messages in `cmd/pyry` append through one seam,
-`appendConversationHistory` (`cmd/pyry/conversation_history.go`): the
+Interactive output, session transitions, runtime/startup and agent/task facts,
+accepted-send facts and delivered operator messages in `cmd/pyry` append through
+one seam, `appendConversationHistory` (`cmd/pyry/conversation_history.go`): the
 interactive emitter's `emit` chokepoint
 (`cmd/pyry/interactive_turn_v2.go`), session transitions' `broadcast`
-(`cmd/pyry/session_transition_v2.go`), and (#2115) `newOperatorMessageHistory`
+(`cmd/pyry/session_transition_v2.go`), and `operatorMessageHistory`
 (`cmd/pyry/operator_message_history.go`), used by queued stream placement and
-`msgqueue.Config.OnDelivered`. Runtime opening/interruption facts use
+`msgqueue.Config.OnDelivered`. The compatible `newOperatorMessageHistory`
+helper delegates to that operator producer. Runtime opening/interruption facts use
 `interactiveTurnEmitterV2.recordRuntimeFact` through the same append seam.
 Claude attribution, reported endings and roster-inferred gone facts use
 `recordAgentFact` at that seam, without copying the mapped reports' prose.
@@ -151,3 +152,84 @@ stay untagged, and callers without source information remain usable with
 absent provenance, never inferred as `none`. Legacy live/replay/page payloads,
 unread watermarks, durable identity and recipient gates retain their behavior,
 including eligible publication with absent identity on nil/failed storage.
+
+### Accepted sends and linked outcomes (#2972)
+
+`runSupervisor` installs one `queuedSendHistory` on the existing queue and
+placement paths. `OnAccepted` writes `send_accepted` from the safe
+`msgqueue.QueuedMessage` projection: `conversation_id`, authenticated opaque
+`device_id`, app `message_id`, client-readable `text`, `attachment_ids`,
+`accepted_at` from the queue's acceptance timestamp, and `client_sent_at` when
+the reported time was parsed. Reported time uses UTC RFC 3339 with nanosecond
+precision. Optional absent values are omitted. Composed delivery bytes, echoed
+prompts and host attachment paths never enter these facts.
+
+The production `suggestionEnqueuer.EnqueueIdentified` forwards the authenticated
+identity and invalidates suggestions only after successful enqueue. Rejected
+enqueue writes nothing. Legacy callers and adapters remain usable with absent
+identity; identity introduces no deduplication, so equal app message IDs from
+different devices produce distinct acceptances.
+
+Every successful acceptance append supplies its own durable history entry ID.
+Outcomes refer to that ID through `accepted_entry_id` within the same
+conversation, never to an app message ID or a queue ID across daemon runs.
+The daemon-local reference map uses conversation and queue ID only to join
+callbacks and placement during that run; it retires the reference on delivery
+or drop. Outcomes carry `conversation_id`, `occurred_at` and `reason`.
+
+| Fact | Link and meaning | Raw visibility and source |
+| --- | --- | --- |
+| `send_accepted` | Durable identity for a successful enqueue, with the fields above. | Shown; bound session captured at acceptance observation. |
+| `send_delivered` | `accepted_entry_id` plus `delivery_entry_id` naming the existing operator `message`; reason `delivered` for ordinary and send-now delivery. | Shown; captured receiving session, shared with the operator message. |
+| `send_dropped` | `accepted_entry_id`; reason `removed` or `give_up` only after actual removal or abandonment. | Hidden; bound session captured at terminal observation. |
+| `send_lost` | `accepted_entry_id`; reason `daemon_restart` for a surviving acceptance without a durable outcome. | Shown; original acceptance's source. |
+
+An actually empty binding is explicit `kind: none` with no session ID. Unknown
+or unavailable source facts remain absent. Delivery retains the
+[receiving-session snapshot](#operator-delivery-provenance-2983), even after
+rebinding; startup never substitutes a replacement session for the acceptance.
+Hidden drops do not raise unread watermarks. All four fact types stay excluded
+from legacy history pages, live publication and reconnect replay, including
+nonvisual receipts. `shown: true` supplies visibility for the future thread;
+it does not authorize legacy transport or implement a thread fold/protocol.
+
+**Gate placement itself on acceptance completion.** Queue callback ordering
+cannot protect the earlier echo/idle commit: placement can reach the producer
+before acceptance observation and before a delayed `OnDelivered`.
+`queuedSendHistory.beforeDelivery` waits for the synchronous acceptance append
+to finish, including failure, before `operatorMessageHistory` appends the
+existing operator message and its linked delivery fact. Waiting holds no
+observer mutex; acceptance never waits for the stream drain. The operator
+message retains its stream position, timestamp and exactly-once legacy push;
+`delivery_entry_id` points to that delivery-order record. Later confirmation
+acknowledges placement without appending or publishing again.
+
+**Use the arbitrated terminal outcome, not a removal return value.** An
+in-flight `Remove` returning true can express a deferred request. Confirmed
+delivery still wins; only the queue's actual removed/give-up `OnTerminal`
+outcome writes a drop. Retry, refused removal/send-now and shutdown alone
+leave acceptance unresolved. See
+[queue confirmation and races](msgqueue-package-lifecycle.md#delivered-notification-2115).
+
+`reconcileStartupHistory` reads surviving registered conversation logs through
+all raw `Store.Page` pages before any closure or restart divider and before
+producers or inbound traffic start. `readStartupSends` resolves acceptance
+entry IDs against durable delivery/drop/loss facts; old operator messages
+without acceptances stay untouched. Failed/incomplete reads or malformed send
+facts infer no loss for that conversation. `closeStartupSends` appends losses
+without re-enqueueing, live publication or replay backfill. A successfully
+recorded loss resolves the acceptance on subsequent starts; a failed loss
+write remains eligible for another startup attempt. See
+[the queue durability boundary](msgqueue-package.md#durability-boundary-in-scope-vs-out)
+and [ADR 042](../decisions/042-daemon-built-thread.md).
+
+Storage remains best effort: nil/failed history preserves queue acceptance,
+delivery/removal and eligible legacy push. Failed acceptance writes release
+the placement gate without inventing an ID or any linked outcome. Delivery
+linkage additionally requires a successful operator-message append. A failed
+outcome append can leave a durable acceptance unresolved. Startup loss records
+that missing durable resolution; the existing
+[shutdown/confirmed-write gap](msgqueue-package-lifecycle.md#concurrency-model)
+means it cannot prove the agent never received the bytes. This is no durable
+backlog or gap-free crash guarantee. Failure logs use fixed event/reason
+discriminants without raw errors, message content, sender keys or host paths.

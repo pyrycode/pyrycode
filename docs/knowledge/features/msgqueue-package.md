@@ -196,12 +196,35 @@ child's (the same boundary as `eventring`):
 - **Survives** a supervised claude-**child** respawn — the retry-the-same-head loop
   bridges the respawn window and drains into the new child.
 - **Does not survive** a full daemon-process restart — purely in-memory, by design.
-  Reconnect/resync covers that boundary. **No on-disk persistence** in this slice.
+  Pending items are not restored or re-enqueued. Durable accepted-send facts
+  live in the existing conversation history log; there is no persistent backlog.
 
 Queue ids are per conversation and daemon run, resetting after restart.
-Acceptance and terminal facts supply the engine contract in
-[ADR 042](../decisions/042-daemon-built-thread.md); the history writer (#2972)
-owns durable linkage to its own acceptance records. Lifecycle wiring is #2971.
+The history writer links acceptance and delivery/drop/loss by its own durable
+acceptance entry ID in the same conversation, so a reused queue ID cannot
+resolve an older send. The engine's lifecycle callbacks remain injected;
+`internal/msgqueue` does not own a history store. See
+[accepted sends and linked outcomes](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
+and [ADR 042](../decisions/042-daemon-built-thread.md).
+
+Before producers or inbound traffic start, startup scans all raw pages of each
+surviving registered conversation log. An acceptance without a durable
+delivery/drop/loss outcome gets a shown `send_lost` fact with reason
+`daemon_restart`, its original acceptance reference and original source,
+before the restart divider. Recovery neither re-enqueues nor publishes live
+or replay traffic. Resolved acceptances and old operator messages without
+acceptance facts are untouched. Successfully recorded loss is not repeated
+after reopening or another restart; failed loss writes remain eligible for
+retry. A failed/incomplete read infers no losses for that conversation.
+
+Intentional removal and actual give-up record hidden `send_dropped` outcomes
+and do not raise unread watermarks. A removal request during an outstanding
+write is not yet proof of a drop: confirmed delivery wins that race. Retry,
+refused removal/send-now and shutdown alone leave the acceptance unresolved.
+History is best effort; failed acceptance writes yield no linked outcome, and
+startup's not-delivered classification means no durable resolution survived.
+The [confirmed-write observation gap](msgqueue-package-lifecycle.md#concurrency-model)
+prevents a guarantee that the agent never received an unresolved send.
 
 ## Memory hygiene
 

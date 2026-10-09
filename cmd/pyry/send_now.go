@@ -89,6 +89,7 @@ func newSendNowDeliver(resolve func(string) (handlers.TurnWriter, error), isClau
 // echo and attach comes second commits. A nil placement commits at attach.
 // Matching is conversation-scoped and follows registration/write order.
 type sendNowPlacement struct {
+	sendHistory          *queuedSendHistory
 	confirmationDispatch func(func())
 	ctx                  context.Context
 	// resolve maps the echo's producing session to its conversation, daemon-side;
