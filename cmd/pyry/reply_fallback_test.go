@@ -46,13 +46,18 @@ func TestReplyFallbackHelperProcess(t *testing.T) {
 	if os.Getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL") != "" || os.Getenv("CLAUDE_CODE_SIMPLE") != "" || os.Getenv("ANTHROPIC_API_KEY") != "" {
 		os.Exit(6)
 	}
+	if os.Getenv("PYRY_REPLY_RAW_MODE") == "1" {
+		_, _ = os.Stdout.WriteString(os.Getenv("PYRY_REPLY_RAW"))
+	}
 	if os.Getenv("PYRY_REPLY_HANG") == "1" {
 		_ = os.WriteFile(os.Getenv("PYRY_REPLY_READY"), []byte(strconv.Itoa(os.Getpid())), 0600)
 		for {
 			time.Sleep(time.Second)
 		}
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"result": os.Getenv("PYRY_REPLY_OUTPUT"), "is_error": os.Getenv("PYRY_REPLY_ERROR") == "1"})
+	if os.Getenv("PYRY_REPLY_RAW_MODE") != "1" {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"result": os.Getenv("PYRY_REPLY_OUTPUT"), "is_error": os.Getenv("PYRY_REPLY_ERROR") == "1"})
+	}
 	code, _ := strconv.Atoi(os.Getenv("PYRY_REPLY_EXIT"))
 	os.Exit(code)
 }
@@ -198,13 +203,18 @@ func TestReplyFallbackProcessCancellation(t *testing.T) {
 }
 
 func TestReplyFallbackProcessEvidence(t *testing.T) {
-	for _, mode := range []string{"success", "failure", "parent cancel", "parent deadline", "own deadline"} {
+	for _, mode := range []string{"success", "failure", "zero", "partial", "invalid utf8", "saturated", "parent cancel", "parent deadline", "own deadline"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("PYRY_REPLY_HELPER", "1")
 			t.Setenv("PYRY_REPLY_USER", "private-user-sentinel")
 			t.Setenv("PYRY_REPLY_ASSISTANT", "private-assistant-sentinel")
 			t.Setenv("PYRY_REPLY_OUTPUT", "private-generated-sentinel")
 			t.Setenv("PRIVATE_VALUE", "private-environment-sentinel")
+			raw := map[string]string{"zero": "", "partial": `{"result":`, "invalid utf8": "\xff", "saturated": strings.Repeat(" ", 8192), "parent cancel": `{"result":"private-generated-sentinel"}`}
+			if output, ok := raw[mode]; ok {
+				t.Setenv("PYRY_REPLY_RAW_MODE", "1")
+				t.Setenv("PYRY_REPLY_RAW", output)
+			}
 			ready := t.TempDir() + "/private-path-sentinel"
 			t.Setenv("PYRY_REPLY_READY", ready)
 			hold := strings.Contains(mode, "deadline") || mode == "parent cancel"
@@ -260,14 +270,61 @@ func TestReplyFallbackProcessEvidence(t *testing.T) {
 			if json.Unmarshal(logs.Bytes(), &record) != nil || record["msg"] != "reply_fallback.lifecycle" || strings.Contains(logs.String(), "private-") || strings.Contains(logs.String(), "selected") {
 				t.Fatal("missing or sensitive daemon evidence")
 			}
+			waited, ok := record["wait_completed"].(bool)
+			if !ok || (!waited && !hold) {
+				t.Fatal("invalid Wait evidence")
+			}
 			for key, want := range map[string]bool{
 				"parent_canceled": mode == "parent cancel", "parent_deadline": mode == "parent deadline",
 				"fallback_canceled": mode == "parent cancel", "fallback_deadline": strings.Contains(mode, "deadline"),
 				"own_deadline_elapsed": mode == "own deadline", "group_cancel_requested": hold,
-				"wait_completed": true, "exit_observed": true,
+				"exit_observed": waited, "output_observed": waited,
 			} {
 				if record[key] != want {
 					t.Fatalf("%s=%v want=%v", key, record[key], want)
+				}
+			}
+			if !waited {
+				for _, key := range []string{"exit_code", "exit_signal", "stdout_bytes", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok", "wait_ok", "wait_delay"} {
+					if record[key] != "unknown" {
+						t.Fatalf("invented %s without Wait", key)
+					}
+				}
+				return // Bounded cancellation need not observe reaping inside its grace.
+			}
+			for key, want := range map[string]bool{
+				"wait_ok": !hold && mode != "failure", "wait_delay": false,
+				"stdout_cap_exceeded": mode == "saturated", "stdout_utf8_ok": mode != "invalid utf8",
+			} {
+				if record[key] != want {
+					t.Fatalf("%s=%v want=%v", key, record[key], want)
+				}
+			}
+			wantBytes := 0
+			if output, ok := raw[mode]; ok {
+				wantBytes = min(len(output), maxAccountTokenBytes+1)
+			} else if !hold {
+				encoded, _ := json.Marshal(map[string]any{"result": "private-generated-sentinel", "is_error": false})
+				wantBytes = len(encoded) + 1
+			}
+			if record["stdout_bytes"] != float64(wantBytes) {
+				t.Fatal("incorrect retained byte count")
+			}
+			decoded := mode == "success" || mode == "failure" || mode == "parent cancel"
+			jsonWant := any(decoded)
+			if mode == "invalid utf8" {
+				jsonWant = "unknown"
+			}
+			if record["stdout_json_ok"] != jsonWant {
+				t.Fatal("incorrect decode observation")
+			}
+			for _, key := range []string{"stdout_result_ok", "stdout_text_ok"} {
+				want := any("unknown")
+				if decoded {
+					want = true
+				}
+				if record[key] != want {
+					t.Fatalf("incorrect %s observation", key)
 				}
 			}
 			code, signal := 0, 0
@@ -593,5 +650,53 @@ func TestReplyFallbackRegistryRemovalCancellation(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestReplyFallbackOutputUnknownWait(t *testing.T) {
+	// A nil buffer makes an accidental read fail; an unobserved Wait owns it.
+	fields := replyFallbackOutput(nil, false, nil)
+	got := make(map[string]any)
+	for i := 0; i < len(fields); i += 2 {
+		got[fields[i].(string)] = fields[i+1]
+	}
+	if got["output_observed"] != false {
+		t.Fatal("invented capture")
+	}
+	for _, key := range []string{"stdout_bytes", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok", "wait_ok", "wait_delay"} {
+		if got[key] != "unknown" {
+			t.Fatalf("invented %s", key)
+		}
+	}
+}
+
+func TestReplyFallbackOutputPredicates(t *testing.T) {
+	for _, tc := range []struct {
+		name, data         string
+		json, result, text any
+	}{
+		{"null preserves result", `{"result":"private-text","result":null}`, true, true, true},
+		{"null preserves error", `{"result":"private-text","is_error":true,"is_error":null}`, true, false, true},
+		{"duplicate result", `{"result":"","result":"private-text"}`, true, true, true},
+		{"null preserves subtype", `{"result":"private-text","subtype":"failure","subtype":null}`, true, false, true},
+		{"duplicate type error", `{"result":7,"result":"private-text"}`, false, "unknown", "unknown"},
+		{"text invalid", `{"result":"private-text\nnext"}`, true, true, false},
+		{"null envelope", `null`, true, true, false},
+		{"saturated decodable", `{"result":"private-text"}` + strings.Repeat(" ", 8192), true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout cappedBuffer
+			_, _ = stdout.Write([]byte(tc.data))
+			fields := replyFallbackOutput(&stdout, true, exec.ErrWaitDelay)
+			got := make(map[string]any)
+			for i := 0; i < len(fields); i += 2 {
+				got[fields[i].(string)] = fields[i+1]
+			}
+			for key, want := range map[string]any{"stdout_json_ok": tc.json, "stdout_result_ok": tc.result, "stdout_text_ok": tc.text, "wait_delay": true, "wait_ok": false, "stdout_bytes": min(len(tc.data), 4097), "stdout_cap_exceeded": len(tc.data) > 4096} {
+				if got[key] != want {
+					t.Fatalf("incorrect %s predicate", key)
+				}
+			}
+		})
 	}
 }

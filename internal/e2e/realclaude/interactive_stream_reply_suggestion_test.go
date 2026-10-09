@@ -470,8 +470,15 @@ func (s suggestSource) diagnostic(idle bool, setRev, clearRev uint64) string {
 		exit = fmt.Sprint(*s.ExitCode)
 	}
 	if s.OutputObserved {
-		output = fmt.Sprintf("bytes=%d utf8=%v json=%v result_success=%v text_valid=%v",
-			s.StdoutBytes, s.UTF8OK, s.JSONOK, s.ResultOK, s.TextOK)
+		jsonOK, resultOK, textOK := "unknown", "unknown", "unknown"
+		if s.UTF8OK {
+			jsonOK = strconv.FormatBool(s.JSONOK)
+		}
+		if s.UTF8OK && s.JSONOK {
+			resultOK, textOK = strconv.FormatBool(s.ResultOK), strconv.FormatBool(s.TextOK)
+		}
+		output = fmt.Sprintf("bytes=%d utf8=%v json=%s result_success=%s text_valid=%s",
+			s.StdoutBytes, s.UTF8OK, jsonOK, resultOK, textOK)
 	}
 	elapsed := s.ElapsedMS
 	if s.StartMS != 0 && s.Completed == 0 {
@@ -503,19 +510,68 @@ func suggestLifecycle(stderr string, pid int) string {
 			if i < 3 || i > 10 {
 				n, err := strconv.ParseInt(value, 10, 64)
 				if err != nil {
+					if value == "unknown" && (key == "exit_code" || key == "exit_signal") && (fields["wait_completed"] != "true" || fields["exit_observed"] != "true") {
+						safe = append(safe, key+"=unknown")
+						continue
+					}
 					break
 				}
 				value = strconv.FormatInt(n, 10)
 			} else {
-				b, err := strconv.ParseBool(value)
-				if err != nil {
+				if value != "true" && value != "false" {
 					break
 				}
-				value = strconv.FormatBool(b)
 			}
 			safe = append(safe, key+"="+value)
 		}
 		if len(safe) == len(keys) {
+			// Presence and applicability gates prevent missing fields becoming zeros
+			// or successful predicates. Only normalized scalars leave this parser.
+			values := make(map[string]string)
+			for _, key := range []string{"output_observed", "wait_ok", "wait_delay", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok"} {
+				values[key] = "unknown"
+				if fields["wait_completed"] == "true" {
+					if value := fields[key]; value == "true" || value == "false" {
+						values[key] = value
+					}
+				}
+			}
+			waitKnown := values["wait_ok"] != "unknown" && values["wait_delay"] != "unknown"
+			if values["wait_ok"] == "true" && values["wait_delay"] == "true" ||
+				(values["wait_ok"] == "true" || values["wait_delay"] == "true") &&
+					(fields["exit_observed"] != "true" || fields["exit_code"] != "0" || fields["exit_signal"] != "0") {
+				waitKnown = false
+			}
+			if !waitKnown {
+				values["wait_ok"], values["wait_delay"] = "unknown", "unknown"
+			}
+			values["stdout_bytes"] = "unknown"
+			decodeKnown := values["stdout_utf8_ok"] == "false" || values["stdout_json_ok"] != "unknown"
+			if values["output_observed"] == "true" && waitKnown && decodeKnown && values["stdout_utf8_ok"] != "unknown" && values["stdout_cap_exceeded"] != "unknown" {
+				if n, err := strconv.ParseInt(fields["stdout_bytes"], 10, 64); err == nil && n >= 0 && n <= 4097 && values["stdout_cap_exceeded"] == strconv.FormatBool(n == 4097) {
+					// Empty stdout is valid UTF-8 and fails JSON decoding.
+					if n != 0 || values["stdout_utf8_ok"] == "true" && values["stdout_json_ok"] == "false" {
+						values["stdout_bytes"] = strconv.FormatInt(n, 10)
+					}
+				}
+			}
+			if values["stdout_bytes"] == "unknown" {
+				for _, key := range []string{"output_observed", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok"} {
+					values[key] = "unknown"
+				}
+			}
+			if values["stdout_utf8_ok"] != "true" {
+				values["stdout_json_ok"] = "unknown"
+			}
+			if values["stdout_json_ok"] != "true" {
+				values["stdout_result_ok"], values["stdout_text_ok"] = "unknown", "unknown"
+			}
+			if fields["wait_completed"] != "true" || fields["exit_observed"] != "true" {
+				safe[len(safe)-2], safe[len(safe)-1] = "exit_code=unknown", "exit_signal=unknown"
+			}
+			for _, key := range []string{"output_observed", "wait_ok", "wait_delay", "stdout_bytes", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok"} {
+				safe = append(safe, key+"="+values[key])
+			}
 			return "daemon lifecycle (cause not inferred): " + strings.Join(safe, " ")
 		}
 	}
