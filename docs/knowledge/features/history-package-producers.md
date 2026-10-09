@@ -4,8 +4,8 @@ Part of [the history package overview](history-package.md).
 
 ## Producers (#2114, #2115)
 
-Interactive output, session transitions, runtime lifecycle facts and delivered
-operator messages in `cmd/pyry` append through one seam,
+Interactive output, session transitions, runtime/startup lifecycle facts and
+delivered operator messages in `cmd/pyry` append through one seam,
 `appendConversationHistory` (`cmd/pyry/conversation_history.go`): the
 interactive emitter's `emit` chokepoint
 (`cmd/pyry/interactive_turn_v2.go`), session transitions' `broadcast`
@@ -277,9 +277,74 @@ traffic by `legacyHistoryType`. Visibility never grants transport eligibility.
 Best-effort nil/failed storage does not change closure, sealing, eligible legacy
 publication, payload meanings or recipient gates. Append failures use the existing
 content-free discriminants, never payloads or filesystem error text. Daemon-start
-reconciliation remains [#3014](https://github.com/pyrycode/pyrycode/issues/3014).
+reconciliation uses the [startup closure point](#startup-reconciliation-3014).
 See [ADR 042](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks)
 and [drain source lifecycle](streamsup-package-draining-turnevents-into-the-interactive-emitter.md).
+
+### Startup reconciliation (#3014)
+
+`runSupervisor` calls `reconcileStartupHistory` synchronously after instance
+ownership and construction of the single history store, before channel delivery,
+queue, relay or pool producers can write. Both relay-enabled and history-only
+daemons use this path. Discovery snapshots `Registry.List()` without a filter,
+including archived conversations, and reads their existing raw `Store.Page`
+logs. Missing and empty logs receive no divider; discovery creates no empty
+history directories. Conversations created after this snapshot receive none.
+No Claude transcript or second durable log supplies recovery evidence.
+
+`readStartupMainWork` walks newest-first across raw pages and segments, passing
+opaque cursors unchanged and terminating only on `AtStart`. It completes each
+conversation's read before appending to that conversation, retaining identities
+and outcomes rather than historical text or tool inputs. A legacy projection
+would discard hidden openings and prior interruptions needed for reconstruction.
+
+For each unfinished main turn, `closeStartupMainWork` appends shown
+`main_tool_interrupted` facts for unfinished ordinary calls, then exactly one
+shown `main_turn_interrupted`, all with cause `daemon_restart`. Turns are ordered
+by their earliest recorded opening evidence and tools by tool ID. Thinking-only
+openings count. Successful/failed results, denials and recorded tool interruptions
+retire calls; normal/interrupted turn endings close the turn even if later facts
+survive. Parent-attributed child work is excluded. Agent/Task launchers can
+identify the main turn but receive no ordinary-tool interruption; agent and
+background-task endings remain [#2969](https://github.com/pyrycode/pyrycode/issues/2969).
+
+After closure, every surviving nonempty raw log receives one `session_divider`
+per startup, even when all its work already ended. It has cause `daemon_restart`,
+explicit `shown: false`, and daemon-authored session metadata `kind: none`.
+All startup facts share the captured startup occurrence time as `occurred_at`
+and entry timestamp. Their durable entry-ID order places tool closures before
+turn closure, then the divider, then new traffic. `closeStartupMainWork` is the
+composable startup closure-before-divider point, alongside `closeRuntimeSource`
+at runtime. These facts remain excluded from legacy pages, replay and live
+traffic independently of visibility.
+
+**Recover identity without inventing provenance.** Tagged turns match recorded
+source and turn ID. Untagged turns match recorded turn/tool IDs within legacy
+session-transition and non-restart divider scopes; restart dividers do not split
+these scopes. Existing entries stay unchanged. Closures retain known old-source
+metadata, while unavailable legacy provenance stays absent. The registry's
+current session/agent cannot attribute old work, and missing IDs are not minted.
+Legacy denials lack parent attribution: parent-attributed evidence excludes
+child-only denial candidates, while an identifiable denial-only main turn can
+still be closed.
+
+**A recovery reference targets only its original opening.** Startup interruptions
+carry optional `runtimeHistoryFact.TurnOpenedEntryID` (`turn_opened_entry_id`),
+the earliest recorded main-opening evidence's durable ID; runtime facts omit it.
+Recovery may append after a legacy delimiter, outside the opening's scope.
+`readStartupMainWork` applies referenced interruptions exclusively to that opening,
+never also to the append-time scope. Otherwise a later turn or tool reusing the
+same IDs would be falsely closed. Recorded interruptions suppress repeated
+closures across starts and late facts cannot reopen the interrupted turn; each
+start still adds its own divider. A saved tool-only interruption also prevents
+repeating that tool's closure when the turn interruption did not survive.
+
+A read failure skips both closure and divider for that conversation: partial
+evidence cannot establish unfinished work. Append failures remain best effort.
+Neither blocks startup nor reconciliation of other conversations. Failure logs
+contain only event, validated canonical conversation ID when available, and
+content-free classifiers; payloads, cursors, source IDs and filesystem error text
+stay out. Invalid registry IDs are rejected without logging their value.
 
 ### Operator delivery provenance (#2983)
 
@@ -358,7 +423,7 @@ recipient gates keep their original meaning.
 | `background_task_updated` | Hidden for patch-only updates; shown when `Status` or `Summary` is nonempty. |
 | Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
-| Runtime history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden only for `idle_sleep`. All remain ineligible for legacy delivery. |
+| Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. All remain ineligible for legacy delivery. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -492,6 +557,18 @@ rule would be defeated by relaying them.
 **Test-shape traps worth knowing before touching these producers
 again:**
 
+- **Reuse legacy IDs after recovery, not just across repeated starts.**
+  `TestStartupHistoryReferenceIsolation` saves full and tool-only recovery before
+  newer scoped work reuses the turn/tool IDs, then checks that the newer work
+  still closes. Repeated starts without new work miss references that also
+  terminate their append-time scope. Its late-fact case checks the opposite:
+  output in the original scope must not reopen an interrupted turn.
+- **Prove the intended storage failure happened.**
+  `TestStartupHistoryFailures` asserts the write failure's append event or the
+  read failure's canonical conversation ID as well as content-free logs and
+  continued reconciliation of a healthy conversation. An invalid registry ID
+  can produce a safe warning before touching storage; absence of sensitive
+  content alone would leave the intended read/write failure untested.
 - **Rotate before successor output and reactivate the same routing ID.**
   `TestRuntimeHistoryRotationBeforeOutput` delays B across A→B→C;
   `TestRuntimeHistoryEvictionBeforeOutput` supplies late parsed tails and both
