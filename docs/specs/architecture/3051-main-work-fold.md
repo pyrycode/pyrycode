@@ -63,3 +63,7 @@ Pending documentation stage: extend `docs/knowledge/features/thread-package.md`,
 - [Threat model] Conversation identity is caller-established and checked by `Feed`; joins are display data, never authority. Daemon/wire integration and its request limits remain downstream of this ticket.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-09
+
+## Revisions
+- 2026-10-09: `ToolUsePayload.Input` exposed a validation gap: JSON null map values decode into empty Go strings. Extend `validRecordedFields` to inspect map elements, preserving nullable maps while rejecting null scalar values. Added `TestMainMalformedStateNeutrality` to prove full join-state neutrality.
+- 2026-10-09: Supplied null recovery references are malformed rather than absent; zero/unresolved references have no target. `TestMainReferenceNeutrality` covers these and mismatched turns. `TestMainScopedEndAndLateTerminal` covers source/turn isolation, late results and inactive late-text coalescing. These supplement the lifecycle tests listed above.

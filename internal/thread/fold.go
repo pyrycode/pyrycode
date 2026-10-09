@@ -36,11 +36,18 @@ type Fold struct {
 	successor                 history.SessionProvenance
 	lastBoundary, legacyScope uint64
 	pending                   map[boundaryKey][]uint64
+	turns                     map[mainKey]*mainTurn
+	openings                  map[uint64]*mainTurn
 }
 
 // New creates an independent fold for a caller-established conversation owner.
 func New(conversationID string) *Fold {
-	return &Fold{conversationID: conversationID, pending: make(map[boundaryKey][]uint64)}
+	return &Fold{
+		conversationID: conversationID,
+		pending:        make(map[boundaryKey][]uint64),
+		turns:          make(map[mainKey]*mainTurn),
+		openings:       make(map[uint64]*mainTurn),
+	}
 }
 
 // Feed consumes increasing IDs. Unsupported or malformed facts still advance
@@ -58,6 +65,9 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		if !decode(e.Payload, &owner) || (owner.ConversationID != "" && owner.ConversationID != f.conversationID) {
 			continue
 		}
+		if f.mainWork(e) {
+			continue
+		}
 		item := Item{ID: e.ID, Order: e.ID, Rev: e.ID, Status: "done", Shown: true}
 		if e.Type == "session_divider" || e.Type == protocol.TypeSessionTransition {
 			if !f.boundary(e, &item) {
@@ -66,27 +76,37 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		} else if !standalone(e, &item) {
 			continue
 		}
-		source := f.successor
-		if item.Session != "" || e.Type == "session_divider" || e.Type == protocol.TypeSessionTransition {
-			source = history.SessionProvenance{SessionID: item.Session, Kind: item.Agent}
+		if item.Kind == "user_message" {
+			for _, st := range f.openings {
+				f.closeText(st, e.ID)
+			}
 		}
-		if e.Session != nil {
-			source = *e.Session
-		}
-		item.Session = source.SessionID
-		item.Agent = recordedAgent(source.Kind)
-		item.NoChild = source.Kind == "none"
-		if e.Shown != nil {
-			item.Shown = *e.Shown
-		}
-		item.Summary = plainSummary(item.Summary)
-		if item.Summary == "" {
-			item.Summary = strings.ReplaceAll(item.Kind, "_", " ")
-		}
-		item.Content = append(json.RawMessage(nil), e.Payload...)
-		f.items = append(f.items, item)
+		f.addItem(e, item)
 	}
 	return nil
+}
+
+func (f *Fold) addItem(e history.Entry, item Item) int {
+	source := f.successor
+	if item.Session != "" || e.Type == "session_divider" || e.Type == protocol.TypeSessionTransition {
+		source = history.SessionProvenance{SessionID: item.Session, Kind: item.Agent}
+	}
+	if e.Session != nil {
+		source = *e.Session
+	}
+	item.Session = source.SessionID
+	item.Agent = recordedAgent(source.Kind)
+	item.NoChild = source.Kind == "none"
+	if e.Shown != nil {
+		item.Shown = *e.Shown
+	}
+	item.Summary = plainSummary(item.Summary)
+	if item.Summary == "" {
+		item.Summary = strings.ReplaceAll(item.Kind, "_", " ")
+	}
+	item.Content = append(json.RawMessage(nil), e.Payload...)
+	f.items = append(f.items, item)
+	return len(f.items) - 1
 }
 
 // Version is the newest consumed valid history entry ID.
@@ -102,7 +122,7 @@ func (f *Fold) Items() []Item {
 }
 
 // decode accepts objects only, checks required fields and validates recorded DTO
-// fields recursively. Null is valid for pointers and slices, never their scalar
+// fields recursively. Null is valid for pointers, maps and slices, never their scalar
 // or struct elements. Unknown fields remain inert source content.
 func decode(raw json.RawMessage, dst any, required ...string) bool {
 	var fields map[string]json.RawMessage
@@ -120,7 +140,7 @@ func decode(raw json.RawMessage, dst any, required ...string) bool {
 
 func validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
 	if string(raw) == "null" {
-		return typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice
+		return typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Map
 	}
 	switch typ.Kind() {
 	case reflect.Pointer:
@@ -142,6 +162,16 @@ func validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
 				if strings.EqualFold(key, name) && !validRecordedFields(value, field.Type) {
 					return false
 				}
+			}
+		}
+	case reflect.Map:
+		var values map[string]json.RawMessage
+		if json.Unmarshal(raw, &values) != nil {
+			return false
+		}
+		for _, value := range values {
+			if !validRecordedFields(value, typ.Elem()) {
+				return false
 			}
 		}
 	case reflect.Slice:
