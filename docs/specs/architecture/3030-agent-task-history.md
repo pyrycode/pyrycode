@@ -86,3 +86,9 @@ Pending for documentation stage: update `docs/knowledge/features/history-package
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-09
+
+## Revisions
+
+- 2026-10-09: Reuse `rememberLauncher`'s existing `launcherTurns` to recognize results and denials, rather than maintaining another call inventory. Parent/name observations live in the raw start fact; results also retain any reported parent, and joins recover attribution within the lifetime.
+- 2026-10-09: Sealed producers retain their lifetime and launcher attribution so a captured late report still joins the predecessor. New producer incarnations mint different durable lifetimes. Unsealed exit and conversation teardown release attribution. `TestAgentHistory_SealedReports` covers background-only sealing, delayed outcome and same-session reactivation.
+- 2026-10-09: `recordAgentFact` flushes preceding buffered text before appending evidence, preserving accepted output order without opening or changing a main turn. `TestAgentHistory_ReceiptValidation` checks every fact's required receipt fields and both raw visibility values through warm/reopened legacy readers and read-mark fixtures.
