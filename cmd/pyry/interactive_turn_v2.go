@@ -267,7 +267,7 @@ func (e *interactiveTurnEmitterV2) selectConversation(convID string, source hist
 }
 
 // releaseConversation forgets empty state. Child attribution survives main-turn
-// closure and is released by closeForConversation at session exit or teardown.
+// closure and is released when the producing child's lifetime is retired.
 // The selection itself is left alone; the next HandleFor reselects.
 func (e *interactiveTurnEmitterV2) releaseConversation(key string) {
 	if st := e.turns[key]; st != nil && (st.runtimeClosedTurnID != "" || st.agentLifetime != "") && e.runtimeSealed[runtimeSourceKey(st.conversationID, st.source.SessionID, st.runtimeIncarnation)] {
@@ -1215,7 +1215,7 @@ func (e *interactiveTurnEmitterV2) closeForConversation(ctx context.Context, con
 		e.childLanes = nil
 		e.launcherTurns = nil
 		e.childToolTurns = nil
-		e.agentLifetime = ""
+		e.retireAgentHistory()
 		e.releaseConversation(key)
 	}
 }

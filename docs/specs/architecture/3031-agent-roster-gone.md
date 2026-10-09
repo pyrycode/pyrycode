@@ -121,3 +121,16 @@ distinguishing raw visibility, legacy unread targets and foreground presentation
   first observed launcher, even before a lifetime is minted. A result that first
   supplies the parent call identity must enrich the retained call for later gone
   facts. Neither change alters existing mapped reports or opens sealed main work.
+
+- 2026-10-09: Verifier finding 1 showed that unsealed child respawns reuse the
+  source/incarnation while `closeRuntimeSource` and `closeForConversation` cleared
+  only the lifetime ID, retaining stale inference maps. Both now call
+  `retireAgentHistory` to clear call facts, task links/outcomes and terminal call
+  markers together with the lifetime. Sealed runtime closure retains predecessor
+  evidence. `runtime_history.go` → `closeRuntimeSource` was read for this repair.
+  `TestAgentHistory_GoneChildLifetimeReset` covers both reset paths, reused IDs
+  after inferred/reported/denied endings, and old links with unrelated denials;
+  `TestAgentHistory_GoneSealedLifetime` covers retained eligibility and terminal
+  evidence across sealing. Both inspect warm/reopened stores under `go test -race`.
+  Security re-review: PASS; drain ownership, storage/receipt boundaries and
+  content-free logging remain unchanged, with no new input or I/O path.

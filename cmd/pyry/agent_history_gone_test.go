@@ -223,6 +223,119 @@ func TestAgentHistory_GoneHousekeeping(t *testing.T) {
 	}
 }
 
+func TestAgentHistory_GoneChildLifetimeReset(t *testing.T) {
+	t.Parallel()
+	for _, reset := range []string{"child-exit", "conversation-close"} {
+		for _, tt := range []struct {
+			name     string
+			ending   turnevent.Event
+			relaunch bool
+			want     int
+		}{
+			{"gone-reused-ids", turnevent.BackgroundTaskRoster{}, true, 2},
+			{"reported-reused-ids", turnevent.BackgroundTaskUpdated{TaskID: "task", Status: "completed"}, true, 1},
+			{"denied-reused-ids", turnevent.ToolCallDenied{ToolCallID: "call"}, true, 1},
+			{"old-link-with-unrelated-denial", turnevent.ToolCallDenied{ToolCallID: "unrelated"}, false, 0},
+		} {
+			t.Run(reset+"/"+tt.name, func(t *testing.T) {
+				dir := t.TempDir()
+				store := history.New(dir)
+				e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
+				e.hist, e.runtimeFacts = store, true
+				ctx := context.Background()
+				source := history.SessionProvenance{Kind: "claude", SessionID: "source"}
+				hold := newSessionBackgroundTaskHold(func(ev turnevent.Event) {
+					e.handleForSource(ctx, testConvID, ev, source, 1)
+				})
+				hold.Sink(turnevent.ToolStart{Title: "Agent", ToolCallID: "call", ParentToolCallID: "old-parent"})
+				hold.Sink(turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "call"})
+				hold.Sink(tt.ending)
+				oldLifetime := e.agentLifetime
+				before := len(testGoneEntries(t, store, testConvID))
+				hold.childExited()
+				if reset == "child-exit" {
+					e.closeRuntimeSource(ctx, testConvID, source.SessionID, "child_exit", historyTS, false, 0, 1)
+				} else {
+					e.closeForConversation(ctx, testConvID)
+				}
+				if len(testGoneEntries(t, store, testConvID)) != before {
+					t.Fatal("reset alone inferred gone")
+				}
+				// Automatic respawns keep the runner's source and incarnation.
+				if tt.relaunch {
+					hold.Sink(turnevent.ToolStart{Title: "Agent", ToolCallID: "call"})
+					hold.Sink(turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "call"})
+				}
+				hold.Sink(turnevent.BackgroundTaskRoster{})
+				hold.Sink(turnevent.BackgroundTaskRoster{})
+				for _, reader := range []*history.Store{store, history.New(dir)} {
+					entries := testGoneEntries(t, reader, testConvID)
+					if len(entries) != tt.want {
+						t.Fatalf("gone=%d want=%d after %s", len(entries), tt.want, reset)
+					}
+					if !tt.relaunch {
+						continue
+					}
+					var gone agentHistoryFact
+					entry := entries[len(entries)-1]
+					if err := json.Unmarshal(entry.Payload, &gone); err != nil {
+						t.Fatal(err)
+					}
+					links := testAgentFacts(t, reader, testConvID)[historyTaskLinked]
+					if gone.LifetimeID == oldLifetime || gone.LifetimeID != links[len(links)-1]["lifetime_id"] || gone.ParentToolCallID != "" || gone.TaskID != "task" || gone.ToolCallID != "call" || entry.Session == nil || *entry.Session != source {
+						t.Fatalf("replacement inherited old child evidence: %+v", gone)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestAgentHistory_GoneSealedLifetime(t *testing.T) {
+	t.Parallel()
+	for _, ended := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ended=%t", ended), func(t *testing.T) {
+			dir := t.TempDir()
+			store := history.New(dir)
+			e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
+			e.hist, e.runtimeFacts = store, true
+			ctx := context.Background()
+			source := history.SessionProvenance{Kind: "claude", SessionID: "source"}
+			old := newSessionBackgroundTaskHold(func(ev turnevent.Event) { e.handleForSource(ctx, testConvID, ev, source, 1) })
+			old.Sink(turnevent.ToolStart{Title: "Agent", ToolCallID: "call", ParentToolCallID: "old-parent"})
+			old.Sink(turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "call"})
+			if ended {
+				old.Sink(turnevent.BackgroundTaskUpdated{TaskID: "task", Status: "completed"})
+			}
+			oldLifetime := e.agentLifetime
+			e.closeRuntimeSource(ctx, testConvID, source.SessionID, "idle_sleep", historyTS, true, 0, 1)
+			next := newSessionBackgroundTaskHold(func(ev turnevent.Event) { e.handleForSource(ctx, testConvID, ev, source, 2) })
+			next.Sink(turnevent.ToolStart{Title: "Agent", ToolCallID: "call"})
+			next.Sink(turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "call"})
+			nextLifetime := e.agentLifetime
+			old.Sink(turnevent.BackgroundTaskRoster{})
+			old.Sink(turnevent.BackgroundTaskRoster{})
+			next.Sink(turnevent.BackgroundTaskRoster{})
+			for _, reader := range []*history.Store{store, history.New(dir)} {
+				byLifetime := map[string]int{}
+				for _, entry := range testGoneEntries(t, reader, testConvID) {
+					var p agentHistoryFact
+					if err := json.Unmarshal(entry.Payload, &p); err != nil {
+						t.Fatal(err)
+					}
+					byLifetime[p.LifetimeID]++
+					if p.LifetimeID == oldLifetime && p.ParentToolCallID != "old-parent" {
+						t.Fatal("sealed predecessor lost call evidence")
+					}
+				}
+				if oldLifetime == nextLifetime || byLifetime[oldLifetime] != 1-testBoolInt(ended) || byLifetime[nextLifetime] != 1 || len(byLifetime) != 2-testBoolInt(ended) {
+					t.Fatalf("sealed evidence changed or leaked to successor: %v", byLifetime)
+				}
+			}
+		})
+	}
+}
+
 func TestAgentHistory_GoneReceiptBarriers(t *testing.T) {
 	t.Parallel()
 	valid, err := json.Marshal(agentHistoryFact{ConversationID: testConvID, LifetimeID: testConvIDB, ToolCallID: "call", TaskID: "task", Status: "gone", OccurredAt: historyTS})

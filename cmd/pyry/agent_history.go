@@ -42,6 +42,12 @@ type agentTaskHistory struct {
 	ended  bool
 }
 
+// retireAgentHistory clears the lifetime and its inference evidence together.
+func (st *convTurnState) retireAgentHistory() {
+	st.agentLifetime = ""
+	st.agentCalls, st.agentTasks, st.agentEnded = nil, nil, nil
+}
+
 func agentHistoryType(typ string) bool {
 	switch typ {
 	case historyAgentObserved, historyAgentResult, historyAgentDenied,

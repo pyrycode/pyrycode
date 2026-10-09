@@ -124,7 +124,8 @@ func (e *interactiveTurnEmitterV2) closeRuntimeSource(ctx context.Context, convI
 		}
 		e.childLanes, e.childToolTurns = nil, nil
 		if !seal {
-			e.launcherTurns, e.agentLifetime = nil, ""
+			e.launcherTurns = nil
+			e.retireAgentHistory()
 		}
 		e.releaseConversation(key)
 	}
