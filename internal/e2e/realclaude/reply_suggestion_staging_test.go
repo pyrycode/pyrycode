@@ -328,8 +328,12 @@ func TestSuggestCLISourceEvidence(t *testing.T) {
 func TestSuggestLifecycleOutput(t *testing.T) {
 	const base = "msg=reply_fallback.lifecycle pid=42 attempt_ms=9810 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 "
 	const output = "output_observed=true wait_ok=false wait_delay=false stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown"
+	const unknownOutput = "stdout_bytes=unknown stdout_cap_exceeded=unknown stdout_utf8_ok=unknown stdout_json_ok=unknown stdout_result_ok=unknown stdout_text_ok=unknown"
 	for _, tc := range []struct{ name, fields, want string }{
-		{"zero", output, "stdout_bytes=0"},
+		{"zero", output, "stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown"},
+		{"zero decoded", strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), unknownOutput},
+		{"zero successful predicates", strings.ReplaceAll(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "=unknown", "=true"), unknownOutput},
+		{"zero invalid utf8", strings.Replace(strings.Replace(output, "stdout_utf8_ok=true", "stdout_utf8_ok=false", 1), "stdout_json_ok=false", "stdout_json_ok=unknown", 1), unknownOutput},
 		{"missing", "output_observed=true", "stdout_bytes=unknown"},
 		{"partial predicates", strings.Replace(output, "stdout_utf8_ok=true ", "", 1), "stdout_bytes=unknown"},
 		{"missing decode", strings.Replace(output, "stdout_json_ok=false ", "", 1), "stdout_bytes=unknown"},
@@ -345,7 +349,7 @@ func TestSuggestLifecycleOutput(t *testing.T) {
 		{"nonboolean", strings.Replace(output, "stdout_utf8_ok=true", "stdout_utf8_ok=1", 1), "stdout_bytes=unknown"},
 		{"invalid utf8 count", strings.Replace(strings.Replace(strings.Replace(output, "stdout_utf8_ok=true", "stdout_utf8_ok=false", 1), "stdout_json_ok=false", "stdout_json_ok=unknown", 1), "stdout_bytes=0", "stdout_bytes=1", 1), "stdout_bytes=1"},
 		{"invalid utf8 decode", strings.Replace(strings.Replace(output, "stdout_utf8_ok=true", "stdout_utf8_ok=false", 1), "stdout_bytes=0", "stdout_bytes=1", 1), "stdout_json_ok=unknown"},
-		{"missing result", strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_result_ok=unknown ", "", 1), "stdout_result_ok=unknown"},
+		{"missing result", strings.Replace(strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_bytes=0", "stdout_bytes=25", 1), "stdout_result_ok=unknown ", "", 1), "stdout_result_ok=unknown"},
 		{"decode gate", strings.ReplaceAll(output, "=unknown", "=true"), "stdout_result_ok=unknown"},
 		{"valid", strings.ReplaceAll(strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_bytes=0", "stdout_bytes=25", 1), "=unknown", "=true"), "stdout_text_ok=true"},
 		{"saturated", strings.Replace(strings.Replace(output, "stdout_bytes=0", "stdout_bytes=4097", 1), "stdout_cap_exceeded=false", "stdout_cap_exceeded=true", 1), "stdout_bytes=4097"},

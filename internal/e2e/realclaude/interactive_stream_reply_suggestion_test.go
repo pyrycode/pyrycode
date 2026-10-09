@@ -549,7 +549,10 @@ func suggestLifecycle(stderr string, pid int) string {
 			decodeKnown := values["stdout_utf8_ok"] == "false" || values["stdout_json_ok"] != "unknown"
 			if values["output_observed"] == "true" && waitKnown && decodeKnown && values["stdout_utf8_ok"] != "unknown" && values["stdout_cap_exceeded"] != "unknown" {
 				if n, err := strconv.ParseInt(fields["stdout_bytes"], 10, 64); err == nil && n >= 0 && n <= 4097 && values["stdout_cap_exceeded"] == strconv.FormatBool(n == 4097) {
-					values["stdout_bytes"] = strconv.FormatInt(n, 10)
+					// Empty stdout is valid UTF-8 and fails JSON decoding.
+					if n != 0 || values["stdout_utf8_ok"] == "true" && values["stdout_json_ok"] == "false" {
+						values["stdout_bytes"] = strconv.FormatInt(n, 10)
+					}
 				}
 			}
 			if values["stdout_bytes"] == "unknown" {
