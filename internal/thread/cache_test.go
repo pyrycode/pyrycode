@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/pyrycode/pyrycode/internal/conversations"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,8 +13,93 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 )
+
+func TestStoreCacheWarmHistoryTruncation(t *testing.T) {
+	t.Parallel()
+	for _, action := range []string{"reopen", "reload", "retry"} {
+		for _, surviving := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%s/%d", action, surviving), func(t *testing.T) {
+				h := history.New(t.TempDir())
+				s := NewStore(h)
+				t.Cleanup(func() { _ = s.Shutdown() })
+				entries := testStoreAppend(t, h, testStoreA,
+					testMain(1, "assistant_delta", `,"text":"surviving "`),
+					testMain(2, "assistant_delta", `,"text":"lost"`))
+				if err := s.Load(context.Background(), testStoreA); err != nil {
+					t.Fatal(err)
+				}
+				first := testStoreWait(t, s, testStoreA, StateUsable, 2)
+				if action == "reload" {
+					if err := s.Unload(testStoreA); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := s.Shutdown(); err != nil {
+					t.Fatal(err)
+				}
+				dir, err := h.LogDir(testStoreA)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+				if err != nil || len(files) != 1 {
+					t.Fatal(files, err)
+				}
+				raw, err := os.ReadFile(files[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+				lines := bytes.SplitAfter(raw, []byte("\n"))
+				retained := bytes.Join(lines[:surviving+1], nil)
+				next := s
+				if action != "reload" {
+					next = NewStore(h)
+					t.Cleanup(func() { _ = next.Shutdown() })
+				}
+				if action == "retry" {
+					if err := os.WriteFile(files[0], []byte("unreadable history\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					if err := next.Load(context.Background(), testStoreA); err != nil {
+						t.Fatal(err)
+					}
+					testStoreWait(t, next, testStoreA, StateUnavailable, 0)
+				}
+				if err := os.WriteFile(files[0], retained, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if warm, err := h.LatestEntryID(testStoreA); err != nil || warm != 2 {
+					t.Fatalf("append cursor is not warm: %d, %v", warm, err)
+				}
+				load := next.Load
+				if action == "retry" {
+					load = next.Retry
+				}
+				if err := load(context.Background(), testStoreA); err != nil {
+					t.Fatal(err)
+				}
+				got := testStoreWait(t, next, testStoreA, StateUsable, uint64(surviving))
+				testStoreEqual(t, got, testStoreA, entries[:surviving])
+				if len(got.Epoch) != 32 || got.Epoch == first.Epoch {
+					t.Fatal("truncated history did not rotate epoch")
+				}
+				after, err := os.ReadFile(files[0])
+				if err != nil || !bytes.Equal(after, retained) {
+					t.Fatal("recovery changed history", err)
+				}
+				entries = append(entries[:surviving], testStoreAppend(t, h, testStoreA,
+					testMain(3, "assistant_delta", `,"text":"tail"`))...)
+				tail := testStoreWait(t, next, testStoreA, StateUsable, 3)
+				testStoreEqual(t, tail, testStoreA, entries)
+				if tail.Epoch != got.Epoch {
+					t.Fatal("tail changed recovered epoch")
+				}
+			})
+		}
+	}
+}
 
 func TestStoreCacheEpochs(t *testing.T) {
 	t.Parallel()

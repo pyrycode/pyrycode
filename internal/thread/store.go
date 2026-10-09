@@ -154,16 +154,18 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		}
 		close(w.done)
 	}()
-	bound, err := s.history.LatestEntryID(id)
+	if s.history == nil {
+		return
+	}
+	// Page reads the surviving log; LatestEntryID can retain an append cursor
+	// ahead of history after truncation. Replay must still reach this read bound.
+	page, err := s.history.Page(id, "", 1)
 	if err != nil {
 		return
 	}
-	// A warm zero cursor and Walk(0) alone do not read storage. Page validates
-	// empty history before it can support a usable zero-version publication.
-	if bound == 0 {
-		if _, err := s.history.Page(id, "", 1); err != nil {
-			return
-		}
+	var bound uint64
+	if len(page.Entries) > 0 {
+		bound = page.Entries[0].ID
 	}
 	if _, err := s.history.EnsureLogDir(id); err != nil {
 		result = ErrPersistence
