@@ -108,6 +108,64 @@ func TestThreadAgentRecordedReplay(t *testing.T) {
 	if !foundCall || !foundResult || !foundEnding {
 		t.Fatal("missing recorded call, result or task final")
 	}
+	var children []thread.Item
+	for _, item := range full.Items() {
+		if item.Parent == agent.ID {
+			children = append(children, item)
+		}
+	}
+	if len(children) != 2 {
+		t.Fatalf("recorded Read children: %#v", children)
+	}
+	for i, want := range []struct{ call, file, marker string }{
+		{"toolu_01WAR86LLmsQa72SgN3P8reE", "$WORKDIR/alpha.txt", "pyry-2191-alpha-marker"},
+		{"toolu_01MBCi2bQ79dotofRkLqJB6m", "$WORKDIR/beta.txt", "pyry-2191-beta-marker"},
+	} {
+		child := children[i]
+		var saved struct {
+			Call   string            `json:"tool_use_id"`
+			Name   string            `json:"name"`
+			Input  map[string]string `json:"input"`
+			Result struct {
+				Summary string `json:"result_summary"`
+				Detail  string `json:"result_detail"`
+			} `json:"result"`
+		}
+		if json.Unmarshal(child.Content, &saved) != nil || saved.Call != want.call || saved.Name != "Read" || saved.Input["file_path"] != want.file || !strings.Contains(saved.Result.Summary+saved.Result.Detail, want.marker) {
+			t.Fatalf("recorded child fields lost: %s", child.Content)
+		}
+		if child.Kind != "tool_call" || child.Status != "done" || child.Active || child.Session != "recorded" || child.Agent != "claude" || child.ID <= agent.ID {
+			t.Fatalf("recorded child: %#v", child)
+		}
+		foundLaunch, foundResult := false, false
+		for _, entry := range entries {
+			var p struct {
+				Call    string            `json:"tool_use_id"`
+				Input   map[string]string `json:"input"`
+				Summary string            `json:"result_summary"`
+				Detail  string            `json:"result_detail"`
+			}
+			_ = json.Unmarshal(entry.Payload, &p)
+			if p.Call != want.call {
+				continue
+			}
+			if entry.Type == "tool_use" {
+				foundLaunch = true
+				if child.ID != entry.ID || child.Order != entry.ID || !reflect.DeepEqual(saved.Input, p.Input) {
+					t.Fatal("child creation identity/input changed")
+				}
+			}
+			if entry.Type == "tool_result" {
+				foundResult = true
+				if child.Rev != entry.ID || saved.Result.Detail != p.Detail || saved.Result.Summary != p.Summary {
+					t.Fatal("child result identity/content changed")
+				}
+			}
+		}
+		if !foundLaunch || !foundResult {
+			t.Fatal("missing recorded child launch/result")
+		}
+	}
 	for split := 0; split <= len(entries); split++ {
 		f := thread.New(testConvID)
 		if err := f.Feed(entries[:split]); err != nil {

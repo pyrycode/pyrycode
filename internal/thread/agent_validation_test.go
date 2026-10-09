@@ -114,9 +114,9 @@ func TestAgentDurableParentText(t *testing.T) {
 					entries[1].Session = testSource("claude", "other")
 				}
 				f := testMainReplay(t, entries)
-				item := testAgent(t, f, "running", true, 0)
+				item := testRetainedAgent(t, f, "running", true, 0)
 				if tc.parent != "" && !tc.isolated {
-					if len(f.Items()) != 2 {
+					if len(f.Items()) != 1 {
 						t.Fatal("child launch split main text", f.Items())
 					}
 					testContent(t, item, "parent_tool_call_id", "outer")

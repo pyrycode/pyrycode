@@ -17,8 +17,9 @@ equals that ID; accepted sends keep order zero until delivery, then use the
 linked user-message entry ID. Dropped and lost sends stay unordered. `Rev` names
 the latest content or state change, floored at the creating ID when an earlier
 pending report is applied. Standalone items keep their creating revision;
-accepted sends, main-work and agent items change in place. A valid send outcome
-sets revision to its entry ID. Redundant terminal reports do not advance revision.
+accepted sends, main work, child work and agent items change in place. A valid
+send outcome sets revision to its entry ID. Redundant terminal reports do not
+advance revision.
 `Items()` returns items in creating-entry ID order, which can differ from
 delivery `Order`; timestamps supply neither ordering nor durable linkage.
 
@@ -47,6 +48,9 @@ Main-work items retain the recorded turn and leave parent unset; running text
 and calls are active, while closed work and ending rows are inactive. Updates
 retain the creating item's attribution and visibility, except for the send
 delivery provenance and drop/loss visibility rules below.
+Child work retains its recorded turn and uses an older agent item's creating ID
+as `Parent`; see [parent repair](#parent-repair) for unresolved evidence and
+ancestor closure.
 `plainSummary` collapses whitespace and removes control characters, with a kind
 label when the result is empty. `Content` retains copied source JSON, including
 unknown fields, as inert display data; summary normalization does not rewrite it.
@@ -71,8 +75,8 @@ logged fact does not add persistence to that emitter. Answer notices consume
 including saved selected/free-text answers and any recorded truncation.
 
 Claude Agent/Task calls own [agent lifecycle items](#agent-lifecycle).
-Child work and background shell folding remain downstream in
-[#3058](https://github.com/pyrycode/pyrycode/issues/3058) and
+Parented text, ordinary tools and nested agents fold in [child lanes](#parent-repair).
+Background shell folding remains downstream in
 [#3059](https://github.com/pyrycode/pyrycode/issues/3059). Cache,
 persistence integration, epochs, daemon wiring, thread protocol and read-mark
 migration remain downstream.
@@ -132,7 +136,7 @@ by assistant/tool state and corrupt later updates. The claim suppresses only
 the public row. A chunk ending between message and outcome can temporarily
 expose both rows; later reconciliation leaves the permanent acceptance item.
 Acceptance alone does not split assistant text; the delivered message still
-closes text runs when ingested.
+closes main text runs when ingested.
 
 Without a valid terminal, acceptance stays queued. **Loss requires an explicit
 recorded `send_lost`; absence never infers it.** Recorded loss identifies missing
@@ -160,20 +164,23 @@ live state or current session bindings.
 
 Assistant deltas coalesce within their source and turn. A main tool launch,
 including a Claude Agent/Task launcher, closes that text run. A delivered user
-`message` closes open text runs throughout the conversation; a matching turn
+`message` closes open main text runs throughout the conversation; a matching turn
 ending closes its own run. Subsequent text creates a new item. Queued acceptance,
 child traffic and tool reports alone do not split text. Saved text retains its
 recorded whitespace; only the summary is normalized.
 
-Parent-attributed text and tools create no main items or joins. Claude and
-metadata-free Agent/Task launches create agent items rather than ordinary calls.
+Parent-attributed text and tools fold in [child lanes](#parent-repair), without
+opening or closing main turns, closing main calls or splitting/coalescing main
+text. Claude and metadata-free Agent/Task launches create agent items rather
+than ordinary calls.
 Only main launches split main text; `agentLaunchIsChild` also consults retained
 parent evidence within the launch's recorded source and lifetime or legacy scope
 before `mainWork` changes the text run. Looking only at the mapped launch payload
 would split text when the preceding durable observation alone saved its parent.
 Codex tools named Agent or Task are ordinary calls: the name alone cannot
 establish Claude launcher semantics. Agent reports update their call-owned item;
-child text/tools and background shell lifecycle remain downstream.
+background shell lifecycle remains downstream in
+[#3059](https://github.com/pyrycode/pyrycode/issues/3059).
 
 ### Scoped joins, pending outcomes and closure
 
@@ -227,7 +234,7 @@ the relevant `historyEntryShown` semantics without importing `cmd/pyry`:
 | Raw reset, clear, agent switch, recovery, workspace change, capacity eviction | True |
 | Raw idle sleep or daemon restart | False |
 | Standalone legacy transition | False for `idle_evict`, true for other supported reasons |
-| Main assistant run, ordinary call or Agent/Task launch | True |
+| Main/child assistant run, ordinary call or Agent/Task launch | True |
 | Main `turn_end` | False only for normal successful `end_turn`; abnormal ends are true |
 | `main_turn_interrupted` | True |
 
@@ -386,8 +393,8 @@ creation attribution and visibility. A preceding `agent_call_observed` supplies
 lifetime/parent evidence, never the creating ID. Observations, links and reports
 create no rows. The item starts `running` and active unless pending evidence
 already changes it. Creation attribution and visibility stay fixed on updates.
-Parent call evidence remains in content; resolving `Item.Parent` and folding
-child text/tools await [#3058](https://github.com/pyrycode/pyrycode/issues/3058).
+Parent call evidence remains in content; [parent repair](#parent-repair) resolves
+`Item.Parent` to the older creating ID and folds child text/tools beneath it.
 Background shell lifecycle awaits
 [#3059](https://github.com/pyrycode/pyrycode/issues/3059).
 
@@ -461,6 +468,70 @@ either identity. Otherwise a correct task reference with a contradictory call ID
 could end a second agent. `TestAgentRecoveryMismatchedLink` pins whole-fact
 rejection.
 
+### Parent repair
+
+`childWork` folds parent-attributed assistant deltas as `assistant_message` and
+ordinary launches as `tool_call`. Claude/legacy nested Agent/Task launches stay
+`agent` items with the same [lifecycle rules](#agent-lifecycle). Text coalesces
+only within its recorded parent call, source, producer lifetime (or original
+legacy scope) and turn lane. Any tool launch, including a nested agent, closes
+only that lane's text run. Known child traffic stays outside main-turn state,
+including parent evidence saved before a mapped launch or supplied only on a
+report. Main Agent/Task launches still split main text; queued sends do not,
+and delivered user messages retain their main-text closure behavior.
+
+`resolveChildren` joins only to an `agent` whose creating ID is strictly less
+than the child's, in this conversation and the same recorded source/lifetime or
+legacy scope. `childGroup` pins pending evidence to that original group; reused
+call IDs cannot steal predecessor children. Tagged and metadata-free evidence
+remain distinct regardless of displayed successor attribution. Self, newer,
+non-agent or mismatched-source/lifetime/scope parents cannot join. Current
+bindings, timestamps and tool names provide no fallback. See
+[durable producer lifetimes](history-package-producers-runtime-lifecycle.md#join-within-a-durable-producer-lifetime)
+and [ADR 042's item model](../decisions/042-daemon-built-thread.md#item-model).
+
+Unresolved parent-attributed creations and reports stay retained internally;
+`Items()` omits unresolved children and descendants whose parent is omitted.
+They never appear as main work. Supported late parent/link enrichment can
+resolve an already older parent or move an existing child/nested agent to a
+different older parent. Repair keeps `ID`, `Kind`, `Order`, creation attribution
+and visibility fixed; a changed parent advances `Rev` to the repairing entry
+ID. Ancestors resolve before descendants, and snapshots remain detached and
+creation-ID ordered. A repaired ordinary call leaves its old lane's call map,
+so a later ending there cannot interrupt it. Saved agent enrichment takes
+precedence over stale lane evidence.
+
+**Retain early ordinary reports independently of main-turn slots.** An explicit
+main opening replaces its turn state; storing an early result only there would
+lose it before child creation. `childReports` keeps copied first-result/denial
+evidence by original source/lifetime-or-legacy-scope, turn and call, including
+reports whose parent is not yet known. A new producer lifetime reusing turn/call
+IDs therefore cannot have its report suppressed by, or replaced with, a
+predecessor terminal.
+For an uncreated child call, adoption compares that evidence only with its own
+lane ending, excluding main-turn closure. Results wait for creation, retain the
+call's original input, and produce `done`, `failed` or `denied` in place. The first terminal wins;
+later conflicting reports cannot change its outcome. An earlier report floors
+revision at creation, and pending payloads remain detached from caller input.
+
+A parent-attributed `turn_end` creates no row. It closes matching child text as
+`done` and unfinished ordinary calls as `interrupted`, retaining raw `ending`
+evidence on the text and calls it closes. An ending received before creation
+remains effective for later calls in that lane. Already terminal outcomes stay
+fixed, and neither this ending nor a main-turn ending completes a nested agent.
+
+**Derive ancestor closure from genuine agent finals, keeping intrinsic child
+state separate.** `restoreChildren` and `resolveChildren` recompute the effect
+on each feed. An ancestor ending makes unfinished text/tools `interrupted` and
+inactive, retaining `parent_ending`; unfinished nested agents become inactive
+without changing their intrinsic status or inventing `EndedOrder`. Closure
+propagates through nested agents and preserves already terminal children.
+A late background task link can reclassify a provisional foreground result as
+launch evidence, remove its derived closure and reopen still-unfinished
+children. Independently closed text and terminal calls remain closed. Eagerly
+storing ancestor closure as a child's own terminal would make this repair
+impossible.
+
 ### Agent validation and testing
 
 Malformed/foreign facts and unusable identities consume version without changing
@@ -487,14 +558,37 @@ invalid-fact tests cover reused IDs, Codex exclusion, retained parents and
 detached inputs/snapshots. `testMainReplay` compares every two-chunk partition
 with full replay.
 
+`TestChildLanes`, `TestChildMainIndependenceAndSend` and `TestChildScopes` cover
+lane isolation, main/send behavior and invalid joins. `TestChildRepair`,
+`TestChildLateRepairAndClosure` and `TestChildNestedLinkRepair` cover retained
+unresolved work, stable repair and old-lane removal; `TestChildNested` covers
+synthetic text/nesting and ancestor closure. `TestChildTurnEndBeforeCreation`
+checks pending lane endings. `TestChildEarlyReportInPreviousMainTurn` and
+`TestChildNewLifetimeEarlyReport` exercise first-report retention with recorded
+Claude and legacy sources, conflicting outcomes and copied payloads;
+`TestChildLifetimeReuse` and `TestChildEarlyResultAfterBoundary` pin original
+groups. `TestChildMalformedNeutrality` compares state after malformed/foreign
+and identity-loss facts, which change version only. These fixtures use
+`testMainReplay` to compare full replay with every two-chunk partition.
+**A reclassification test needs unfinished children at the provisional ending:**
+already terminal children alone cannot prove reopening. `TestChildReclassification`
+keeps active text and an unfinished ordinary call there, then checks both
+reopen after the late link and close on a genuine task final.
+
 `cmd/pyry.TestThreadAgentRecordedReplay` runs offline in the standard gate. It
 passes the committed `parent_tool_use_v2.1.259.json` through `streamsup.NewParser`
 and interactive raw-history emission into `Fold`. The test requires #2191's
 Claude 2.1.259 capture provenance from 2026-09-09 and fails if the recording is
 missing. Its one foreground Agent call has `run_in_background: false` but also
 a recorded task link: the task completion supplies `finished`, while the tool
-result remains retained launch content. All evidence comes from recorded frames;
-synthetic fold fixtures cover other shapes separately. Assert the saved prompt,
-background flag and both result markers before comparing retained fields:
+result remains retained launch content. Its two recorded `Read` calls become
+`done` ordinary children beneath that single agent. The test checks their
+creating IDs/order against emitted raw-history calls, recorded `file_path`
+inputs (`$WORKDIR/alpha.txt` and `$WORKDIR/beta.txt`), result revisions and both
+marker strings, then compares every replay partition. All evidence comes from
+recorded frames. The recording contains no forwarded subagent text and
+establishes no nesting-depth guarantee; synthetic child fixtures prove text and
+nesting separately. Assert the saved prompt, background flag and both result
+markers before comparing retained fields:
 comparing two absent fields could pass while proving no retention. See
 [capture evidence requirements](development-verification.md).

@@ -40,6 +40,10 @@ type Fold struct {
 	turns                     map[mainKey]*mainTurn
 	openings                  map[uint64]*mainTurn
 	accepted, messages        map[uint64]int
+	childTurns                map[childKey]*mainTurn
+	childCalls                map[childCallKey]*childCall
+	childReports              map[childCallKey]*mainOutcome
+	children                  map[int]*childState
 	agentGroups               map[agentKey]*agentGroup
 	agentLifetimes            map[agentKey]string
 	agentObservations         map[uint64][]agentObservation
@@ -49,6 +53,10 @@ type Fold struct {
 func New(conversationID string) *Fold {
 	return &Fold{
 		conversationID:    conversationID,
+		childTurns:        make(map[childKey]*mainTurn),
+		childCalls:        make(map[childCallKey]*childCall),
+		childReports:      make(map[childCallKey]*mainOutcome),
+		children:          make(map[int]*childState),
 		agentGroups:       make(map[agentKey]*agentGroup),
 		agentLifetimes:    make(map[agentKey]string),
 		agentObservations: make(map[uint64][]agentObservation),
@@ -75,36 +83,46 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		if !decode(e.Payload, &owner) || (owner.ConversationID != "" && owner.ConversationID != f.conversationID) {
 			continue
 		}
-		main := f.mainWork(e)
-		if f.agentWork(e) || main {
-			continue
-		}
-		if f.sendFact(e) {
-			continue
-		}
-		item := Item{ID: e.ID, Order: e.ID, Rev: e.ID, Status: "done", Shown: true}
-		if e.Type == "session_divider" || e.Type == protocol.TypeSessionTransition {
-			scope := f.legacyScope
-			if !f.boundary(e, &item) {
-				continue
-			}
-			if f.legacyScope != scope {
-				clear(f.agentLifetimes)
-			}
-		} else if !standalone(e, &item) {
-			continue
-		}
-		if item.Kind == "user_message" {
-			for _, st := range f.openings {
-				f.closeText(st, e.ID)
-			}
-		}
-		index := f.addItem(e, item)
-		if item.Kind == "user_message" {
-			f.messages[e.ID] = index
-		}
+		f.restoreChildren()
+		f.feedEntry(e)
+		f.resolveChildren(e.ID)
 	}
 	return nil
+}
+
+func (f *Fold) feedEntry(e history.Entry) {
+	child := f.childWork(e)
+	main := false
+	if !child {
+		main = f.mainWork(e)
+	}
+	if f.agentWork(e) || main || child {
+		return
+	}
+	if f.sendFact(e) {
+		return
+	}
+	item := Item{ID: e.ID, Order: e.ID, Rev: e.ID, Status: "done", Shown: true}
+	if e.Type == "session_divider" || e.Type == protocol.TypeSessionTransition {
+		scope := f.legacyScope
+		if !f.boundary(e, &item) {
+			return
+		}
+		if f.legacyScope != scope {
+			clear(f.agentLifetimes)
+		}
+	} else if !standalone(e, &item) {
+		return
+	}
+	if item.Kind == "user_message" {
+		for _, st := range f.openings {
+			f.closeText(st, e.ID)
+		}
+	}
+	index := f.addItem(e, item)
+	if item.Kind == "user_message" {
+		f.messages[e.ID] = index
+	}
 }
 
 func (f *Fold) addItem(e history.Entry, item Item) int {
@@ -137,12 +155,17 @@ func (f *Fold) Version() uint64 { return f.version }
 // Claimed delivery rows are represented by their permanent acceptance item.
 func (f *Fold) Items() []Item {
 	var result []Item
-	for _, item := range f.items {
+	visible := make(map[uint64]bool)
+	for index, item := range f.items {
+		if f.children[index] != nil && (item.Parent == 0 || !visible[item.Parent]) {
+			continue
+		}
 		if index, ok := f.messages[item.ID]; ok && index < 0 {
 			continue
 		}
 		item.Content = append(json.RawMessage(nil), item.Content...)
 		result = append(result, item)
+		visible[item.ID] = true
 	}
 	return result
 }
