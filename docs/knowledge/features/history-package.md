@@ -18,7 +18,7 @@ wire-serving consumer,
 | --- | --- |
 | [Shape](history-package-shape.md) | Entry and metadata contracts, paging bounds and durable ID allocation. |
 | [A cleanup on a failed write is not the guarantee it looks like](history-package-failed-write-recovery.md) | Write rollback and read tolerance after fresh or active segment failures. |
-| [Producers (#2114, #2115)](history-package-producers.md) | Captured provenance, runtime/startup dividers and interrupted work, visibility, delivery ordering and producer tests. |
+| [Producers (#2114, #2115)](history-package-producers.md) | Map of captured provenance, runtime/startup closure, agent/task attribution and reported endings, visibility, receipts and producer verification. |
 | [`LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)](history-package-watermarks.md) | Raw durable cursors, displayable unread watermarks and lazy recovery. |
 
 ## Why not claude's transcripts
@@ -159,7 +159,7 @@ Receipt-only pages and repeated/overlapping delivery cannot establish sight.
 Join receipts by conversation and durable ID: closures/dividers may share both
 an occurrence timestamp and identical banner bytes, so the legacy (`type`, `ts`)
 fallback cannot distinguish them.
-See [receipt validation and publication](history-package-producers.md#legacy-eligibility-and-explicit-visibility-2965)
+See [receipt validation and publication](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)
 and the [wire contract](../../protocol-mobile.md#a-history-entry).
 
 The adapter forwards that raw page's opaque `Cursor` and `AtStart` unchanged.

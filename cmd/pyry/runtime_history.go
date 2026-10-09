@@ -122,7 +122,10 @@ func (e *interactiveTurnEmitterV2) closeRuntimeSource(ctx context.Context, convI
 			e.transitionTo(ctx, convID, turnbridge.StateIdle)
 			e.endTurn()
 		}
-		e.childLanes, e.launcherTurns, e.childToolTurns = nil, nil, nil
+		e.childLanes, e.childToolTurns = nil, nil
+		if !seal {
+			e.launcherTurns, e.agentLifetime = nil, ""
+		}
 		e.releaseConversation(key)
 	}
 }
