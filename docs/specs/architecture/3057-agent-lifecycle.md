@@ -60,3 +60,6 @@ Approximately 950 written lines, no exported types, one integration point, four 
 
 ## Revisions
 - 2026-10-09: Recovery validation also checks an available task-to-call link when a saved ending supplies both identities. Matching the task observation alone must not let a contradictory call ID end a second agent. `TestAgentRecoveryMismatchedLink` pins rejection of the whole fact.
+- 2026-10-09, verifier findings 1–2: Reject mapped call facts with lost turn/parent identities before mutating joins; roster rows validate both truncated and dropped task/call identities. Unusable call links still retain independent task evidence. `TestAgentIdentityMarkers`, `TestAgentReportIdentityMarkers` and `TestAgentRosterIdentityMarkers` cover whole-state neutrality, early reports, late links and every feed partition.
+- 2026-10-09, verifier finding 3: `mainWork` consults scoped retained agent parent evidence before opening or closing main work. `TestAgentDurableParentText` proves saved child launches preserve one text run while main launches and other sources still split it.
+- 2026-10-09, verifier finding 4: Mapped progress/update/roster envelopes cannot supply call or parent identity; started reports supply only their supported call link. Extra raw fields remain inert. `TestAgentTaskExtraIdentity` covers identity and revision neutrality while allowing saved update content.

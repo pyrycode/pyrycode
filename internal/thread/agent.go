@@ -69,7 +69,37 @@ type agentFact struct {
 }
 
 func (p agentFact) usable(id, field string) bool {
-	return id != "" && !slices.Contains(p.Truncated, field) && !slices.Contains(p.Dropped, field)
+	return id != "" && !p.lost(field)
+}
+
+func (p agentFact) lost(fields ...string) bool {
+	for _, field := range fields {
+		if slices.Contains(p.Truncated, field) || slices.Contains(p.Dropped, field) {
+			return true
+		}
+	}
+	return false
+}
+
+// agentLaunchIsChild consults only the launch's recorded source and active
+// lifetime or legacy scope. Saved parent evidence cannot cross those boundaries.
+func (f *Fold) agentLaunchIsChild(e history.Entry, call string) bool {
+	var p protocol.ToolUsePayload
+	if e.Type != protocol.TypeToolUse || !decode(e.Payload, &p) || (p.Name != "Agent" && p.Name != "Task") {
+		return false
+	}
+	key := agentKey{scope: f.legacyScope}
+	if e.Session != nil {
+		key.source, key.tagged = *e.Session, true
+	}
+	source := key
+	source.scope = 0
+	key.lifetime = f.agentLifetimes[source]
+	if key.lifetime != "" {
+		key.scope = 0
+	}
+	g := f.agentGroups[key]
+	return g != nil && g.calls[call] != nil && g.calls[call].parent != ""
 }
 
 // agentWork preserves results separately from task endings so late links can
@@ -86,6 +116,18 @@ func (f *Fold) agentWork(e history.Entry) bool {
 	var p agentFact
 	if !decode(e.Payload, &p) {
 		return durable
+	}
+	toolReport := e.Type == protocol.TypeToolUse || e.Type == protocol.TypeToolResult || e.Type == protocol.TypeToolDenied
+	if toolReport && p.lost("turn_id", "parent_tool_use_id", "parent_tool_call_id") {
+		return false
+	}
+	var roster struct {
+		Tasks []struct {
+			Task      string   `json:"task_id"`
+			Call      string   `json:"tool_call_id"`
+			Truncated []string `json:"truncated_fields"`
+			Dropped   []string `json:"dropped_fields"`
+		} `json:"tasks"`
 	}
 	key := agentKey{scope: f.legacyScope}
 	if e.Session != nil {
@@ -155,12 +197,14 @@ func (f *Fold) agentWork(e history.Entry) bool {
 	if referenced {
 		key = original.key
 	}
-	call := p.Call
-	if !durable && e.Type != protocol.TypeBackgroundTaskStarted && e.Type != protocol.TypeBackgroundTaskRoster {
+	call := ""
+	if toolReport {
 		call = p.Use
+	} else if durable || e.Type == protocol.TypeBackgroundTaskStarted {
+		call = p.Call
 	}
 	callField := "tool_call_id"
-	if !durable && (e.Type == protocol.TypeToolUse || e.Type == protocol.TypeToolResult || e.Type == protocol.TypeToolDenied) {
+	if toolReport {
 		callField = "tool_use_id"
 	}
 	if !p.usable(call, callField) {
@@ -236,7 +280,18 @@ func (f *Fold) agentWork(e history.Entry) bool {
 		p.Status = "ended_with_session"
 	case protocol.TypeBackgroundTaskRoster:
 		var dto protocol.BackgroundTaskRosterPayload
-		if !decode(e.Payload, &dto, "tasks") {
+		if !decode(e.Payload, &dto, "tasks") || !decode(e.Payload, &roster) {
+			return false
+		}
+		usable := roster.Tasks[:0]
+		for _, row := range roster.Tasks {
+			id := agentFact{Truncated: row.Truncated, Dropped: row.Dropped}
+			if id.usable(row.Task, "task_id") {
+				usable = append(usable, row)
+			}
+		}
+		roster.Tasks = usable
+		if len(roster.Tasks) == 0 {
 			return false
 		}
 	default:
@@ -255,7 +310,7 @@ func (f *Fold) agentWork(e history.Entry) bool {
 		g = &agentGroup{key: key, calls: map[string]*agentCall{}, tasks: map[string]*agentTask{}}
 		f.agentGroups[key] = g
 	}
-	if call != "" {
+	if call != "" && (durable || toolReport) {
 		parent, field := p.ParentCall, "parent_tool_call_id"
 		if parent == "" {
 			parent, field = p.Parent, "parent_tool_use_id"
@@ -299,16 +354,12 @@ func (f *Fold) agentWork(e history.Entry) bool {
 		}
 		agentAddReport(&g.call(call).reports, e, p.Status, field, durable)
 	case protocol.TypeBackgroundTaskRoster:
-		var dto protocol.BackgroundTaskRosterPayload
-		_ = json.Unmarshal(e.Payload, &dto)
-		for _, row := range dto.Tasks {
-			if row.TaskID == "" || slices.Contains(row.TruncatedFields, "task_id") {
-				continue
-			}
-			task := g.task(row.TaskID)
-			observe("", row.TaskID)
-			if row.ToolCallID != "" && !slices.Contains(row.TruncatedFields, "tool_call_id") {
-				task.call = row.ToolCallID
+		for _, row := range roster.Tasks {
+			task := g.task(row.Task)
+			observe("", row.Task)
+			id := agentFact{Truncated: row.Truncated, Dropped: row.Dropped}
+			if id.usable(row.Call, "tool_call_id") {
+				task.call = row.Call
 				if task.link == nil || (!durable && !task.linkMapped) {
 					task.linkMapped = !durable
 					task.link = append(json.RawMessage(nil), e.Payload...)

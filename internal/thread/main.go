@@ -126,7 +126,7 @@ func mainDecode(e history.Entry) (mainIdentity, string, string, bool, bool) {
 
 func (f *Fold) mainWork(e history.Entry) bool {
 	id, summary, status, shown, valid := mainDecode(e)
-	if !valid {
+	if !valid || f.agentLaunchIsChild(e, id.ToolUseID) {
 		return false
 	}
 	key := mainKey{scope: f.legacyScope, turn: id.TurnID}
