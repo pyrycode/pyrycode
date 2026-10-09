@@ -4,27 +4,37 @@ package realclaude
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/thread"
-	"strings"
-	"testing"
 )
 
-func TestThreadShadowRetainedEvidence(t *testing.T) {
-	h, e, err := shadowReadPair("testdata")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := shadowValidatePair(h, e, true); err != nil {
-		t.Fatal(err)
-	}
-	shadowReplay(t, h, e, false)
-}
-
 func TestThreadShadowReaderRejectsIncomplete(t *testing.T) {
-	if _, _, err := shadowReadPair(t.TempDir()); err == nil {
-		t.Fatal("missing pair accepted")
+	for _, tc := range []struct {
+		name  string
+		files []string
+	}{
+		{"both_missing", nil},
+		{"history_missing", []string{shadowExpectedFile}},
+		{"expected_missing", []string{shadowHistoryFile}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range tc.files {
+				// Empty synthetic schema controls are never retained as live evidence.
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(`{}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := shadowReadPair(dir); err == nil || err.Error() != "shadow evidence pair missing" {
+				t.Fatal("missing evidence escaped strict reader rejection")
+			}
+		})
 	}
 	h := shadowHistory{}
 	e := shadowExpected{}
