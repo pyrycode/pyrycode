@@ -63,3 +63,6 @@ Pending documentation stage:
 - Concurrency: single fold owner, no I/O with publication lock held, joined workers and final certificate last prevent partial clean exits.
 - Threat model: caller retains conversation authorization; no transport/authentication changes. No new history machine-crash guarantee.
 **Reviewer:** builder self-review, 2026-10-09.
+
+## Revisions
+- 2026-10-09: `TestStoreCacheZeroHistoryValidation` proved that a warm zero history cursor plus `ForwardReader.Walk(0)` could publish a cached empty view without reading unreadable history. `Store.run` now additionally validates zero-bound history with `history.Store.Page(id, "", 1)` before recovery. Positive versions retain bounded forward replay; neither case serves cache-only state.

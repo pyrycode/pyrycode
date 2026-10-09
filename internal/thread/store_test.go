@@ -41,7 +41,7 @@ func testThreadStore(t *testing.T) (*Store, *history.Store) {
 	t.Helper()
 	h := history.New(t.TempDir())
 	s := NewStore(h)
-	t.Cleanup(s.Shutdown)
+	t.Cleanup(func() { _ = s.Shutdown() })
 	return s, h
 }
 func testStoreAppend(t *testing.T, h *history.Store, id conversations.ConversationID, entries ...history.Entry) []history.Entry {
