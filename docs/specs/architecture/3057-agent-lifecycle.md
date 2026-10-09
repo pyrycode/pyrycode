@@ -57,3 +57,6 @@ Pending documentation stage: `docs/knowledge/features/thread-package.md`, “Age
 
 ## Sizing
 Approximately 950 written lines, no exported types, one integration point, four criteria. Above the line ceiling; actual grandchild #3057 → #3047 → #2961 requires building and `needs-human:sizing` is applied. Candidate independent seams: foreground calls, linked task lifecycle, recovery references.
+
+## Revisions
+- 2026-10-09: Recovery validation also checks an available task-to-call link when a saved ending supplies both identities. Matching the task observation alone must not let a contradictory call ID end a second agent. `TestAgentRecoveryMismatchedLink` pins rejection of the whole fact.
