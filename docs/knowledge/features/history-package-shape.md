@@ -4,8 +4,9 @@ Part of [the history package overview](history-package.md).
 
 ## Shape
 
-Three production files (`log.go`, `segment.go`, `cursor.go`), a leaf importing
-only `internal/conversations` (for `ValidID`/`ConversationID`) and stdlib —
+Four production files (`log.go`, `segment.go`, `cursor.go`, `forward.go`), a
+leaf importing only `internal/conversations` (for `ValidID`/`ConversationID`)
+and stdlib —
 never the wire-payload types, never decoding a payload, the same posture
 [`eventring`](eventring-package.md) has. `New(instanceDir)` builds
 `conversations/<id>/history/` beneath the given root exactly as
@@ -30,6 +31,10 @@ func (s *Store) Page(convID conversations.ConversationID, cursor string, limit i
 func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, error)
 func (s *Store) LatestDisplayableEntryID(convID conversations.ConversationID) (uint64, error)
 func (s *Store) LogDir(convID conversations.ConversationID) (string, error)
+func (s *Store) Forward(convID conversations.ConversationID, afterID uint64) (*ForwardReader, error)
+func (r *ForwardReader) Walk(ctx context.Context, throughID uint64, consume func([]Entry) error) error
+func (r *ForwardReader) Tail(ctx context.Context, consume func([]Entry) error) error
+func (r *ForwardReader) LastEntryID() uint64
 ```
 
 `Store.LogDir` (#2673) returns the absolute, symlink-resolved, existing log
@@ -113,3 +118,77 @@ client-supplied id of canonical shape genuinely resolves inside the
 conversation it names and defeats every check beneath it. This is
 `ResolvePath`'s precondition verbatim, and it is `#2116`'s to satisfy by
 reaching the conversation through the session, never off the wire.
+
+## Forward consumption
+
+Capture a conversation's high-water ID H with `LatestEntryID`, construct
+`Store.Forward(convID, afterID)`, then call `Walk(ctx, H, consume)` to replay
+raw entries in `(afterID, H]`, exactly once after successful delivery and in
+strictly increasing ID order across segments. Resume is exclusive; zero starts
+from the beginning, and the resume ID need not exist in storage. Appends above
+H remain for a later walk or tail. Nil return explicitly completes the range,
+including an empty or initially missing log; reopening preserves this contract.
+Every entry retains its type, opaque payload, timestamp and optional session
+and visibility metadata, including hidden and unknown types. Payload interpretation
+and thread reduction remain the consumer's responsibility
+([ADR 042](../decisions/042-daemon-built-thread.md)).
+
+Callbacks receive at most `MaxPageEntries`. A successful callback advances
+`LastEntryID`; an error is returned and leaves that chunk retryable, so callbacks
+that partially apply a chunk before failing must handle its redelivery. Reads use
+the existing `segmentCeiling`, holding only one decoded segment and a delivery
+chunk. The reader retains scalar progress across calls, skips fully consumed
+sealed segments, and may reread the current appendable segment. Tail catch-up
+can list the directory but never reopens or decodes earlier completed segments.
+
+Keep the same reader for `Tail(ctx, consume)`. It registers a capacity-one
+wakeup before catching up from `LastEntryID`, then waits for successful appends
+through that same `Store`. Catch-up recovers commits made during replay or
+before registration; buffered, coalescing notifications cover commits during
+catch-up and the read-to-wait transition. Notifications indicate work, while
+the log supplies every newer committed entry in order. Both `Append` and
+`AppendWithMetadata` return the successful committed ID and notify only after
+updating the append cursor; failures return ID zero and publish no success
+notification. Another `Store` or an external writer supplies no wakeup; external
+writers and deletion during consumption are unsupported.
+
+Reader methods require serialized caller use. `Walk` and `Tail` execute
+synchronously, check cancellation between bounded segment reads and before
+callbacks, and `Tail` also waits on context cancellation. Cancellation returns
+`ctx.Err()`; callbacks must return promptly or honor the context while blocking.
+No decoded buffers remain on the reader after return or while tailing waits,
+and tail registrations are removed on every exit. Consumer processing and
+waiting run outside the store mutex (see [Concurrency](history-package.md#concurrency)).
+
+`Forward` validates conversation-ID shape and shares the authenticated-conversation
+precondition above. Each listing and segment read re-resolves directory containment;
+listing filters regular files and the read rechecks the leaf. Read/listing failures,
+containment violations, oversized segments, corrupt complete entries, non-increasing
+or zero stored IDs, and unknown versions return explicit errors. A positioned log
+that disappears returns a read error. `decodeSegment` retains its trailing-write
+tolerance, including an incomplete header or final entry; complete corruption is
+never skipped to report successful completion.
+
+Committed/durable retains the append contract: completed writes and recovered
+complete entries survive process restart. There is no new fsync or machine-crash
+guarantee, and the storage version, backward pages and opaque cursors are unchanged
+([failed-write recovery](history-package-failed-write-recovery.md)).
+
+### Ordering validation and verification
+
+Stored-ID validation must survive skipped sealed segments across walks and tail
+catch-ups. A single uninterrupted walk rejects duplicate/decreasing segment
+boundaries even when separate calls would silently skip them. `ForwardReader`
+therefore retains a validation boundary independently of the caller's resume ID
+and delivery progress: it excludes the current segment while that segment is
+reread or retryable, then includes it once sealed and consumed. Using the last
+delivered ID instead would reject valid rereads or miss corruption below an
+arbitrary resume ID. `TestForwardOrderingAcrossCalls` and
+`TestForwardOrderingResumeAndRetry` cover both sides of this boundary.
+
+`TestForwardBoundedChunksAndPosition` damages every completed segment, including
+the sealed final segment: damaging only the oldest leaves a needless reread of
+the final one undetected. `TestForwardCommitNotifications` obstructs the segment
+the next append will actually use; a full active segment rolls, bypassing an
+obstruction at its old filename. These fixtures prove positioned reads and
+failed-append silence rather than relying only on successful delivery counts.
