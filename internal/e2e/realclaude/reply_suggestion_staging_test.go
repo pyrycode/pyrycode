@@ -204,7 +204,7 @@ func TestSuggestSourceUncertainEvidence(t *testing.T) {
 		{prefix + strings.Replace(fields, "parent_deadline=false", "parent_deadline=true", 1) + "\n", 42, true}, // Simultaneous deadlines remain visible.
 	} {
 		got := suggestLifecycle(tc.stderr, tc.pid)
-		if strings.Contains(got, "private-") || strings.Contains(got, "unknown") == tc.known {
+		if strings.Contains(got, "private-") || (got == "daemon lifecycle: unknown") == tc.known {
 			t.Fatal("unsafe or incorrectly classified daemon record")
 		}
 		if tc.known && (!strings.Contains(got, "fallback_deadline=true") || !strings.Contains(got, "group_cancel_requested=true")) {
@@ -322,5 +322,75 @@ func TestSuggestCLISourceEvidence(t *testing.T) {
 	info, err := os.Stat(evidence)
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatal("source evidence must be private")
+	}
+}
+
+func TestSuggestLifecycleOutput(t *testing.T) {
+	const base = "msg=reply_fallback.lifecycle pid=42 attempt_ms=9810 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 "
+	const output = "output_observed=true wait_ok=false wait_delay=false stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown"
+	for _, tc := range []struct{ name, fields, want string }{
+		{"zero", output, "stdout_bytes=0"},
+		{"missing", "output_observed=true", "stdout_bytes=unknown"},
+		{"partial predicates", strings.Replace(output, "stdout_utf8_ok=true ", "", 1), "stdout_bytes=unknown"},
+		{"missing decode", strings.Replace(output, "stdout_json_ok=false ", "", 1), "stdout_bytes=unknown"},
+		{"missing cap", strings.Replace(output, "stdout_cap_exceeded=false ", "", 1), "stdout_bytes=unknown"},
+		{"contradictory cap", strings.Replace(output, "stdout_cap_exceeded=false", "stdout_cap_exceeded=true", 1), "stdout_bytes=unknown"},
+		{"malformed", strings.Replace(output, "stdout_bytes=0", "stdout_bytes=private-output", 1), "stdout_bytes=unknown"},
+		{"null", strings.Replace(output, "stdout_bytes=0", "stdout_bytes=<nil>", 1), "stdout_bytes=unknown"},
+		{"negative", strings.Replace(output, "stdout_bytes=0", "stdout_bytes=-1", 1), "stdout_bytes=unknown"},
+		{"above sentinel", strings.Replace(output, "stdout_bytes=0", "stdout_bytes=4098", 1), "stdout_bytes=unknown"},
+		{"missing wait", strings.Replace(output, "wait_ok=false ", "", 1), "stdout_bytes=unknown"},
+		{"contradictory wait", strings.Replace(strings.Replace(output, "wait_ok=false", "wait_ok=true", 1), "wait_delay=false", "wait_delay=true", 1), "wait_ok=unknown"},
+		{"contradictory exit", strings.Replace(output, "wait_ok=false", "wait_ok=true", 1), "wait_ok=unknown"},
+		{"nonboolean", strings.Replace(output, "stdout_utf8_ok=true", "stdout_utf8_ok=1", 1), "stdout_bytes=unknown"},
+		{"invalid utf8 count", strings.Replace(strings.Replace(strings.Replace(output, "stdout_utf8_ok=true", "stdout_utf8_ok=false", 1), "stdout_json_ok=false", "stdout_json_ok=unknown", 1), "stdout_bytes=0", "stdout_bytes=1", 1), "stdout_bytes=1"},
+		{"invalid utf8 decode", strings.Replace(strings.Replace(output, "stdout_utf8_ok=true", "stdout_utf8_ok=false", 1), "stdout_bytes=0", "stdout_bytes=1", 1), "stdout_json_ok=unknown"},
+		{"missing result", strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_result_ok=unknown ", "", 1), "stdout_result_ok=unknown"},
+		{"decode gate", strings.ReplaceAll(output, "=unknown", "=true"), "stdout_result_ok=unknown"},
+		{"valid", strings.ReplaceAll(strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_bytes=0", "stdout_bytes=25", 1), "=unknown", "=true"), "stdout_text_ok=true"},
+		{"saturated", strings.Replace(strings.Replace(output, "stdout_bytes=0", "stdout_bytes=4097", 1), "stdout_cap_exceeded=false", "stdout_cap_exceeded=true", 1), "stdout_bytes=4097"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := suggestLifecycle(base+tc.fields+"\n", 42)
+			if !strings.Contains(got, tc.want) || strings.Contains(got, "private-") {
+				t.Fatal("incorrect safe output observation")
+			}
+		})
+	}
+	got := suggestLifecycle(strings.Replace(base, "wait_completed=true", "wait_completed=false", 1)+output+"\n", 42)
+	if !strings.Contains(got, "stdout_bytes=unknown") || !strings.Contains(got, "exit_code=unknown") {
+		t.Fatal("unobserved Wait invented output/exit")
+	}
+	completed := strings.Replace(strings.Replace(base, "exit_code=-1", "exit_code=0", 1), "exit_signal=9", "exit_signal=0", 1)
+	for _, fields := range []string{
+		strings.Replace(output, "wait_ok=false", "wait_ok=true", 1),
+		strings.Replace(output, "wait_delay=false", "wait_delay=true", 1),
+	} {
+		if got := suggestLifecycle(completed+fields+"\n", 42); !strings.Contains(got, "stdout_bytes=0") || strings.Contains(got, "wait_ok=unknown") || strings.Contains(got, "wait_delay=unknown") {
+			t.Fatal("lost successful Wait or WaitDelay snapshot")
+		}
+	}
+	unknown := strings.Replace(strings.Replace(strings.Replace(strings.Replace(base, "wait_completed=true", "wait_completed=false", 1), "exit_observed=true", "exit_observed=false", 1), "exit_code=-1", "exit_code=unknown", 1), "exit_signal=9", "exit_signal=unknown", 1)
+	if got := suggestLifecycle(unknown+output+"\n", 42); !strings.Contains(got, "exit_code=unknown") || !strings.Contains(got, "wait_ok=unknown") || !strings.Contains(got, "stdout_bytes=unknown") {
+		t.Fatal("lost explicit unknown completion")
+	}
+}
+
+func TestSuggestSourceDiagnosticApplicability(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		utf8, json bool
+		want       string
+	}{
+		{"invalid utf8", false, true, "json=unknown result_success=unknown text_valid=unknown"},
+		{"failed decode", true, false, "json=false result_success=unknown text_valid=unknown"},
+		{"decoded", true, true, "json=true result_success=false text_valid=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := suggestSource{OutputObserved: true, UTF8OK: tc.utf8, JSONOK: tc.json, TextOK: true}
+			if got := source.diagnostic(false, 0, 0); !strings.Contains(got, tc.want) || strings.Contains(got, "private-") {
+				t.Fatal("incorrect source predicate applicability")
+			}
+		})
 	}
 }
