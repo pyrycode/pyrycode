@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -56,7 +58,7 @@ func TestReplyFallbackHelperProcess(t *testing.T) {
 		}
 	}
 	if os.Getenv("PYRY_REPLY_RAW_MODE") != "1" {
-		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"result": os.Getenv("PYRY_REPLY_OUTPUT"), "is_error": os.Getenv("PYRY_REPLY_ERROR") == "1"})
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"type": "result", "result": os.Getenv("PYRY_REPLY_OUTPUT"), "is_error": os.Getenv("PYRY_REPLY_ERROR") == "1"})
 	}
 	code, _ := strconv.Atoi(os.Getenv("PYRY_REPLY_EXIT"))
 	os.Exit(code)
@@ -79,7 +81,7 @@ func TestReplyFallbackProcess(t *testing.T) {
 		if bin != "configured-claude" {
 			t.Fatal("wrong binary")
 		}
-		for flag, want := range map[string]string{"--model": "haiku", "--fallback-model": "", "--max-turns": "1", "--output-format": "json", "--tools": "", "--setting-sources": "", "--mcp-config": `{"mcpServers":{}}`, "--settings": `{"disableAllHooks":true,"autoMemoryEnabled":false}`} {
+		for flag, want := range map[string]string{"--model": "haiku", "--fallback-model": "", "--max-turns": "1", "--output-format": "stream-json", "--tools": "", "--setting-sources": "", "--mcp-config": `{"mcpServers":{}}`, "--settings": `{"disableAllHooks":true,"autoMemoryEnabled":false}`} {
 			found := false
 			for i, arg := range args {
 				if arg == flag && i+1 < len(args) && args[i+1] == want {
@@ -89,6 +91,9 @@ func TestReplyFallbackProcess(t *testing.T) {
 			if !found {
 				t.Fatalf("missing isolation flag %s", flag)
 			}
+		}
+		if !slices.Contains(args, "--verbose") {
+			t.Fatal("missing verbose stream flag")
 		}
 		for _, value := range args {
 			if strings.Contains(value, "secret") || strings.Contains(value, "final only") {
@@ -210,7 +215,7 @@ func TestReplyFallbackProcessEvidence(t *testing.T) {
 			t.Setenv("PYRY_REPLY_ASSISTANT", "private-assistant-sentinel")
 			t.Setenv("PYRY_REPLY_OUTPUT", "private-generated-sentinel")
 			t.Setenv("PRIVATE_VALUE", "private-environment-sentinel")
-			raw := map[string]string{"zero": "", "partial": `{"result":`, "invalid utf8": "\xff", "saturated": strings.Repeat(" ", 8192), "parent cancel": `{"result":"private-generated-sentinel"}`}
+			raw := map[string]string{"zero": "", "partial": `{"type":"result","result":`, "invalid utf8": "\xff", "saturated": strings.Repeat(" ", 8192), "parent cancel": `{"type":"result","result":"private-generated-sentinel"}` + "\n"}
 			if output, ok := raw[mode]; ok {
 				t.Setenv("PYRY_REPLY_RAW_MODE", "1")
 				t.Setenv("PYRY_REPLY_RAW", output)
@@ -304,7 +309,7 @@ func TestReplyFallbackProcessEvidence(t *testing.T) {
 			if output, ok := raw[mode]; ok {
 				wantBytes = min(len(output), maxAccountTokenBytes+1)
 			} else if !hold {
-				encoded, _ := json.Marshal(map[string]any{"result": "private-generated-sentinel", "is_error": false})
+				encoded, _ := json.Marshal(map[string]any{"type": "result", "result": "private-generated-sentinel", "is_error": false})
 				wantBytes = len(encoded) + 1
 			}
 			if record["stdout_bytes"] != float64(wantBytes) {
@@ -655,7 +660,15 @@ func TestReplyFallbackRegistryRemovalCancellation(t *testing.T) {
 
 func TestReplyFallbackOutputUnknownWait(t *testing.T) {
 	// A nil buffer makes an accidental read fail; an unobserved Wait owns it.
-	fields := replyFallbackOutput(nil, false, nil)
+	var stream replyFallbackStream
+	_, _ = stream.Write([]byte(`{"type":"system","subtype":"init"}` + "\n"))
+	fields := replyFallbackOutput(&stream, false, nil)
+	progress := stream.progressFields()
+	encoded, _ := json.Marshal(progress)
+	if !bytes.Contains(encoded, []byte(`"init"`)) {
+		t.Fatal("lost independent observation without Wait")
+	}
+	_ = replyFallbackOutput(nil, false, nil) // Completion path must not dereference an inaccessible writer.
 	got := make(map[string]any)
 	for i := 0; i < len(fields); i += 2 {
 		got[fields[i].(string)] = fields[i+1]
@@ -675,17 +688,17 @@ func TestReplyFallbackOutputPredicates(t *testing.T) {
 		name, data         string
 		json, result, text any
 	}{
-		{"null preserves result", `{"result":"private-text","result":null}`, true, true, true},
-		{"null preserves error", `{"result":"private-text","is_error":true,"is_error":null}`, true, false, true},
-		{"duplicate result", `{"result":"","result":"private-text"}`, true, true, true},
-		{"null preserves subtype", `{"result":"private-text","subtype":"failure","subtype":null}`, true, false, true},
-		{"duplicate type error", `{"result":7,"result":"private-text"}`, false, "unknown", "unknown"},
-		{"text invalid", `{"result":"private-text\nnext"}`, true, true, false},
-		{"null envelope", `null`, true, true, false},
-		{"saturated decodable", `{"result":"private-text"}` + strings.Repeat(" ", 8192), true, true, true},
+		{"null preserves result", `{"type":"result","result":"private-text","result":null}`, true, true, true},
+		{"null preserves error", `{"type":"result","result":"private-text","is_error":true,"is_error":null}`, true, false, true},
+		{"duplicate result", `{"type":"result","result":"","result":"private-text"}`, true, true, true},
+		{"null preserves subtype", `{"type":"result","result":"private-text","subtype":"failure","subtype":null}`, true, false, true},
+		{"duplicate type error", `{"type":"result","result":7,"result":"private-text"}`, false, "unknown", "unknown"},
+		{"text invalid", `{"type":"result","result":"private-text\nnext"}`, true, true, false},
+		{"null envelope", `null`, false, "unknown", "unknown"},
+		{"oversized envelope", `{"type":"result","result":"private-text"}` + strings.Repeat(" ", 8192), false, "unknown", "unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var stdout cappedBuffer
+			var stdout replyFallbackStream
 			_, _ = stdout.Write([]byte(tc.data))
 			fields := replyFallbackOutput(&stdout, true, exec.ErrWaitDelay)
 			got := make(map[string]any)
@@ -698,5 +711,75 @@ func TestReplyFallbackOutputPredicates(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReplyFallbackStream(t *testing.T) {
+	result := `{"type":"result","result":"private-text"}` + "\n"
+	for _, tc := range []struct {
+		name, input, event, source string
+		retries                    int
+		result                     bool
+	}{
+		{"result", result, "result", "unknown", 0, true},
+		{"long progress", strings.Repeat(`{"type":"system","subtype":"api_retry","attempt":99}`+"\n", 100) + result, "result", "unknown", 100, true},
+		{"unknown", `{"type":"private-event"}` + "\n", "none", "unknown", 0, false},
+		{"partial", `{"type":"system","subtype":"init"`, "none", "unknown", 0, false},
+		{"invalid", "\xff\n{bad}\n" + result, "result", "unknown", 0, true},
+		{"oversized", `{"type":"result","result":"` + strings.Repeat("x", 4096) + `"}` + "\n" + result, "result", "unknown", 0, true},
+		{"oversized only", `{"type":"result","result":"` + strings.Repeat("x", 4096) + `"}` + "\n", "none", "unknown", 0, false},
+		{"init", `{"type":"system","subtype":"init","apiKeySource":"none"}` + "\n", "init", "none", 0, false},
+		{"source rejection", `{"type":"system","subtype":"init","apiKeySource":"private-secret"}` + "\n", "init", "unknown", 0, false},
+		{"source missing", `{"type":"system","subtype":"init"}` + "\n", "init", "unknown", 0, false},
+		{"source null", `{"type":"system","subtype":"init","apiKeySource":null}` + "\n", "init", "unknown", 0, false},
+		{"source type", `{"type":"system","subtype":"init","apiKeySource":7}` + "\n", "init", "unknown", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, chunk := range []int{1, 17, len(tc.input)} {
+				var stream replyFallbackStream
+				for start := 0; start < len(tc.input); start += chunk {
+					_, _ = stream.Write([]byte(tc.input[start:min(start+chunk, len(tc.input))]))
+				}
+				stream.finish()
+				if stream.current.event != tc.event && !(tc.event == "none" && stream.current.event == "") || stream.current.source != tc.source && !(tc.source == "unknown" && stream.current.source == "") || stream.current.retries != tc.retries || stream.decoded != tc.result || len(stream.line) > 4096 {
+					t.Fatal("incorrect bounded observation")
+				}
+				fields := append(replyFallbackOutput(&stream, true, nil), stream.progressFields()...)
+				encoded, _ := json.Marshal(fields)
+				if strings.Contains(string(encoded), "private-") {
+					t.Fatal("sensitive evidence")
+				}
+			}
+		})
+	}
+}
+
+func TestReplyFallbackStreamFreeze(t *testing.T) {
+	for _, before := range []bool{false, true} {
+		var stream replyFallbackStream
+		if before {
+			_, _ = stream.Write([]byte(`{"type":"system","subtype":"init","apiKeySource":"ANTHROPIC_API_KEY"}` + "\n"))
+		}
+		stream.freeze()
+		frozen := stream.frozen
+		var workers sync.WaitGroup
+		for range 4 {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for range 20 {
+					stream.freeze()
+					_, _ = stream.Write([]byte(`{"type":"system","subtype":"api_retry"}` + "\n"))
+				}
+			}()
+		}
+		workers.Wait()
+		_, _ = stream.Write([]byte(`{"type":"result","result":"private-late"}` + "\n"))
+		if stream.frozen != frozen || !stream.cancelFrozen || stream.current.retries != 80 {
+			t.Fatal("frozen snapshot changed")
+		}
+		if before != frozen.init || frozen.retries != 0 || (!before && !frozen.at.IsZero()) {
+			t.Fatal("invented pre-cancellation progress")
+		}
 	}
 }
