@@ -52,8 +52,14 @@ func testLegacyCheckpoint(entries []protocol.HistoryEntry, presented, confirmed 
 			var banner protocol.BannerPayload
 			valid = valid && json.Unmarshal(entry.Payload, &banner) == nil && banner.Level == "info"
 			nonvisual = true
-		case protocol.TypeTurnState, protocol.TypeTurnEnd:
+		case protocol.TypeTurnState, protocol.TypeContextUsage:
 			nonvisual = true
+		case protocol.TypeTurnEnd:
+			var end protocol.TurnEndPayload
+			valid = json.Unmarshal(entry.Payload, &end) == nil
+			nonvisual = end.StopReason == "end_turn" && !end.IsError &&
+				(end.Outcome == "" || end.Outcome == "success") &&
+				(end.TerminalReason == "" || end.TerminalReason == "completed") && end.ErrorCategory == ""
 		case protocol.TypeMessage, protocol.TypeAssistantDelta:
 		default:
 			valid = false
@@ -89,42 +95,123 @@ func testLegacyCheckpoint(entries []protocol.HistoryEntry, presented, confirmed 
 	return candidate
 }
 
+// testLegacyLatest mirrors mobile contributesToUnreadWatermark on received wire
+// entries. Keep this independent of the daemon's eligibility/visibility helpers.
+func testLegacyLatest(entries []protocol.HistoryEntry) uint64 {
+	var latest uint64
+	for _, entry := range entries {
+		switch entry.Type {
+		case "turn_state", "stall", "api_retry", "compacting", "session_transition":
+			continue
+		}
+		latest = max(latest, entry.ID)
+	}
+	return latest
+}
+
+func testLegacySerializedPage(t *testing.T, store *history.Store) ([]protocol.HistoryEntry, []byte) {
+	t.Helper()
+	page := newHistoryPager(store, discardLogger())(testConvID, "", 128)
+	if !page.AtStart || page.Cursor != "" {
+		t.Fatal("expected terminal page")
+	}
+	wire, err := json.Marshal(protocol.HistoryPagePayload{Entries: page.Entries, Cursor: page.Cursor, AtStart: page.AtStart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded protocol.HistoryPagePayload
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded.Entries, wire
+}
+
 func TestLegacyRuntimeReceipts_CompletedTurn(t *testing.T) {
 	t.Parallel()
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
-			store := history.New(t.TempDir())
-			raw := json.RawMessage(`{"conversation_id":"` + testConvID + `","message_id":"user","role":"user","text":"synthetic"}`)
-			if appendConversationHistory(store, discardLogger(), "test", testConvID, protocol.TypeMessage, raw, historyTS) == nil {
-				t.Fatal("append failed")
-			}
-			e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
+			dir := t.TempDir()
+			store := history.New(dir)
+			bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "phone", Interactive: true}, {ConnID: "peer", Interactive: true}, {ConnID: "legacy"}}}}
+			e := newInteractiveTurnEmitterV2(nil, bcast, discardLogger())
 			e.hist, e.runtimeFacts = store, enabled
+			ctx := context.Background()
+			e.emit(ctx, testConvID, protocol.TypeMessage, protocol.MessagePayload{ConversationID: testConvID, MessageID: "user", Role: "user", Text: "synthetic"})
 			source := history.SessionProvenance{Kind: "claude", SessionID: "synthetic-session"}
-			e.HandleFor(context.Background(), testConvID, turnevent.TextChunk{Text: "synthetic reply"}, source)
-			e.HandleFor(context.Background(), testConvID, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, source)
-			page := newHistoryPager(store, discardLogger())(testConvID, "", 128)
+			e.HandleFor(ctx, testConvID, turnevent.TextChunk{Text: "synthetic reply"}, source)
+			e.HandleFor(ctx, testConvID, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, source)
+			wantLatest, wantCheckpoint, wantRaw := uint64(4), uint64(5), uint64(3)
+			if enabled {
+				wantLatest, wantCheckpoint, wantRaw = 5, 6, 4
+			}
 			rawEntries := historyEntries(t, store, testConvID)
-			if !page.AtStart || page.Cursor != "" {
-				t.Fatal("expected terminal page")
+			entries, wire := testLegacySerializedPage(t, store)
+			versions := map[string][]protocol.HistoryEntry{"history": entries, "phone": nil, "peer": nil, "replay": nil}
+			addEnvelope := func(name string, env protocol.Envelope) {
+				encoded, err := json.Marshal(env)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var decoded protocol.Envelope
+				if err := json.Unmarshal(encoded, &decoded); err != nil || decoded.HistoryEntryID == nil {
+					t.Fatalf("missing serialized identity: %s / %v", encoded, err)
+				}
+				versions[name] = append(versions[name], protocol.HistoryEntry{ID: *decoded.HistoryEntryID, Type: decoded.Type, Payload: decoded.Payload, TS: decoded.TS})
 			}
-			latest, err := store.LatestDisplayableEntryID(conversations.ConversationID(testConvID))
-			if err != nil {
-				t.Fatal(err)
+			for _, push := range bcast.pushes {
+				if push.connID == "legacy" {
+					t.Fatal("noninteractive recipient received history")
+				}
+				addEnvelope(push.connID, push.env)
 			}
-			// The completed assistant version includes turn_end, then idle extends it.
-			presented := uint64(len(rawEntries) - 1)
-			if got := testLegacyCheckpoint(page.Entries, presented, 0, false); got != uint64(len(rawEntries)) || got < latest {
-				t.Fatalf("checkpoint=%d, want %d reaching watermark %d; entries=%+v", got, len(rawEntries), latest, page.Entries)
+			events, _ := e.ring.After(testConvID, 0)
+			for _, event := range events {
+				id := event.HistoryEntryID
+				addEnvelope("replay", protocol.Envelope{Type: event.Type, Payload: event.Payload, TS: event.TS, HistoryEntryID: &id})
 			}
-			if got := testLegacyCheckpoint(page.Entries, 0, 0, false); got != 0 {
-				t.Fatal("fetched history granted sight")
+			joined := slices.Clone(entries)
+			for _, name := range []string{"phone", "peer", "replay"} {
+				joined = append(joined, versions[name]...)
 			}
-			serialized, err := json.Marshal(protocol.HistoryPagePayload{Entries: page.Entries, Cursor: page.Cursor, AtStart: page.AtStart})
-			if err != nil {
-				t.Fatal(err)
+			versions["overlap"] = append(joined, entries...)
+			for name, received := range versions {
+				if name != "overlap" && len(received) != len(entries) {
+					t.Fatalf("%s delivered %d/%d entries", name, len(received), len(entries))
+				}
+				for _, expected := range entries {
+					matched := false
+					for _, actual := range received {
+						if actual.ID == expected.ID {
+							if actual.Type != expected.Type || !actual.TS.Equal(expected.TS) || !bytes.Equal(actual.Payload, expected.Payload) {
+								t.Fatalf("%s changed durable identity/payload: %+v / %+v", name, actual, expected)
+							}
+							matched = true
+						}
+					}
+					if !matched {
+						t.Fatalf("%s missing durable ID %d", name, expected.ID)
+					}
+				}
+				if got := testLegacyLatest(received); got != wantLatest {
+					t.Fatalf("%s latest=%d want %d", name, got, wantLatest)
+				}
+				if got := testLegacyCheckpoint(received, wantLatest, 0, false); got != wantCheckpoint {
+					t.Fatalf("%s checkpoint=%d want %d", name, got, wantCheckpoint)
+				}
+				if testLegacyCheckpoint(received, 0, 0, false) != 0 {
+					t.Fatalf("%s receipt delivery conferred presentation", name)
+				}
 			}
-			t.Logf("mobile handoff enabled=%v watermark=%d checkpoint=%d page=%s", enabled, latest, len(rawEntries), serialized)
+			for _, reader := range []*history.Store{store, history.New(dir)} {
+				testLegacyListAndMark(t, reader, wantCheckpoint, wantLatest, 0)
+				if got, err := reader.LatestDisplayableEntryID(conversations.ConversationID(testConvID)); err != nil || got != wantRaw {
+					t.Fatalf("raw watermark=%d,%v want %d", got, err, wantRaw)
+				}
+				if got := historyEntries(t, reader, testConvID); !reflect.DeepEqual(got, rawEntries) {
+					t.Fatal("raw entries or metadata changed")
+				}
+			}
+			t.Logf("mobile handoff enabled=%v latest=%d checkpoint=%d clamp=%d page=%s", enabled, wantLatest, wantCheckpoint, wantLatest, wire)
 		})
 	}
 }
@@ -164,7 +251,7 @@ func TestLegacyRuntimeReceipts_BoundedPages(t *testing.T) {
 			}
 			for _, reader := range []*history.Store{store, history.New(dir)} {
 				if !mixed {
-					if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 0 {
+					if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 12 {
 						t.Fatalf("all-runtime watermark=%d,%v", got, err)
 					}
 				}
@@ -368,7 +455,7 @@ func TestLegacyRuntimeReceipts_Watermark(t *testing.T) {
 		}
 	}
 	for _, reader := range []*history.Store{store, history.New(dir)} {
-		if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 1 {
+		if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 5 {
 			t.Fatalf("legacy watermark=%d,%v", got, err)
 		}
 		if got, err := reader.LatestDisplayableEntryID(id); err != nil || got != 5 {
@@ -385,8 +472,103 @@ func TestLegacyRuntimeReceipts_Watermark(t *testing.T) {
 	if _, err := store.AppendWithMetadata(id, protocol.TypeMessage, json.RawMessage(`{}`), historyTS, history.Metadata{Shown: new(bool)}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := (legacyHistoryReader{store}).LatestDisplayableEntryID(id); err != nil || got != 6 {
-		t.Fatalf("hidden eligibility raised watermark=%d,%v", got, err)
+	if got, err := (legacyHistoryReader{store}).LatestDisplayableEntryID(id); err != nil || got != 7 {
+		t.Fatalf("hidden eligible target=%d,%v", got, err)
+	}
+	// More than one reader page of explicitly shown statuses must not hide
+	// older wire-counted content or raise the legacy target.
+	for i := 0; i < 130; i++ {
+		shown := true
+		if _, err := store.AppendWithMetadata(id, protocol.TypeTurnState, json.RawMessage(`{}`), historyTS, history.Metadata{Shown: &shown}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, reader := range []*history.Store{store, history.New(dir)} {
+		if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 7 {
+			t.Fatalf("multi-page legacy target=%d,%v", got, err)
+		}
+		if got, err := reader.LatestDisplayableEntryID(id); err != nil || got != 137 {
+			t.Fatalf("raw visibility target=%d,%v", got, err)
+		}
+	}
+}
+
+func testLegacyListAndMark(t *testing.T, store *history.Store, checkpoint, latest, held uint64) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	reg, err := conversations.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := conversations.ConversationID(testConvID)
+	reg.Create(conversations.Conversation{ID: id, ReadUpTo: held, IsPromoted: true})
+	reg.Create(conversations.Conversation{ID: conversations.ConversationID(testConvIDB), ReadUpTo: 2, IsPromoted: true})
+	if err := reg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	reader := legacyHistoryReader{store}
+	invoke := func(h dispatch.Handler, typ string, payload json.RawMessage, requestID uint64) protocol.Envelope {
+		out := make(chan protocol.RoutingEnvelope, 2)
+		conn := dispatch.NewTestConn("phone", out, nil)
+		if err := h(context.Background(), conn, protocol.Envelope{ID: requestID, Type: typ, Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+		var env protocol.Envelope
+		select {
+		case frame := <-out:
+			if err := json.Unmarshal(frame.Frame, &env); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatal("missing handler reply")
+		}
+		if env.InReplyTo == nil || *env.InReplyTo != requestID {
+			t.Fatalf("uncorrelated reply: %+v", env)
+		}
+		return env
+	}
+	assertList := func(wantRead uint64) {
+		list := invoke(handlers.ListConversationsWithAgents(reg, nil, reader), protocol.TypeListConversations, json.RawMessage(`{}`), 10)
+		var summary protocol.ConversationsPayload
+		if err := json.Unmarshal(list.Payload, &summary); err != nil {
+			t.Fatal(err)
+		}
+		if list.Type != protocol.TypeConversations || len(summary.Conversations) != 2 || summary.Conversations[0].LatestEntryID != latest || summary.Conversations[0].ReadUpTo != wantRead {
+			t.Fatalf("list=%+v want latest/read %d/%d", summary, latest, wantRead)
+		}
+	}
+	assertList(held)
+	mark := handlers.MarkConversationRead(reg, reader, path, nil, discardLogger())
+	want := max(held, min(checkpoint, latest))
+	for i, upTo := range []uint64{checkpoint, 0, checkpoint, checkpoint + 100} {
+		env := invoke(mark, protocol.TypeMarkConversationRead, json.RawMessage(fmt.Sprintf(`{"conversation_id":"%s","up_to":%d}`, testConvID, upTo)), uint64(20+i))
+		var updated protocol.ConversationUpdatedPayload
+		if err := json.Unmarshal(env.Payload, &updated); err != nil {
+			t.Fatal(err)
+		}
+		if env.Type != protocol.TypeConversationUpdated || updated.ID != testConvID || updated.ReadUpTo != want || latest > updated.ReadUpTo {
+			t.Fatalf("mark=%+v want %d clearing latest %d", updated, want, latest)
+		}
+		reg, err = conversations.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cv, _ := reg.Get(id)
+		other, _ := reg.Get(conversations.ConversationID(testConvIDB))
+		if cv.ReadUpTo != want || other.ReadUpTo != 2 {
+			t.Fatalf("persisted mark/isolation=%d/%d", cv.ReadUpTo, other.ReadUpTo)
+		}
+		mark = handlers.MarkConversationRead(reg, reader, path, nil, discardLogger())
+		assertList(want)
+	}
+	host, err := conversations.Load(filepath.Join(t.TempDir(), "conversations.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.Create(conversations.Conversation{ID: id})
+	isolated, _ := host.Get(id)
+	if isolated.ReadUpTo != 0 {
+		t.Fatal("mark crossed host")
 	}
 }
 
@@ -394,73 +576,16 @@ func TestLegacyRuntimeReceipts_ReadMarks(t *testing.T) {
 	t.Parallel()
 	for _, held := range []uint64{0, 9} {
 		t.Run(fmt.Sprint(held), func(t *testing.T) {
-			root := t.TempDir()
-			path := filepath.Join(root, "conversations.json")
-			reg, err := conversations.Load(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			reg.Create(conversations.Conversation{ID: conversations.ConversationID(testConvID), ReadUpTo: held, IsPromoted: true})
-			reg.Create(conversations.Conversation{ID: conversations.ConversationID(testConvIDB), ReadUpTo: 2, IsPromoted: true})
-			if err := reg.Save(path); err != nil {
-				t.Fatal(err)
-			}
-			store := history.New(root)
-			id := conversations.ConversationID(testConvID)
-			if _, err := store.Append(id, protocol.TypeMessage, json.RawMessage(`{}`), historyTS); err != nil {
+			dir := t.TempDir()
+			store := history.New(dir)
+			if _, err := store.Append(conversations.ConversationID(testConvID), protocol.TypeMessage, json.RawMessage(`{}`), historyTS); err != nil {
 				t.Fatal(err)
 			}
 			if appendConversationHistory(store, discardLogger(), "test", testConvID, historyTurnInterrupted, testRuntimeFact(t, historyTurnInterrupted, testConvID), historyTS) == nil {
 				t.Fatal("append failed")
 			}
-			reader := legacyHistoryReader{store}
-			invoke := func(h dispatch.Handler, typ string, payload json.RawMessage) protocol.Envelope {
-				out := make(chan protocol.RoutingEnvelope, 2)
-				conn := dispatch.NewTestConn("phone", out, nil)
-				if err := h(context.Background(), conn, protocol.Envelope{ID: 10, Type: typ, Payload: payload}); err != nil {
-					t.Fatal(err)
-				}
-				var env protocol.Envelope
-				if err := json.Unmarshal((<-out).Frame, &env); err != nil {
-					t.Fatal(err)
-				}
-				return env
-			}
-			list := invoke(handlers.ListConversationsWithAgents(reg, nil, reader), protocol.TypeListConversations, json.RawMessage(`{}`))
-			var summary protocol.ConversationsPayload
-			if err := json.Unmarshal(list.Payload, &summary); err != nil {
-				t.Fatal(err)
-			}
-			if list.Type != protocol.TypeConversations || len(summary.Conversations) != 2 || summary.Conversations[0].LatestEntryID != 1 {
-				t.Fatalf("list=%+v", list)
-			}
-			mark := handlers.MarkConversationRead(reg, reader, path, nil, discardLogger())
-			for i := 0; i < 2; i++ {
-				env := invoke(mark, protocol.TypeMarkConversationRead, json.RawMessage(`{"conversation_id":"`+testConvID+`","up_to":99}`))
-				if env.Type != protocol.TypeConversationUpdated {
-					t.Fatalf("mark=%+v", env)
-				}
-			}
-			reopened, err := conversations.Load(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cv, _ := reopened.Get(id)
-			if cv.ReadUpTo != max(held, 1) {
-				t.Fatalf("held mark=%d", cv.ReadUpTo)
-			}
-			other, _ := reopened.Get(conversations.ConversationID(testConvIDB))
-			if other.ReadUpTo != 2 {
-				t.Fatal("mark crossed conversation")
-			}
-			host, err := conversations.Load(filepath.Join(t.TempDir(), "conversations.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			host.Create(conversations.Conversation{ID: id})
-			isolated, _ := host.Get(id)
-			if isolated.ReadUpTo != 0 {
-				t.Fatal("mark crossed host")
+			for _, reader := range []*history.Store{store, history.New(dir)} {
+				testLegacyListAndMark(t, reader, 99, 2, held)
 			}
 		})
 	}
@@ -493,5 +618,143 @@ func TestLegacyRuntimeReceipts_StartupDivider(t *testing.T) {
 	}
 	if got := testLegacyCheckpoint(page.Entries, 1, 0, false); got != 2 {
 		t.Fatalf("startup checkpoint=%d", got)
+	}
+}
+func TestLegacyRuntimeReceipts_WireTargets(t *testing.T) {
+	t.Parallel()
+	// Explicit wire vocabulary keeps this oracle independent of legacyHistoryType.
+	types := []string{
+		"message", "assistant_delta", "tool_use", "tool_result", "tool_denied",
+		"turn_end", "banner", "background_task_started", "background_task_updated",
+		"compaction_boundary", "model_refusal_fallback", "model_refusal_no_fallback",
+		"unrecognized_message", "session_transition", "turn_state", "stall", "api_retry",
+		"compacting", "tool_progress", "thinking_progress", "background_task_roster",
+		"background_task_progress", "rate_limited", "context_usage", "model_announced",
+		"session_facts", "mcp_status", "model_list", "slash_command_list",
+		"main_turn_opened", "main_tool_interrupted", "main_turn_interrupted", "session_divider",
+		"future_content", "invalid_runtime_fact",
+	}
+	for _, typ := range types {
+		t.Run(typ, func(t *testing.T) {
+			for _, visibility := range []string{"absent", "false", "true"} {
+				t.Run(visibility, func(t *testing.T) {
+					dir := t.TempDir()
+					store := history.New(dir)
+					var shown *bool
+					if visibility != "absent" {
+						value := visibility == "true"
+						shown = &value
+					}
+					entryType, payload := typ, json.RawMessage(`{}`)
+					if legacyRuntimeFact(typ) {
+						payload = testRuntimeFact(t, typ, testConvID)
+					}
+					if typ == "invalid_runtime_fact" {
+						entryType = historyTurnOpened
+					}
+					metadata := history.Metadata{Shown: shown, Session: &history.SessionProvenance{Kind: "claude", SessionID: "stored-session"}}
+					id := conversations.ConversationID(testConvID)
+					if _, err := store.AppendWithMetadata(id, entryType, payload, historyTS, metadata); err != nil {
+						t.Fatal(err)
+					}
+					excluded := slices.Contains([]string{"turn_state", "stall", "api_retry", "compacting", "session_transition"}, typ)
+					unsupported := typ == "future_content" || typ == "invalid_runtime_fact"
+					want := uint64(1)
+					if excluded || unsupported && visibility == "false" {
+						want = 0
+					}
+					for _, reader := range []*history.Store{store, history.New(dir)} {
+						if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != want {
+							t.Fatalf("legacy target=%d,%v want %d", got, err, want)
+						}
+						entries, _ := testLegacySerializedPage(t, reader)
+						if unsupported {
+							if len(entries) != 0 {
+								t.Fatal("unsupported entry certified as receipt")
+							}
+						} else if got := testLegacyLatest(entries); got != want {
+							t.Fatalf("client latest=%d want %d", got, want)
+						}
+						raw, err := reader.Page(id, "", 1)
+						if err != nil || len(raw.Entries) != 1 || raw.Entries[0].Type != entryType || !bytes.Equal(raw.Entries[0].Payload, payload) || !raw.Entries[0].TS.Equal(historyTS) || !reflect.DeepEqual(raw.Entries[0].Shown, shown) || !reflect.DeepEqual(raw.Entries[0].Session, metadata.Session) {
+							t.Fatalf("raw entry changed: %+v / %v", raw, err)
+						}
+						if got, err := reader.LatestEntryID(id); err != nil || got != 1 {
+							t.Fatalf("raw cursor=%d,%v", got, err)
+						}
+						testLegacyListAndMark(t, reader, 1, want, 0)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestLegacyRuntimeReceipts_CompletionTails(t *testing.T) {
+	t.Parallel()
+	for _, ending := range []struct {
+		name  string
+		event turnevent.TurnEnd
+		shown bool
+	}{
+		{"normal", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, false},
+		{"failed", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn, IsError: true, Outcome: "error_during_execution"}, true},
+		{"stopped", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonCancelled}, true},
+	} {
+		t.Run(ending.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := history.New(dir)
+			e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
+			e.hist, e.runtimeFacts = store, true
+			ctx := context.Background()
+			source := history.SessionProvenance{Kind: "claude", SessionID: "session"}
+			e.emit(ctx, testConvID, protocol.TypeMessage, protocol.MessagePayload{ConversationID: testConvID, Role: "user", Text: "request"})
+			e.HandleFor(ctx, testConvID, turnevent.TextChunk{Text: "reply"}, source)
+			e.HandleFor(ctx, testConvID, ending.event, source)
+			raw := historyEntries(t, store, testConvID)
+			if len(raw) != 6 || raw[4].Type != protocol.TypeTurnEnd || raw[4].Shown == nil || *raw[4].Shown != ending.shown {
+				t.Fatalf("completion raw visibility=%+v", raw)
+			}
+			entries, _ := testLegacySerializedPage(t, store)
+			wantBeforeCompletion := uint64(6)
+			if ending.shown {
+				wantBeforeCompletion = 4
+			}
+			if got := testLegacyCheckpoint(entries, 4, 0, false); got != wantBeforeCompletion {
+				t.Fatalf("unpresented terminal outcome checkpoint=%d want %d", got, wantBeforeCompletion)
+			}
+			for _, tail := range []struct {
+				name               string
+				append             func()
+				latest, checkpoint uint64
+			}{
+				{"completion", func() {}, 5, 6},
+				{"metadata", func() {
+					e.HandleFor(ctx, testConvID, turnevent.ContextUsage{Model: "synthetic", TotalTokens: 1, MaxTokens: 100}, source)
+				}, 7, 7},
+				{"runtime", func() {
+					e.emit(ctx, testConvID, historySessionDivider, runtimeHistoryFact{ConversationID: testConvID, Cause: "daemon_restart", OccurredAt: historyTS})
+				}, 8, 8},
+			} {
+				t.Run(tail.name, func(t *testing.T) {
+					tail.append()
+					for _, reader := range []*history.Store{store, history.New(dir)} {
+						entries, _ := testLegacySerializedPage(t, reader)
+						if got := testLegacyLatest(entries); got != tail.latest {
+							t.Fatalf("client latest=%d want %d", got, tail.latest)
+						}
+						// The completion version was explicitly presented. Metadata and
+						// receipt tails extend accounting without granting new sight.
+						if got := testLegacyCheckpoint(entries, 5, 0, false); got != tail.checkpoint {
+							t.Fatalf("checkpoint=%d want %d", got, tail.checkpoint)
+						}
+						if testLegacyCheckpoint(entries, 0, 0, false) != 0 {
+							t.Fatal("tail granted presentation")
+						}
+						testLegacyListAndMark(t, reader, tail.checkpoint, tail.latest, 0)
+					}
+				})
+			}
+		})
 	}
 }

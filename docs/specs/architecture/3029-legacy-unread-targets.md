@@ -78,3 +78,7 @@ Pending documentation stage: update `docs/protocol-mobile.md`, “A history entr
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-09
+
+## Revisions
+
+- 2026-10-09: The completion-outcome and nonvisual-tail scenarios use the dedicated `TestLegacyRuntimeReceipts_CompletionTails` sibling rather than the visibility matrix in `WireTargets`. The explicit completed version remains presented while metadata/runtime tails extend its checkpoint. `Watermark` also walks beyond 128 excluded entries. Contracts and production scope are unchanged.
