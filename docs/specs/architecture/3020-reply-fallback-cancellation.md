@@ -66,3 +66,7 @@ None. Expected written work is about 350 lines including this plan, zero exporte
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-09
+
+## Revisions
+
+- 2026-10-09: Put the shared pipe/worker harness and controlled tests in `cmd/pyry/reply_fallback_cancellation_test.go`, keeping the existing evidence file local and below its size limit. The deadline fixture hides the wrapped cancel-context value so Go propagates its declared `DeadlineExceeded` error rather than the underlying cancellation error. The actual own-deadline case also holds Wait through return and then releases/joins it, proving the unchanged default grace without relying on scheduler timing. Eventual completion waits have failure bounds that allow cleanup to kill and join workers.
