@@ -41,24 +41,52 @@ the cursor loaded is still caught on the next lookup.
 
 ### Unread state uses a separate, lazily recovered watermark (#2954)
 
-`LatestDisplayableEntryID` supplies both `ListConversationsWithAgents`'s
-`latest_entry_id` and `MarkConversationRead`'s clamp. `displayableEntry` first
+Raw `Store.LatestDisplayableEntryID` is metadata-aware. `displayableEntry` first
 uses explicit `Entry.Shown`: true counts even a normally excluded status type,
 and false excludes even a normally counted type. With `Shown == nil`,
 `displayableType` excludes exactly `turn_state`, `stall`, `api_retry`,
 `compacting`, and `session_transition`; every other stored type counts,
 including unknown and empty types. Missing, empty and entirely hidden logs
 return `0`. A durable idle status with absent visibility after the last
-reply must not keep unread set forever. Both handlers must use this same
-watermark for `latest_entry_id > read_up_to` to clear after marking that reply
-read; see the [wire contract](../../protocol-mobile.md#marking-a-conversation-read).
+reply must not keep unread set forever. This raw API remains available unchanged
+to future thread consumers; it can count shown interruptions and dividers.
 Hidden entries still appear in `Page` and `LatestEntryID`, consume durable IDs
 and advance the raw cursor; filtering creates no second ID space and decodes
 no payloads. Payload fields named `shown` or `session` have no effect on these
 metadata rules.
 
-After `load`, the first filtered lookup walks `listSegments` newest-first and
-each `readSegment`'s entries backwards until a qualifying entry is found.
+**Legacy list and read clamping share a narrower view (#3026).** `startRelayV2`
+passes `legacyHistoryReader` to both `ListConversationsWithAgents` and
+`MarkConversationRead`. Its `LatestDisplayableEntryID` skips exactly
+`main_turn_opened`, `main_tool_interrupted`, `main_turn_interrupted` and
+`session_divider` regardless of `Shown`; these runtime-only facts cannot raise
+legacy unread beyond content. Every other entry retains the raw visibility rule,
+including conservative counting of unknown types with absent or true visibility.
+Transport exclusion therefore does not certify unknown content read. A
+runtime-only log returns `0`, even when its raw watermark is nonzero.
+
+The adapter validates through the raw reader, then walks newest-first raw pages
+of 128 entries until it finds qualifying content or `AtStart`. It keeps bounded
+memory and adds no cache that could become stale after append or reopen. This
+watermark walk is separate from `newHistoryPager`, which projects exactly one
+bounded raw page and retains its opaque cursor and `AtStart`, including pages
+containing only [runtime receipts](history-package.md#reader-2116).
+
+`read_up_to` stays in the original durable ID space. The registry persists
+`max(held, min(up_to, latest))`; a held mark above the narrower legacy watermark
+is preserved, never lowered. Marks remain monotonic and isolated by host and
+conversation. List values and fetched, live or replayed receipts confer no sight;
+mobile still requires presentation evidence and refuses unknown, malformed or
+unidentified receipts and unaccounted holes. Both handlers must share this view
+for `latest_entry_id > read_up_to` to clear after a presented reply is marked
+read; see the [wire contract](../../protocol-mobile.md#marking-a-conversation-read).
+`TestLegacyRuntimeReceipts_Watermark` checks warm/reopened stores, raw watermark
+preservation and append after lookup; `TestLegacyRuntimeReceipts_ReadMarks`
+checks list/clamp agreement, persistence, repeats and held marks above the clamp.
+
+Within the raw store, after `load`, the first filtered lookup walks `listSegments`
+newest-first and each `readSegment`'s entries backwards until a qualifying entry
+is found.
 Reopening already-written logs therefore works even when mixed legacy and
 metadata entries have trailing hidden entries spanning segments. The existing
 decoder tolerates empty/incomplete tails and torn final lines. The scan holds

@@ -688,17 +688,32 @@ Both fields are required:
 | `up_to` | unsigned 64-bit integer | The durable [history entry id](#a-history-entry) the operator has read up to. Decoded through a `*uint64`, so a missing key or explicit `null` decodes to `nil` and `encoding/json`'s range parsing rejects a negative, fractional, exponent, string, boolean or over-`2^64-1` value — every one of these is `protocol.malformed`. `0` is a valid, meaningful value: an empty conversation's own starting mark. |
 
 **The stored mark becomes `max(held, min(up_to, latest))`**, where `held` is
-the mark already on disk and `latest` is the same filtered watermark reported
-as `list_conversations.latest_entry_id`: the newest durable history entry id
-excluding exactly `turn_state`, `stall`, `api_retry`, `compacting`, and
-`session_transition`. Every other stored type counts, including unknown types;
-missing, empty and status-only logs yield `0`. A `up_to` at or below `held`
+the mark already on disk and `latest` is the same legacy watermark reported
+as `list_conversations.latest_entry_id` (#3026). It always skips the four
+runtime-only fact types `main_turn_opened`, `main_tool_interrupted`,
+`main_turn_interrupted` and `session_divider`, regardless of stored visibility.
+For every other entry, explicit stored `shown` decides whether it counts. With
+absent visibility, only `turn_state`, `stall`, `api_retry`, `compacting` and
+`session_transition` are excluded; unknown types conservatively count. Transport
+exclusion does not certify unknown content read. Missing, empty and entirely
+hidden/runtime-only logs yield `0`. A `up_to` at or below `held`
 changes nothing; a `up_to` past `latest` clamps to `latest` before the `max`;
 and the mark can never move backward, including under two devices racing each
 other. When `latest == 0`, an initial zero mark stays zero, while an existing
-higher mark is preserved. Reading through the last displayable id clears unread
+higher mark is preserved, including a mark held above the narrower legacy
+watermark. Marks remain persistent and isolated by host and conversation.
+Reading through the last legacy-displayable id clears unread
 on the next list even if statuses follow it; new displayable content makes
 `latest_entry_id > read_up_to` again.
+
+**Accounting is not presentation.** A list watermark, fetched history or a live/
+replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
+Submit a checkpoint only from the operator's presentation evidence. Known
+nonvisual receipts can account for intervening durable IDs, but unknown,
+malformed or unidentified receipts and unaccounted numeric holes remain barriers.
+The daemon's clamp bounds the requested mark; it does not establish that the
+operator saw the content. Raw history and its metadata-aware watermark remain
+unchanged for future thread consumers.
 
 The registry resolves the conversation **before** its history is read, so an
 unknown or empty id never reaches the history store. The compare, the save and
@@ -5447,25 +5462,63 @@ timeline reducer it already runs for the live stream.
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | number | The **durable, per-conversation** entry id. Monotonic within one conversation's log and **stable across daemon restarts**. |
-| `type` | string | The wire type the stored frame carried. |
-| `payload` | object | The stored frame's body, verbatim. |
-| `ts` | string (RFC 3339) | When the entry was appended. |
+| `type` | string | The eligible stored wire type, or `banner` for a validated runtime receipt. |
+| `payload` | object | Eligible stored payload bytes unchanged, or the nonvisual receipt shape below. |
+| `ts` | string (RFC 3339) | The original durable entry timestamp, also retained by receipts. |
+
+**Known runtime facts use nonvisual receipts (#3026).** Only
+`main_turn_opened`, `main_tool_interrupted`, `main_turn_interrupted` and
+`session_divider` project into legacy history as `type: "banner"` with this
+payload (all five keys are required and nonnull):
+
+```json
+{
+  "conversation_id": "11111111-1111-4111-8111-111111111111",
+  "level": "info",
+  "text": "",
+  "truncated": false,
+  "stops_turn": false
+}
+```
+
+The receipt retains the raw fact's original `id` and `ts`; it is not a new
+durable append or a second ID space. Runtime payloads and metadata stay off
+legacy transports. Projection validates matching conversation ownership,
+occurrence time and required identities: a turn ID for opening/turn interruption,
+also a tool-call ID for tool interruption, and a cause plus predecessor session
+for a divider. A `daemon_restart` divider needs no predecessor/successor session
+IDs. Missing durable identity or timestamp and malformed facts produce no
+receipt; arbitrary unknown types remain excluded without being certified harmless.
+
+Unchanged mobile decoding/reduction understands this info banner as nonvisual
+accounting. It draws no content and changes no turn, permission, model or status
+state. Accounting grants no presentation of unseen content. Unknown, malformed
+or unidentified receipts and unaccounted holes remain read-evidence barriers;
+an all-receipt page cannot establish sight. The projection consumes exactly one
+bounded raw page and preserves its opaque `cursor` and `at_start`, including
+all-runtime pages; it never scans ahead to fill a page after excluding facts.
 
 **A direct live envelope's `history_entry_id` is this entry's `id` (#2861).**
 After a successful append, interactive-turn emission, session-transition
 broadcast and operator-message history commit/publication attach that same
 per-conversation id to every interactive recipient's direct envelope. Reconnect
-replay of history-backed interactive-turn and operator-message ring events
-carries the original append's id too (#2909), without appending another entry.
-Channel posts still omit it; session transitions are not ring-replayed. Use it as
+replay of history-backed interactive-turn, runtime-receipt and operator-message
+ring events carries the original append's id too (#2909), without appending another entry.
+Running runtime facts, including dividers, publish the same receipt bytes and
+original durable ID/timestamp to live recipients and the replay ring. Startup
+reconciliation receipts are available through history, without populating the
+ring or sending live frames. Existing recipient and agent/isolation gates apply.
+Channel posts still omit it; ordinary `session_transition` frames are not
+ring-replayed. Use it as
 [`mark_conversation_read.up_to`](#marking-a-conversation-read) when the operator
 has read through that entry. It is independent of the envelope's connection
 `id` and ring `event_id`; neither is a durable read-mark target. Older daemons,
 absent or failed history storage, and non-history-backed frames (live or replayed)
-omit `history_entry_id` entirely, never as `null` or `0`. Live delivery and
-existing ring recording proceed even when history cannot be appended. In those
-cases, obtain a target from a served entry's `id` or the conversation's
-`list_conversations.latest_entry_id`, as appropriate to what the operator has read.
+omit `history_entry_id` entirely, never as `null` or `0`. Eligible legacy delivery
+and existing ring recording proceed even when history cannot be appended;
+failed or absent storage cannot mint a runtime receipt. Obtain a durable target
+only with presentation evidence, using a served entry's `id`; a list watermark
+alone is not a read checkpoint.
 
 **The entry's `id` is not an `event_id`.** [`event_id`](#reconnect-replay--resync-consumer-647)
 is the in-memory ring's id: per-process, reset by a daemon restart, and meaningful
@@ -5474,12 +5527,13 @@ both look like small integers, and a client must not join them.
 
 **This same durable id space is what `read_up_to` and `latest_entry_id` are stated
 in (#2779).** [`list_conversations`](#list_conversations)'s `conversations` reply
-reports `latest_entry_id` as the newest `id` excluding exactly `turn_state`,
-`stall`, `api_retry`, `compacting`, and `session_transition`. Every other stored
-type counts, including unknown types; missing, empty and status-only logs
-report `0`. **History pages still contain those status entries, and all stored
-entries use the same durable id sequence** — this watermark filters which id
-counts for unread, not which entries are stored or served. Both that reply and
+reports `latest_entry_id` using the shared
+[legacy list/read watermark](#marking-a-conversation-read): known runtime-only
+facts never raise it; other entries use explicit visibility or the absent-metadata
+fallback. **History pages still contain eligible hidden/status entries and
+validated runtime receipts, and all entries use the original durable ID sequence.**
+The watermark filters unread independently of transport projection. Raw history,
+metadata and raw watermark APIs remain unchanged. Both that reply and
 [`conversation_updated`](#conversation_updated) report `read_up_to`, the host
 operator's durable read mark, in the same space — a position among these durable
 ids, never a count of entries and never a connection's
@@ -5488,10 +5542,11 @@ host/operator-scoped, not per-device: every paired client on this host reads the
 same value, raised by [`mark_conversation_read`](#marking-a-conversation-read)
 (#2780).
 
-**`type` is a stored string that nothing re-validates** against the type table
-above, so a client MUST tolerate an entry type it does not recognise rather than
-treating one as a protocol violation — the same forward-compatibility rule this
-document applies to unknown fields.
+**Raw storage accepts arbitrary type strings; legacy transports use a closed
+projection.** A client MUST still tolerate an entry type it does not recognise
+rather than treating it as a protocol violation, but must not certify that entry
+as harmless read accounting — the same forward-compatibility rule this document
+applies to unknown fields does not grant presentation evidence.
 
 **An entry carries exactly the trust class of the live frame it mirrors.** `type`
 and `payload` are **replayed content**: operator-authored for a stored
@@ -5541,12 +5596,20 @@ and no duplicate**, and an entry appended between the ask and the answer arrives
 on both.
 
 **When present, join the live or replayed `history_entry_id` to the page entry's
-`id`, within the same conversation.** The three direct live producer paths above share the
+`id`, within the same conversation.** The direct live producer paths above share the
 successful append's id with their envelopes, so this join uses durable identity.
 History-backed ring replay retains that same id, payload and timestamp, even for
 an event emitted with no connected recipient; replay creates no new history entry.
 The pair (`conversation_id`, `history_entry_id`) also identifies the same entry
 across devices and daemon restarts.
+
+This join also applies to the four known runtime facts' info-banner receipts:
+history, live publication and reconnect replay carry the same projected bytes,
+original durable ID and timestamp. Repeated or overlapping delivery accounts
+for that ID once, duplicates no content and grants no additional sight. Do not
+derive harmlessness from a missing receipt: unknown/malformed/unidentified
+receipts and unaccounted holes remain barriers even when a later completed reply
+has been presented. Fetched pages and replay alone establish no presentation.
 
 **Without `history_entry_id`, fall back to (`type`, `ts`).** An entry in a page
 and its twin on the live or replay lane carry the same `type` and the same `ts`,
@@ -5554,7 +5617,9 @@ so a client reconciles on that pair within the conversation. This remains needed
 for older daemons and non-history-backed frames, including channel-post replay.
 An absent or failed history append may
 leave no stored twin to join at all; obtain a durable read-mark target from
-history/list rather than substituting either live counter.
+history together with presentation evidence rather than substituting either
+live counter or treating a list watermark as sight. Runtime receipts always
+require successful durable identity; the fallback cannot certify one without it.
 
 Why not the obvious candidates, each of which fails on some entry:
 
@@ -5568,13 +5633,13 @@ Why not the obvious candidates, each of which fails on some entry:
   none — and `session_transition` is precisely the type the log is the *only*
   retention for.
 
-**Why the pair is sound.** The daemon mints **one timestamp per logical event**,
-hoisted above the per-connection fan-out, and hands that same value to the log
-entry and to every outbound envelope for that event; the payload bytes are stored
-verbatim. A collision would need two entries of the same type in the same
-nanosecond on one conversation, which a single sequential emit path does not
-produce. A client that wants a decisive tie-break has one for free: **compare
-`payload` bytes**, which are identical across the two lanes.
+**The fallback applies to eligible legacy events.** Their timestamp is captured
+once above per-connection fan-out and shared with the durable entry; payload
+bytes match across history and live/replay. Compare payload bytes when resolving
+a possible (`type`, `ts`) collision. Runtime receipts require the durable join:
+multiple closures and their divider can share an occurrence timestamp and the
+same empty banner payload, so neither (`type`, `ts`) nor payload bytes can
+distinguish their original durable IDs.
 
 #### Rejects
 
