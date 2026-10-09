@@ -17,6 +17,15 @@ type startupAgentKey struct {
 	scope    int
 }
 
+// startupAgentReference addresses one identity in its original observation.
+// The observation fixes legacy scope; a roster can observe several task IDs.
+type startupAgentReference struct {
+	source     history.SessionProvenance
+	lifetime   string
+	observedID uint64
+	identity   string
+}
+
 // startupAgentEvidence retains only identities and outcomes from raw pages.
 type startupAgentEvidence struct {
 	agentHistoryFact
@@ -74,7 +83,8 @@ func readStartupAgentWork(store *history.Store, convID conversations.Conversatio
 	}
 	groups := map[startupAgentKey]*convTurnState{}
 	active := map[history.SessionProvenance]string{}
-	closed := map[uint64]bool{}
+	closedCalls := map[startupAgentReference]bool{}
+	closedTasks := map[startupAgentReference]bool{}
 	scope := 0
 	for i := len(evidence) - 1; i >= 0; i-- {
 		p := evidence[i]
@@ -87,10 +97,10 @@ func readStartupAgentWork(store *history.Store, convID conversations.Conversatio
 		}
 		if p.typ == historyAgentSessionEnded {
 			if p.CallObservedEntryID != 0 {
-				closed[p.CallObservedEntryID] = true
+				closedCalls[startupAgentReference{p.source, p.LifetimeID, p.CallObservedEntryID, p.ToolCallID}] = true
 			}
 			if p.TaskObservedEntryID != 0 {
-				closed[p.TaskObservedEntryID] = true
+				closedTasks[startupAgentReference{p.source, p.LifetimeID, p.TaskObservedEntryID, p.TaskID}] = true
 			}
 			// Explicit references address original legacy observations, not this scope.
 			if p.LifetimeID == "" {
@@ -198,12 +208,12 @@ func readStartupAgentWork(store *history.Store, convID conversations.Conversatio
 				delete(st.agentCalls, id)
 				continue
 			}
-			if closed[call.CallObservedEntryID] {
+			if closedCalls[startupAgentReference{st.source, st.agentLifetime, call.CallObservedEntryID, id}] {
 				st.agentEnded[id] = true
 			}
 		}
-		for _, task := range st.agentTasks {
-			task.ended = task.ended || closed[task.observedID]
+		for id, task := range st.agentTasks {
+			task.ended = task.ended || closedTasks[startupAgentReference{st.source, st.agentLifetime, task.observedID, id}]
 			if task.ended && task.callID != "" {
 				st.agentEnded[task.callID] = true
 			}

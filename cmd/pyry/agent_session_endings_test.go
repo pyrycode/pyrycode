@@ -320,3 +320,89 @@ func TestAgentSessionEndings_ReportedRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentSessionEndings_RosterReferenceIsolation(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		source *history.SessionProvenance
+		linked bool
+	}{
+		{name: "legacy-unlinked"},
+		{name: "legacy-linked", linked: true},
+		{name: "attributed-unlinked", source: &history.SessionProvenance{Kind: "claude", SessionID: "source"}},
+		{name: "attributed-linked", source: &history.SessionProvenance{Kind: "claude", SessionID: "source"}, linked: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := history.New(dir)
+			convID := conversations.ConversationID(testConvID)
+			reg := &conversations.Registry{}
+			reg.Create(conversations.Conversation{ID: convID})
+			put := func(typ string, payload any) uint64 {
+				t.Helper()
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				shown := true
+				id, err := store.AppendWithMetadata(convID, typ, raw, historyTS, history.Metadata{Session: tt.source, Shown: &shown})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return id
+			}
+			observe := func() (uint64, uint64) {
+				var rows []map[string]string
+				var firstCall uint64
+				for _, task := range []string{"first", "second"} {
+					row := map[string]string{"task_id": task}
+					if tt.linked {
+						row["tool_call_id"] = "call-" + task
+						id := put(protocol.TypeToolUse, map[string]string{"name": "Agent", "tool_use_id": row["tool_call_id"]})
+						if task == "first" {
+							firstCall = id
+						}
+					}
+					rows = append(rows, row)
+				}
+				return put(protocol.TypeBackgroundTaskRoster, map[string]any{"tasks": rows}), firstCall
+			}
+			originalRoster, firstCall := observe()
+			put(protocol.TypeSessionTransition, map[string]string{"cause": "operator_reset"})
+			reusedRoster, _ := observe()
+			// Only one ending survived recovery; its append scope already reuses both IDs.
+			saved := agentHistoryFact{ConversationID: testConvID, TaskID: "first", TaskObservedEntryID: originalRoster, Cause: "daemon_restart", OccurredAt: historyTS}
+			if tt.linked {
+				saved.ToolCallID, saved.CallObservedEntryID = "call-first", firstCall
+			}
+			put(historyAgentSessionEnded, saved)
+			for attempt := 0; attempt < 2; attempt++ {
+				reconcileStartupHistory(history.New(dir), reg, discardLogger(), historyTS.Add(time.Duration(attempt+1)*time.Second))
+				entries := testSessionEndings(t, history.New(dir))
+				if len(entries) != 4 {
+					t.Fatalf("reconciliation %d: endings=%d want=4", attempt+1, len(entries))
+				}
+				counts := map[uint64]map[string]int{originalRoster: {}, reusedRoster: {}}
+				for _, entry := range entries {
+					var p agentHistoryFact
+					if err := json.Unmarshal(entry.Payload, &p); err != nil {
+						t.Fatal(err)
+					}
+					if counts[p.TaskObservedEntryID] == nil || p.LifetimeID != "" || !reflect.DeepEqual(entry.Session, tt.source) {
+						t.Fatalf("lost original attribution: %s", entry.Payload)
+					}
+					if tt.linked && (p.ToolCallID != "call-"+p.TaskID || p.CallObservedEntryID == 0) {
+						t.Fatalf("lost linked call: %s", entry.Payload)
+					}
+					counts[p.TaskObservedEntryID][p.TaskID]++
+				}
+				for observation, tasks := range counts {
+					if !reflect.DeepEqual(tasks, map[string]int{"first": 1, "second": 1}) {
+						t.Fatalf("observation %d: endings=%v", observation, tasks)
+					}
+				}
+			}
+		})
+	}
+}
