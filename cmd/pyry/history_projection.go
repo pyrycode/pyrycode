@@ -40,7 +40,7 @@ func historyEntryShown(typ string, raw json.RawMessage) bool {
 	switch typ {
 	case historyTurnOpened, historyAgentObserved, historyTaskObserved, historyTaskLinked:
 		return false
-	case historyToolInterrupted, historyTurnInterrupted, historyAgentResult, historyAgentDenied, historyTaskOutcome:
+	case historyToolInterrupted, historyTurnInterrupted, historyAgentResult, historyAgentDenied, historyTaskOutcome, historyTaskGone:
 		return true
 	case historySessionDivider:
 		var p runtimeHistoryFact

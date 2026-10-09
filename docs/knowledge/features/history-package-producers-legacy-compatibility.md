@@ -25,12 +25,13 @@ publication unless `legacyRuntimeReceipt` validates their receipt projection.
 Successful appends remain readable through raw `Store.Page` after reopening.
 Raw storage accepts arbitrary types; the transport vocabulary is closed independently.
 
-**Account known runtime and agent/task IDs without certifying unseen content (#3026, #3030).**
+**Account known runtime and agent/task IDs without certifying unseen content (#3026, #3030, #3031).**
 `legacyRuntimeReceipt` handles exactly `main_turn_opened`, `main_tool_interrupted`,
 `main_turn_interrupted`, `session_divider`, `agent_call_observed`,
 `agent_call_result`, `agent_call_denied`, `background_task_observed`,
-`background_task_linked` and `background_task_outcome`. It emits `banner` with all five
-required fields: `{conversation_id, level:"info", text:"", truncated:false,
+`background_task_linked`, `background_task_outcome` and `background_task_gone`.
+It emits `banner` with all five required fields:
+`{conversation_id, level:"info", text:"", truncated:false,
 stops_turn:false}`. It requires a nonzero successful durable ID, nonzero entry
 timestamp, matching conversation and nonzero `occurred_at`. Openings and turn
 interruptions need `turn_id`; tool interruptions also need `tool_call_id`.
@@ -39,12 +40,15 @@ Dividers need `cause` and a predecessor session, except `daemon_restart` divider
 `lifetime_id` and nonzero `occurred_at`. Observed calls need a call ID and an
 `Agent`/`Task` tool name; results need a call ID and `completed`/`failed`; denials
 need a call ID and `denied`. Task observations need a task ID, links need both
-task and call IDs, and outcomes need a task ID and any nonempty status.
+task and call IDs, and outcomes need a task ID and any nonempty status. Gone
+requires both task and call IDs and exactly `status: gone`, retaining its
+[unknown-outcome meaning](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
 Malformed facts and arbitrary unknown types stay holes, never harmless receipts.
 The unchanged mobile decoder counts valid info receipts toward legacy latest
 without drawing content or changing turn, permission, model or status state.
 Receipt-only delivery gives no sight; malformed/unidentified receipts and
-unaccounted holes remain barriers.
+unaccounted holes remain barriers. Receipt accounting alone never advances a
+read mark or grants foreground presentation.
 
 **Runtime writers bypass `emit`.** Changing only its allowlist would leave live
 and reconnect accounting incomplete. `recordRuntimeFact`, `recordAgentFact` and
@@ -93,7 +97,7 @@ recipient gates keep their original meaning.
 | Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
 | Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; validated nonvisual receipts count toward legacy latest. |
-| Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`. Raw payloads stay off legacy transports; validated receipts count toward legacy latest for either visibility value and confer no foreground presentation. |
+| Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`. Raw payloads stay off legacy transports; validated receipts count toward legacy latest for either visibility value and confer no foreground presentation. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -237,6 +241,24 @@ again:**
   would miss lost attribution or reopened main work. `TestAgentHistory_SealedReports`
   adds first starts after sealing with and without preceding main work, so an
   originating-turn-address predicate cannot silently drop results/denials.
+- **Exercise joins through the hold before testing roster absence.**
+  `TestAgentHistory_GoneRosters` sends incomplete originating starts through
+  `sessionBackgroundTaskHold.Sink`, then complete roster rows and a later empty
+  refresh. Testing only already-enriched rows would miss a lost task truncation
+  marker that turns an invalid join into inference eligibility. It also checks
+  refresh-before-link/call ordering, task IDs distinct from call IDs, launch
+  results and repeated/late reports in warm/reopened stores.
+  `TestAgentHistory_GoneHousekeeping` prunes joins with an incomplete roster,
+  reads retained state and resets the hold before a fresh complete refresh:
+  housekeeping must neither infer gone nor erase the emitter's retained links.
+- **Respawn with the same source/incarnation to test lifetime retirement.**
+  `TestAgentHistory_GoneChildLifetimeReset` covers unsealed child exit and
+  conversation close, reusing IDs after gone, reported and denied endings and
+  checking old links with an unrelated denial. New source IDs alone would miss
+  stale joins or terminal markers surviving a retired lifetime.
+  `TestAgentHistory_GoneSealedLifetime` checks the complementary boundary:
+  sealed predecessors retain eligibility and terminal evidence while successor
+  work stays isolated. Both inspect warm/reopened real stores.
 - **Validate every receipt shape independently of raw visibility.**
   `TestAgentHistory_ReceiptValidation` removes each fact's required fields and
   checks warm/reopened legacy readers with both `Shown` values.
@@ -244,6 +266,9 @@ again:**
   fixtures, comparing page/live/replay identity and bytes as well as malformed
   barriers and receipt-only sight. Raw visibility checks alone would miss
   broken unread accounting or accidental foreground presentation.
+  `TestAgentHistory_GoneReceiptBarriers` rejects malformed gone facts, incorrect
+  gone statuses, unrelated unknown types and absent storage identities; a valid
+  receipt bridges its own durable checkpoint hole only.
 - **Reuse legacy IDs after recovery, not just across repeated starts.**
   `TestStartupHistoryReferenceIsolation` saves full and tool-only recovery before
   newer scoped work reuses the turn/tool IDs, then checks that the newer work
