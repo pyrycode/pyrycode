@@ -199,6 +199,7 @@ type interactiveTurnEmitterV2 struct {
 // convTurnState retains one producing session's lifecycle and buffered text
 // within a conversation. Selection, flushing and closing retain that source.
 type convTurnState struct {
+	agentLifetime       string
 	runtimeIncarnation  uint64
 	runtimeTools        map[string]string
 	runtimeEpoch        uint64
@@ -213,7 +214,7 @@ type convTurnState struct {
 	currentState        turnbridge.TurnState // this source's main phase
 	phaseOrder          uint64               // order of this source's last main-phase event
 	childLanes          map[string]*assistantDeltaLane
-	launcherTurns       map[string]string // Agent/Task call ID to its originating turn
+	launcherTurns       map[string]string // observed Agent/Task call ID to its originating turn, if any
 	childToolTurns      map[string]string // child tool ID to its fixed originating turn
 
 	deltaBuf    strings.Builder // accumulated assistant text for the open (un-flushed) delta
@@ -266,11 +267,11 @@ func (e *interactiveTurnEmitterV2) selectConversation(convID string, source hist
 // closure and is released by closeForConversation at session exit or teardown.
 // The selection itself is left alone; the next HandleFor reselects.
 func (e *interactiveTurnEmitterV2) releaseConversation(key string) {
-	if st := e.turns[key]; st != nil && st.runtimeClosedTurnID != "" && e.runtimeSealed[runtimeSourceKey(st.conversationID, st.source.SessionID, st.runtimeIncarnation)] {
+	if st := e.turns[key]; st != nil && (st.runtimeClosedTurnID != "" || st.agentLifetime != "") && e.runtimeSealed[runtimeSourceKey(st.conversationID, st.source.SessionID, st.runtimeIncarnation)] {
 		return
 	}
 	if st, ok := e.turns[key]; ok && !st.inTurn && st.deltaBuf.Len() == 0 &&
-		len(st.childLanes) == 0 && len(st.launcherTurns) == 0 && len(st.childToolTurns) == 0 {
+		len(st.childLanes) == 0 && len(st.launcherTurns) == 0 && len(st.childToolTurns) == 0 && st.agentLifetime == "" {
 		delete(e.turns, key)
 	}
 }
@@ -332,7 +333,11 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 	}
 	key := e.selectConversation(convID, captured, incarnation)
 	defer e.releaseConversation(key)
+	e.observeAgentHistory(ctx, ev)
 	if e.runtimeFacts && e.runtimeSealed[runtimeSourceKey(convID, captured.SessionID, incarnation)] {
+		if v, ok := ev.(turnevent.ToolStart); ok {
+			e.rememberLauncher(v, e.runtimeClosedTurnID)
+		}
 		switch v := ev.(type) {
 		case turnevent.ThoughtChunk:
 		case turnevent.TextChunk:
@@ -984,14 +989,16 @@ func (e *interactiveTurnEmitterV2) ensureDeltaLane(convID, parentID string) bool
 
 // rememberLauncher retains observed spawning calls, including nested agents,
 // until their producing session is closed. Ordinary main tools need no retention.
+// A sealed source may observe a call without an originating main turn; map
+// membership still recognizes its results and denials.
 func (e *interactiveTurnEmitterV2) rememberLauncher(v turnevent.ToolStart, origin string) {
-	if origin == "" || v.ToolCallID == "" || (v.Title != "Agent" && v.Title != "Task") {
+	if v.ToolCallID == "" || (v.Title != "Agent" && v.Title != "Task") {
 		return
 	}
 	if e.launcherTurns == nil {
 		e.launcherTurns = make(map[string]string)
 	}
-	if _, exists := e.launcherTurns[v.ToolCallID]; !exists {
+	if e.launcherTurns[v.ToolCallID] == "" {
 		e.launcherTurns[v.ToolCallID] = origin
 	}
 }
@@ -1205,6 +1212,7 @@ func (e *interactiveTurnEmitterV2) closeForConversation(ctx context.Context, con
 		e.childLanes = nil
 		e.launcherTurns = nil
 		e.childToolTurns = nil
+		e.agentLifetime = ""
 		e.releaseConversation(key)
 	}
 }
