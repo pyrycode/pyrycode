@@ -397,6 +397,16 @@ never logged. `TestReplyFallbackProcess` and
 refusal, output validation and process termination; `TestReplyFallbackLifecycle`
 covers final-message selection, native priority, late delivery and stale results.
 
+`replyFallback.run` and `replyFallbackOutput` must receive `cmd.Wait` completion
+before reading process state or stdout, even after group cancellation. The caller may
+return within its bound before reaping; unknown evidence is valid, and a nil
+Wait error placeholder cannot imply success without receipt. Retain the actual
+cancellation-arm Wait error. `decodeReplyFallback` shares production struct
+semantics with diagnostics so null/duplicate fields cannot change validation
+between paths. Decodable retained bytes, including a saturated prefix, do not
+establish timely arrival or publication eligibility; see
+[the snapshot and consumer contract](e2e-realclaude.md#test-infrastructure).
+
 The owner has one leaf mutex, released before registry reads, queue gates,
 writes, credential lookup, inference or pushes. Reset cancels pending work and
 advances a generation; fallback publication rechecks conversation identity,
