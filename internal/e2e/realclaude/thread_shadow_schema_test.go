@@ -109,6 +109,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 	var legacyText strings.Builder
 	var agentCall string
 	var childText strings.Builder
+	var legacyQueued, legacyDelivered string
 	tool, result, queued, delivered, closed := false, false, false, false, false
 	for _, env := range e.Legacy {
 		var p struct {
@@ -118,6 +119,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 			ToolUseID       string `json:"tool_use_id"`
 			ParentToolUseID string `json:"parent_tool_use_id"`
 			Role            string `json:"role"`
+			MessageID       string `json:"message_id"`
 		}
 		if json.Unmarshal(env.Payload, &p) != nil {
 			return errors.New("invalid legacy observation")
@@ -145,12 +147,20 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 				result = true
 			}
 		case protocol.TypeMessage:
-			if p.Role == "user" && strings.Contains(p.Text, "SHADOW_QUEUED") {
+			if p.Role == "user" && p.MessageID == "shadow-queued" && strings.Contains(p.Text, "SHADOW_QUEUED") {
 				delivered = true
+				legacyDelivered = p.Text
 			}
 		case protocol.TypeQueueState:
-			if bytes.Contains(env.Payload, []byte("SHADOW_QUEUED")) {
-				queued = true
+			var state protocol.QueueStatePayload
+			if json.Unmarshal(env.Payload, &state) != nil {
+				return errors.New("invalid legacy queue observation")
+			}
+			for _, msg := range state.Queued {
+				if msg.MessageID == "shadow-queued" && strings.Contains(msg.Text, "SHADOW_QUEUED") {
+					queued = true
+					legacyQueued = msg.Text
+				}
 			}
 		case protocol.TypeSessionTransition:
 			closed = true
@@ -200,6 +210,16 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 	}
 	if end == 0 || h.Entries[end-1].Session == nil || accepted == 0 || delivery <= accepted || outcome <= delivery || end <= accepted || divider <= outcome || e.Checkpoints[0].Version != accepted || e.Checkpoints[1].Version != end || e.Checkpoints[2].Version != outcome || e.Checkpoints[3].Version != divider {
 		return errors.New("raw scenario checkpoints or queue joins missing")
+	}
+	var acceptance struct {
+		Text     string `json:"text"`
+		DeviceID string `json:"device_id"`
+	}
+	var message protocol.MessagePayload
+	if json.Unmarshal(h.Entries[accepted-1].Payload, &acceptance) != nil || acceptance.DeviceID == "" || acceptance.Text != legacyQueued ||
+		h.Entries[delivery-1].Type != protocol.TypeMessage || json.Unmarshal(h.Entries[delivery-1].Payload, &message) != nil ||
+		message.Role != "user" || message.MessageID != "shadow-queued" || message.Text != legacyDelivered {
+		return errors.New("raw acceptance or delivery differs from observed legacy user text")
 	}
 	for _, cp := range e.Checkpoints {
 		if err := shadowRawRows(h, cp); err != nil {
@@ -318,7 +338,7 @@ func shadowSanitize(raw []byte) ([]byte, error) {
 	return json.Marshal(walk(value))
 }
 
-// shadowRawRows derives text runs and ordinary tool outcomes from raw facts,
+// shadowRawRows derives user content, text runs and ordinary tool outcomes from raw facts,
 // without consulting a Fold or saved expected rows.
 func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 	type lane struct{ session, turn, parent string }
@@ -334,6 +354,7 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 	texts := map[uint64]string{}
 	calls := map[toolKey]bool{}
 	terminals := map[toolKey]terminal{}
+	sendOutcomes := map[uint64]history.Entry{}
 	for _, entry := range h.Entries {
 		if entry.ID > cp.Version {
 			break
@@ -345,6 +366,7 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 			Call            string `json:"tool_use_id"`
 			InterruptedCall string `json:"tool_call_id"`
 			IsError         bool   `json:"is_error"`
+			Accepted        uint64 `json:"accepted_entry_id"`
 		}
 		if json.Unmarshal(entry.Payload, &p) != nil {
 			return errors.New("invalid raw fact")
@@ -356,6 +378,10 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 		key := lane{session, p.Turn, p.Parent}
 		call := toolKey{key, p.Call}
 		switch entry.Type {
+		case "send_delivered":
+			if sendOutcomes[p.Accepted].ID == 0 {
+				sendOutcomes[p.Accepted] = entry
+			}
 		case protocol.TypeAssistantDelta:
 			if open[key] == 0 {
 				open[key] = entry.ID
@@ -398,6 +424,39 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 			return errors.New("row creating ID outside retained history")
 		}
 		source := h.Entries[item.ID-1]
+		if item.Kind == "user_message" {
+			var want, saved map[string]any
+			if json.Unmarshal(source.Payload, &want) != nil || want == nil || (source.Type != "send_accepted" && source.Type != protocol.TypeMessage) {
+				return errors.New("user row lacks raw acceptance or message")
+			}
+			if source.Type == "send_accepted" {
+				if outcome, ok := sendOutcomes[item.ID]; ok {
+					var link struct {
+						Delivery uint64 `json:"delivery_entry_id"`
+					}
+					if json.Unmarshal(outcome.Payload, &link) != nil || link.Delivery <= item.ID || link.Delivery >= outcome.ID {
+						return errors.New("invalid raw user delivery link")
+					}
+					message := h.Entries[link.Delivery-1]
+					var delivered, terminal map[string]any
+					if message.Type != protocol.TypeMessage || json.Unmarshal(message.Payload, &delivered) != nil || delivered["role"] != "user" || json.Unmarshal(outcome.Payload, &terminal) != nil {
+						return errors.New("invalid raw user delivery payload")
+					}
+					// Receiving content comes from the message; sender identity and
+					// times remain those recorded at acceptance.
+					for _, field := range []string{"device_id", "message_id", "accepted_at", "client_sent_at"} {
+						if value, present := want[field]; present {
+							delivered[field] = value
+						}
+					}
+					delivered["outcome"] = terminal
+					want = delivered
+				}
+			}
+			if json.Unmarshal(item.Content, &saved) != nil || !reflect.DeepEqual(saved, want) {
+				return errors.New("user content or sender identity differs from raw facts")
+			}
+		}
 		if item.Kind == "assistant_message" {
 			var content struct {
 				Text string `json:"text"`
