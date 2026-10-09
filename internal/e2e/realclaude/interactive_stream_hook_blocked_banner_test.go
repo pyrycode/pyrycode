@@ -325,19 +325,36 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 			verdicts, oslcapHookPassed)
 	}
 
-	// --- Exactly one banner across the whole window ----------------------------
-	// Over EVERY frame from the blocked send to turn 2's terminal frame, because
-	// all of them passed through next — not over whatever a coarser drain had not
-	// already discarded. More than one means the informational arm fired twice for
-	// one refusal, or a second producer of turnevent.Banner landed (#2258 owns the
-	// notification subtype and would be exactly that).
-	if len(w.banners) != 1 {
-		t.Fatalf("the client saw %d banner frames between the blocked send and the liveness turn's terminal "+
-			"frame, want exactly 1 — a second means the informational arm fired twice for one refusal, or a "+
-			"second producer of turnevent.Banner reached this path", len(w.banners))
+	// Every banner is retained: one refusal and one nonvisual opening receipt
+	// for the unblocked turn. Duplicates or additional producers must still fail.
+	if len(w.banners) != 2 {
+		t.Fatalf("the client saw %d banner frames across the refusal and liveness turn, want exactly one "+
+			"refusal and one runtime opening receipt", len(w.banners))
+	}
+	wantReceipt := protocol.BannerPayload{ConversationID: convID, Level: "info"}
+	if w.banners[1] != wantReceipt {
+		t.Fatalf("post-refusal banner = %#v, want nonvisual receipt %#v", w.banners[1], wantReceipt)
+	}
+	receipt := w.bannerEnvelopes[1]
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(receipt.Payload, &fields); err != nil {
+		t.Fatalf("decode receipt fields: %v", err)
+	}
+	for _, key := range []string{"conversation_id", "level", "text", "truncated", "stops_turn"} {
+		if raw, ok := fields[key]; !ok || string(raw) == "null" {
+			t.Errorf("runtime receipt missing required nonnull field %q", key)
+		}
+	}
+	refusal := w.bannerEnvelopes[0]
+	if receipt.HistoryEntryID == nil || *receipt.HistoryEntryID == 0 || receipt.TS.IsZero() ||
+		receipt.EventID == nil || *receipt.EventID == 0 {
+		t.Fatal("runtime opening receipt has no durable/replay identity or timestamp")
+	}
+	if refusal.HistoryEntryID == nil || *receipt.HistoryEntryID <= *refusal.HistoryEntryID || receipt.TS.Before(refusal.TS) {
+		t.Fatal("runtime opening receipt does not follow the durable refusal banner")
 	}
 	t.Logf("AC 1: the session answered the next unblocked prompt after the refusal (send_message #%d), and "+
-		"exactly one banner crossed the window", liveReqID)
+		"exactly one refusal banner and one identified nonvisual opening receipt crossed the window", liveReqID)
 }
 
 // hookBannerInstallUserSettings writes the rig's settings JSON into the minted
@@ -429,7 +446,8 @@ func hookBannerSpawnArgv(h *perConvHarness) string {
 // structurally true over the whole window rather than true of whatever a coarser
 // drain happened not to have consumed already.
 type hookBannerWindow struct {
-	banners []protocol.BannerPayload
+	banners         []protocol.BannerPayload
+	bannerEnvelopes []protocol.Envelope
 
 	// readTimedOut records that a receive deadline expired, which on this client is
 	// terminal rather than recoverable — see next's guard.
@@ -535,6 +553,7 @@ func (w *hookBannerWindow) next(t *testing.T, h *perConvHarness,
 				t.Fatalf("decode banner payload: %v", err)
 			}
 			w.banners = append(w.banners, p)
+			w.bannerEnvelopes = append(w.bannerEnvelopes, env)
 		}
 		return env, true
 	}
@@ -646,6 +665,10 @@ func (w *hookBannerWindow) awaitCompletedTurn(t *testing.T, h *perConvHarness, c
 			}
 		}
 		switch env.Type {
+		case protocol.TypeBanner:
+			if !sawAck || sawDelta {
+				t.Error("the opening receipt must follow the unblocked prompt's ack and precede its assistant text")
+			}
 		case protocol.TypeAck:
 			if env.InReplyTo != nil && *env.InReplyTo == reqID {
 				sawAck = true
