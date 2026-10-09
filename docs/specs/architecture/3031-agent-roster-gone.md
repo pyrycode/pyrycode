@@ -113,3 +113,11 @@ distinguishing raw visibility, legacy unread targets and foreground presentation
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-09
+
+## Revisions
+
+- 2026-10-09: Ordering tests exposed two details needed to retain all known evidence.
+  `releaseConversation` must keep a usable denial received before a sealed source's
+  first observed launcher, even before a lifetime is minted. A result that first
+  supplies the parent call identity must enrich the retained call for later gone
+  facts. Neither change alters existing mapped reports or opens sealed main work.

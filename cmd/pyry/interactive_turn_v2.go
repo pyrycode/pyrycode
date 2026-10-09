@@ -200,6 +200,9 @@ type interactiveTurnEmitterV2 struct {
 // within a conversation. Selection, flushing and closing retain that source.
 type convTurnState struct {
 	agentLifetime       string
+	agentCalls          map[string]agentHistoryFact
+	agentTasks          map[string]*agentTaskHistory
+	agentEnded          map[string]bool
 	runtimeIncarnation  uint64
 	runtimeTools        map[string]string
 	runtimeEpoch        uint64
@@ -271,7 +274,7 @@ func (e *interactiveTurnEmitterV2) releaseConversation(key string) {
 		return
 	}
 	if st, ok := e.turns[key]; ok && !st.inTurn && st.deltaBuf.Len() == 0 &&
-		len(st.childLanes) == 0 && len(st.launcherTurns) == 0 && len(st.childToolTurns) == 0 && st.agentLifetime == "" {
+		len(st.childLanes) == 0 && len(st.launcherTurns) == 0 && len(st.childToolTurns) == 0 && st.agentLifetime == "" && len(st.agentEnded) == 0 {
 		delete(e.turns, key)
 	}
 }
