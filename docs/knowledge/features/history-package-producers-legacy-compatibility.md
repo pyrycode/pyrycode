@@ -92,7 +92,7 @@ validate expected receipts separately from refusals rather than ignoring info
 banners, which would hide duplicate receipts. `TestInteractiveStreamHookBlockedBannerReachesTheClient`
 keeps the full refusal/liveness window and checks the opening receipt before text.
 
-All four existing writers now use `AppendWithMetadata` with explicit
+The common append seam uses `AppendWithMetadata` with explicit
 `Metadata.Shown`, classified from the already-marshalled payload by
 `historyEntryShown`. Interactive output, channel posts, session transitions and
 delivered operator messages also use captured `Metadata.Session` when source
@@ -111,6 +111,7 @@ recipient gates keep their original meaning.
 | Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; validated nonvisual receipts count toward legacy latest. |
 | Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Raw payloads stay off legacy transports; validated receipts count toward legacy latest for either visibility value and confer no foreground presentation. |
 | [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. All four stay excluded from legacy pages, live traffic, replay and receipts. |
+| [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the future fold, with original asking-session provenance when known. Excluded from legacy pages, live traffic, reconnect replay and nonvisual receipts; open prompts remain live-only. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty

@@ -5,8 +5,9 @@ Part of [the history package overview](history-package.md).
 ## Producers (#2114, #2115)
 
 Interactive output, session transitions, runtime/startup and agent/task facts,
-accepted-send facts and delivered operator messages in `cmd/pyry` append through
-one seam, `appendConversationHistory` (`cmd/pyry/conversation_history.go`): the
+accepted-send facts, remote prompt answers and delivered operator messages in
+`cmd/pyry` append through one seam, `appendConversationHistory`
+(`cmd/pyry/conversation_history.go`): the
 interactive emitter's `emit` chokepoint
 (`cmd/pyry/interactive_turn_v2.go`), session transitions' `broadcast`
 (`cmd/pyry/session_transition_v2.go`), and `operatorMessageHistory`
@@ -233,3 +234,94 @@ that missing durable resolution; the existing
 means it cannot prove the agent never received the bytes. This is no durable
 backlog or gap-free crash guarantee. Failure logs use fixed event/reason
 discriminants without raw errors, message content, sender keys or host paths.
+
+### Resolved remote prompt answers (#2973)
+
+`startRelayV2` wires the existing history store and exact-session harness lookup
+into `streamApprovalBridge`. Remote permission resolutions through
+`modalResolverV2` and question resolutions through `questionResolverV2` append
+one `prompt_answered` fact per modal or question batch, through
+`recordPromptAnswer` and `appendConversationHistory`. This covers the supported
+Claude and Codex remote paths. Local control-socket approvals and the future
+thread fold/protocol remain downstream of this producer; see
+[ADR 042's prompt decision](../decisions/042-daemon-built-thread.md#the-six-approved-decisions).
+
+The payload carries `conversation_id`, the modal/batch `correlation_id`, the
+asking session's daemon routing `session_id` when available, UTC `resolved_at`,
+actor `source: remote`, `decision`, effective child `behavior`, `session_grant`,
+safe `context` and explicit `truncated`. `resolved_at` also supplies the entry
+timestamp. The payload's actor source is separate from optional
+`Metadata.Session` provenance: known `claude` or `codex` plus the asking routing
+ID. Unknown or unavailable harness provenance stays absent; it is never
+inferred from the current conversation or defaulted to Claude or `none`.
+
+`Surface` captures the original conversation, asking routing ID, harness and
+permission tool/class or cloned question context beside the surface correlation.
+Resolution snapshots that immutable owner under the bridge mutex before
+actuating the parked approval, then appends outside bridge and registry locks.
+Cursor movement, rebinding and agent switches cannot attribute an old answer
+to a successor. Retirement removes live ownership, but cannot erase the snapshot
+of a winning answer. A new surface reusing a parked tool ID gets a fresh
+correlation and owner.
+
+**The parked approval's winning result is the persistence boundary.**
+`ResolveStream`, `AnswerQuestionDiagnostic` and `RefuseQuestionDiagnostic`
+record only when `permbridge.Registry.Resolve` returns true. A consumed question
+surface can still return success and emit its required dismissal after expiry
+has already resolved the parked approval. Saving from that consumption or
+dismissal would falsely retain an answer the child never accepted. Open prompts
+and reconnect snapshots remain live-only. Unauthorized, invalid, stale,
+duplicate and unrouted attempts, automatic timeout, disconnect and session
+teardown write no answer fact; existing authorization, child verdicts and
+single-dismissal contracts remain intact. See
+[the parked registry arbiter](permbridge-package.md) and
+[question surface ownership](questionbridge-package.md).
+
+| Resolution | Saved decision and context |
+| --- | --- |
+| Permission allow | `decision: allow`, `behavior: allow`; `context.tool` and `context.class`. `session_grant` reflects the effective verdict's session grant or applied permission updates, rather than merely the client's request for always-allow. |
+| Permission deny/cancel | Distinct `decision: deny` or `cancel`, both with `behavior: deny` and no session grant; retain tool/class. |
+| Question answer | `decision: answer`, `behavior: allow`; each question has its zero-based `index`, `text`, `multi_select` and selected `values`. Each value retains `text`; a surfaced option-label match also retains its description as `meaning`. Unmatched values remain free text, and multi-select retains multiple values. |
+| Question refusal | `decision: refusal`, `behavior: deny`; retain the question context without inventing selected values. |
+
+A nil-device cancellation still performs the existing fail-closed deny and
+dismissal, but cannot establish an authenticated remote operator decision, so
+it writes no fact. A dismissal's remote source alone is insufficient evidence
+of an operator answer.
+
+`boundPromptAnswerProjection` caps the serialized `context` at **16 KiB,
+including JSON escaping**. Question values are limited to 128 per question in
+the saved projection, and text/meaning fields are shortened until its encoding
+fits. Any cut sets the fact's `truncated: true`; the child receives the full
+validated answer unchanged. This cap covers the context/answer projection,
+not the outer fact's identity and decision fields.
+
+The allowlist omits bearer/answer tokens, device credentials, raw transport and
+updated-tool-input envelopes, permission reasons/descriptions/blocked paths,
+grant-rule inputs and all permission tool inputs, including host paths.
+Question text and selected option descriptions are intentionally retained in
+the bounded question projection. Operational logs carry no prompt or answer
+content, including forged option IDs; storage failures use fixed event/reason
+discriminants without raw errors or storage paths.
+
+Writes are best effort. Nil storage is silent; failed storage preserves
+resolution and dismissal without retrying the answer or inventing a durable
+success. Child delivery and storage are not crash-atomic. `historyEntryShown`
+marks the fact explicitly `shown: true`, raising the raw shown-entry watermark
+in warm and reopened logs for the future fold. It remains excluded from legacy
+history pages, including nonvisual receipts, reconnect replay and live content.
+Legacy publication and the bounded raw page's cursor/`AtStart` are unchanged;
+see [visibility versus transport eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
+
+`TestPromptAnswerHistoryPermission` and `TestPromptAnswerHistoryQuestion` use
+the production resolvers/bridge and real store to check decisions, original
+ownership, exactly-once capture and legacy exclusion. The after-consumption
+expiry fixture in `TestPromptAnswerHistoryLosingResolution` distinguishes
+surface success from a winning parked resolution. `TestPromptAnswerHistoryRetirement`
+checks that retirement cannot erase captured ownership;
+`TestPromptAnswerHistoryUnauthenticatedCancel` prevents invented operator
+answers. Bounded-projection and storage tests cover escaping, unchanged child
+answers and content-free failures. `TestInteractiveStreamStdioModalAllow`,
+`TestInteractiveStreamStdioPermissionDeny`, `TestInteractiveStreamQuestionAnswer`
+and `TestInteractiveStreamQuestionRefusal` assert the raw durable fact after
+actual Claude resolution; the deterministic resolver tests also cover Codex.
