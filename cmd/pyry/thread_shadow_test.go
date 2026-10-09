@@ -106,7 +106,7 @@ func TestThreadShadowReload(t *testing.T) {
 }
 
 func TestThreadShadowRemoval(t *testing.T) {
-	s, h, reg, store := testShadow(t)
+	s, h, reg, _ := testShadow(t)
 	s.quiet = func(conversations.ConversationID) bool { return false }
 	a, b := conversations.ConversationID(testPostID(t)), conversations.ConversationID(testPostID(t))
 	reg.Create(conversations.Conversation{ID: a})
@@ -115,7 +115,7 @@ func TestThreadShadowRemoval(t *testing.T) {
 	testShadowAppend(t, h, b)
 	entered := make(chan struct{})
 	var once sync.Once
-	store = thread.NewStore(h, func(ctx context.Context, id conversations.ConversationID) error {
+	store := thread.NewStore(h, func(ctx context.Context, id conversations.ConversationID) error {
 		if id == a {
 			once.Do(func() { close(entered) })
 			<-ctx.Done()
@@ -175,7 +175,7 @@ func TestThreadShadowShutdown(t *testing.T) {
 }
 
 func TestThreadShadowLongReplay(t *testing.T) {
-	s, h, reg, store := testShadow(t)
+	s, h, reg, _ := testShadow(t)
 	s.quiet = func(conversations.ConversationID) bool { return false }
 	a, b := conversations.ConversationID(testConvID), conversations.ConversationID(testConvIDB)
 	reg.Create(conversations.Conversation{ID: a})
@@ -190,7 +190,7 @@ func TestThreadShadowLongReplay(t *testing.T) {
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	defer unblock()
 	var once sync.Once
-	store = thread.NewStore(h, func(ctx context.Context, id conversations.ConversationID) error {
+	store := thread.NewStore(h, func(ctx context.Context, id conversations.ConversationID) error {
 		if id == a {
 			once.Do(func() { close(entered) })
 			select {
