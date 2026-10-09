@@ -12,12 +12,15 @@ hidden facts; legacy receipt projections discard facts needed by the fold.
 
 Construct each owner with `New(conversationID)`, then call `Feed` with strictly
 increasing entry IDs in `1..history.MaxEntryID` (`2^53 - 1`). Gaps are allowed.
-`Item.ID` is its creating entry's ID, `Order` equals that ID and `Kind` is
-immutable. `Rev` names the latest content or state change, floored at the creating
-ID when an earlier pending report is applied. Standalone items keep their
-creating revision; main-work items change in place. Redundant terminal reports
-do not advance revision.
-`Items()` returns items in entry-ID order. Entry timestamps never sort them.
+`Item.ID` is its creating entry's ID and `Kind` is immutable. `Order` normally
+equals that ID; accepted sends keep order zero until delivery, then use the
+linked user-message entry ID. Dropped and lost sends stay unordered. `Rev` names
+the latest content or state change, floored at the creating ID when an earlier
+pending report is applied. Standalone items keep their creating revision;
+accepted sends and main-work items change in place. A valid send outcome sets
+revision to its entry ID. Redundant terminal reports do not advance revision.
+`Items()` returns items in creating-entry ID order, which can differ from
+delivery `Order`; timestamps supply neither ordering nor durable linkage.
 
 `Version()` is the newest consumed valid ID, including hidden, unsupported,
 malformed and redundant facts that add no item. A zero, excessive, repeated or
@@ -30,16 +33,20 @@ Full replay and incremental feeds produce the same items and version, including
 chunks split between companion boundaries, early reports, creations and endings.
 Different conversation owners can
 consume the same IDs without sharing items, successor attribution, pending
-pairs or main-work state. The owner serializes `Feed`, `Items` and `Version`;
-there are no locks or goroutines. Payloads are copied on ingestion, and `Items` returns detached items
-with copied content, so input or snapshot mutation cannot change fold state.
+pairs, send claims or main-work state. The owner serializes `Feed`, `Items` and
+`Version`; there are no locks or goroutines. Payloads are copied on ingestion,
+and `Items` returns detached items with copied content, so input or snapshot
+mutation cannot change fold state.
 
 Each item also has recorded `Session`/`Agent`, `NoChild`, optional `Turn`/`Parent`,
 `Status`, `Active`, `Shown`, a plain one-line `Summary` and kind-specific
 `Content`. Standalone items leave turn and parent unset and are inactive.
+Accepted sends also leave turn and parent unset, but remain active while queued
+and become inactive at a valid terminal outcome.
 Main-work items retain the recorded turn and leave parent unset; running text
 and calls are active, while closed work and ending rows are inactive. Updates
-retain the creating item's attribution and visibility.
+retain the creating item's attribution and visibility, except for the send
+delivery provenance and drop/loss visibility rules below.
 `plainSummary` collapses whitespace and removes control characters, with a kind
 label when the result is empty. `Content` retains copied source JSON, including
 unknown fields, as inert display data; summary normalization does not rewrite it.
@@ -63,12 +70,76 @@ logged fact does not add persistence to that emitter. Answer notices consume
 [resolved prompt facts](history-package-producers.md#resolved-remote-prompt-answers-2973),
 including saved selected/free-text answers and any recorded truncation.
 
-Accepted-send linkage and delivery reconciliation remain separate extensions in
-[#3052](https://github.com/pyrycode/pyrycode/issues/3052); agent/background folding
-remains separate in [#3047](https://github.com/pyrycode/pyrycode/issues/3047).
-Accepted-send and agent/task lifecycle facts create no items yet. Cache,
+Agent/background folding remains separate in
+[#3047](https://github.com/pyrycode/pyrycode/issues/3047).
+Agent/task lifecycle facts create no items yet. Cache,
 persistence integration, epochs, daemon wiring, thread protocol and read-mark
 migration remain downstream.
+
+### Accepted sends and durable outcomes
+
+`sendFact` folds the [raw accepted-send facts and linked outcomes](history-package-producers.md#accepted-sends-and-linked-outcomes-2972),
+including hidden outcomes. A valid `send_accepted` creates one permanent
+`user_message` with acceptance-entry ID/revision, status `queued`, active true
+and `Order == 0`. It is shown by default, subject to explicit `Entry.Shown`.
+Content retains recorded safe text, attachment IDs, `device_id`, app
+`message_id`, `accepted_at` and `client_sent_at`, when present. Normal attribution
+applies: absent provenance stays unknown or uses recorded successor fallback;
+explicit `kind: none` remains distinct and blocks that fallback.
+
+| Raw outcome | Required reason | Acceptance-item result |
+| --- | --- | --- |
+| `send_delivered` | `delivered` | Inactive, `delivered`, linked message's entry ID as order; acceptance visibility retained. |
+| `send_dropped` | `removed` or `give_up` | Inactive, `dropped`, hidden, order zero. |
+| `send_lost` | `daemon_restart` | Inactive, `lost`, shown, order zero. |
+
+Each terminal names `accepted_entry_id`; delivery additionally names the valid
+user `message` through `delivery_entry_id`. Both references must resolve to
+earlier valid entries in this conversation's fold. Missing, zero, out-of-range,
+forward, wrong-kind, malformed or foreign-conversation references resolve
+nothing. A message claimed by another acceptance cannot be reused. Invalid
+links reserve neither acceptance nor message, so a later valid outcome can
+still resolve the send. The first valid terminal in entry-ID order wins; later
+duplicate or conflicting terminals change no content, state or revision and
+cannot claim another message. Text, app IDs, daemon-local queue IDs and
+timestamps never establish the join. Equal app IDs across devices still create
+distinct acceptance items.
+
+Delivery keeps the acceptance ID/kind and starts content from the linked
+message's safe delivered text, attachments and client metadata. Recorded
+acceptance `device_id`, `message_id`, `accepted_at` and `client_sent_at` override
+the corresponding delivered fields only when present. `deliveredSendContent`
+decodes those sender fields in JSON order with case-insensitive matching before
+merging. Selecting them by map iteration would make duplicate case variants
+nondeterministic; the last matching recorded value wins. It removes delivered
+case variants when replacing a field, keeping one canonical sender key.
+
+The linked message supplies the summary and receiving `Session`/`Agent`/`NoChild`
+already resolved under the existing attribution rules, including any successor
+fallback at message ingestion. Acceptance-time or outcome-time bindings and
+later session switches cannot replace that snapshot. See
+[operator receiving provenance](history-package-producers.md#operator-delivery-provenance-2983).
+Drop/loss retain acceptance content and provenance. Every valid terminal stores
+its copied raw payload under `outcome`, retaining reason, `occurred_at` and
+links, and sets revision to the outcome entry ID. Outcome visibility cannot
+override the table's rules.
+
+After delivery, `Items` omits the claimed message's public row; unmatched
+messages retain their delivered identity and order. **Keep internal item indexes
+stable:** removing a reconciled message from storage would shift indexes held
+by assistant/tool state and corrupt later updates. The claim suppresses only
+the public row. A chunk ending between message and outcome can temporarily
+expose both rows; later reconciliation leaves the permanent acceptance item.
+Acceptance alone does not split assistant text; the delivered message still
+closes text runs when ingested.
+
+Without a valid terminal, acceptance stays queued. **Loss requires an explicit
+recorded `send_lost`; absence never infers it.** Recorded loss identifies missing
+durable resolution after restart, not proof that the agent never received the
+bytes. A successful write followed by a failed outcome append can leave that
+same unresolved history. See the
+[producer durability boundary](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
+and [ADR 042](../decisions/042-daemon-built-thread.md#the-six-approved-decisions).
 
 ### Main-work source entries
 
@@ -140,12 +211,12 @@ and [runtime main-work closure](history-package-producers-runtime-lifecycle.md#h
 ### Visibility and live-state exclusions
 
 For supported item-producing facts, explicit `Entry.Shown` wins over the default.
-Absent it, `standalone`, `boundary` and `mainDecode` follow the relevant
-`historyEntryShown` semantics without importing `cmd/pyry`:
+Absent it, `standalone`, `boundary`, `sendFact` and `mainDecode` follow the
+relevant `historyEntryShown` semantics without importing `cmd/pyry`:
 
 | Fact | Default shown |
 | --- | --- |
-| Delivered user message, compaction, refusal, unrecognized output, saved answer | True |
+| Accepted send, delivered user message, compaction, refusal, unrecognized output, saved answer | True |
 | Banner | False only for `level: info` with `stops_turn` false |
 | Supplied attachment offer | False |
 | Raw reset, clear, agent switch, recovery, workspace change, capacity eviction | True |
@@ -159,6 +230,9 @@ A normal end has `is_error` false, `outcome` absent/empty or `success`,
 `terminal_reason` absent/empty or `completed`, and no `error_category`.
 Tool reports update the call's state/content without replacing its creating
 visibility. `main_turn_opened` remains row-free even with explicit shown true.
+Send outcomes update the acceptance rather than adding a row: delivery retains
+acceptance visibility, while drop forces hidden and loss forces shown, regardless
+of explicit visibility on the outcome.
 
 Hidden supported facts still create items. Visibility cannot admit an excluded
 source type: open permission/question prompts and live readings never create
@@ -277,3 +351,19 @@ look unchanged. `testMainReplay` checks every two-chunk partition against full
 replay; `TestMainReplayAndOwnership` checks copied pending reports, detached
 content and independent owners. Run the offline package checks with
 `go test -race ./internal/thread`.
+
+`TestSendDelivery`, `TestSendTerminalStates` and `TestSendLinksAndTerminals`
+cover permanent identity, delivered content/order, supported reasons,
+unresolved acceptances, linked/unmatched messages, conflicting terminals,
+message reuse and equal app IDs across devices with Claude, Codex and
+metadata-free fixtures. `TestSendOwnershipAndProvenance` checks receiving
+fallback across session switches, explicit no-child attribution, independent
+owners reusing durable IDs and detached input/snapshots. `TestSendTextRuns`
+checks text splits and later main-work updates after message suppression.
+`TestSendMinimalAndCasing` covers absent sender fields, nullable attachments and
+deterministic duplicate case variants. `TestSendMalformedNeutrality` compares
+whole fold state before later valid resolution, catching damaged joins or
+attribution even when rows appear unchanged; wrongly typed/null scalars or links
+and unsupported reasons change version only. These scenarios use `testMainReplay`
+to compare full replay with every two-chunk partition, including the gap between
+message and outcome.

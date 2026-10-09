@@ -72,7 +72,7 @@ func TestMainTextRuns(t *testing.T) {
 				entries[i].Session = source
 			}
 			f := testMainReplay(t, entries)
-			if len(f.Items()) != 7 {
+			if len(f.Items()) != 8 {
 				t.Fatalf("unexpected rows: %#v", f.Items())
 			}
 			first := testMainItem(t, f, 2, 7, "assistant_message", "done", false)
