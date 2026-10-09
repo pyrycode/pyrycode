@@ -74,5 +74,5 @@ None. Expected written work is about 350 lines including this plan, zero exporte
 
 ## Documentation handoff
 
-- Pending for the documentation stage: `docs/knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md` § Native reply suggestions after the result, “One isolated Haiku attempt”: update the testing description with deterministic received/withheld parent cancellation and deadline evidence, the actual own-deadline case with held Wait, and separate eventual-reaping synchronization, including cleanup of a delayed Wait worker.
-- Pending for the documentation stage: `docs/knowledge/features/development-verification.md` § Prove that tests distinguish the change: carry the custom-context propagation lesson that hiding the wrapped cancel-context value makes derived contexts propagate the fixture's declared deadline error.
+- Satisfied: `docs/knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md` § Native reply suggestions after the result, “One isolated Haiku attempt”: documents deterministic received/withheld parent cancellation and deadline evidence, the actual own-deadline case with held Wait, separate eventual-reaping synchronization and cleanup of a delayed Wait worker.
+- Satisfied: `docs/knowledge/features/development-verification.md` § Prove that tests distinguish the change: documents how hiding the wrapped cancel-context value makes derived contexts propagate the fixture's declared deadline error.
