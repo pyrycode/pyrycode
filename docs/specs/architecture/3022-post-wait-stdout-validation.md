@@ -75,3 +75,9 @@ Pending documentation stage: update `docs/knowledge/features/e2e-realclaude.md`,
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-08
+
+## Revisions
+
+### 2026-10-09 — verifier finding 2: recovery route
+
+The parked builder work was recovered manually onto then-current main as plan commit `9d48e4ef` followed by implementation commit `f00bfa54`; `774fc51a` subsequently merged main. The recorded recovery head `25d778fb` is not an ancestor of this PR. This actual route supersedes Context's prescribed branch-from-recovery route: it preserves the child's narrow diagnostic/test/spec slice without importing sibling work or the aggregate historical spec into the main-based diff. No Git history is rewritten. `feature/2882` and retained worktree `/work/Projects/.pyrycode-worktrees/pyrycode/builder-2882` remain at `25d778fb`; the immutable historical spec and all historical E/P/F/S declarations above remain unchanged and unresolved.
