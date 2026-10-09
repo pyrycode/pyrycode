@@ -72,7 +72,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -271,7 +270,7 @@ func spawnBootstrapDaemonWithIdle(t *testing.T, home, workdir, claudeBin, relayU
 	// t.Parallel, where nothing pins it process-wide; the credential is inherited.
 	// Add the relay switches.
 	cmd.Env = homeEnv(home, "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderr) // DEBUG tee + eviction-WARN source
+	cmd.Stderr = stderr // Primary daemon logs stay in memory.
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("realclaude: pyry start: %v", err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -26,10 +27,12 @@ const replyFallbackPrompt = "Suggest one short next reply the user could send af
 var errReplyFallback = errors.New("reply fallback unavailable")
 
 type replyFallback struct {
-	binary  string
-	account streamsup.AccountTokenProvider
-	command func(context.Context, string, ...string) *exec.Cmd
-	logger  *slog.Logger
+	binary     string
+	account    streamsup.AccountTokenProvider
+	command    func(context.Context, string, ...string) *exec.Cmd
+	logger     *slog.Logger
+	stderrPipe func() (*os.File, *os.File, error)
+	wait       func(*exec.Cmd) error
 }
 
 func replyFallbackArgs() []string {
@@ -94,12 +97,20 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 100 * time.Millisecond
-	if cmd.Start() != nil {
+	pipe := f.stderrPipe
+	if pipe == nil {
+		pipe = os.Pipe
+	}
+	stderr := captureReplyFallbackStderr(cmd, pipe)
+	startErr := cmd.Start()
+	stderr.started(startErr == nil)
+	if startErr != nil {
 		return "", errReplyFallback
 	}
 	childStarted := time.Now()
 	waitCompleted := false
 	defer func() {
+		stderrFields := stderr.finish(ctx)
 		if f.logger == nil {
 			return
 		}
@@ -124,10 +135,15 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 			"exit_observed", exitObserved, "exit_code", exitCode, "exit_signal", exitSignal}
 		fields = append(fields, replyFallbackOutput(&stdout, waitCompleted, err)...)
 		fields = append(fields, stdout.progressFields()...)
+		fields = append(fields, stderrFields...)
 		f.logger.Info("reply_fallback.lifecycle", fields...)
 	}()
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	wait := f.wait
+	if wait == nil {
+		wait = (*exec.Cmd).Wait
+	}
+	go func() { done <- wait(cmd) }()
 	select {
 	case err = <-done:
 		waitCompleted = true
@@ -376,4 +392,106 @@ func replyFallbackEnv(env []string) []string {
 	}
 	return append(out, "CLAUDE_CODE_SAFE_MODE=1", "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1", "CLAUDE_CODE_DISABLE_ATTACHMENTS=1",
 		"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0", "CLAUDE_CODE_AUTO_CONNECT_IDE=0", "CLAUDE_CODE_MAX_RETRIES=0", "CLAUDE_CODE_NO_MODEL_FALLBACK=1")
+}
+
+// replyFallbackStderrTail retains the end in bounded storage, independent of
+// stdout validation. Its byte limit applies before trailing CR/LF and line cuts.
+type replyFallbackStderrTail struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (t *replyFallbackStderrTail) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) > 1024 {
+		p = p[len(p)-1024:]
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.buf == nil {
+		t.buf = make([]byte, 0, 1024)
+	}
+	if over := len(t.buf) + len(p) - 1024; over > 0 {
+		t.buf = t.buf[:copy(t.buf, t.buf[over:])]
+	}
+	t.buf = append(t.buf, p...)
+	return n, nil
+}
+
+func (t *replyFallbackStderrTail) String() string {
+	t.mu.Lock()
+	s := strings.TrimRight(string(t.buf), "\r\n")
+	t.mu.Unlock()
+	lines := strings.Split(s, "\n")
+	return strings.Join(lines[max(0, len(lines)-5):], "\n")
+}
+
+// replyFallbackDaemonOnly is solely an attribute value. Text marshaling lets
+// slog quote untrusted bytes; the marker excludes even empty tails from the ring.
+type replyFallbackDaemonOnly string
+
+func (replyFallbackDaemonOnly) LogDaemonOnly()                 {}
+func (d replyFallbackDaemonOnly) MarshalText() ([]byte, error) { return []byte(d), nil }
+
+type replyFallbackStderrCapture struct {
+	tail   replyFallbackStderrTail
+	pr, pw *os.File
+	done   chan struct{}
+	eof    bool // Read only after done; only the reader sets this.
+}
+
+// A private file pipe avoids exec's stderr copier and its effect on Wait. Setup
+// failure preserves discarded stderr and carries no raw error into diagnostics.
+func captureReplyFallbackStderr(cmd *exec.Cmd, pipe func() (*os.File, *os.File, error)) *replyFallbackStderrCapture {
+	c := &replyFallbackStderrCapture{}
+	pr, pw, err := pipe()
+	if err != nil {
+		return c
+	}
+	c.pr, c.pw = pr, pw
+	cmd.Stderr = pw
+	return c
+}
+
+func (c *replyFallbackStderrCapture) started(ok bool) {
+	if c.pw == nil {
+		return
+	}
+	_ = c.pw.Close() // Child owns its inherited copy; parent must not retain it.
+	if !ok {
+		_ = c.pr.Close()
+		return
+	}
+	c.done = make(chan struct{})
+	go func() { defer close(c.done); _, err := io.Copy(&c.tail, c.pr); c.eof = err == nil }()
+}
+
+// finish joins the reader before taking its snapshot, independently of Wait.
+// Cancellation never adds a drain grace; forced closure cannot establish EOF.
+func (c *replyFallbackStderrCapture) finish(ctx context.Context) []any {
+	if c.done == nil {
+		return []any{"stderr_observed", false, "stderr_reader_done", "unknown", "stderr_eof", "unknown", "stderr_partial", "unknown"}
+	}
+	forced := false
+	select {
+	case <-c.done:
+	default:
+		if ctx.Err() == nil {
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-c.done:
+			case <-ctx.Done():
+				forced = true
+			case <-timer.C:
+				forced = true
+			}
+			timer.Stop()
+		} else {
+			forced = true
+		}
+	}
+	_ = c.pr.Close() // Unblock any pending poller read, including descendant-held stderr.
+	<-c.done
+	eof := c.eof && !forced
+	return []any{"stderr_observed", true, "stderr_reader_done", true, "stderr_eof", eof, "stderr_partial", !eof, "stderr_tail", replyFallbackDaemonOnly(c.tail.String())}
 }

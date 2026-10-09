@@ -30,7 +30,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -345,7 +344,7 @@ func spawnBootstrapDaemonBinary(t *testing.T, bin, home, workdir, claudeBin, rel
 	// t.Parallel, where nothing pins it process-wide; the credential is inherited.
 	// Add the relay switches.
 	cmd.Env = homeEnv(home, "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderr) // DEBUG tee
+	cmd.Stderr = stderr // Primary daemon logs stay in memory.
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("realclaude: pyry start: %v", err)
@@ -529,5 +528,13 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 func (b *lockedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.String()
+	// The producer's tail is its final attribute, quoted onto one physical
+	// line. Omit that suffix even on an incomplete failure/cleanup snapshot.
+	lines := strings.Split(b.buf.String(), "\n")
+	for i, line := range lines {
+		if before, _, ok := strings.Cut(line, " stderr_tail="); ok {
+			lines[i] = before + ` stderr_tail="(daemon log only)"`
+		}
+	}
+	return strings.Join(lines, "\n")
 }
