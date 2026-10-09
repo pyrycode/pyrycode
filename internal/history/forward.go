@@ -19,6 +19,10 @@ type ForwardReader struct {
 	afterID uint64
 	segment uint64
 	sealed  bool
+
+	// Last validated stored ID preceding the first segment the next walk reads.
+	// An unsealed segment is reread, so its own IDs are excluded from this bound.
+	boundaryID uint64
 }
 
 // Forward constructs an exclusive resume position; zero starts at the beginning.
@@ -56,7 +60,7 @@ func (r *ForwardReader) Walk(ctx context.Context, throughID uint64, consume func
 	if err != nil {
 		return err
 	}
-	var previous uint64
+	previous := r.boundaryID
 	for _, seg := range segs {
 		if seg.num < r.segment || (seg.num == r.segment && r.sealed) {
 			continue
@@ -68,6 +72,7 @@ func (r *ForwardReader) Walk(ctx context.Context, throughID uint64, consume func
 		if err != nil {
 			return err
 		}
+		boundaryID := previous
 		// Check the stored order before using IDs as resume boundaries.
 		for _, e := range entries {
 			if e.entry.ID <= previous {
@@ -77,6 +82,7 @@ func (r *ForwardReader) Walk(ctx context.Context, throughID uint64, consume func
 		}
 		r.segment = seg.num
 		r.sealed = false
+		r.boundaryID = boundaryID
 		var chunk []Entry
 		for _, e := range entries {
 			if e.entry.ID <= r.afterID {
@@ -99,6 +105,9 @@ func (r *ForwardReader) Walk(ctx context.Context, throughID uint64, consume func
 			}
 		}
 		r.sealed = sealed && (len(entries) == 0 || entries[len(entries)-1].entry.ID <= r.afterID)
+		if r.sealed {
+			r.boundaryID = previous
+		}
 		if previous >= throughID {
 			return nil
 		}

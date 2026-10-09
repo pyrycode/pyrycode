@@ -197,6 +197,112 @@ func TestForwardBoundedChunksAndPosition(t *testing.T) {
 	}
 }
 
+func testForwardStoredIDs(t *testing.T, s *Store, segment uint64, sealed bool, ids ...uint64) {
+	t.Helper()
+	dir := historyDir(s.instanceDir, convA)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(segmentHeaderLine)
+	for _, id := range ids {
+		line, err := encodeEntry(Entry{ID: id, Type: "unknown", Payload: json.RawMessage(`{}`), TS: testTS})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, line...)
+	}
+	if sealed {
+		data = append(data, `{"id":`...) // A torn tail seals the segment.
+	}
+	if err := os.WriteFile(filepath.Join(dir, segmentName(segment)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestForwardOrderingAcrossCalls(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		id   uint64
+	}{
+		{"duplicate", 3},
+		{"decreasing", 2},
+	} {
+		for _, mode := range []string{"walk", "replay-to-tail", "tail-catch-up"} {
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				s := newStore(t.TempDir(), testSegmentBytes)
+				testForwardStoredIDs(t, s, 1, true, 3)
+				r := testForwardReader(t, s, 0)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var ids []uint64
+				consume := func(es []Entry) error {
+					for _, e := range es {
+						ids = append(ids, e.ID)
+					}
+					if mode == "tail-catch-up" && es[len(es)-1].ID == 3 {
+						if id, err := s.Append(convA, "unknown", json.RawMessage(`{}`), testTS); err != nil || id != 4 {
+							t.Fatalf("append ID=%d: %v", id, err)
+						}
+						// Corrupt the committed segment before the notified catch-up.
+						testForwardStoredIDs(t, s, 2, false, tt.id, 4)
+					}
+					if es[len(es)-1].ID > 3 {
+						cancel()
+					}
+					return nil
+				}
+				if mode != "tail-catch-up" {
+					testForwardStoredIDs(t, s, 2, false, tt.id, 4)
+					if err := r.Walk(ctx, 3, consume); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var err error
+				if mode == "walk" {
+					err = r.Walk(ctx, 4, consume)
+				} else {
+					err = r.Tail(ctx, consume)
+				}
+				if !errors.Is(err, ErrCorruptSegment) || !reflect.DeepEqual(ids, []uint64{3}) || r.LastEntryID() != 3 {
+					t.Fatalf("IDs=%v last=%d error=%v, want [3], 3, corruption", ids, r.LastEntryID(), err)
+				}
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if len(s.followers) != 0 {
+					t.Fatal("failed tail retained a registration")
+				}
+			})
+		}
+	}
+}
+
+func TestForwardOrderingResumeAndRetry(t *testing.T) {
+	t.Parallel()
+	s := newStore(t.TempDir(), testSegmentBytes)
+	testForwardStoredIDs(t, s, 1, true, 1)
+	testForwardStoredIDs(t, s, 2, false, 3, 5)
+	r := testForwardReader(t, s, 2) // The resume ID need not exist in storage.
+	stop := errors.New("consumer stopped")
+	if err := r.Walk(context.Background(), 3, func([]Entry) error { return stop }); !errors.Is(err, stop) || r.LastEntryID() != 2 {
+		t.Fatalf("failed callback: last=%d error=%v", r.LastEntryID(), err)
+	}
+	var ids []uint64
+	for _, h := range []uint64{3, 5} {
+		if err := r.Walk(context.Background(), h, func(es []Entry) error {
+			for _, e := range es {
+				ids = append(ids, e.ID)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(ids, []uint64{3, 5}) || r.LastEntryID() != 5 {
+		t.Fatalf("IDs=%v last=%d, want [3 5], 5", ids, r.LastEntryID())
+	}
+}
+
 func TestForwardCommitNotifications(t *testing.T) {
 	t.Parallel()
 	s := newStore(t.TempDir(), testSegmentBytes)

@@ -30,6 +30,7 @@ No package goroutines. The caller executes Walk/Tail synchronously and cancels v
 | Registered catch-up, coalesced appends, append at read-to-wait boundary | `TestForwardTailContinuity` |
 | Missing log becomes populated, multiple readers, cancellation and unregister | `TestForwardTailContinuity` |
 | Callback failure then retry; cancellation between segments | `TestForwardStops` |
+| Duplicate/decreasing segment boundaries across walks, replay-to-tail and notified catch-up; resume and retry within the current segment | `TestForwardOrderingAcrossCalls`, `TestForwardOrderingResumeAndRetry` |
 
 ## Error handling
 Return validation, containment, listing/open/read, oversized/corrupt segment, unknown-version and callback errors explicitly. Re-resolve before each read and recheck that its listed leaf is regular. Reuse trailing-write tolerance; no fsync guarantee is added. Cancellation returns ctx.Err and drops owned buffers/registrations. External writers and deletion while consuming are unsupported; read disappearance is an error, not successful completion.
@@ -48,6 +49,7 @@ Resolved: use callbacks with nil completion and synchronous context cancellation
 **Verdict:** PASS
 **Findings:**
 - [Trust boundaries] Forward validates with `conversations.ValidID`; the authenticated-conversation precondition remains required. Stored payloads stay opaque; increasing ID validation refuses damaged ordering.
+- [Trust boundaries, verifier finding 1] MUST FIX addressed: retain the last validated stored ID preceding the next segment read across calls. This boundary includes a skipped sealed segment and excludes the segment being reread; it is independent of the caller's exclusive resume ID. Duplicate/decreasing boundaries fail before delivery across walks and tail catch-ups, without reopening completed segments.
 - [Tokens/secrets] No credentials created or retained. Consumer payloads are conversation content; no new logging or payload-bearing errors.
 - [File operations] `resolveDir` runs before listing and each segment read; `listSegments` filters regular leaves and the read rechecks regularity. Existing private-directory check-then-use threat boundary remains; no files or modes change.
 - [Subprocesses/cryptography] No subprocess or cryptographic operations introduced.
@@ -60,3 +62,4 @@ Resolved: use callbacks with nil completion and synchronous context cancellation
 
 ## Revisions
 - 2026-10-09: review made sealed-segment progress explicit, so even a full final segment is not reopened; disappearance after positioning returns a read error. `TestForwardBoundedChunksAndPosition` covers both; `TestForwardTailReadToWait` pins the append after the final read and before waiting.
+- 2026-10-09, verifier finding 1: `Walk` reset stored-ID validation after skipping sealed segments across calls. Retain a scalar validation boundary separately from delivery progress: before the current segment while it remains retryable, and through it once sealed and consumed. `TestForwardOrderingAcrossCalls` covers duplicate/decreasing IDs across separate walks, replay-to-tail and notified catch-up; `TestForwardOrderingResumeAndRetry` covers arbitrary resume IDs, callback failure and rereading the current segment. Existing completed-segment read bounds remain unchanged.
