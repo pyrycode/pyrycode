@@ -15,6 +15,7 @@ for details. Do not load the complete catalog into every run.
 - [Sessions](features/sessions-package.md): session registry and runner lifecycle.
 - [Stream supervision](features/streamsup-package.md): child events and turn lifecycle.
 - [Message queue](features/msgqueue-package.md): queue state and delivery.
+- [Conversation thread](features/thread-package.md): standalone history folding, item identity, visibility and session attribution.
 - [Development verification](features/development-verification.md): testing, captures and source-reading practices.
 - [Fake integration harness](features/e2e-harness.md): offline integration tests.
 - [Live Claude tests](features/e2e-realclaude.md): authenticated integration tests.
