@@ -3,7 +3,8 @@
 `Fold` builds deterministic items from supplied raw `history.Entry` values for
 one conversation. `Store` owns background replay and tailing for independently
 loaded conversations. Both implement the history-backed storage design of
-[ADR 042](../decisions/042-daemon-built-thread.md); daemon wiring remains downstream.
+[ADR 042](../decisions/042-daemon-built-thread.md). The daemon runs the store in
+shadow; app publication remains downstream.
 Use [raw history and its metadata](history-package-shape.md#shape), including
 hidden facts; legacy receipt projections discard facts needed by the fold.
 
@@ -12,6 +13,70 @@ hidden facts; legacy receipt projections discard facts needed by the fold.
 | [Background store](thread-package-background-store.md) | Loading, bounded replay/tail handoff, snapshot readiness, retry, isolation and joined lifecycle. |
 | [Main-thread folding](thread-package-main-thread-folding.md) | Item identity/order/version, standalone entries, accepted sends, main work, visibility and recorded provenance. |
 | [Agents and background work](thread-package-agents-and-background-work.md) | Agent and shell lifecycles, scoped joins, recovery references, parent repair and offline evidence. |
+
+## Shadow lifecycle and evidence
+
+`runSupervisor` composes `thread.NewStore` with the same `history.Store` used by
+interactive emission, session transitions, operator sends/queue facts and direct
+channel posts. After `reconcileStartupHistory` and completion of `startRelay`'s
+runtime-history construction, `threadShadow.start` schedules registered old logs
+in the background without waiting for replay. Construction must finish before
+shadow quiescence readers enter: `installRuntimeHistory` assigns
+`busy.runtimeSink`, which those readers subsequently treat as immutable.
+Folding consumes raw entries, including hidden facts and captured source
+provenance; it never attributes old entries through the active session cursor.
+
+Background discovery and per-conversation coordination inspect committed history
+versions. This covers conversations created after startup and activity after
+unload, including `channelDelivery.deliver`, which bypasses
+`appendConversationHistory`. Waking only from that helper would miss direct
+posts. Loaded workers use the same reader for replay and committed tailing;
+settled items/revisions match full replay through the consumed version.
+Replay/cache I/O and joins run outside producer/publication paths and gates.
+
+A caught-up usable fold unloads only when `Snapshot.Active` is false and
+`shadowQuiescent` finds producer/transition processing quiescent. Active
+background or unresolved private work, queue entries, channel writes, pending
+runtime boundaries, unconsumed stream output and placement commands prevent
+retirement. Idle sleep must publish and fold its closure/divider facts first.
+Unload releases items, private joins and pending reports while coordination
+retains the consumed version. Later commits reload through cache validation and
+fresh log replay, including a direct post or an append racing `Unload`; cached
+public items never seed continuation state.
+
+`dropRingOnConversationDelete` retains the registry's single removal observer
+for explicit deletion and sweep, including with the relay disabled. It preserves
+ring/reply-suggestion cleanup, tombstones the ID, joins shadow coordination and
+unloads the store worker. Registry membership checks and tombstones prevent late
+commits, callbacks or discovery from reopening removed conversations.
+
+Shutdown seals producer admission and joins/drains writers before final history
+versions are established. Shadow contexts are detached from daemon cancellation
+so producer drains and error-return cleanup can commit their final facts.
+[`Server.Seal`](control-plane-server-and-deadlines.md#handler-admission-and-ownership)
+joins admitted control writers while the listener retains ownership through
+final cache persistence. Shadow shutdown discovers final new activity, stops
+discovery/admission, joins each remaining coordinator after final catch-up, then
+calls `Store.Shutdown`. History/fold failures end final waiting; they cannot
+certify a clean cache exit even if persistence succeeds. Final discovery must
+also establish every remaining registered conversation's boundary: checking only
+existing coordinators would overlook a conversation that failed before one was
+created. `thread_shadow.clean_exit` requires both complete final folding and
+successful `Store.Shutdown` persistence. Fixed failure reasons and validated IDs
+are the diagnostic boundary; content, payloads and host paths are excluded.
+
+No app receives thread items yet: shadow advertises no `thread` capability and
+sends no thread frames. Nil or failed shadow storage leaves legacy traffic
+operational. `TestThreadShadowLegacy` checks an authenticated Noise peer through
+the production session manager, comparing live frames, reconnect replay, history
+requests and negotiated capabilities with enabled, nil and failed storage.
+Fake broadcaster capture or direct ring/pager reads alone miss those client
+boundaries. `TestThreadShadowLongReplay` pauses an actual 36,000-entry refold
+while another conversation appends and publishes, then checks full-replay
+equality; `TestThreadShadowRemoval` pauses actual replay/tail work to prove joined
+retirement and continued progress elsewhere. These are deterministic wiring
+proofs. Retained authenticated real-log evidence belongs to
+[#3068](https://github.com/pyrycode/pyrycode/issues/3068) before protocol migration.
 
 ## Cache and epochs
 

@@ -441,7 +441,10 @@ snapshot over a replacement daemon's new post.
 
 Shutdown cancels the daemon context, seals and joins complete post callbacks
 with `channelDelivery.stopAccepting`, and joins the delivery consumer. Only then
-does it cancel control serving, close the listener and join response handlers.
+does it call `Server.Seal` to refuse and join control handlers while retaining
+the listener. It joins remaining producers and drains/persists the shadow fold
+before cancelling control serving, closing the listener and joining `ctrlDone`.
+See [handler admission and ownership](control-plane-server-and-deadlines.md#handler-admission-and-ownership).
 Early-return defers preserve the same writer-before-socket-release ordering.
 `guardPoster` covers lookup/creation as well as acceptance; sealed callbacks and
 direct acceptance refuse without storage or carry work. Lock order is handler

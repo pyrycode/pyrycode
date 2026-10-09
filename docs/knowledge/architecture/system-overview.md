@@ -141,12 +141,28 @@ barriers, including when its queue is full. With no relay URL, the same drain
 publishes into history through `historyOnlyBroadcaster`.
 
 The control socket owns this writer boundary: `runSupervisor` binds it before
-pending-state load and retains it until post callbacks are sealed/joined and the
-consumer stops. Releasing it on daemon cancellation before joining writers would
+pending-state load and retains it until post callbacks are sealed/joined,
+producers stop and final shadow cache persistence finishes. Releasing it on
+daemon cancellation before joining writers would
 let an old snapshot overwrite a replacement daemon's accepted work. Control
 serving therefore has a separate cancellation lifetime. See
 [durable channel-post delivery](../features/control-plane-channel-post-live-delivery.md)
 and [control lifecycle](../features/control-plane.md#lifecycle).
+
+### Shadow conversation thread
+
+`runSupervisor` composes `internal/thread.Store` with the producers' shared
+`history.Store`. After startup reconciliation and runtime-history construction,
+background discovery schedules registered logs; independent per-conversation
+workers replay raw entries and tail committed history. Quiescent folds unload
+and later activity reloads them; the registry removal observer tombstones and
+joins removed work. This cache flow has no app publication capability.
+
+Shadow contexts outlive daemon cancellation so producer joins precede final
+fold catch-up and `Store.Shutdown`. `control.Server.Seal` joins admitted handlers
+while retaining listener ownership through final persistence, followed by
+`Close`. See [shadow lifecycle and evidence](../features/thread-package.md#shadow-lifecycle-and-evidence)
+and [control admission](../features/control-plane-server-and-deadlines.md#handler-admission-and-ownership).
 
 ### Restart Cycle
 

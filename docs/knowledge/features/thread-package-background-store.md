@@ -4,7 +4,12 @@
 
 ### Loading and replay readiness
 
-`NewStore(*history.Store) *Store` creates a background cache owner. History remains
+`NewStore(h *history.Store, beforeFold ...func(context.Context, conversations.ConversationID) error) *Store`
+creates a background cache owner. Ordinary production callers supply only `h`.
+The first optional callback runs before each actual replay/tail chunk; it must
+return promptly or honor cancellation, and failure withdraws the view. This
+lets daemon tests pause real fold work rather than merely delaying `Load`
+admission, and lets removal cancel and join that paused work. History remains
 the only durable source, and store processing never writes history bytes. See
 [cache and epochs](thread-package.md#cache-and-epochs) for on-disk recovery records.
 `Load(ctx, conversationID) error` starts one background worker and returns
@@ -42,7 +47,7 @@ store or external writer supplies no wakeup. See
 ### Snapshots and retry
 
 `Snapshot(conversationID) Snapshot` performs no history I/O. Its fields are
-`State`, `Items`, `Version`, `Epoch` and `Err`:
+`Active`, `State`, `Items`, `Version`, `Epoch` and `Err`:
 
 | State | Meaning |
 | --- | --- |
@@ -53,6 +58,11 @@ store or external writer supplies no wakeup. See
 
 Only `StateUsable` carries items/version/epoch. The random epoch is independent of
 deterministic item equality and follows the [recovery compatibility rules](thread-package.md#cache-and-epochs).
+`Active` is computed from every private fold item at the same publication,
+including unresolved children omitted from `Items`. An empty public item list
+therefore cannot establish unload eligibility. `TestStorePrivateActiveWork`
+checks an invisible active child and its later closure; daemon retirement also
+requires [producer quiescence](thread-package.md#shadow-lifecycle-and-evidence).
 Lookup copies an immutable publication's items and content outside the store
 lock, so mutation of a returned snapshot
 cannot affect later snapshots. A history/cache read or write failure, unsafe
@@ -110,8 +120,10 @@ worker identity, retirement, shutdown and cancellation, preventing late callback
 from restoring released state. Cancelling a worker context alone leaves an
 unavailable view until retry or unload; it does not shut down other conversations.
 
-Daemon construction, startup reconciliation and lifecycle wiring remain
-[#3049](https://github.com/pyrycode/pyrycode/issues/3049).
+The daemon owns [startup discovery, retirement and final committed-version
+draining](thread-package.md#shadow-lifecycle-and-evidence). `Store.Shutdown`
+cancels workers; callers must finish producer draining and tail catch-up before
+invoking it to preserve final commits.
 
 ### Store verification
 
