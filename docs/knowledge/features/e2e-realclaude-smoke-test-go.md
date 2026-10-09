@@ -17,7 +17,7 @@
     Absent and set-empty variables retain their original presence and value.
     `authenticatedHome` does not mutate the process environment, so parallel
     consumers can pass its returned HOME explicitly through `homeEnv`; see
-    [parallel tests](e2e-realclaude.md#test-infrastructure).
+    [parallel tests](e2e-realclaude-test-infrastructure.md#test-infrastructure).
     Credential presence is the fixture's gate; real Claude decides validity.
     **Why HOME stays pinned:** per-test transcript namespaces under
     `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` prevent cross-test JSONL

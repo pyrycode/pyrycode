@@ -78,7 +78,7 @@ background task's lifetime beyond that closed-input run. `streamsup` keeps
 stdin open between interactive turns, so Composer Stop does not enter this
 cleanup path. The standing live tests prove both boundaries through actual
 task liveness and completion; see
-[the live-test witnesses](e2e-realclaude.md#test-infrastructure).
+[the live-test witnesses](e2e-realclaude-test-infrastructure.md#test-infrastructure).
 
 ## Teardown: SIGTERM → SIGKILL grace + descendant-group reap
 

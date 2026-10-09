@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -32,7 +33,7 @@ type replyFallback struct {
 }
 
 func replyFallbackArgs() []string {
-	return []string{"--print", "--model", "haiku", "--fallback-model", "", "--max-turns", "1", "--output-format", "json",
+	return []string{"--print", "--model", "haiku", "--fallback-model", "", "--max-turns", "1", "--output-format", "stream-json", "--verbose",
 		"--tools", "", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 		"--setting-sources", "", "--settings", `{"disableAllHooks":true,"autoMemoryEnabled":false}`, "--no-session-persistence", "--system-prompt", replyFallbackPrompt}
 }
@@ -83,11 +84,12 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 	}
 	cmd := command(ctx, f.binary, replyFallbackArgs()...)
 	cmd.Dir, cmd.Env, cmd.Stdin = dir, env, bytes.NewReader(input)
-	var stdout cappedBuffer
-	cmd.Stdout = &stdout // capped at the existing credential-command buffer bound
+	var stdout replyFallbackStream
+	cmd.Stdout = &stdout
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var groupCancelRequested atomic.Bool
 	cmd.Cancel = func() error {
+		stdout.freeze()
 		groupCancelRequested.Store(true)
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
@@ -121,6 +123,7 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 			"group_cancel_requested", groupCancelRequested.Load(), "wait_completed", waitCompleted,
 			"exit_observed", exitObserved, "exit_code", exitCode, "exit_signal", exitSignal}
 		fields = append(fields, replyFallbackOutput(&stdout, waitCompleted, err)...)
+		fields = append(fields, stdout.progressFields()...)
 		f.logger.Info("reply_fallback.lifecycle", fields...)
 	}()
 	done := make(chan error, 1)
@@ -137,10 +140,11 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 		}
 		return "", errReplyFallback
 	}
-	if err != nil || ctx.Err() != nil || len(stdout.Bytes()) > maxAccountTokenBytes {
+	stdout.finish()
+	if err != nil || ctx.Err() != nil {
 		return "", errReplyFallback
 	}
-	result, decoded := decodeReplyFallback(stdout.Bytes())
+	result, decoded := stdout.result, stdout.decoded
 	if !decoded || result.IsError || (result.Subtype != "" && result.Subtype != "success") {
 		return "", errReplyFallback
 	}
@@ -165,27 +169,164 @@ func decodeReplyFallback(data []byte) (replyFallbackResult, bool) {
 	return result, decoded
 }
 
-// replyFallbackOutput describes retained bytes only, never EOF, real-child
-// completion, pre-deadline arrival or publication eligibility. Saturation is a
-// lower bound on received output, not its total size.
-func replyFallbackOutput(stdout *cappedBuffer, waited bool, waitErr error) []any {
-	var count, capExceeded, utf8OK, jsonOK, resultOK, textOK, waitOK, waitDelay any = "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"
-	if waited {
-		data := stdout.Bytes() // Wait receipt synchronizes the writer; never read otherwise.
-		count, capExceeded, utf8OK = len(data), len(data) > maxAccountTokenBytes, utf8.Valid(data)
-		waitOK, waitDelay = waitErr == nil, errors.Is(waitErr, exec.ErrWaitDelay)
-		if utf8.Valid(data) {
-			result, decoded := decodeReplyFallback(data)
-			jsonOK = decoded
-			if decoded {
-				resultOK = !result.IsError && (result.Subtype == "" || result.Subtype == "success")
-				textOK = validReplyFallback(strings.TrimSpace(result.Result))
+// replyFallbackStream retains one bounded NDJSON envelope. Receipt saturation
+// is independent of result size; oversized frames are discarded through newline.
+type replyFallbackStream struct {
+	mu              sync.Mutex
+	line            []byte
+	oversized       bool
+	count           int
+	invalidUTF8     bool
+	result          replyFallbackResult
+	decoded         bool
+	resultBytes     int
+	current, frozen replyFallbackProgress
+	cancelFrozen    bool
+}
+
+type replyFallbackProgress struct {
+	event, source string
+	at            time.Time
+	init          bool
+	retries       int
+	ageMS         int64
+}
+
+func (s *replyFallbackStream) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count = min(4097, s.count+len(p))
+	for _, b := range p {
+		if b == '\n' {
+			s.envelope()
+			s.line, s.oversized = s.line[:0], false
+		} else if !s.oversized {
+			if len(s.line) == 4096 {
+				s.oversized = true
+				s.line = s.line[:0]
+			} else {
+				s.line = append(s.line, b)
 			}
+		}
+	}
+	return len(p), nil
+}
+
+// finish is called only after Wait receipt, never to interpret partial live input.
+func (s *replyFallbackStream) finish() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.envelope()
+	s.line, s.oversized = s.line[:0], false
+}
+
+func (s *replyFallbackStream) envelope() {
+	if s.oversized || len(s.line) == 0 {
+		return
+	}
+	if !utf8.Valid(s.line) {
+		s.invalidUTF8 = true
+		return
+	}
+	var event struct {
+		Type, Subtype string
+		Source        json.RawMessage `json:"apiKeySource"`
+	}
+	if json.Unmarshal(s.line, &event) != nil {
+		return
+	}
+	label := ""
+	switch {
+	case event.Type == "system" && event.Subtype == "init":
+		label = "init"
+		s.current.init = true
+		source := "unknown"
+		if json.Unmarshal(event.Source, &source) != nil || (source != "none" && source != "ANTHROPIC_API_KEY") {
+			source = "unknown"
+		}
+		s.current.source = source
+	case event.Type == "system" && event.Subtype == "api_retry":
+		label = "api_retry"
+		if s.current.retries < int(^uint(0)>>1) {
+			s.current.retries++
+		}
+	case event.Type == "result":
+		result, decoded := decodeReplyFallback(s.line)
+		if !decoded {
+			return
+		}
+		label = "result"
+		s.result, s.decoded, s.resultBytes = result, true, len(s.line)
+	default:
+		return
+	}
+	s.current.event, s.current.at = label, time.Now()
+}
+
+// freeze serializes the snapshot with recognized events before any kill signal.
+func (s *replyFallbackStream) freeze() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancelFrozen {
+		return
+	}
+	s.cancelFrozen = true
+	s.frozen = s.current
+	if !s.frozen.at.IsZero() {
+		s.frozen.ageMS = time.Since(s.frozen.at).Milliseconds()
+	}
+}
+
+func (s *replyFallbackStream) progressFields() []any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fields := []any{"cancel_snapshot_observed", s.cancelFrozen}
+	for _, entry := range []struct {
+		prefix string
+		p      replyFallbackProgress
+		known  bool
+	}{{"progress_", s.current, true}, {"cancel_", s.frozen, s.cancelFrozen}} {
+		var event, age, init, source, retries any = "unknown", "unknown", "unknown", "unknown", "unknown"
+		if entry.known {
+			event, init, retries = "none", entry.p.init, entry.p.retries
+			if entry.p.source != "" {
+				source = entry.p.source
+			}
+			if !entry.p.at.IsZero() {
+				event = entry.p.event
+				age = entry.p.ageMS
+				if entry.prefix == "progress_" {
+					age = time.Since(entry.p.at).Milliseconds()
+				}
+			}
+		}
+		fields = append(fields, entry.prefix+"event", event, entry.prefix+"age_ms", age, entry.prefix+"init", init, entry.prefix+"source", source, entry.prefix+"retries", retries)
+	}
+	return fields
+}
+
+// replyFallbackOutput gates completion predicates on Wait receipt. Incremental
+// observations are synchronized independently by progressFields.
+func replyFallbackOutput(stdout *replyFallbackStream, waited bool, waitErr error) []any {
+	var count, capExceeded, utf8OK, jsonOK, resultOK, textOK, waitOK, waitDelay, resultBytes any = "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"
+	if waited {
+		stdout.finish()
+		stdout.mu.Lock()
+		defer stdout.mu.Unlock()
+		count, capExceeded, utf8OK = stdout.count, stdout.count == 4097, !stdout.invalidUTF8 || stdout.decoded
+		waitOK, waitDelay = waitErr == nil, errors.Is(waitErr, exec.ErrWaitDelay)
+		if utf8OK == true {
+			jsonOK = stdout.decoded
+		}
+		if stdout.decoded {
+			resultBytes = stdout.resultBytes
+			resultOK = !stdout.result.IsError && (stdout.result.Subtype == "" || stdout.result.Subtype == "success")
+			textOK = validReplyFallback(strings.TrimSpace(stdout.result.Result))
 		}
 	}
 	return []any{"output_observed", waited, "stdout_bytes", count, "stdout_cap_exceeded", capExceeded,
 		"stdout_utf8_ok", utf8OK, "stdout_json_ok", jsonOK, "stdout_result_ok", resultOK, "stdout_text_ok", textOK,
-		"wait_ok", waitOK, "wait_delay", waitDelay}
+		"result_bytes", resultBytes, "wait_ok", waitOK, "wait_delay", waitDelay}
 }
 
 func validReplyFallback(text string) bool {

@@ -357,7 +357,54 @@ record({"progress": "spawn", "pid": os.getpid(), "child_pid": child.pid})
 def progress(stage, count):
     record({"progress": stage, "pid": os.getpid(), "child_pid": child.pid,
             "bytes": min(4097, count), "saturated": count >= 4097})
-retained = bytearray()
+fields = {"utf8_ok": True, "json_ok": False, "result_ok": False, "text_ok": False, "result_bytes": None}
+def observe(data):
+    try:
+        raw = data.decode("utf-8")
+        if len(data) <= 4096:
+            def reject_constant(value):
+                raise ValueError()
+            result = json.loads(raw, parse_constant=reject_constant,
+                                object_pairs_hook=lambda pairs: ("object", pairs))
+            if isinstance(result, tuple):
+                pairs = [(k.casefold(), v) for k, v in result[1]]
+                # Go reports a type error even if a later duplicate is well typed.
+                for k, v in pairs:
+                    if ((k in ("type", "result", "subtype") and v is not None and not isinstance(v, str)) or
+                            (k == "is_error" and v is not None and not isinstance(v, bool))):
+                        raise ValueError()
+                # encoding/json matches these struct fields case-insensitively.
+                # JSON null leaves Go's existing string/bool struct field unchanged.
+                result = {}
+                for k, v in pairs:
+                    if v is not None:
+                        result[k] = v
+                if result.get("type") != "result":
+                    return
+                text = result.get("result")
+                subtype = result.get("subtype")
+                text = "" if text is None else text
+                subtype = "" if subtype is None else subtype
+                is_error = result.get("is_error")
+                if (isinstance(text, str) and isinstance(subtype, str) and
+                        (is_error is None or isinstance(is_error, bool))):
+                    fields["utf8_ok"] = True
+                    fields["json_ok"] = True
+                    fields["result_bytes"] = len(data)
+                    fields["result_ok"] = not is_error and subtype in ("", "success")
+                    # encoding/json replaces unpaired escaped UTF-16 surrogates.
+                    text = text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+                    # Match strings.TrimSpace, not Python's broader C0 whitespace.
+                    text = text.strip("\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000")
+                    fields["text_ok"] = (0 < len(text) <= 240 and len(text.encode("utf-8")) <= 1024 and
+                        not any(unicodedata.category(c) == "Cc" or c in "\u2028\u2029" for c in text))
+    except UnicodeError:
+        if not fields["json_ok"]:
+            fields["utf8_ok"] = False
+    except (ValueError, TypeError, AttributeError):
+        pass # Only fixed predicates survive; never report exception/output text.
+line = bytearray()
+oversized = False
 size = 0
 forwarded = 0
 while True:
@@ -368,56 +415,30 @@ while True:
     size = min(4097, size + len(chunk))
     if first_read:
         progress("read", size)
-    retained.extend(chunk[:max(0, 4097 - len(retained))])
+    for byte in chunk:
+        if byte == 10:
+            if not oversized:
+                observe(line)
+            line.clear()
+            oversized = False
+        elif not oversized:
+            if len(line) == 4096:
+                line.clear()
+                oversized = True
+            else:
+                line.append(byte)
     acknowledged = sys.stdout.buffer.write(chunk)
     sys.stdout.buffer.flush()
     first_forward = forwarded == 0
     forwarded = min(4097, forwarded + acknowledged)
     if first_forward and acknowledged > 0:
         progress("forward", forwarded)
+if line and not oversized:
+    observe(line)
 code = child.wait()
-fields = {"completed": 1, "elapsed_ms": int((time.monotonic() - started) * 1000),
+fields.update({"completed": 1, "elapsed_ms": int((time.monotonic() - started) * 1000),
           "pid": os.getpid(), "child_pid": child.pid,
-          "exit_code": code, "stdout_bytes": size, "output_observed": True,
-          "utf8_ok": False, "json_ok": False, "result_ok": False, "text_ok": False}
-try:
-    raw = retained.decode("utf-8")
-    fields["utf8_ok"] = True
-    if size <= 4096:
-        def reject_constant(value):
-            raise ValueError()
-        result = json.loads(raw, parse_constant=reject_constant,
-                            object_pairs_hook=lambda pairs: ("object", pairs))
-        if isinstance(result, tuple):
-            pairs = [(k.casefold(), v) for k, v in result[1]]
-            # Go reports a type error even if a later duplicate is well typed.
-            for k, v in pairs:
-                if ((k in ("result", "subtype") and v is not None and not isinstance(v, str)) or
-                        (k == "is_error" and v is not None and not isinstance(v, bool))):
-                    raise ValueError()
-            # encoding/json matches these struct fields case-insensitively.
-            # JSON null leaves Go's existing string/bool struct field unchanged.
-            result = {}
-            for k, v in pairs:
-                if v is not None:
-                    result[k] = v
-            text = result.get("result")
-            subtype = result.get("subtype")
-            text = "" if text is None else text
-            subtype = "" if subtype is None else subtype
-            is_error = result.get("is_error")
-            if (isinstance(text, str) and isinstance(subtype, str) and
-                    (is_error is None or isinstance(is_error, bool))):
-                fields["json_ok"] = True
-                fields["result_ok"] = not is_error and subtype in ("", "success")
-                # encoding/json replaces unpaired escaped UTF-16 surrogates.
-                text = text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
-                # Match strings.TrimSpace, not Python's broader C0 whitespace.
-                text = text.strip("\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000")
-                fields["text_ok"] = (0 < len(text) <= 240 and len(text.encode("utf-8")) <= 1024 and
-                    not any(unicodedata.category(c) == "Cc" or c in "\u2028\u2029" for c in text))
-except (ValueError, TypeError, AttributeError, UnicodeError):
-    pass # Only fixed predicates survive; never report exception/output text.
+          "exit_code": code, "stdout_bytes": size, "output_observed": True})
 record(fields)
 if code < 0:
     signal.signal(-code, signal.SIG_DFL)
@@ -450,6 +471,7 @@ type suggestSource struct {
 	StartMS        int64 `json:"start_ms"`
 	ElapsedMS      int64 `json:"elapsed_ms"`
 	ExitCode       *int  `json:"exit_code"`
+	ResultBytes    *int  `json:"result_bytes"`
 	StdoutBytes    int   `json:"stdout_bytes"`
 	OutputObserved bool  `json:"output_observed"`
 	UTF8OK         bool  `json:"utf8_ok"`
@@ -474,7 +496,7 @@ func (s suggestSource) stage(wireSet bool) string {
 		return "unsuccessful invocation"
 	case !s.OutputObserved:
 		return "unknown (no output validation evidence)"
-	case s.StdoutBytes > 4096 || !s.UTF8OK || !s.JSONOK || !s.ResultOK || !s.TextOK:
+	case s.ResultBytes == nil || *s.ResultBytes < 1 || *s.ResultBytes > 4096 || !s.UTF8OK || !s.JSONOK || !s.ResultOK || !s.TextOK:
 		return "unusable output"
 	default:
 		return "usable output without wire set"
@@ -498,6 +520,13 @@ func (s suggestSource) diagnostic(idle bool, setRev, clearRev uint64) string {
 		}
 		output = fmt.Sprintf("bytes=%d utf8=%v json=%s result_success=%s text_valid=%s",
 			s.StdoutBytes, s.UTF8OK, jsonOK, resultOK, textOK)
+	}
+	resultBytes := "unknown"
+	if s.OutputObserved && s.JSONOK && s.ResultBytes != nil && *s.ResultBytes > 0 && *s.ResultBytes <= 4096 {
+		resultBytes = strconv.Itoa(*s.ResultBytes)
+	}
+	if s.OutputObserved {
+		output += " result_bytes=" + resultBytes
 	}
 	elapsed, wrapperPID := "unknown", "unknown"
 	if s.Completed == 1 {
@@ -605,6 +634,16 @@ func suggestLifecycle(stderr string, pid int) string {
 			if values["stdout_utf8_ok"] != "true" {
 				values["stdout_json_ok"] = "unknown"
 			}
+			values["result_bytes"] = "unknown"
+			if fields["wait_completed"] == "true" && values["stdout_json_ok"] == "true" {
+				n, err := strconv.Atoi(fields["result_bytes"])
+				count, _ := strconv.Atoi(values["stdout_bytes"])
+				if err == nil && n > 0 && n <= 4096 && n <= count {
+					values["result_bytes"] = strconv.Itoa(n)
+				} else {
+					values["stdout_json_ok"] = "unknown"
+				}
+			}
 			if values["stdout_json_ok"] != "true" {
 				values["stdout_result_ok"], values["stdout_text_ok"] = "unknown", "unknown"
 			}
@@ -614,6 +653,8 @@ func suggestLifecycle(stderr string, pid int) string {
 			for _, key := range []string{"output_observed", "wait_ok", "wait_delay", "stdout_bytes", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok"} {
 				safe = append(safe, key+"="+values[key])
 			}
+			safe = append(safe, "result_bytes="+values["result_bytes"])
+			safe = append(safe, suggestProgressFields(fields)...)
 			return "daemon lifecycle (cause not inferred): " + strings.Join(safe, " ")
 		}
 	}
@@ -625,7 +666,7 @@ func (s *suggestSource) invalidateProgress() {
 	s.ChildPID, s.ReadBytes, s.ForwardBytes = 0, 0, 0
 	s.ProgressAmbiguous = true
 	s.Completed, s.ElapsedMS = 0, 0
-	s.OutputObserved, s.ExitCode = false, nil
+	s.OutputObserved, s.ExitCode, s.ResultBytes = false, nil, nil
 }
 
 // suggestMetadata requires unique keys; missing and null scalars remain unknown.
@@ -752,7 +793,7 @@ func readSuggestSource(t *testing.T, path string) suggestSource {
 				decode("utf8_ok", &entry.UTF8OK) && decode("json_ok", &entry.JSONOK) &&
 				decode("result_ok", &entry.ResultOK) && decode("text_ok", &entry.TextOK)
 			valid = valid && ((!entry.JSONOK && !entry.ResultOK && !entry.TextOK) ||
-				(entry.JSONOK && entry.UTF8OK && entry.StdoutBytes > 0 && entry.StdoutBytes <= 4096)) &&
+				(entry.JSONOK && entry.UTF8OK && entry.StdoutBytes > 0 && decode("result_bytes", &entry.ResultBytes) && entry.ResultBytes != nil && *entry.ResultBytes > 0 && *entry.ResultBytes <= 4096 && *entry.ResultBytes <= entry.StdoutBytes)) &&
 				(entry.StdoutBytes != 0 || entry.UTF8OK) &&
 				((entry.StdoutBytes == 0 && !total.ReadKnown && !total.ForwardKnown) ||
 					(entry.StdoutBytes > 0 && total.ReadKnown && total.ForwardKnown && entry.StdoutBytes >= total.ReadBytes && entry.StdoutBytes >= total.ForwardBytes))
@@ -762,7 +803,7 @@ func readSuggestSource(t *testing.T, path string) suggestSource {
 			}
 			total.Completed, total.ElapsedMS, total.ExitCode, total.StdoutBytes = 1, entry.ElapsedMS, entry.ExitCode, entry.StdoutBytes
 			total.OutputObserved, total.UTF8OK, total.JSONOK = true, entry.UTF8OK, entry.JSONOK
-			total.ResultOK, total.TextOK = entry.ResultOK, entry.TextOK
+			total.ResultOK, total.TextOK, total.ResultBytes = entry.ResultOK, entry.TextOK, entry.ResultBytes
 			continue
 		}
 		// Stream records are independent of the print-mode invocation.
@@ -811,4 +852,54 @@ func TestInteractiveStream_FallbackReplySuggestionSetThenClear(t *testing.T) {
 		t.Fatal("explicit-null clear at higher revision absent")
 	}
 	logSource()
+}
+
+func suggestProgressFields(fields map[string]string) []string {
+	var safe []string
+	for _, prefix := range []string{"progress_", "cancel_"} {
+		event, age, init, source, retries := "unknown", "unknown", "unknown", "unknown", "unknown"
+		applicable := prefix == "progress_" || fields["cancel_snapshot_observed"] == "true"
+		if applicable {
+			switch fields[prefix+"event"] {
+			case "none", "init", "api_retry", "result":
+				event = fields[prefix+"event"]
+			}
+			if event != "unknown" {
+				if value := fields[prefix+"init"]; value == "true" || value == "false" {
+					init = value
+				}
+				if n, err := strconv.ParseInt(fields[prefix+"retries"], 10, 64); err == nil && n >= 0 {
+					retries = strconv.FormatInt(n, 10)
+				}
+				switch fields[prefix+"source"] {
+				case "none", "ANTHROPIC_API_KEY":
+					if init == "true" {
+						source = fields[prefix+"source"]
+					}
+				}
+				if event != "none" {
+					if n, err := strconv.ParseInt(fields[prefix+"age_ms"], 10, 64); err == nil && n >= 0 {
+						age = strconv.FormatInt(n, 10)
+					}
+				}
+			}
+		}
+		// Contradictions invalidate the participating observations and event age;
+		// independent fields remain known and missing values are never inferred.
+		conflictingInit := event == "none" && init == "true" || event == "init" && init == "false"
+		conflictingRetries := event == "none" && retries != "unknown" && retries != "0" || event == "api_retry" && retries == "0"
+		if conflictingInit {
+			init, source = "unknown", "unknown"
+		}
+		if conflictingRetries {
+			retries = "unknown"
+		}
+		if conflictingInit || conflictingRetries {
+			event, age = "unknown", "unknown"
+		}
+		for _, entry := range []struct{ key, value string }{{"event", event}, {"age_ms", age}, {"init", init}, {"source", source}, {"retries", retries}} {
+			safe = append(safe, prefix+entry.key+"="+entry.value)
+		}
+	}
+	return safe
 }

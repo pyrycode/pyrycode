@@ -133,32 +133,37 @@ func TestSuggestCLIFallbackEvidence(t *testing.T) {
 		name, output, stage string
 		exit                int
 	}{
+		{"stream saturation then result", strings.Repeat(`{"type":"system","subtype":"api_retry"}`+"\n", 120) + `{"type":"result","result":"private-generated-text"}` + "\n", "usable output without wire set", 0},
+		{"invalid frames then result", "\xff\n{bad}\n" + strings.Repeat("x", 5000) + "\n" + `{"type":"result","result":"private-generated-text"}` + "\n", "usable output without wire set", 0},
+		{"unknown envelope", `{"type":"private-kind","result":"private-generated-text"}` + "\n", "unusable output", 0},
+		{"partial result", `{"type":"result","result":"private-generated-text"`, "unusable output", 0},
+
 		{"zero output", "", "unusable output", 0},
-		{"success", `{"result":"private-generated-text","subtype":"success","is_error":false}`, "usable output without wire set", 0},
-		{"nonzero exit", `{"result":"private-generated-text"}`, "unsuccessful invocation", 7},
-		{"signal exit", `{"result":"private-generated-text"}`, "unsuccessful invocation", -1},
+		{"success", `{"type":"result","result":"private-generated-text","subtype":"success","is_error":false}`, "usable output without wire set", 0},
+		{"nonzero exit", `{"type":"result","result":"private-generated-text"}`, "unsuccessful invocation", 7},
+		{"signal exit", `{"type":"result","result":"private-generated-text"}`, "unsuccessful invocation", -1},
 		{"invalid utf8", "\xffprivate-generated-text", "unusable output", 0},
 		{"malformed json", "private-raw-stdout", "unusable output", 0},
-		{"error result", `{"result":"private-generated-text","is_error":true}`, "unusable output", 0},
-		{"wrong subtype", `{"result":"private-generated-text","subtype":"private-subtype"}`, "unusable output", 0},
-		{"wrong field type", `{"result":7}`, "unusable output", 0},
-		{"wrong subtype type", `{"result":"private-generated-text","subtype":false}`, "unusable output", 0},
-		{"duplicate field type", `{"result":7,"result":"private-generated-text"}`, "unusable output", 0},
-		{"null preserves result", `{"result":"private-generated-text","result":null}`, "usable output without wire set", 0},
-		{"null preserves error", `{"result":"private-generated-text","is_error":true,"is_error":null}`, "unusable output", 0},
-		{"folded error field", `{"result":"private-generated-text","iſ_error":true}`, "unusable output", 0},
-		{"empty", `{"result":"  "}`, "unusable output", 0},
-		{"multiline", `{"result":"private-generated-text\nnext"}`, "unusable output", 0},
-		{"separator", `{"result":"private-generated-text\u2028next"}`, "unusable output", 0},
-		{"too many runes", `{"result":"` + strings.Repeat("x", 241) + `"}`, "unusable output", 0},
-		{"control whitespace", `{"result":"\u001cprivate-generated-text"}`, "unusable output", 0},
-		{"stdout cap", strings.Repeat(" ", 4097) + `{"result":"ok"}`, "unusable output", 0},
-		{"trim and unicode", `{"result":" \t` + strings.Repeat("界", 240) + `\n"}`, "usable output without wire set", 0},
-		{"escaped surrogate", `{"result":"private-generated-text\ud800"}`, "usable output without wire set", 0},
+		{"error result", `{"type":"result","result":"private-generated-text","is_error":true}`, "unusable output", 0},
+		{"wrong subtype", `{"type":"result","result":"private-generated-text","subtype":"private-subtype"}`, "unusable output", 0},
+		{"wrong field type", `{"type":"result","result":7}`, "unusable output", 0},
+		{"wrong subtype type", `{"type":"result","result":"private-generated-text","subtype":false}`, "unusable output", 0},
+		{"duplicate field type", `{"type":"result","result":7,"result":"private-generated-text"}`, "unusable output", 0},
+		{"null preserves result", `{"type":"result","result":"private-generated-text","result":null}`, "usable output without wire set", 0},
+		{"null preserves error", `{"type":"result","result":"private-generated-text","is_error":true,"is_error":null}`, "unusable output", 0},
+		{"folded error field", `{"type":"result","result":"private-generated-text","iſ_error":true}`, "unusable output", 0},
+		{"empty", `{"type":"result","result":"  "}`, "unusable output", 0},
+		{"multiline", `{"type":"result","result":"private-generated-text\nnext"}`, "unusable output", 0},
+		{"separator", `{"type":"result","result":"private-generated-text\u2028next"}`, "unusable output", 0},
+		{"too many runes", `{"type":"result","result":"` + strings.Repeat("x", 241) + `"}`, "unusable output", 0},
+		{"control whitespace", `{"type":"result","result":"\u001cprivate-generated-text"}`, "unusable output", 0},
+		{"stdout cap", strings.Repeat(" ", 4097) + `{"type":"result","result":"ok"}`, "unusable output", 0},
+		{"trim and unicode", `{"type":"result","result":" \t` + strings.Repeat("界", 240) + `\n"}`, "usable output without wire set", 0},
+		{"escaped surrogate", `{"type":"result","result":"private-generated-text\ud800"}`, "usable output without wire set", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			evidence := installSuggestStandIn(t, tc.output, tc.exit, false)
-			cmd := exec.Command("claude", "--print", "--output-format", "json")
+			cmd := exec.Command("claude", "--print", "--output-format", "stream-json", "--verbose")
 			cmd.Stdin = strings.NewReader("private-input-sentinel")
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -400,7 +405,9 @@ func TestSuggestLifecycleOutput(t *testing.T) {
 		{"invalid utf8 decode", strings.Replace(strings.Replace(output, "stdout_utf8_ok=true", "stdout_utf8_ok=false", 1), "stdout_bytes=0", "stdout_bytes=1", 1), "stdout_json_ok=unknown"},
 		{"missing result", strings.Replace(strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_bytes=0", "stdout_bytes=25", 1), "stdout_result_ok=unknown ", "", 1), "stdout_result_ok=unknown"},
 		{"decode gate", strings.ReplaceAll(output, "=unknown", "=true"), "stdout_result_ok=unknown"},
-		{"valid", strings.ReplaceAll(strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_bytes=0", "stdout_bytes=25", 1), "=unknown", "=true"), "stdout_text_ok=true"},
+		{"valid", "result_bytes=25 " + strings.ReplaceAll(strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_bytes=0", "stdout_bytes=25", 1), "=unknown", "=true"), "stdout_text_ok=true"},
+		{"saturated decoded", "result_bytes=25 " + strings.ReplaceAll(strings.Replace(strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_bytes=0", "stdout_bytes=4097", 1), "stdout_cap_exceeded=false", "stdout_cap_exceeded=true", 1), "=unknown", "=true"), "stdout_text_ok=true"},
+		{"oversized result metadata", "result_bytes=4097 " + strings.ReplaceAll(strings.Replace(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "stdout_bytes=0", "stdout_bytes=25", 1), "=unknown", "=true"), "stdout_text_ok=unknown"},
 		{"saturated", strings.Replace(strings.Replace(output, "stdout_bytes=0", "stdout_bytes=4097", 1), "stdout_cap_exceeded=false", "stdout_cap_exceeded=true", 1), "stdout_bytes=4097"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -591,5 +598,55 @@ func TestSuggestPrefixCorrelation(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestSuggestStreamProgressGates(t *testing.T) {
+	for _, tc := range []struct{ name, fields, want string }{
+		{"observed zero", "progress_event=none progress_init=false progress_source=unknown progress_retries=0", "progress_retries=0"},
+		{"missing retry", "progress_event=init progress_init=true progress_source=none", "progress_retries=unknown"},
+		{"invalid retry", "progress_event=api_retry progress_retries=private-value", "progress_retries=unknown"},
+		{"rejected source", "progress_event=init progress_init=true progress_source=private-secret progress_retries=0", "progress_source=unknown"},
+		{"absent time", "progress_event=none progress_age_ms=7", "progress_age_ms=unknown"},
+		{"frozen gate", "cancel_snapshot_observed=false cancel_event=result cancel_retries=8", "cancel_event=unknown"},
+		{"frozen zero", "cancel_snapshot_observed=true cancel_event=none cancel_init=false cancel_retries=0", "cancel_retries=0"},
+		{"known source", "progress_event=init progress_init=true progress_source=ANTHROPIC_API_KEY progress_age_ms=3 progress_retries=0", "progress_source=ANTHROPIC_API_KEY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := map[string]string{}
+			for _, token := range strings.Fields(tc.fields) {
+				key, value, _ := strings.Cut(token, "=")
+				fields[key] = value
+			}
+			got := strings.Join(suggestProgressFields(fields), " ")
+			if !strings.Contains(got, tc.want) || strings.Contains(got, "private-") {
+				t.Fatal("incorrect safe progress applicability")
+			}
+		})
+	}
+	for _, prefix := range []string{"progress_", "cancel_"} {
+		for _, tc := range []struct{ name, fields, want string }{
+			{"none with retries", "event=none age_ms=7 init=false source=unknown retries=2", "event=unknown age_ms=unknown init=false source=unknown retries=unknown"},
+			{"none with init", "event=none age_ms=7 init=true source=ANTHROPIC_API_KEY retries=0", "event=unknown age_ms=unknown init=unknown source=unknown retries=0"},
+			{"init not observed", "event=init age_ms=7 init=false source=none retries=2", "event=unknown age_ms=unknown init=unknown source=unknown retries=2"},
+			{"retry with zero", "event=api_retry age_ms=7 init=true source=none retries=0", "event=unknown age_ms=unknown init=true source=none retries=unknown"},
+			{"observed zero", "event=none age_ms=7 init=false source=unknown retries=0", "event=none age_ms=unknown init=false source=unknown retries=0"},
+			{"init with missing metadata", "event=init age_ms=7", "event=init age_ms=7 init=unknown source=unknown retries=unknown"},
+			{"retry with missing count", "event=api_retry age_ms=7 init=false", "event=api_retry age_ms=7 init=false source=unknown retries=unknown"},
+		} {
+			t.Run(prefix+tc.name, func(t *testing.T) {
+				fields := map[string]string{"cancel_snapshot_observed": "true"}
+				for _, token := range strings.Fields(tc.fields) {
+					key, value, _ := strings.Cut(token, "=")
+					fields[prefix+key] = value
+				}
+				got := strings.Join(suggestProgressFields(fields), " ")
+				for _, token := range strings.Fields(tc.want) {
+					if !strings.Contains(got, prefix+token) {
+						t.Errorf("missing %s%s in %s", prefix, token, got)
+					}
+				}
+			})
+		}
 	}
 }

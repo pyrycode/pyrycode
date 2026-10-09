@@ -365,7 +365,8 @@ preserves another conversation's ring and suggestion. See
 
 **One isolated Haiku attempt.** `replyFallback.run` uses the daemon's configured
 Claude binary and `claudeAccount.provider()` with the `haiku` alias, no
-more-expensive model fallback and one fresh print-mode turn. Fixed system
+more-expensive model fallback and one fresh print-mode turn with
+`--output-format stream-json --verbose`. Fixed system
 instructions ask for a short next reply; the two bounded exchange sides are
 JSON-encoded stdin, never argv or shell text. The private temporary cwd,
 empty setting sources, safe mode and explicit discovery exclusions disable
@@ -379,15 +380,23 @@ A configured provider is re-read inside the deadline and replaces ambient
 OAuth/API credentials; refusal prevents the launch rather than selecting a
 different account. The ten-second attempt bound includes credential lookup,
 startup and termination: a 9800 ms context reserves termination time, group
-cancellation sends `SIGKILL`, and bounded pipe waits keep escaped descendants
-from holding the caller open. Lookup is selected against cancellation even
-if a reader ignores its context. The shared `streamrunner.Run` would add a
+cancellation sends `SIGKILL`, and 100 ms cancellation Wait grace and pipe waits
+keep escaped descendants from holding the caller open. Lookup is selected
+against cancellation even if a reader ignores its context. The shared `streamrunner.Run` would add a
 five-second termination grace and treat parent cancellation as nil, so this
 private helper owns the stricter bound. Missing binary/model/authentication,
 unsupported isolation flags, child failure, cancellation or timeout produces
 no publication and no retry. See [account source cancellation](claude-account-source.md#a-subprocess-bound-has-to-be-enforced-by-returning-on-ctxdone-not-by-waiting-on-the-child).
 
-Successful JSON result text is trimmed, then `validReplyFallback` requires
+`replyFallbackStream` incrementally retains at most 4096 bytes per envelope,
+discarding oversized frames through newline. Only complete UTF-8 JSON
+`type=result` envelopes passing `decodeReplyFallback` supply a reply; malformed,
+unknown or oversized frames cannot consume a later result's allowance.
+Whole-stream receipt saturates at 4097 independently of the 1–4096-byte
+`result_bytes` bound: treating saturation as oversized result output would
+reject valid results after ordinary progress. Oversized results are never
+truncated. A complete final envelope without newline is examined only after
+Wait receipt. Successful result text is trimmed, then `validReplyFallback` requires
 nonblank single-line valid UTF-8, no remaining control characters or U+2028/
 U+2029 separators, at most 240 Unicode code points and 1024 UTF-8 bytes.
 Oversized or otherwise invalid output is rejected rather than truncated.
@@ -397,15 +406,43 @@ never logged. `TestReplyFallbackProcess` and
 refusal, output validation and process termination; `TestReplyFallbackLifecycle`
 covers final-message selection, native priority, late delivery and stale results.
 
-`replyFallback.run` and `replyFallbackOutput` must receive `cmd.Wait` completion
-before reading process state or stdout, even after group cancellation. The caller may
-return within its bound before reaping; unknown evidence is valid, and a nil
-Wait error placeholder cannot imply success without receipt. Retain the actual
-cancellation-arm Wait error. `decodeReplyFallback` shares production struct
-semantics with diagnostics so null/duplicate fields cannot change validation
-between paths. Decodable retained bytes, including a saturated prefix, do not
-establish timely arrival or publication eligibility; see
-[the snapshot and consumer contract](e2e-realclaude.md#test-infrastructure).
+The daemon reader recognizes decoded `system/init`, `system/api_retry` and
+`result` progress. One writer mutex serializes recognition with the first
+`cmd.Cancel` snapshot before its signal, through both the context watcher and
+explicit cancellation. Last event, age, init/source and retry count are frozen;
+later input and repeated cancellation affect neither contents nor applicability.
+Current observations may advance separately. No recognized event means `none`,
+with unknown age; absent/invalid evidence remains unknown. Retries count decoded
+retry events only, including observed zero, never inferred from
+`attempt`/`max_retries`. Reported source is exactly `none`,
+`ANTHROPIC_API_KEY` or `unknown`; missing, invalid or other categories become
+unknown. Init/source prove neither authentication nor readiness.
+
+`replyFallbackOutput` requires `cmd.Wait` receipt before process-state and
+completion-dependent output/exit/Wait predicates, even after group cancellation.
+The caller may return before reaping; independently synchronized progress may
+remain known while completion stays unknown. Retain the actual cancellation-arm
+Wait error; a nil placeholder without receipt cannot imply success.
+`decodeReplyFallback` shares production null/duplicate-field semantics with
+diagnostics. Wrapper and daemon readers are independent: spawn/read/acknowledged
+forward prefixes do not establish daemon receipt or child completion. Consumers
+require typed, applicable, consistent metadata; contradictory event/init/retry
+observations and their age become unknown while independent fields stay known.
+A decoded result without wire publication proves neither forwarding loss nor
+publication eligibility; see
+[the snapshot and consumer contract](e2e-realclaude-test-infrastructure.md#test-infrastructure).
+
+The [#3024 counted batch](../../specs/architecture/3024-fallback-stream-observation.md#six-run-results)
+retains E/P/F/S **6/2/4/0**, with runs **1, 2, 4 and 6 FAIL**. Run 1 froze a
+valid result before deadline cancellation/unsuccessful Wait without publication;
+runs 2/4/6 froze init-only progress and observed zero retries without a decoded
+result. The [operator disposition](https://github.com/pyrycode/pyrycode/issues/3024#issuecomment-6077408952)
+accepts this as observation evidence for [#2923](https://github.com/pyrycode/pyrycode/issues/2923).
+Earlier #2882 **6/4/2/0** (runs 2/5 FAIL), #2873 **6/5/1/0** (run 4 FAIL), and
+PR #2896 **6/3/3/0** (runs 1/3/6 FAIL) remain unresolved; see the
+[retained historical spec](https://github.com/pyrycode/pyrycode/blob/25d778fbd0e54753bd82a6d4eca9a097c996f6f4/docs/specs/architecture/2882-fallback-stdout-evidence.md).
+An all-pass batch establishes non-reproduction only. Result/deadline and
+init-only absence need separate investigation without inferring cause.
 
 The owner has one leaf mutex, released before registry reads, queue gates,
 writes, credential lookup, inference or pushes. Reset cancels pending work and
@@ -428,4 +465,4 @@ resume spawns unless `promptSuggestionsDisabled` finds the last effective
 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` entry equal to `false`. Claude honours
 its own `promptSuggestionEnabled: false` settings disable. Missing native
 output can now use the fallback independently of those native controls; see
-[the live-test staging and reader lessons](e2e-realclaude.md#test-infrastructure).
+[the live-test staging and reader lessons](e2e-realclaude-test-infrastructure.md#test-infrastructure).
