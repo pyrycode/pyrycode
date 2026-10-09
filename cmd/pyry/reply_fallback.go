@@ -33,6 +33,7 @@ type replyFallback struct {
 	logger     *slog.Logger
 	stderrPipe func() (*os.File, *os.File, error)
 	wait       func(*exec.Cmd) error
+	waitGrace  func(time.Duration) <-chan time.Time
 }
 
 func replyFallbackArgs() []string {
@@ -149,10 +150,14 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 		waitCompleted = true
 	case <-ctx.Done():
 		_ = cmd.Cancel() // Best effort: the context watcher may already have killed the group.
+		grace := f.waitGrace
+		if grace == nil {
+			grace = time.After
+		}
 		select {
 		case err = <-done:
 			waitCompleted = true
-		case <-time.After(100 * time.Millisecond):
+		case <-grace(100 * time.Millisecond):
 		}
 		return "", errReplyFallback
 	}

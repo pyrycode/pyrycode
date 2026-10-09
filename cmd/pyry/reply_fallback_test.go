@@ -82,6 +82,13 @@ func TestReplyFallbackHelperProcess(t *testing.T) {
 	if os.Getenv("PYRY_REPLY_RAW_MODE") == "1" {
 		_, _ = os.Stdout.WriteString(os.Getenv("PYRY_REPLY_RAW"))
 	}
+	if fd, err := strconv.Atoi(os.Getenv("PYRY_REPLY_READY_FD")); err == nil {
+		ready := os.NewFile(uintptr(fd), "reply-ready")
+		if _, err := ready.Write([]byte{1}); err != nil {
+			os.Exit(9)
+		}
+		_ = ready.Close()
+	}
 	if os.Getenv("PYRY_REPLY_HANG") == "1" {
 		_ = os.WriteFile(os.Getenv("PYRY_REPLY_READY"), []byte(strconv.Itoa(os.Getpid())), 0600)
 		for {
@@ -277,10 +284,9 @@ func TestReplyFallbackProcessEvidence(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			raw := map[string]string{"zero": "", "partial": `{"type":"result","result":`, "invalid utf8": "\xff", "saturated": strings.Repeat(" ", 8192), "parent cancel": `{"type":"result","result":"private-generated-sentinel"}` + "\n"}
-			ready := t.TempDir() + "/private-path-sentinel"
 			env := []string{"PYRY_REPLY_HELPER=1", "PYRY_REPLY_USER=private-user-sentinel",
 				"PYRY_REPLY_ASSISTANT=private-assistant-sentinel", "PYRY_REPLY_OUTPUT=private-generated-sentinel",
-				"PRIVATE_VALUE=private-environment-sentinel", "PYRY_REPLY_READY=" + ready}
+				"PRIVATE_VALUE=private-environment-sentinel", "PRIVATE_PATH=/private-path-sentinel"}
 			if output, ok := raw[mode]; ok {
 				env = append(env, "PYRY_REPLY_RAW_MODE=1", "PYRY_REPLY_RAW="+output)
 			}
@@ -291,51 +297,41 @@ func TestReplyFallbackProcessEvidence(t *testing.T) {
 			if mode == "failure" {
 				env = append(env, "PYRY_REPLY_EXIT=7")
 			}
-			var logs bytes.Buffer
-			var child *exec.Cmd
-			f := replyFallback{logger: slog.New(slog.NewJSONHandler(&logs, nil)),
-				account: func(context.Context) (string, streamsup.AccountTokenFailure, error) { return "selected", "", nil },
-				command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-					child = replyFallbackTestCommand(ctx, env)
-					return child
-				}}
-			parent, cancel := context.WithCancel(context.Background())
-			if mode == "parent deadline" {
-				parent, cancel = context.WithTimeout(context.Background(), 2*time.Second)
-			}
-			defer cancel()
-			done := make(chan error, 1)
-			go func() { _, err := f.run(parent, "private-user-sentinel", "private-assistant-sentinel"); done <- err }()
+			base, cancel := context.WithCancelCause(context.Background())
+			parent := testReplyFallbackContext{base}
+			a := testStartReplyFallback(t, parent, func() { cancel(context.Canceled) }, env, mode == "own deadline", nil)
 			if hold {
-				deadline := time.Now().Add(5 * time.Second)
-				for {
-					if _, err := os.Stat(ready); err == nil {
-						break
-					}
-					if time.Now().After(deadline) {
-						cancel()
-						<-done
-						t.Fatal("child not ready")
-					}
-					time.Sleep(time.Millisecond)
-				}
+				a.awaitReady(t)
 				if mode == "parent cancel" {
-					cancel()
+					cancel(context.Canceled)
+				} else if mode == "parent deadline" {
+					deadline, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
+					defer stop()
+					<-deadline.Done()
+					cancel(deadline.Err())
 				}
 			}
-			select {
-			case err := <-done:
-				if (err == nil) != (mode == "success") {
-					t.Fatal("execution contract changed")
+			a.awaitReturn(t, 12*time.Second)
+			if mode == "success" {
+				if a.err != nil || a.text != "private-generated-sentinel" {
+					t.Fatal("success execution contract changed")
 				}
-			case <-time.After(12 * time.Second):
-				cancel()
-				<-done
-				t.Fatal("fallback hung")
+			} else if a.text != "" || !errors.Is(a.err, errReplyFallback) {
+				t.Fatal("failure execution contract changed")
 			}
-			var record map[string]any
-			if json.Unmarshal(logs.Bytes(), &record) != nil || record["msg"] != "reply_fallback.lifecycle" || strings.Contains(logs.String(), "private-") || strings.Contains(logs.String(), "selected") {
-				t.Fatal("missing or sensitive daemon evidence")
+			record := a.record(t)
+			if mode == "own deadline" && record["wait_completed"] != false {
+				t.Fatal("own deadline observed held completion")
+			}
+			// Reaping is a separate proof from the immutable return-time snapshot.
+			a.unhold()
+			a.awaitWait(t)
+			child := a.child
+			if hold {
+				status := child.ProcessState.Sys().(syscall.WaitStatus)
+				if !status.Signaled() || status.Signal() != syscall.SIGKILL {
+					t.Fatal("child survived group cancellation")
+				}
 			}
 			waited, ok := record["wait_completed"].(bool)
 			if !ok || (!waited && !hold) {
@@ -352,11 +348,7 @@ func TestReplyFallbackProcessEvidence(t *testing.T) {
 				}
 			}
 			if !waited {
-				for _, key := range []string{"exit_code", "exit_signal", "stdout_bytes", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok", "wait_ok", "wait_delay"} {
-					if record[key] != "unknown" {
-						t.Fatalf("invented %s without Wait", key)
-					}
-				}
+				testReplyFallbackUnknownCompletion(t, record)
 				return // Bounded cancellation need not observe reaping inside its grace.
 			}
 			for key, want := range map[string]bool{
@@ -406,9 +398,6 @@ func TestReplyFallbackProcessEvidence(t *testing.T) {
 			}
 			if attempt, ok := record["attempt_ms"].(float64); !ok || attempt < record["child_ms"].(float64) || record["child_ms"].(float64) < 0 {
 				t.Fatal("invalid lifecycle timing")
-			}
-			if hold && syscall.Kill(child.Process.Pid, 0) == nil {
-				t.Fatal("child survived group cancellation")
 			}
 		})
 	}
