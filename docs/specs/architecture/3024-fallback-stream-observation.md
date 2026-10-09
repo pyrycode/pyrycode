@@ -82,3 +82,62 @@ Declared 2026-10-09 after instrumentation commit `0e1aea42` and passing offline 
 `python3 /work/Projects/pyrycode-agents/dispatcher/scripts/live-claude-gate.py go --tests '^TestInteractiveStream_FallbackReplySuggestionSetThenClear$'`
 
 No retries, replacements, checkout changes, or historical reruns, even on failure/skip/zero execution. Preserve one exchange and the 15-second suggestion window. Count executed/passed/failed/skipped per run and aggregate; authentication/environment failure or zero execution is not proof. Retain only fixed-label wrapper/daemon observations, correlated PIDs/counts/times and wire revisions. All-pass establishes non-reproduction only. Any failed batch remains failed and feeds the evidence-backed #2923 follow-up without implementing correction here. The dispatcher separately owns the counted full live gate; documentation handoff remains pending.
+
+## Six-run results
+
+All six sequential authenticated launcher invocations used unchanged pushed declaration commit `28974c1c9322d7b7b1d2927ada542db52f2289bc`. No retries, replacements or checkout changes. E/P/F/S = **6/2/4/0**. Runs **1, 2, 4 and 6 remain FAIL**; runs 3 and 5 passed the strict set/clear assertions. Separate dispatcher full live gate remains pending.
+
+| Run | Executed | Passed | Failed | Skipped | Launcher exit |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 0 | 1 | 0 | 1 |
+| 2 | 1 | 0 | 1 | 0 | 1 |
+| 3 | 1 | 1 | 0 | 0 | 0 |
+| 4 | 1 | 0 | 1 | 0 | 1 |
+| 5 | 1 | 1 | 0 | 0 | 0 |
+| 6 | 1 | 0 | 1 | 0 | 1 |
+
+Safe boundary observations below are reader-produced scalar metadata, correlated by wrapper PID; wrapper child PID is independently recorded. Whole-stream saturation is not a final-result size. Reported source `none` proves neither authenticated readiness nor cause; zero retries means no decoded retry events observed. No result without publication establishes forwarding loss.
+
+Run 1:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=0 pid=1617213 elapsed_ms=12975 exit=unknown output={unknown} set_revision=0 clear_revision=0 stage=incomplete invocation (exit/output unknown) child_pid=1617214 spawn=true read={bytes=897 saturated=false} forward={bytes=897 saturated=false}
+daemon lifecycle (cause not inferred): pid=1617213 attempt_ms=9804 child_ms=9803 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 output_observed=true wait_ok=false wait_delay=false stdout_bytes=4097 stdout_cap_exceeded=true stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true result_bytes=1847 progress_event=result progress_age_ms=481 progress_init=true progress_source=none progress_retries=0 cancel_event=result cancel_age_ms=478 cancel_init=true cancel_source=none cancel_retries=0
+```
+
+Run 2:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=0 pid=1617488 elapsed_ms=12975 exit=unknown output={unknown} set_revision=0 clear_revision=0 stage=incomplete invocation (exit/output unknown) child_pid=1617489 spawn=true read={bytes=897 saturated=false} forward={bytes=897 saturated=false}
+daemon lifecycle (cause not inferred): pid=1617488 attempt_ms=9801 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 output_observed=true wait_ok=false wait_delay=false stdout_bytes=2621 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown result_bytes=unknown progress_event=init progress_age_ms=9341 progress_init=true progress_source=none progress_retries=0 cancel_event=init cancel_age_ms=9340 cancel_init=true cancel_source=none cancel_retries=0
+```
+
+Run 3:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=1617755 elapsed_ms=8710 exit=0 output={bytes=4097 utf8=true json=true result_success=true text_valid=true result_bytes=1814} set_revision=1 clear_revision=2 stage=wire set observed child_pid=1617756 spawn=true read={bytes=897 saturated=false} forward={bytes=897 saturated=false}
+daemon lifecycle (cause not inferred): pid=1617755 attempt_ms=8742 child_ms=8742 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=4097 stdout_cap_exceeded=true stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true result_bytes=1814 progress_event=result progress_age_ms=500 progress_init=true progress_source=none progress_retries=0 cancel_event=unknown cancel_age_ms=unknown cancel_init=unknown cancel_source=unknown cancel_retries=unknown
+```
+
+Run 4:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=0 pid=1618060 elapsed_ms=12973 exit=unknown output={unknown} set_revision=0 clear_revision=0 stage=incomplete invocation (exit/output unknown) child_pid=1618061 spawn=true read={bytes=897 saturated=false} forward={bytes=897 saturated=false}
+daemon lifecycle (cause not inferred): pid=1618060 attempt_ms=9803 child_ms=9802 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 output_observed=true wait_ok=false wait_delay=false stdout_bytes=2230 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown result_bytes=unknown progress_event=init progress_age_ms=9353 progress_init=true progress_source=none progress_retries=0 cancel_event=init cancel_age_ms=9351 cancel_init=true cancel_source=none cancel_retries=0
+```
+
+Run 5:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=1618332 elapsed_ms=6231 exit=0 output={bytes=4097 utf8=true json=true result_success=true text_valid=true result_bytes=1847} set_revision=1 clear_revision=2 stage=wire set observed child_pid=1618333 spawn=true read={bytes=897 saturated=false} forward={bytes=897 saturated=false}
+daemon lifecycle (cause not inferred): pid=1618332 attempt_ms=6264 child_ms=6264 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=4097 stdout_cap_exceeded=true stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true result_bytes=1847 progress_event=result progress_age_ms=476 progress_init=true progress_source=none progress_retries=0 cancel_event=unknown cancel_age_ms=unknown cancel_init=unknown cancel_source=unknown cancel_retries=unknown
+```
+
+Run 6:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=0 pid=1618594 elapsed_ms=12973 exit=unknown output={unknown} set_revision=0 clear_revision=0 stage=incomplete invocation (exit/output unknown) child_pid=1618595 spawn=true read={bytes=897 saturated=false} forward={bytes=897 saturated=false}
+daemon lifecycle (cause not inferred): pid=1618594 attempt_ms=9807 child_ms=9806 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 output_observed=true wait_ok=false wait_delay=false stdout_bytes=2426 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown result_bytes=unknown progress_event=init progress_age_ms=9105 progress_init=true progress_source=none progress_retries=0 cancel_event=init cancel_age_ms=9097 cancel_init=true cancel_source=none cancel_retries=0
+```
+
+Evidence-backed follow-up for #2923: run 1 froze a valid result 478 ms after recognition, then observed deadline cancellation/Wait SIGKILL with no publication. Runs 2, 4 and 6 froze init-only progress, observed zero retries, and received no decoded result. Investigate these distinct deadline/completion paths while preserving account isolation, the existing publication guards and strict staging; this slice makes no correction or cause claim. Runs 3 and 5 demonstrate successful publication with saturated stream receipt and bounded final results, but do not resolve any historical or new failure. Documentation and separate dispatcher live gate remain pending.
