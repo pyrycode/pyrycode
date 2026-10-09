@@ -689,31 +689,49 @@ Both fields are required:
 
 **The stored mark becomes `max(held, min(up_to, latest))`**, where `held` is
 the mark already on disk and `latest` is the same legacy watermark reported
-as `list_conversations.latest_entry_id` (#3026). It always skips the four
-runtime-only fact types `main_turn_opened`, `main_tool_interrupted`,
-`main_turn_interrupted` and `session_divider`, regardless of stored visibility.
-For every other entry, explicit stored `shown` decides whether it counts. With
-absent visibility, only `turn_state`, `stall`, `api_retry`, `compacting` and
-`session_transition` are excluded; unknown types conservatively count. Transport
-exclusion does not certify unknown content read. Missing, empty and entirely
-hidden/runtime-only logs yield `0`. A `up_to` at or below `held`
+as `list_conversations.latest_entry_id` (#3029). This legacy target follows
+wire types: `turn_state`, `stall`, `api_retry`, `compacting` and
+`session_transition` never count, even with stored `shown: true`. Every other
+eligible legacy type counts regardless of absent/false/true stored `shown`,
+including normal, failed or stopped `turn_end` and nonvisual metadata. Validated
+runtime facts projected as info-banner receipts also count at their original
+durable IDs, including receipt-only logs and runtime tails. Unsupported entries,
+including invalid runtime facts, retain the conservative visibility fallback:
+absent/true counts, false excludes. Neither exclusion nor fallback counting
+certifies a harmless receipt. Missing/empty logs and logs with no qualifying
+entry yield `0`; an all-hidden raw log can still have a nonzero legacy target.
+A `up_to` at or below `held`
 changes nothing; a `up_to` past `latest` clamps to `latest` before the `max`;
 and the mark can never move backward, including under two devices racing each
 other. When `latest == 0`, an initial zero mark stays zero, while an existing
-higher mark is preserved, including a mark held above the narrower legacy
+higher mark is preserved, including a mark held above the current legacy
 watermark. Marks remain persistent and isolated by host and conversation.
-Reading through the last legacy-displayable id clears unread
-on the next list even if statuses follow it; new displayable content makes
+Reading through the last legacy-counted id clears unread
+on the next list even if excluded statuses follow it; new counted entries make
 `latest_entry_id > read_up_to` again.
 
 **Accounting is not presentation.** A list watermark, fetched history or a live/
 replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
-Submit a checkpoint only from the operator's presentation evidence. Known
+Submit a checkpoint only from explicit foreground presentation evidence. Known
 nonvisual receipts can account for intervening durable IDs, but unknown,
 malformed or unidentified receipts and unaccounted numeric holes remain barriers.
 The daemon's clamp bounds the requested mark; it does not establish that the
 operator saw the content. Raw history and its metadata-aware watermark remain
 unchanged for future thread consumers.
+
+For the completed reply below, IDs are in append order. The normal `turn_end`
+counts toward latest despite being stored hidden; the trailing idle state can
+extend an already-presented checkpoint without raising latest.
+
+| Runtime facts | Durable sequence | Client/list latest | Presented checkpoint (`up_to`) | Confirmed `read_up_to` from an initial zero mark | Raw visible watermark |
+| --- | --- | --- | --- | --- | --- |
+| Enabled | 1 message, 2 info-banner receipt, 3 responding state, 4 assistant delta, 5 normal turn end, 6 idle state | 5 | 6 | 5 | 4 |
+| Disabled | 1 message, 2 responding state, 3 assistant delta, 4 normal turn end, 5 idle state | 4 | 5 | 4 | 3 |
+
+History, live and replay yield the same client latest; repeated or overlapping
+delivery cannot lower latest/read marks or create presentation. The client
+merges the correlated daemon-confirmed mark, rather than assuming the requested
+checkpoint was persisted. Both controls clear `latest_entry_id > read_up_to`.
 
 The registry resolves the conversation **before** its history is read, so an
 unknown or empty id never reaches the history store. The compare, the save and
@@ -5528,11 +5546,16 @@ both look like small integers, and a client must not join them.
 **This same durable id space is what `read_up_to` and `latest_entry_id` are stated
 in (#2779).** [`list_conversations`](#list_conversations)'s `conversations` reply
 reports `latest_entry_id` using the shared
-[legacy list/read watermark](#marking-a-conversation-read): known runtime-only
-facts never raise it; other entries use explicit visibility or the absent-metadata
-fallback. **History pages still contain eligible hidden/status entries and
-validated runtime receipts, and all entries use the original durable ID sequence.**
-The watermark filters unread independently of transport projection. Raw history,
+[legacy list/read watermark](#marking-a-conversation-read): eligible wire types
+count regardless of stored `shown`, except `turn_state`, `stall`, `api_retry`,
+`compacting` and `session_transition`, which never count. Validated runtime
+info-banner receipts count at their original IDs, including receipt-only pages
+and tails. Unsupported entries keep conservative absent/true visibility counting
+and false exclusion without certifying receipt accounting. **History pages still
+contain eligible hidden/status entries and validated runtime receipts, and all
+entries use the original durable ID sequence.** Neither `shown` nor session
+metadata is serialized on this legacy route; raw visibility cannot distinguish
+identical eligible wire entries' targets. Raw history,
 metadata and raw watermark APIs remain unchanged. Both that reply and
 [`conversation_updated`](#conversation_updated) report `read_up_to`, the host
 operator's durable read mark, in the same space — a position among these durable
@@ -5605,11 +5628,19 @@ across devices and daemon restarts.
 
 This join also applies to the four known runtime facts' info-banner receipts:
 history, live publication and reconnect replay carry the same projected bytes,
-original durable ID and timestamp. Repeated or overlapping delivery accounts
-for that ID once, duplicates no content and grants no additional sight. Do not
+original durable ID and timestamp. Their `banner` wire type contributes to the
+same legacy latest target on every lane, regardless of the raw fact's `shown`.
+Repeated or overlapping delivery accounts for that ID once, duplicates no
+content and cannot lower latest/read marks or grant additional sight. Do not
 derive harmlessness from a missing receipt: unknown/malformed/unidentified
 receipts and unaccounted holes remain barriers even when a later completed reply
-has been presented. Fetched pages and replay alone establish no presentation.
+has been presented. Received durable identity enables joining and deduplication;
+a validated receipt accounts for its ID; explicit foreground presentation
+establishes sight; a correlated `conversation_updated.read_up_to` establishes the
+daemon-confirmed persisted mark. These are separate facts.
+Fetched pages and replay alone establish no presentation. The
+[completed-turn controls](#marking-a-conversation-read) compare client-derived
+latest, presented checkpoint and confirmation across all three lanes.
 
 **Without `history_entry_id`, fall back to (`type`, `ts`).** An entry in a page
 and its twin on the live or replay lane carry the same `type` and the same `ts`,
