@@ -390,6 +390,32 @@ The marker is a method-set contract (`daemonLogOnly interface{ LogDaemonOnly() }
 
 First producer: `streamsup`'s stderr tail on the `claude exited` record, when the child exited on its own — see [streamsup-package-supervise-loop-run.md § `claude exited` record](streamsup-package-supervise-loop-run.md#claude-exited-record-session-id-and-a-capped-stderr-tail-2723). This is a per-value opt-out a producer makes deliberately, not a general-purpose redactor for the ring or the bundle — none exists, and nothing about this mechanism scans a value's content for secrets.
 
+Fallback helpers also mark the final `stderr_tail` attribute on
+`reply_fallback.lifecycle`, including failed exits and bounded cancellation.
+The end-weighted retention contract is last 1024 bytes, trim trailing CR/LF,
+then last five newline-delimited lines. Raw stderr may contain sensitive values;
+the exception permits only primary local daemon output. `replyFallbackDaemonOnly`
+implements the marker and the `daemonLogOnly.MarshalText` contract: the text
+handler quotes/escapes its structured value as needed, keeping untrusted bytes
+inside one attribute on one physical record. Consumers must skip quoted contents
+when selecting a PID or validating scalar fields.
+The actual `SlogTee` ring copy contains only the fixed replacement, including
+for an observed empty tail. Excerpts, hashes and text-derived categories are
+also excluded from the ring, `pyry logs`, phone/debug bundles, reports, specs,
+issue/PR comments and knowledge docs.
+
+Only content-free capture/reader booleans travel with other validated scalars.
+Unavailable capture has unknown reader predicates; an observed empty tail can
+still be partial. Joined reader completion and observed EOF are independent of
+Wait receipt: forced close/read failure means partial, not a complete child
+error report. Unobserved Wait leaves exit/completion unknown. The return-time
+stderr snapshot follows bounded cleanup; stdout progress freezes before
+cancellation. See [fallback observation boundaries](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+Ring exclusion cannot protect a direct primary-log tee into a test report.
+Live harnesses keep primary output in memory and omit the final tail suffix
+from report snapshots, even incomplete failure/cleanup records; see
+[the consuming diagnostics](e2e-realclaude-test-infrastructure.md#test-infrastructure).
+
 ## Lifecycle
 
 `runSupervisor` binds `ctrl.Listen` after constructing the pool, before loading

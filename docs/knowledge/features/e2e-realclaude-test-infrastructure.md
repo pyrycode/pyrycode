@@ -288,7 +288,10 @@ means a bounded decoded result, not a valid whole stream; decoded result-success
 and trimmed-text predicates stay separate from Wait success and receipt
 saturation. `decodeReplyFallback` and `validReplyFallback` match production.
 
-`suggestLifecycle` selects complete daemon lines by wrapper PID, validates
+`suggestLifecycle` uses `suggestLogScalars` to scan complete daemon records with
+quote/escape awareness before selecting the wrapper PID. Quoted attribute
+contents cannot supply or override real PID/scalar fields; duplicate fields or
+incomplete records do not establish observations. It validates
 presence/applicability and consistent count/cap, result-size and Wait/exit
 predicates. `suggestSource.diagnostic` applies the wrapper gates. Missing or
 invalid evidence stays unknown. `suggestProgressFields` also rejects impossible
@@ -297,9 +300,46 @@ with zero): conflicting event/age and participating fields become unknown,
 while independent init/source or retries stay known. Allowlists alone miss these
 contradictions. Wrapper exit is not child exit; a valid result without a wire set
 establishes neither forwarding loss nor publication eligibility. Simultaneous
-contexts identify no cause. Logs/evidence contain only fixed labels, validated
+contexts identify no cause. Exported logs/evidence contain only fixed labels, validated
 source categories, booleans, counts/PIDs and times, never prompt/reply text, raw
 stdout/stderr/errors, credentials, account identifiers or environment values.
+
+The primary local daemon log alone has a raw-stderr exception: fallback retains
+the last 1024 bytes, trims trailing CR/LF, then keeps the last five newline-delimited
+lines. This end-weighted tail may contain sensitive values. It is only the final
+structured `stderr_tail` value, with `LogDaemonOnly` and the
+`daemonLogOnly.MarshalText` quoting contract; actual `control.SlogTee` wiring
+replaces it with `(daemon log only)` in the ring. No raw tail, excerpt, hash or
+text-derived category reaches ring-backed `pyry logs`, phone/debug bundles,
+test reports, specs, issue/PR comments or knowledge docs.
+
+`suggestStderrFields` validates capture/reader booleans independently of Wait.
+Unavailable capture means `stderr_observed=false` with reader predicates unknown;
+available empty differs from unavailable or nonempty local capture. A joined
+reader (`stderr_reader_done=true`) proves cleanup, not EOF. Only independently
+observed EOF permits `stderr_eof=true`/`stderr_partial=false`; forced closure,
+read failure or unfinished drainage is partial, possibly empty. Wait cannot
+prove EOF, and reader EOF cannot prove child completion or a complete error
+report. Without Wait, child completion/exit predicates remain unknown. Stdout
+progress freezes before cancellation; stderr is sampled after joining its reader
+on return, after bounded normal-Wait drainage or cancellation cleanup without
+added drain grace. These are different observation boundaries.
+
+Ring exclusion alone missed direct primary-log tees and failure snapshots.
+Live daemon harnesses now capture primary output only in memory, and
+`lockedBuffer.String` omits the final `stderr_tail` suffix even on incomplete
+records. Preserve final-attribute ordering and never dump primary buffers on
+assertion failure or cleanup. `TestReplyFallbackStderrProcess` checks actual
+capture through `SlogTee`, the ring and `debugbundle.Assemble`;
+`TestReplyFallbackStderrTail`, `TestReplyFallbackStderrCleanup` and
+`TestReplyFallbackStderrFailedStart` cover retention and reader ownership.
+`TestSuggestLifecycleQuotedTail` and `TestSuggestStderrObservationGates` pin
+quote-aware exclusion and independent unknown/typed/consistency gates with
+content-free failures. A remaining [verifier finding](https://github.com/pyrycode/pyrycode/pull/3040#issuecomment-6078824404)
+is that `suggestLogScalars` rejects a valid unquoted TextHandler value containing
+a backslash, making the entire record unknown. Live harness masking avoids that
+tail shape before consumption; this limitation does not bypass export exclusion.
+See [the compact spec](../../specs/architecture/3025-fallback-stderr-tail.md).
 
 Offline `TestReplyFallbackStream`/`TestReplyFallbackStreamFreeze` and
 `TestSuggestCLIFallbackEvidence` cover chunking, skipped frames, saturation then

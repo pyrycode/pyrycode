@@ -565,13 +565,7 @@ func suggestLifecycle(stderr string, pid int) string {
 	keys := []string{"pid", "attempt_ms", "child_ms", "parent_canceled", "parent_deadline", "fallback_canceled", "fallback_deadline", "own_deadline_elapsed", "group_cancel_requested", "wait_completed", "exit_observed", "exit_code", "exit_signal"}
 	lines := strings.Split(stderr, "\n")
 	for _, line := range lines[:len(lines)-1] {
-		fields := make(map[string]string)
-		for _, token := range strings.Fields(line) {
-			key, value, ok := strings.Cut(token, "=")
-			if ok {
-				fields[key] = value
-			}
-		}
+		fields := suggestLogScalars(line)
 		if fields["msg"] != "reply_fallback.lifecycle" || pid <= 0 || fields["pid"] != strconv.Itoa(pid) {
 			continue
 		}
@@ -655,6 +649,7 @@ func suggestLifecycle(stderr string, pid int) string {
 			}
 			safe = append(safe, "result_bytes="+values["result_bytes"])
 			safe = append(safe, suggestProgressFields(fields)...)
+			safe = append(safe, suggestStderrFields(fields)...)
 			return "daemon lifecycle (cause not inferred): " + strings.Join(safe, " ")
 		}
 	}
@@ -902,4 +897,72 @@ func suggestProgressFields(fields map[string]string) []string {
 		}
 	}
 	return safe
+}
+
+// suggestLogScalars skips quoted values as indivisible tokens. Their contents
+// cannot supply fields, even when they contain spaces, equals signs or escapes.
+func suggestLogScalars(line string) map[string]string {
+	fields := make(map[string]string)
+	seen := make(map[string]bool)
+	for len(line) > 0 {
+		line = strings.TrimLeft(line, " \t")
+		if line == "" {
+			break
+		}
+		key, rest, ok := strings.Cut(line, "=")
+		if !ok || strings.ContainsAny(key, " \t\"") {
+			return nil
+		}
+		if seen[key] {
+			return nil
+		}
+		seen[key] = true
+		if strings.HasPrefix(rest, `"`) {
+			end := 1
+			for end < len(rest) && rest[end] != '"' {
+				if rest[end] == '\\' {
+					end++
+				}
+				end++
+			}
+			if end >= len(rest) {
+				return nil
+			}
+			line = rest[end+1:]
+			if line != "" && line[0] != ' ' && line[0] != '\t' {
+				return nil
+			}
+			continue
+		}
+		end := strings.IndexAny(rest, " \t")
+		if end < 0 {
+			end = len(rest)
+		}
+		value := rest[:end]
+		if strings.ContainsAny(value, `"\`) {
+			return nil
+		}
+		fields[key] = value
+		line = rest[end:]
+	}
+	return fields
+}
+
+func suggestStderrFields(fields map[string]string) []string {
+	observed, done, eof, partial := "unknown", "unknown", "unknown", "unknown"
+	if v := fields["stderr_observed"]; v == "true" || v == "false" {
+		observed = v
+	}
+	if observed == "true" {
+		if v := fields["stderr_reader_done"]; v == "true" || v == "false" {
+			done = v
+		}
+		if done == "true" {
+			e, p := fields["stderr_eof"], fields["stderr_partial"]
+			if e == "true" && p == "false" || e == "false" && p == "true" {
+				eof, partial = e, p
+			}
+		}
+	}
+	return []string{"stderr_observed=" + observed, "stderr_reader_done=" + done, "stderr_eof=" + eof, "stderr_partial=" + partial}
 }

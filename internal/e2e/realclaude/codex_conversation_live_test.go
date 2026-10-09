@@ -42,7 +42,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -709,7 +708,7 @@ func spawnCodexDaemon(t *testing.T, workdir, claudeBin, codexBin, relayURL strin
 		"--model", permissionDaemonModel,
 	)
 	cmd.Env = append(os.Environ(), "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderr)
+	cmd.Stderr = stderr // Primary daemon logs stay in memory.
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("pyry start: %v", err)

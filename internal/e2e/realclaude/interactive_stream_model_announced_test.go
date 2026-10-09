@@ -107,7 +107,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -378,7 +377,7 @@ func spawnBootstrapDaemonVerbose(t *testing.T, home, workdir, claudeBin, relayUR
 	// daemon's own Debug-level records for the life of one turn — bounded in
 	// practice by the turn, the same buffer spawnBootstrapDaemonWithIdle already
 	// fills at Info.
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderr)
+	cmd.Stderr = stderr // Primary daemon logs stay in memory.
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("realclaude: pyry start: %v", err)
