@@ -613,10 +613,14 @@ func spawnEnv(base []string, name, sessionID string) []string {
 // accountTokenEnv admits one attempt outside runner locks. The short-lived read
 // context is separate from the iteration context used by the admitted child.
 func (r *Runner) accountTokenEnv(ctx context.Context, env []string) ([]string, error) {
+	return r.accountTokenEnvWithTimeout(ctx, env, 10*time.Second)
+}
+
+func (r *Runner) accountTokenEnvWithTimeout(ctx context.Context, env []string, timeout time.Duration) ([]string, error) {
 	if r.cfg.AccountTokenProvider == nil {
 		return env, nil
 	}
-	readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	readCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	token, failure, privateErr := r.cfg.AccountTokenProvider(readCtx)
 	// Cancellation takes precedence even if a reader returns a token as success.
