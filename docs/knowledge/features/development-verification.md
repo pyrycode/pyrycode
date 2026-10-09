@@ -129,6 +129,16 @@ after the pool helper's cleanup; otherwise shutdown waits on a runner whose
 release cannot run until that wait ends. See [session eviction fixtures](sessions-package-testing.md#cancellation-and-completed-eviction)
 for the `gatedRunner` and `runPoolReady` example.
 
+A custom cancellation fixture must propagate its declared error through derived
+contexts. Overriding only `Err` on a wrapped cancel context can leave
+`context.WithTimeout` using the underlying `context.Canceled` through Go's
+cancel-context optimization. `testReplyFallbackContext` hides the wrapped
+cancel-context value with `Value` returning nil and returns the triggered cause
+from `Err`, so derived contexts observe `context.DeadlineExceeded` in the
+deadline case. This test-only wrapper lets the stimulus follow child readiness;
+retain a real timer-driven deadline case separately. See
+[reply fallback lifecycle evidence](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+
 A `context.WithCancel` stand-in cannot prove OS-signal shutdown classification:
 `signal.NotifyContext` can record a signal-specific cause instead of
 `context.Canceled`. Send real SIGTERM and SIGINT in isolated helper subprocesses,

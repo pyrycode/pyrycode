@@ -432,6 +432,39 @@ A decoded result without wire publication proves neither forwarding loss nor
 publication eligibility; see
 [the snapshot and consumer contract](e2e-realclaude-test-infrastructure.md#test-infrastructure).
 
+Child readiness cannot guarantee Wait receipt within the cancellation grace
+under scheduling delay. `TestReplyFallbackCancellationEvidence` waits for a
+private readiness pipe after fixture input/environment validation, then forces
+received and withheld Wait outcomes for both parent cancellation and parent
+deadline. In received cases, the private `waitGrace` seam releases held Wait on
+grace entry and keeps timeout unavailable until receipt; withheld cases retain
+the real 100 ms timer and hold Wait beyond bounded return. Production leaves
+the seam nil, preserving the 9800 ms context and 100 ms grace. Each started
+attempt must emit exactly one `reply_fallback.lifecycle` snapshot before deferred
+context cleanup. Received completion records the observed exit; withheld
+completion requires `wait_completed=false`, `exit_observed=false` and
+`output_observed=false`, with completion-dependent fields, including
+`result_bytes`, unknown. Both return an empty reply with `errReplyFallback` and
+request group termination. See [custom deadline-context propagation](development-verification.md#prove-that-tests-distinguish-the-change).
+
+`TestReplyFallbackProcessEvidence` retains success, nonzero exit, privacy and
+actual timer-driven deadlines. Its own-deadline case holds Wait through the
+9.8-second deadline and bounded return, proving the default grace without
+assuming prompt reaping. Return-time evidence stays immutable: release held
+work and separately join eventual completion before inspecting `ProcessState`
+or asserting child termination. Cleanup cancels, releases gates, closes
+readiness descriptors and joins run, Wait and readiness workers even after a
+fatal assertion.
+
+Cleanup must establish successful Start independently of Wait-worker scheduling.
+After joining the run worker, `testStartReplyFallback` checks the command's nonnil
+`Process`, then joins both Wait start and completion. A nonblocking worker-start
+check can mistake an unscheduled worker for failed Start and leak it on failure.
+`TestReplyFallbackAttemptCleanupDelayedWait` withholds that start signal through
+bounded return and releases it only once cleanup begins the join;
+`TestReplyFallbackAttemptCleanupFailedStart` preserves the no-worker/no-lifecycle
+path for actual Start failure.
+
 Every started helper logs its available stderr tail on success, failed exit or
 bounded cancellation return. `replyFallbackStderrTail` keeps the last 1024
 bytes, trims trailing CR/LF, then keeps the last five newline-delimited lines.
