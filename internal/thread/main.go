@@ -24,6 +24,7 @@ type mainTurn struct {
 	end     *mainOutcome
 }
 type mainCall struct {
+	shell    *agentCall
 	group    agentKey
 	item     int
 	launcher bool
@@ -212,6 +213,9 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		callID = id.ToolCallID
 	}
 	call := st.calls[callID]
+	if call != nil && call.shell != nil && call.group != f.childGroup(e) && id.Opening == nil {
+		call = nil
+	}
 	if call == nil {
 		call = &mainCall{group: f.childGroup(e), item: -1, terminal: st.end}
 		st.calls[callID] = call
@@ -228,6 +232,9 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 			return true
 		}
 		call.item = f.addItem(e, Item{ID: e.ID, Order: e.ID, Rev: e.ID, Kind: "tool_call", Turn: id.TurnID, Status: status, Active: true, Shown: shown, Summary: summary})
+		if (p.Name == "Bash" || p.Name == "local_bash") && (!st.key.tagged || st.key.source.Kind == "claude") {
+			f.registerShell(e, callID, call)
+		}
 		if call.terminal == nil {
 			call.terminal = st.end
 		}
@@ -257,7 +264,7 @@ func (f *Fold) closeText(st *mainTurn, rev uint64) {
 	st.text = -1
 }
 func (f *Fold) applyTerminal(call *mainCall) {
-	if call.item < 0 || call.terminal == nil || call.launcher {
+	if call.item < 0 || call.terminal == nil || call.launcher || (call.shell != nil && call.shell.linked) {
 		return
 	}
 	item := &f.items[call.item]

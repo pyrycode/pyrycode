@@ -24,6 +24,8 @@ type agentGroup struct {
 	tasks map[string]*agentTask
 }
 type agentCall struct {
+	ordinary *mainCall
+	linked   bool
 	parent   string
 	observed uint64
 	item     int
@@ -136,7 +138,7 @@ func (f *Fold) agentWork(e history.Entry) bool {
 	source := key
 	source.scope = 0
 	if durable {
-		if p.ConversationID != f.conversationID || p.At.IsZero() || (p.Lifetime != "" && !conversations.ValidID(p.Lifetime)) {
+		if p.ConversationID != f.conversationID || p.At.IsZero() || p.lost("conversation_id", "lifetime_id") || (p.Lifetime != "" && !conversations.ValidID(p.Lifetime)) {
 			return true
 		}
 		if e.Type != "agent_ended_with_session" && p.Lifetime == "" {
@@ -297,11 +299,21 @@ func (f *Fold) agentWork(e history.Entry) bool {
 	default:
 		return durable
 	}
+	promote := durable && !referenced && key.lifetime != "" && f.agentLifetimes[source] == ""
 	g := f.agentGroups[key]
+	if promote && g == nil {
+		original := source
+		original.scope = f.legacyScope
+		g = f.agentGroups[original]
+	}
 	if typ == "agent_ended_with_session" && g != nil && p.Task != "" && call != "" {
 		if task := g.tasks[p.Task]; task != nil && task.call != "" && task.call != call {
 			return true
 		}
+	}
+	if promote {
+		f.promoteShellEvidence(key)
+		g = f.agentGroups[key]
 	}
 	if durable && !referenced {
 		f.agentLifetimes[source] = key.lifetime
@@ -459,6 +471,11 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 			reports = append(reports, task.reports...)
 		}
 	}
+	c.linked = linked
+	if c.ordinary != nil && !linked {
+		f.applyShellForeground(c)
+		return
+	}
 	// Entry ordering, rather than map iteration, decides both enrichment and finals.
 	reports = append(reports, c.reports...)
 	slices.SortStableFunc(reports, func(a, b *agentReport) int {
@@ -473,6 +490,9 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	status, active, ended := "running", true, uint64(0)
 	var final *agentReport
 	for _, r := range reports {
+		if c.ordinary != nil && r.mapped && !shellReportMatches(r, item.Turn) {
+			continue
+		}
 		if r.field == "result" {
 			if _, ok := content["result"]; !ok {
 				put("result", r.raw)
