@@ -74,3 +74,11 @@ The logging requirement is incorporated into Design, resolving the finding befor
 ## Revisions
 
 2026-10-09: Result predicates now describe the bounded decoded final envelope; `result_bytes` explicitly separates its 1–4096-byte bound from saturated 0–4097 stream receipt. Invalid/skipped earlier frames cannot poison a later result. Complete unterminated final JSON is examined only after Wait receipt; it cannot populate the frozen pre-cancellation snapshot. Added late-result/repeated-cancellation, source-null/missing and saturated-result metadata assertions. Offline race checks, touched-package race suite, vet and build pass. Final sizing forecast including declaration/results: approximately 750 written lines, no exports, three local consumers, five criteria, fewer than ten reject paths; no sizing exception required. QMD timed out; runtime-authorized repository search supplied the owning docs.
+
+## Six-run declaration
+
+Declared 2026-10-09 after instrumentation commit `0e1aea42` and passing offline checks. The commit containing this declaration will be pushed before launch 1 and is the unchanged checkout for exactly six sequential authenticated launches numbered 1–6 through:
+
+`python3 /work/Projects/pyrycode-agents/dispatcher/scripts/live-claude-gate.py go --tests '^TestInteractiveStream_FallbackReplySuggestionSetThenClear$'`
+
+No retries, replacements, checkout changes, or historical reruns, even on failure/skip/zero execution. Preserve one exchange and the 15-second suggestion window. Count executed/passed/failed/skipped per run and aggregate; authentication/environment failure or zero execution is not proof. Retain only fixed-label wrapper/daemon observations, correlated PIDs/counts/times and wire revisions. All-pass establishes non-reproduction only. Any failed batch remains failed and feeds the evidence-backed #2923 follow-up without implementing correction here. The dispatcher separately owns the counted full live gate; documentation handoff remains pending.
