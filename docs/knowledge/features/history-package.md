@@ -18,7 +18,7 @@ wire-serving consumer,
 | --- | --- |
 | [Shape](history-package-shape.md) | Entry and metadata contracts, paging bounds and durable ID allocation. |
 | [A cleanup on a failed write is not the guarantee it looks like](history-package-failed-write-recovery.md) | Write rollback and read tolerance after fresh or active segment failures. |
-| [Producers (#2114, #2115)](history-package-producers.md) | Captured provenance, runtime dividers and interrupted work, visibility, delivery ordering and producer tests. |
+| [Producers (#2114, #2115)](history-package-producers.md) | Captured provenance, runtime/startup dividers and interrupted work, visibility, delivery ordering and producer tests. |
 | [`LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)](history-package-watermarks.md) | Raw durable cursors, displayable unread watermarks and lazy recovery. |
 
 ## Why not claude's transcripts
@@ -154,6 +154,13 @@ valid walks; **consumers terminate on `AtStart`, never on an empty entry list**.
 A terminal page has `AtStart == true` and an empty cursor. Treating an empty
 list as exhaustion loses older eligible content; scanning ahead instead would
 turn one bounded request into work proportional to the hidden history.
+
+**Filtered counts cannot determine raw page boundaries.** A hidden startup
+divider changes raw pagination even though legacy clients never receive it.
+`TestRelayV2_ConversationHistory` compares cursors and `AtStart` with each raw
+page, covering a nonempty partial terminal page, an exact-fill walk with an
+empty terminal page, and an empty nonterminal page containing only the divider.
+Deriving exhaustion from seeded legacy counts would miss these boundaries.
 
 `TestHistoryProjection_BoundedWalk` compares each projected page with its raw
 page in warm and reopened stores, using mixed and entirely excluded logs,

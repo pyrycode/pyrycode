@@ -44,7 +44,7 @@ func historyEntryShown(typ string, raw json.RawMessage) bool {
 		return true
 	case historySessionDivider:
 		var p runtimeHistoryFact
-		return json.Unmarshal(raw, &p) != nil || p.Cause != "idle_sleep"
+		return json.Unmarshal(raw, &p) != nil || (p.Cause != "idle_sleep" && p.Cause != "daemon_restart")
 	case protocol.TypeTurnState, protocol.TypeStall, protocol.TypeApiRetry,
 		protocol.TypeCompacting, protocol.TypeToolProgress, protocol.TypeThinkingProgress,
 		protocol.TypeBackgroundTaskRoster, protocol.TypeBackgroundTaskProgress,
