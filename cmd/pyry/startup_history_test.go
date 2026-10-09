@@ -372,6 +372,7 @@ func TestStartupHistoryReconciliation(t *testing.T) {
 			if ending != "" {
 				want = want[2:]
 			}
+			want = append(want[:len(want)-1], historyAgentSessionEnded+"::launcher", historyAgentSessionEnded+"::task-launcher", historySessionDivider+"::")
 			var got []string
 			for _, e := range all[len(before):] {
 				var p runtimeHistoryFact

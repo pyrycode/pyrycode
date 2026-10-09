@@ -35,6 +35,10 @@ func reconcileStartupHistory(store *history.Store, reg *conversations.Registry, 
 			continue
 		}
 		turns, nonempty, err := readStartupMainWork(store, conv.ID)
+		var agents []*convTurnState
+		if err == nil && nonempty {
+			agents, err = readStartupAgentWork(store, conv.ID)
+		}
 		if err != nil {
 			logger.Warn("history: startup read failed", "event", "startup_history.read_err", "conversation_id", string(conv.ID), "reason", historyPageFailure(err))
 			continue
@@ -43,6 +47,7 @@ func reconcileStartupHistory(store *history.Store, reg *conversations.Registry, 
 			continue
 		}
 		closeStartupMainWork(store, logger, string(conv.ID), turns, at)
+		closeStartupAgentWork(store, logger, agents, at)
 		p := runtimeHistoryFact{ConversationID: string(conv.ID), Cause: "daemon_restart", OccurredAt: at}
 		appendStartupHistoryFact(store, logger, historySessionDivider, p, history.SessionProvenance{Kind: "none"})
 	}

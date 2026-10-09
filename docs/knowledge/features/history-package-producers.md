@@ -15,6 +15,9 @@ interactive emitter's `emit` chokepoint
 `interactiveTurnEmitterV2.recordRuntimeFact` through the same append seam.
 Claude attribution, reported endings and roster-inferred gone facts use
 `recordAgentFact` at that seam, without copying the mapped reports' prose.
+`closeAgentHistory` and `closeStartupAgentWork` append `agent_ended_with_session`
+through the same seam before session dividers (#3032), retaining unfinished
+agent/background work even after the main turn ends.
 The existing legacy emitters resolve the four event values — conversation
 id, wire type, marshalled payload, one hoisted timestamp — for the ring
 append or the fan-out itself, so their log append needed no new mapping, only
@@ -29,7 +32,7 @@ not from an envelope in flight (see
 | Document | Topics |
 | --- | --- |
 | [Interactive provenance](history-package-producers-interactive-provenance.md) | Captured source, retained text and child lanes, conversation phase and channel posts. |
-| [Runtime and startup lifecycle](history-package-producers-runtime-lifecycle.md) | Boundaries, interrupted main work, durable agent/task identities, reported endings and complete-roster gone inference. |
+| [Runtime and startup lifecycle](history-package-producers-runtime-lifecycle.md) | Boundaries, interrupted main work, agent/task identities and endings, linked-work deduplication and exactly-once restart recovery. |
 | [Legacy compatibility and verification](history-package-producers-legacy-compatibility.md) | Explicit raw visibility, nonvisual receipts, legacy unread targets, delivery ordering and producer tests. |
 
 Claude Agent/Task calls and background reports retain attribution alongside their
@@ -45,8 +48,19 @@ source and durable child lifetime. An empty reported roster qualifies. No refres
 retained read or join pruning alone implies an ending. Codex produces no gone
 facts. See [roster completeness and ordering](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
 
-Gone has explicit raw `shown: true`. Its raw payload stays excluded from legacy
-history pages, live delivery and replay. After successful storage, #3026's
+`agent_ended_with_session` retains known call/task/parent/tool identities, dying
+source, durable lifetime, occurrence time and actual boundary cause. A usable
+call/task link closes as one work item; unlinked identities close independently.
+Runtime endings precede the divider and successor traffic; `child_exit` closes
+the selected child lifetime without a divider. Startup uses `daemon_restart` and
+original observation references, preserving legacy scope and unavailable
+attribution without minting missing IDs. See
+[session endings](history-package-producers-runtime-lifecycle.md#unfinished-agenttask-session-endings-3032)
+and [agent recovery](history-package-producers-runtime-lifecycle.md#recover-agenttask-work-and-original-identities-3032).
+
+Gone and ended-with-session facts have explicit raw `shown: true`. Their raw
+payloads stay excluded from legacy history pages, live delivery and replay.
+After successful storage, #3026's
 validated nonvisual receipt retains the original durable ID and timestamp;
 \#3029 counts it toward the legacy unread target independently of raw visibility.
 That accounting confers no foreground presentation or read-mark advancement by
