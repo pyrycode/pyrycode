@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,7 +20,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/debugbundle"
 	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
@@ -28,6 +32,12 @@ import (
 func TestReplyFallbackHelperProcess(t *testing.T) {
 	if os.Getenv("PYRY_REPLY_HELPER") != "1" {
 		return
+	}
+	if os.Getenv("PYRY_REPLY_DESCENDANT") == "1" {
+		_ = os.WriteFile(os.Getenv("PYRY_REPLY_DESC_READY"), []byte(strconv.Itoa(os.Getpid())), 0600)
+		for {
+			time.Sleep(time.Second)
+		}
 	}
 	input, _ := io.ReadAll(os.Stdin)
 	var sides map[string]string
@@ -47,6 +57,27 @@ func TestReplyFallbackHelperProcess(t *testing.T) {
 	}
 	if os.Getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL") != "" || os.Getenv("CLAUDE_CODE_SIMPLE") != "" || os.Getenv("ANTHROPIC_API_KEY") != "" {
 		os.Exit(6)
+	}
+	for range 256 {
+		_, _ = os.Stderr.WriteString(os.Getenv("PYRY_REPLY_STDERR_PREFIX"))
+	}
+	_, _ = os.Stderr.WriteString(os.Getenv("PYRY_REPLY_STDERR"))
+	if path := os.Getenv("PYRY_REPLY_DESC_READY"); path != "" {
+		child := exec.Command(os.Args[0], "-test.run=^TestReplyFallbackHelperProcess$")
+		child.Env = append(os.Environ(), "PYRY_REPLY_DESCENDANT=1")
+		child.Stderr = os.Stderr
+		if os.Getenv("PYRY_REPLY_DESC_ESCAPE") == "1" {
+			child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		}
+		if child.Start() != nil {
+			os.Exit(8)
+		}
+		for {
+			if _, err := os.Stat(path); err == nil {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 	}
 	if os.Getenv("PYRY_REPLY_RAW_MODE") == "1" {
 		_, _ = os.Stdout.WriteString(os.Getenv("PYRY_REPLY_RAW"))
@@ -812,5 +843,270 @@ func TestReplyFallbackStreamFreeze(t *testing.T) {
 		if before != frozen.init || frozen.retries != 0 || (!before && !frozen.at.IsZero()) {
 			t.Fatal("invented pre-cancellation progress")
 		}
+	}
+}
+
+func TestReplyFallbackStderrTail(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"", ""}, {"a\r\n", "a"}, {"0\n1\n2\n3\n4\n5\n6\r\n", "2\n3\n4\n5\n6"},
+		{strings.Repeat("x", 4096) + "end", strings.Repeat("x", 1021) + "end"},
+	} {
+		for _, chunk := range []int{1, 1024, 8192} {
+			var tail replyFallbackStderrTail
+			for start := 0; start < len(tc.input); start += chunk {
+				_, _ = tail.Write([]byte(tc.input[start:min(start+chunk, len(tc.input))]))
+			}
+			if tail.String() != tc.want || len(tail.buf) > 1024 || cap(tail.buf) > 1024 {
+				t.Fatal("incorrect bounded suffix")
+			}
+		}
+	}
+	var tail replyFallbackStderrTail
+	var workers sync.WaitGroup
+	for range 4 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for range 100 {
+				_, _ = tail.Write(bytes.Repeat([]byte("x"), 8192))
+				_ = tail.String()
+			}
+		}()
+	}
+	workers.Wait()
+	if len(tail.String()) != 1024 {
+		t.Fatal("lost bounded concurrent tail")
+	}
+}
+
+func TestReplyFallbackStderrCleanup(t *testing.T) {
+	for _, mode := range []string{"failed start", "eof", "forced", "read error"} {
+		t.Run(mode, func(t *testing.T) {
+			cmd := &exec.Cmd{}
+			c := captureReplyFallbackStderr(cmd, os.Pipe)
+			if c.pr == nil {
+				t.Fatal("pipe setup failed")
+			}
+			writer, err := syscall.Dup(int(c.pw.Fd()))
+			if err != nil {
+				t.Fatal("duplicate pipe failed")
+			}
+			w := os.NewFile(uintptr(writer), "test-stderr")
+			defer w.Close()
+			c.started(mode != "failed start")
+			if mode == "failed start" {
+				if _, err := c.pr.Read(make([]byte, 1)); err == nil {
+					t.Fatal("failed Start retained reader")
+				}
+				return
+			}
+			_, _ = w.WriteString("private-cleanup-sentinel")
+			if mode == "eof" {
+				_ = w.Close()
+				<-c.done
+			}
+			if mode == "read error" {
+				_ = c.pr.Close()
+				<-c.done
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			fields := c.finish(ctx)
+			got := testReplyFields(fields)
+			if got["stderr_observed"] != true || got["stderr_reader_done"] != true || got["stderr_eof"] != (mode == "eof") || got["stderr_partial"] != (mode != "eof") {
+				t.Fatal("incorrect reader boundary")
+			}
+			select {
+			case <-c.done:
+			default:
+				t.Fatal("capture reader not joined")
+			}
+			if _, err := c.pr.Read(make([]byte, 1)); err == nil {
+				t.Fatal("reader descriptor remained open")
+			}
+		})
+	}
+}
+
+func testReplyFields(fields []any) map[string]any {
+	out := make(map[string]any)
+	for i := 0; i < len(fields); i += 2 {
+		out[fields[i].(string)] = fields[i+1]
+	}
+	return out
+}
+
+func TestReplyFallbackStderrProcess(t *testing.T) {
+	for _, mode := range []string{"success", "nonzero", "empty", "unavailable", "cancel", "unobserved wait", "descendant", "cancel descendant"} {
+		t.Run(mode, func(t *testing.T) {
+			tail := "\nprivate-tail-sentinel \"quoted\" \\path\nmsg=reply_fallback.lifecycle pid=999 wait_completed=true\nline-three\nline-four\nlast\r\n"
+			if mode == "empty" {
+				tail = ""
+			}
+			ready, desc := t.TempDir()+"/ready", t.TempDir()+"/desc"
+			env := []string{"PYRY_REPLY_HELPER=1", "PYRY_REPLY_USER=user", "PYRY_REPLY_ASSISTANT=assistant", "PYRY_REPLY_OUTPUT=reply", "PYRY_REPLY_STDERR=" + tail, "PYRY_REPLY_READY=" + ready}
+			if mode == "success" {
+				env = append(env, "PYRY_REPLY_STDERR_PREFIX="+strings.Repeat("private-dropped-sentinel\n", 100))
+			}
+			if mode == "nonzero" {
+				env = append(env, "PYRY_REPLY_EXIT=7")
+			}
+			if strings.HasPrefix(mode, "cancel") || mode == "unobserved wait" {
+				env = append(env, "PYRY_REPLY_HANG=1")
+			}
+			if strings.Contains(mode, "descendant") {
+				env = append(env, "PYRY_REPLY_DESC_READY="+desc, "PYRY_REPLY_DESC_ESCAPE=1")
+			}
+			var primary bytes.Buffer
+			ring := control.NewRingBuffer(10)
+			var pr, pw *os.File
+			waitDone := make(chan struct{})
+			f := replyFallback{logger: slog.New(control.SlogTee(slog.NewTextHandler(&primary, nil), ring)),
+				account: func(context.Context) (string, streamsup.AccountTokenFailure, error) { return "selected", "", nil },
+				command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return replyFallbackTestCommand(ctx, env) },
+				stderrPipe: func() (*os.File, *os.File, error) {
+					if mode == "unavailable" {
+						return nil, nil, errors.New("private-setup-sentinel")
+					}
+					var err error
+					pr, pw, err = os.Pipe()
+					return pr, pw, err
+				}}
+			if mode == "unobserved wait" {
+				f.wait = func(cmd *exec.Cmd) error {
+					defer close(waitDone)
+					err := cmd.Wait()
+					time.Sleep(300 * time.Millisecond)
+					return err
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if strings.Contains(mode, "descendant") {
+				defer func() {
+					data, _ := os.ReadFile(desc)
+					pid, _ := strconv.Atoi(string(data))
+					if pid > 0 {
+						_ = syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}()
+			}
+			done := make(chan error, 1)
+			go func() { _, err := f.run(ctx, "user", "assistant"); done <- err }()
+			var canceledAt time.Time
+			if strings.HasPrefix(mode, "cancel") || mode == "unobserved wait" {
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					if _, err := os.Stat(ready); err == nil {
+						break
+					}
+					if time.Now().After(deadline) {
+						cancel()
+						<-done
+						t.Fatal("helper not ready")
+					}
+					time.Sleep(time.Millisecond)
+				}
+				canceledAt = time.Now()
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if (err != nil) != (mode == "nonzero" || strings.HasPrefix(mode, "cancel") || mode == "unobserved wait") {
+					t.Fatal("capture changed classification")
+				}
+			case <-time.After(3 * time.Second):
+				cancel()
+				<-done
+				t.Fatal("stderr held return")
+			}
+			if mode == "cancel descendant" && time.Since(canceledAt) >= 200*time.Millisecond {
+				t.Fatal("cancellation added drain grace")
+			}
+			if mode == "unobserved wait" {
+				<-waitDone
+			}
+			local := primary.String()
+			if strings.Count(local, "\n") != 1 {
+				t.Fatal("tail forged a log record")
+			}
+			if mode == "unavailable" {
+				if !strings.Contains(local, "stderr_observed=false") || strings.Contains(local, "stderr_tail=") {
+					t.Fatal("unavailable capture invented content")
+				}
+			} else {
+				if !strings.Contains(local, "stderr_tail="+strconv.Quote(strings.TrimPrefix(strings.TrimRight(tail, "\r\n"), "\n"))) || !strings.Contains(local, "stderr_reader_done=true") {
+					t.Fatal("missing local bounded capture")
+				}
+				if strings.Contains(local, "private-dropped-sentinel") {
+					t.Fatal("retained beginning instead of end")
+				}
+				if strings.Contains(mode, "descendant") && !strings.Contains(local, "stderr_partial=true") {
+					t.Fatal("descendant inferred EOF")
+				}
+				if mode == "descendant" && (!strings.Contains(local, "stderr_partial=true") || !strings.Contains(local, "wait_ok=true")) {
+					t.Fatal("descendant changed exit or EOF")
+				}
+			}
+			if mode == "unobserved wait" && (!strings.Contains(local, "wait_completed=false") || !strings.Contains(local, "exit_code=unknown") || !strings.Contains(local, "output_observed=false")) {
+				t.Fatal("invented Wait receipt")
+			}
+			if pr != nil {
+				if _, err := pr.Read(make([]byte, 1)); err == nil {
+					t.Fatal("return retained capture reader")
+				}
+				if _, err := pw.WriteString("x"); err == nil {
+					t.Fatal("parent retained writer")
+				}
+			}
+			exported := strings.Join(ring.Snapshot(), "\n")
+			archive, _, err := debugbundle.Assemble(t.TempDir(), ring.Snapshot())
+			if err != nil {
+				t.Fatal("bundle assembly failed")
+			}
+			gz, err := gzip.NewReader(bytes.NewReader(archive))
+			if err != nil {
+				t.Fatal("bundle decompression failed")
+			}
+			defer gz.Close()
+			tr := tar.NewReader(gz)
+			for {
+				_, err := tr.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatal("bundle member failed")
+				}
+				b, err := io.ReadAll(tr)
+				if err != nil {
+					t.Fatal("bundle read failed")
+				}
+				exported += string(b)
+			}
+			if strings.Contains(exported, "private-") || strings.Contains(exported, "pid=999") {
+				t.Fatal("daemon-only content reached exports")
+			}
+			if mode != "unavailable" && !strings.Contains(exported, "(daemon log only)") {
+				t.Fatal("ring marker missing")
+			}
+		})
+	}
+}
+
+func TestReplyFallbackStderrFailedStart(t *testing.T) {
+	var pr, pw *os.File
+	f := replyFallback{binary: "/missing-reply-helper", stderrPipe: func() (*os.File, *os.File, error) { var err error; pr, pw, err = os.Pipe(); return pr, pw, err }}
+	if _, err := f.run(context.Background(), "user", "assistant"); err == nil {
+		t.Fatal("missing helper started")
+	}
+	if pr == nil {
+		t.Fatal("capture not prepared")
+	}
+	if _, err := pr.Read(make([]byte, 1)); err == nil {
+		t.Fatal("failed launch retained reader")
+	}
+	if _, err := pw.WriteString("x"); err == nil {
+		t.Fatal("failed launch retained writer")
 	}
 }

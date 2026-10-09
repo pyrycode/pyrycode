@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -229,7 +228,7 @@ func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, mod
 	// t.Parallel, where nothing pins it process-wide; the credential is inherited.
 	// Add the relay switches.
 	cmd.Env = homeEnv(home, "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderr) // DEBUG tee
+	cmd.Stderr = stderr // Primary daemon logs stay in memory.
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("realclaude: pyry start: %v", err)

@@ -650,3 +650,50 @@ func TestSuggestStreamProgressGates(t *testing.T) {
 		}
 	}
 }
+
+func TestSuggestLifecycleQuotedTail(t *testing.T) {
+	const fields = "msg=reply_fallback.lifecycle pid=42 attempt_ms=10 child_ms=9 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 stderr_observed=true stderr_reader_done=true stderr_eof=true stderr_partial=false"
+	for _, tail := range []string{
+		"private-tail-sentinel pid=999 wait_completed=false stderr_eof=false",
+		"private-tail-sentinel\nmsg=reply_fallback.lifecycle pid=999",
+		"private-tail-sentinel \\\" pid=999 \\",
+	} {
+		for _, line := range []string{fields + " stderr_tail=" + strconv.Quote(tail), "stderr_tail=" + strconv.Quote(tail) + " " + fields} {
+			got := suggestLifecycle(line+"\n", 42)
+			if !strings.Contains(got, "pid=42") || !strings.Contains(got, "wait_completed=true") || !strings.Contains(got, "stderr_eof=true") || strings.Contains(got, "private-") {
+				t.Fatal("quoted tail altered safe evidence")
+			}
+			if suggestLifecycle(line+"\n", 999) != "daemon lifecycle: unknown" {
+				t.Fatal("quoted tail supplied PID")
+			}
+		}
+	}
+	for _, suffix := range []string{` stderr_tail="unterminated`, ` pid=999`, ` private="ignored"pid=999`} {
+		if suggestLifecycle(fields+suffix+"\n", 42) != "daemon lifecycle: unknown" {
+			t.Fatal("malformed or ambiguous record accepted")
+		}
+	}
+	var capture lockedBuffer
+	_, _ = capture.Write([]byte(fields + " stderr_tail=" + strconv.Quote("private-tail-sentinel") + "\n" + fields + ` stderr_tail="private-incomplete`))
+	if strings.Contains(capture.String(), "private-") || !strings.Contains(capture.String(), "pid=42") {
+		t.Fatal("report snapshot exposed tail")
+	}
+}
+
+func TestSuggestStderrObservationGates(t *testing.T) {
+	for _, tc := range []struct {
+		fields map[string]string
+		want   string
+	}{
+		{nil, "stderr_observed=unknown stderr_reader_done=unknown stderr_eof=unknown stderr_partial=unknown"},
+		{map[string]string{"stderr_observed": "false", "stderr_eof": "true"}, "stderr_observed=false stderr_reader_done=unknown stderr_eof=unknown stderr_partial=unknown"},
+		{map[string]string{"stderr_observed": "true", "stderr_reader_done": "true", "stderr_eof": "false", "stderr_partial": "true", "wait_completed": "false"}, "stderr_observed=true stderr_reader_done=true stderr_eof=false stderr_partial=true"},
+		{map[string]string{"stderr_observed": "true", "stderr_reader_done": "true", "stderr_eof": "true", "stderr_partial": "false", "wait_completed": "false"}, "stderr_observed=true stderr_reader_done=true stderr_eof=true stderr_partial=false"},
+		{map[string]string{"stderr_observed": "true", "stderr_reader_done": "true", "stderr_eof": "true", "stderr_partial": "true"}, "stderr_observed=true stderr_reader_done=true stderr_eof=unknown stderr_partial=unknown"},
+		{map[string]string{"stderr_observed": "true", "stderr_reader_done": "private-invalid", "stderr_eof": "false", "stderr_partial": "true"}, "stderr_observed=true stderr_reader_done=unknown stderr_eof=unknown stderr_partial=unknown"},
+	} {
+		if strings.Join(suggestStderrFields(tc.fields), " ") != tc.want {
+			t.Fatal("invalid independent reader predicates")
+		}
+	}
+}
