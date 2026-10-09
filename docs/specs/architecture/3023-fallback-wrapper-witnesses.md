@@ -58,3 +58,6 @@ Pending documentation stage: update `docs/knowledge/features/e2e-realclaude.md`,
 - Threat model: observer-only evidence, not authorization/readiness. OUT OF SCOPE: stream-format investigation #3024 and stderr-class evidence #3025; historical failure cause unresolved.
 **Reviewer:** builder (self-review per checklist)
 **Date:** 2026-10-09
+
+## Revisions
+- 2026-10-09 builder review: recovery metadata accepted absent elapsed fields and duplicate JSON keys. Require exact present typed scalar fields, a positive invocation PID/start time, and ordered correlated completion; invalid evidence clears completion and reports ambiguous progress. Added `TestSuggestPrefixCorrelation` for 1/4096/4097 prefixes, partial completion, and invalid repeated/correlated metadata. The self-review remains PASS: fixed metadata only, exact inherited I/O/group, 0600 evidence, 64-KiB read bound, no new credential/network/cryptographic path. No daemon changes.
