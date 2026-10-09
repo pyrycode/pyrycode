@@ -4,6 +4,7 @@ package thread
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"time"
 	"unicode"
@@ -100,8 +101,9 @@ func (f *Fold) Items() []Item {
 	return result
 }
 
-// decode accepts objects only and verifies required fields are present/non-null.
-// DTO decoding rejects incorrect recorded field types without logging content.
+// decode accepts objects only, checks required fields and validates recorded DTO
+// fields recursively. Null is valid for pointers and slices, never their scalar
+// or struct elements. Unknown fields remain inert source content.
 func decode(raw json.RawMessage, dst any, required ...string) bool {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil || json.Unmarshal(raw, dst) != nil {
@@ -111,6 +113,46 @@ func decode(raw json.RawMessage, dst any, required ...string) bool {
 		v, ok := fields[key]
 		if !ok || string(v) == "null" {
 			return false
+		}
+	}
+	return validRecordedFields(raw, reflect.TypeOf(dst).Elem())
+}
+
+func validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
+	if string(raw) == "null" {
+		return typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice
+	}
+	switch typ.Kind() {
+	case reflect.Pointer:
+		return validRecordedFields(raw, typ.Elem())
+	case reflect.Struct:
+		// Time's JSON decoder validates its string representation, not struct fields.
+		if typ == reflect.TypeOf(time.Time{}) {
+			return true
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) != nil {
+			return false
+		}
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			name := strings.Split(field.Tag.Get("json"), ",")[0]
+			for key, value := range fields {
+				// Match the case-insensitive field names accepted by encoding/json.
+				if strings.EqualFold(key, name) && !validRecordedFields(value, field.Type) {
+					return false
+				}
+			}
+		}
+	case reflect.Slice:
+		var values []json.RawMessage
+		if json.Unmarshal(raw, &values) != nil {
+			return false
+		}
+		for _, value := range values {
+			if !validRecordedFields(value, typ.Elem()) {
+				return false
+			}
 		}
 	}
 	return true

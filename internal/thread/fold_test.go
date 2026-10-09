@@ -124,6 +124,88 @@ func TestExcludedAndMalformed(t *testing.T) {
 	}
 }
 
+func TestMalformedRecordedFields(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, typ, raw string }{
+		{"attachment_element", "message", `{"role":"user","text":"hello","attachment_ids":[null]}`},
+		{"message_id", "message", `{"role":"user","text":"hello","message_id":null}`},
+		{"device_name", "message", `{"role":"user","text":"hello","device_name":null}`},
+		{"client_version", "message", `{"role":"user","text":"hello","client_version":null}`},
+		{"client_sent_at", "message", `{"role":"user","text":"hello","client_sent_at":null}`},
+		{"queued_id", "message", `{"role":"user","text":"hello","queued_msg_id":null}`},
+		{"sent_now", "message", `{"role":"user","text":"hello","sent_now":null}`},
+		{"owner", "message", `{"conversation_id":null,"role":"user","text":"hello"}`},
+		{"stops_turn", "banner", `{"text":"hello","stops_turn":null}`},
+		{"case_folded", "banner", `{"text":"hello","STOPS_TURN":null}`},
+		{"truncated", "unrecognized_message", `{"raw":"hello","truncated":null}`},
+		{"model", "model_refusal_fallback", `{"banner":"hello","fallback_model":null}`},
+		{"reported_field", "model_refusal_no_fallback", `{"banner":"hello","dropped_fields":[null]}`},
+		{"attachment_name", "attachment_offered", `{"attachment_id":"file","filename":"hello","conversation_id":null}`},
+		{"resolved_at", "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{},"resolved_at":null}`},
+		{"session_grant", "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{},"session_grant":null}`},
+		{"question", "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{"questions":[null]}}`},
+		{"question_index", "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{"questions":[{"index":null}]}}`},
+		{"wrong_index", "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{"questions":[{"index":"0"}]}}`},
+		{"question_flag", "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{"questions":[{"multi_select":null}]}}`},
+		{"answer", "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{"questions":[{"values":[null]}]}}`},
+		{"answer_text", "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{"questions":[{"values":[{"text":null}]}]}}`},
+		{"answer_meaning", "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{"questions":[{"values":[{"meaning":null}]}]}}`},
+		{"next_agent", "session_divider", `{"cause":"operator_reset","occurred_at":"2026-01-01T00:00:00Z","previous_session_id":"old","new_session_id":"current","next_agent":null}`},
+		{"previous_agent", "session_divider", `{"cause":"operator_reset","occurred_at":"2026-01-01T00:00:00Z","previous_session_id":"old","new_session_id":"current","previous_agent":null}`},
+		{"raw_successor", "session_divider", `{"cause":"operator_reset","occurred_at":"2026-01-01T00:00:00Z","previous_session_id":"old","new_session_id":null}`},
+		{"legacy_pair", "session_transition", `{"reason":"clear","occurred_at":"2026-01-01T00:00:00Z","previous_session_id":"old","new_session_id":"current","next_agent":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, want := New("a"), New("a")
+			initial := testDivider(1, "claude_clear", "old", "current", "claude", "")
+			testFeed(t, f, initial)
+			testFeed(t, want, initial)
+			bad := testEntry(2, tc.typ, tc.raw)
+			bad.Session = testSource("codex", "current")
+			shown := true
+			bad.Shown = &shown
+			testFeed(t, f, bad)
+			want.version = 2
+			if !reflect.DeepEqual(f, want) {
+				t.Fatalf("malformed fact changed items, pairs, scope or attribution: got %#v want %#v", f, want)
+			}
+			pair := testTransition(4, "clear", "old", "current")
+			pair.Session = testSource("codex", "current")
+			later := []history.Entry{testMessage(3), pair, testMessage(5)}
+			testFeed(t, f, later...)
+			testFeed(t, want, later...)
+			if !reflect.DeepEqual(f, want) {
+				t.Fatal("malformed fact affected later attribution or matching")
+			}
+			replay := New("a")
+			testFeed(t, replay, append([]history.Entry{initial, bad}, later...)...)
+			if !reflect.DeepEqual(f, replay) {
+				t.Fatal("incremental feed differs from replay")
+			}
+		})
+	}
+}
+
+func TestNullableRecordedFields(t *testing.T) {
+	t.Parallel()
+	for _, e := range []history.Entry{
+		testEntry(1, "compaction_boundary", `{"trigger":"auto","pre_tokens":null,"post_tokens":0}`),
+		testEntry(1, "message", `{"role":"user","text":"hello","attachment_ids":null,"future":null}`),
+		testEntry(1, "model_refusal_fallback", `{"banner":"hello","truncated_fields":null,"dropped_fields":null}`),
+		testEntry(1, "prompt_answered", `{"correlation_id":"q","decision":"answer","context":{"questions":null}}`),
+		testEntry(1, "session_transition", `{"reason":"clear","occurred_at":"2026-01-01T00:00:00Z","previous_session_id":"old","new_session_id":"current","workspace_cwd":null}`),
+		testEntry(1, "session_divider", `{"cause":"operator_reset","occurred_at":"2026-01-01T00:00:00Z","previous_session_id":"old","new_session_id":"current","reset_handoff_outcome":null}`),
+	} {
+		t.Run(e.Type, func(t *testing.T) {
+			f := New("a")
+			testFeed(t, f, e)
+			if items := f.Items(); len(items) != 1 || f.Version() != 1 || !reflect.DeepEqual(items[0].Content, e.Payload) {
+				t.Fatalf("valid nullable content lost: %#v", items)
+			}
+		})
+	}
+}
+
 func TestFoldReplay(t *testing.T) {
 	t.Parallel()
 	entries := []history.Entry{testMessage(1), testDivider(2, "agent_switch", "s", "n", "", "codex"), testMessage(3), testTransition(4, "clear", "s", "n"), testMessage(5), testDivider(6, "idle_sleep", "n", "", "codex", ""), testTransition(7, "idle_evict", "n", "n"), testMessage(8)}
