@@ -13,7 +13,7 @@ import (
 
 // shadowRawShell checks controlled task-linked shells against raw task evidence.
 // A task link changes lifecycle ownership; a launch result cannot finish it.
-func shadowRawShell(h shadowHistory, cp shadowCheckpoint, item thread.Item, source history.Entry, call protocol.ToolUsePayload) (bool, error) {
+func shadowRawShell(h shadowHistory, cp shadowCheckpoint, item thread.Item, source history.Entry, call protocol.ToolUsePayload, parentEnding json.RawMessage) (bool, error) {
 	if (call.Name != "Bash" && call.Name != "local_bash") || (source.Session != nil && source.Session.Kind != "claude") {
 		return false, nil
 	}
@@ -120,6 +120,12 @@ func shadowRawShell(h shadowHistory, cp shadowCheckpoint, item thread.Item, sour
 	}
 	if result.ID != 0 && !equal("result", result.Payload) {
 		return true, errors.New("shell launch result differs from raw report")
+	}
+	if active && parentEnding != nil {
+		status, active = "interrupted", false
+		if !equal("parent_ending", parentEnding) {
+			return true, errors.New("child shell lost independently validated parent ending")
+		}
 	}
 	if item.Status != status || item.Active != active || item.EndedOrder != final.ID || (final.ID != 0 && !equal(finalField, final.Payload)) {
 		return true, fmt.Errorf("shell lifecycle differs from raw task outcome: creation=%d terminal=%d status_match=%t active_match=%t order_match=%t content_match=%t", item.ID, final.ID, item.Status == status, item.Active == active, item.EndedOrder == final.ID, final.ID == 0 || equal(finalField, final.Payload))

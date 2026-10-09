@@ -227,7 +227,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 		}
 		ids := map[uint64]thread.Item{}
 		orders := map[uint64]bool{}
-		foundQueue, foundChild, settled := false, false, false
+		foundQueue, foundChild, settled, foundDivider := false, false, false, false
 		var foldedMain strings.Builder
 		for _, item := range cp.Items {
 			if item.ID == 0 || item.ID > cp.Version || item.Rev < item.ID || item.Rev > cp.Version || ids[item.ID].ID != 0 || item.Order > cp.Version || (item.Order == 0 && item.Status != "queued") || (item.Kind != "user_message" && item.Order != item.ID) || (item.Order != 0 && orders[item.Order]) {
@@ -239,6 +239,15 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 			}
 			if source.Session != nil && source.Session.Kind != "none" && (item.Session != source.Session.SessionID || item.Agent != source.Session.Kind) {
 				return errors.New("item source ownership changed")
+			}
+			if item.Kind == "agent" || item.Kind == "tool_call" || item.Kind == "assistant_message" {
+				var recorded struct {
+					Turn string `json:"turn_id"`
+				}
+				_ = json.Unmarshal(source.Payload, &recorded)
+				if item.Turn != recorded.Turn {
+					return errors.New("work turn differs from raw creation")
+				}
 			}
 			if item.Parent != 0 {
 				parent, ok := ids[item.Parent]
@@ -273,6 +282,26 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 					return errors.New("queued identity status or placement changed")
 				}
 			}
+			if item.ID == divider {
+				foundDivider = true
+				saved := h.Entries[divider-1]
+				var boundary struct {
+					Session string `json:"previous_session_id"`
+					Agent   string `json:"previous_agent"`
+				}
+				_ = json.Unmarshal(saved.Payload, &boundary)
+				noChild := false
+				if saved.Session != nil {
+					boundary.Session, boundary.Agent = saved.Session.SessionID, saved.Session.Kind
+					noChild = saved.Session.Kind == "none"
+				}
+				if boundary.Agent != "claude" && boundary.Agent != "codex" {
+					boundary.Agent = "unknown"
+				}
+				if item.Kind != "session_divider" || item.Order != divider || item.Rev != divider || item.Parent != 0 || item.Active || !item.Shown || item.NoChild != noChild || item.Session != boundary.Session || item.Agent != boundary.Agent || !shadowJSONEqual(item.Content, saved.Payload) {
+					return errors.New("closure divider differs from raw fact")
+				}
+			}
 			if cp.Version >= end && item.Turn == mainTurn && item.Parent == 0 && item.Kind != "agent" && item.Active {
 				return errors.New("main completion left active work")
 			}
@@ -287,8 +316,8 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 				orders[item.Order] = true
 			}
 		}
-		if cp.Name == "session_closed" && !settled {
-			return errors.New("closure did not settle active work before divider")
+		if cp.Name == "session_closed" && (!settled || !foundDivider) {
+			return errors.New("closure did not retain divider and settle active work before it")
 		}
 		if !foundQueue {
 			return errors.New("accepted queue item missing")
@@ -338,7 +367,7 @@ func shadowSanitize(raw []byte) ([]byte, error) {
 	return json.Marshal(walk(value))
 }
 
-// shadowRawRows derives user content, text runs and ordinary tool outcomes from raw facts,
+// shadowRawRows derives user content, text runs and work outcomes from raw facts,
 // without consulting a Fold or saved expected rows.
 func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 	type lane struct{ session, turn, parent string }
@@ -352,6 +381,7 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 	}
 	open := map[lane]uint64{}
 	texts := map[uint64]string{}
+	textEndings := map[uint64]history.Entry{}
 	calls := map[toolKey]bool{}
 	terminals := map[toolKey]terminal{}
 	sendOutcomes := map[uint64]history.Entry{}
@@ -391,6 +421,9 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 			calls[call] = true
 			delete(open, key)
 		case protocol.TypeTurnEnd, "main_turn_interrupted":
+			if key.parent != "" && open[key] != 0 {
+				textEndings[open[key]] = entry
+			}
 			delete(open, key)
 			for call := range calls {
 				if call.lane == key && terminals[call].entry.ID == 0 {
@@ -423,6 +456,7 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 		}
 	}
 	seen := map[uint64]bool{}
+	parents := map[uint64]thread.Item{}
 	for _, item := range cp.Items {
 		if item.ID == 0 || item.ID > uint64(len(h.Entries)) || item.ID > cp.Version {
 			return errors.New("row creating ID outside retained history")
@@ -469,18 +503,31 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 			if texts[item.ID] == "" || content.Text != texts[item.ID] {
 				return errors.New("text run differs from raw observations")
 			}
-			if item.Parent == 0 {
-				active := false
-				for key, id := range open {
-					active = active || (key.parent == "" && id == item.ID)
+			active := false
+			for _, id := range open {
+				active = active || id == item.ID
+			}
+			status := "done"
+			if active {
+				status = "running"
+				if ending := shadowParentEnding(parents[item.Parent]); ending != nil {
+					status, active = "interrupted", false
+					var content map[string]json.RawMessage
+					_ = json.Unmarshal(item.Content, &content)
+					if !shadowJSONEqual(content["parent_ending"], ending) {
+						return errors.New("child text lost independently validated parent ending")
+					}
 				}
-				status := "done"
-				if active {
-					status = "running"
+			}
+			if ending, ok := textEndings[item.ID]; ok {
+				var content map[string]json.RawMessage
+				_ = json.Unmarshal(item.Content, &content)
+				if !shadowJSONEqual(content["ending"], ending.Payload) {
+					return errors.New("child text lost raw lane ending")
 				}
-				if item.Status != status || item.Active != active {
-					return errors.New("main text status differs from raw boundaries")
-				}
+			}
+			if item.Status != status || item.Active != active {
+				return errors.New("text status differs from raw boundaries or parent final")
 			}
 			seen[item.ID] = true
 		}
@@ -488,17 +535,38 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 			seen[item.ID] = true
 		}
 
-		if item.Kind == "tool_call" {
+		if item.Kind == "tool_call" || item.Kind == "agent" {
 			var call protocol.ToolUsePayload
 			_ = json.Unmarshal(source.Payload, &call)
 			var content map[string]json.RawMessage
 			_ = json.Unmarshal(item.Content, &content)
+			var launch map[string]json.RawMessage
+			_ = json.Unmarshal(source.Payload, &launch)
 			var saved protocol.ToolUsePayload
 			_ = json.Unmarshal(item.Content, &saved)
-			if source.Type != protocol.TypeToolUse || call.Name == "" || !reflect.DeepEqual(saved.Input, call.Input) {
-				return errors.New("tool creation input lost")
+			if source.Type != protocol.TypeToolUse || call.Name == "" || !reflect.DeepEqual(saved, call) {
+				return errors.New("work row lacks raw creation")
 			}
-			if linked, err := shadowRawShell(h, cp, item, source, call); err != nil {
+			for field, raw := range launch {
+				if !shadowJSONEqual(content[field], raw) {
+					return errors.New("work creation fields differ from raw launch")
+				}
+			}
+			kind := "tool_call"
+			if (call.Name == "Agent" || call.Name == "Task") && (source.Session == nil || source.Session.Kind == "claude") {
+				kind = "agent"
+			}
+			if item.Kind != kind {
+				return errors.New("work kind differs from raw launch")
+			}
+			if item.Kind == "agent" {
+				if err := shadowRawAgent(h, cp, item, source, call, parents[item.Parent]); err != nil {
+					return err
+				}
+				parents[item.ID] = item
+				continue
+			}
+			if linked, err := shadowRawShell(h, cp, item, source, call, shadowParentEnding(parents[item.Parent])); err != nil {
 				return err
 			} else if linked {
 				continue
@@ -512,7 +580,14 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 					return fmt.Errorf("tool outcome differs from first raw terminal: version=%d creation=%d terminal=%d status_match=%t inactive=%t content_match=%t", cp.Version, item.ID, outcome.entry.ID, item.Status == outcome.status, !item.Active, reflect.DeepEqual(got, want))
 				}
 			} else {
-				if item.Status != "running" || !item.Active {
+				status, active := "running", true
+				if ending := shadowParentEnding(parents[item.Parent]); ending != nil {
+					status, active = "interrupted", false
+					if !shadowJSONEqual(content["parent_ending"], ending) {
+						return errors.New("child tool lost independently validated parent ending")
+					}
+				}
+				if item.Status != status || item.Active != active {
 					return errors.New("unfinished tool status differs from raw lifecycle")
 				}
 			}
