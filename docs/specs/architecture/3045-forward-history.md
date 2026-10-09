@@ -57,3 +57,6 @@ Resolved: use callbacks with nil completion and synchronous context cancellation
 - [Threat model] No new relay endpoint or permission capability. Future #3048 consumer owns daemon integration; transport authorization remains in existing authenticated handlers.
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-09
+
+## Revisions
+- 2026-10-09: review made sealed-segment progress explicit, so even a full final segment is not reopened; disappearance after positioning returns a read error. `TestForwardBoundedChunksAndPosition` covers both; `TestForwardTailReadToWait` pins the append after the final read and before waiting.
