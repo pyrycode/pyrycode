@@ -35,7 +35,7 @@ and timeout paths. An assertion or timeout dump can disclose credentials even
 when successful runs look safe. Exercise those diagnostics with a synthetic
 inherited sentinel and a minimal subprocess environment. Helpers used exclusively
 by tagged tests must share their build tag; an ordinary staticcheck run otherwise rejects
-them as unused. See [the isolated live failure/release contract](e2e-realclaude.md#test-infrastructure).
+them as unused. See [the isolated live failure/release contract](e2e-realclaude-test-infrastructure.md#test-infrastructure).
 
 For request/reply correlation that spans an `io.Writer` call, proving
 "registered before write" and "a failed write cannot emit" in separate tests

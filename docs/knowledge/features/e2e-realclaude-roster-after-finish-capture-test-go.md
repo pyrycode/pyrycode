@@ -46,7 +46,7 @@ The closed-input Composer Stop proof reproduced the FIFO stall on Claude
 child exit while the background FIFO remained held. `TestComposerForegroundGate`
 checks held execution, normal release and repeated-release cleanup offline.
 See [the repair evidence](https://github.com/pyrycode/pyrycode/issues/2775#issuecomment-6008658292)
-and [the cleanup attribution checks](e2e-realclaude.md#test-infrastructure).
+and [the cleanup attribution checks](e2e-realclaude-test-infrastructure.md#test-infrastructure).
 
 ### Ordering a roster against the terminal-status line discards the one line the ticket needs
 
