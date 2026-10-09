@@ -249,6 +249,7 @@ type Store struct {
 	instanceDir     string
 	maxSegmentBytes int64
 	convs           map[conversations.ConversationID]*convLog
+	followers       map[conversations.ConversationID]map[chan struct{}]struct{}
 
 	// AC-4 instrumentation: the two numbers "serving the newest page does work
 	// bounded by the requested page size, not by the log size" is stated in.
@@ -394,6 +395,7 @@ func (s *Store) AppendWithMetadata(convID conversations.ConversationID, typ stri
 	} else {
 		c.segBytes += written
 	}
+	s.notifyCommitted(convID)
 	return id, nil
 }
 

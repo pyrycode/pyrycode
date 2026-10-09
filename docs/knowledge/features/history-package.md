@@ -1,8 +1,9 @@
 # `internal/history` — versioned, segmented per-conversation log
 
 The durable, append-only, per-conversation message log the daemon writes as it
-fans envelopes out, read newest-first by walking backwards on demand. Landed
-in #2112 as a storage floor with no caller; #2114 gave it its first two —
+fans envelopes out, read newest-first by paging backwards or oldest-first with
+snapshot walks and same-Store tailing. Landed in #2112 as a storage floor with
+no caller; #2114 gave it its first two —
 the interactive emitter's `emit` chokepoint and session transitions — and
 \#2115 gave it a third: the operator's own typed message, written from
 the safe `msgqueue.QueuedMessage` projection. Stream Claude delivery commits
@@ -16,7 +17,7 @@ wire-serving consumer,
 
 | Document | Topics |
 | --- | --- |
-| [Shape](history-package-shape.md) | Entry and metadata contracts, paging bounds and durable ID allocation. |
+| [Shape](history-package-shape.md) | Entry and metadata contracts, paging bounds, durable ID allocation and forward replay/tailing. |
 | [A cleanup on a failed write is not the guarantee it looks like](history-package-failed-write-recovery.md) | Write rollback and read tolerance after fresh or active segment failures. |
 | [Producers (#2114, #2115)](history-package-producers.md) | Map of captured provenance, runtime/startup closure, agent/task attribution and reported endings, visibility, receipts and producer verification. |
 | [`LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)](history-package-watermarks.md) | Raw durable cursors, displayable unread watermarks and lazy recovery. |
@@ -35,13 +36,15 @@ already flows is less new code than reading a foreign format back.
 ## Why segments, and why the premise for them was wrong once
 
 Retention is **none** (deliberately — endless for now, not deferred by
-accident) and access is **newest-first, walking backwards on demand**. Those
-two facts, not an I/O cost argument, are why the log is segmented rather than
-one growing file: the newest segment stays small, older segments are opened
-only when a client scrolls into them, segment boundaries double as the index
+accident) and the original browsing access is **newest-first, walking backwards
+on demand**. Those two facts, not an I/O cost argument, are why the log is segmented
+rather than one growing file: the newest segment stays small, browsing opens older
+segments only when a client scrolls into them, segment boundaries double as the index
 so no sidecar file is needed, and a future retention policy becomes a file
-delete rather than a rewrite. An earlier draft justified segmentation by
-claiming a plain append-only file can't be opened cheaply at its end — false
+delete rather than a rewrite. [Forward consumption](history-package-shape.md#forward-consumption)
+also walks these segments chronologically and skips completed segments while tailing.
+An earlier draft justified segmentation by claiming a plain append-only file
+can't be opened cheaply at its end — false
 (seek to EOF, read one block backwards) — and was corrected before it shipped.
 **A segmentation design should be justified by the access pattern it serves,
 not by a plausible-sounding I/O claim that happens to point the same way.**
@@ -105,14 +108,25 @@ the reader skips any non-regular directory entry rather than following it.
 ## Concurrency
 
 No goroutine is spawned and there is no `Close` — the store is passive, like
-`Ring`. One `sync.Mutex` guards the per-conversation state map, the read
-counters, and both append paths and `Page`'s storage work, held only around
-bounded file I/O and never across a channel op or another lock. Reads take the lock
-rather than racing appends: the alternative (lock-free reads plus a
+`Ring`. One `sync.Mutex` guards the per-conversation state map, read counters,
+tail registrations, both append paths and `Page`'s storage work. Forward walks
+release it after listing and after each bounded segment read/decode, before
+callbacks, delivery or waiting; they never hold it across the whole replay.
+Reads take the lock rather than racing appends: the alternative (lock-free reads plus a
 torn-trailing-line tolerance on the read path) buys a shorter hold at the cost
 of reasoning about partial-write visibility across every filesystem the daemon
 runs on, and holding a leaf mutex across a bounded read was judged cheaper
 than being wrong about that.
+
+Committed-append wakeups use nonblocking sends under the mutex into capacity-one
+channels; further commits coalesce while a wakeup is pending. Consumer processing
+or waiting cannot hold the store mutex or delay append completion, including for
+another conversation. `TestForwardReplayToTail` pauses a multi-segment replay
+callback and proves appends to both the same and another conversation finish
+before replay resumes. `ForwardReader` methods require serialized caller use;
+`Store` remains safe for concurrent callers. See
+[Forward consumption](history-package-shape.md#forward-consumption) for catch-up,
+cancellation and retry contracts.
 
 **Measured (#2114), against a fixed decision rule.** `Append`'s cost at the
 interactive emit chokepoint is dominated by the directory-resolution
@@ -215,7 +229,8 @@ enum rather than a bare error.
 internal/history/
 ├── log.go       Store, New, Append, AppendWithMetadata, Page, metadata types, sentinels, per-conversation cache, directory resolution
 ├── segment.go   segment naming/ordering, versioned header, entry-line codec, whole-segment read
-└── cursor.go    cursor mint + parse + validation
+├── cursor.go    cursor mint + parse + validation
+└── forward.go   chronological snapshot walks, progress and committed-append tail wakeups
 ```
 
 ## Related
