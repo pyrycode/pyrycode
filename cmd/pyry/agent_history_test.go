@@ -426,6 +426,56 @@ func TestAgentHistory_StorageFailure(t *testing.T) {
 
 func TestAgentHistory_SealedReports(t *testing.T) {
 	t.Parallel()
+	for _, mainBeforeSeal := range []bool{false, true} {
+		for _, tool := range []string{"Agent", "Task"} {
+			for _, status := range []turnevent.ToolStatus{turnevent.ToolStatusCompleted, turnevent.ToolStatusFailed} {
+				t.Run(fmt.Sprintf("first-after-seal/main=%t/%s/%s", mainBeforeSeal, tool, status), func(t *testing.T) {
+					dir := t.TempDir()
+					store := history.New(dir)
+					e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
+					e.hist, e.runtimeFacts = store, true
+					ctx := context.Background()
+					source := history.SessionProvenance{Kind: "claude", SessionID: "reused"}
+					if mainBeforeSeal {
+						e.handleForSource(ctx, testConvID, turnevent.ThoughtChunk{}, source, 1)
+					}
+					e.closeRuntimeSource(ctx, testConvID, "reused", "idle_sleep", historyTS, true, 0, 1)
+					e.handleForSource(ctx, testConvID, turnevent.ToolStart{Title: tool, ToolCallID: "call"}, source, 2)
+					e.handleForSource(ctx, testConvID, turnevent.TextChunk{Text: "successor"}, source, 2)
+					successor := e.convTurnState
+					turnID, lifetime, phaseOrder := e.turnID, e.agentLifetime, e.nextPhaseOrder
+					for _, ev := range []turnevent.Event{
+						turnevent.ToolStart{Title: tool, ToolCallID: "call", ParentToolCallID: "parent"},
+						turnevent.ToolCallDenied{ToolCallID: "call", ToolName: tool},
+						turnevent.ToolUpdate{ToolCallID: "call", ParentToolCallID: "parent", Status: status},
+					} {
+						e.handleForSource(ctx, testConvID, ev, source, 1)
+						if e.inTurn || e.turnID != "" || e.currentState != "" {
+							t.Fatal("sealed call reopened main work")
+						}
+						if !successor.inTurn || successor.turnID != turnID || successor.currentState != turnbridge.StateResponding || successor.agentLifetime != lifetime || e.nextPhaseOrder != phaseOrder {
+							t.Fatal("sealed call changed successor state")
+						}
+					}
+					for _, reader := range []*history.Store{store, history.New(dir)} {
+						facts := testAgentFacts(t, reader, testConvID)
+						if len(facts[historyAgentObserved]) != 2 || len(facts[historyAgentResult]) != 1 || len(facts[historyAgentDenied]) != 1 {
+							t.Fatalf("sealed first-call reports: %+v", facts)
+						}
+						observed, result, denied := facts[historyAgentObserved][1], facts[historyAgentResult][0], facts[historyAgentDenied][0]
+						if observed["tool"] != tool || observed["parent_tool_call_id"] != "parent" || result["status"] != string(status) || result["parent_tool_call_id"] != "parent" || denied["status"] != "denied" {
+							t.Fatalf("sealed reports changed: %+v", facts)
+						}
+						for _, fact := range []map[string]string{result, denied} {
+							if fact["tool_call_id"] != "call" || fact["lifetime_id"] != observed["lifetime_id"] || fact["lifetime_id"] == lifetime {
+								t.Fatalf("sealed report joined successor: %+v", fact)
+							}
+						}
+					}
+				})
+			}
+		}
+	}
 	dir := t.TempDir()
 	store := history.New(dir)
 	e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())

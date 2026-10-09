@@ -107,7 +107,7 @@ func (e *interactiveTurnEmitterV2) observeAgentHistory(ctx context.Context, ev t
 		p := agentHistoryFact{ToolCallID: v.ToolCallID, ParentToolCallID: v.ParentToolCallID, Tool: v.Title}
 		e.recordAgentFact(ctx, historyAgentObserved, p)
 	case turnevent.ToolUpdate:
-		if e.launcherTurns[v.ToolCallID] == "" || (v.Status != turnevent.ToolStatusCompleted && v.Status != turnevent.ToolStatusFailed) {
+		if _, observed := e.launcherTurns[v.ToolCallID]; !observed || (v.Status != turnevent.ToolStatusCompleted && v.Status != turnevent.ToolStatusFailed) {
 			return
 		}
 		p := agentHistoryFact{ToolCallID: v.ToolCallID, ParentToolCallID: v.ParentToolCallID, Status: string(v.Status)}
@@ -116,7 +116,7 @@ func (e *interactiveTurnEmitterV2) observeAgentHistory(ctx context.Context, ev t
 		if v.ToolCallID == "" || slices.Contains(v.DroppedFields, "tool_call_id") || slices.Contains(v.TruncatedFields, "tool_call_id") {
 			return
 		}
-		if e.launcherTurns[v.ToolCallID] == "" {
+		if _, observed := e.launcherTurns[v.ToolCallID]; !observed {
 			return
 		}
 		p := agentHistoryFact{ToolCallID: v.ToolCallID, Status: "denied"}
