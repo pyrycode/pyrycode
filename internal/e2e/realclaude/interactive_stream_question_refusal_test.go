@@ -213,6 +213,7 @@ func TestInteractiveStreamQuestionRefusal(t *testing.T) {
 	// request id 2 and the refusal 3, so follow-up frames start at 4.
 	const firstFollowUpReqID uint64 = 4
 	obs := settleRefusedTurn(t, h, convID, batch.QuestionBatchID, firstFollowUpReqID, perTurnReplyBudget)
+	requirePromptAnswerHistory(t, h, convID, batch.QuestionBatchID, "refusal", false)
 
 	// AC 2: claude did not perform the work the question was blocking. Checked AFTER
 	// idle so the tool phase is definitively over, and non-vacuous because every

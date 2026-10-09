@@ -60,3 +60,6 @@ Pending documentation stage: in `docs/knowledge/features/history-package-produce
 - Concurrency: ownership snapshot before actuation and winning Resolve guard avoid retirement races and losing-answer facts; no nested locks or new goroutines.
 - Threat model: existing authenticated encrypted relay and authorization contracts remain; crash-atomic child delivery and future fold are outside this slice under ADR 042.
 **Reviewer:** builder self-review. **Date:** 2026-10-09.
+
+## Revisions
+- 2026-10-09: `ResolveCancel` preserves its existing nil-device deny/dismissal behavior. Self-review found that this compatibility path must not invent an authenticated remote operator: suppress its answer fact while keeping child delivery unchanged. `TestPromptAnswerHistoryUnauthenticatedCancel` covers it. `TestPromptAnswerHistoryRetirement` additionally forces question-owner retirement before parked resolution and races permission retirement after delivery.

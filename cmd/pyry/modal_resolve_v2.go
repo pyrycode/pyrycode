@@ -11,6 +11,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/audit"
 	"github.com/pyrycode/pyrycode/internal/devices"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -115,7 +116,16 @@ func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (re
 	// registry's only producer is the bridge's Surface, so a miss has never been
 	// observed; it is logged, not defended (#1546). The modal is already consumed,
 	// so the audit and dismissal below still happen — aborting would orphan it.
-	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, false, false, reasonRemoteDeny)
+	handled := false
+	if bridge, ok := r.streamApprovals.(*streamApprovalBridge); ok {
+		decision := ""
+		if dev.MayAnswerPrompt() {
+			decision = "cancel"
+		}
+		handled = bridge.resolveStreamDecision(modalID, false, false, reasonRemoteDeny, decision)
+	} else if r.streamApprovals != nil {
+		handled = r.streamApprovals.ResolveStream(modalID, false, false, reasonRemoteDeny)
+	}
 	if !handled {
 		r.logUnrouted("relay: modal cancel reached no stream approval", "modal_cancel.unrouted", modalID)
 	}
@@ -198,14 +208,12 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 	// Step 4: map option_id → outcome against THIS modal's surfaced options. A
 	// forged or wrong-class option_id is not a locatable option ⇒ reject with no
 	// verdict, no consume, no audit (no security decision was
-	// made; it is a malformed client frame). Warn-logged with a length-bounded
-	// option_id (it is attacker-controlled; slog JSON-escapes it).
+	// made; it is a malformed client frame). Logs carry no supplied option content.
 	outcome, ok := classifyAnswer(out, optionID)
 	if !ok {
 		r.logger.Warn("relay: modal answer invalid option",
 			"event", "modal_answer.invalid_option",
-			"modal_id", modalID,
-			"option_id", truncateForLog(optionID, 64))
+			"modal_id", modalID)
 		return relay.ModalDismissal{}, false
 	}
 
@@ -349,12 +357,15 @@ type streamQuestionRegistry interface {
 // the transport-sentinel Push err reach any log field — the same discipline the
 // modal emitter and control server hold.
 type streamApprovalBridge struct {
-	perm       *permbridge.Registry   // claude-facing completer store (#1103)
-	modal      streamModalRegistry    // client-facing modal store (#716)
-	bcast      interactiveBroadcaster // *relay.V2SessionManager (ActiveConns/Push)
-	activeConv func() string          // cursor; the stamp when sessionConv misses (#1065, #2675)
-	ctx        context.Context        // daemon ctx captured at construction, for broadcasts
-	logger     *slog.Logger
+	perm           *permbridge.Registry   // claude-facing completer store (#1103)
+	modal          streamModalRegistry    // client-facing modal store (#716)
+	bcast          interactiveBroadcaster // *relay.V2SessionManager (ActiveConns/Push)
+	activeConv     func() string          // cursor; the stamp when sessionConv misses (#1065, #2675)
+	ctx            context.Context        // daemon ctx captured at construction, for broadcasts
+	logger         *slog.Logger
+	hist           *history.Store
+	sessionHarness func(string) (string, bool)
+	promptOwners   map[string]promptHistoryOwner
 
 	// toolCallInFlight answers turnBusyTracker's conversation-keyed membership
 	// question (ToolCallInFlight, #1917) — "is this tool call in flight on this
@@ -414,7 +425,7 @@ type streamApprovalBridge struct {
 	// Read without mu, written before the control server can call Surface.
 	sessionConv func(sessionID string) (conversationID string, ok bool)
 
-	// mu is a leaf lock guarding byModal + byQuestion + nextID ONLY: held around
+	// mu is a leaf lock guarding correlations, promptOwners and nextID: held around
 	// O(1) map ops and the counter bump, never across modal.Record,
 	// perm.Lookup/perm.Resolve, modal.Resolve, questions.Record/questions.Resolve,
 	// or a Push — so bridge.mu → registry.mu never nests and there is no deadlock
@@ -451,14 +462,15 @@ type streamApprovalCorrelation struct {
 // control-server handler goroutine, which carries no ctx of its own).
 func newStreamApprovalBridge(perm *permbridge.Registry, modal *modalbridge.Registry, bcast interactiveBroadcaster, activeConv func() string, ctx context.Context, logger *slog.Logger) *streamApprovalBridge {
 	return &streamApprovalBridge{
-		perm:       perm,
-		modal:      modal,
-		bcast:      bcast,
-		activeConv: activeConv,
-		ctx:        ctx,
-		logger:     logger,
-		byModal:    make(map[string]streamApprovalCorrelation),
-		byQuestion: make(map[string]string),
+		perm:         perm,
+		modal:        modal,
+		bcast:        bcast,
+		activeConv:   activeConv,
+		ctx:          ctx,
+		logger:       logger,
+		byModal:      make(map[string]streamApprovalCorrelation),
+		byQuestion:   make(map[string]string),
+		promptOwners: make(map[string]promptHistoryOwner),
 	}
 }
 
@@ -617,6 +629,7 @@ func (b *streamApprovalBridge) RefuseQuestion(batchID string) (consumed bool) {
 func (b *streamApprovalBridge) RefuseQuestionDiagnostic(batchID string) (bool, string) {
 	b.mu.Lock()
 	toolUseID, ok := b.byQuestion[batchID]
+	owner := b.promptOwners[batchID]
 	b.mu.Unlock()
 	if !ok {
 		return false, "missing_correlation"
@@ -629,7 +642,10 @@ func (b *streamApprovalBridge) RefuseQuestionDiagnostic(batchID string) (bool, s
 	// A Resolve miss here means permbridge already resolved this approval on its
 	// own timer — nothing to do, and the client must still learn the panel is
 	// dead, so the dismissal below is unconditional.
-	b.perm.Resolve(toolUseID, permbridge.Deny(reasonQuestionRefused))
+	verdict := permbridge.Deny(reasonQuestionRefused)
+	if b.perm.Resolve(toolUseID, verdict) {
+		b.recordPromptAnswer(batchID, owner, "refusal", verdict, nil)
+	}
 
 	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
 		QuestionBatchID: batchID,
@@ -721,6 +737,7 @@ func (b *streamApprovalBridge) AnswerQuestion(batchID string, answers []protocol
 func (b *streamApprovalBridge) AnswerQuestionDiagnostic(batchID string, answers []protocol.QuestionAnswerEntry) (bool, string) {
 	b.mu.Lock()
 	toolUseID, ok := b.byQuestion[batchID]
+	owner := b.promptOwners[batchID]
 	b.mu.Unlock()
 	if !ok {
 		return false, "missing_correlation"
@@ -749,7 +766,10 @@ func (b *streamApprovalBridge) AnswerQuestionDiagnostic(batchID string, answers 
 	// Lookup above and now — the batch is consumed either way, and the client
 	// must still learn the panel is dead, so the dismissal below is
 	// unconditional.
-	b.perm.Resolve(toolUseID, permbridge.Allow(updated))
+	verdict := permbridge.Allow(updated)
+	if b.perm.Resolve(toolUseID, verdict) {
+		b.recordPromptAnswer(batchID, owner, "answer", verdict, answers)
+	}
 
 	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
 		QuestionBatchID: batchID,
@@ -861,9 +881,10 @@ func answerVerdict(input json.RawMessage, questions []protocol.Question, answers
 // that still gets claude an allow/deny decision.
 func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 	conversationID := b.conversationFor(req.SessionID)
+	owner := b.promptOwner(req, conversationID)
 	if b.questions != nil {
 		if batch, ok := questionbridge.Parse(req.ToolName, req.Input); ok {
-			return b.surfaceQuestion(batch, req.ToolUseID, conversationID)
+			return b.surfaceQuestion(batch, req.ToolUseID, conversationID, owner)
 		}
 	}
 
@@ -892,6 +913,8 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 	modalID := payload.ModalID
 
 	b.mu.Lock()
+	owner.class = wireClass
+	b.promptOwners[modalID] = owner
 	b.byModal[modalID] = streamApprovalCorrelation{
 		toolUseID:               req.ToolUseID,
 		requiresUserInteraction: req.RequiresUserInteraction,
@@ -941,7 +964,7 @@ func (b *streamApprovalBridge) conversationFor(sessionID string) string {
 // claude-authored strings reach the marshalled payload and NOTHING else; no log
 // field here carries the question text, a header, an option label or description,
 // the tool name, or any other byte of the parked input.
-func (b *streamApprovalBridge) surfaceQuestion(batch protocol.QuestionShownPayload, toolUseID, conversationID string) (retire func()) {
+func (b *streamApprovalBridge) surfaceQuestion(batch protocol.QuestionShownPayload, toolUseID, conversationID string, owner promptHistoryOwner) (retire func()) {
 	stamped, err := b.questions.Record(batch, conversationID)
 	if err != nil {
 		// crypto/rand failure — drop the batch (no question_shown, no
@@ -954,6 +977,8 @@ func (b *streamApprovalBridge) surfaceQuestion(batch protocol.QuestionShownPaylo
 	batchID := stamped.QuestionBatchID
 
 	b.mu.Lock()
+	owner.questions = stamped.Questions
+	b.promptOwners[batchID] = owner
 	b.byQuestion[batchID] = toolUseID
 	b.mu.Unlock()
 
@@ -990,6 +1015,7 @@ func (b *streamApprovalBridge) surfaceQuestion(batch protocol.QuestionShownPaylo
 func (b *streamApprovalBridge) retireQuestion(batchID string) {
 	b.mu.Lock()
 	delete(b.byQuestion, batchID)
+	delete(b.promptOwners, batchID)
 	b.mu.Unlock()
 
 	if _, ok := b.questions.Resolve(batchID); !ok {
@@ -1050,24 +1076,35 @@ func (b *streamApprovalBridge) RemoteAnswerable(modalID string) bool {
 // and does NOT consume the modalbridge entry (ResolveAnswer already consumed it
 // before calling here, which gates a second ResolveStream for the same modalID).
 // Runs on the relay manager's single Run goroutine.
-func (b *streamApprovalBridge) ResolveStream(modalID string, allow, alwaysAllow bool, denyReason string) (handled bool) {
+func (b *streamApprovalBridge) ResolveStream(modalID string, allow, alwaysAllow bool, denyReason string) bool {
+	decision := "deny"
+	if allow {
+		decision = "allow"
+	}
+	return b.resolveStreamDecision(modalID, allow, alwaysAllow, denyReason, decision)
+}
+
+func (b *streamApprovalBridge) resolveStreamDecision(modalID string, allow, alwaysAllow bool, denyReason, decision string) bool {
 	b.mu.Lock()
 	correlation, ok := b.byModal[modalID]
+	owner := b.promptOwners[modalID]
 	b.mu.Unlock()
 	if !ok {
-		return false // not a stream approval — caller Warn-logs the miss
+		return false
 	}
-
+	verdict := permbridge.Deny(denyReason)
 	if allow {
-		if req, ok := b.perm.Lookup(correlation.toolUseID); ok {
-			verdict := permbridge.Allow(req.Input)
-			if alwaysAllow {
-				verdict = permbridge.AllowAlways(req.Input, req.AlwaysAllow)
-			}
-			b.perm.Resolve(correlation.toolUseID, verdict)
+		req, live := b.perm.Lookup(correlation.toolUseID)
+		if !live {
+			return true
 		}
-	} else {
-		b.perm.Resolve(correlation.toolUseID, permbridge.Deny(denyReason))
+		verdict = permbridge.Allow(req.Input)
+		if alwaysAllow {
+			verdict = permbridge.AllowAlways(req.Input, req.AlwaysAllow)
+		}
+	}
+	if b.perm.Resolve(correlation.toolUseID, verdict) && decision != "" {
+		b.recordPromptAnswer(modalID, owner, decision, verdict, nil)
 	}
 	return true
 }
@@ -1265,6 +1302,7 @@ func (b *streamApprovalBridge) retire(modalID string) {
 
 	b.mu.Lock()
 	delete(b.byModal, modalID)
+	delete(b.promptOwners, modalID)
 	b.mu.Unlock()
 
 	if !ok {

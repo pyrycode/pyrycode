@@ -94,7 +94,7 @@ func TestInteractiveStreamModalResolution(t *testing.T) {
 func TestInteractiveStreamStdioModalAllow(t *testing.T) {
 	runParallel(t)
 	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
-	driveInteractiveStreamModalResolution(t, h, convID)
+	driveInteractiveStreamModalResolution(t, h, convID, true)
 }
 
 func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
@@ -221,7 +221,7 @@ func TestInteractiveStreamStdioCancelDeniesParkedPermission(t *testing.T) {
 	}
 }
 
-func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, convID string) {
+func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, convID string, knownSession ...bool) {
 	t.Helper()
 	// A per-run nonce keeps the trigger command distinct (defeats accidental
 	// caching) without asserting on its echo.
@@ -254,6 +254,7 @@ func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, conv
 	// than #1030 Phase A's drainForAssistantReply (M1 only) — the tool executing
 	// after the authorized allow is what produces the continuation delta.
 	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	requirePromptAnswerHistory(t, h, convID, shown.ModalID, "allow", len(knownSession) > 0 && knownSession[0])
 }
 
 // --- harness ----------------------------------------------------------------

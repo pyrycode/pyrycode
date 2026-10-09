@@ -77,10 +77,10 @@ func TestInteractiveStreamPermissionDeny(t *testing.T) {
 func TestInteractiveStreamStdioPermissionDeny(t *testing.T) {
 	runParallel(t)
 	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
-	driveInteractiveStreamPermissionDeny(t, h, convID)
+	driveInteractiveStreamPermissionDeny(t, h, convID, true)
 }
 
-func driveInteractiveStreamPermissionDeny(t *testing.T, h *perConvHarness, convID string) {
+func driveInteractiveStreamPermissionDeny(t *testing.T, h *perConvHarness, convID string, knownSession ...bool) {
 	t.Helper()
 	// A per-run nonce keeps the trigger's target filename unique (defeats
 	// accidental caching AND makes the absence walk unambiguous — no other run's
@@ -153,6 +153,7 @@ func driveInteractiveStreamPermissionDeny(t *testing.T, h *perConvHarness, convI
 	// absent under the daemon workdir. Checked AFTER idle so the tool phase is
 	// definitively over.
 	requireTriggerFileAbsent(t, h.workdir, nonce)
+	requirePromptAnswerHistory(t, h, convID, modalID, "deny", len(knownSession) > 0 && knownSession[0])
 }
 
 // denyModalsUntilIdle drives a fully-denied turn to terminal turn_state{idle} for
