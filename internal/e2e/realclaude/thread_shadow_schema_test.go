@@ -223,7 +223,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 	}
 	for _, cp := range e.Checkpoints {
 		if err := shadowRawRows(h, cp); err != nil {
-			return err
+			return fmt.Errorf("raw checkpoint version=%d: %w", cp.Version, err)
 		}
 		ids := map[uint64]thread.Item{}
 		orders := map[uint64]bool{}
@@ -411,6 +411,10 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 				}
 				terminals[call] = terminal{entry, "result", status}
 			}
+		case protocol.TypeToolDenied:
+			if terminals[call].entry.ID == 0 {
+				terminals[call] = terminal{entry, "denial", "denied"}
+			}
 		case "main_tool_interrupted":
 			call.call = p.InterruptedCall
 			if terminals[call].entry.ID == 0 {
@@ -494,13 +498,18 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 			if source.Type != protocol.TypeToolUse || call.Name == "" || !reflect.DeepEqual(saved.Input, call.Input) {
 				return errors.New("tool creation input lost")
 			}
+			if linked, err := shadowRawShell(h, cp, item, source, call); err != nil {
+				return err
+			} else if linked {
+				continue
+			}
 			key := toolKey{lane{item.Session, call.TurnID, call.ParentToolUseID}, call.ToolUseID}
 			if outcome, ok := terminals[key]; ok {
 				var got, want any
 				_ = json.Unmarshal(content[outcome.field], &got)
 				_ = json.Unmarshal(outcome.entry.Payload, &want)
 				if item.Status != outcome.status || item.Active || !reflect.DeepEqual(got, want) {
-					return errors.New("tool outcome differs from first raw terminal")
+					return fmt.Errorf("tool outcome differs from first raw terminal: version=%d creation=%d terminal=%d status_match=%t inactive=%t content_match=%t", cp.Version, item.ID, outcome.entry.ID, item.Status == outcome.status, !item.Active, reflect.DeepEqual(got, want))
 				}
 			} else {
 				if item.Status != "running" || !item.Active {
