@@ -75,6 +75,8 @@ The logging requirement is incorporated into Design, resolving the finding befor
 
 2026-10-09: Result predicates now describe the bounded decoded final envelope; `result_bytes` explicitly separates its 1–4096-byte bound from saturated 0–4097 stream receipt. Invalid/skipped earlier frames cannot poison a later result. Complete unterminated final JSON is examined only after Wait receipt; it cannot populate the frozen pre-cancellation snapshot. Added late-result/repeated-cancellation, source-null/missing and saturated-result metadata assertions. Offline race checks, touched-package race suite, vet and build pass. Final sizing forecast including declaration/results: approximately 750 written lines, no exports, three local consumers, five criteria, fewer than ten reject paths; no sizing exception required. QMD timed out; runtime-authorized repository search supplied the owning docs.
 
+2026-10-09 (verifier finding 1 on `861b6a3a`): `suggestProgressFields` marks contradictory event/init or event/retry observations and their event age unknown for both current and applicable frozen snapshots. Independent init/source or retry observations remain known, including observed zero; missing metadata is never inferred. `TestSuggestStreamProgressGates` covers all four reported contradictions under both prefixes and independent/missing fields. The original six-run declaration and every outcome remain unchanged; no live rerun or missing-suggestion correction belongs to this rework.
+
 ## Six-run declaration
 
 Declared 2026-10-09 after instrumentation commit `0e1aea42` and passing offline checks. The commit containing this declaration will be pushed before launch 1 and is the unchanged checkout for exactly six sequential authenticated launches numbered 1–6 through:

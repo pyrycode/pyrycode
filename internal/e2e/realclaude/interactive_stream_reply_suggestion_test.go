@@ -884,6 +884,19 @@ func suggestProgressFields(fields map[string]string) []string {
 				}
 			}
 		}
+		// Contradictions invalidate the participating observations and event age;
+		// independent fields remain known and missing values are never inferred.
+		conflictingInit := event == "none" && init == "true" || event == "init" && init == "false"
+		conflictingRetries := event == "none" && retries != "unknown" && retries != "0" || event == "api_retry" && retries == "0"
+		if conflictingInit {
+			init, source = "unknown", "unknown"
+		}
+		if conflictingRetries {
+			retries = "unknown"
+		}
+		if conflictingInit || conflictingRetries {
+			event, age = "unknown", "unknown"
+		}
 		for _, entry := range []struct{ key, value string }{{"event", event}, {"age_ms", age}, {"init", init}, {"source", source}, {"retries", retries}} {
 			safe = append(safe, prefix+entry.key+"="+entry.value)
 		}

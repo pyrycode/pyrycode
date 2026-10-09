@@ -624,4 +624,29 @@ func TestSuggestStreamProgressGates(t *testing.T) {
 			}
 		})
 	}
+	for _, prefix := range []string{"progress_", "cancel_"} {
+		for _, tc := range []struct{ name, fields, want string }{
+			{"none with retries", "event=none age_ms=7 init=false source=unknown retries=2", "event=unknown age_ms=unknown init=false source=unknown retries=unknown"},
+			{"none with init", "event=none age_ms=7 init=true source=ANTHROPIC_API_KEY retries=0", "event=unknown age_ms=unknown init=unknown source=unknown retries=0"},
+			{"init not observed", "event=init age_ms=7 init=false source=none retries=2", "event=unknown age_ms=unknown init=unknown source=unknown retries=2"},
+			{"retry with zero", "event=api_retry age_ms=7 init=true source=none retries=0", "event=unknown age_ms=unknown init=true source=none retries=unknown"},
+			{"observed zero", "event=none age_ms=7 init=false source=unknown retries=0", "event=none age_ms=unknown init=false source=unknown retries=0"},
+			{"init with missing metadata", "event=init age_ms=7", "event=init age_ms=7 init=unknown source=unknown retries=unknown"},
+			{"retry with missing count", "event=api_retry age_ms=7 init=false", "event=api_retry age_ms=7 init=false source=unknown retries=unknown"},
+		} {
+			t.Run(prefix+tc.name, func(t *testing.T) {
+				fields := map[string]string{"cancel_snapshot_observed": "true"}
+				for _, token := range strings.Fields(tc.fields) {
+					key, value, _ := strings.Cut(token, "=")
+					fields[prefix+key] = value
+				}
+				got := strings.Join(suggestProgressFields(fields), " ")
+				for _, token := range strings.Fields(tc.want) {
+					if !strings.Contains(got, prefix+token) {
+						t.Errorf("missing %s%s in %s", prefix, token, got)
+					}
+				}
+			})
+		}
+	}
 }
