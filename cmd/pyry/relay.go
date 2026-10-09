@@ -147,6 +147,7 @@ func resolveWorkspaceFolder(parent, name string) (string, error) {
 // does not read (relayURL, version, allowInsecure, shutdown) still
 // travel in the struct so they too are bound by name at the call site.
 type relayWiring struct {
+	shadow *threadShadow
 	// instanceName is the daemon instance name; it derives the per-instance
 	// server-id, device-registry, conversations-registry, and static-key paths.
 	instanceName string
@@ -490,6 +491,7 @@ func startRelay(
 	w relayWiring,
 ) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), announcePost func(protocol.AssistantDeltaPayload), pairingProvider localPairingProvider, err error) {
 	if w.relayURL == "" {
+		dropRingOnConversationDelete(w.convReg, nil, w.suggestions, w.shadow)
 		logger.Info("relay: disabled (no URL configured)")
 		if w.streamSink != nil {
 			bcast := historyOnlyBroadcaster{}
@@ -621,9 +623,10 @@ func relay4409Threshold(logger *slog.Logger) int {
 // through Registry.Delete — has its ring entry dropped, so its retained events
 // stop pinning daemon memory. The ring is keyed by the same conversation id
 // string the registry stores. Pending reply work and suggestion state are also
-// cancelled and forgotten. A nil registry (no conversations registry in this
+// cancelled and forgotten; shadow coordination is retired and joined.
+// A nil registry (no conversations registry in this
 // posture) leaves nothing to observe.
-func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring, suggestions *replySuggestions) {
+func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring, suggestions *replySuggestions, shadow ...*threadShadow) {
 	if reg == nil {
 		return
 	}
@@ -631,7 +634,12 @@ func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.R
 		if suggestions != nil {
 			suggestions.forget(string(id))
 		}
-		ring.Drop(string(id))
+		if ring != nil {
+			ring.Drop(string(id))
+		}
+		if len(shadow) > 0 {
+			shadow[0].remove(id)
+		}
 	})
 }
 
@@ -1706,7 +1714,7 @@ func startRelayV2(
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
 		// Free a removed conversation's replay events when the registry drops it
 		// (#1502); installed here because this is where the ring is born.
-		dropRingOnConversationDelete(w.convReg, emitter.ring, suggestions)
+		dropRingOnConversationDelete(w.convReg, emitter.ring, suggestions, w.shadow)
 		replayRing = emitter.ring
 		// The durable conversation log (#2114), assigned the same way the ring is
 		// reached one line up: newInteractiveTurnEmitterV2 has 86 call sites and a

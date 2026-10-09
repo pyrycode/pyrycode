@@ -73,8 +73,9 @@ Parented text, ordinary tools and nested agents fold in [child lanes](thread-pac
 Linked Claude/legacy Bash calls retain ordinary identity with
 [background shell lifecycle](thread-package-agents-and-background-work.md#background-shells).
 [Cache persistence and epochs](thread-package.md#cache-and-epochs) belong to the
-background store. Daemon wiring, thread protocol and read-mark migration remain
-downstream.
+background store. [Daemon shadow wiring](thread-package.md#shadow-lifecycle-and-evidence)
+folds history without app publication; thread protocol and read-mark migration
+remain downstream.
 
 ### Accepted sends and durable outcomes
 

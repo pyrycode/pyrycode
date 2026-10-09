@@ -1,7 +1,32 @@
 # Control Plane — server construction and deadlines
 
 Split from [control-plane.md](control-plane.md). This document owns dependency
-installation, pairing/update providers and control request/response deadlines.
+installation, handler admission/ownership, pairing/update providers and control
+request/response deadlines.
+
+## Handler admission and ownership
+
+`Server.Seal()` refuses new handlers and joins admitted handlers while leaving
+the listener bound. `Serve` checks the sealed flag and adds to the handler
+WaitGroup under `Server.mu`; accepted connections after sealing are closed
+without dispatch. Serializing admission with sealing prevents an `Add` racing
+the final `Wait`. The wait runs outside the mutex. Repeated seals are safe, and
+sealing does not close the listener or remove its socket; `Close` performs that
+release after owner cleanup.
+
+Joining the message queue does not join control handlers that can still write
+history or schedule work. In `runSupervisor`, shutdown first seals/joins channel
+post callbacks and their consumer, then calls `ctrl.Seal` before joining the
+remaining producers and draining the [shadow fold's final committed
+versions](thread-package.md#shadow-lifecycle-and-evidence). The detached control
+context keeps the listener bound through `Store.Shutdown` persistence. Only
+after that cleanup does the daemon cancel control serving, call `Close` and join
+`ctrlDone`. Releasing ownership earlier could admit a replacement daemon while
+old writers or cache persistence remain in flight.
+
+`TestServerSealRetainsOwnership` pauses an admitted writer, verifies that sealing
+waits, refuses late requests and replacement `Listen`, then releases the writer
+and checks repeated sealing and close cleanup.
 
 ## Server Construction
 
@@ -96,8 +121,9 @@ provider waits only for the bounded metadata/eligibility decision, with a
 60-second production HTTP budget, never for idle, asset download, installation
 or restart. Accepted work uses the daemon context, so disconnect or client
 timeout does not retract it. Daemon shutdown cancels the work; `runSupervisor`
-drains control handlers through `ctrlDone`, joins the scheduler, then joins
-updater workers even when scheduling is disabled.
+joins admitted control handlers with `Server.Seal`, joins the scheduler and
+updater workers even when scheduling is disabled, then releases control serving
+after final shadow persistence.
 
 Publishing acceptance before installation alone does not prove the response was
 written: an already-idle daemon can install and request restart immediately.

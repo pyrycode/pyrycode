@@ -325,12 +325,14 @@ func TestChannelDelivery_SessionDaemonWiring(t *testing.T) {
 	const name = "provenance-wiring"
 	reg, _ := newChannelTestRegistry(t, home)
 	id := addConversation(t, reg, "posts", true, false)
+	old := addConversation(t, reg, "old-history", true, false)
 	boot, dormant := testPostID(t), testPostID(t)
 	reg.Update(id, func(c *conversations.Conversation) { c.CurrentSessionID = dormant })
 	instance := resolveInstanceDirPath(name)
 	if err := os.MkdirAll(instance, 0700); err != nil {
 		t.Fatal(err)
 	}
+	testShadowAppend(t, history.New(instance), old)
 	if err := reg.Save(resolveConversationsRegistryPath(name)); err != nil {
 		t.Fatal(err)
 	}
@@ -378,9 +380,21 @@ func TestChannelDelivery_SessionDaemonWiring(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	testShadowWait(t, func() bool {
+		raw, err := os.ReadFile(filepath.Join(instance, "conversations", string(old), "history", "thread-cache.json"))
+		var cache struct {
+			Version  uint64
+			Complete bool
+		}
+		return err == nil && json.Unmarshal(raw, &cache) == nil && cache.Version == 2 && cache.Complete
+	})
 	if err := control.ChannelPost(ctx, socket, "posts", "accepted by daemon"); err != nil {
 		t.Fatal(err)
 	}
+	testShadowWait(t, func() bool {
+		page, err := history.New(instance).Page(id, "", 10)
+		return err == nil && len(page.Entries) == 2
+	})
 	if err := control.Stop(ctx, socket); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +407,18 @@ func TestChannelDelivery_SessionDaemonWiring(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("daemon shutdown did not join")
 	}
-	// Shutdown may precede delivery. Both paths must retain the same snapshot.
+	rawCache, err := os.ReadFile(filepath.Join(instance, "conversations", string(id), "history", "thread-cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cache struct {
+		Version  uint64
+		Complete bool
+	}
+	if json.Unmarshal(rawCache, &cache) != nil || cache.Version != 2 || !cache.Complete {
+		t.Fatal("daemon did not persist final shadow version")
+	}
+	// Reload retains the same source captured at acceptance.
 	h := history.New(instance)
 	d := testDelivery(t, instance, h, nil)
 	d.drain()

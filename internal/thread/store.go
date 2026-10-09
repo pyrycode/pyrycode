@@ -31,6 +31,7 @@ var (
 // Snapshot is a detached view. Only StateUsable carries Items, Version and Epoch;
 // ErrUnavailable describes recoverable failure without exposing source errors.
 type Snapshot struct {
+	Active  bool // includes private unresolved work omitted from Items
 	State   SnapshotState
 	Items   []Item
 	Version uint64
@@ -57,6 +58,7 @@ type Store struct {
 	mu           sync.Mutex
 	history      *history.Store
 	forward      func(conversations.ConversationID) (storeReader, error)
+	beforeFold   func(context.Context, conversations.ConversationID) error
 	workers      map[conversations.ConversationID]*conversationWorker
 	closed       bool
 	initMu       sync.Mutex
@@ -70,9 +72,15 @@ type Store struct {
 
 // NewStore creates a background cache owner; history is the durable source.
 // Tail notifications cover commits through the supplied history Store only.
-func NewStore(h *history.Store) *Store {
+// An optional fold barrier runs before each replay/tail chunk. It must return
+// promptly or honor cancellation; failure withdraws the conversation view.
+func NewStore(h *history.Store, beforeFold ...func(context.Context, conversations.ConversationID) error) *Store {
+	var barrier func(context.Context, conversations.ConversationID) error
+	if len(beforeFold) > 0 {
+		barrier = beforeFold[0]
+	}
 	return &Store{
-		history: h,
+		history: h, beforeFold: barrier,
 		records: make(map[conversations.ConversationID]progressRecord),
 		replace: os.Rename,
 		workers: make(map[conversations.ConversationID]*conversationWorker),
@@ -190,16 +198,24 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		return
 	}
 	fold := New(string(id))
+	feed := func(entries []history.Entry) error {
+		if s.beforeFold != nil {
+			if err := s.beforeFold(ctx, id); err != nil {
+				return err
+			}
+		}
+		return fold.Feed(entries)
+	}
 	epoch := ""
 	if candidate.Epoch != "" {
-		if err := reader.Walk(ctx, candidate.Version, fold.Feed); err != nil {
+		if err := reader.Walk(ctx, candidate.Version, feed); err != nil {
 			return
 		}
 		if fold.Version() == candidate.Version && sameItems(candidate.Items, fold.Items()) {
 			epoch = candidate.Epoch
 		}
 	}
-	if err := reader.Walk(ctx, bound, fold.Feed); err != nil || fold.Version() != bound || ctx.Err() != nil {
+	if err := reader.Walk(ctx, bound, feed); err != nil || fold.Version() != bound || ctx.Err() != nil {
 		return
 	}
 	if epoch == "" {
@@ -214,6 +230,9 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 			return err
 		}
 		snapshot := Snapshot{State: StateUsable, Items: fold.Items(), Version: fold.Version(), Epoch: epoch}
+		for _, item := range fold.items {
+			snapshot.Active = snapshot.Active || item.Active
+		}
 		if err := s.checkpoint(id, recovery, snapshot); err != nil {
 			return err
 		}
@@ -231,7 +250,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := fold.Feed(entries); err != nil {
+		if err := feed(entries); err != nil {
 			return ErrUnavailable
 		}
 		return publish()
