@@ -57,6 +57,15 @@ func (f *Fold) childWork(e history.Entry) bool {
 	}
 	ck := childCallKey{group, id.TurnID, id.ToolUseID}
 	saved := f.childCalls[ck]
+	// Reports without parent evidence may belong to a later child creation.
+	// Their original group and first terminal survive main-turn replacement.
+	if saved == nil && f.childReports[ck] == nil && (e.Type == protocol.TypeToolResult || e.Type == protocol.TypeToolDenied) {
+		field := "result"
+		if e.Type == protocol.TypeToolDenied {
+			field = "denial"
+		}
+		f.childReports[ck] = &mainOutcome{id: e.ID, status: status, field: field, raw: append(json.RawMessage(nil), e.Payload...)}
+	}
 	if parent == "" && id.ToolUseID != "" {
 		if g := f.agentGroups[group]; g != nil {
 			if c := g.calls[id.ToolUseID]; c != nil {
@@ -88,8 +97,16 @@ func (f *Fold) childWork(e history.Entry) bool {
 				call = main.calls[id.ToolUseID]
 				delete(main.calls, id.ToolUseID)
 			}
+			if call.item < 0 {
+				// A main-turn ending cannot close an uncreated child call.
+				call.terminal = st.end
+				if report := f.childReports[ck]; report != nil && (call.terminal == nil || report.id < call.terminal.id) {
+					call.terminal = report
+				}
+			}
 			saved = &childCall{parent, call}
 			f.childCalls[ck] = saved
+			delete(f.childReports, ck)
 		}
 		if saved.parent != parent {
 			if old := f.childTurns[childKey{group, saved.parent, id.TurnID}]; old != nil {

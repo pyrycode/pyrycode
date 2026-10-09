@@ -193,6 +193,84 @@ func TestChildEarlyResultAfterBoundary(t *testing.T) {
 	testChildItem(t, f, 4, 2, "tool_call", "done", false)
 }
 
+func TestChildEarlyReportInPreviousMainTurn(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ typ, extra, status, field string }{
+		{"tool_result", `,"is_error":false,"result_detail":"early"`, "done", "result"},
+		{"tool_result", `,"is_error":true,"result_detail":"early"`, "failed", "result"},
+		{"tool_denied", `,"message":"early"`, "denied", "denial"},
+	} {
+		for _, source := range []*history.SessionProvenance{nil, testSource("claude", "s")} {
+			t.Run(tc.status+"/"+sourceName(source), func(t *testing.T) {
+				entries := []history.Entry{
+					testMain(1, "tool_use", `,"tool_use_id":"a","name":"Agent"`),
+					testMain(2, tc.typ, `,"tool_use_id":"c"`+tc.extra),
+					testMain(3, "turn_end", `,"stop_reason":"end_turn"`),
+					testMain(4, "main_turn_opened", `,"occurred_at":"2026-10-09T00:00:00Z"`),
+					testMain(5, "tool_result", `,"tool_use_id":"c","is_error":true,"result_detail":"conflict"`),
+					testChild(6, "tool_use", "a", `,"tool_use_id":"c","name":"Read","input":{"path":"original"}`),
+				}
+				for i := range entries {
+					entries[i].Session = source
+				}
+				entries[5].Shown = new(bool)
+				full := testMainReplay(t, entries)
+				f := New("a")
+				for _, entry := range entries {
+					entry.Payload = append(json.RawMessage(nil), entry.Payload...)
+					testFeed(t, f, entry)
+					entry.Payload[0] = 'X'
+				}
+				if !reflect.DeepEqual(full.Items(), f.Items()) || full.Version() != f.Version() {
+					t.Fatal("single-entry feeds or input mutation changed replay")
+				}
+				item := testChildItem(t, f, 6, 1, "tool_call", tc.status, false)
+				if item.Rev != 6 || item.Shown {
+					t.Fatal("early report changed creation revision or visibility", item)
+				}
+				testContent(t, item, "input", map[string]any{"path": "original"})
+				var report map[string]any
+				if err := json.Unmarshal(entries[1].Payload, &report); err != nil {
+					t.Fatal(err)
+				}
+				testContent(t, item, tc.field, report)
+				testContent(t, item, "ending", nil)
+			})
+		}
+	}
+}
+
+func TestChildNewLifetimeEarlyReport(t *testing.T) {
+	t.Parallel()
+	for _, source := range []*history.SessionProvenance{nil, testSource("claude", "s")} {
+		t.Run(sourceName(source), func(t *testing.T) {
+			entries := []history.Entry{
+				testDurable(1, "agent_call_observed", `,"tool_call_id":"a","tool":"Agent"`),
+				testMain(2, "tool_use", `,"tool_use_id":"a","name":"Agent"`),
+				testMain(3, "tool_result", `,"tool_use_id":"c","is_error":true,"result_detail":"old"`),
+				testDurable(4, "agent_call_observed", `,"lifetime_id":"22222222-2222-4222-8222-222222222222","tool_call_id":"a","tool":"Agent"`),
+				testMain(5, "tool_use", `,"tool_use_id":"a","name":"Agent"`),
+				testMain(6, "tool_result", `,"tool_use_id":"c","is_error":false,"result_detail":"new"`),
+				testMain(7, "tool_denied", `,"tool_use_id":"c","message":"conflict"`),
+				testChild(8, "tool_use", "a", `,"tool_use_id":"c","name":"Read","input":{"path":"new"}`),
+			}
+			for i := range entries {
+				entries[i].Session = source
+			}
+			f := testMainReplay(t, entries)
+			item := testChildItem(t, f, 8, 5, "tool_call", "done", false)
+			if item.Rev != 8 {
+				t.Fatal("early report revision precedes creation", item)
+			}
+			testContent(t, item, "input", map[string]any{"path": "new"})
+			testContent(t, item, "result", map[string]any{"turn_id": "t", "tool_use_id": "c", "is_error": false, "result_detail": "new"})
+			testContent(t, item, "denial", nil)
+			testChildItem(t, f, 2, 0, "agent", "running", true)
+			testChildItem(t, f, 5, 0, "agent", "running", true)
+		})
+	}
+}
+
 func TestChildLifetimeReuse(t *testing.T) {
 	t.Parallel()
 	entries := []history.Entry{

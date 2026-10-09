@@ -42,6 +42,7 @@ type Fold struct {
 	accepted, messages        map[uint64]int
 	childTurns                map[childKey]*mainTurn
 	childCalls                map[childCallKey]*childCall
+	childReports              map[childCallKey]*mainOutcome
 	children                  map[int]*childState
 	agentGroups               map[agentKey]*agentGroup
 	agentLifetimes            map[agentKey]string
@@ -54,6 +55,7 @@ func New(conversationID string) *Fold {
 		conversationID:    conversationID,
 		childTurns:        make(map[childKey]*mainTurn),
 		childCalls:        make(map[childCallKey]*childCall),
+		childReports:      make(map[childCallKey]*mainOutcome),
 		children:          make(map[int]*childState),
 		agentGroups:       make(map[agentKey]*agentGroup),
 		agentLifetimes:    make(map[agentKey]string),
