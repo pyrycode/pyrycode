@@ -24,6 +24,7 @@ type mainTurn struct {
 	end     *mainOutcome
 }
 type mainCall struct {
+	group    agentKey
 	item     int
 	launcher bool
 	terminal *mainOutcome
@@ -96,7 +97,7 @@ func mainDecode(e history.Entry) (mainIdentity, string, string, bool, bool) {
 	default:
 		return id, "", "", false, false
 	}
-	valid = valid && decode(e.Payload, &id) && id.TurnID != "" && id.Parent == "" && id.ParentCall == ""
+	valid = valid && decode(e.Payload, &id) && id.TurnID != ""
 	if valid && id.Opening == nil {
 		var fields map[string]json.RawMessage
 		_ = json.Unmarshal(e.Payload, &fields)
@@ -126,7 +127,7 @@ func mainDecode(e history.Entry) (mainIdentity, string, string, bool, bool) {
 
 func (f *Fold) mainWork(e history.Entry) bool {
 	id, summary, status, shown, valid := mainDecode(e)
-	if !valid || f.agentLaunchIsChild(e, id.ToolUseID) {
+	if !valid || id.Parent != "" || id.ParentCall != "" || f.agentLaunchIsChild(e, id.ToolUseID) {
 		return false
 	}
 	key := mainKey{scope: f.legacyScope, turn: id.TurnID}
@@ -154,12 +155,21 @@ func (f *Fold) mainWork(e history.Entry) bool {
 	if e.Type == "main_turn_opened" {
 		return true
 	}
+	return f.foldWork(e, id, summary, status, shown, st, false)
+}
+
+func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string, shown bool, st *mainTurn, child bool) bool {
 	ending := e.Type == protocol.TypeTurnEnd || e.Type == "main_turn_interrupted"
 	if ending {
 		item := Item{ID: e.ID, Order: e.ID, Rev: e.ID, Kind: "turn_end", Turn: id.TurnID, Status: status, Summary: summary, Shown: shown}
-		f.addItem(e, item)
+		if !child {
+			f.addItem(e, item)
+		}
 		if st != nil && st.end == nil {
 			st.end = &mainOutcome{id: e.ID, status: "interrupted", field: "ending", raw: append(json.RawMessage(nil), e.Payload...)}
+			if child && st.text >= 0 {
+				f.setContent(st.text, "ending", st.end.raw)
+			}
 			f.closeText(st, e.ID)
 			for _, call := range st.calls {
 				if call.terminal == nil {
@@ -203,7 +213,7 @@ func (f *Fold) mainWork(e history.Entry) bool {
 	}
 	call := st.calls[callID]
 	if call == nil {
-		call = &mainCall{item: -1, terminal: st.end}
+		call = &mainCall{group: f.childGroup(e), item: -1, terminal: st.end}
 		st.calls[callID] = call
 	}
 	if e.Type == protocol.TypeToolUse {
@@ -213,7 +223,7 @@ func (f *Fold) mainWork(e history.Entry) bool {
 		}
 		var p protocol.ToolUsePayload
 		_ = json.Unmarshal(e.Payload, &p)
-		if (p.Name == "Agent" || p.Name == "Task") && (!key.tagged || key.source.Kind == "claude") {
+		if (p.Name == "Agent" || p.Name == "Task") && (!st.key.tagged || st.key.source.Kind == "claude") {
 			call.launcher = true
 			return true
 		}

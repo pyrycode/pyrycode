@@ -55,3 +55,7 @@ Pending documentation stage: `docs/knowledge/features/thread-package.md`, “Age
 - Concurrency: serialized owner contract remains, with detached snapshots and no new goroutines.
 - Threat model: this stage folds saved evidence only; transport authentication, wire size limits and cache integration remain downstream ADR 042 migration work.
 **Reviewer:** builder self-review. **Date:** 2026-10-09.
+
+## Revisions
+2026-10-09: Scoped child adoption also records the original group on ordinary pending calls; otherwise a reused turn/call could import an early predecessor result. `TestChildLifetimeReuse` caught that failure. A parent repair removes the old lane association, and saved agent enrichment takes precedence over stale lane evidence (`TestChildLateRepairAndClosure`, `TestChildNestedLinkRepair`). Child turn endings retain evidence on text as well as calls; `TestChildTurnEndBeforeCreation` covers pending closure. Canonical intrinsic/derived snapshots keep malformed feeds version-only (`TestChildMalformedNeutrality`). `TestChildMainIndependenceAndSend` covers idle main state and delivered text closure. These refine the planned scope/closure contracts without new exports, consumers or lifecycle branches.
+Tagged main turns use scope zero, while child evidence without a lifetime retains legacy scope. Adoption locates the main turn with its key convention and separately validates the original group (`TestChildEarlyResultAfterBoundary`).

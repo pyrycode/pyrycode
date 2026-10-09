@@ -31,6 +31,14 @@ func testAgent(t *testing.T, f *Fold, status string, active bool, ended uint64) 
 	}
 	return item
 }
+
+// Retained agents with unresolved parent evidence are deliberately not public.
+func testRetainedAgent(t *testing.T, f *Fold, status string, active bool, ended uint64) Item {
+	t.Helper()
+	snapshot := *f
+	snapshot.children = nil
+	return testAgent(t, &snapshot, status, active, ended)
+}
 func testAgentCall(id uint64) history.Entry {
 	return testMain(id, "tool_use", `,"tool_use_id":"c","name":"Agent","input":{"prompt":"original"}`)
 }
@@ -200,17 +208,17 @@ func TestAgentInvalidFacts(t *testing.T) {
 	e.Shown = new(bool)
 	testFeed(t, f, e)
 	e.Payload[2] = 'x'
-	original := testAgent(t, f, "running", true, 0)
+	original := testRetainedAgent(t, f, "running", true, 0)
 	if original.Shown || original.Turn != "t" {
 		t.Fatal(original)
 	}
 	testContent(t, original, "parent_tool_use_id", "parent")
 	original.Content[2] = 'x'
-	testContent(t, f.Items()[0], "input", map[string]any{"prompt": "original"})
+	testContent(t, testRetainedAgent(t, f, "running", true, 0), "input", map[string]any{"prompt": "original"})
 	for i, raw := range []string{`{"tool_use_id":"c","is_error":null}`, `{"tool_use_id":"c","is_error":false,"conversation_id":"foreign"}`, `{"tool_use_id":"c","is_error":false,"truncated_fields":["tool_use_id"]}`} {
 		testFeed(t, f, testEntry(uint64(i+2), "tool_result", raw))
 	}
-	testAgent(t, f, "running", true, 0)
+	testRetainedAgent(t, f, "running", true, 0)
 	if f.Version() != 4 {
 		t.Fatal(f.Version())
 	}
@@ -228,7 +236,7 @@ func TestAgentEarlyTaskReportsAndChildLaunch(t *testing.T) {
 	}
 	entries := []history.Entry{testMain(1, "assistant_delta", `,"text":"one"`), testMain(2, "tool_use", `,"tool_use_id":"c","name":"Task","parent_tool_use_id":"parent"`), testMain(3, "assistant_delta", `,"text":"two"`)}
 	f = testMainReplay(t, entries)
-	item = testAgent(t, f, "running", true, 0)
+	item = testRetainedAgent(t, f, "running", true, 0)
 	testContent(t, item, "parent_tool_use_id", "parent")
 	testContent(t, testMainItem(t, f, 1, 3, "assistant_message", "running", true), "text", "onetwo")
 }
@@ -272,10 +280,10 @@ func TestAgentDurableParentAndSourceReferences(t *testing.T) {
 	entries[0].Session = testSource("claude", "original")
 	entries[1].Session = testSource("claude", "original")
 	entries[2].Session = testSource("claude", "different")
-	item := testAgent(t, testMainReplay(t, entries), "running", true, 0)
+	item := testRetainedAgent(t, testMainReplay(t, entries), "running", true, 0)
 	testContent(t, item, "parent_tool_call_id", "outer")
 	entries[2].Session = testSource("claude", "original")
-	testAgent(t, testMainReplay(t, entries), "ended_with_session", false, 3)
+	testRetainedAgent(t, testMainReplay(t, entries), "ended_with_session", false, 3)
 }
 
 func TestAgentRecoveryMismatchedLink(t *testing.T) {

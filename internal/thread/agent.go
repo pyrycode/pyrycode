@@ -316,7 +316,7 @@ func (f *Fold) agentWork(e history.Entry) bool {
 			parent, field = p.Parent, "parent_tool_use_id"
 		}
 		c := g.call(call)
-		if c.parent == "" && p.usable(parent, field) {
+		if p.usable(parent, field) && !p.lost("parent_tool_use_id", "parent_tool_call_id") {
 			c.parent = parent
 		}
 	}
