@@ -61,3 +61,6 @@ Pending documentation stage: create `docs/knowledge/features/thread-package.md`,
 **Date:** 2026-10-09
 
 Sizing rechecked: one deliverable, four acceptance criteria, two exported types, no consumers, at most ten rejection categories; approximately 740 written lines including plan and tests, below 800.
+
+## Revisions
+- 2026-10-09: producer review of `promptAnswerFact.SessionID` showed saved answers can retain an asking-session ID even when harness metadata is absent. Keep that recorded ID with unknown agent ahead of successor fallback; explicit entry provenance still wins. Metadata-free legacy dividers likewise retain their recorded session ID independently of whether they supply a successor. `TestBoundaryMalformedNeutrality` covers these cases and malformed boundary/visibility neutrality.
