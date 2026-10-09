@@ -59,3 +59,7 @@ Pending documentation stage: complete “Shadow lifecycle and evidence” in `do
 **Date:** 2026-10-09
 
 Sizing: four acceptance criteria, approximately 580 test/helper lines + 60 plan lines + up to 150 compact artifact lines = 790 total; zero exported types, zero changed consumers, no production state-machine branches.
+
+## Revisions
+2026-10-09: Independent raw text-run/tool-result checks and a third active turn before reset make content loss and pre-divider interruption non-vacuous. The closure checkpoint is the raw `session_divider`, before its legacy companion. Credential-free fixture checks use `!e2e_realclaude`; the tagged capture validates generated usable records while builder recovery supplies the pending counted report pin. Approximately 830 total lines exceed the ceiling; actual parentage is #3068 → #3049 → #2961, so the grandchild rule requires continuing under `needs-human:sizing`. Capture and replay readers form one coupled evidence deliverable.
+Final sizing recount: 918 plan/test lines before the compact observed artifacts. Additional negative provenance controls and exact raw-to-legacy text equality account for the increase; `needs-human:sizing` remains applied under the same grandchild rule.
