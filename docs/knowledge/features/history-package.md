@@ -139,13 +139,28 @@ load.
 ## Reader (#2116)
 
 `internal/relay`'s `request_history` handler reads through `newHistoryPager`,
-wired at `cmd/pyry/relay.go`. The adapter filters exactly one bounded raw
-`Store.Page` result with `legacyHistoryType`; it never scans ahead to fill a
-page after excluding new history-only types. Filtering ignores `Entry.Shown`,
-so hidden eligible legacy events still appear, while new types stay excluded
-with absent, false or true visibility. Neither metadata field is projected
-onto `protocol.HistoryEntry`; eligible entries retain their original durable
-ID, timestamp and payload bytes, newest-first.
+wired at `cmd/pyry/relay.go`. The adapter projects exactly one bounded raw
+`Store.Page` result; it never scans ahead to fill a page. `legacyHistoryType`
+preserves eligible legacy events regardless of `Entry.Shown`, with their original
+durable ID, timestamp and payload bytes, newest-first. `legacyRuntimeReceipt`
+projects only validated `main_turn_opened`, `main_tool_interrupted`,
+`main_turn_interrupted` and `session_divider` into nonvisual `banner` receipts
+(#3026). Their payload is `{conversation_id, level:"info", text:"",
+truncated:false, stops_turn:false}` with all five fields present; ID and timestamp
+remain those of the raw fact. Raw facts and metadata are unchanged, and neither
+metadata field nor runtime payload is forwarded to the legacy wire.
+
+Known facts need matching ownership, occurrence time and required identities;
+unknown types and malformed facts remain excluded without being certified
+harmless. A valid receipt accounts for its durable ID but grants no presentation
+and changes no turn, permission, model or status state. Unknown, malformed or
+unidentified receipts and unaccounted numeric holes remain mobile read barriers.
+Receipt-only pages and repeated/overlapping delivery cannot establish sight.
+Join receipts by conversation and durable ID: closures/dividers may share both
+an occurrence timestamp and identical banner bytes, so the legacy (`type`, `ts`)
+fallback cannot distinguish them.
+See [receipt validation and publication](history-package-producers.md#legacy-eligibility-and-explicit-visibility-2965)
+and the [wire contract](../../protocol-mobile.md#a-history-entry).
 
 The adapter forwards that raw page's opaque `Cursor` and `AtStart` unchanged.
 An empty filtered page with `AtStart == false` retains a usable cursor to the
@@ -155,12 +170,19 @@ A terminal page has `AtStart == true` and an empty cursor. Treating an empty
 list as exhaustion loses older eligible content; scanning ahead instead would
 turn one bounded request into work proportional to the hidden history.
 
-**Filtered counts cannot determine raw page boundaries.** A hidden startup
-divider changes raw pagination even though legacy clients never receive it.
+**Projected counts cannot determine raw page boundaries.** A hidden startup
+divider now occupies a nonvisual receipt, while excluded unknown or malformed
+facts still shorten pages. An all-runtime page can contain only receipts; it
+retains the raw cursor and `AtStart` just as an entirely excluded page does.
 `TestRelayV2_ConversationHistory` compares cursors and `AtStart` with each raw
 page, covering a nonempty partial terminal page, an exact-fill walk with an
-empty terminal page, and an empty nonterminal page containing only the divider.
-Deriving exhaustion from seeded legacy counts would miss these boundaries.
+empty terminal page, and a receipt-only nonterminal page containing the startup
+divider. Deriving exhaustion from seeded content counts would miss these boundaries.
+`TestLegacyRuntimeReceipts_BoundedPages` checks all four facts at page edges and
+in the middle, repeated walks and warm/reopened stores; `TestLegacyRuntimeReceipts_StartupDivider`
+uses the real startup writer, which intentionally has no predecessor/successor
+session identity. Requiring those sessions would leave restart holes while
+running-turn tests stayed green.
 
 `TestHistoryProjection_BoundedWalk` compares each projected page with its raw
 page in warm and reopened stores, using mixed and entirely excluded logs,
@@ -206,7 +228,9 @@ internal/history/
   check, and the 0o700/0o600 modes this package copies verbatim.
 - [relay-package-handlers.md](relay-package-handlers.md) § `ListConversations` —
   `LatestDisplayableEntryID`'s consumers: the `historyLatestReader` interface
-  `*Store` satisfies for list and mark-read, and lookup-failure wire behavior.
+  satisfied by the daemon's legacy view for list and mark-read, and lookup-failure
+  wire behavior. [Watermarks](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
+  distinguishes that view from the raw store API.
 - [`conversations-package.md`](conversations-package.md) § `ReadUpTo` — the
   durable read mark stated in this package's same per-conversation id space,
   landed in the same ticket (#2779).

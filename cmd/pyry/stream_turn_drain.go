@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -128,6 +129,8 @@ type confirmedStreamStop struct {
 // must be structurally impossible. The drain stops on ctx, not on close; any
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
+	runtimeReplayRing *eventring.Ring // installed before workers; boundaries publish on the drain
+
 	runtimeNextProducer uint64                       // guarded by offerMu
 	runtimeProducers    map[string]uint64            // latest activation per routing ID, guarded by offerMu
 	runtimeProducerTags map[string]*streamSessionTag // registered routing owners, guarded by offerMu
