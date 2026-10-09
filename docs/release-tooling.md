@@ -246,3 +246,11 @@ temp dir. Unlike `e2e-install`, it does **not** mutate the real user domain.
 
 When: on the release checklist, and before touching `pyry update` code
 (`cmd/pyry/update*.go`, `internal/update`).
+
+## Full production timeout proofs
+
+`make test` checks the update decision's operation deadline with a short injected duration.
+Its production ceiling remains 70 seconds.
+`make test-slow` also exercises the public operation through the full ceiling and the
+supervisor's real token-read deadline. `make preship` includes this tier.
+Documentation and historical-spec maintenance tests live in `pyrycode-agents` and are opt-in.

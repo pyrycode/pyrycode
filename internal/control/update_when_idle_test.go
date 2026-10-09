@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -304,6 +305,14 @@ func TestUpdateWhenIdle_SilentPeerCeiling(t *testing.T) {
 	if updateWhenIdleTimeout != 70*time.Second {
 		t.Fatalf("operation timeout = %v, want 70s", updateWhenIdleTimeout)
 	}
+	timeout := 100 * time.Millisecond
+	request := func(ctx context.Context, socket string) (*UpdateWhenIdleResult, error) {
+		return updateWhenIdle(ctx, socket, timeout)
+	}
+	if os.Getenv("PYRY_SLOW_TESTS") == "1" {
+		timeout = updateWhenIdleTimeout
+		request = UpdateWhenIdle
+	}
 	release := make(chan struct{})
 	sock := startUpdatePeer(t, func(conn net.Conn) {
 		var req Request
@@ -311,10 +320,10 @@ func TestUpdateWhenIdle_SilentPeerCeiling(t *testing.T) {
 		<-release
 	})
 	defer close(release)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*updateWhenIdleTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+5*time.Second)
 	defer cancel()
 	start := time.Now()
-	got, err := UpdateWhenIdle(ctx, sock)
+	got, err := request(ctx, sock)
 	elapsed := time.Since(start)
 	if err == nil || got != nil {
 		t.Fatalf("decision = %+v, %v; want nil, error", got, err)
@@ -322,8 +331,8 @@ func TestUpdateWhenIdle_SilentPeerCeiling(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Errorf("caller expired before operation bound: %v", ctx.Err())
 	}
-	if elapsed < updateWhenIdleTimeout-time.Second || elapsed > updateWhenIdleTimeout+3*time.Second {
-		t.Errorf("elapsed = %v, want near %v", elapsed, updateWhenIdleTimeout)
+	if elapsed < timeout-20*time.Millisecond || elapsed > timeout+3*time.Second {
+		t.Errorf("elapsed = %v, want near %v", elapsed, timeout)
 	}
 }
 

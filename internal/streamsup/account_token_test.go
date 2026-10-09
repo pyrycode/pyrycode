@@ -345,6 +345,9 @@ func TestAccountTokenBlockedReadCancellation(t *testing.T) {
 
 func TestAccountTokenReadDeadline(t *testing.T) {
 	t.Parallel()
+	if os.Getenv("PYRY_SLOW_TESTS") != "1" {
+		t.Skip("full production token deadline: run make test-slow")
+	}
 	rec := &logRecorder{}
 	entered := make(chan struct{})
 	var reads atomic.Int32
@@ -373,6 +376,23 @@ func TestAccountTokenReadDeadline(t *testing.T) {
 	}
 	if reads.Load() != 2 || strings.Count(out.String(), "\"Args\"") != 1 {
 		t.Fatal("expired read launched a child")
+	}
+}
+
+func TestAccountTokenBoundedRead(t *testing.T) {
+	t.Parallel()
+	r := &Runner{cfg: Config{AccountTokenProvider: func(ctx context.Context) (string, AccountTokenFailure, error) {
+		<-ctx.Done()
+		return privateToken, "", nil
+	}}}
+	parent, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	env, err := r.accountTokenEnvWithTimeout(parent, []string{"KEEP=value"}, 20*time.Millisecond)
+	if env != nil || err == nil || err.Error() != "streamsup: account token: timeout" {
+		t.Fatalf("expired provider result admitted: env=%v err=%v", env, err)
+	}
+	if parent.Err() != nil {
+		t.Fatal("caller expired before the token-read deadline")
 	}
 }
 

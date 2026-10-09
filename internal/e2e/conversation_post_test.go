@@ -49,6 +49,23 @@ func TestConversationPost_E2E_UserTurns(t *testing.T) {
 			if _, err := os.Stat(stem + "." + row.CurrentSessionID); !os.IsNotExist(err) {
 				t.Fatal("fresh conversation already activated")
 			}
+			if kind == "chat" {
+				// Check the rejected lookup before any turn starts, so legitimate
+				// turn metadata writes cannot race with the registry comparison.
+				registryPath := filepath.Join(home, ".pyry", "test", "conversations.json")
+				before, err := os.ReadFile(registryPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r := runVerb(t, socket, home, "conversation", "post", "--id=private-missing-id", "--text=private-message")
+				after, err := os.ReadFile(registryPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.ExitCode != 1 || len(r.Stdout) != 0 || !bytes.Contains(r.Stderr, []byte("unknown conversation")) || bytes.Contains(r.Stderr, []byte("private-")) || !bytes.Equal(before, after) {
+					t.Fatalf("unknown: %+v", r)
+				}
+			}
 			text := "  operator " + kind + "\n\tunchanged é  "
 			// Instance selection remains usable and explicit socket wins.
 			r = runVerb(t, socket, home, "conversation", "-pyry-name=other", "-pyry-socket="+socket, "post", "--id="+id, "--text", text)
@@ -128,20 +145,7 @@ func TestConversationPost_E2E_UserTurns(t *testing.T) {
 			}
 		})
 	}
-	// A miss cannot create state and must not expose lookup text.
-	registryPath := filepath.Join(home, ".pyry", "test", "conversations.json")
-	before, err := os.ReadFile(registryPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := runVerb(t, socket, home, "conversation", "post", "--id=private-missing-id", "--text=private-message")
-	after, err := os.ReadFile(registryPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.ExitCode != 1 || len(r.Stdout) != 0 || !bytes.Contains(r.Stderr, []byte("unknown conversation")) || bytes.Contains(r.Stderr, []byte("private-")) || !bytes.Equal(before, after) {
-		t.Fatalf("unknown: %+v", r)
-	}
+
 }
 
 func TestConversationPost_E2E_SyntaxContentAndTransport(t *testing.T) {
