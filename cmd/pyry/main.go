@@ -599,6 +599,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// for queueChanges' reason. The ring that push appends to is born in the relay
 	// leg, which hands it to the emitter's Run at start.
 	operatorMessages := make(chan operatorMessage, operatorMessageQueueSize)
+	sends := newQueuedSendHistory(conversationHistory, logger, channelPostSession(convReg, pool.HarnessFor))
 	// Queued Claude history entries and pushes wait for their echoes, which the stream drain hands over through the sink. Built only on the
 	// stream path, beside the tracker whose idle is its fallback; nil elsewhere,
 	// which commits at the write as before.
@@ -607,6 +608,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		sendNowPlace = newSendNowPlacement(ctx,
 			func(sid string) (string, bool) { return conversationForSession(convReg, sid) },
 			turnBusy.WaitIdle)
+		sendNowPlace.sendHistory = sends
 		sendNowPlace.bindQueued(ctx, streamSink, conversationHistory, router.isClaude, logger)
 		streamSink.setEchoObserver(sendNowPlace.echo)
 	}
@@ -633,15 +635,17 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// the seam that produces the hold error it marks. The composed value goes no
 		// further than newInboundDeliver's WriteUserTurn — see channelCarry on why the
 		// "clients see no change" property is structural here rather than a filter.
-		Deliver:  postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(replySugg.trackDelivery(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout, sendNowPlace))))),
-		OnChange: queueStateNotify(queueChanges, logger),
-		OnGiveUp: blocked,
+		Deliver:    postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(replySugg.trackDelivery(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout, sendNowPlace))))),
+		OnChange:   queueStateNotify(queueChanges, logger),
+		OnGiveUp:   blocked,
+		OnAccepted: sends.accepted,
+		OnTerminal: sends.terminal,
 		// History uses only the safe queued projection. Stream Claude writes
 		// prepare it at the final write boundary and OnDelivered acknowledges
 		// placement; other deliveries commit here. The channel carry is cleared
 		// only on confirmation, never on a failed attempt or send-now delivery.
 		OnDelivered: deliveredFuncs(
-			newOperatorMessageHistory(conversationHistory, operatorMessageNotify(operatorMessages, logger), sendNowPlace, logger),
+			operatorMessageHistory(conversationHistory, operatorMessageNotify(operatorMessages, logger), sendNowPlace, logger, sends),
 			postCarry.clearDelivered,
 			replySuggDelivered,
 		),

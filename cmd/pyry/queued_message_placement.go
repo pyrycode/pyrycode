@@ -21,7 +21,7 @@ func (p *sendNowPlacement) bindQueued(ctx context.Context, sink *streamTurnSink,
 		}
 	}
 	p.record = func(convID string, msg msgqueue.QueuedMessage, source ...history.SessionProvenance) {
-		newOperatorMessageHistory(store, sink.publishOperator, nil, logger, source...)(convID, msg)
+		operatorMessageHistory(store, sink.publishOperator, nil, logger, p.sendHistory, source...)(convID, msg)
 	}
 	p.dispatch = func(commit func()) { sink.dispatchPlacement(ctx, commit) }
 	p.isClaude = isClaude

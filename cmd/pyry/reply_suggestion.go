@@ -535,6 +535,21 @@ func (q suggestionEnqueuer) EnqueueSent(conversationID, messageID, text, deliver
 	return id
 }
 
+// EnqueueIdentified preserves authenticated identity through the suggestion wrapper.
+func (q suggestionEnqueuer) EnqueueIdentified(conversationID, messageID, text, delivery string, attachmentIDs []string, deviceID, deviceName, clientVersion string, clientSentAt time.Time) uint64 {
+	identified, ok := q.inner.(interface {
+		EnqueueIdentified(string, string, string, string, []string, string, string, string, time.Time) uint64
+	})
+	if !ok {
+		return q.EnqueueSent(conversationID, messageID, text, delivery, attachmentIDs, deviceName, clientVersion, clientSentAt)
+	}
+	id := identified.EnqueueIdentified(conversationID, messageID, text, delivery, attachmentIDs, deviceID, deviceName, clientVersion, clientSentAt)
+	if id != 0 {
+		q.s.accepted(conversationID, id)
+	}
+	return id
+}
+
 // suggestionQueueSender invalidates on an accepted send-now.
 type suggestionQueueSender struct {
 	inner relay.QueueSender
