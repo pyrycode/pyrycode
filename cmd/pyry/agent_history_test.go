@@ -25,7 +25,7 @@ func testAgentFacts(t *testing.T, store *history.Store, conv string) map[string]
 	t.Helper()
 	facts := map[string][]map[string]string{}
 	for _, entry := range historyEntries(t, store, conv) {
-		if !strings.HasPrefix(entry.Type, "agent_call_") && !strings.HasPrefix(entry.Type, "background_task_o") && entry.Type != "background_task_linked" {
+		if !strings.HasPrefix(entry.Type, "agent_call_") && !strings.HasPrefix(entry.Type, "background_task_o") && entry.Type != "background_task_linked" && entry.Type != "background_task_gone" {
 			continue
 		}
 		var p map[string]string
@@ -35,7 +35,7 @@ func testAgentFacts(t *testing.T, store *history.Store, conv string) map[string]
 		if p["conversation_id"] != conv || p["lifetime_id"] == "" || p["occurred_at"] == "" {
 			t.Fatalf("incomplete fact: %s", entry.Payload)
 		}
-		shown := entry.Type == "agent_call_result" || entry.Type == "agent_call_denied" || entry.Type == "background_task_outcome"
+		shown := entry.Type == "agent_call_result" || entry.Type == "agent_call_denied" || entry.Type == "background_task_outcome" || entry.Type == "background_task_gone"
 		if entry.Shown == nil || *entry.Shown != shown || entry.Session == nil || entry.Session.Kind != "claude" {
 			t.Fatalf("metadata: %+v", entry)
 		}
@@ -290,6 +290,12 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 	e.HandleFor(ctx, testConvID, turnevent.ToolCallDenied{ToolCallID: "call"}, source)
 	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "call"}, source)
 	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskUpdated{TaskID: "task", Status: "completed"}, source)
+	e.HandleFor(ctx, testConvID, turnevent.ToolStart{Title: "Agent", ToolCallID: "gone-call"}, source)
+	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskStarted{TaskID: "gone-task", ToolCallID: "gone-call"}, source)
+	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskRoster{}, source)
+	if len(testGoneEntries(t, store, testConvID)) != 1 {
+		t.Fatal("gone fact missing from compatibility fixture")
+	}
 	// Hidden identity at the tail must still be a legacy unread target.
 	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskProgress{TaskID: "task"}, source)
 	raw := historyEntries(t, store, testConvID)
@@ -397,8 +403,13 @@ func TestAgentHistory_StorageFailure(t *testing.T) {
 			}
 			e.hist, e.runtimeFacts = store, true
 			source := history.SessionProvenance{Kind: "claude", SessionID: "source"}
+			e.HandleFor(context.Background(), testConvID, turnevent.ToolStart{Title: "Agent", ToolCallID: "call-id-secret-sentinel"}, source)
 			e.HandleFor(context.Background(), testConvID, turnevent.BackgroundTaskStarted{TaskID: "task-id-secret-sentinel", ToolCallID: "call-id-secret-sentinel", Description: "description-secret-sentinel"}, source)
+			e.HandleFor(context.Background(), testConvID, turnevent.BackgroundTaskRoster{}, source)
 			if mode == "history-only" {
+				if len(testGoneEntries(t, store, testConvID)) != 1 {
+					t.Fatal("relay-disabled gone missing")
+				}
 				if len(testAgentFacts(t, store, testConvID)["background_task_linked"]) != 1 {
 					t.Fatal("relay-disabled fact missing")
 				}
@@ -408,7 +419,7 @@ func TestAgentHistory_StorageFailure(t *testing.T) {
 						t.Fatal("failed append produced receipt")
 					}
 				}
-				if len(bcast.pushes) != 1 || bcast.pushes[0].env.Type != protocol.TypeBackgroundTaskStarted {
+				if len(bcast.pushes) != 4 || bcast.pushes[2].env.Type != protocol.TypeBackgroundTaskStarted || bcast.pushes[3].env.Type != protocol.TypeBackgroundTaskRoster {
 					t.Fatal("mapped report lost")
 				}
 			}
@@ -513,7 +524,13 @@ func TestAgentHistory_ReceiptValidation(t *testing.T) {
 	for _, ev := range []turnevent.Event{turnevent.ToolStart{Title: "Agent", ToolCallID: "call"}, turnevent.ToolUpdate{ToolCallID: "call", Status: turnevent.ToolStatusFailed}, turnevent.ToolCallDenied{ToolCallID: "call"}, turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "call"}, turnevent.BackgroundTaskUpdated{TaskID: "task", Status: "unknown"}} {
 		e.HandleFor(ctx, testConvID, ev, source)
 	}
-	fields := map[string][]string{"agent_call_observed": {"tool_call_id", "tool"}, "agent_call_result": {"tool_call_id", "status"}, "agent_call_denied": {"tool_call_id", "status"}, "background_task_observed": {"task_id"}, "background_task_linked": {"task_id", "tool_call_id"}, "background_task_outcome": {"task_id", "status"}}
+	e.HandleFor(ctx, testConvID, turnevent.ToolStart{Title: "Agent", ToolCallID: "gone-call"}, source)
+	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskStarted{TaskID: "gone-task", ToolCallID: "gone-call"}, source)
+	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskRoster{}, source)
+	if len(testGoneEntries(t, store, testConvID)) != 1 {
+		t.Fatal("gone fact missing from validation fixture")
+	}
+	fields := map[string][]string{"agent_call_observed": {"tool_call_id", "tool"}, "agent_call_result": {"tool_call_id", "status"}, "agent_call_denied": {"tool_call_id", "status"}, "background_task_observed": {"task_id"}, "background_task_linked": {"task_id", "tool_call_id"}, "background_task_outcome": {"task_id", "status"}, "background_task_gone": {"task_id", "tool_call_id", "status"}}
 	for _, entry := range historyEntries(t, store, testConvID) {
 		required, ok := fields[entry.Type]
 		if !ok {

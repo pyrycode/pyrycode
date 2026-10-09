@@ -234,9 +234,14 @@ old and new work after reopening. Minted lifetime IDs persist in the raw facts,
 so a fresh emitter or reactivated child has a different durable identity even
 when local numbering and routing IDs repeat. `endTurn` retains lifetime and
 launcher attribution because background work can outlive the main turn.
-An unsealed producer exit or conversation teardown releases it. Sealing retains
-predecessor attribution for captured late reports; a successor incarnation has
-its own lifetime.
+An unsealed producer exit or conversation teardown retires it through
+`retireAgentHistory`, clearing retained call facts, task links/outcomes and
+terminal call markers together with the lifetime. A child respawn inside one
+runner can reuse its source/incarnation: clearing only the lifetime would let an
+old join infer gone under a new lifetime, or an old ending suppress a replacement
+task using the same IDs. `closeRuntimeSource` and `closeForConversation` share
+this cleanup. Sealed runtime closure retains predecessor attribution and terminal
+evidence for captured late reports; a successor incarnation has its own lifetime.
 
 **A sealed source can first observe a launcher after its boundary.**
 `rememberLauncher` must run before the sealed-path return, and recognition of
@@ -244,6 +249,11 @@ later results/denials uses `launcherTurns` membership. A nonempty originating-tu
 address is insufficient: background-only sources may never have opened main
 work. Retaining those calls permits their later reports to join the predecessor
 without opening a main turn or child lane or changing successor phase/lifetime.
+`releaseConversation` also retains usable denial evidence received before the
+sealed source's first launcher, even before a lifetime is minted. Otherwise
+empty-state cleanup would forget the denial and allow a later roster to infer
+gone. Unsealed denial handling opens main work, so ordinary ordering cases alone
+do not exercise this retention boundary.
 `recordAgentFact` flushes preceding buffered text before the append, preserving
 accepted output order without opening or changing a main turn.
 
@@ -260,17 +270,60 @@ Preserve the result, link and outcome independently. A link can arrive after
 either report and still determine launch meaning; eagerly folding a tool result
 into a permanent task ending would lose this distinction. Denial remains
 independent terminal evidence, including when a failed result also arrives.
-Status-empty updates, summary/patch-only reports, progress, rosters and main-turn
-end supply no background ending. Roster disappearance inference belongs to
-[#3031](https://github.com/pyrycode/pyrycode/issues/3031), and session-ending
-inference to [#3032](https://github.com/pyrycode/pyrycode/issues/3032).
+Status-empty updates, summary/patch-only reports, progress and main-turn end
+supply no background ending. Only a later complete roster can establish
+[gone](#gone-requires-a-later-complete-roster-3031); session-ending inference
+remains [#3032](https://github.com/pyrycode/pyrycode/issues/3032).
 
-Identity/link facts are explicitly hidden; results, denials and task outcomes are
-explicitly shown. Neither value grants foreground presentation or raw legacy
-transport eligibility. Successful validated facts use nonvisual receipts at
+Identity/link facts are explicitly hidden; results, denials, task outcomes and
+gone facts are explicitly shown. Neither value grants foreground presentation
+or raw legacy transport eligibility. Successful validated facts use nonvisual receipts at
 their original durable IDs/timestamps, counted toward the legacy unread target
 independently of raw visibility under #3029. Receipt-only traffic does not confer
 sight or advance a read mark by itself. See
 [receipt validation and visibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
 [ADR 042](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks)
 and [the attribution contract](../../specs/architecture/3030-agent-task-history.md).
+
+### Gone requires a later complete roster (#3031)
+
+`observeGoneRoster` records `background_task_gone` with `status: gone` when a
+received complete Claude roster omits a previously linked task whose Agent/Task
+call was observed in the same conversation, captured source and durable child
+lifetime. Gone means **unknown outcome**, never a reported finish or evidence
+of success/failure. It retains the task and call IDs, tool name, known parent
+call ID, lifetime, captured source metadata and occurrence time. A parent first
+supplied by a launch result enriches the retained call for this later fact.
+
+A complete roster has `DroppedTasks == 0` and a nonempty, untruncated `task_id`
+on every row; an empty reported roster qualifies. Compare roster task IDs with
+linked task IDs, never tool-call IDs. A complete link requires both nonempty,
+untruncated task and call IDs. Description-only truncation invalidates neither
+the link nor roster completeness.
+
+**Validate the originating identity before enriching a later row.**
+`sessionBackgroundTaskHold.retainStart` refuses a missing/truncated task ID;
+`enrichedRoster` preserves call-ID truncation on enriched rows. Checking only
+the later row would let a shortened originating task ID gain a complete-looking
+call link after its truncation marker was lost. `observeTaskIdentity` still
+rejects incomplete identities at the observer boundary.
+
+Inference checks retained links before observing the incoming roster's rows.
+A refresh before a usable link or observed call is known cannot be applied
+retroactively; another qualifying refresh is required. A usable denial or a
+reported nonempty task status suppresses inference even when received before
+the link. Linked tool results remain launch reports, and main-turn completion
+retains eligibility. Once inferred, both task and call retain terminal markers:
+repeated refreshes, starts, links and late reports cannot duplicate gone or
+reopen ended work within that lifetime.
+
+No refresh supplies no ending. Incomplete rosters, retained-roster reads, bounded
+join eviction/pruning and child-reset housekeeping alone never establish gone.
+The hold's enrichment cache is separate from the emitter's retained eligibility;
+pruning the cache does not discard already observed links. Only forwarded fresh
+roster events reach inference, after the hold releases its leaf mutex. Inference
+and its state remain owned by the single drain, including captured late rosters
+for sealed predecessors; other conversations, sources and lifetimes remain
+unaffected. Codex and unknown producers infer nothing. No extra live refresh,
+session-ending inference or second durable log is introduced. See
+[the roster contract](../../specs/architecture/3031-agent-roster-gone.md).

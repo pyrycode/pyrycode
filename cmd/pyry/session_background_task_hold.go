@@ -202,6 +202,10 @@ func (h *sessionBackgroundTaskHold) listsTask(id string) bool {
 // known task keeps its original insertion position. Overflow evicts the oldest
 // pending join, preserving current roster matches. The caller holds mu.
 func (h *sessionBackgroundTaskHold) retainStart(e turnevent.BackgroundTaskStarted) {
+	// A shortened task ID cannot safely enrich another report's complete identity.
+	if e.TaskID == "" || slices.Contains(e.TruncatedFields, "task_id") {
+		return
+	}
 	j := backgroundTaskJoin{e.TaskID, e.ToolCallID, slices.Contains(e.TruncatedFields, "tool_call_id")}
 	for i := range h.joins {
 		if h.joins[i].taskID == e.TaskID {

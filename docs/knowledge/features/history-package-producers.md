@@ -13,8 +13,8 @@ interactive emitter's `emit` chokepoint
 (`cmd/pyry/operator_message_history.go`), used by queued stream placement and
 `msgqueue.Config.OnDelivered`. Runtime opening/interruption facts use
 `interactiveTurnEmitterV2.recordRuntimeFact` through the same append seam.
-Claude attribution and reported endings use `recordAgentFact` at that seam,
-without copying the mapped reports' prose.
+Claude attribution, reported endings and roster-inferred gone facts use
+`recordAgentFact` at that seam, without copying the mapped reports' prose.
 The existing legacy emitters resolve the four event values — conversation
 id, wire type, marshalled payload, one hoisted timestamp — for the ring
 append or the fan-out itself, so their log append needed no new mapping, only
@@ -29,7 +29,7 @@ not from an envelope in flight (see
 | Document | Topics |
 | --- | --- |
 | [Interactive provenance](history-package-producers-interactive-provenance.md) | Captured source, retained text and child lanes, conversation phase and channel posts. |
-| [Runtime and startup lifecycle](history-package-producers-runtime-lifecycle.md) | Boundaries, interrupted main work, durable agent/task identities, links and reported endings. |
+| [Runtime and startup lifecycle](history-package-producers-runtime-lifecycle.md) | Boundaries, interrupted main work, durable agent/task identities, reported endings and complete-roster gone inference. |
 | [Legacy compatibility and verification](history-package-producers-legacy-compatibility.md) | Explicit raw visibility, nonvisual receipts, legacy unread targets, delivery ordering and producer tests. |
 
 Claude Agent/Task calls and background reports retain attribution alongside their
@@ -37,6 +37,20 @@ existing mapped reports. See [agent/task attribution and reported endings](histo
 for launch-result meaning and durable source/lifetime isolation, and
 [legacy eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)
 for the separate raw visibility, unread-target and presentation contracts.
+
+`background_task_gone` means an **unknown outcome** (#3031). It requires an
+observed Claude Agent/Task call with a complete task-to-call join and a later
+received complete roster omitting that task in the same conversation, captured
+source and durable child lifetime. An empty reported roster qualifies. No refresh,
+retained read or join pruning alone implies an ending. Codex produces no gone
+facts. See [roster completeness and ordering](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
+
+Gone has explicit raw `shown: true`. Its raw payload stays excluded from legacy
+history pages, live delivery and replay. After successful storage, #3026's
+validated nonvisual receipt retains the original durable ID and timestamp;
+\#3029 counts it toward the legacy unread target independently of raw visibility.
+That accounting confers no foreground presentation or read-mark advancement by
+itself. See [receipt validation](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 
 ### Legacy transition provenance (#2982)
 
