@@ -147,7 +147,7 @@ the hold at dequeue lets a post overtake the divider. Confirmation-only operator
 placement uses the drain with a whole-queue fence. Delivery release checks open
 turns, since a denial may open one without a running phase. Sealed predecessor
 events keep legacy provenance and bounded text sequencing but bypass successor
-busy/idle mutation. See [runtime history facts and ordering](history-package-producers.md#runtime-boundaries-and-main-work-closure-3013)
+busy/idle mutation. See [runtime history facts and ordering](history-package-producers-runtime-lifecycle.md#runtime-boundaries-and-main-work-closure-3013)
 for visibility, closure exclusions and focused regression tests.
 
 **Child attribution must be independent of main lifecycle (#2960).** Guarding only
