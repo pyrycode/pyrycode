@@ -16,6 +16,7 @@ package realclaude
 // The suggestion is claude-authored and untrusted: only its length is logged.
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -352,18 +353,31 @@ try:
 except OSError:
     record({"completed": 1, "elapsed_ms": int((time.monotonic() - started) * 1000)})
     sys.exit(1)
+record({"progress": "spawn", "pid": os.getpid(), "child_pid": child.pid})
+def progress(stage, count):
+    record({"progress": stage, "pid": os.getpid(), "child_pid": child.pid,
+            "bytes": min(4097, count), "saturated": count >= 4097})
 retained = bytearray()
 size = 0
+forwarded = 0
 while True:
     chunk = os.read(child.stdout.fileno(), 8192)
     if not chunk:
         break
-    size += len(chunk)
+    first_read = size == 0
+    size = min(4097, size + len(chunk))
+    if first_read:
+        progress("read", size)
     retained.extend(chunk[:max(0, 4097 - len(retained))])
-    sys.stdout.buffer.write(chunk)
+    acknowledged = sys.stdout.buffer.write(chunk)
     sys.stdout.buffer.flush()
+    first_forward = forwarded == 0
+    forwarded = min(4097, forwarded + acknowledged)
+    if first_forward and acknowledged > 0:
+        progress("forward", forwarded)
 code = child.wait()
 fields = {"completed": 1, "elapsed_ms": int((time.monotonic() - started) * 1000),
+          "pid": os.getpid(), "child_pid": child.pid,
           "exit_code": code, "stdout_bytes": size, "output_observed": True,
           "utf8_ok": False, "json_ok": False, "result_ok": False, "text_ok": False}
 try:
@@ -420,6 +434,10 @@ sys.exit(code)
 // suggestSource contains only source metadata. Generated text and credentials
 // never enter its evidence file or the test's diagnostic logs.
 type suggestSource struct {
+	ChildPID                                            int  `json:"child_pid"`
+	Started, ReadKnown, ForwardKnown, ProgressAmbiguous bool `json:"-"`
+	ReadBytes, ForwardBytes                             int  `json:"-"`
+
 	PID            int   `json:"pid"`
 	Streams        int   `json:"streams"`
 	Results        int   `json:"results"`
@@ -446,7 +464,7 @@ func (s suggestSource) stage(wireSet bool) string {
 		return "wire set observed"
 	case s.Calls == 0:
 		return "no observed invocation (cause unknown)"
-	case s.Calls != 1 || s.Completed > s.Calls:
+	case s.ProgressAmbiguous || s.Calls != 1 || s.Completed > s.Calls:
 		return "unknown (ambiguous invocation evidence)"
 	case s.Completed == 0:
 		return "incomplete invocation (exit/output unknown)"
@@ -464,6 +482,7 @@ func (s suggestSource) stage(wireSet bool) string {
 }
 
 // diagnostic uses only fixed labels and scalar metadata, never source values.
+// Spawn proves creation; read/flush prefixes prove neither readiness nor daemon receipt.
 func (s suggestSource) diagnostic(idle bool, setRev, clearRev uint64) string {
 	exit, output := "unknown", "unknown"
 	if s.ExitCode != nil {
@@ -480,12 +499,35 @@ func (s suggestSource) diagnostic(idle bool, setRev, clearRev uint64) string {
 		output = fmt.Sprintf("bytes=%d utf8=%v json=%s result_success=%s text_valid=%s",
 			s.StdoutBytes, s.UTF8OK, jsonOK, resultOK, textOK)
 	}
-	elapsed := s.ElapsedMS
-	if s.StartMS != 0 && s.Completed == 0 {
-		elapsed = max(0, time.Now().UnixMilli()-s.StartMS)
+	elapsed, wrapperPID := "unknown", "unknown"
+	if s.Completed == 1 {
+		elapsed = strconv.FormatInt(s.ElapsedMS, 10)
+	} else if s.StartMS > 0 {
+		elapsed = strconv.FormatInt(max(0, time.Now().UnixMilli()-s.StartMS), 10)
 	}
-	return fmt.Sprintf("fallback source: streams=%d results=%d idle=%v calls=%d completed=%d pid=%d elapsed_ms=%d exit=%s output={%s} set_revision=%d clear_revision=%d stage=%s",
-		s.Streams, s.Results, idle, s.Calls, s.Completed, s.PID, elapsed, exit, output, setRev, clearRev, s.stage(setRev != 0))
+	if s.PID > 0 {
+		wrapperPID = strconv.Itoa(s.PID)
+	}
+	start, read, forward := "unknown", "unknown", "unknown"
+	if s.Started {
+		start = "true"
+	}
+	if s.ReadKnown {
+		read = fmt.Sprintf("bytes=%d saturated=%v", s.ReadBytes, s.ReadBytes == 4097)
+	}
+	if s.ForwardKnown {
+		forward = fmt.Sprintf("bytes=%d saturated=%v", s.ForwardBytes, s.ForwardBytes == 4097)
+	}
+	if s.ProgressAmbiguous {
+		start, read, forward = "ambiguous", "ambiguous", "ambiguous"
+	}
+	childPID := "unknown"
+	if s.Started {
+		childPID = strconv.Itoa(s.ChildPID)
+	}
+	progress := fmt.Sprintf(" child_pid=%s spawn=%s read={%s} forward={%s}", childPID, start, read, forward)
+	return fmt.Sprintf("fallback source: streams=%d results=%d idle=%v calls=%d completed=%d pid=%s elapsed_ms=%s exit=%s output={%s} set_revision=%d clear_revision=%d stage=%s",
+		s.Streams, s.Results, idle, s.Calls, s.Completed, wrapperPID, elapsed, exit, output, setRev, clearRev, s.stage(setRev != 0)) + progress
 }
 
 // suggestLifecycle selects complete daemon records by wrapper PID. Only parsed
@@ -578,9 +620,47 @@ func suggestLifecycle(stderr string, pid int) string {
 	return "daemon lifecycle: unknown"
 }
 
+func (s *suggestSource) invalidateProgress() {
+	s.Started, s.ReadKnown, s.ForwardKnown = false, false, false
+	s.ChildPID, s.ReadBytes, s.ForwardBytes = 0, 0, 0
+	s.ProgressAmbiguous = true
+	s.Completed, s.ElapsedMS = 0, 0
+	s.OutputObserved, s.ExitCode = false, nil
+}
+
+// suggestMetadata requires unique keys; missing and null scalars remain unknown.
+func suggestMetadata(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	token, err := dec.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, false
+	}
+	fields := make(map[string]json.RawMessage)
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		name, ok := key.(string)
+		if !ok || fields[name] != nil {
+			return nil, false
+		}
+		var value json.RawMessage
+		if dec.Decode(&value) != nil {
+			return nil, false
+		}
+		fields[name] = value
+	}
+	_, err = dec.Token()
+	return fields, err == nil
+}
+
 func readSuggestSource(t *testing.T, path string) suggestSource {
 	t.Helper()
 	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return suggestSource{}
+	}
 	if err != nil {
 		t.Fatal("open native source evidence failed")
 	}
@@ -588,33 +668,113 @@ func readSuggestSource(t *testing.T, path string) suggestSource {
 	var total suggestSource
 	dec := json.NewDecoder(io.LimitReader(f, 64*1024))
 	for {
-		var entry suggestSource
-		if err := dec.Decode(&entry); errors.Is(err, io.EOF) {
-			return total
-		} else if errors.Is(err, io.ErrUnexpectedEOF) {
-			return total // The observer may be midway through its final append.
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return total // An interrupted final append preserves earlier witnesses.
 		} else if err != nil {
-			t.Fatal("decode source metadata failed")
+			total.invalidateProgress()
+			return total
 		}
-		total.Streams += entry.Streams
-		total.Results += entry.Results
-		total.Events += entry.Events
-		total.Suggestions += entry.Suggestions
-		total.Bytes += entry.Bytes
-		total.Warnings += entry.Warnings
-		if entry.Calls != 0 {
-			// Start a fresh observation without carrying the previous output flags.
-			streams, results, events, suggestions, bytes, warnings := total.Streams, total.Results, total.Events, total.Suggestions, total.Bytes, total.Warnings
-			calls, completed := total.Calls+entry.Calls, total.Completed
-			total = entry
-			total.Streams, total.Results, total.Events, total.Suggestions, total.Bytes, total.Warnings = streams, results, events, suggestions, bytes, warnings
-			total.Calls, total.Completed = calls, completed
+		fields, unique := suggestMetadata(raw)
+		var entry suggestSource
+		if !unique || json.Unmarshal(raw, &entry) != nil {
+			total.invalidateProgress()
+			continue
 		}
-		if entry.Completed != 0 {
-			total.Completed += entry.Completed
-			total.ElapsedMS, total.ExitCode, total.StdoutBytes = entry.ElapsedMS, entry.ExitCode, entry.StdoutBytes
-			total.OutputObserved, total.UTF8OK, total.JSONOK = entry.OutputObserved, entry.UTF8OK, entry.JSONOK
+		present := func(names ...string) bool {
+			for _, name := range names {
+				if fields[name] == nil || string(fields[name]) == "null" {
+					return false
+				}
+			}
+			return true
+		}
+		// Decode exact key names so case-folded aliases cannot supply metadata.
+		decode := func(name string, value any) bool {
+			return present(name) && json.Unmarshal(fields[name], value) == nil
+		}
+		if fields["calls"] != nil {
+			valid := decode("calls", &entry.Calls) && entry.Calls == 1 &&
+				decode("pid", &entry.PID) && entry.PID > 0 &&
+				decode("start_ms", &entry.StartMS) && entry.StartMS > 0 &&
+				fields["progress"] == nil && fields["completed"] == nil
+			if !valid || total.Calls != 0 || total.ProgressAmbiguous {
+				total.invalidateProgress()
+				continue
+			}
+			total.Calls, total.PID, total.StartMS = 1, entry.PID, entry.StartMS
+			continue
+		}
+		if fields["progress"] != nil {
+			var stage string
+			var count int
+			var saturated bool
+			valid := decode("progress", &stage) && !total.ProgressAmbiguous && total.Calls == 1 && total.Completed == 0 &&
+				decode("pid", &entry.PID) && entry.PID == total.PID &&
+				decode("child_pid", &entry.ChildPID) && entry.ChildPID > 0 && entry.ChildPID != entry.PID && fields["completed"] == nil
+			if stage == "spawn" {
+				valid = valid && !total.Started && !total.ReadKnown && !total.ForwardKnown
+				if valid {
+					total.Started, total.ChildPID = true, entry.ChildPID
+				}
+			} else {
+				valid = valid && total.Started && entry.ChildPID == total.ChildPID && decode("bytes", &count) &&
+					count > 0 && count <= 4097 && decode("saturated", &saturated) && saturated == (count == 4097)
+				switch stage {
+				case "read":
+					valid = valid && !total.ReadKnown && !total.ForwardKnown
+					if valid {
+						total.ReadKnown, total.ReadBytes = true, count
+					}
+				case "forward":
+					valid = valid && total.ReadKnown && !total.ForwardKnown && count <= total.ReadBytes
+					if valid {
+						total.ForwardKnown, total.ForwardBytes = true, count
+					}
+				default:
+					valid = false
+				}
+			}
+			if !valid {
+				total.invalidateProgress()
+			}
+			continue
+		}
+		if fields["completed"] != nil {
+			valid := !total.ProgressAmbiguous && total.Started && total.Completed == 0 &&
+				decode("completed", &entry.Completed) && entry.Completed == 1 &&
+				decode("pid", &entry.PID) && entry.PID == total.PID &&
+				decode("child_pid", &entry.ChildPID) && entry.ChildPID == total.ChildPID &&
+				decode("elapsed_ms", &entry.ElapsedMS) && entry.ElapsedMS >= 0 &&
+				decode("exit_code", &entry.ExitCode) && entry.ExitCode != nil && *entry.ExitCode >= -255 && *entry.ExitCode <= 255 &&
+				decode("stdout_bytes", &entry.StdoutBytes) && entry.StdoutBytes >= 0 && entry.StdoutBytes <= 4097 &&
+				decode("output_observed", &entry.OutputObserved) && entry.OutputObserved &&
+				decode("utf8_ok", &entry.UTF8OK) && decode("json_ok", &entry.JSONOK) &&
+				decode("result_ok", &entry.ResultOK) && decode("text_ok", &entry.TextOK)
+			valid = valid && ((!entry.JSONOK && !entry.ResultOK && !entry.TextOK) ||
+				(entry.JSONOK && entry.UTF8OK && entry.StdoutBytes > 0 && entry.StdoutBytes <= 4096)) &&
+				(entry.StdoutBytes != 0 || entry.UTF8OK) &&
+				((entry.StdoutBytes == 0 && !total.ReadKnown && !total.ForwardKnown) ||
+					(entry.StdoutBytes > 0 && total.ReadKnown && total.ForwardKnown && entry.StdoutBytes >= total.ReadBytes && entry.StdoutBytes >= total.ForwardBytes))
+			if !valid {
+				total.invalidateProgress()
+				continue
+			}
+			total.Completed, total.ElapsedMS, total.ExitCode, total.StdoutBytes = 1, entry.ElapsedMS, entry.ExitCode, entry.StdoutBytes
+			total.OutputObserved, total.UTF8OK, total.JSONOK = true, entry.UTF8OK, entry.JSONOK
 			total.ResultOK, total.TextOK = entry.ResultOK, entry.TextOK
+			continue
+		}
+		// Stream records are independent of the print-mode invocation.
+		for _, counter := range []struct {
+			name  string
+			total *int
+		}{{"streams", &total.Streams}, {"results", &total.Results}, {"events", &total.Events},
+			{"suggestions", &total.Suggestions}, {"bytes", &total.Bytes}, {"warnings", &total.Warnings}} {
+			var n int
+			if decode(counter.name, &n) && n > 0 && n <= 1<<30 {
+				*counter.total += n
+			}
 		}
 	}
 }

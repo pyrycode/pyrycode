@@ -133,6 +133,7 @@ func TestSuggestCLIFallbackEvidence(t *testing.T) {
 		name, output, stage string
 		exit                int
 	}{
+		{"zero output", "", "unusable output", 0},
 		{"success", `{"result":"private-generated-text","subtype":"success","is_error":false}`, "usable output without wire set", 0},
 		{"nonzero exit", `{"result":"private-generated-text"}`, "unsuccessful invocation", 7},
 		{"signal exit", `{"result":"private-generated-text"}`, "unsuccessful invocation", -1},
@@ -176,7 +177,10 @@ func TestSuggestCLIFallbackEvidence(t *testing.T) {
 			if wantExit < 0 {
 				wantExit = -int(syscall.SIGTERM)
 			}
-			if *source.ExitCode != wantExit || source.StdoutBytes != len(tc.output) {
+			if !source.Started || source.ChildPID <= 0 || source.ReadKnown != (len(tc.output) > 0) || source.ForwardKnown != (len(tc.output) > 0) {
+				t.Fatal("lost completed boundary witnesses")
+			}
+			if *source.ExitCode != wantExit || source.StdoutBytes != min(4097, len(tc.output)) {
 				t.Fatal("exit or stdout byte count does not match the observed child")
 			}
 			if tc.stage != "unusable output" && (!source.UTF8OK || !source.JSONOK || !source.ResultOK || !source.TextOK) {
@@ -223,62 +227,107 @@ func TestSuggestSourceUncertainEvidence(t *testing.T) {
 		}
 	}
 	path := filepath.Join(t.TempDir(), "source.jsonl")
-	if err := os.WriteFile(path, []byte("{\"streams\":1}\n{\"calls\":1,\"start_ms\":1}\n{\"completed\":"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("{\"streams\":1}\n{\"calls\":1,\"pid\":42,\"start_ms\":1}\n{\"completed\":"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := readSuggestSource(t, path); got != (suggestSource{Streams: 1, Calls: 1, StartMS: 1}) {
+	if got := readSuggestSource(t, path); got != (suggestSource{Streams: 1, Calls: 1, PID: 42, StartMS: 1}) {
 		t.Fatal("partial append lost completed source metadata or invented completion")
 	}
 }
 
 func TestSuggestCLIFallbackIncomplete(t *testing.T) {
-	evidence := installSuggestStandIn(t, "private-partial-output", 0, true)
-	ready := filepath.Join(t.TempDir(), "ready")
-	t.Setenv("GO_SUGGEST_READY", ready)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "claude", "--print")
-	cmd.Stdin = strings.NewReader("private-input-sentinel")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	var stdout lockedBuffer
-	var stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cancel()
-		if cmd.ProcessState == nil {
-			_ = cmd.Wait() // Reap the process after an early failure too.
-		}
-	}()
-	// Child readiness precedes wrapper forwarding. Wait for the forwarded bytes
-	// in the synchronized capture before cancellation; both output pipes must
-	// then close, otherwise Wait blocks until the context catches the leak.
-	for {
-		if _, err := os.Stat(ready); err == nil && len(stdout.String()) >= len("private-partial-output") {
-			break
-		}
-		if ctx.Err() != nil {
-			_ = cmd.Wait()
-			t.Fatal("stand-in did not reach held invocation with forwarded output")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err := cmd.Cancel(); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Wait(); err == nil || ctx.Err() != nil || stdout.String() != "private-partial-output" || stderr.String() != "private-stderr-sentinel" {
-		t.Fatal("group termination failed or observer changed partial I/O")
-	}
-	source := readSuggestSource(t, evidence)
-	if source.Calls != 1 || source.Completed != 0 || source.PID != cmd.Process.Pid || source.ExitCode != nil || source.OutputObserved || source.stage(false) != "incomplete invocation (exit/output unknown)" {
-		t.Fatalf("unexpected incomplete evidence: %s", source.diagnostic(false, 0, 0))
-	}
-	checkSuggestPrivacy(t, evidence, source)
-	if stage := (suggestSource{}).stage(false); stage != "no observed invocation (cause unknown)" {
-		t.Fatal("missing invocation overstates cause")
+	for _, boundary := range []string{"spawn", "read", "forward"} {
+		t.Run(boundary, func(t *testing.T) {
+			output := "private-partial-output"
+			if boundary == "spawn" {
+				output = ""
+			}
+			evidence := installSuggestStandIn(t, output, 0, true)
+			t.Setenv("GO_SUGGEST_READY", filepath.Join(t.TempDir(), "ready"))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "claude", "--print")
+			cmd.Stdin = strings.NewReader("private-input-sentinel")
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+			var stdout lockedBuffer
+			var stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if boundary == "read" {
+				r, w, err := os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer r.Close()
+				defer w.Close()
+				// Fill the pipe before launch; the wrapper can read but cannot flush.
+				fd := int(w.Fd())
+				if err := syscall.SetNonblock(fd, true); err != nil {
+					t.Fatal(err)
+				}
+				for {
+					if _, err := syscall.Write(fd, make([]byte, 4096)); err != nil {
+						if err != syscall.EAGAIN {
+							t.Fatal(err)
+						}
+						break
+					}
+				}
+				if err := syscall.SetNonblock(fd, false); err != nil {
+					t.Fatal(err)
+				}
+				cmd.Stdout = w
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				cancel()
+				if cmd.ProcessState == nil {
+					_ = cmd.Wait()
+				}
+			}()
+			for {
+				source := readSuggestSource(t, evidence)
+				reached := source.Started
+				if boundary == "read" {
+					reached = source.ReadKnown
+				}
+				if boundary == "forward" {
+					reached = source.ForwardKnown && stdout.String() == output
+				}
+				if reached {
+					if group, err := syscall.Getpgid(source.ChildPID); err != nil || group != cmd.Process.Pid {
+						t.Fatal("child escaped wrapper process group")
+					}
+					break
+				}
+				if ctx.Err() != nil {
+					t.Fatal("boundary witness not reached")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if err := cmd.Cancel(); err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Wait(); err == nil || ctx.Err() != nil {
+				t.Fatal("group termination failed")
+			}
+			source := readSuggestSource(t, evidence)
+			if source.Calls != 1 || source.Completed != 0 || source.PID != cmd.Process.Pid || source.ChildPID <= 0 || !source.Started || source.ExitCode != nil || source.OutputObserved {
+				t.Fatal("lost surviving spawn or invented completion")
+			}
+			if source.ReadKnown != (boundary != "spawn") || source.ForwardKnown != (boundary == "forward") {
+				t.Fatal("incorrect read/forward witnesses")
+			}
+			if source.ReadKnown && source.ReadBytes != len(output) || source.ForwardKnown && source.ForwardBytes != len(output) {
+				t.Fatal("incorrect prefix counts")
+			}
+			if boundary == "forward" && (stdout.String() != output || stderr.String() != "private-stderr-sentinel") {
+				t.Fatal("changed exact I/O")
+			}
+			checkSuggestPrivacy(t, evidence, source)
+		})
 	}
 }
 
@@ -394,6 +443,152 @@ func TestSuggestSourceDiagnosticApplicability(t *testing.T) {
 			source := suggestSource{OutputObserved: true, UTF8OK: tc.utf8, JSONOK: tc.json, TextOK: true}
 			if got := source.diagnostic(false, 0, 0); !strings.Contains(got, tc.want) || strings.Contains(got, "private-") {
 				t.Fatal("incorrect source predicate applicability")
+			}
+		})
+	}
+}
+
+func TestSuggestSourceCapturePresence(t *testing.T) {
+	if readSuggestSource(t, filepath.Join(t.TempDir(), "absent")) != (suggestSource{}) {
+		t.Fatal("absent file invented evidence")
+	}
+	const start = "{\"calls\":1,\"pid\":42,\"start_ms\":1}\n"
+	const capture = `{"completed":1,"pid":42,"child_pid":43,"elapsed_ms":1,"exit_code":0,"output_observed":true,"stdout_bytes":0,"utf8_ok":true,"json_ok":false,"result_ok":false,"text_ok":false}`
+	for _, tc := range []struct {
+		name, record string
+		observed     bool
+	}{
+		{"explicit zero", capture, true},
+		{"duplicate completion", capture + "\n" + capture, false},
+		{"progress after completion", capture + "\n" + `{"progress":"read","pid":42,"child_pid":43,"bytes":1,"saturated":false}`, false},
+		{"partial completion", `{"completed":1,"pid":42`, false},
+		{"wrapper mismatch", strings.Replace(capture, `"pid":42`, `"pid":44`, 1), false},
+		{"child mismatch", strings.Replace(capture, `"child_pid":43`, `"child_pid":44`, 1), false},
+		{"missing pid", strings.Replace(capture, `"pid":42,`, "", 1), false},
+		{"before spawn", "before-spawn", false},
+		{"missing completion", strings.Replace(capture, `"completed":1,`, "", 1), false},
+		{"missing elapsed", strings.Replace(capture, `"elapsed_ms":1,`, "", 1), false},
+		{"negative elapsed", strings.Replace(capture, `"elapsed_ms":1`, `"elapsed_ms":-1`, 1), false},
+		{"missing exit", strings.Replace(capture, `"exit_code":0,`, "", 1), false},
+		{"null exit", strings.Replace(capture, `"exit_code":0`, `"exit_code":null`, 1), false},
+		{"duplicate key", strings.Replace(capture, `"stdout_bytes":0`, `"stdout_bytes":1,"stdout_bytes":0`, 1), false},
+		{"typed exit", strings.Replace(capture, `"exit_code":0`, `"exit_code":"private-error"`, 1), false},
+		{"invalid zero utf8", strings.Replace(capture, `"utf8_ok":true`, `"utf8_ok":false`, 1), false},
+		{"zero decoded", strings.Replace(capture, `"json_ok":false`, `"json_ok":true`, 1), false},
+		{"read without forward", `{"progress":"read","pid":42,"child_pid":43,"bytes":1,"saturated":false}` + "\n" + strings.Replace(capture, `"stdout_bytes":0`, `"stdout_bytes":1`, 1), false},
+		{"missing count", strings.Replace(capture, `"stdout_bytes":0,`, "", 1), false},
+		{"null count", strings.Replace(capture, `"stdout_bytes":0`, `"stdout_bytes":null`, 1), false},
+		{"missing predicate", strings.Replace(capture, `,"text_ok":false`, "", 1), false},
+		{"null predicate", strings.Replace(capture, `"json_ok":false`, `"json_ok":null`, 1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source.jsonl")
+			records := start + `{"progress":"spawn","pid":42,"child_pid":43}` + "\n" + tc.record + "\n"
+			if tc.record == "before-spawn" {
+				records = start + capture + "\n" + `{"progress":"spawn","pid":42,"child_pid":43}` + "\n"
+			}
+			if err := os.WriteFile(path, []byte(records), 0600); err != nil {
+				t.Fatal(err)
+			}
+			got := readSuggestSource(t, path)
+			if got.OutputObserved != tc.observed || (got.Completed == 1) != tc.observed || (got.ExitCode != nil) != tc.observed {
+				t.Fatal("missing metadata became observed capture")
+			}
+			if !tc.observed && !strings.Contains(got.diagnostic(false, 0, 0), "output={unknown}") {
+				t.Fatal("invented zero capture")
+			}
+		})
+	}
+}
+
+func TestSuggestProgressMetadata(t *testing.T) {
+	const start = "{\"calls\":1,\"pid\":42,\"start_ms\":1}\n"
+	const spawn = `{"progress":"spawn","pid":42,"child_pid":43}` + "\n"
+	const read = `{"progress":"read","pid":42,"child_pid":43,"bytes":4097,"saturated":true}` + "\n"
+	for _, tc := range []struct {
+		name, records    string
+		known, ambiguous bool
+	}{
+		{"missing", "", false, false},
+		{"spawn", spawn, false, false},
+		{"saturated", spawn + read, true, false},
+		{"null", spawn + strings.Replace(read, "4097", "null", 1), false, true},
+		{"missing count", spawn + strings.Replace(read, `"bytes":4097,`, "", 1), false, true},
+		{"malformed", spawn + strings.Replace(read, "4097", `"private-value"`, 1), false, true},
+		{"partial", spawn + `{"progress":"read"`, false, false},
+		{"partial after read", spawn + read + `{"progress":"forward"`, true, false},
+		{"wrapper mismatch", spawn + strings.Replace(read, "42", "44", 1), false, true},
+		{"child mismatch", spawn + strings.Replace(read, "43", "44", 1), false, true},
+		{"contradictory cap", spawn + strings.Replace(read, "true", "false", 1), false, true},
+		{"out of order", read, false, true},
+		{"null stage", spawn + strings.Replace(read, `"progress":"read"`, `"progress":null`, 1), false, true},
+		{"missing saturation", spawn + strings.Replace(read, `,"saturated":true`, "", 1), false, true},
+		{"duplicate", spawn + read + read, false, true},
+		{"duplicate key", spawn + strings.Replace(read, `"bytes":4097`, `"bytes":1,"bytes":4097`, 1), false, true},
+		{"zero prefix", spawn + strings.Replace(strings.Replace(read, "4097", "0", 1), "true", "false", 1), false, true},
+		{"above cap", spawn + strings.Replace(read, "4097", "4098", 1), false, true},
+		{"forward before read", spawn + strings.Replace(read, `"read"`, `"forward"`, 1), false, true},
+		{"duplicate spawn", spawn + spawn, false, true},
+		{"repeated invocation", spawn + start + read, false, true},
+		{"missing wrapper", spawn + strings.Replace(read, `"pid":42,`, "", 1), false, true},
+		{"wrong stage type", spawn + strings.Replace(read, `"progress":"read"`, `"progress":true`, 1), false, true},
+		{"same process", strings.Replace(spawn, "43", "42", 1), false, true},
+		{"read bound", spawn + strings.Repeat(" ", 64*1024) + read, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source.jsonl")
+			if err := os.WriteFile(path, []byte(start+tc.records), 0600); err != nil {
+				t.Fatal(err)
+			}
+			source := readSuggestSource(t, path)
+			if source.ReadKnown != tc.known || source.ProgressAmbiguous != tc.ambiguous || (tc.name == "partial" && !source.Started) {
+				t.Fatal("invented or lost progress")
+			}
+			if tc.known && source.ReadBytes != 4097 {
+				t.Fatal("lost bounded prefix")
+			}
+			if strings.Contains(source.diagnostic(false, 0, 0), "private-") {
+				t.Fatal("malformed input escaped into diagnostic")
+			}
+		})
+	}
+}
+
+func TestSuggestPrefixCorrelation(t *testing.T) {
+	const start = `{"calls":1,"pid":42,"start_ms":1}` + "\n" + `{"progress":"spawn","pid":42,"child_pid":43}` + "\n"
+	for _, n := range []int{1, 4096, 4097} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			count := strconv.Itoa(n)
+			read := `{"progress":"read","pid":42,"child_pid":43,"bytes":` + count + `,"saturated":` + strconv.FormatBool(n == 4097) + `}` + "\n"
+			forward := strings.Replace(read, `"read"`, `"forward"`, 1)
+			capture := `{"completed":1,"pid":42,"child_pid":43,"elapsed_ms":1,"exit_code":0,"output_observed":true,"stdout_bytes":` + count + `,"utf8_ok":true,"json_ok":false,"result_ok":false,"text_ok":false}` + "\n"
+			for _, tc := range []struct {
+				name, records    string
+				completed, known bool
+			}{
+				{"prefix", start + read + forward, false, true},
+				{"partial completion", start + read + forward + `{"completed":`, false, true},
+				{"complete", start + read + forward + capture, true, true},
+				{"smaller capture", start + read + forward + strings.Replace(capture, `"stdout_bytes":`+count, `"stdout_bytes":0`, 1), false, false},
+				{"duplicate forward", start + read + forward + forward, false, false},
+				{"forward mismatch", start + read + strings.Replace(forward, `"child_pid":43`, `"child_pid":44`, 1), false, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					path := filepath.Join(t.TempDir(), "source.jsonl")
+					if err := os.WriteFile(path, []byte(tc.records), 0600); err != nil {
+						t.Fatal(err)
+					}
+					got := readSuggestSource(t, path)
+					if got.ReadKnown != tc.known || got.ForwardKnown != tc.known || got.OutputObserved != tc.completed || (got.Completed == 1) != tc.completed {
+						t.Fatal("incorrect correlated prefix/completion")
+					}
+					if tc.known && (got.ReadBytes != n || got.ForwardBytes != n || !strings.Contains(got.diagnostic(false, 0, 0), "bytes="+count+" saturated="+strconv.FormatBool(n == 4097))) {
+						t.Fatal("lost prefix or saturation")
+					}
+					if !tc.completed && (!strings.Contains(got.diagnostic(false, 0, 0), "exit=unknown output={unknown}") || got.ExitCode != nil) {
+						t.Fatal("prefix invented completion")
+					}
+				})
 			}
 		})
 	}
