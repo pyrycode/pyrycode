@@ -79,7 +79,7 @@ package realclaude
 // assistant line at all — the committed capture's block phase held system/init,
 // the informational line, then result, and nothing else. It would Fatal at the
 // first milestone. drainForControlEvent returns the first frame of a type and
-// silently consumes everything before it, which makes "exactly one banner" and "no
+// silently consumes everything before it, which makes exact banner counts and "no
 // unrecognized_message" unassertable after the fact, and makes the NEGATIVE — the
 // banner did not arrive — inexpressible. So the window gets one local primitive
 // (hookBannerWindow.next) that every frame passes through, with two thin waits
@@ -442,7 +442,7 @@ func hookBannerSpawnArgv(h *perConvHarness) string {
 
 // hookBannerWindow is the state the hook-refusal window accumulates. Every frame
 // between the blocked send and the liveness turn's terminal turn_state{idle}
-// passes through its next method, which is what makes "exactly one banner"
+// passes through its next method, which is what makes exact banner counts
 // structurally true over the whole window rather than true of whatever a coarser
 // drain happened not to have consumed already.
 type hookBannerWindow struct {
