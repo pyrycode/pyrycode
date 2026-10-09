@@ -65,7 +65,7 @@ and existing rotation signatures remain compatible. The daemon's
 `toWirePayload` maps only `ReasonClear` and `ReasonEviction`, rejecting empty
 or unknown reasons before legacy history append or wire fan-out. Runtime
 history-only dividers and predecessor closure use `Cause` independently; see
-[runtime history boundaries](history-package-producers.md#runtime-boundaries-and-main-work-closure-3013).
+[runtime history boundaries](history-package-producers-runtime-lifecycle.md#runtime-boundaries-and-main-work-closure-3013).
 
 | Lifecycle cause | Producer | Legacy reason → wire delimiter |
 |---|---|---|
