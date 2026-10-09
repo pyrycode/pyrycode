@@ -187,6 +187,8 @@ type Server struct {
 	mu       sync.Mutex
 	listener net.Listener
 	closed   bool
+	sealed   bool
+	handlers sync.WaitGroup
 	closedCh chan struct{} // closed by Close, lets Serve's ctx-watcher exit
 	// rekeyer is the optional Rekeyer used to service VerbRekey
 	// requests. Installed via SetRekeyer between NewServer and Serve
@@ -639,21 +641,27 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 	}()
 
-	var handleWG sync.WaitGroup
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			// If we're shutting down, this is expected.
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				handleWG.Wait() // wait for in-flight handlers
+				s.handlers.Wait() // wait for in-flight handlers
 				return nil
 			}
 			s.log.Warn("control: accept failed", "err", err)
 			continue
 		}
-		handleWG.Add(1)
+		s.mu.Lock()
+		if s.sealed {
+			s.mu.Unlock()
+			_ = conn.Close()
+			continue
+		}
+		s.handlers.Add(1)
+		s.mu.Unlock()
 		go func() {
-			defer handleWG.Done()
+			defer s.handlers.Done()
 			s.handle(conn)
 		}()
 	}

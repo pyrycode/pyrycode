@@ -129,6 +129,7 @@ type confirmedStreamStop struct {
 // must be structurally impossible. The drain stops on ctx, not on close; any
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
+	shadowProcessed   atomic.Uint64   // last fully published accepted output
 	runtimeReplayRing *eventring.Ring // installed before workers; boundaries publish on the drain
 
 	runtimeNextProducer uint64                       // guarded by offerMu
@@ -775,6 +776,7 @@ func startStreamTurnDrainV2(
 				handleEnvelope(env)
 				if env.queued != 0 {
 					processed = env.queued
+					sink.shadowProcessed.Store(processed)
 				}
 			case <-emitter.flushC():
 				closePendingLifecycles()

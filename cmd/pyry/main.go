@@ -48,6 +48,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
 // Version is set at build time via -ldflags "-X main.Version=...".
@@ -576,6 +577,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// relayWiring.hist, which the #2114 producers reach it through.
 	conversationHistory := history.New(resolveInstanceDirPath(*name))
 	reconcileStartupHistory(conversationHistory, convReg, logger, time.Now().UTC())
+	shadow := newThreadShadow(conversationHistory, convReg, thread.NewStore(conversationHistory), logger)
+	defer func() { _ = shadow.shutdown() }() // shadow failures log fixed diagnostics
 	// #2499's carry-forward, the fifth value in this block built BEFORE
 	// msgqueue.New: it wraps the delivery seam AND hangs off OnDelivered, so both
 	// of its queue-facing halves are set in the literal below. Its third half is
@@ -675,8 +678,19 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	if err != nil {
 		return fmt.Errorf("msgqueue init: %w", err)
 	}
+	shadow.quiet = func(id conversations.ConversationID) bool {
+		return shadowQuiescent(postDelivery, queue, streamSink, id)
+	}
+	shadow.start()
 	qDone := make(chan error, 1)
 	go func() { qDone <- queue.Run(ctx) }()
+	queueJoined := false
+	defer func() {
+		cancelCause(nil)
+		if !queueJoined {
+			<-qDone
+		}
+	}()
 
 	// The queue_state producer (#722): on each backlog change it snapshots the
 	// changed conversation and fans a queue_state envelope to interactive phones.
@@ -868,6 +882,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		suggestions:                   replySugg,
 		busy:                          turnBusy,
 		hist:                          conversationHistory,
+		shadow:                        shadow,
 		postDelivery:                  postDelivery,
 		approvalParked:                approvalParked,
 	})
@@ -894,9 +909,12 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// the unblocking cancel queued behind the block (#1492). Cause contexts are
 	// first-cause-wins, so a 4409 already recorded by startRelay's conn.Wait
 	// classifier survives this nil and fatalCause still reports it.
+	relayJoined := false
 	defer func() {
 		cancelCause(nil)
-		relayCleanup()
+		if !relayJoined {
+			relayCleanup()
+		}
 	}()
 
 	// Install the shared approval registry between NewServer and Serve so the
@@ -1028,19 +1046,26 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// Then stop control handlers before joining their auto-update workers.
 	postDelivery.stopAccepting()
 	<-postDeliveryDone
-	controlCancel()
-	_ = ctrl.Close()
-	<-ctrlDone
-	controlJoined = true
+	ctrl.Seal()
+	// Keep the control listener bound through final shadow persistence.
+	// Queue and post admission are sealed before capturing committed versions.
 
 	// Join the inbound-queue lifecycle: ctx is cancelled by the time we get here
 	// (either before pool.Run returned or by the cancelCause above), so queue.Run
 	// has observed ctx.Done and is winding down its drains. Waiting here keeps the
 	// daemon from exiting while a drain goroutine is still in flight.
 	<-qDone
+	queueJoined = true
 	<-seedDone
 	<-auDone
 	au.join()
+	relayCleanup()
+	relayJoined = true
+	_ = shadow.shutdown() // optional cache failure does not change daemon exit status
+	controlCancel()
+	_ = ctrl.Close()
+	<-ctrlDone
+	controlJoined = true
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return fmt.Errorf("supervisor: %w", runErr)
