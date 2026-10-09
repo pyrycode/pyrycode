@@ -71,9 +71,10 @@ including saved selected/free-text answers and any recorded truncation.
 Claude Agent/Task calls own [agent lifecycle items](thread-package-agents-and-background-work.md#agent-lifecycle).
 Parented text, ordinary tools and nested agents fold in [child lanes](thread-package-agents-and-background-work.md#parent-repair).
 Linked Claude/legacy Bash calls retain ordinary identity with
-[background shell lifecycle](thread-package-agents-and-background-work.md#background-shells). Cache persistence,
-epochs, daemon wiring, thread protocol and read-mark
-migration remain downstream.
+[background shell lifecycle](thread-package-agents-and-background-work.md#background-shells).
+[Cache persistence and epochs](thread-package.md#cache-and-epochs) belong to the
+background store. Daemon wiring, thread protocol and read-mark migration remain
+downstream.
 
 ### Accepted sends and durable outcomes
 
