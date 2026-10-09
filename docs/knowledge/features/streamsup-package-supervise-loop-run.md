@@ -33,7 +33,7 @@ acquisition, preserving the single-acquisition argv/session/cancellation
 contract above. Nonblocking open followed by regular-file validation rejects
 a mistaken FIFO instead of stalling supervision and shutdown. Invalid activated
 input remains a spawn failure, preventing accidental release to real Claude.
-See [test infrastructure](e2e-realclaude.md#test-infrastructure) for activation,
+See [test infrastructure](e2e-realclaude-test-infrastructure.md#test-infrastructure) for activation,
 ordinary-build exclusion and backlog recovery semantics.
 
 ### Optional account token admission

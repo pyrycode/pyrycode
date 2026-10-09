@@ -51,7 +51,7 @@ None. A selection file alone supplies the external next-spawn control; a callabl
 
 ## Documentation handoff
 
-Satisfied in [`docs/knowledge/features/e2e-realclaude.md` § Test infrastructure](../../knowledge/features/e2e-realclaude.md#test-infrastructure): the actual tagged build command, `PYRY_E2E_CLAUDE_BIN_FILE` activation, absolute-path selection and atomic replacement/release contract for an external isolated driver, next-spawn semantics and ordinary-build exclusion. Release before give-up delivers retained backlog without client resend, while release after `session.blocked` needs a fresh message and never replays dropped backlog. Mobile #1731 consumes this contract.
+Satisfied in [`docs/knowledge/features/e2e-realclaude-test-infrastructure.md` § Test infrastructure](../../knowledge/features/e2e-realclaude-test-infrastructure.md#test-infrastructure): the actual tagged build command, `PYRY_E2E_CLAUDE_BIN_FILE` activation, absolute-path selection and atomic replacement/release contract for an external isolated driver, next-spawn semantics and ordinary-build exclusion. Release before give-up delivers retained backlog without client resend, while release after `session.blocked` needs a fresh message and never replays dropped backlog. Mobile #1731 consumes this contract.
 
 Satisfied in **Shortened waits** in that section: the dropped recovery arm's `PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s`, observed automatic recovery before fresh enqueue, and the retained arm's default window, with subtest-scoped override cleanup.
 
