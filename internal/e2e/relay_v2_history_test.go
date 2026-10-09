@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -115,10 +116,9 @@ func TestRelayV2_LiveHistoryEntryID(t *testing.T) {
 
 // TestRelayV2_ConversationHistory serves seeded history to a paired phone before
 // any message is sent. The raw log has six legacy entries and a hidden restart
-// divider. Two-entry raw pages yield a partial terminal legacy page; an exact
-// raw-log-sized request needs an empty terminal page. Both walks retain raw
-// cursors and AtStart while excluding lifecycle facts and preserving seeded IDs
-// newest-first, including an empty nonterminal page when the divider fills it.
+// divider projected into a nonvisual receipt. The walks preserve every seeded
+// entry and the receipt exactly once, with their original IDs and timestamps,
+// retaining raw cursors and AtStart even on receipt-only and empty terminal pages.
 // Rejected requests expose no content and do not stall interrupts.
 func TestRelayV2_ConversationHistory(t *testing.T) {
 	const (
@@ -236,12 +236,13 @@ func TestRelayV2_ConversationHistory(t *testing.T) {
 		limit  int
 		counts []int
 	}{
-		{"partial_terminal", pageSize, []int{1, 2, 2, 1}},
-		{"exact_fill", seeded + 1, []int{seeded, 0}},
-		{"hidden_only_head", 1, []int{0, 1, 1, 1, 1, 1, 1, 0}},
+		{"partial_terminal", pageSize, []int{2, 2, 2, 1}},
+		{"exact_fill", seeded + 1, []int{seeded + 1, 0}},
+		{"hidden_only_head", 1, []int{1, 1, 1, 1, 1, 1, 1, 0}},
 	} {
 		t.Run(walk.name, func(t *testing.T) {
 			seen := make([]uint64, 0, seeded)
+			receipts := 0
 			cursor := ""
 			pages := 0
 			for {
@@ -270,8 +271,30 @@ func TestRelayV2_ConversationHistory(t *testing.T) {
 					t.Errorf("page %d at_start = %v, want %v", pages, page.AtStart, pages == len(walk.counts))
 				}
 				for _, e := range page.Entries {
-					if e.Type != protocol.TypeAssistantDelta {
-						t.Errorf("legacy page included non-seeded type %q", e.Type)
+					if e.ID == divider.ID {
+						if e.Type != protocol.TypeBanner || !e.TS.Equal(divider.TS) {
+							t.Fatalf("receipt type/timestamp changed: %+v", e)
+						}
+						var got map[string]any
+						if err := json.Unmarshal(e.Payload, &got); err != nil {
+							t.Fatalf("decode receipt: %v", err)
+						}
+						want := map[string]any{
+							"conversation_id": knownConvID, "level": "info", "text": "",
+							"truncated": false, "stops_turn": false,
+						}
+						if !reflect.DeepEqual(got, want) {
+							t.Fatalf("receipt payload = %#v, want %#v", got, want)
+						}
+						receipts++
+						continue
+					}
+					if e.ID == 0 || e.ID > seeded || e.Type != protocol.TypeAssistantDelta {
+						t.Fatalf("legacy page included unexpected entry: %+v", e)
+					}
+					wantPayload := fmt.Sprintf(`{"text":"seeded-%d"}`, e.ID-1)
+					if string(e.Payload) != wantPayload || !e.TS.Equal(base.Add(time.Duration(e.ID-1)*time.Second)) {
+						t.Fatalf("seeded payload/timestamp changed: %+v", e)
 					}
 					seen = append(seen, e.ID)
 				}
@@ -285,6 +308,9 @@ func TestRelayV2_ConversationHistory(t *testing.T) {
 					t.Fatalf("page %d is not at_start and carries no cursor", pages)
 				}
 				cursor = page.Cursor
+			}
+			if receipts != 1 {
+				t.Fatalf("walked %d restart receipts, want exactly one", receipts)
 			}
 			if len(seen) != seeded {
 				t.Fatalf("walked %d entries, want %d — none skipped, none repeated", len(seen), seeded)

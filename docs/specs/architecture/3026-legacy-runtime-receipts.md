@@ -11,6 +11,7 @@
 - `cmd/pyry/relay.go` → `startRelayV2`: shared list/read reader wiring and replay installation.
 - `cmd/pyry/startup_history.go` → `reconcileStartupHistory`: restart dividers have occurrence/conversation identity without a predecessor session.
 - `internal/history/log.go` → `Page`, `displayableEntry`: absent visibility fallback, durable IDs and cursor contract.
+- `internal/e2e/relay_v2_history_test.go` → `TestRelayV2_ConversationHistory`: encrypted bounded walks, startup receipt identity and request rejection/interrupt deadlines.
 - `internal/relay/handlers/list_conversations.go`, `mark_conversation_read.go` → `historyLatestReader`, `MarkConversationRead`: narrow reader seam and persistent monotonic clamp.
 - `docs/knowledge/features/history-package.md` § Reader, `history-package-producers.md` § Legacy eligibility and explicit visibility, `history-package-watermarks.md` § Unread state: bounded projection and raw metadata contracts.
 - `docs/knowledge/features/development-verification.md` § Protocol boundaries: check serialized required fields and execution counts.
@@ -91,3 +92,5 @@ Pending documentation stage:
 ## Revisions
 
 2026-10-09: The merged `reconcileStartupHistory` emits a `daemon_restart` divider without predecessor/successor session IDs. Accept that captured occurrence and conversation identity in `legacyRuntimeReceipt`; other divider causes still require a predecessor. `TestLegacyRuntimeReceipts_StartupDivider` covers the real startup writer and reopened pager. The unchanged mobile checkpoint rules are modeled in Go; the actual mobile full live proof remains pending.
+
+2026-10-09: Verifier finding 1 identified stale `TestRelayV2_ConversationHistory` expectations. Its three walks now require exactly one startup receipt with all five nonvisual payload fields and the original durable ID/timestamp, alongside exactly-once seeded content. Raw cursor/AtStart, foreign-conversation and invalid-cursor rejection, interrupts and deadlines remain asserted; unknown-fact exclusion tests remain unchanged. No production contract changed.
