@@ -688,17 +688,50 @@ Both fields are required:
 | `up_to` | unsigned 64-bit integer | The durable [history entry id](#a-history-entry) the operator has read up to. Decoded through a `*uint64`, so a missing key or explicit `null` decodes to `nil` and `encoding/json`'s range parsing rejects a negative, fractional, exponent, string, boolean or over-`2^64-1` value — every one of these is `protocol.malformed`. `0` is a valid, meaningful value: an empty conversation's own starting mark. |
 
 **The stored mark becomes `max(held, min(up_to, latest))`**, where `held` is
-the mark already on disk and `latest` is the same filtered watermark reported
-as `list_conversations.latest_entry_id`: the newest durable history entry id
-excluding exactly `turn_state`, `stall`, `api_retry`, `compacting`, and
-`session_transition`. Every other stored type counts, including unknown types;
-missing, empty and status-only logs yield `0`. A `up_to` at or below `held`
+the mark already on disk and `latest` is the same legacy watermark reported
+as `list_conversations.latest_entry_id` (#3029). This legacy target follows
+wire types: `turn_state`, `stall`, `api_retry`, `compacting` and
+`session_transition` never count, even with stored `shown: true`. Every other
+eligible legacy type counts regardless of absent/false/true stored `shown`,
+including normal, failed or stopped `turn_end` and nonvisual metadata. Validated
+runtime facts projected as info-banner receipts also count at their original
+durable IDs, including receipt-only logs and runtime tails. Unsupported entries,
+including invalid runtime facts, retain the conservative visibility fallback:
+absent/true counts, false excludes. Neither exclusion nor fallback counting
+certifies a harmless receipt. Missing/empty logs and logs with no qualifying
+entry yield `0`; an all-hidden raw log can still have a nonzero legacy target.
+A `up_to` at or below `held`
 changes nothing; a `up_to` past `latest` clamps to `latest` before the `max`;
 and the mark can never move backward, including under two devices racing each
 other. When `latest == 0`, an initial zero mark stays zero, while an existing
-higher mark is preserved. Reading through the last displayable id clears unread
-on the next list even if statuses follow it; new displayable content makes
+higher mark is preserved, including a mark held above the current legacy
+watermark. Marks remain persistent and isolated by host and conversation.
+Reading through the last legacy-counted id clears unread
+on the next list even if excluded statuses follow it; new counted entries make
 `latest_entry_id > read_up_to` again.
+
+**Accounting is not presentation.** A list watermark, fetched history or a live/
+replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
+Submit a checkpoint only from explicit foreground presentation evidence. Known
+nonvisual receipts can account for intervening durable IDs, but unknown,
+malformed or unidentified receipts and unaccounted numeric holes remain barriers.
+The daemon's clamp bounds the requested mark; it does not establish that the
+operator saw the content. Raw history and its metadata-aware watermark remain
+unchanged for future thread consumers.
+
+For the completed reply below, IDs are in append order. The normal `turn_end`
+counts toward latest despite being stored hidden; the trailing idle state can
+extend an already-presented checkpoint without raising latest.
+
+| Runtime facts | Durable sequence | Client/list latest | Presented checkpoint (`up_to`) | Confirmed `read_up_to` from an initial zero mark | Raw visible watermark |
+| --- | --- | --- | --- | --- | --- |
+| Enabled | 1 message, 2 info-banner receipt, 3 responding state, 4 assistant delta, 5 normal turn end, 6 idle state | 5 | 6 | 5 | 4 |
+| Disabled | 1 message, 2 responding state, 3 assistant delta, 4 normal turn end, 5 idle state | 4 | 5 | 4 | 3 |
+
+History, live and replay yield the same client latest; repeated or overlapping
+delivery cannot lower latest/read marks or create presentation. The client
+merges the correlated daemon-confirmed mark, rather than assuming the requested
+checkpoint was persisted. Both controls clear `latest_entry_id > read_up_to`.
 
 The registry resolves the conversation **before** its history is read, so an
 unknown or empty id never reaches the history store. The compare, the save and
@@ -2938,7 +2971,7 @@ Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` 
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation the menu belongs to (routing key, matching every other interactive event). |
-| `models` | array of object | The models claude will accept for this conversation, **one row per family** (below), in claude's own order. **Always present, never `null`** — an empty `[]` is a positive statement that claude offered nothing, so a client decoding into a non-optional array type never has to branch. |
+| `models` | array of object | The models claude will accept for this conversation, **one row per family/variant** (below), in claude's own order. **Always present, never `null`** — an empty `[]` is a positive statement that claude offered nothing, so a client decoding into a non-optional array type never has to branch. |
 | `dropped_models` | int | How many entries the producer cut that this frame does **not** carry; `0` when nothing was dropped. **The count is real**: the producer bounds the entry count and reports what it cut — see below. |
 
 Each element of `models`:
@@ -2946,15 +2979,15 @@ Each element of `models`:
 | Field | Type | Meaning |
 |---|---|---|
 | `resolved_model` | string | What `value` resolves to **right now**: the concrete identifier. Published *before* the first turn, so a client can show which model a family currently means instead of inferring it from an announcement after the fact. |
-| `value` | string | The argument you pass to select this model. **Not a dated identifier** — below. Sendable back on [`set_session_settings`](#set_session_settings), bracketed variant rows included (#1838); a published value is still re-validated there rather than trusted, and re-validated against **this session's own agent's** menu (#2629), not always Claude's — below. |
+| `value` | string | The argument you pass to select this model: the offered alias, or the newest pinned row when that exact family/variant has no alias — below. Sendable back on [`set_session_settings`](#set_session_settings), bracketed variant rows included (#1838); a published value is still re-validated there rather than trusted, and re-validated against **this session's own agent's** menu (#2629), not always Claude's — below. |
 | `display_name` | string | claude's human label for the row, and the intended join key against [`model_announced`](#model_announced). |
 | `effort_levels` | array of string | The reasoning-effort levels this model supports. **Always present, never `null`**; `[]` means the model exposes no effort control, which is the one position this wire states for both claude's *absent* and *empty* list. |
 | `supports_auto_mode` | bool | Whether claude accepts `auto` permission mode for this model. claude refuses the request per model, so a client greys the option out when this is `false` (pyrycode-desktop#682). Absent in claude's reply decodes to `false`, which is the correct reading. |
 | `truncated_fields` | array of string \| null | Names of **this row's** cut fields, in producer order: `resolved_model`, `value`, `display_name`, `effort_levels`. `null` when nothing was cut. Each row reports its own; there is no hoisted or flattened list. `effort_levels` is the one name reporting on a list rather than a scalar — it covers an element cut to fit, the list itself shortened, or both, appearing at most once per row in every case. |
 | `agent` | string (omitempty) | `"claude"` or `"codex"` — the agent this row's model belongs to. Present only for a client that negotiated `multi_agent` (#2651); absent, key omitted, for every other client. |
-| `family` | string (omitempty) | The model family: a Codex row's family name, or a Claude row's own `value`. Present only for a `multi_agent` client; omitted otherwise. |
+| `family` | string (omitempty) | The model family: a Codex row's family name, or a Claude row's family alias with its bracket group preserved, even when `value` is pinned. Present only for a `multi_agent` client; omitted otherwise. |
 
-**A `multi_agent` client's `models` merges both agents' vocabulary, tagged; every other client's list is unchanged.** For a client that negotiated `multi_agent` (#2643), `models` carries Claude's held entries first, in claude's own order, followed by Codex's held entries in the vocabulary store's order — one row per family, at that family's newest resolved version — regardless of which agent the named conversation itself runs. Every row carries `agent` and `family`: a Claude row's `family` is its `value`'s family alias, which is the `value` itself on every family row; a Codex row's `agent` is `"codex"`, its `family` is the Codex family name, and its `display_name` equals that same family name, since Codex publishes no separate display string. `dropped_models` keeps its present meaning and counts only Claude's tail cut — the merge adds no combined cap of its own (#2651). When only one agent has anything held, that agent's rows are all a capable client gets; when neither does, no `model_list` frame is sent for that conversation, exactly as for any other client. A client that did not negotiate `multi_agent` gets exactly today's list — Claude's entries only, with `agent` and `family` absent from the wire rather than merely empty, so the frame stays byte-identical to what it has always been. This governs all three delivery paths in this section: the live-lane frame below, the connect-time reconcile, and the [`request_model_list`](#asking-for-a-model-list-on-demand) reply. The live-lane frame is rewritten per connection at the moment it is sealed (#2652) rather than merged once and stored, so a `multi_agent` client's copy reflects whatever Codex vocabulary the daemon holds *at that instant* — not whatever it held when the child answered `initialize` — while every other connection, including one replayed later from the same event-ring entry, still receives the original Claude-only bytes untouched. A connect-time reconcile or an on-demand reply is never merged a second time on top of that: both already carry the merged list from their own source and, unlike the live-lane frame, never carry an `event_id` (§ above), which is what the daemon's per-connection rewrite uses to tell "a fresh push" apart from "a frame already merged upstream."
+**A `multi_agent` client's `models` merges both agents' vocabulary, tagged; every other client's list is unchanged.** For a client that negotiated `multi_agent` (#2643), `models` carries Claude's held entries first, in claude's own order, followed by Codex's held entries in the vocabulary store's order — one row per family, at that family's newest resolved version — regardless of which agent the named conversation itself runs. Every row carries `agent` and `family`: a Claude row's `family` is its `value`'s family alias, preserving any bracket group (`claude-fable-5-1[1m]` has family `fable[1m]`); a Codex row's `agent` is `"codex"`, its `family` is the Codex family name, and its `display_name` equals that same family name, since Codex publishes no separate display string. `dropped_models` keeps its present meaning and counts only Claude's tail cut — the merge adds no combined cap of its own (#2651). When only one agent has anything held, that agent's rows are all a capable client gets; when neither does, no `model_list` frame is sent for that conversation, exactly as for any other client. A client that did not negotiate `multi_agent` gets exactly today's list — Claude's entries only, with `agent` and `family` absent from the wire rather than merely empty, so the frame stays byte-identical to what it has always been. This governs all three delivery paths in this section: the live-lane frame below, the connect-time reconcile, and the [`request_model_list`](#asking-for-a-model-list-on-demand) reply. The live-lane frame is rewritten per connection at the moment it is sealed (#2652) rather than merged once and stored, so a `multi_agent` client's copy reflects whatever Codex vocabulary the daemon holds *at that instant* — not whatever it held when the child answered `initialize` — while every other connection, including one replayed later from the same event-ring entry, still receives the original Claude-only bytes untouched. A connect-time reconcile or an on-demand reply is never merged a second time on top of that: both already carry the merged list from their own source and, unlike the live-lane frame, never carry an `event_id` (§ above), which is what the daemon's per-connection rewrite uses to tell "a fresh push" apart from "a frame already merged upstream."
 
 **`dropped_models` means what its name promises, and `len(models) + dropped_models` is the menu's true size.** The producer bounds the entry count at **ten** (#1812) and reports here how many entries it cut, so a client can render "10 of 40" rather than presenting a shortened menu as complete. The producer cuts only the overflow, so a non-zero `dropped_models` always arrives beside exactly ten entries; a shorter list is always a complete one. The count reaches the wire intact: the decode records the overflow where the cut happens, the mapping onto this frame carries the number **verbatim rather than recomputing it from `len(models)`** (#1848), and the producer passes it through (#1849). Two properties bound how a client may use it. The list is truncated **from the tail**, so the entries you receive are the first ten of the family-reduced list, in claude's own order; pinned rows removed by that reduction are not counted here. And ten is a **daemon-side producer cap, not a wire constant** — it may change without any change to this contract, so a client must never hardcode it, treat a list of exactly ten as a signal, or derive the cap from anything but the number in this field.
 
@@ -2995,9 +3028,11 @@ The payload names one conversation and nothing else. There is **no request-id ke
 
 Four things a client will otherwise get wrong:
 
-**1. `value` is a family, not a version.** It is what you *pass*: an alias (`sonnet`), a bracketed variant (`opus[1m]`), or `default`. Claude Code also publishes pinned rows (`claude-opus-5`, `claude-opus-4-7`) beside its family rows; a pyry session follows the latest model of a family, so the daemon drops each pinned row whose family row is present and keeps only the newest pinned row of a family that has none (such as `claude-fable-5[1m]` in a 2.1.239 capture). A pinned id a client sends anyway on [`set_session_settings`](#set_session_settings) or `create_conversation` is resolved to its family before it is checked against this list and stored. A client cannot derive a family by splitting `value` on `-` (a `multi_agent` client reads `family`), and must not present it as a version. `resolved_model` is the dated one: what the family resolves to right now.
+**1. `value` identifies the offered family/variant choice.** The daemon keeps one row per Claude family/variant: an offered alias wins over its pinned rows; otherwise the newest pinned row is kept. Bracket groups distinguish variants, so `opus` does not replace an `opus[1m]` row. For example, if `fable[1m]` is absent and `claude-fable-5-1[1m]` is the newest pin for that variant, the published `value` remains exactly `claude-fable-5-1[1m]`.
 
-**2. A lookup against this list can miss, and that is ordinary rather than an error.** claude announces an identifier **at least as specific** as the one it was given, so a [`model_announced`](#model_announced) value need not appear here at all (`claude-haiku-4-5` does not). `display_name` is the intended join, **not** `resolved_model` — the announcement names a concrete dated identifier while a client's rows are alias families. That frame is the per-turn announcement of what claude ran; this one is the menu of what it will accept.
+A selectable published value sent on [`set_session_settings`](#set_session_settings) is checked against that offered row, then stored and executed as the family alias with its bracket group preserved. Subsequent [`session_settings`](#session_settings) readback identifies the same published row while the vocabulary is unchanged (#3017); choosing a pinned row still follows the latest Claude model of that family. A pinned input also remains accepted when the matching alias is offered, and readback then names that alias. `create_conversation` retains its family normalization. A client cannot derive a family by splitting `value` on `-` (a `multi_agent` client reads `family`). `resolved_model` reports what the choice resolves to right now; it is not the selection identity.
+
+**2. A lookup against this list can miss, and that is ordinary rather than an error.** claude announces an identifier **at least as specific** as the one it was given, so a [`model_announced`](#model_announced) value need not appear here at all (`claude-haiku-4-5` does not). `display_name` is the intended join, **not** `resolved_model` — the announcement names a concrete dated identifier while a client's rows represent families and variants. That frame is the per-turn announcement of what claude ran; this one is the menu of what it will accept.
 
 **3. A published value is not automatically sendable back — check it against this session's own agent, not a fixed assumption.** The only inbound path that accepts a model is [`set_session_settings`](#set_session_settings), whose rule — widened at #1838 for exactly the rows below — accepts `""` or, within a 64-byte bound, a value whose first byte is alphanumeric, whose remaining bytes are in `[A-Za-z0-9._-]`, and which may carry **one trailing bracket group**: `[`…`]` as the value's final element, non-empty, and drawn from that same closed byte class. Every `value` claude has been measured to publish now passes, the bracketed variant rows (`opus[1m]`, `claude-fable-5[1m]`) included. The group is bounded that way rather than by adding two bytes to the charset because the rule is #845's argv-injection defense: a leading, unbalanced, empty or nested bracket is still rejected, as is a second group or any suffix after one, and so is a leading dash, a shell metachar, whitespace, a control byte and any byte at or above `0x80`. That closure matters **twice**, because an accepted value reaches two sinks — the claude argv, where `--model` and the value are separate `execve` elements no shell parses, and the **live child's turn text**, since a model change on a running session is written as `/model <value>` on one line and an accepted value must therefore stay a single whitespace-free token. `effort_levels` used to carry the identical hazard and be deliberately not widened for it, on the premise that the inbound effort grammar was a closed set of five levels shared by every session. **That premise stopped holding once a session could run an agent other than Claude (#2629):** `effort` now passes the same shape grammar `model` does (bounded, first-byte-alphanumeric — see below) and is then checked against the **entries of the session's own agent** for the model it will run, so a level in a row's `effort_levels` — including one no Claude row ever lists, like Codex's `ultra` — is sendable back on a session running that row's agent, and refused on a session running a different one. When the target model has no entry for its agent at all, the fallback is scoped to that agent (#2666): the fixed set `{low, medium, high, xhigh, max}` for Claude, or the levels every *held* Codex family advertises (none while no family is held) for Codex. So a client must still read a published `value` or `effort_levels` entry as a candidate rather than a guarantee — right for *this* session, not portable to another — and must handle the refusal.
 
@@ -5140,7 +5175,7 @@ still bound to Codex; ordinary delivery resumes after commitment.
 
 #### `session_settings_updated`
 
-Direction **binary → phone** (outbound). The daemon's confirmation that a `set_session_settings` was applied. It carries only the `session_id` it confirms; the request↔reply correlation rides `in_reply_to` (#845). The client already knows what it sent, so the reply does not echo the applied settings.
+Direction **binary → phone** (outbound). The daemon's confirmation that a `set_session_settings` was applied. It carries only the `session_id` it confirms; the request↔reply correlation rides `in_reply_to` (#845). The reply does not echo the applied settings or carry a model field. To confirm the published model selection, request [`session_settings`](#session_settings) for the conversation after this acknowledgement.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -5183,14 +5218,14 @@ Answered by `session_settings` below, correlated by `in_reply_to`.
 
 #### `session_settings`
 
-Direction **binary → phone** (outbound). The resolved session's stored model and effort, Claude's confirmed applied effort when available, the current child's last confirmed permission posture when available, and the context-window reading. Every original field is always present (no omission tag), so **each original zero value is a real answer rather than an omitted field**. Optional reports and unavailable applied effort are omitted as described below.
+Direction **binary → phone** (outbound). The resolved session's model override expressed as its published menu row, saved effort, Claude's confirmed applied effort when available, the current child's last confirmed permission posture when available, and the context-window reading. Every original field is always present (no omission tag), so **each original zero value is a real answer rather than an omitted field**. Optional reports and unavailable applied effort are omitted as described below.
 
 This is the **read half** the settings cluster shipped without. Before it, a client scraped these values off [`screen_snapshot`](#screen_snapshot), which carried copies of them — that reply was a picture of the terminal, so a daemon running the stream-json interactive runner had no terminal to answer from, and took the settings down with it (`server.binary_offline`). `screen_snapshot` has had no producer at all since #2540; this route is the only one left, gated on nothing but the interactive capability, and answers on both runners.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `session_id` | string | The session to address a `set_session_settings` to. **Empty string = the daemon has no session to address**; a client must treat the settings as read-only rather than sending an empty id, which would be rejected. |
-| `model` | string | Stored model override; **empty string = inherited daemon default** (no override). This is the **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
+| `model` | string | Model override expressed as the current offered [`model_list`](#model_list) row: the alias when offered, otherwise the newest pinned row for that family/variant. **Empty string = inherited daemon default** (no override). With no usable matching row, the canonical stored model is retained. This is the **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
 | `effort` | string | The saved per-session reasoning-effort choice; **empty string = inherited daemon default** (no override). This field remains the saved choice and is never replaced by Claude's applied value. |
 | `effective_effort` | string or null (optional) | Claude-applied effort, independent of `effort`. A string is a confirmed applied level; explicit `null` means Claude reported no effort parameter; an omitted key means the applied value is unavailable or unsupported. Clients must preserve those three states rather than treating null and omission alike. |
 | `yolo` | bool | Derived from the current child's last confirmed permission mode: `true` only for confirmed `bypassPermissions`. **`false` alone is not proof that permissions are enforced**; it also accompanies an unavailable confirmation. |
@@ -5199,6 +5234,8 @@ This is the **read half** the settings cluster shipped without. Before it, a cli
 | `window_tokens` | int | Context-window size. **`0` = the usage reader is unwired**, not an empty window — do not render a percentage from it. **A dormant session's reply also reports `0` here**, alongside `used_tokens: 0` above, rather than the usage reader's default window: reporting a genuine window beside a zero used count would claim a fresh session on a channel that may in fact be near full (#2449). |
 | `capabilities` | object (optional) | The resolved session's supported controls for a `multi_agent` connection; see below. |
 | `memory_search` | object (optional) | Search access for one agent and workspace; see below. Omission means the client has no report, not confirmed absence. |
+
+**A selectable published model round-trips through readback (#3017).** An offered alias is preferred; otherwise the newest pinned row identifies the family/variant. Selecting `claude-fable-5-1[1m]` when no `fable[1m]` alias is offered stores and executes `fable[1m]`, but this reply's `model` is exactly `claude-fable-5-1[1m]`. With unchanged vocabulary, repeated reads and reopening the conversation preserve that value, including a dormant bound session; selecting one session leaves another's model and effort unchanged. Readback uses the current vocabulary, so a later menu refresh may change the offered identity while execution continues to follow the stored family. Codex identifiers remain exact and resetting `model` to `""` still reports inheritance. Model-specific effort validation and `capabilities.effort_levels` use that same offered row, including on effort-only writes after family normalization.
 
 `permission_mode` and `yolo` are derived from the same current-child confirmation. Confirmed bypass reports `permission_mode: "bypassPermissions"` **and** `yolo: true`; an unavailable confirmation reports `permission_mode: ""` and `yolo: false`. The reply can therefore name a posture the write half refuses to accept on its own `permission_mode` field, but `yolo: false` without a non-empty `permission_mode` must be rendered as unknown rather than enforced.
 
@@ -5443,25 +5480,63 @@ timeline reducer it already runs for the live stream.
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | number | The **durable, per-conversation** entry id. Monotonic within one conversation's log and **stable across daemon restarts**. |
-| `type` | string | The wire type the stored frame carried. |
-| `payload` | object | The stored frame's body, verbatim. |
-| `ts` | string (RFC 3339) | When the entry was appended. |
+| `type` | string | The eligible stored wire type, or `banner` for a validated runtime receipt. |
+| `payload` | object | Eligible stored payload bytes unchanged, or the nonvisual receipt shape below. |
+| `ts` | string (RFC 3339) | The original durable entry timestamp, also retained by receipts. |
+
+**Known runtime facts use nonvisual receipts (#3026).** Only
+`main_turn_opened`, `main_tool_interrupted`, `main_turn_interrupted` and
+`session_divider` project into legacy history as `type: "banner"` with this
+payload (all five keys are required and nonnull):
+
+```json
+{
+  "conversation_id": "11111111-1111-4111-8111-111111111111",
+  "level": "info",
+  "text": "",
+  "truncated": false,
+  "stops_turn": false
+}
+```
+
+The receipt retains the raw fact's original `id` and `ts`; it is not a new
+durable append or a second ID space. Runtime payloads and metadata stay off
+legacy transports. Projection validates matching conversation ownership,
+occurrence time and required identities: a turn ID for opening/turn interruption,
+also a tool-call ID for tool interruption, and a cause plus predecessor session
+for a divider. A `daemon_restart` divider needs no predecessor/successor session
+IDs. Missing durable identity or timestamp and malformed facts produce no
+receipt; arbitrary unknown types remain excluded without being certified harmless.
+
+Unchanged mobile decoding/reduction understands this info banner as nonvisual
+accounting. It draws no content and changes no turn, permission, model or status
+state. Accounting grants no presentation of unseen content. Unknown, malformed
+or unidentified receipts and unaccounted holes remain read-evidence barriers;
+an all-receipt page cannot establish sight. The projection consumes exactly one
+bounded raw page and preserves its opaque `cursor` and `at_start`, including
+all-runtime pages; it never scans ahead to fill a page after excluding facts.
 
 **A direct live envelope's `history_entry_id` is this entry's `id` (#2861).**
 After a successful append, interactive-turn emission, session-transition
 broadcast and operator-message history commit/publication attach that same
 per-conversation id to every interactive recipient's direct envelope. Reconnect
-replay of history-backed interactive-turn and operator-message ring events
-carries the original append's id too (#2909), without appending another entry.
-Channel posts still omit it; session transitions are not ring-replayed. Use it as
+replay of history-backed interactive-turn, runtime-receipt and operator-message
+ring events carries the original append's id too (#2909), without appending another entry.
+Running runtime facts, including dividers, publish the same receipt bytes and
+original durable ID/timestamp to live recipients and the replay ring. Startup
+reconciliation receipts are available through history, without populating the
+ring or sending live frames. Existing recipient and agent/isolation gates apply.
+Channel posts still omit it; ordinary `session_transition` frames are not
+ring-replayed. Use it as
 [`mark_conversation_read.up_to`](#marking-a-conversation-read) when the operator
 has read through that entry. It is independent of the envelope's connection
 `id` and ring `event_id`; neither is a durable read-mark target. Older daemons,
 absent or failed history storage, and non-history-backed frames (live or replayed)
-omit `history_entry_id` entirely, never as `null` or `0`. Live delivery and
-existing ring recording proceed even when history cannot be appended. In those
-cases, obtain a target from a served entry's `id` or the conversation's
-`list_conversations.latest_entry_id`, as appropriate to what the operator has read.
+omit `history_entry_id` entirely, never as `null` or `0`. Eligible legacy delivery
+and existing ring recording proceed even when history cannot be appended;
+failed or absent storage cannot mint a runtime receipt. Obtain a durable target
+only with presentation evidence, using a served entry's `id`; a list watermark
+alone is not a read checkpoint.
 
 **The entry's `id` is not an `event_id`.** [`event_id`](#reconnect-replay--resync-consumer-647)
 is the in-memory ring's id: per-process, reset by a daemon restart, and meaningful
@@ -5470,12 +5545,18 @@ both look like small integers, and a client must not join them.
 
 **This same durable id space is what `read_up_to` and `latest_entry_id` are stated
 in (#2779).** [`list_conversations`](#list_conversations)'s `conversations` reply
-reports `latest_entry_id` as the newest `id` excluding exactly `turn_state`,
-`stall`, `api_retry`, `compacting`, and `session_transition`. Every other stored
-type counts, including unknown types; missing, empty and status-only logs
-report `0`. **History pages still contain those status entries, and all stored
-entries use the same durable id sequence** — this watermark filters which id
-counts for unread, not which entries are stored or served. Both that reply and
+reports `latest_entry_id` using the shared
+[legacy list/read watermark](#marking-a-conversation-read): eligible wire types
+count regardless of stored `shown`, except `turn_state`, `stall`, `api_retry`,
+`compacting` and `session_transition`, which never count. Validated runtime
+info-banner receipts count at their original IDs, including receipt-only pages
+and tails. Unsupported entries keep conservative absent/true visibility counting
+and false exclusion without certifying receipt accounting. **History pages still
+contain eligible hidden/status entries and validated runtime receipts, and all
+entries use the original durable ID sequence.** Neither `shown` nor session
+metadata is serialized on this legacy route; raw visibility cannot distinguish
+identical eligible wire entries' targets. Raw history,
+metadata and raw watermark APIs remain unchanged. Both that reply and
 [`conversation_updated`](#conversation_updated) report `read_up_to`, the host
 operator's durable read mark, in the same space — a position among these durable
 ids, never a count of entries and never a connection's
@@ -5484,10 +5565,11 @@ host/operator-scoped, not per-device: every paired client on this host reads the
 same value, raised by [`mark_conversation_read`](#marking-a-conversation-read)
 (#2780).
 
-**`type` is a stored string that nothing re-validates** against the type table
-above, so a client MUST tolerate an entry type it does not recognise rather than
-treating one as a protocol violation — the same forward-compatibility rule this
-document applies to unknown fields.
+**Raw storage accepts arbitrary type strings; legacy transports use a closed
+projection.** A client MUST still tolerate an entry type it does not recognise
+rather than treating it as a protocol violation, but must not certify that entry
+as harmless read accounting — the same forward-compatibility rule this document
+applies to unknown fields does not grant presentation evidence.
 
 **An entry carries exactly the trust class of the live frame it mirrors.** `type`
 and `payload` are **replayed content**: operator-authored for a stored
@@ -5537,12 +5619,28 @@ and no duplicate**, and an entry appended between the ask and the answer arrives
 on both.
 
 **When present, join the live or replayed `history_entry_id` to the page entry's
-`id`, within the same conversation.** The three direct live producer paths above share the
+`id`, within the same conversation.** The direct live producer paths above share the
 successful append's id with their envelopes, so this join uses durable identity.
 History-backed ring replay retains that same id, payload and timestamp, even for
 an event emitted with no connected recipient; replay creates no new history entry.
 The pair (`conversation_id`, `history_entry_id`) also identifies the same entry
 across devices and daemon restarts.
+
+This join also applies to the four known runtime facts' info-banner receipts:
+history, live publication and reconnect replay carry the same projected bytes,
+original durable ID and timestamp. Their `banner` wire type contributes to the
+same legacy latest target on every lane, regardless of the raw fact's `shown`.
+Repeated or overlapping delivery accounts for that ID once, duplicates no
+content and cannot lower latest/read marks or grant additional sight. Do not
+derive harmlessness from a missing receipt: unknown/malformed/unidentified
+receipts and unaccounted holes remain barriers even when a later completed reply
+has been presented. Received durable identity enables joining and deduplication;
+a validated receipt accounts for its ID; explicit foreground presentation
+establishes sight; a correlated `conversation_updated.read_up_to` establishes the
+daemon-confirmed persisted mark. These are separate facts.
+Fetched pages and replay alone establish no presentation. The
+[completed-turn controls](#marking-a-conversation-read) compare client-derived
+latest, presented checkpoint and confirmation across all three lanes.
 
 **Without `history_entry_id`, fall back to (`type`, `ts`).** An entry in a page
 and its twin on the live or replay lane carry the same `type` and the same `ts`,
@@ -5550,7 +5648,9 @@ so a client reconciles on that pair within the conversation. This remains needed
 for older daemons and non-history-backed frames, including channel-post replay.
 An absent or failed history append may
 leave no stored twin to join at all; obtain a durable read-mark target from
-history/list rather than substituting either live counter.
+history together with presentation evidence rather than substituting either
+live counter or treating a list watermark as sight. Runtime receipts always
+require successful durable identity; the fallback cannot certify one without it.
 
 Why not the obvious candidates, each of which fails on some entry:
 
@@ -5564,13 +5664,13 @@ Why not the obvious candidates, each of which fails on some entry:
   none — and `session_transition` is precisely the type the log is the *only*
   retention for.
 
-**Why the pair is sound.** The daemon mints **one timestamp per logical event**,
-hoisted above the per-connection fan-out, and hands that same value to the log
-entry and to every outbound envelope for that event; the payload bytes are stored
-verbatim. A collision would need two entries of the same type in the same
-nanosecond on one conversation, which a single sequential emit path does not
-produce. A client that wants a decisive tie-break has one for free: **compare
-`payload` bytes**, which are identical across the two lanes.
+**The fallback applies to eligible legacy events.** Their timestamp is captured
+once above per-connection fan-out and shared with the durable entry; payload
+bytes match across history and live/replay. Compare payload bytes when resolving
+a possible (`type`, `ts`) collision. Runtime receipts require the durable join:
+multiple closures and their divider can share an occurrence timestamp and the
+same empty banner payload, so neither (`type`, `ts`) nor payload bytes can
+distinguish their original durable IDs.
 
 #### Rejects
 

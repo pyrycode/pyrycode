@@ -1,3 +1,5 @@
+> Moved: the setup tool now lives in pyrycode-agents under container/qmd-current/ (pyrycode/pyrycode-agents#125, pyrycode/pyrycode#3018).
+
 # Evergreen QMD collection setup (#2930)
 
 ## Files read

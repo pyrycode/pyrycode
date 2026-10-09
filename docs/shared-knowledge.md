@@ -14,48 +14,10 @@ The old [project-memory path](PROJECT-MEMORY.md) is a compatibility pointer.
 
 Use `pyrycode-current` for current feature and decision questions; use `pyrycode-docs` for historical ticket reasoning.
 
-With Node installed and `qmd` on `PATH`, configure the current collection from
-any working directory on Linux or macOS. Set `PYRYCODE_REPO` to the absolute
-checkout path:
-
-```sh
-PYRYCODE_REPO=/absolute/path/to/pyrycode
-node "$PYRYCODE_REPO/cmd/qmd-current/setup.mjs"
-qmd update
-qmd embed
-```
-
-Setup reconciles QMD's default `index.yml` to search only Markdown files directly
-or recursively under this checkout's `docs/knowledge/features/` and
-`docs/knowledge/decisions/`. It preserves other collections and all contexts.
-Rerunning corrects an existing wrong scope without creating a duplicate collection.
-See [the setup overview](knowledge/features/qmd-current-setup.md) for reconciliation
-and verification details.
-
-Setup writes configuration only. Run `qmd update` to index new or changed files
-and remove stale membership, then `qmd embed` to refresh vectors for the indexed
-documents. Embedding alone does not discover file changes. Keep the same
-configuration and index environment for both commands; these instructions use
-the default index, without QMD's `--index` option.
-
-For isolated verification, use these options before running setup and QMD:
-
-| Option | Effect |
-| --- | --- |
-| `--repo /absolute/temporary-corpus` on the setup command | Uses a repository-shaped corpus with `docs/knowledge/features/` and `docs/knowledge/decisions/`; otherwise the checkout is inferred from the script's location. |
-| `QMD_CONFIG_DIR=/absolute/scratch/config` | Selects the directory containing `index.yml`; otherwise setup uses `$XDG_CONFIG_HOME/qmd`, falling back to `~/.config/qmd`. |
-| `INDEX_PATH=/absolute/scratch/index.sqlite` | Selects QMD's SQLite index for subsequent commands; setup itself does not open it. |
-| `XDG_CACHE_HOME=/absolute/scratch/cache` | Keeps QMD caches separate during verification. |
-
-Export the environment variables in the shell running all three commands. Set
-both `QMD_CONFIG_DIR` and `INDEX_PATH` to isolate configuration and indexed data;
-`--repo` alone only changes the corpus.
-
-Shared-host automatic provisioning and role search defaults await adoption by
-the agents-repository maintainer. The invocation to adopt in
-`pyrycode-agents/container/entrypoint.sh`, `write_qmd_config`, is
-`node "$PYRYCODE_REPO/cmd/qmd-current/setup.mjs"`, followed by indexing with the
-same environment. This repository-local setup does not provision shared hosts.
+Collection setup and its isolated verification live in the agents repository.
+See [current documentation search setup](https://github.com/pyrycode/pyrycode-agents/blob/main/docs/current-docs-search.md)
+for the command, configuration options and index refresh order.
+Automatic container provisioning remains a separate follow-up.
 
 ## Capture
 

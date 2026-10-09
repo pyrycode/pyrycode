@@ -414,8 +414,15 @@ func TestSessionTransitionEmitterV2_DroppedTransitionsWriteNothing(t *testing.T)
 
 			e.broadcast(context.Background(), tt.trans)
 
-			if len(bcast.pushes) != 0 {
-				t.Fatalf("fanned out %d envelopes for a dropped transition; want 0", len(bcast.pushes))
+			wantPushes := 0
+			if tt.trans.Cause == sessions.CauseRecovery {
+				wantPushes = 1
+			}
+			if len(bcast.pushes) != wantPushes {
+				t.Fatalf("fanned out %d envelopes; want %d receipts", len(bcast.pushes), wantPushes)
+			}
+			if wantPushes == 1 {
+				testLegacyReceiptEnvelope(t, bcast.pushes[0].env, testConvID)
 			}
 			entries := historyEntries(t, store, testConvID)
 			if tt.trans.Cause == sessions.CauseRecovery {

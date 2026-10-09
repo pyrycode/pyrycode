@@ -4,8 +4,8 @@ Part of [the history package overview](history-package.md).
 
 ## Producers (#2114, #2115)
 
-Interactive output, session transitions, runtime lifecycle facts and delivered
-operator messages in `cmd/pyry` append through one seam,
+Interactive output, session transitions, runtime/startup lifecycle facts and
+delivered operator messages in `cmd/pyry` append through one seam,
 `appendConversationHistory` (`cmd/pyry/conversation_history.go`): the
 interactive emitter's `emit` chokepoint
 (`cmd/pyry/interactive_turn_v2.go`), session transitions' `broadcast`
@@ -271,15 +271,85 @@ retains chunk bounds and sequence progression. Other conversations stay untouche
 
 #### Legacy exclusion and write failures
 
-All four runtime types are history-only: hidden openings, shown interruptions
-and even shown dividers remain excluded from legacy pages, ring replay and live
-traffic by `legacyHistoryType`. Visibility never grants transport eligibility.
+All four runtime types remain raw history facts; their payloads never enter
+legacy transports. Validated facts instead project to nonvisual info-banner
+receipts in history and, when recorded while running, live/replay (#3026).
+See [legacy eligibility](#legacy-eligibility-and-explicit-visibility-2965).
+Visibility never grants raw facts transport eligibility.
 Best-effort nil/failed storage does not change closure, sealing, eligible legacy
 publication, payload meanings or recipient gates. Append failures use the existing
 content-free discriminants, never payloads or filesystem error text. Daemon-start
-reconciliation remains [#3014](https://github.com/pyrycode/pyrycode/issues/3014).
+reconciliation uses the [startup closure point](#startup-reconciliation-3014).
 See [ADR 042](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks)
 and [drain source lifecycle](streamsup-package-draining-turnevents-into-the-interactive-emitter.md).
+
+### Startup reconciliation (#3014)
+
+`runSupervisor` calls `reconcileStartupHistory` synchronously after instance
+ownership and construction of the single history store, before channel delivery,
+queue, relay or pool producers can write. Both relay-enabled and history-only
+daemons use this path. Discovery snapshots `Registry.List()` without a filter,
+including archived conversations, and reads their existing raw `Store.Page`
+logs. Missing and empty logs receive no divider; discovery creates no empty
+history directories. Conversations created after this snapshot receive none.
+No Claude transcript or second durable log supplies recovery evidence.
+
+`readStartupMainWork` walks newest-first across raw pages and segments, passing
+opaque cursors unchanged and terminating only on `AtStart`. It completes each
+conversation's read before appending to that conversation, retaining identities
+and outcomes rather than historical text or tool inputs. Legacy receipts omit
+the opening and interruption identities needed for reconstruction.
+
+For each unfinished main turn, `closeStartupMainWork` appends shown
+`main_tool_interrupted` facts for unfinished ordinary calls, then exactly one
+shown `main_turn_interrupted`, all with cause `daemon_restart`. Turns are ordered
+by their earliest recorded opening evidence and tools by tool ID. Thinking-only
+openings count. Successful/failed results, denials and recorded tool interruptions
+retire calls; normal/interrupted turn endings close the turn even if later facts
+survive. Parent-attributed child work is excluded. Agent/Task launchers can
+identify the main turn but receive no ordinary-tool interruption; agent and
+background-task endings remain [#2969](https://github.com/pyrycode/pyrycode/issues/2969).
+
+After closure, every surviving nonempty raw log receives one `session_divider`
+per startup, even when all its work already ended. It has cause `daemon_restart`,
+explicit `shown: false`, and daemon-authored session metadata `kind: none`.
+All startup facts share the captured startup occurrence time as `occurred_at`
+and entry timestamp. Their durable entry-ID order places tool closures before
+turn closure, then the divider, then new traffic. `closeStartupMainWork` is the
+composable startup closure-before-divider point, alongside `closeRuntimeSource`
+at runtime. Legacy history projects these facts as nonvisual receipts; startup
+does not backfill the in-memory replay ring or publish live frames. The restart
+divider intentionally has no predecessor/successor session IDs. Receipt validation
+accepts its captured conversation and occurrence identity; requiring a predecessor
+would leave a restart read hole that running-turn tests cannot detect.
+
+**Recover identity without inventing provenance.** Tagged turns match recorded
+source and turn ID. Untagged turns match recorded turn/tool IDs within legacy
+session-transition and non-restart divider scopes; restart dividers do not split
+these scopes. Existing entries stay unchanged. Closures retain known old-source
+metadata, while unavailable legacy provenance stays absent. The registry's
+current session/agent cannot attribute old work, and missing IDs are not minted.
+Legacy denials lack parent attribution: parent-attributed evidence excludes
+child-only denial candidates, while an identifiable denial-only main turn can
+still be closed.
+
+**A recovery reference targets only its original opening.** Startup interruptions
+carry optional `runtimeHistoryFact.TurnOpenedEntryID` (`turn_opened_entry_id`),
+the earliest recorded main-opening evidence's durable ID; runtime facts omit it.
+Recovery may append after a legacy delimiter, outside the opening's scope.
+`readStartupMainWork` applies referenced interruptions exclusively to that opening,
+never also to the append-time scope. Otherwise a later turn or tool reusing the
+same IDs would be falsely closed. Recorded interruptions suppress repeated
+closures across starts and late facts cannot reopen the interrupted turn; each
+start still adds its own divider. A saved tool-only interruption also prevents
+repeating that tool's closure when the turn interruption did not survive.
+
+A read failure skips both closure and divider for that conversation: partial
+evidence cannot establish unfinished work. Append failures remain best effort.
+Neither blocks startup nor reconciliation of other conversations. Failure logs
+contain only event, validated canonical conversation ID when available, and
+content-free classifiers; payloads, cursors, source IDs and filesystem error text
+stay out. Invalid registry IDs are rejected without logging their value.
 
 ### Operator delivery provenance (#2983)
 
@@ -325,9 +395,10 @@ including eligible publication with absent identity on nil/failed storage.
 
 `legacyHistoryType` is a fixed allowlist of the existing producer vocabulary
 from `turnbridge.MapEvent`/`MapState`, operator messages and session transitions.
-A new history-only type is excluded by default from every connection's legacy
+A new history-only type's raw payload is excluded from every connection's legacy
 history, live fan-out and reconnect replay, whether its stored `Shown` is nil,
-false or true. Visibility controls the
+false or true. Only the four known runtime facts have a receipt projection.
+Visibility controls the raw
 [unread watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954),
 not permission to reach a transport. Conversely, an eligible legacy event still
 reaches its existing recipients and history pages when `Shown` is false,
@@ -336,11 +407,51 @@ including normal turn ends, info banners and live status readings. This preserve
 old apps treat unknown history entries as read-mark barriers.
 
 `interactiveTurnEmitterV2.emit` appends once before checking this allowlist,
-including when no clients are connected. An excluded fact returns before
-`Ring.AppendWithHistoryID` or recipient enumeration, so it cannot enter live
-delivery or reconnect replay, even if storage is absent or fails. Successful
-appends remain readable through raw `Store.Page` after reopening. Raw storage
-accepts arbitrary types; the transport vocabulary is closed independently.
+including when no clients are connected. Unsupported facts return before ring
+publication unless `legacyRuntimeReceipt` validates their receipt projection.
+Successful appends remain readable through raw `Store.Page` after reopening.
+Raw storage accepts arbitrary types; the transport vocabulary is closed independently.
+
+**Account known runtime IDs without certifying unseen content (#3026).**
+`legacyRuntimeReceipt` handles exactly `main_turn_opened`, `main_tool_interrupted`,
+`main_turn_interrupted` and `session_divider`. It emits `banner` with all five
+required fields: `{conversation_id, level:"info", text:"", truncated:false,
+stops_turn:false}`. It requires a nonzero successful durable ID, nonzero entry
+timestamp, matching conversation and nonzero `occurred_at`. Openings and turn
+interruptions need `turn_id`; tool interruptions also need `tool_call_id`.
+Dividers need `cause` and a predecessor session, except `daemon_restart` dividers.
+Malformed facts and arbitrary unknown types stay holes, never harmless receipts.
+The unchanged mobile decoder counts valid info receipts toward legacy latest
+without drawing content or changing turn, permission, model or status state.
+Receipt-only delivery gives no sight; malformed/unidentified receipts and
+unaccounted holes remain barriers.
+
+**Runtime writers bypass `emit`.** Changing only its allowlist would leave live
+and reconnect accounting incomplete. `recordRuntimeFact` and
+`sessionTransitionEmitterV2.broadcast` append each raw fact once, then use
+`publishLegacyHistory` for the receipt. Runtime dividers use the replay ring
+installed on the runtime sink before workers start. History, direct recipients
+and replay share the original ID and timestamp, with the same receipt bytes;
+there is no second durable append or ID allocator. Existing interactive and
+agent/isolation gates still apply. Nil/failed storage produces no receipt, while
+eligible legacy delivery and replay continue without durable identity. Ordinary
+`session_transition` frames retain their separate, non-ring behavior.
+
+Raw visibility and legacy unread targets differ (#3029): the
+[legacy watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
+counts validated receipts regardless of `Shown`. Raw facts, metadata and store
+watermarks remain unchanged. The
+[pager](history-package.md#reader-2116) retains one bounded raw page's cursor and
+`AtStart`; accounting never authorizes scanning ahead to fill a page.
+
+`TestLegacyRuntimeReceipts_CompletedTurn` uses the real store and `HandleFor`
+normal text/completion with runtime facts disabled as a control; omitting the
+enabled opening ID leaves a checkpoint hole despite presenting the reply.
+`TestLegacyRuntimeReceipts_LiveReplay` checks shared identity and overlap.
+An exact live banner count includes these receipts: retain every banner and
+validate expected receipts separately from refusals rather than ignoring info
+banners, which would hide duplicate receipts. `TestInteractiveStreamHookBlockedBannerReachesTheClient`
+keeps the full refusal/liveness window and checks the opening receipt before text.
 
 All four existing writers now use `AppendWithMetadata` with explicit
 `Metadata.Shown`, classified from the already-marshalled payload by
@@ -358,7 +469,7 @@ recipient gates keep their original meaning.
 | `background_task_updated` | Hidden for patch-only updates; shown when `Status` or `Summary` is nonempty. |
 | Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
-| Runtime history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden only for `idle_sleep`. All remain ineligible for legacy delivery. |
+| Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; validated nonvisual receipts count toward legacy latest. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -367,11 +478,11 @@ to known terminal words would silently hide future completion facts. Conditional
 legacy payloads that fail decoding conservatively classify as shown; classification
 does not rewrite or reject their payloads.
 
-Previously stored entries are neither rewritten nor reclassified. Their absent
-visibility retains the store's legacy type fallback, which excludes only
-`turn_state`, `stall`, `api_retry`, `compacting` and `session_transition`.
-Explicit visibility governs the same unread watermark in warm and reopened
-stores. Raw pages still include hidden entries and retain their durable IDs.
+Previously stored entries retain raw visibility semantics. Legacy targets count
+eligible types regardless of `Shown`, except `turn_state`, `stall`, `api_retry`,
+`compacting` and `session_transition`, which never count. Unsupported entries
+keep absent/true counting and false exclusion without certifying receipts.
+Raw pages retain hidden entries and their IDs; no metadata is rewritten.
 
 **Carry the append result, not a second lookup or another counter (#2861).**
 `appendConversationHistory` returns the successful `Store.AppendWithMetadata`
@@ -394,7 +505,8 @@ adding metadata later lets concurrent replay observe an incomplete record.
 same ring seam without another history write. Both paths retain the id even with
 no live recipients. Replay uses that original identity and never appends history;
 absent/failed storage leaves zero ring metadata and an omitted wire key. Channel
-posts retain their missing-id behavior, and transitions remain outside the ring.
+posts retain their missing-id behavior, and ordinary `session_transition` frames
+remain outside the ring; runtime-divider receipts use it.
 See [ring publication](eventring-package.md#concurrency).
 
 **Why this producer reads `text`, never the delivered payload.** Since #2038
@@ -492,6 +604,18 @@ rule would be defeated by relaying them.
 **Test-shape traps worth knowing before touching these producers
 again:**
 
+- **Reuse legacy IDs after recovery, not just across repeated starts.**
+  `TestStartupHistoryReferenceIsolation` saves full and tool-only recovery before
+  newer scoped work reuses the turn/tool IDs, then checks that the newer work
+  still closes. Repeated starts without new work miss references that also
+  terminate their append-time scope. Its late-fact case checks the opposite:
+  output in the original scope must not reopen an interrupted turn.
+- **Prove the intended storage failure happened.**
+  `TestStartupHistoryFailures` asserts the write failure's append event or the
+  read failure's canonical conversation ID as well as content-free logs and
+  continued reconciliation of a healthy conversation. An invalid registry ID
+  can produce a safe warning before touching storage; absence of sensitive
+  content alone would leave the intended read/write failure untested.
 - **Rotate before successor output and reactivate the same routing ID.**
   `TestRuntimeHistoryRotationBeforeOutput` delays B across A→B→C;
   `TestRuntimeHistoryEvictionBeforeOutput` supplies late parsed tails and both

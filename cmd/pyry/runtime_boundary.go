@@ -128,6 +128,7 @@ func (s *streamTurnSink) takeBoundaries(processed uint64) []runtimeBoundary {
 // thread facts. Both daemon relay configurations install this same path.
 func installRuntimeHistory(s *streamTurnSink, e *interactiveTurnEmitterV2, busy *turnBusyTracker) {
 	e.runtimeFacts = true
+	s.runtimeReplayRing = e.ring
 	s.runtimeEnabled.Store(true)
 	if busy != nil {
 		busy.runtimeSink = s

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -113,34 +114,12 @@ func TestRelayV2_LiveHistoryEntryID(t *testing.T) {
 	}
 }
 
-// TestRelayV2_ConversationHistory is the first end-to-end run of the
-// conversation-history verb (#2116) — a real daemon reading a real on-disk log
-// and answering a paired phone. Every piece under it is unit-tested inside its
-// own package: the log and its cursor (#2112), the wire shapes (#2113), the
-// handler and its rejects, and the cmd/pyry sentinel classifier; nothing until
-// now has run the whole chain in one process.
-//
-// FOUR CLAIMS, ONE RUN:
-//
-//   - THE WALK. A conversation with recorded traffic is answered WITHOUT THE
-//     CLIENT SENDING A MESSAGE FIRST, and echoing each page's cursor back walks to
-//     the start returning every entry exactly once, newest-first.
-//   - THE BOUNDARY. The walk terminates on `at_start` and never on an empty
-//     `entries`: with six entries walked two at a time the third page fills
-//     EXACTLY at the first entry and must report `at_start` false with a usable
-//     cursor, and only the fourth call is the empty terminal one.
-//   - THE REJECTS reach the wire as coded errors that echo nothing.
-//   - NO STALL. A frame sent immediately after a request is serviced while that
-//     request is still being answered.
-//
-// THE LOG IS SEEDED DIRECTLY ONTO THE HOST rather than produced by driving a
-// turn, the same choice TestRelayV2_AttachmentRetrieval makes about a stored
-// file and for the same reasons. The producers are #2114's and #2115's subject
-// and are covered where they live; driving one here would make this run depend on
-// them and would cost a full turn round trip to reach the interactive chokepoint.
-// The seeding uses the log's own Append, so what lands is exactly what a producer
-// would have left — same segment format, same id sequence — and it happens before
-// the daemon starts, so this process is the only writer at any moment.
+// TestRelayV2_ConversationHistory serves seeded history to a paired phone before
+// any message is sent. The raw log has six legacy entries and a hidden restart
+// divider projected into a nonvisual receipt. The walks preserve every seeded
+// entry and the receipt exactly once, with their original IDs and timestamps,
+// retaining raw cursors and AtStart even on receipt-only and empty terminal pages.
+// Rejected requests expose no content and do not stall interrupts.
 func TestRelayV2_ConversationHistory(t *testing.T) {
 	const (
 		initialUUID = "11111111-1111-4111-8111-111111111111"
@@ -221,6 +200,23 @@ func TestRelayV2_ConversationHistory(t *testing.T) {
 
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)
+	raw, err := store.Page(conversations.ConversationID(knownConvID), "", seeded+2)
+	if err != nil {
+		t.Fatalf("read startup history: %v", err)
+	}
+	if len(raw.Entries) != seeded+1 || !raw.AtStart {
+		t.Fatalf("startup raw history = %+v, want six seeds and one restart divider", raw)
+	}
+	divider := raw.Entries[0]
+	var fact struct {
+		Cause string `json:"cause"`
+	}
+	if err := json.Unmarshal(divider.Payload, &fact); err != nil {
+		t.Fatal(err)
+	}
+	if divider.ID != seeded+1 || divider.Type != "session_divider" || divider.Shown == nil || *divider.Shown || fact.Cause != "daemon_restart" {
+		t.Fatalf("unexpected startup divider: %+v", divider)
+	}
 
 	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -234,50 +230,97 @@ func TestRelayV2_ConversationHistory(t *testing.T) {
 	// ── The walk ──
 	// No send_message first: a client that has just opened a conversation asks for
 	// history straight away, and that is the whole point of the verb.
-	seen := make([]uint64, 0, seeded)
-	cursor := ""
-	pages := 0
-	for {
-		reqID := firstReqID + uint64(pages)
-		sendRequestHistoryE2E(t, phone, send, reqID, protocol.RequestHistoryPayload{
-			ConversationID: knownConvID,
-			Cursor:         cursor,
-			Limit:          pageSize,
+	reqID := firstReqID
+	for _, walk := range []struct {
+		name   string
+		limit  int
+		counts []int
+	}{
+		{"partial_terminal", pageSize, []int{2, 2, 2, 1}},
+		{"exact_fill", seeded + 1, []int{seeded + 1, 0}},
+		{"hidden_only_head", 1, []int{1, 1, 1, 1, 1, 1, 1, 0}},
+	} {
+		t.Run(walk.name, func(t *testing.T) {
+			seen := make([]uint64, 0, seeded)
+			receipts := 0
+			cursor := ""
+			pages := 0
+			for {
+				rawPage, err := store.Page(conversations.ConversationID(knownConvID), cursor, walk.limit)
+				if err != nil {
+					t.Fatalf("read raw page: %v", err)
+				}
+				sendRequestHistoryE2E(t, phone, send, reqID, protocol.RequestHistoryPayload{
+					ConversationID: knownConvID,
+					Cursor:         cursor,
+					Limit:          walk.limit,
+				})
+				page := awaitHistoryPage(t, phone, recv, reqID, replyDeadline)
+				reqID++
+				pages++
+				if pages > len(walk.counts) {
+					t.Fatal("walk did not terminate")
+				}
+				if len(page.Entries) != walk.counts[pages-1] {
+					t.Errorf("page %d carried %d entries, want %d", pages, len(page.Entries), walk.counts[pages-1])
+				}
+				if page.Cursor != rawPage.Cursor || page.AtStart != rawPage.AtStart {
+					t.Error("legacy page changed the raw cursor or AtStart")
+				}
+				if page.AtStart != (pages == len(walk.counts)) {
+					t.Errorf("page %d at_start = %v, want %v", pages, page.AtStart, pages == len(walk.counts))
+				}
+				for _, e := range page.Entries {
+					if e.ID == divider.ID {
+						if e.Type != protocol.TypeBanner || !e.TS.Equal(divider.TS) {
+							t.Fatalf("receipt type/timestamp changed: %+v", e)
+						}
+						var got map[string]any
+						if err := json.Unmarshal(e.Payload, &got); err != nil {
+							t.Fatalf("decode receipt: %v", err)
+						}
+						want := map[string]any{
+							"conversation_id": knownConvID, "level": "info", "text": "",
+							"truncated": false, "stops_turn": false,
+						}
+						if !reflect.DeepEqual(got, want) {
+							t.Fatalf("receipt payload = %#v, want %#v", got, want)
+						}
+						receipts++
+						continue
+					}
+					if e.ID == 0 || e.ID > seeded || e.Type != protocol.TypeAssistantDelta {
+						t.Fatalf("legacy page included unexpected entry: %+v", e)
+					}
+					wantPayload := fmt.Sprintf(`{"text":"seeded-%d"}`, e.ID-1)
+					if string(e.Payload) != wantPayload || !e.TS.Equal(base.Add(time.Duration(e.ID-1)*time.Second)) {
+						t.Fatalf("seeded payload/timestamp changed: %+v", e)
+					}
+					seen = append(seen, e.ID)
+				}
+				if page.AtStart {
+					if page.Cursor != "" {
+						t.Error("terminal page cursor must be empty")
+					}
+					break
+				}
+				if page.Cursor == "" {
+					t.Fatalf("page %d is not at_start and carries no cursor", pages)
+				}
+				cursor = page.Cursor
+			}
+			if receipts != 1 {
+				t.Fatalf("walked %d restart receipts, want exactly one", receipts)
+			}
+			if len(seen) != seeded {
+				t.Fatalf("walked %d entries, want %d — none skipped, none repeated", len(seen), seeded)
+			}
+			for i, id := range seen {
+				if want := uint64(seeded - i); id != want {
+					t.Errorf("walked entry %d = id %d, want %d — newest-first, exactly once", i, id, want)
+				}
+			}
 		})
-		page := awaitHistoryPage(t, phone, recv, reqID, replyDeadline)
-		pages++
-		for _, e := range page.Entries {
-			seen = append(seen, e.ID)
-		}
-		if page.AtStart {
-			if page.Cursor != "" {
-				t.Errorf("terminal page cursor = %q, want empty whenever at_start is set", page.Cursor)
-			}
-			if len(page.Entries) != 0 {
-				t.Errorf("terminal page carried %d entries; the fill ended exactly at the first entry on the page before it", len(page.Entries))
-			}
-			break
-		}
-		if page.Cursor == "" {
-			t.Fatalf("page %d is not at_start and carries no cursor; the walk cannot continue", pages)
-		}
-		cursor = page.Cursor
-		if pages > seeded+2 {
-			t.Fatal("walk did not terminate")
-		}
-	}
-
-	if pages != seeded/pageSize+1 {
-		t.Errorf("walk took %d pages, want %d — %d full pages then the empty terminal one",
-			pages, seeded/pageSize+1, seeded/pageSize)
-	}
-	if len(seen) != seeded {
-		t.Fatalf("walked %d entries, want %d — none skipped, none repeated", len(seen), seeded)
-	}
-	for i, id := range seen {
-		if want := uint64(seeded - i); id != want {
-			t.Errorf("walked entry %d = id %d, want %d — newest-first, exactly once", i, id, want)
-		}
 	}
 
 	// ── A conversation this daemon does not host ──

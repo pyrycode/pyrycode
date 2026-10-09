@@ -203,13 +203,13 @@ func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate
 		if err != nil {
 			return relay.ErrSessionUnknown
 		}
-		// A pinned Claude pick is checked and stored as its family, the row the
-		// menu offers. u is this call's copy, so the caller's frame is untouched.
-		if checkModel {
-			family := followFamily(harness, *u.Model)
-			u.Model = &family
-		}
 		list, have := agentModelVocabulary(a.p, a.saved, harness, id)
+		// Validate the published row while storage and execution follow its family.
+		// u is this call's copy, so the caller's frame is untouched.
+		if checkModel {
+			offered := offeredModel(harness, list, *u.Model)
+			u.Model = &offered
+		}
 		if checkModel {
 			if err := validateModelVocabulary(list, have, *u.Model); err != nil {
 				return err
@@ -228,6 +228,10 @@ func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate
 			if err := validateEffortVocabulary(harness, list, have, model, *u.Effort); err != nil {
 				return err
 			}
+		}
+		if checkModel {
+			family := followFamily(harness, *u.Model)
+			u.Model = &family
 		}
 	}
 
@@ -300,8 +304,8 @@ func (a settingsUpdaterAdapter) storedModel(id sessions.SessionID) (string, erro
 
 // followFamily resolves a Claude model to its family alias, so a session follows
 // the latest model of a family whichever spelling the client sent: claude-opus-5
-// and claude-opus-4-7 both become opus. It runs before a model is validated
-// against the menu, which offers one row per family, and before it is stored.
+// and claude-opus-4-7 both become opus. Menu identity is resolved separately by
+// offeredModel; stored and executed Claude settings use the family spelling.
 // Any other agent's model passes through unchanged (#2647). An empty agent is
 // claude, as it is to the pool.
 func followFamily(agent, model string) string {
@@ -372,13 +376,15 @@ func codexCommonEffortLevels(families []turnevent.ModelOption) []string {
 // effortLevelsFor answers the levels a non-empty effort is accepted from for
 // model on harness (#2629, #2646): the EffortLevels of the entry list advertises
 // for it, none when it advertises none, else that agent's fallback set. An entry
-// is an exact, uncut Value match: a cut value is not the model's name, and cut
-// levels cannot prove a level absent, so either falls through to the fallback set
+// represents the same family/variant with an uncut Value. A cut value is not
+// the model's name, and cut levels cannot prove a level absent, so either falls
+// through to the fallback set
 // rather than refusing on partial evidence. It is both the check and the reported
 // list, which is what keeps a session's effort_levels from drifting from what is
 // accepted.
 func effortLevelsFor(harness string, list turnevent.ModelList, have bool, model string) []string {
 	if have && model != "" {
+		model = offeredModel(harness, list, model)
 		for _, option := range list.Models {
 			if option.Value != model || slices.Contains(option.TruncatedFields, "value") || slices.Contains(option.TruncatedFields, "effort_levels") {
 				continue

@@ -353,14 +353,14 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 		if v.ParentToolCallID != "" {
 			return
 		}
-		if !e.startTurnIfNeeded(convID) {
+		if !e.startTurnIfNeeded(ctx, convID) {
 			return
 		}
 		e.flushDelta(ctx) // any pending delta precedes the thinking transition
 		// Thought text is never forwarded; thinking surfaces only as a state.
 		e.transitionTo(ctx, convID, turnbridge.StateThinking)
 	case turnevent.TextChunk:
-		if v.ParentToolCallID == "" && !e.startTurnIfNeeded(convID) {
+		if v.ParentToolCallID == "" && !e.startTurnIfNeeded(ctx, convID) {
 			return
 		}
 		// Lane/message-boundary flush: changing either key ends the prior delta
@@ -398,7 +398,7 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 			e.rememberLauncher(v, origin)
 			return
 		}
-		if !e.startTurnIfNeeded(convID) {
+		if !e.startTurnIfNeeded(ctx, convID) {
 			return
 		}
 		e.flushDelta(ctx) // buffered text precedes the tool_use it logically preceded
@@ -410,7 +410,7 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 			e.emitChildTool(ctx, convID, v.ParentToolCallID, v.ToolCallID, ev)
 			return
 		}
-		if !e.startTurnIfNeeded(convID) {
+		if !e.startTurnIfNeeded(ctx, convID) {
 			return
 		}
 		e.flushDelta(ctx) // buffered text precedes the tool_result
@@ -426,7 +426,7 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 		// It is turn-scoped but lifecycle-neutral: preserve wire order by flushing
 		// prior text, then publish without emitting another turn_state or retaining
 		// counter state in the daemon.
-		if !e.startTurnIfNeeded(convID) {
+		if !e.startTurnIfNeeded(ctx, convID) {
 			return
 		}
 		e.flushDelta(ctx)
@@ -440,7 +440,7 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 			e.emitMappedAt(ctx, convID, ev, origin, 0)
 			return
 		}
-		if !e.startTurnIfNeeded(convID) {
+		if !e.startTurnIfNeeded(ctx, convID) {
 			return
 		}
 		e.flushDelta(ctx)
@@ -609,7 +609,7 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 		// (streamsup.minThinkingTokensPerEvent, one per 64 tokens of accumulated
 		// delta) is what keeps the count to roughly 1–2 per typical turn, and no
 		// second cap is imposed here.
-		if !e.startTurnIfNeeded(convID) {
+		if !e.startTurnIfNeeded(ctx, convID) {
 			return
 		}
 		e.flushDelta(ctx)
@@ -934,7 +934,7 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 // fresh turn id, reset seq, and clear its phase until main-phase activity. On
 // a turn-id mint failure (crypto/rand — defensive) it WARN-logs and leaves the
 // turn closed so the next event retries. Returns whether a turn is open.
-func (e *interactiveTurnEmitterV2) startTurnIfNeeded(convID string) bool {
+func (e *interactiveTurnEmitterV2) startTurnIfNeeded(ctx context.Context, convID string) bool {
 	if e.inTurn {
 		return true
 	}
@@ -952,7 +952,7 @@ func (e *interactiveTurnEmitterV2) startTurnIfNeeded(convID string) bool {
 	e.inTurn = true
 	e.turnConvID = convID
 	if e.runtimeFacts {
-		e.recordRuntimeFact(historyTurnOpened, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, OccurredAt: time.Now().UTC()})
+		e.recordRuntimeFact(ctx, historyTurnOpened, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, OccurredAt: time.Now().UTC()})
 	}
 	e.suggestions.turnStarted(convID)
 	return true
@@ -1354,44 +1354,14 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 	historyEntryID := appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
 		convID, typ, payloadJSON, ts, e.source)
 	if !legacyHistoryType(typ) {
-		return // durable facts never enter the legacy ring or live fan-out
+		var ok bool
+		payloadJSON, ok = legacyRuntimeReceipt(convID, typ, payloadJSON, historyEntryID, ts)
+		if !ok {
+			return
+		}
+		typ = protocol.TypeBanner
 	}
-	// Publish the complete event only after the history result is known: replay
-	// can read the ring concurrently, including before any recipient is open.
-	eventID := e.ring.AppendWithHistoryID(convID, typ, payloadJSON, ts, historyEntryID)
-
-	// Fresh snapshot per envelope: a conn that joined mid-turn is included next
-	// emit; a dropped conn is absent here, or surfaces as a Push error below.
-	for _, c := range e.bcast.ActiveConns(ctx) {
-		if !c.Interactive {
-			continue // the capability gate — non-interactive conns never see the structured stream
-		}
-		e.nextID++
-		// &eventID is shared by reference across every per-conn envelope: it is
-		// a loop-invariant local, captured once and never reassigned, and Push
-		// only ever reads the envelope (marshal/seal). So all conns observe the
-		// identical durable id (AC-2) with no race and no per-conn allocation.
-		env := protocol.Envelope{
-			ID:             e.nextID,
-			Type:           typ,
-			TS:             ts,
-			Payload:        payloadJSON,
-			EventID:        &eventID,
-			HistoryEntryID: historyEntryID,
-		}
-		if err := e.bcast.Push(ctx, c.ConnID, env); err != nil {
-			if ctx.Err() != nil {
-				return // teardown
-			}
-			e.logger.Debug("relay: interactive-turn push dropped",
-				"event", "interactive_turn.push_err",
-				"conn_id", c.ConnID,
-				"env_id", e.nextID,
-				"conversation_id", convID,
-				"turn_id", e.turnID,
-				"err", err)
-		}
-	}
+	publishLegacyHistory(ctx, e.bcast, e.ring, e.logger, &e.nextID, convID, typ, payloadJSON, ts, historyEntryID)
 }
 
 // eventKind returns a content-free type discriminant for an Event, for log
