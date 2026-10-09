@@ -266,77 +266,80 @@ producer isolation, byte preservation and metadata redaction with a stand-in
 that never participates in the live proof.
 
 **A suggestion frame alone cannot prove its source.** `installSuggestCLI`
-refuses non-stream launches in the native probe. The fallback set/clear test
-instead removes `--prompt-suggestions` and disables native generation only on
-the persistent child. It stages one exchange and a 15-second window: two seconds
-for native output, then the ten-second production attempt (9.8-second internal
-deadline reserving termination time). It requires a nonempty UTF-8 single-line
-reply for `suggestConvID`, at most 240 characters/1024 bytes, then `suggested_reply: null`
-at a higher revision after accepted input. Authenticated absence is FAIL, never
-a skip. Both tests run under `make e2e-realclaude` and
+refuses non-stream native-probe launches. Fallback disables native generation and
+removes `--prompt-suggestions` only on the persistent child. One exchange gets
+15 seconds: two for native output, then ten for production fallback (9.8-second
+internal deadline plus termination). Require a UTF-8 single-line nonempty reply
+for `suggestConvID`, ≤240 characters/1024 bytes, then `suggested_reply: null` at a
+higher revision after accepted input. Authenticated absence is FAIL. Both tests
+run under `make e2e-realclaude` and
 [passed a counted gate](https://github.com/pyrycode/pyrycode/issues/2856#issuecomment-6009817217).
-Their shared wire shape cannot identify the producer.
 
-The wrapper forwards stdout unchanged and inherits stdin/stderr. Private
-metadata records invocation/completion counts, wrapper PID, start/elapsed times,
-real-child exit, byte count and fixed validation predicates over at most 4097
-bytes. `output_observed` gates counts/predicates; incomplete elapsed time is
-since start, not child duration. `readSuggestSource` tolerates partial appends;
-`suggestSource.diagnostic` joins metadata with stream/result counts, idle state
-and wire revisions, distinguishing absent/incomplete invocation, failed exit,
-unusable output and usable output without a set.
+The print-mode JSON wrapper forwards exact stdout, inheriting stdin/stderr and
+the daemon group. Its 0600 metadata retains correlated wrapper/child PIDs:
+successful spawn, first nonempty read, first acknowledged write/successful flush.
+Witnesses survive cancellation without completion.
+Spawn proves creation, never readiness or authentication. Read/forward counts are
+prefixes from 1–4097, saturated exactly at 4097; they prove neither final totals,
+pre-deadline arrival, daemon receipt, EOF, child exit nor publication eligibility.
 
-Group cancellation can kill the wrapper before completion metadata.
-`replyFallback.run` emits `reply_fallback.lifecycle` for each started helper:
-wrapper PID, attempt/child milliseconds, parent/fallback cancellation and deadline
-flags, `own_deadline_elapsed`, atomic `group_cancel_requested`, `wait_completed`
-and wrapper exit code/signal. Snapshot contexts before deferred cleanup, whose
-cancellation would otherwise make success look canceled.
+`readSuggestSource` reads ≤64 KiB. Partial final appends preserve prior witnesses;
+missing files/fields mean unknown, never zero. Struct decoding accepts duplicate
+keys and defaults missing/null scalars to zero: require unique, present, typed
+metadata, stage order and matching positive wrapper/child PIDs. Duplicate,
+malformed, out-of-order, PID-mismatched or cap-inconsistent records invalidate
+progress/completion as ambiguous. Completion needs elapsed time, exit, count and
+predicates consistent with prefixes; zero may complete after spawn without
+read/forward. Only valid completion sets `output_observed`; otherwise exit/output
+stay unknown. Incomplete elapsed time is since invocation, not child duration.
+
+`replyFallback.run` logs `reply_fallback.lifecycle`: wrapper PID, attempt/child
+times, parent/fallback cancellation/deadline, `own_deadline_elapsed`, atomic
+`group_cancel_requested`, `wait_completed`, wrapper exit code/signal. Snapshot
+contexts before cleanup cancellation, which would misclassify success.
 
 **Daemon receipt is a post-Wait snapshot.** `replyFallbackOutput` reads stdout
-only after buffered Wait receipt, preserving cancellation's received Wait error.
-Without receipt, neither buffer nor process state is read: count, overflow,
-validation, exit and Wait outcomes are unknown. With receipt,
-`output_observed=true`; `stdout_bytes` ranges 0–4097, the 4096-byte allowance
-plus one sentinel. `stdout_cap_exceeded` is true exactly at 4097. Saturation is
-a lower bound, never total output or EOF. `wait_ok` reports nil Wait error;
-`wait_delay` reports `exec.ErrWaitDelay`. Explicit zero means no daemon-retained
-bytes, not no real-child output; empty bytes are valid UTF-8 and fail JSON decoding.
+after buffered Wait receipt, retaining cancellation's received Wait error.
+Without receipt, buffer/process state are unread; output/exit/Wait stay unknown.
+With receipt, `output_observed=true`;
+`stdout_bytes` is 0–4097 (4096-byte allowance plus sentinel), with
+`stdout_cap_exceeded` true exactly at 4097. Saturation is a lower bound, never
+total output or EOF. `wait_ok` means nil Wait error; `wait_delay` means
+`exec.ErrWaitDelay`. Explicit zero means no daemon-retained bytes, not no child
+output; empty bytes are valid UTF-8 and fail JSON decoding.
 
-`decodeReplyFallback` shares production Go struct decoding, including null and
-duplicate fields. `stdout_json_ok` applies only to valid UTF-8; failed UTF-8
-leaves decoding unknown. Successful decoding independently permits
-`stdout_result_ok` (`is_error`/`subtype`) and `stdout_text_ok` (trimmed `result`
-through `validReplyFallback`), regardless of Wait success or overflow.
-`suggestSource.diagnostic` applies the same gates to its source predicates.
+`decodeReplyFallback` uses production Go struct decoding, including null/duplicate
+fields. `stdout_json_ok` requires valid UTF-8; otherwise decoding stays unknown.
+Decoded output independently permits `stdout_result_ok` (`is_error`/`subtype`)
+and `stdout_text_ok` (trimmed `result` through `validReplyFallback`), regardless
+of Wait success or overflow. `suggestSource.diagnostic` uses the same gates.
 
-`suggestLifecycle` accepts complete daemon lines matched to the source wrapper
-PID and emits only present, typed, consistent scalars. Missing counts, partial
-or malformed evidence, contradictory count/cap or Wait/exit outcomes leave
-output unknown. A zero count claiming invalid UTF-8 or successful decoding also
-invalidates the output snapshot while preserving independent Wait observations.
-Missing or inapplicable result/text predicates stay unknown. Wrapper exit does
-not witness real-child exit. The snapshot proves neither pre-deadline arrival,
-real-child completion nor publication eligibility. Simultaneous contexts stay
-ambiguous; timing/cancellation alone identifies no cause. Diagnostics contain
-only fixed labels, booleans, counts, PIDs and times, never prompt/reply text,
-raw stdout/stderr/errors, argv, paths, credentials, account or environment values.
+`suggestLifecycle` requires complete daemon lines, matching wrapper PID and
+present typed consistent scalars. Missing/partial/malformed evidence or
+contradictory count/cap or Wait/exit leaves output unknown. Zero claiming
+invalid UTF-8 or successful decoding invalidates output, preserving independent
+Wait observations. Missing/inapplicable result/text predicates stay unknown.
+Wrapper exit cannot prove child exit; the snapshot proves neither pre-deadline
+arrival, child completion nor publication eligibility. Simultaneous contexts stay
+ambiguous; timing/cancellation identifies no cause. Records/diagnostics contain
+only fixed labels, booleans, validated counts/PIDs and times, never prompt/reply
+text, stdout/stderr/errors, argv, paths, credentials, account or environment values.
 
-Offline process/output tests cover exits, deadlines, cancellation, zero,
-partial/invalid captures, saturation and null/duplicate decoding.
-`TestReplyFallbackOutputUnknownWait` uses an inaccessible buffer; bounded
-cancellation need not reap within its grace. `TestSuggestLifecycleOutput`
-asserts every genuine-zero predicate and rejects impossible zero snapshots.
-Use nonzero counts in missing-result tests: zero rejection can hide a broken gate. `TestSuggestSourceDiagnosticApplicability` pins source gates;
-isolation, exact I/O and privacy have separate checks, not live proof.
-`TestSuggestCLIFallbackIncomplete` waits for forwarded `lockedBuffer` bytes
-before cancellation and checks I/O after Wait: child readiness missed a forwarding
-race. Python must mirror Go whitespace, null/duplicate and case-insensitive field
-semantics; dictionary conversion can misclassify output. Null preserves Go scalars.
+Offline tests cover exits/deadlines, I/O, privacy, invalid captures and saturation.
+`TestReplyFallbackOutputUnknownWait` uses an inaccessible buffer:
+cancellation need not reap within its grace. `TestSuggestLifecycleOutput` pins
+genuine zero; missing-result tests need nonzero counts so zero rejection cannot
+hide a broken gate. `TestSuggestSourceDiagnosticApplicability` pins source gates.
+`TestSuggestCLIFallbackIncomplete` cancels at spawn, blocked-flush read and
+acknowledged forwarding; completion stays unknown. Readiness missed a forwarding
+race: wait for witnesses/`lockedBuffer` bytes, inspect I/O after Wait.
+`TestSuggestSourceCapturePresence` rejects invented observations. Python must
+mirror Go whitespace, null/duplicate and case-insensitive fields: dictionary
+conversion loses type errors; null preserves scalars.
 
-The [#2873 record](../../specs/architecture/2873-fallback-source-evidence.md)
-and [PR #2892](https://github.com/pyrycode/pyrycode/pull/2892) retain the evidence.
-Counts are executed/passed/failed/skipped:
+Historical evidence: [#2873](../../specs/architecture/2873-fallback-source-evidence.md),
+[PR #2892](https://github.com/pyrycode/pyrycode/pull/2892).
+Counts: executed/passed/failed/skipped.
 
 | Targeted batch commit | E/P/F/S |
 | --- | --- |
@@ -351,24 +354,22 @@ Counts are executed/passed/failed/skipped:
 | [PR #2896 batch](https://github.com/pyrycode/pyrycode/pull/2896) | 6/3/3/0 |
 
 **Internal-deadline/live-parent absence remains unresolved.** #2873 run 4
-remains FAIL: fallback/own deadline flags, neither parent flag, cancellation and
-wrapper Wait/SIGKILL; completion, real-child exit/output and earlier failure
-causes remain unknown. Earlier #2882 runs 2/5 and PR #2896 runs 1/3/6 remain
-FAIL. Those later failed runs retained explicit zero daemon bytes, UTF-8 true,
-JSON false and unknown result/text, with no wire set/clear. The
-[immutable historical spec][fallback-history]
-retains every outcome. The [#3022 contract](../../specs/architecture/3022-post-wait-stdout-validation.md)
-recovers the snapshot/consumer; wrapper witnesses, stream adaptation and stderr
-are separate slices. Execution, deadlines, cancellation, policy, staging and
-[release control](https://github.com/pyrycode/pyrycode/issues/2859) are unchanged.
+remains FAIL: fallback/own deadline, neither parent flag, wrapper Wait/SIGKILL;
+completion, child exit/output and cause unknown. Earlier #2882 runs
+2/5 and PR #2896 runs **1, 3 and 6 remain FAIL**. The latter witnessed spawn,
+unknown read/forward, independently zero daemon bytes after wrapper Wait/SIGKILL,
+UTF-8 true, JSON false, unknown result/text, no set/clear; cause unknown.
+The [historical spec][fallback-history] retains all outcomes.
+The [#3022 snapshot contract](../../specs/architecture/3022-post-wait-stdout-validation.md)
+and [wrapper witness contract](../../specs/architecture/3023-fallback-wrapper-witnesses.md)
+preserve execution, deadlines, cancellation, account/isolation, policy, staging and
+[release control](https://github.com/pyrycode/pyrycode/issues/2859).
 
 The [#2881 full gate](https://github.com/pyrycode/pyrycode/issues/2881#issuecomment-6017651019)
-at `81c7ac78f9` counted 1635/1635/0/27. Passing gates cannot recover missing
-witnesses or reclassify failures.
-Non-reproduction establishes no fix; timeout establishes no defect. Baseline
-comparisons need repeated counted runs, matching inputs and all outcomes; see
+at `81c7ac78f9` counted 1635/1635/0/27. Passing cannot recover witnesses or resolve
+historical failures. Compare repeated counted runs with matching inputs; see
 [development verification](development-verification.md#test-execution-and-artifact-survival).
-Evidence acceptance neither resolves intermittency nor waives a failed current gate.
+Non-reproduction proves no fix; timeout proves no defect; evidence waives no failed gate.
 
 [fallback-history]: https://github.com/pyrycode/pyrycode/blob/25d778fbd0e54753bd82a6d4eca9a097c996f6f4/docs/specs/architecture/2882-fallback-stdout-evidence.md
 
