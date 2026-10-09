@@ -421,9 +421,10 @@ timestamp, matching conversation and nonzero `occurred_at`. Openings and turn
 interruptions need `turn_id`; tool interruptions also need `tool_call_id`.
 Dividers need `cause` and a predecessor session, except `daemon_restart` dividers.
 Malformed facts and arbitrary unknown types stay holes, never harmless receipts.
-The unchanged mobile decoder accounts valid info receipts without drawing content
-or changing turn, permission, model or status state. Receipt-only delivery gives
-no sight; malformed/unidentified receipts and unaccounted holes remain barriers.
+The unchanged mobile decoder counts valid info receipts toward legacy latest
+without drawing content or changing turn, permission, model or status state.
+Receipt-only delivery gives no sight; malformed/unidentified receipts and
+unaccounted holes remain barriers.
 
 **Runtime writers bypass `emit`.** Changing only its allowlist would leave live
 and reconnect accounting incomplete. `recordRuntimeFact` and
@@ -436,10 +437,10 @@ agent/isolation gates still apply. Nil/failed storage produces no receipt, while
 eligible legacy delivery and replay continue without durable identity. Ordinary
 `session_transition` frames retain their separate, non-ring behavior.
 
-Read receipts and unread watermarks serve different purposes: the
+Raw visibility and legacy unread targets differ (#3029): the
 [legacy watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
-skips these four types regardless of raw visibility. Raw facts, metadata and
-store watermarks remain unchanged for thread consumers. The
+counts validated receipts regardless of `Shown`. Raw facts, metadata and store
+watermarks remain unchanged. The
 [pager](history-package.md#reader-2116) retains one bounded raw page's cursor and
 `AtStart`; accounting never authorizes scanning ahead to fill a page.
 
@@ -468,7 +469,7 @@ recipient gates keep their original meaning.
 | `background_task_updated` | Hidden for patch-only updates; shown when `Status` or `Summary` is nonempty. |
 | Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
-| Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; validated facts use nonvisual receipts and never raise the legacy watermark. |
+| Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; validated nonvisual receipts count toward legacy latest. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -477,12 +478,11 @@ to known terminal words would silently hide future completion facts. Conditional
 legacy payloads that fail decoding conservatively classify as shown; classification
 does not rewrite or reject their payloads.
 
-Previously stored entries are neither rewritten nor reclassified. Their absent
-visibility retains the store's legacy type fallback, which excludes only
-`turn_state`, `stall`, `api_retry`, `compacting` and `session_transition`.
-Explicit visibility governs the raw unread watermark in warm and reopened
-stores; the legacy view additionally skips the four runtime types. Raw pages
-still include hidden entries and retain their durable IDs.
+Previously stored entries retain raw visibility semantics. Legacy targets count
+eligible types regardless of `Shown`, except `turn_state`, `stall`, `api_retry`,
+`compacting` and `session_transition`, which never count. Unsupported entries
+keep absent/true counting and false exclusion without certifying receipts.
+Raw pages retain hidden entries and their IDs; no metadata is rewritten.
 
 **Carry the append result, not a second lookup or another counter (#2861).**
 `appendConversationHistory` returns the successful `Store.AppendWithMetadata`

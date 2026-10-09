@@ -74,14 +74,16 @@ func publishLegacyHistory(ctx context.Context, bcast interactiveBroadcaster, rin
 	}
 }
 
-// legacyHistoryReader omits known runtime-only facts from the unread watermark.
-// Unknown content retains the raw visibility rule, so unsupported content can
-// still block read confirmation. No raw entries, metadata or IDs are changed.
+// legacyHistoryReader counts the legacy wire types, including validated runtime
+// facts projected as banners, independently of raw visibility. Unsupported
+// entries retain conservative visibility counting without certifying receipts.
+// No raw entries, metadata or IDs are changed.
 type legacyHistoryReader struct{ store *history.Store }
 
 func (r legacyHistoryReader) LatestDisplayableEntryID(convID conversations.ConversationID) (uint64, error) {
 	// Preserve nil-store errors and the raw reader's ID/containment validation.
-	latest, err := r.store.LatestDisplayableEntryID(convID)
+	// An all-hidden log can still contain entries counted by legacy clients.
+	latest, err := r.store.LatestEntryID(convID)
 	if err != nil || latest == 0 {
 		return latest, err
 	}
@@ -92,19 +94,22 @@ func (r legacyHistoryReader) LatestDisplayableEntryID(convID conversations.Conve
 			return 0, err
 		}
 		for _, entry := range page.Entries {
-			if legacyRuntimeFact(entry.Type) {
+			// These status types never contribute to the client's unread target,
+			// even if a producer explicitly stored them as shown.
+			switch entry.Type {
+			case protocol.TypeTurnState, protocol.TypeStall, protocol.TypeApiRetry,
+				protocol.TypeCompacting, protocol.TypeSessionTransition:
 				continue
 			}
-			shown := true
-			if entry.Shown != nil {
-				shown = *entry.Shown
-			} else {
-				switch entry.Type {
-				case protocol.TypeTurnState, protocol.TypeStall, protocol.TypeApiRetry, protocol.TypeCompacting, protocol.TypeSessionTransition:
-					shown = false
-				}
+			if legacyHistoryType(entry.Type) {
+				return entry.ID, nil
 			}
-			if shown {
+			if _, ok := legacyRuntimeReceipt(string(convID), entry.Type, entry.Payload, &entry.ID, entry.TS); ok {
+				return entry.ID, nil
+			}
+			// Transport exclusion does not establish harmlessness. Unsupported
+			// entries keep the raw visibility fallback and remain receipt holes.
+			if entry.Shown == nil || *entry.Shown {
 				return entry.ID, nil
 			}
 		}
