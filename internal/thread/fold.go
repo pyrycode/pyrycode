@@ -17,6 +17,7 @@ import (
 // inert data; NoChild distinguishes explicit no-child provenance from unknown.
 type Item struct {
 	ID, Order, Rev       uint64
+	EndedOrder           uint64
 	Kind, Session, Agent string
 	NoChild              bool
 	Turn                 string
@@ -39,17 +40,23 @@ type Fold struct {
 	turns                     map[mainKey]*mainTurn
 	openings                  map[uint64]*mainTurn
 	accepted, messages        map[uint64]int
+	agentGroups               map[agentKey]*agentGroup
+	agentLifetimes            map[agentKey]string
+	agentObservations         map[uint64][]agentObservation
 }
 
 // New creates an independent fold for a caller-established conversation owner.
 func New(conversationID string) *Fold {
 	return &Fold{
-		conversationID: conversationID,
-		pending:        make(map[boundaryKey][]uint64),
-		turns:          make(map[mainKey]*mainTurn),
-		openings:       make(map[uint64]*mainTurn),
-		accepted:       make(map[uint64]int),
-		messages:       make(map[uint64]int),
+		conversationID:    conversationID,
+		agentGroups:       make(map[agentKey]*agentGroup),
+		agentLifetimes:    make(map[agentKey]string),
+		agentObservations: make(map[uint64][]agentObservation),
+		pending:           make(map[boundaryKey][]uint64),
+		turns:             make(map[mainKey]*mainTurn),
+		openings:          make(map[uint64]*mainTurn),
+		accepted:          make(map[uint64]int),
+		messages:          make(map[uint64]int),
 	}
 }
 
@@ -68,7 +75,8 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		if !decode(e.Payload, &owner) || (owner.ConversationID != "" && owner.ConversationID != f.conversationID) {
 			continue
 		}
-		if f.mainWork(e) {
+		main := f.mainWork(e)
+		if f.agentWork(e) || main {
 			continue
 		}
 		if f.sendFact(e) {
@@ -76,8 +84,12 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		}
 		item := Item{ID: e.ID, Order: e.ID, Rev: e.ID, Status: "done", Shown: true}
 		if e.Type == "session_divider" || e.Type == protocol.TypeSessionTransition {
+			scope := f.legacyScope
 			if !f.boundary(e, &item) {
 				continue
+			}
+			if f.legacyScope != scope {
+				clear(f.agentLifetimes)
 			}
 		} else if !standalone(e, &item) {
 			continue

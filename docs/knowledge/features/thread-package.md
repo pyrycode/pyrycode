@@ -17,8 +17,8 @@ equals that ID; accepted sends keep order zero until delivery, then use the
 linked user-message entry ID. Dropped and lost sends stay unordered. `Rev` names
 the latest content or state change, floored at the creating ID when an earlier
 pending report is applied. Standalone items keep their creating revision;
-accepted sends and main-work items change in place. A valid send outcome sets
-revision to its entry ID. Redundant terminal reports do not advance revision.
+accepted sends, main-work and agent items change in place. A valid send outcome
+sets revision to its entry ID. Redundant terminal reports do not advance revision.
 `Items()` returns items in creating-entry ID order, which can differ from
 delivery `Order`; timestamps supply neither ordering nor durable linkage.
 
@@ -70,9 +70,10 @@ logged fact does not add persistence to that emitter. Answer notices consume
 [resolved prompt facts](history-package-producers.md#resolved-remote-prompt-answers-2973),
 including saved selected/free-text answers and any recorded truncation.
 
-Agent/background folding remains separate in
-[#3047](https://github.com/pyrycode/pyrycode/issues/3047).
-Agent/task lifecycle facts create no items yet. Cache,
+Claude Agent/Task calls own [agent lifecycle items](#agent-lifecycle).
+Child work and background shell folding remain downstream in
+[#3058](https://github.com/pyrycode/pyrycode/issues/3058) and
+[#3059](https://github.com/pyrycode/pyrycode/issues/3059). Cache,
 persistence integration, epochs, daemon wiring, thread protocol and read-mark
 migration remain downstream.
 
@@ -165,10 +166,14 @@ child traffic and tool reports alone do not split text. Saved text retains its
 recorded whitespace; only the summary is normalized.
 
 Parent-attributed text and tools create no main items or joins. Claude and
-metadata-free Agent/Task launches split main text but create no ordinary call,
-and their reports create no ordinary call item. Codex tools named Agent or Task
-are ordinary calls: the name alone cannot establish Claude launcher semantics.
-Agent/task lifecycle and background facts remain excluded from this fold.
+metadata-free Agent/Task launches create agent items rather than ordinary calls.
+Only main launches split main text; `agentLaunchIsChild` also consults retained
+parent evidence within the launch's recorded source and lifetime or legacy scope
+before `mainWork` changes the text run. Looking only at the mapped launch payload
+would split text when the preceding durable observation alone saved its parent.
+Codex tools named Agent or Task are ordinary calls: the name alone cannot
+establish Claude launcher semantics. Agent reports update their call-owned item;
+child text/tools and background shell lifecycle remain downstream.
 
 ### Scoped joins, pending outcomes and closure
 
@@ -211,8 +216,8 @@ and [runtime main-work closure](history-package-producers-runtime-lifecycle.md#h
 ### Visibility and live-state exclusions
 
 For supported item-producing facts, explicit `Entry.Shown` wins over the default.
-Absent it, `standalone`, `boundary`, `sendFact` and `mainDecode` follow the
-relevant `historyEntryShown` semantics without importing `cmd/pyry`:
+Absent it, `standalone`, `boundary`, `sendFact`, `mainDecode` and `agentWork` follow
+the relevant `historyEntryShown` semantics without importing `cmd/pyry`:
 
 | Fact | Default shown |
 | --- | --- |
@@ -222,7 +227,7 @@ relevant `historyEntryShown` semantics without importing `cmd/pyry`:
 | Raw reset, clear, agent switch, recovery, workspace change, capacity eviction | True |
 | Raw idle sleep or daemon restart | False |
 | Standalone legacy transition | False for `idle_evict`, true for other supported reasons |
-| Main assistant run or ordinary call | True |
+| Main assistant run, ordinary call or Agent/Task launch | True |
 | Main `turn_end` | False only for normal successful `end_turn`; abnormal ends are true |
 | `main_turn_interrupted` | True |
 
@@ -268,10 +273,11 @@ divider's visibility. See
 [runtime boundary producers](history-package-producers-runtime-lifecycle.md#divider-causes-and-reset-outcomes).
 
 Each non-restart raw divider or standalone legacy transition delimits private
-legacy join scope for untagged main work and later folding extensions. A matching
-pair counts once; `daemon_restart` alone does not delimit that scope. Clearing
+legacy join scope for untagged main work and agent work without a saved lifetime.
+A matching pair counts once; `daemon_restart` alone does not delimit that scope. Clearing
 successor attribution on restart and delimiting legacy joins are separate
-decisions. Agent joins remain a separate extension.
+decisions. Agent joins use
+[their recorded lifetime or legacy scope](#identity-and-recovery).
 
 ### Recorded provenance and successor fallback
 
@@ -367,3 +373,128 @@ attribution even when rows appear unchanged; wrongly typed/null scalars or links
 and unsupported reasons change version only. These scenarios use `testMainReplay`
 to compare full replay with every two-chunk partition, including the gap between
 message and outcome.
+
+## Agents and background work
+
+### Agent lifecycle
+
+`agentWork` creates one immutable-kind `agent` only from a valid mapped Claude
+`tool_use` named `Agent` or `Task`, including a parent-attributed launch.
+Metadata-free legacy launches qualify; explicitly non-Claude sources do not.
+The mapped call entry supplies `ID`, `Order`, recorded `Turn`, retained input,
+creation attribution and visibility. A preceding `agent_call_observed` supplies
+lifetime/parent evidence, never the creating ID. Observations, links and reports
+create no rows. The item starts `running` and active unless pending evidence
+already changes it. Creation attribution and visibility stay fixed on updates.
+Parent call evidence remains in content; resolving `Item.Parent` and folding
+child text/tools await [#3058](https://github.com/pyrycode/pyrycode/issues/3058).
+Background shell lifecycle awaits
+[#3059](https://github.com/pyrycode/pyrycode/issues/3059).
+
+`applyAgent` retains the launch JSON and adds copied `result`, `denial`,
+`task_id`/`task_link`, `task_report` and `ending` fields as evidence arrives.
+Status-empty mapped reports can enrich content without closing work; after a
+final they are retained under `task_update`. Payloads, including patch strings,
+remain inert data. A patch containing a status cannot supply that status.
+
+| Evidence | Status and activity |
+| --- | --- |
+| Unlinked successful/failed tool result | `finished` / `failed`, inactive. |
+| Tool denial, even with a task link | `denied`, inactive. |
+| Linked task update with `completed` | `finished`, inactive. |
+| Linked task update with `stopped`, `failed` or another nonempty word except `stopping` | Retains that status, inactive. |
+| Supplied task `stopping` | `stopping`, active, no final. |
+| Saved `background_task_gone` | `gone`, inactive; outcome unknown. |
+| Saved `agent_ended_with_session` | `ended_with_session`, inactive, saved cause retained under `ending`. |
+
+**Keep launch results separate from task endings.** A complete task-to-call link
+makes tool results launch fields, even when received before the link. Recompute
+the earliest genuine final in entry-ID order after linking. A late link can
+remove a provisional foreground final, returning the item to active with no
+ending if no genuine final remains, or expose an earlier pending task ending.
+Neither `run_in_background` nor result text establishes the link. See
+[producer launch/result separation](history-package-producers-runtime-lifecycle.md#keep-launch-results-separate-from-task-outcomes).
+
+The first genuine final wins; later conflicting finals cannot replace its
+outcome or order. `agentAddReport` reconciles matching durable/mapped companions
+within the same scoped identity, status and report kind as one logical outcome:
+the earliest evidence ID owns terminal order and the mapped payload supplies
+content. Thus a later mapped companion may enrich the winning report without
+moving its ending. `Item.EndedOrder` is zero before a final; content omits
+`ended_order`. Afterward both use the winning evidence ID floored at creation,
+so early reports cannot place an ending before its item. Observable content,
+link or state changes advance `Rev`, also floored at creation; redundant reports
+do not. Entry-ID order, never timestamps or map iteration, selects the final.
+
+Progress, roster absence and main-turn end supply no ending in the fold. Gone
+requires the [saved producer fact](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
+Session endings retain the recorded cause, including `daemon_restart`,
+`child_exit` or `capacity_eviction`; a divider alone cannot end an agent.
+`stopping` is consumed only when supplied. Current producers record no stop
+acceptance fact, so an inbound stop request cannot imply either `stopping` or
+`stopped`. See [ADR 042](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
+
+### Identity and recovery
+
+Joins belong only to this conversation and the recorded source, using saved
+`lifetime_id` when available. Durable observations establish the active producer
+lifetime used by their mapped reports. Without a lifetime, joins use recorded
+session-transition/non-restart-divider scopes; restart dividers do not split
+them. Tagged and metadata-free evidence stay distinct even if successor fallback
+gives items the same displayed attribution. Reused call/task IDs in another
+source, lifetime or legacy scope cannot mutate predecessor items. Results, links
+and endings received before creation remain pending across feeds.
+
+Supplied `call_observed_entry_id` and `task_observed_entry_id` on a saved session
+ending must resolve to earlier original observations with matching identity,
+recorded source and available lifetime. Legacy mapped observations, including
+individual tasks in a roster, can supply that original identity when durable
+observations are absent. All supplied references must agree on the original
+group; recovery uses its scope, never the ending's append-time scope. Unresolved,
+null, zero, out-of-range, forward, wrong-kind or mismatched references join
+nothing, with no fallback. See
+[original-observation recovery](history-package-producers-runtime-lifecycle.md#recover-agenttask-work-and-original-identities-3032).
+
+**Matching a task observation alone is insufficient when an ending also names
+a call.** Validate the available saved task-to-call association before applying
+either identity. Otherwise a correct task reference with a contradictory call ID
+could end a second agent. `TestAgentRecoveryMismatchedLink` pins whole-fact
+rejection.
+
+### Agent validation and testing
+
+Malformed/foreign facts and unusable identities consume version without changing
+items or joins. Mapped launches, results and denials reject truncated/dropped
+call, turn or parent identities before mutating pending state. A truncated or
+dropped call link cannot join, but independently usable task evidence survives
+for a later complete link, including its original ending order. Roster rows
+validate task and call loss markers separately.
+
+**Validate identity support per event kind.** A shared decoder must not promote
+extra progress/update/roster envelope fields into call or parent evidence.
+Started reports supply their supported call link; roster links come from usable
+rows. Unsupported fields can remain in saved raw content without becoming join
+keys. `TestAgentTaskExtraIdentity` covers this boundary; the identity-marker
+tests compare whole fold state, catching damaged pending joins even while
+visible rows remain unchanged.
+
+`TestAgentLifecyclePermutations`, `TestAgentDurableCompanions` and
+`TestAgentCompanionPendingFinals` cover early reports, late links and companion
+boundaries. `TestAgentFirstFinal`, `TestAgentTaskEnrichment` and
+`TestAgentSavedGoneAndEnding` cover conflicting finals, stopping/stopped,
+summary-only enrichment and saved causes. Scope/reference, child-launch and
+invalid-fact tests cover reused IDs, Codex exclusion, retained parents and
+detached inputs/snapshots. `testMainReplay` compares every two-chunk partition
+with full replay.
+
+`cmd/pyry.TestThreadAgentRecordedReplay` runs offline in the standard gate. It
+passes the committed `parent_tool_use_v2.1.259.json` through `streamsup.NewParser`
+and interactive raw-history emission into `Fold`. The test requires #2191's
+Claude 2.1.259 capture provenance from 2026-09-09 and fails if the recording is
+missing. Its one foreground Agent call has `run_in_background: false` but also
+a recorded task link: the task completion supplies `finished`, while the tool
+result remains retained launch content. All evidence comes from recorded frames;
+synthetic fold fixtures cover other shapes separately. Assert the saved prompt,
+background flag and both result markers before comparing retained fields:
+comparing two absent fields could pass while proving no retention. See
+[capture evidence requirements](development-verification.md).

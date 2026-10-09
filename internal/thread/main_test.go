@@ -225,7 +225,7 @@ func TestMainValidationAndLaunchers(t *testing.T) {
 	}
 	entries = append(entries, testMain(13, "assistant_delta", `,"text":"two"`), testMain(14, "tool_use", `,"tool_use_id":"a","name":"Agent"`), testMain(15, "tool_result", `,"tool_use_id":"a","result_detail":"launch"`), testMain(16, "assistant_delta", `,"text":"three"`), testMain(17, "tool_use", `,"tool_use_id":"task","name":"Task"`), testMain(18, "tool_result", `,"tool_use_id":"task"`), testMain(19, "assistant_delta", `,"text":"four"`))
 	f := testMainReplay(t, entries)
-	if len(f.Items()) != 3 {
+	if len(f.Items()) != 5 {
 		t.Fatal(f.Items())
 	}
 	testContent(t, testMainItem(t, f, 1, 14, "assistant_message", "done", false), "text", "onetwo")
