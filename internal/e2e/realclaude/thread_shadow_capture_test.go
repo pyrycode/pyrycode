@@ -39,8 +39,12 @@ func TestThreadShadowHistoryCapture(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := shadowValidatePair(h, e, true); err != nil {
-			t.Fatal(err)
+		if !t.Run(shadowScenarioCheck, func(t *testing.T) {
+			if err := shadowValidatePair(h, e, true); err != nil {
+				t.Fatal(err)
+			}
+		}) {
+			return
 		}
 		for i, name := range shadowChecks {
 			t.Run(name, func(t *testing.T) { shadowReplay(t, h, shadowExpected{Checkpoints: e.Checkpoints[i : i+1]}, false) })
@@ -205,8 +209,13 @@ func TestThreadShadowHistoryCapture(t *testing.T) {
 	}
 	retained.Provenance = shadowProvenance{Schema: 1, Capture: fmt.Sprintf("shadow-%d", time.Now().UnixNano()), ClaudeVersion: version, DaemonCommit: strings.TrimSpace(string(source)), HistorySHA256: shadowDigest(retained.Entries), Checks: checks}
 	expected.Provenance = retained.Provenance
-	if err := shadowValidatePair(retained, expected, false); err != nil {
-		t.Fatal(err)
+	if !t.Run(shadowScenarioCheck, func(t *testing.T) {
+		checks[shadowScenarioCheck] = shadowCheck{Executed: 1}
+		if err := shadowValidatePair(retained, expected, false); err != nil {
+			t.Fatal(err)
+		}
+	}) {
+		return
 	}
 	scanner := newDropcapScanner(h.home, dir, h.workdir)
 	for _, record := range []struct {

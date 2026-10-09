@@ -21,6 +21,7 @@ import (
 
 const shadowHistoryFile = "thread_shadow_history.json"
 const shadowExpectedFile = "thread_shadow_expected.json"
+const shadowScenarioCheck = "scenario_evidence"
 
 var shadowChecks = []string{"before_delivery", "main_complete", "after_delivery", "session_closed"}
 var shadowPath = regexp.MustCompile(`/(?:Users|home|tmp|private|work|var|opt|root|etc|mnt|run|srv|Library|Applications|dev|usr|bin|proc|sys)/[^\s"'<>\\]*`)
@@ -82,8 +83,11 @@ func shadowValidatePair(h shadowHistory, e shadowExpected, pinned bool) error {
 	if pinned && !regexp.MustCompile(`^https://github\.com/pyrycode/pyrycode/(issues|pull)/[0-9]+#issuecomment-[0-9]+$`).MatchString(p.GateReport) {
 		return errors.New("shadow evidence lacks counted dispatcher report pin")
 	}
-	if len(p.Checks) != len(shadowChecks) || len(e.Checkpoints) != len(shadowChecks) {
+	if len(p.Checks) != len(shadowChecks)+1 || len(e.Checkpoints) != len(shadowChecks) {
 		return errors.New("incomplete shadow capture checks")
+	}
+	if p.Checks[shadowScenarioCheck] != (shadowCheck{Executed: 1}) {
+		return errors.New("missing failed skipped scenario evidence check")
 	}
 	var previous uint64
 	for i, name := range shadowChecks {
@@ -318,18 +322,29 @@ func shadowSanitize(raw []byte) ([]byte, error) {
 // without consulting a Fold or saved expected rows.
 func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 	type lane struct{ session, turn, parent string }
+	type toolKey struct {
+		lane
+		call string
+	}
+	type terminal struct {
+		entry         history.Entry
+		field, status string
+	}
 	open := map[lane]uint64{}
 	texts := map[uint64]string{}
-	results := map[string]history.Entry{}
+	calls := map[toolKey]bool{}
+	terminals := map[toolKey]terminal{}
 	for _, entry := range h.Entries {
 		if entry.ID > cp.Version {
 			break
 		}
 		var p struct {
-			Text   string `json:"text"`
-			Turn   string `json:"turn_id"`
-			Parent string `json:"parent_tool_use_id"`
-			Call   string `json:"tool_use_id"`
+			Text            string `json:"text"`
+			Turn            string `json:"turn_id"`
+			Parent          string `json:"parent_tool_use_id"`
+			Call            string `json:"tool_use_id"`
+			InterruptedCall string `json:"tool_call_id"`
+			IsError         bool   `json:"is_error"`
 		}
 		if json.Unmarshal(entry.Payload, &p) != nil {
 			return errors.New("invalid raw fact")
@@ -339,14 +354,23 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 			session = entry.Session.SessionID
 		}
 		key := lane{session, p.Turn, p.Parent}
+		call := toolKey{key, p.Call}
 		switch entry.Type {
 		case protocol.TypeAssistantDelta:
 			if open[key] == 0 {
 				open[key] = entry.ID
 			}
 			texts[open[key]] += p.Text
-		case protocol.TypeToolUse, protocol.TypeTurnEnd, "main_turn_interrupted":
+		case protocol.TypeToolUse:
+			calls[call] = true
 			delete(open, key)
+		case protocol.TypeTurnEnd, "main_turn_interrupted":
+			delete(open, key)
+			for call := range calls {
+				if call.lane == key && terminals[call].entry.ID == 0 {
+					terminals[call] = terminal{entry, "ending", "interrupted"}
+				}
+			}
 		case protocol.TypeMessage:
 			for k := range open {
 				if k.parent == "" {
@@ -354,7 +378,18 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 				}
 			}
 		case protocol.TypeToolResult:
-			results[session+"/"+p.Turn+"/"+p.Call] = entry
+			if terminals[call].entry.ID == 0 {
+				status := "done"
+				if p.IsError {
+					status = "failed"
+				}
+				terminals[call] = terminal{entry, "result", status}
+			}
+		case "main_tool_interrupted":
+			call.call = p.InterruptedCall
+			if terminals[call].entry.ID == 0 {
+				terminals[call] = terminal{entry, "interruption", "interrupted"}
+			}
 		}
 	}
 	seen := map[uint64]bool{}
@@ -400,25 +435,16 @@ func shadowRawRows(h shadowHistory, cp shadowCheckpoint) error {
 			if source.Type != protocol.TypeToolUse || call.Name == "" || !reflect.DeepEqual(saved.Input, call.Input) {
 				return errors.New("tool creation input lost")
 			}
-			if result, ok := results[item.Session+"/"+call.TurnID+"/"+call.ToolUseID]; ok {
-				var payload protocol.ToolResultPayload
-				_ = json.Unmarshal(result.Payload, &payload)
-				status := "done"
-				if payload.IsError {
-					status = "failed"
-				}
+			key := toolKey{lane{item.Session, call.TurnID, call.ParentToolUseID}, call.ToolUseID}
+			if outcome, ok := terminals[key]; ok {
 				var got, want any
-				_ = json.Unmarshal(content["result"], &got)
-				_ = json.Unmarshal(result.Payload, &want)
-				if item.Status != status || item.Active || !reflect.DeepEqual(got, want) {
-					return errors.New("tool outcome differs from raw result")
+				_ = json.Unmarshal(content[outcome.field], &got)
+				_ = json.Unmarshal(outcome.entry.Payload, &want)
+				if item.Status != outcome.status || item.Active || !reflect.DeepEqual(got, want) {
+					return errors.New("tool outcome differs from first raw terminal")
 				}
 			} else {
-				status, active := "running", true
-				if cp.Name == "session_closed" {
-					status, active = "interrupted", false
-				}
-				if item.Status != status || item.Active != active {
+				if item.Status != "running" || !item.Active {
 					return errors.New("unfinished tool status differs from raw lifecycle")
 				}
 			}

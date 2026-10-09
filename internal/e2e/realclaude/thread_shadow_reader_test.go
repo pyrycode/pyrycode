@@ -78,6 +78,58 @@ func TestThreadShadowRawRowsRejectsLostText(t *testing.T) {
 	}
 }
 
+// Synthetic terminal-order controls are never retained as live history.
+func TestThreadShadowRawToolTerminalOrder(t *testing.T) {
+	creation := json.RawMessage(`{"turn_id":"turn","tool_use_id":"call","name":"Bash","input":{"command":"echo marker"}}`)
+	result := json.RawMessage(`{"turn_id":"turn","tool_use_id":"call","is_error":false,"result_summary":"marker"}`)
+	lateResult := json.RawMessage(`{"turn_id":"turn","tool_use_id":"call","is_error":true,"result_summary":"late interruption"}`)
+	interruption := json.RawMessage(`{"turn_id":"turn","tool_call_id":"call","cause":"operator_reset","occurred_at":"2026-10-09T00:00:00Z"}`)
+	ending := json.RawMessage(`{"turn_id":"turn","stop_reason":"end_turn"}`)
+	for _, tc := range []struct {
+		name, typ, field, status string
+		raw                      json.RawMessage
+	}{
+		{"result", protocol.TypeToolResult, "result", "done", result},
+		{"failed_result", protocol.TypeToolResult, "result", "failed", lateResult},
+		{"interruption_before_result", "main_tool_interrupted", "interruption", "interrupted", interruption},
+		{"turn_end_before_result", protocol.TypeTurnEnd, "ending", "interrupted", ending},
+		{"turn_interruption_before_result", "main_turn_interrupted", "ending", "interrupted", interruption},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := shadowHistory{Entries: []history.Entry{{ID: 1, Type: protocol.TypeToolUse, Payload: creation}, {ID: 2, Type: tc.typ, Payload: tc.raw}, {ID: 3, Type: protocol.TypeToolResult, Payload: lateResult}}}
+			var content map[string]json.RawMessage
+			_ = json.Unmarshal(creation, &content)
+			content[tc.field] = tc.raw
+			raw, _ := json.Marshal(content)
+			cp := shadowCheckpoint{Version: 3, Items: []thread.Item{{ID: 1, Kind: "tool_call", Status: tc.status, Content: raw}}}
+			if err := shadowRawRows(h, cp); err != nil {
+				t.Fatal(err)
+			}
+			cp.Items[0].Status = "running"
+			if shadowRawRows(h, cp) == nil {
+				t.Fatal("terminal status loss accepted")
+			}
+			cp.Items[0].Status = tc.status
+			content[tc.field] = json.RawMessage(`{}`)
+			cp.Items[0].Content, _ = json.Marshal(content)
+			if shadowRawRows(h, cp) == nil {
+				t.Fatal("terminal content loss accepted")
+			}
+		})
+	}
+	t.Run("closure_requires_raw_terminal", func(t *testing.T) {
+		h := shadowHistory{Entries: []history.Entry{{ID: 1, Type: protocol.TypeToolUse, Payload: creation}}}
+		cp := shadowCheckpoint{Name: "session_closed", Version: 1, Items: []thread.Item{{ID: 1, Kind: "tool_call", Status: "interrupted", Content: creation}}}
+		if shadowRawRows(h, cp) == nil {
+			t.Fatal("interruption inferred without raw terminal")
+		}
+		cp.Items[0].Status, cp.Items[0].Active = "running", true
+		if err := shadowRawRows(h, cp); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 // These schema controls are synthetic and never promoted to capture artifacts.
 func TestThreadShadowPairRejectsBadProvenance(t *testing.T) {
 	h := shadowHistory{Conversation: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
@@ -90,6 +142,7 @@ func TestThreadShadowPairRejectsBadProvenance(t *testing.T) {
 	for _, name := range shadowChecks {
 		h.Provenance.Checks[name] = shadowCheck{Executed: 1}
 	}
+	h.Provenance.Checks[shadowScenarioCheck] = shadowCheck{Executed: 1}
 	e.Provenance = h.Provenance
 	if err := shadowValidatePair(h, e, false); err == nil || err.Error() != "required legacy scenario absent" {
 		t.Fatal("schema control did not reach independent witness check")
@@ -103,6 +156,10 @@ func TestThreadShadowPairRejectsBadProvenance(t *testing.T) {
 		{"changed_history", "inconsistent", func(h *shadowHistory, e *shadowExpected) { h.Entries[0].Payload = json.RawMessage(`{"changed":true}`) }},
 		{"skipped_check", "missing failed skipped", func(h *shadowHistory, e *shadowExpected) {
 			h.Provenance.Checks[shadowChecks[0]] = shadowCheck{Skipped: 1}
+			e.Provenance = h.Provenance
+		}},
+		{"skipped_scenario", "missing failed skipped", func(h *shadowHistory, e *shadowExpected) {
+			h.Provenance.Checks[shadowScenarioCheck] = shadowCheck{Skipped: 1}
 			e.Provenance = h.Provenance
 		}},
 		{"missing_checkpoint", "incomplete", func(h *shadowHistory, e *shadowExpected) { e.Checkpoints = e.Checkpoints[:3] }},
