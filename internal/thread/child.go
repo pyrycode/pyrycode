@@ -151,7 +151,7 @@ func (f *Fold) restoreChildren() {
 func (f *Fold) resolveChildren(rev uint64) {
 	for key, g := range f.agentGroups {
 		for _, c := range g.calls {
-			if c.item >= 0 && c.parent != "" {
+			if c.item >= 0 && c.parent != "" && c.ordinary == nil {
 				f.saveChild(c.item, key, c.parent)
 			}
 		}

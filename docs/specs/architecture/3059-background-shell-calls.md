@@ -52,3 +52,7 @@ Pending documentation stage: in `docs/knowledge/features/thread-package.md`, ext
 - Threat model: this ticket adds no relay/CLI endpoint or authentication behavior; wire transport remains outside the fold.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-09
+
+## Revisions
+- 2026-10-09: Edge-case proofs required retaining pending ordinary owners when the first lifetime arrives before creation, and accepting later foreground child results through that retained owner. `resolveChildren` preserves the child's original parent group when lifecycle evidence is promoted; this adds one localized edit in `child.go`. Mapped ordinary results retain `mainDecode` turn validation. Durable facts with lost conversation/lifetime identity are rejected before promotion. Additional race proofs: `TestShellFirstLifetimePendingCreation`, `TestShellUnlinkedChildAfterLifetime`, `TestShellInvalidPendingEvidence`, and `TestShellRecordedIdentityAndSavedEnding`. Written work remains below 800 lines with no exports or migrations.
+- 2026-10-09: `TestShellInvalidEndingBeforeFirstLifetime` exposed a rejected ending promoting evidence before task/call validation. Association validation now precedes all promotion. `TestShellTaggedBoundaryReuse` pins reused routing identities across sleep/reactivation. Final sizing: approximately 700 written lines, zero exported types/interfaces, zero migrated consumers, four acceptance criteria and fewer than ten added rejection branches.
