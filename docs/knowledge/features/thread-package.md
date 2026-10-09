@@ -76,8 +76,8 @@ including saved selected/free-text answers and any recorded truncation.
 
 Claude Agent/Task calls own [agent lifecycle items](#agent-lifecycle).
 Parented text, ordinary tools and nested agents fold in [child lanes](#parent-repair).
-Background shell folding remains downstream in
-[#3059](https://github.com/pyrycode/pyrycode/issues/3059). Cache,
+Linked Claude/legacy Bash calls retain ordinary identity with
+[background shell lifecycle](#background-shells). Cache,
 persistence integration, epochs, daemon wiring, thread protocol and read-mark
 migration remain downstream.
 
@@ -149,7 +149,9 @@ and [ADR 042](../decisions/042-daemon-built-thread.md#the-six-approved-decisions
 ### Main-work source entries
 
 `mainWork` folds recorded main facts, including hidden ones, without consulting
-live state or current session bindings.
+live state or current session bindings. The ordinary result/closure rules below
+apply to foreground calls; [linked background shells](#background-shells) use
+independent task lifecycle.
 
 | Raw source type | Item kind | Saved content and status |
 | --- | --- | --- |
@@ -179,8 +181,8 @@ before `mainWork` changes the text run. Looking only at the mapped launch payloa
 would split text when the preceding durable observation alone saved its parent.
 Codex tools named Agent or Task are ordinary calls: the name alone cannot
 establish Claude launcher semantics. Agent reports update their call-owned item;
-background shell lifecycle remains downstream in
-[#3059](https://github.com/pyrycode/pyrycode/issues/3059).
+linked Claude/legacy Bash reports enrich their existing ordinary call with
+[background shell lifecycle](#background-shells).
 
 ### Scoped joins, pending outcomes and closure
 
@@ -192,17 +194,19 @@ Other sources, turns and conversation owners remain independent. Empty or
 explicitly truncated/dropped join identities cannot create joins.
 
 Tool reports can precede creation and remain pending across feed chunks. The
-first valid terminal outcome in entry-ID order wins; later duplicate or
+first valid foreground terminal outcome in entry-ID order wins; later duplicate or
 conflicting outcomes change neither content, state nor revision. The creating
 call retains its input and gets the saved report when it arrives. Applying an
 earlier report keeps revision at least the creating ID.
 
 The first matching turn ending closes running text as `done` and unfinished
-ordinary calls as `interrupted`, storing the raw ending under `ending` on each
-call. **A turn closure supplies no successful tool result.** Already terminal
-calls retain their outcome; child work is unaffected. Endings received before
-creation remain effective across chunks. Late text may coalesce but stays
-inactive; late calls are inactive and later reports cannot replace their ending.
+foreground ordinary calls as `interrupted`, storing the raw ending under
+`ending` on each call. **A turn closure supplies no successful tool result.**
+Already terminal calls retain their outcome; child work is unaffected. Endings
+received before creation remain effective across chunks. Late text may coalesce
+but stays inactive; late foreground calls are inactive and later reports cannot
+replace their ending. A linked background shell outlives that turn; a late task
+link can repair its provisional closure, and late launch results stay retained.
 
 `main_turn_opened` records an explicit opening without a row. In legacy logs,
 the earliest valid main text, call or result/denial evidence supplies an implicit
@@ -395,8 +399,6 @@ create no rows. The item starts `running` and active unless pending evidence
 already changes it. Creation attribution and visibility stay fixed on updates.
 Parent call evidence remains in content; [parent repair](#parent-repair) resolves
 `Item.Parent` to the older creating ID and folds child text/tools beneath it.
-Background shell lifecycle awaits
-[#3059](https://github.com/pyrycode/pyrycode/issues/3059).
 
 `applyAgent` retains the launch JSON and adds copied `result`, `denial`,
 `task_id`/`task_link`, `task_report` and `ending` fields as evidence arrives.
@@ -441,6 +443,43 @@ Session endings retain the recorded cause, including `daemon_restart`,
 acceptance fact, so an inbound stop request cannot imply either `stopping` or
 `stopped`. See [ADR 042](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
 
+### Background shells
+
+`foldWork` creates Claude/legacy `Bash` and `local_bash` as ordinary `tool_call`
+items; `registerShell` retains their owners for task lifecycle enrichment. A
+complete usable task-to-call link enriches that existing item with copied
+`task_id`, `task_link`, launch `result`, `task_report` and saved `ending` evidence
+as available. It creates neither an `agent` nor a task row. Creating input,
+`ID`, `Kind`, `Order`, `Turn`, attribution, visibility and existing child
+parenting remain intact. Tasks without a usable matching call create no item;
+early reports wait for their link and creation. Unlinked shells keep ordinary
+foreground result and turn-closure behavior. Explicitly non-Claude calls,
+including Codex Bash calls, keep ordinary semantics.
+
+**A launch result cannot finish linked shell work.** `applyAgent` uses the
+[first genuine final and companion rules](#agent-lifecycle) on the ordinary
+item: `completed` becomes inactive `finished`; `failed`, `stopped`, `gone`,
+`ended_with_session` and unfamiliar nonempty terminal words are inactive;
+supplied `stopping` is active and nonfinal. Denial remains genuine terminal
+evidence. A late link reclassifies an earlier result as launch evidence and
+removes provisional main-turn closure, restoring active work when no genuine
+final remains. A result arriving after turn closure is still saved, even when
+the link arrives later. Neither a background flag nor launch-result text
+establishes the join.
+
+The winning report and actual saved session-ending cause stay fixed against
+later conflicting finals. `Item.EndedOrder` and content `ended_order` use the
+earliest valid terminal evidence ID, floored at creation; before a final the
+item field is zero and content omits it. Actual content/state changes alone
+advance `Rev`, also floored at creation, and snapshots remain detached.
+Status-empty summary/patch reports enrich `task_report` or, after a final,
+`task_update`; patch strings stay inert. Progress, roster omission and main-turn
+end do not finish linked work. The fold never infers shell `gone` from a roster:
+only validated saved lifecycle evidence supplies that status. A saved
+`agent_ended_with_session` can end the linked shell with its recorded cause even
+after the main turn ended; a divider by itself supplies no such ending. See
+[independent session endings](history-package-producers-runtime-lifecycle.md#unfinished-agenttask-session-endings-3032).
+
 ### Identity and recovery
 
 Joins belong only to this conversation and the recorded source, using saved
@@ -451,6 +490,17 @@ them. Tagged and metadata-free evidence stay distinct even if successor fallback
 gives items the same displayed attribution. Reused call/task IDs in another
 source, lifetime or legacy scope cannot mutate predecessor items. Results, links
 and endings received before creation remain pending across feeds.
+
+**Shell calls can predate the first saved producer lifetime.** Unlike Agent/Task
+launches, ordinary Bash creation has no preceding `agent_call_observed`.
+`promoteShellEvidence` reconciles earlier call/result/task evidence only from
+the same recorded source and uninterrupted pre-lifetime scope when a validated
+durable fact establishes a lifetime. It preserves original observation
+references and never adopts established successor lifetimes or
+boundary-separated predecessors, even when routing/call/task IDs are reused.
+Current session bindings cannot supply the missing identity. Retain pending
+ordinary owners as well as reports: moving reports alone loses early results
+when creation follows the first lifetime fact.
 
 Supplied `call_observed_entry_id` and `task_observed_entry_id` on a saved session
 ending must resolve to earlier original observations with matching identity,
@@ -466,7 +516,10 @@ nothing, with no fallback. See
 a call.** Validate the available saved task-to-call association before applying
 either identity. Otherwise a correct task reference with a contradictory call ID
 could end a second agent. `TestAgentRecoveryMismatchedLink` pins whole-fact
-rejection.
+rejection. Validate that association before lifetime promotion as well:
+otherwise a rejected ending still changes joins.
+`TestShellInvalidEndingBeforeFirstLifetime` checks whole-state neutrality for
+this ordering.
 
 ### Parent repair
 
@@ -501,6 +554,14 @@ creation-ID ordered. A repaired ordinary call leaves its old lane's call map,
 so a later ending there cannot interrupt it. Saved agent enrichment takes
 precedence over stale lane evidence.
 
+**Keep a shell's original parent lane separate from promoted lifecycle evidence.**
+`resolveChildren` retains ordinary child parenting when the first lifetime
+adopts the shell's task evidence. Moving its parent group too could hide a
+child whose parent remains in the original legacy group. The retained ordinary
+owner must also accept later foreground results when no task link exists;
+`TestShellFirstLifetimePendingCreation` and `TestShellUnlinkedChildAfterLifetime`
+pin these cases.
+
 **Retain early ordinary reports independently of main-turn slots.** An explicit
 main opening replaces its turn state; storing an early result only there would
 lose it before child creation. `childReports` keeps copied first-result/denial
@@ -510,15 +571,17 @@ IDs therefore cannot have its report suppressed by, or replaced with, a
 predecessor terminal.
 For an uncreated child call, adoption compares that evidence only with its own
 lane ending, excluding main-turn closure. Results wait for creation, retain the
-call's original input, and produce `done`, `failed` or `denied` in place. The first terminal wins;
+call's original input, and produce `done`, `failed` or `denied` in place for
+foreground work. The first terminal wins;
 later conflicting reports cannot change its outcome. An earlier report floors
 revision at creation, and pending payloads remain detached from caller input.
 
 A parent-attributed `turn_end` creates no row. It closes matching child text as
-`done` and unfinished ordinary calls as `interrupted`, retaining raw `ending`
-evidence on the text and calls it closes. An ending received before creation
+`done` and unfinished foreground ordinary calls as `interrupted`, retaining raw
+`ending` evidence on the text and calls it closes. An ending received before creation
 remains effective for later calls in that lane. Already terminal outcomes stay
-fixed, and neither this ending nor a main-turn ending completes a nested agent.
+fixed, and neither this ending nor a main-turn ending completes a nested agent
+or linked background shell.
 
 **Derive ancestor closure from genuine agent finals, keeping intrinsic child
 state separate.** `restoreChildren` and `resolveChildren` recompute the effect
@@ -558,6 +621,16 @@ invalid-fact tests cover reused IDs, Codex exclusion, retained parents and
 detached inputs/snapshots. `testMainReplay` compares every two-chunk partition
 with full replay.
 
+`TestShellLifecycleOrders` compares all creation/result/link/outcome orders
+with full replay, every two-chunk partition and single-entry feeds.
+`TestShellLateLinkAndEnrichment` covers turn-end-before-link, late results,
+stopping, inert patches and omission; `TestShellFinalsAndRecovery` covers
+conflicting finals, durable/mapped companions and original recovery references.
+`TestShellLifetimeScopes` and `TestShellTaggedBoundaryReuse` pin source,
+lifetime and boundary isolation, including sleep/reactivation with reused
+routing IDs. Identity/invalid-evidence tests check retained input and creation
+provenance, saved causes, Codex exclusion and detached content.
+
 `TestChildLanes`, `TestChildMainIndependenceAndSend` and `TestChildScopes` cover
 lane isolation, main/send behavior and invalid joins. `TestChildRepair`,
 `TestChildLateRepairAndClosure` and `TestChildNestedLinkRepair` cover retained
@@ -592,3 +665,25 @@ nesting separately. Assert the saved prompt, background flag and both result
 markers before comparing retained fields:
 comparing two absent fields could pass while proving no retention. See
 [capture evidence requirements](development-verification.md).
+
+`cmd/pyry.TestThreadShellRecordedReplay` also runs in the standard offline gate.
+It feeds every verbatim `frames` payload in recorded order through production
+session parsing and interactive raw-history emission into `Fold`, requiring
+these committed files under `internal/e2e/realclaude/testdata/`:
+
+| Recording | Required capture provenance | Frames |
+| --- | --- | --- |
+| `task_notification_v2.1.259.json` | #2247, Claude 2.1.259, `2026-09-09T21:09:37+03:00` | 2 |
+| `roster_after_finish_v2.1.280.json` | #2525, Claude 2.1.280, `2026-09-22T22:02:30+03:00` | 6 |
+
+Missing files or changed provenance fail the proof. Both recordings omit
+ordinary Bash creation/result context: the test supplies explicitly synthetic
+creation, launch result and main-turn end using each recording's own call ID.
+Recorded task evidence then proves one ordinary call with its task link and
+`finished` completion, with no agent row. Creation ID comes from emitted
+`tool_use`; `EndedOrder` comes from the saved `background_task_outcome`.
+In #2525, the empty roster before completion leaves the shell active with zero
+ending order. Filtering to completion alone would miss that behavior. Full
+replay, every partition and single-entry feeds agree. These recordings prove
+shell completion and omission behavior; they supply no agent-gone proof. See
+[the producer's narrower gone evidence](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
