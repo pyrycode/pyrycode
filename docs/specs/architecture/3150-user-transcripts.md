@@ -4,6 +4,7 @@
 - `cmd/pyry/main.go` → `runSupervisor`: shared history store, startup workspace and shutdown joins.
 - `cmd/pyry/memory_roots.go` → `resolveEffectiveMemory`: validated daemon-owned destination, independent of search roots.
 - `cmd/pyry/thread_shadow.go` → `discover`, `follow`: registered-chat discovery without delivery-path I/O.
+- `cmd/pyry/operator_message_history.go` → `operatorMessageHistory`: persists safe conversational text, excluding composed instructions and host attachment paths.
 - `internal/history/forward.go` → `Forward`, `Walk`: bounded chronological replay, positioned retry and cancellation.
 - `internal/thread/fold.go` → `Feed`, `Items`: inert content and recorded attribution.
 - `internal/thread/boundaries.go` → `boundary`: paired dividers and successor fallback; eviction is not replacement.
@@ -63,3 +64,6 @@ Pending documentation stage:
 - Threat model: derived local files are private; no new relay authorization or credential capability. Existing history retention is unchanged.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-10
+
+## Revisions
+- 2026-10-10: final sizing is 362 production, 369 tests/helpers and 69 plan lines (800 total); no interface or lifecycle contract changed. Composition tests use a separate valid startup vault because a vault containing transcript storage is rejected by the existing resolver.
