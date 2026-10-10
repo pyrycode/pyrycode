@@ -1,0 +1,357 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
+)
+
+func testReplyEntries(facts ...string) []history.Entry {
+	entries := make([]history.Entry, 0, len(facts))
+	for i, fact := range facts {
+		typ, payload, _ := strings.Cut(fact, " ")
+		entries = append(entries, testTranscriptEntry(uint64(i+1), typ, payload, "A"))
+	}
+	return entries
+}
+func testReplyBody(t *testing.T, files map[string]string, text string) string {
+	t.Helper()
+	for _, body := range files {
+		if strings.Contains(body, text) {
+			return body
+		}
+	}
+	t.Fatalf("missing %q in %v", text, files)
+	return ""
+}
+
+const replyUser = `message {"role":"user","text":"question"}`
+const replyOpen = `main_turn_opened {"turn_id":"t","occurred_at":"2026-01-01T00:00:00Z"}`
+const replyText = `assistant_delta {"turn_id":"t","text":"answer"}`
+const replyEnd = `turn_end {"turn_id":"t","stop_reason":"end_turn"}`
+
+func TestMemoryTranscriptReplies(t *testing.T) {
+	entries := testReplyEntries(replyUser, replyOpen,
+		`assistant_delta {"turn_id":"t","text":"  before\n"}`,
+		"assistant_delta {\"turn_id\":\"t\",\"text\":\"\\n```  \"}",
+		`tool_use {"turn_id":"t","tool_use_id":"call","name":"Bash","input_summary":"secret tool"}`,
+		`assistant_delta {"turn_id":"t","text":"between  "}`,
+		`tool_use {"turn_id":"t","tool_use_id":"call2","name":"Read"}`,
+		`assistant_delta {"turn_id":"t","text":"after\n"}`,
+		`message {"role":"user","text":"another question"}`, replyEnd)
+	for _, kind := range []string{"claude", "codex"} {
+		t.Run(kind, func(t *testing.T) {
+			for i := range entries {
+				entries[i].Session.Kind = kind
+			}
+			w := newMemoryTranscriptReader(nil, "chat")
+			testMemoryMust(t, w.feed(entries[:9]))
+			before := testReplyBody(t, w.files(conversations.Conversation{ID: "chat"}), "question")
+			if strings.Contains(before, "Speaker: assistant") {
+				t.Fatal("run closure released unfinished reply")
+			}
+			testMemoryMust(t, w.feed(entries[9:]))
+			after := w.files(conversations.Conversation{ID: "chat"})
+			body := testReplyBody(t, after, "question")
+			for _, want := range []string{"  before\n\n```  ", "between  ", "after\n", "Message: chat/3\nTimestamp: 1970-01-01T00:00:03Z", "Agent: " + kind, "Last text entry: 9\n", "Last delivered entry: 9\n"} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("missing %q: %s", want, body)
+				}
+			}
+			if strings.Count(body, "Speaker: assistant") != 3 || strings.Contains(body, "secret tool") {
+				t.Fatal(body)
+			}
+			if !reflect.DeepEqual(after, testTranscriptView(t, entries)) {
+				t.Fatal("reconstruction differs")
+			}
+		})
+	}
+}
+func TestMemoryTranscriptReplyTerminals(t *testing.T) {
+	for _, tc := range []struct {
+		name, terminal string
+		release        bool
+	}{
+		{"normal", replyEnd, true},
+		{"error", `turn_end {"turn_id":"t","stop_reason":"error","is_error":true,"outcome":"error"}`, true},
+		{"cancelled", `turn_end {"turn_id":"t","stop_reason":"cancelled","terminal_reason":"cancelled"}`, true},
+		{"interrupted", `main_turn_interrupted {"turn_id":"t","cause":"child_exit","occurred_at":"2026-01-01T00:00:00Z","turn_opened_entry_id":2}`, false},
+		{"child", `turn_end {"turn_id":"t","stop_reason":"end_turn","parent_tool_use_id":"child"}`, false},
+		{"foreign", `turn_end {"conversation_id":"elsewhere","turn_id":"t","stop_reason":"end_turn"}`, false},
+		{"wrong turn", `turn_end {"turn_id":"other","stop_reason":"end_turn"}`, false},
+		{"null", `turn_end {"turn_id":"t","stop_reason":null}`, false},
+		{"missing", `turn_end {"turn_id":"t"}`, false},
+		{"lost identity", `turn_end {"turn_id":"t","stop_reason":"end_turn","truncated_fields":["turn_id"]}`, false},
+		{"null reference", `main_turn_interrupted {"turn_id":"t","cause":"child_exit","occurred_at":"2026-01-01T00:00:00Z","turn_opened_entry_id":null}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := testReplyEntries(replyUser, replyOpen, replyText, tc.terminal)
+			body := testReplyBody(t, testTranscriptView(t, entries), "question")
+			if strings.Contains(body, "Speaker: assistant") != tc.release {
+				t.Fatal(body)
+			}
+			entries = append(entries, testTranscriptEntry(5, "turn_end", `{"turn_id":"t","stop_reason":"end_turn"}`, "A"))
+			if strings.Contains(testReplyBody(t, testTranscriptView(t, entries), "question"), "Speaker: assistant") != (tc.name != "interrupted") {
+				t.Fatal("first terminal did not win")
+			}
+		})
+	}
+}
+func TestMemoryTranscriptReplyScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func([]history.Entry)
+	}{
+		{"agent", func(e []history.Entry) { e[3].Session.Kind = "codex" }},
+		{"session", func(e []history.Entry) { e[3].Session.SessionID = "B" }},
+		{"tagged legacy", func(e []history.Entry) { e[3].Session = nil }},
+		{"legacy tagged", func(e []history.Entry) { e[0].Session = nil; e[1].Session = nil; e[2].Session = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := testReplyEntries(replyUser, replyOpen, replyText, replyEnd)
+			tc.change(entries)
+			if strings.Contains(testReplyBody(t, testTranscriptView(t, entries), "question"), "Speaker: assistant") {
+				t.Fatal("foreign source completed reply")
+			}
+		})
+	}
+	entries := testReplyEntries(replyUser, replyOpen, replyText,
+		`main_turn_interrupted {"turn_id":"t","cause":"restart","occurred_at":"2026-01-01T00:00:00Z","turn_opened_entry_id":2}`,
+		replyUser, replyOpen, `assistant_delta {"turn_id":"t","text":"fresh answer"}`,
+		`main_turn_interrupted {"turn_id":"t","cause":"restart","occurred_at":"2026-01-01T00:00:00Z","turn_opened_entry_id":2}`, replyEnd)
+	body := testReplyBody(t, testTranscriptView(t, entries), "question")
+	if strings.Count(body, "Speaker: assistant") != 1 || !strings.Contains(body, "fresh answer") {
+		t.Fatal(body)
+	}
+	// A divider's displayed successor does not join legacy and tagged evidence.
+	entries = testReplyEntries(`session_divider {"cause":"agent_switch","previous_session_id":"old","new_session_id":"A","next_agent":"claude","occurred_at":"2026-01-01T00:00:00Z"}`, replyUser, replyText, replyEnd)
+	entries[1].Session = nil
+	entries[2].Session = nil
+	if strings.Contains(testReplyBody(t, testTranscriptView(t, entries), "question"), "Speaker: assistant") {
+		t.Fatal("display fallback joined tagged ending")
+	}
+	entries[3].Session = nil
+	if !strings.Contains(testReplyBody(t, testTranscriptView(t, entries), "question"), "Speaker: assistant") {
+		t.Fatal("legacy completion lost")
+	}
+	// An untagged lifetime cannot cross a legacy boundary, but a referenced interruption can.
+	entries = testReplyEntries(replyUser, replyText, `session_divider {"cause":"idle_sleep","previous_session_id":"A","occurred_at":"2026-01-01T00:00:00Z"}`, replyEnd)
+	for i := range entries {
+		entries[i].Session = nil
+	}
+	if strings.Contains(testReplyBody(t, testTranscriptView(t, entries), "question"), "Speaker: assistant") {
+		t.Fatal("legacy scope crossed")
+	}
+}
+func TestMemoryTranscriptReplyExclusions(t *testing.T) {
+	entries := testReplyEntries(replyUser, replyOpen, replyText, replyEnd,
+		replyOpen, `assistant_delta {"turn_id":"t","text":"wrap-up excluded"}`, replyEnd,
+		`send_accepted {"text":"queued excluded","accepted_at":"2026-01-01T00:00:00Z"}`,
+		`main_turn_opened {"turn_id":"background","occurred_at":"2026-01-01T00:00:00Z"}`,
+		`assistant_delta {"turn_id":"background","text":"background excluded"}`,
+		`turn_end {"turn_id":"background","stop_reason":"end_turn"}`,
+		`thinking_delta {"turn_id":"t","text":"reasoning excluded"}`,
+		`assistant_delta {"turn_id":"t","text":"child excluded","parent_tool_use_id":"child"}`,
+		`message {"role":"system","text":"instructions excluded"}`)
+	body := testReplyBody(t, testTranscriptView(t, entries), "question")
+	if strings.Contains(body, "excluded") || strings.Count(body, "Speaker: assistant") != 1 {
+		t.Fatal(body)
+	}
+	for _, provenance := range []string{"none", "unknown", "different"} {
+		t.Run(provenance, func(t *testing.T) {
+			e := testReplyEntries(replyUser, replyText, replyEnd)
+			switch provenance {
+			case "none":
+				e[0].Session = &history.SessionProvenance{Kind: "none"}
+			case "unknown":
+				e[0].Session = nil
+			case "different":
+				e[0].Session.SessionID = "B"
+			}
+			for _, b := range testTranscriptView(t, e) {
+				if strings.Contains(b, "Speaker: assistant") {
+					t.Fatal(b)
+				}
+			}
+		})
+	}
+	e := testReplyEntries(replyUser, replyText, replyEnd)
+	for i := range e {
+		e[i].Session = nil
+	}
+	body = testReplyBody(t, testTranscriptView(t, e), "question")
+	if !strings.Contains(body, "Session: unknown") || !strings.Contains(body, "Agent: unknown") || !strings.Contains(body, "Speaker: assistant") {
+		t.Fatal(body)
+	}
+}
+func TestMemoryTranscriptReplyBoundaries(t *testing.T) {
+	entries := testReplyEntries(replyUser, replyText, replyEnd,
+		`session_divider {"cause":"agent_switch","previous_session_id":"A","new_session_id":"B","previous_agent":"claude","next_agent":"codex","occurred_at":"2026-01-01T00:00:00Z"}`,
+		`message {"role":"user","text":"successor question"}`,
+		`assistant_delta {"turn_id":"next","text":"successor answer"}`,
+		`turn_end {"turn_id":"next","stop_reason":"end_turn"}`)
+	for i := 4; i < 7; i++ {
+		entries[i].Session = &history.SessionProvenance{Kind: "codex", SessionID: "B"}
+	}
+	w := newMemoryTranscriptReader(nil, "chat")
+	testMemoryMust(t, w.feed(entries))
+	before := w.files(conversations.Conversation{ID: "chat"})
+	entries = append(entries, testTranscriptEntry(8, "assistant_delta", `{"turn_id":"t","text":"late "}`, "A"), testTranscriptEntry(9, "assistant_delta", `{"turn_id":"t","text":"tail  \n"}`, "A"))
+	testMemoryMust(t, w.feed(entries[7:]))
+	after := w.files(conversations.Conversation{ID: "chat"})
+	if testReplyBody(t, before, "successor answer") != testReplyBody(t, after, "successor answer") {
+		t.Fatal("successor changed")
+	}
+	body := testReplyBody(t, after, "late tail  \n")
+	for _, want := range []string{"Closing entry: 4\n", "Last delivered entry: 1\n", "Last text entry: 9\n", "Message: chat/8\nTimestamp: 1970-01-01T00:00:08Z"} {
+		if !strings.Contains(body, want) {
+			t.Fatal(body)
+		}
+	}
+	testMemoryMust(t, w.feed([]history.Entry{testTranscriptEntry(10, "assistant_delta", `{"turn_id":"t","text":"extended"}`, "A")}))
+	body = testReplyBody(t, w.files(conversations.Conversation{ID: "chat"}), "late tail  \nextended")
+	if !strings.Contains(body, "Last text entry: 10\n") || !strings.Contains(body, "Message: chat/8\nTimestamp: 1970-01-01T00:00:08Z") {
+		t.Fatal(body)
+	}
+}
+func TestMemoryTranscriptReplyWorker(t *testing.T) {
+	home := testManagedHome(t)
+	base := filepath.Join(home, "vault")
+	testMemoryMust(t, os.Mkdir(base, 0700))
+	settings := testManagedMemory()
+	reg, err := conversations.Load(filepath.Join(home, "registry.json"))
+	testMemoryMust(t, err)
+	id, err := conversations.NewID()
+	testMemoryMust(t, err)
+	reg.Create(conversations.Conversation{ID: id, CurrentSessionID: "wrong"})
+	h := history.New(filepath.Join(home, "history"))
+	appendFact := func(fact string) {
+		t.Helper()
+		typ, payload, _ := strings.Cut(fact, " ")
+		_, err := h.AppendWithMetadata(id, typ, json.RawMessage(payload), time.Now(), history.Metadata{Session: &history.SessionProvenance{Kind: "claude", SessionID: "A"}})
+		testMemoryMust(t, err)
+	}
+	appendFact(replyUser)
+	appendFact(replyOpen)
+	appendFact(replyText)
+	ticks := make(chan time.Time, 1)
+	published := make(chan struct{}, 10)
+	stop := startMemoryTranscripts(context.Background(), &settings, base, h, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), memoryTranscriptHooks{ticks: ticks, beforeRename: func() { published <- struct{}{} }})
+	t.Cleanup(stop)
+	wait := func() {
+		t.Helper()
+		select {
+		case <-published:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no publication")
+		}
+	}
+	wait()
+	dir := filepath.Join(home, ".pyry", "memory", "recent-transcripts")
+	testShadowWait(t, func() bool { return len(testTranscriptDisk(t, dir)) == 1 })
+	if strings.Contains(testReplyBody(t, testTranscriptDisk(t, dir), "question"), "Speaker: assistant") {
+		t.Fatal("unfinished published")
+	}
+	appendFact(replyEnd)
+	ticks <- time.Now().Add(memoryTranscriptInterval)
+	wait()
+	testShadowWait(t, func() bool {
+		for _, b := range testTranscriptDisk(t, dir) {
+			if strings.Contains(b, "Speaker: assistant") {
+				return true
+			}
+		}
+		return false
+	})
+	if memoryTranscriptInterval > 60*time.Second {
+		t.Fatalf("interval %s exceeds bound", memoryTranscriptInterval)
+	}
+}
+
+func TestMemoryTranscriptReplyReuse(t *testing.T) {
+	// A second delivered message still belongs to the unfinished interval, so
+	// completing it cannot qualify an assistant-only lifetime opened afterwards.
+	e := testReplyEntries(replyUser, replyOpen, replyText, replyUser, replyEnd, replyOpen,
+		`assistant_delta {"turn_id":"t","text":"wrap-up excluded"}`, replyEnd)
+	if b := testReplyBody(t, testTranscriptView(t, e), "question"); strings.Contains(b, "excluded") {
+		t.Fatal(b)
+	}
+	e = testReplyEntries(replyUser, replyText, replyEnd, replyUser, replyEnd,
+		replyOpen, `assistant_delta {"turn_id":"t","text":"next exchange"}`, replyEnd)
+	if b := testReplyBody(t, testTranscriptView(t, e), "question"); !strings.Contains(b, "next exchange") {
+		t.Fatal("duplicate ending consumed next user exchange")
+	}
+
+	// Missing/malformed/repeated openings cannot move a lifetime into another generation.
+	e = testReplyEntries(replyUser, replyOpen, replyText,
+		`main_turn_opened {"turn_id":"t","occurred_at":null}`, replyEnd)
+	if b := testReplyBody(t, testTranscriptView(t, e), "question"); !strings.Contains(b, "Speaker: assistant") {
+		t.Fatal(b)
+	}
+	// Reusing the routing ID does not move late runs to its successor generation.
+	e = testReplyEntries(replyUser, replyText, replyEnd,
+		`session_divider {"cause":"operator_reset","previous_session_id":"A","new_session_id":"B","occurred_at":"2026-01-01T00:00:00Z"}`,
+		`session_divider {"cause":"agent_switch","previous_session_id":"B","new_session_id":"A","occurred_at":"2026-01-02T00:00:00Z"}`,
+		`message {"role":"user","text":"reused question"}`,
+		`assistant_delta {"turn_id":"fresh","text":"fresh reply"}`,
+		`turn_end {"turn_id":"fresh","stop_reason":"end_turn"}`)
+	w := newMemoryTranscriptReader(nil, "chat")
+	testMemoryMust(t, w.feed(e))
+	before := w.files(conversations.Conversation{ID: "chat"})
+	testMemoryMust(t, w.feed([]history.Entry{testTranscriptEntry(9, "assistant_delta", `{"turn_id":"t","text":"late original"}`, "A")}))
+	after := w.files(conversations.Conversation{ID: "chat"})
+	if testReplyBody(t, before, "fresh reply") != testReplyBody(t, after, "fresh reply") {
+		t.Fatal("reused successor changed")
+	}
+	if b := testReplyBody(t, after, "late original"); !strings.Contains(b, "Closing entry: 4\n") || strings.Contains(b, "fresh reply") {
+		t.Fatal(b)
+	}
+	// A legacy recovery reference crosses boundaries only to its original opening.
+	e = testReplyEntries(replyUser, replyText,
+		`session_divider {"cause":"idle_sleep","previous_session_id":"A","occurred_at":"2026-01-01T00:00:00Z"}`,
+		`main_turn_interrupted {"turn_id":"t","turn_opened_entry_id":2,"cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`,
+		replyEnd)
+	for i := range e {
+		e[i].Session = nil
+	}
+	if b := testReplyBody(t, testTranscriptView(t, e), "question"); strings.Contains(b, "Speaker: assistant") {
+		t.Fatal(b)
+	}
+}
+
+func TestMemoryTranscriptReplyImplicitOpening(t *testing.T) {
+	for _, first := range []string{`tool_use {"turn_id":"t","tool_use_id":"call","name":"Read"}`, `tool_result {"turn_id":"t","tool_use_id":"call","is_error":false}`} {
+		e := testReplyEntries(replyUser, first, replyText,
+			`main_turn_interrupted {"turn_id":"t","turn_opened_entry_id":2,"cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`, replyEnd)
+		if b := testReplyBody(t, testTranscriptView(t, e), "question"); strings.Contains(b, "Speaker: assistant") {
+			t.Fatal(b)
+		}
+	}
+	e := testReplyEntries(replyUser, `tool_use {"turn_id":"t","tool_use_id":"child","name":"Read","parent_tool_use_id":"parent"}`,
+		`tool_result {"turn_id":"t","tool_use_id":"child","is_error":false}`, replyText,
+		`main_turn_interrupted {"turn_id":"t","turn_opened_entry_id":4,"cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`, replyEnd)
+	if b := testReplyBody(t, testTranscriptView(t, e), "question"); strings.Contains(b, "Speaker: assistant") {
+		t.Fatal(b)
+	}
+}
+
+func TestMemoryTranscriptReplyObservedChild(t *testing.T) {
+	e := testReplyEntries(replyUser,
+		`agent_call_observed {"conversation_id":"chat","lifetime_id":"11111111-1111-4111-8111-111111111111","tool_call_id":"child","tool":"Agent","parent_tool_call_id":"outer","occurred_at":"2026-01-01T00:00:00Z"}`,
+		`tool_use {"turn_id":"t","tool_use_id":"child","name":"Agent"}`,
+		`tool_result {"turn_id":"t","tool_use_id":"child","is_error":false}`, replyText,
+		`main_turn_interrupted {"turn_id":"t","turn_opened_entry_id":5,"cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`, replyEnd)
+	if b := testReplyBody(t, testTranscriptView(t, e), "question"); strings.Contains(b, "Speaker: assistant") {
+		t.Fatal(b)
+	}
+}

@@ -68,3 +68,6 @@ Pending for documentation stage:
 - Threat model: local history/subprocess content is inert fenced text, never instructions to the exporter. Index/search integration is owned by #3099/#3103; broader recovery proof is #3161.
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-10
+
+## Revisions
+- 2026-10-10: focused review added explicit child-call evidence to keep parentless child reports from establishing an implicit main opening, and tied pending-user cleanup to the first terminal only. `TestMemoryTranscriptReplyImplicitOpening`, `TestMemoryTranscriptReplyObservedChild` and `TestMemoryTranscriptReplyReuse` cover these contracts, including parent attribution retained only in a preceding observation. Final lifecycle coverage includes those tests alongside the table above; no API, worker or publication design changed.
