@@ -3536,7 +3536,7 @@ correlated at the envelope, rather than minting a second status shape.
 |---|---|---|
 | `conversation_id` | string | Conversation whose child supplied the report. Always present. |
 | `servers` | array of object | The retained MCP servers in claude's order. **Always present, never `null`**; an admitted report with no servers serialises as `[]`. |
-| `dropped_servers` | int | Daemon-derived number of tail entries omitted when the source report was bounded. Always present as a number, including `0`; copied from the neutral event rather than inferred from the retained list length. |
+| `dropped_servers` | int | Daemon-derived total of producer omissions plus every row omitted by mapping. Always present as a number, including `0`; exact when representable, otherwise saturated at the daemon's maximum `int` (`math.MaxInt`). |
 
 Each element of `servers` always carries all five keys below. Missing or
 zero-valued source strings encode as `""`; none of the fields is optional.
@@ -3549,12 +3549,28 @@ zero-valued source strings encode as `""`; none of the fields is optional.
 | `scope` | string | claude's open-set scope text. It describes the report and grants no access or authority. |
 | `version` | string | `serverInfo.version`, carried as an opaque string; `""` when absent. Do not parse it as a required semantic version. |
 
-`dropped_servers` preserves the source event's accounting. The daemon retains a
-prefix of the decoded server array and records every omitted tail entry, so
-`len(servers) + dropped_servers` is the original decoded array length. The wire
-layer does not recompute the count, and the retained length is not a substitute
-for reading it. The producer's entry cap is not a wire constant and clients must
-not hardcode one.
+The producer retains at most 16 servers and caps `error` to 256 UTF-8 bytes.
+Mapping then retains the longest prefix of whole rows in source order whose
+encoded `servers` array fits **63,000 bytes**, counting JSON escaping, row syntax,
+commas and both array brackets. It stops at the first row that cannot fit; an
+oversized first row maps successfully to `servers: []` with every source row
+counted as omitted. All five retained fields cross verbatim after the existing
+producer limits, without shortening server names or changing the supplied event.
+Reports that already fit keep their existing payload.
+
+`dropped_servers` adds mapping omissions to the producer's count, saturating at
+`math.MaxInt` if that sum is unrepresentable. When the sum is representable,
+`len(servers) + dropped_servers` is the original decoded array length. The
+retained length is not a substitute for reading the count, and clients must not
+hardcode the producer's entry cap.
+
+The array budget leaves 2,519 bytes under the 65,519-byte application-envelope
+limit for payload syntax and source metadata: a 36-byte conversation ID and
+256-byte producing-session ID under worst JSON escaping, timestamp, maximum
+envelope ID/correlation/event/history counters and dropped count. Complete-envelope
+boundary tests also cover omitted and `null` session tags. This mapping contract
+is shared by automatic publication and requester-only readings; see
+[the mapper contract](knowledge/features/turnbridge-package-outbound-adapter-map-event.md).
 
 **The live frame is emitted.** #2375 maps an admitted `MCPStatus` onto this
 payload and publishes it through the interactive live lane. The live producer has
