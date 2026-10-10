@@ -69,3 +69,15 @@ Measure the original fixture using an external overlay under focused and paralle
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-10
+
+## Revisions
+
+### 2026-10-10 — phase measurement and stronger partial replay
+
+Resolved the open question with measured original-fixture evidence: focused overlay folding took 1.52s of a 1.67s handoff; the unchanged parallel thread/history suite took 2.24s folding and 2.37s to handoff. The instrumented original fixture separately measured 2.03s folding, 142ms checkpointing and 3ms publication. These runs completed successfully, so the historical five-second expiry was not reproduced; the evidence identifies incidental fixture folding as the dominant delay, rather than showing worker failure or a broken barrier. `resolveChildren` and `recordShown` traverse growing item collections for each replay fact. Bound the public fixture to four messages while retaining all 4,098 committed raw facts and exact ordered delivery assertions. No timeout increases or production changes are needed.
+
+Move the replay pause after the first successful feed but before its callback returns. This proves an actually partially folded replay still exposes no publication, with meaningful message items on both sides of the raw chunk boundary. Assert that replay delivered at least two bounded chunks. Capture duplicate worker identity explicitly. Snapshot progress waits retain their original finite helper and receive named phase log context; shared helpers remain untouched.
+
+An external overlay forcing A's checkpoint replacement to fail produced the expected `replay to tail handoff: worker exited; phase=checkpointing replay consumed=4098 chunks=2 state=3 version=0` failure and exited normally after cleanup. This verifies diagnostics distinguish checkpoint failure from elapsed folding rather than waiting out the generic barrier deadline.
+
+Final-code failure overlays also verify cleanup: forced checkpoint replacement fails immediately with the checkpoint phase (0.83s total); a reader held until cancellation fails at the finite initial barrier deadline and joins normally (5.59s total, within a 15s process timeout). The final focused race run executed and passed all 20 repetitions without retrying failures. Successful replay handoff phases are now measured in milliseconds rather than seconds.

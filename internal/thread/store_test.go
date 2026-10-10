@@ -91,15 +91,72 @@ func TestStoreReplayTailIsolation(t *testing.T) {
 	t.Parallel()
 	s, h := testThreadStore(t)
 	var entries []history.Entry
+	// Raw entries cross the reader's chunk bound; public items stay bounded so
+	// per-entry folding work does not turn the isolation proof into a load test.
 	for i := 0; i < history.MaxPageEntries+2; i++ {
-		entries = append(entries, testMessage(0))
+		e := testEntry(0, "unsupported", `{}`)
+		if i == 0 || i >= history.MaxPageEntries-1 {
+			e = testMessage(0)
+		}
+		entries = append(entries, e)
 	}
 	entries = testStoreAppend(t, h, testStoreA, entries...)
+	dir, err := h.LogDir(testStoreA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	replay, release, handoff, tail := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var releaseOnce, tailOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }); tailOnce.Do(func() { close(tail) }) })
+	var operationDone <-chan struct{}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		tailOnce.Do(func() { close(tail) })
+		cancel()
+		if operationDone != nil {
+			<-operationDone
+		}
+	})
 	var mu sync.Mutex
 	var seen []uint64
+	phase := "opening replay reader"
+	var foldTime time.Duration
+	var replayDone, checkpointDone time.Time
+	chunks := 0
+	await := func(name string, signal <-chan struct{}) {
+		t.Helper()
+		s.mu.Lock()
+		worker := s.workers[testStoreA]
+		s.mu.Unlock()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		reason := "deadline exceeded"
+		select {
+		case <-signal:
+			return
+		case <-worker.done:
+			reason = "worker exited"
+		case <-timer.C:
+		}
+		mu.Lock()
+		lastPhase, consumed, count := phase, len(seen), chunks
+		mu.Unlock()
+		s.mu.Lock()
+		state, version := worker.snapshot.State, worker.snapshot.Version
+		s.mu.Unlock()
+		t.Fatalf("%s: %s; phase=%s consumed=%d chunks=%d state=%v version=%d", name, reason, lastPhase, consumed, count, state, version)
+	}
+	replace := s.replace
+	s.replace = func(src, dst string) error {
+		err := replace(src, dst)
+		if err == nil && filepath.Dir(dst) == dir && filepath.Base(dst) == cacheName {
+			mu.Lock()
+			checkpointDone = time.Now()
+			phase = "preparing publication"
+			mu.Unlock()
+		}
+		return err
+	}
 	base := s.forward
 	s.forward = func(id conversations.ConversationID) (storeReader, error) {
 		r, err := base(id)
@@ -112,22 +169,49 @@ func TestStoreReplayTailIsolation(t *testing.T) {
 				if len(chunk) > history.MaxPageEntries {
 					t.Error("oversized chunk")
 				}
-				if first {
-					first = false
-					close(replay)
-					<-release
-				}
 				mu.Lock()
-				for _, e := range chunk {
-					seen = append(seen, e.ID)
+				phase = "folding chunk"
+				mu.Unlock()
+				started := time.Now()
+				err := feed(chunk)
+				mu.Lock()
+				foldTime += time.Since(started)
+				if err == nil {
+					chunks++
+					for _, e := range chunk {
+						seen = append(seen, e.ID)
+					}
 				}
 				mu.Unlock()
-				return feed(chunk)
+				if err == nil && first {
+					first = false
+					mu.Lock()
+					phase = "paused partial replay"
+					mu.Unlock()
+					close(replay)
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return err
 			}
 		}
 		return testStoreReader{storeReader: r, walk: func(ctx context.Context, h uint64, feed func([]history.Entry) error) error {
-			return r.Walk(ctx, h, record(feed))
+			err := r.Walk(ctx, h, record(feed))
+			mu.Lock()
+			replayDone = time.Now()
+			phase = "checkpointing replay"
+			if err != nil {
+				phase = "replay walk failed"
+			}
+			mu.Unlock()
+			return err
 		}, tail: func(ctx context.Context, feed func([]history.Entry) error) error {
+			mu.Lock()
+			phase = "paused tail handoff"
+			mu.Unlock()
 			close(handoff)
 			select {
 			case <-tail:
@@ -137,34 +221,74 @@ func TestStoreReplayTailIsolation(t *testing.T) {
 			return r.Tail(ctx, record(feed))
 		}}, nil
 	}
-	if err := s.Load(context.Background(), testStoreA); err != nil {
+	if err := s.Load(ctx, testStoreA); err != nil {
 		t.Fatal(err)
 	}
-	testStoreSignal(t, replay)
-	if err := s.Load(context.Background(), testStoreA); err != nil {
+	await("initial replay barrier", replay)
+	s.mu.Lock()
+	worker := s.workers[testStoreA]
+	s.mu.Unlock()
+	if err := s.Load(ctx, testStoreA); err != nil {
 		t.Fatal(err)
 	}
-	if s.Snapshot(testStoreA).State != StateRebuilding {
-		t.Fatal("partial replay usable")
+	s.mu.Lock()
+	duplicate := s.workers[testStoreA]
+	s.mu.Unlock()
+	if duplicate != worker {
+		t.Fatal("duplicate load replaced worker")
 	}
+	partial := s.Snapshot(testStoreA)
+	if partial.State != StateRebuilding || partial.Version != 0 || len(partial.Items) != 0 {
+		t.Fatal("partial replay exposed a publication")
+	}
+	type appendResult struct {
+		entry history.Entry
+		err   error
+	}
+	result := make(chan appendResult, 1)
 	done := make(chan struct{})
+	operationDone = done
 	go func() {
 		defer close(done)
-		entries = append(entries, testStoreAppend(t, h, testStoreA, testMessage(0))...)
-		testStoreAppend(t, h, testStoreB, testMessage(0))
-		if err := s.Load(context.Background(), testStoreB); err != nil {
-			t.Error(err)
+		e := testMessage(0)
+		id, err := h.Append(testStoreA, e.Type, e.Payload, e.TS)
+		e.ID = id
+		if err == nil {
+			_, err = h.Append(testStoreB, e.Type, e.Payload, e.TS)
 		}
-		testStoreWait(t, s, testStoreB, StateUsable, 1)
+		if err == nil {
+			err = s.Load(ctx, testStoreB)
+		}
+		result <- appendResult{e, err}
 	}()
-	testStoreSignal(t, done)
+	await("appends and B load while replay paused", done)
+	appended := <-result
+	if appended.err != nil {
+		t.Fatal(appended.err)
+	}
+	entries = append(entries, appended.entry)
+	t.Log("waiting for B publication while A replay is paused")
+	testStoreWait(t, s, testStoreB, StateUsable, 1)
+	mu.Lock()
+	foldBeforeRelease := foldTime
+	mu.Unlock()
+	started := time.Now()
 	releaseOnce.Do(func() { close(release) })
-	testStoreSignal(t, handoff)
+	await("replay to tail handoff", handoff)
+	mu.Lock()
+	t.Logf("replay to handoff: total=%s fold=%s walk=%s checkpoint=%s publication=%s", time.Since(started), foldTime-foldBeforeRelease, replayDone.Sub(started), checkpointDone.Sub(replayDone), time.Since(checkpointDone))
+	replayChunks := chunks
+	mu.Unlock()
+	if replayChunks < 2 {
+		t.Fatal("replay did not cross the chunk boundary")
+	}
 	testStoreEqual(t, s.Snapshot(testStoreA), testStoreA, entries[:len(entries)-1])
 	entries = append(entries, testStoreAppend(t, h, testStoreA, testMessage(0))...)
 	tailOnce.Do(func() { close(tail) })
+	t.Log("waiting for replay/handoff commits to catch up")
 	testStoreEqual(t, testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries))), testStoreA, entries)
 	entries = append(entries, testStoreAppend(t, h, testStoreA, testMessage(0))...)
+	t.Log("waiting for the later tail commit")
 	snap := testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries)))
 	testStoreEqual(t, snap, testStoreA, entries)
 	snap.Items[0].Content[0] = 'X'
