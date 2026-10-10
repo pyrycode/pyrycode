@@ -70,6 +70,7 @@ Pending for documentation stage:
 - [Trust boundaries] `validateMemorySettings` checks CLI and persisted settings before save/status/effective use; resolution returns no usable result on failure.
 - [Tokens] SHOULD FIX: parser and load errors can echo reference-like input. Suppress parser output and replace errors with static diagnostics; never serialize the stored embedding struct into status. Lifecycle resolution owns protection and freshness.
 - [File operations] Canonical directory/access checks precede component ancestry exclusions; reserved-path peeling must use lstat so a broken symlink cannot look absent. `UpdateMemory` owns private atomic writes. Validation creates nothing; runtime check/use protection belongs to #3098/#3099/#3100/#3101.
+- [File operations — verifier finding 1] Resolved: the derived transcript path is also an index input. `memoryReserved` rejects canonical equality or ancestry overlap with credential storage before configure, status or effective resolution can return usable settings. `TestMemoryTranscriptCredentialOverlap` covers aliases to credential storage and its ancestors/descendants for both vault modes, empty failed resolution and unchanged saved bytes.
 - [Subprocesses] No production subprocess or shell; test helper re-execs only this test binary with explicit arguments.
 - [Cryptography] No new crypto or secret comparisons; reuse credential lifecycle.
 - [Network and I/O] Local metadata only, no network listeners or manual memsearch operations.
@@ -83,3 +84,4 @@ Pending for documentation stage:
 ## Revisions
 
 - 2026-10-10: Final implementation and hermetic coverage exceed the initial 770-line sketch (approximately 880 lines); canonical reserved-path and POSIX access cases account for the overage. Actual GitHub lineage is #3097 → #3108 → #3117, so the grandchild sizing rule requires continued building with `needs-human:sizing`. Candidate standalone seams would have been offline configure/status and effective daemon resolution; no scope is added. Root ordering is stable in input order, with the effective vault first unless a containing read-only root subsumes it; ownership/destination fields remain independent.
+- 2026-10-10, verifier finding 1: The original security review omitted the derived transcript root's boundary with credentials. Reserved transcript and credential roots must be disjoint after resolution, including symlink aliases, so unsafe storage is rejected before any settings publication or search-root union.

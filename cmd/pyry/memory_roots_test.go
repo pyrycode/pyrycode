@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -9,6 +10,38 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/config"
 )
+
+func TestMemoryTranscriptCredentialOverlap(t *testing.T) {
+	for _, target := range []string{"credentials", ".", "credentials/child"} {
+		for _, mode := range []string{"default", "separate"} {
+			t.Run(target+"/"+mode, func(t *testing.T) {
+				home := testManagedHome(t)
+				vault := filepath.Join(home, "vault")
+				testMemoryMust(t, os.Mkdir(vault, 0700))
+				s := testManagedMemory()
+				if mode == "separate" {
+					s.Vault = config.MemoryVault{Mode: mode, Path: vault}
+				}
+				testMemoryMust(t, configureMemory(context.Background(), s))
+				path := filepath.Join(home, ".pyry", "config.json")
+				before, err := os.ReadFile(path)
+				testMemoryMust(t, err)
+				memory := filepath.Join(home, ".pyry", "memory")
+				testMemoryMust(t, os.MkdirAll(filepath.Join(memory, "credentials", "child"), 0700))
+				testMemoryMust(t, os.Symlink(filepath.Join(memory, target), filepath.Join(memory, "recent-transcripts")))
+				s.Capture.Model = "replacement"
+				testMemoryReject(t, configureMemory(context.Background(), s))
+				out, err := testManagedCommand(t, "status")
+				testMemoryCheck(t, err != nil && out == "", "unsafe transcript status reported success")
+				got, err := resolveEffectiveMemory(context.Background(), s, vault)
+				testMemoryCheck(t, err != nil && reflect.DeepEqual(got, effectiveMemory{}), "credential storage entered effective roots")
+				after, err := os.ReadFile(path)
+				testMemoryMust(t, err)
+				testMemoryCheck(t, bytes.Equal(before, after), "unsafe transcript validation changed settings")
+			})
+		}
+	}
+}
 
 func TestMemoryPathValidation(t *testing.T) {
 	home := testManagedHome(t)

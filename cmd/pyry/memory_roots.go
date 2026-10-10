@@ -79,6 +79,9 @@ func memoryReserved(home string) (memoryReservedPaths, error) {
 	if err != nil {
 		return memoryReservedPaths{}, err
 	}
+	if memoryOverlaps(paths.transcripts, paths.credentials) {
+		return memoryReservedPaths{}, errMemorySettings
+	}
 	return paths, nil
 }
 func memoryContains(parent, child string) bool {
