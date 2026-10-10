@@ -80,8 +80,9 @@ authoritative watermark lookup and session-state reconciliation providers are
 installed. Nil/false disables `thread`; advertisement alone is insufficient.
 `handleNoiseInit` records `s.thread` only on authenticated admission, and rekey
 preserves it. `ActiveConn.Thread` exposes the decision for open connections.
-Production leaves readiness unwired until #3077, after retained state and
-session-state reconciliation (#3076/#3082).
+Production leaves readiness unwired until #3077. The relay's supplied-state
+reconciliation is implemented (#3082); daemon provenance and retained readings
+remain pending #3076.
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
 replies, but `threadWithheld` independently gates all three thread update kinds
@@ -91,7 +92,8 @@ be open, thread-capable, interactive and pass the existing Codex restriction.
 A missing conversation ID fails closed for items. Neither `thread` alone nor
 `in_reply_to` grants interactive or multi-agent access. Unsolicited content
 replaced by the thread is suppressed on live, replay and connect-reconcile
-paths, while transient progress and ordinary replies retain their access rules.
+paths. Supplied live state has independent source-conversation gates, including
+for correlated replies and empty clears; see [supplied live-state ordering](#supplied-live-state-ordering).
 Suppression returns normally: an error would abandon replay and strand buffered
 live traffic even if a one-frame denial test passed. See the
 [wire filtering contract](../../protocol-mobile.md#daemon-thread-updates-v2-supplied-delivery-contract)
@@ -121,3 +123,32 @@ permitted replay and live traffic. Continuation payload/order and the envelope
 budget are pinned by `TestV2Session_ThreadContinuations`; projection must not
 grow the codec's supplied `SessionID`. See the
 [summary contract](../../protocol-mobile.md#conversations).
+
+### Supplied live-state ordering
+
+Carry provenance with the originating reading through `PushLiveState` and
+`ThreadLiveState`, rather than resolving a conversation's current binding when
+sealing delayed output. `liveWithheld` uses `LiveState.ConversationID` even when
+the wire payload is `{}` or names only a prompt/session ID. Correlation is not
+authorization: a supplied reply and its clear require interactive access, a
+known source conversation and the existing Codex gate. Withheld readings do not
+advance delivery state. See the [wire contract](../../protocol-mobile.md#session-scoped-live-state-v2-supplied-delivery-contract).
+
+`forwardLiveState` orders session generations across all families for one
+conversation, then revisions by normalized family and `ReadingID`. Sorting
+opaque session IDs would misorder transitions. A family-wide revision alone
+would discard another outstanding prompt or tool/task reading. Conversely,
+shown and dismissed messages for one prompt must share a family: separate type
+keys let an older shown snapshot restore an answered prompt. `liveStateClear`
+normalizes modal/question dismissal and settings-update types to their matching
+shown/settings families. Clears reset once per family and generation; individual
+reading identities keep their revisions independent.
+
+Duplicate unsolicited readings are suppressed, but equal-revision correlated
+replies still answer the request. Treating them as duplicate pushes would leave
+the request unanswered. Strictly older replies and older-session output are
+suppressed. Source ordering also supersedes the legacy `replySuggestionStale`
+guard for supplied suggestion readings; its payload-only conversation revision
+cannot express session transitions. `TestLiveStateOrdering` covers overtaken
+snapshots, answered prompts, distinct IDs/conversations, delayed replies and
+late clears. Delivery watermarks are connection-local and disappear on teardown.

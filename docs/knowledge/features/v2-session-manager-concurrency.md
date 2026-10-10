@@ -221,3 +221,26 @@ before-decode inert gate. Capability advertisement is separate (#2797).
 **A zero-value enum member needs a producer that names it, or staticcheck flags it dead even though the type "handles" it by default.** The first cut of this widening leaned on `appFrameRoute`'s zero value implicitly — the v1 `enqueueAppFrame` call built `appFrameJob{plaintext: plaintext}` with no `kind`, and the worker caught it with a bare `default:` rather than a `case appFrameRoute:`. `staticcheck`'s `U1000` correctly called `appFrameRoute` unused: nothing in the source named the identifier, so the compiler couldn't see that the zero value was meaningful rather than accidental, and the doc-block claim that "the routing decision lives in one place" rested on a member neither producer nor consumer mentioned. The fix is to name it at both ends — the v1 call passes `kind: appFrameRoute` explicitly and the worker gains its own `case appFrameRoute:` — which makes `default:` genuinely unreachable in normal operation while still being the safe catch for a kind added without an arm. The general lesson: when a tagged-dispatch enum's zero value is meant to be a real, load-bearing case (not just "unset"), give it an explicit producer and an explicit consumer arm rather than trusting Go's zero-value default to stand in for both — the compiler cannot verify that a default arm and an elided zero-value case actually agree on what they mean.
 
 `V2Session.State()` is a plain field read. Safe today because no cross-goroutine reads exist. Both the push surface (#571, rewritten #610) and the #588 enumeration surface deliberately keep it that way: the #610 `Push` reads only `m.queues` under `pushMu` (never `s.state`), while `forwardEnvelope` reads `s.state` **on the `Run` goroutine** during the drain, and `handleActiveConns` reads `s.state` (and `s.interactive`, #626) **on the `Run` goroutine** (funneled through `m.snapshot`) — neither via a cross-goroutine `State()` call. So the broadcast/enumeration layer that this comment once anticipated (the [#589](../codebase/589.md) assistant-turn fan-out, built on #571's `Push` + #588's `ActiveConns`) introduces **no** new reader of `s.state` off the owner goroutine, and `State()` still needs no `atomic.Int32`/mutex. Should a future slice read `s.state` directly from a producer goroutine *outside* the funnel, that accessor will need the atomic/mutex then — not pre-emptively refactored.
+
+## Supplied current-state delivery
+
+A connect snapshot must not enter the bounded push/outbox queue as a batch:
+one snapshot can contain more readings than either queue holds, and blocking
+or sealing from its producer would violate `Run`'s single-writer ownership.
+`ThreadLiveState` instead returns a detached, nonblocking cursor with no resource
+needing closure. `drainLiveOnce` consumes at most one reading per pass; the
+generated family clear and its fresh reading take separate passes. `Run` owns
+the cursor, pending fresh state and delivered watermarks. Transport-down holds
+before consuming a cursor or popping queued input; reconnect re-signals the
+pump, and cancellation/teardown end delivery. `TestLiveStatePacing` and
+`TestLiveStateRun` exercise a snapshot larger than push capacity without overflow.
+
+Queued live updates drain before the next snapshot reading, so connect state
+can be overtaken. Snapshot and live delivery must use the same
+[source ordering](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#supplied-live-state-ordering)
+to keep that snapshot from restoring stale state. `PushLiveState` copies payload,
+session tag and correlation values beside the unsealed queue entry; looking up
+the current binding later could retag old output as fresh. A fresh reading is
+parked only after its clear forwards successfully. Retaining it earlier turns a
+failed clear into an endlessly re-signaled pending read, blocking unrelated
+queued and snapshot state; see [complete-envelope validation](protocol-package-types-envelope.md#live-state-session-metadata).

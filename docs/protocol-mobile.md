@@ -380,8 +380,8 @@ Envelope-level fields beyond the v1 set:
 |---|---|---|---|
 | `event_id` | int | no (omitempty) | In-memory event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present on ring-backed interactive structured-stream frames and operator messages (binary → phone), including their reconnect replay; absent on session transitions and frames without ring recording. See [Interactive events](#interactive-events-v2-capability-gated). Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
 | `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present after a successful history append on direct live interactive-turn, session-transition and operator-message envelopes (#2861); reconnect replay of history-backed ring events carries that original append's id (#2909). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients **must fall back to history/list** for a durable read-mark target. |
-| `session_id` | nonempty string or null | no | **Thread-only metadata; production session-state integration pending #3082/#3077.** Omitted means metadata was not supplied; explicit `null` positively means no producing session; a nonempty string names the producer. Supplied only for thread-negotiated live-state delivery. Independent of existing payload session fields. |
-| `session_state_cleared` | bool | no (omitempty) | **Thread-only clear; production session-state integration pending #3082/#3077.** `true` with payload `{}` explicitly clears this envelope kind's session-scoped reading. Ordinary updates omit the flag. Supplied only for thread-negotiated live-state delivery. |
+| `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082).** Omitted means no provenance was supplied; explicit `null` positively means no producing session; a nonempty string names the producing session. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. Daemon provenance/retention and production installation/activation remain pending #3076/#3077. |
+| `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears the family's session-scoped readings before fresh readings for the supplied session. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
 
 The relay strips supplied session metadata from non-thread connections and
 omits explicit clear frames entirely on those connections. Production providers
@@ -393,6 +393,15 @@ distinctions through decoding and re-encoding; these tags convey no authorizatio
 An existing `payload.session_id` or other payload session field keeps its own
 meaning and is neither replaced nor overwritten by envelope metadata. When the
 new optional fields are unset, existing envelope serialization is unchanged.
+
+A delayed push or on-demand reply retains its source tag; the relay never
+substitutes the conversation's newer session binding. Fresh replies retain
+`in_reply_to`; automatically generated family clears are uncorrelated. Clients
+handle `session_state_cleared: true` before decoding the ordinary payload schema,
+because a clear's `{}` intentionally has none of that schema's required fields.
+Supplied thread live state carries neither `event_id` nor `history_entry_id`.
+Ordering, access gates and connect reconciliation follow the
+[session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract).
 
 `history_entry_id` identifies the stored entry for the envelope's conversation,
 using the same durable per-conversation namespace as `HistoryEntry.ID` and
@@ -661,7 +670,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`session_settings_updated`** | binary → phone | no | **New in v2.** Outbound reply confirming a `set_session_settings`, correlated by `in_reply_to` (#845). See [Session settings](#session-settings-v2). |
 | **`request_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the run configuration of the conversation it names in `conversation_id`. A request that names no conversation names no session, and is answered with the all-zero reply. Interactive-capability-gated. See [Session settings](#session-settings-v2). |
 | **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration and optional reports, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
-| **`session_error`** | binary → phone | no | **New in v2.** Unsolicited, conversation-scoped session-error frame reporting a session problem for the conversation; its `code` says whether the problem is terminal — `session.blocked`, the daemon gave up delivering the conversation's queued backlog (#1007) — or not — `session.child_crashing`, the conversation's claude child keeps exiting at startup and the daemon is still restarting it (#2724). Carries `conversation_id`, `code`, `message`; NOT `in_reply_to`-correlated. See [Error codes](#error-codes). |
+| **`session_error`** | binary → phone | no | **New in v2.** Unsolicited, conversation-scoped session-error frame reporting a session problem for the conversation; its `code` says whether the problem is terminal — `session.blocked`, the daemon gave up delivering the conversation's queued backlog (#1007) — or not — `session.child_crashing`, the conversation's claude child keeps exiting at startup and the daemon is still restarting it (#2724). Carries `conversation_id`, `code`, `message`; NOT `in_reply_to`-correlated. Supplied thread delivery uses the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract), including session tags and `{}` clears. See [Error codes](#error-codes). |
 | **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. It names the conversation the bytes belong to (#2142) — **meaningful on the upload leg only**, a **lookup key validated against the daemon's registry** before it becomes a path component and never a value trusted as sent, with **naming a conversation not authorization**; the daemon files an upload under it since #2143. See [Attachments](#attachments). |
 | **`attachment_stored`** | binary → phone | no | **New in v2.** The upload leg's **success reply** — the transfer completed, its claims were checked, and the bytes are stored under the `attachment_id` the client chose (#1895). Correlated by `in_reply_to`, which names the chunk **whose arrival completed the transfer** rather than the last one sent. Carries that one id and nothing else: no host path, no directory component, no stored filename. Nothing emits it yet (#1897). See [Attachments](#attachments). |
 | **`request_attachment`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a stored attachment, naming the conversation and the attachment and nothing else (#2052). The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent, and naming a conversation is **not authorization**. Correlation rides `in_reply_to`, so the payload carries **no request-id key**; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames, or `attachment.not_found` / `attachment.stream_aborted`. **Nothing answers it yet** — the handler is #2054 and the stream #2053. See [Attachments](#attachments). |
@@ -687,8 +696,9 @@ Payload shapes for unchanged types are identical to v1. The relevant per-type sc
 per-connection relay delivery contract (#3081), including the bounded codec
 and continuations from #3073. **The shipped daemon does not emit these updates
 or negotiate `thread`: production readiness is unwired.** Provider installation
-and activation remain pending #3077; authoritative session-state reconciliation
-and retained state are separate prerequisites (#3082/#3076).
+and activation remain pending #3077. Relay-owned supplied session-state
+reconciliation is implemented in #3082; daemon provenance and retained readings
+remain pending #3076.
 [ADR 042](knowledge/decisions/042-daemon-built-thread.md) defines the migration.
 Catch-up/pages and replacement of replay/resync remain #2963; later pages can
 reuse the full-item added-payload assembly representation below.
@@ -715,7 +725,9 @@ subject to existing access gates. Ordinary correlated request/reply traffic
 retains its behavior; thread items still require the item gates above.
 A suppressed replay event advances the replay watermark and drains normally,
 allowing later permitted frames and buffered live traffic to follow. This
-filtering does not supply #3082's authoritative live-state reconciliation.
+filtering is complemented by the supplied
+[current live-state reconciliation](#session-scoped-live-state-v2-supplied-delivery-contract)
+from #3082.
 
 Connections without `thread` receive none of the three update kinds and no
 `last_shown_version`, envelope `session_id` or `session_state_cleared`, even
@@ -1726,11 +1738,87 @@ projection and replaced-content filtering follow the
 
 The daemon MUST echo only what it itself supports — the agreed set is the **intersection** of the phone's advertised set with the daemon's own, never a blind mirror of the phone's claims. The result follows daemon-supported-set order, removes duplicates and drops unknown strings; a supported string, including `stop_background_task`, is omitted when the client does not advertise it. A phone that does not advertise `interactive` (or whose `interactive` is not echoed back) simply does not receive the structured interactive event stream; there is no separate non-interactive `message` fan-out on v2 (it was removed in #699). The intersection logic — the daemon-side trust decision computing advertised ∩ supported, echoing it in `hello_ack`, and recording the negotiated `interactive` flag per connection — is implemented in #626 (`internal/relay` v2 session manager; `negotiateCapabilities` + the capability-aware `ActiveConns` enumeration). The capability-gated fan-out that routes the interactive event stream only to granted connections shipped in #632/#633.
 
+### Session-scoped live state (v2, supplied delivery contract)
+
+The relay accepts source-bound current readings for authenticated, open
+connections that negotiated both `thread` and `interactive` (#3082). This
+contract covers permission prompts and question batches (`modal_shown` /
+`modal_dismissed`, `question_shown` / `question_dismissed`), `turn_state`, `stall`,
+`api_retry`, `compacting`, `thinking_progress`, `tool_progress`,
+`background_task_progress`, `resetting`, `rate_limited`, `context_usage`,
+`model_announced`, `session_facts`, `session_settings` / `session_settings_updated`,
+`mcp_status`, `slash_command_list`, `model_list`, `reply_suggestion` and
+`session_error`. Task lifecycle/rosters and queue content instead become thread
+items; their transient progress remains live state.
+
+**Implementation boundary:** the relay delivery/reconciliation contract is
+implemented using supplied providers and fakes. Actual daemon provenance and
+retained current readings remain pending #3076; provider installation and
+production activation remain pending #3077. Production still does not negotiate
+`thread`. The behavior below applies when those source providers and readiness
+are supplied, and does not claim that existing daemon emitters have migrated.
+
+Each supplied push or on-demand reply keeps its producing session metadata:
+omitted `session_id` means no provenance was supplied, explicit `null` positively
+means no producing session, and a nonempty string identifies the producer.
+Empty strings and other JSON shapes are invalid. Payload session fields and
+reply correlation retain their existing meanings. The relay uses the supplied
+conversation identity to check membership and agent access, including for `{}`
+clears and correlated replies. Unknown conversations, missing interactive access
+and Codex conversations withheld for missing `multi_agent` receive no such state.
+Session attribution never grants access.
+
+**Clear before fresh.** On the first supplied reading of a family for a session
+generation, the relay sends that family's envelope with
+`session_state_cleared: true`, payload `{}` and the supplied session tag, then
+sends the fresh reading on a later manager pass. This also initializes a fresh
+connection. A clear resets the family's held readings, without creating a thread
+item or resolving a prompt. Shown/dismissed modal types share the `modal_shown`
+clear family; shown/dismissed question types share `question_shown`; settings
+and their update acknowledgements share `session_settings`. Generated clears
+omit `in_reply_to`; the following reply preserves its original correlation.
+Repeated supplied clears cannot erase already delivered fresh state.
+
+**Stale-state suppression.** Source-supplied positive session generations order
+transitions per conversation; opaque session IDs are never sorted. After newer
+session state is delivered, older-session queued output and delayed replies are
+discarded. Within a generation, positive revisions order each independently
+addressable reading. Singleton readings, distinct prompt IDs and distinct
+tool/task IDs have separate revision state, as do separate conversations.
+Shown and dismissed messages for one prompt share that state, so an overtaken
+shown snapshot cannot restore an answered prompt. Duplicate unsolicited readings
+are suppressed; an equal-revision correlated reply can still answer its request,
+while a strictly older reply is suppressed. Generations and reading revisions
+are relay source-ordering inputs, not new envelope fields or inferred provenance.
+
+**Current connect reconciliation.** Thread connect/reconnect consumes supplied
+current readings, skips duplicate legacy connect providers and withholds scoped
+live state from the replay ring. Retry and compaction providers include both
+active and inactive readings: `active: false` repairs a lost falling edge rather
+than leaving an indicator pinned. Prompt/question providers supply only
+outstanding state and preserve original answer IDs and answerability.
+Queued live updates can overtake a detached connect snapshot; source ordering
+prevents that snapshot from overwriting the newer reading.
+
+Delivery is paced at at most one envelope per manager pass, with a return to
+`Run` between clear and fresh state. A snapshot can exceed push/outbox capacity
+without being enqueued as a batch. Transport-down holds, cancellation and teardown
+stop consumption and sealing. Complete fresh and generated clear envelopes must
+each fit **65519 bytes** after JSON escaping and metadata; ordinary live state
+does not use thread-item continuation encoding.
+
+These frames carry no replay or history identity, contribute no thread items or
+catch-up data, and never advance `last_shown_version`. Connections without
+`thread` retain their existing stream, snapshots and replay/resync, receive no
+envelope session metadata and receive no explicit clear frames. This work does
+not replace legacy replay/resync with catch-up; thread catch-up/pages and that
+replacement remain #2963.
+
 ### Interactive events (v2, capability-gated)
 
 These twenty-three envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model, with host-post producers described below. Claude-turn payload fields remain present (no omitempty), so boundary values like `seq: 0`, `is_error: false`, and `elapsed_seconds: 0` are explicit on the wire. Host-post `turn_end` is the four-field exception: it omits all Claude result and metric fields.
 
-**Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the daemon-resident id assigned to each structured event in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` identifies an envelope and can differ across recipients or replay, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in the daemon's emit order. **Retention is per conversation; the id space is not** (#2022). One ring-wide counter assigns every id, so an id is never shared by two conversations and a conversation's own ids ascend without being contiguous — ids belonging to other conversations sit between them, and the first id a conversation is assigned is normally far above 1. **A client may therefore keep one scalar cursor**: no event the daemon emits later, in any conversation, can carry an id at or below one already seen. A client that keys its cursor per conversation is equally correct and unaffected. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
+**Legacy replay cursor (`event_id`, #649).** Ring-backed frames in this stream carry an envelope-level `event_id` (the optional `Envelope` field above) — the daemon-resident id assigned to each structured event in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` identifies an envelope and can differ across recipients or replay, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in the daemon's emit order. **Retention is per conversation; the id space is not** (#2022). One ring-wide counter assigns every id, so an id is never shared by two conversations and a conversation's own ids ascend without being contiguous — ids belonging to other conversations sit between them, and the first id a conversation is assigned is normally far above 1. **A client may therefore keep one scalar cursor**: no event the daemon emits later, in any conversation, can carry an id at or below one already seen. A client that keys its cursor per conversation is equally correct and unaffected. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
 Host-post deltas and completion (#2809) use the same ring registered with
 `V2SessionManager.SetReplaySource`. Their live and replay envelopes carry the
@@ -1747,12 +1835,15 @@ if interruption preceded its first live push. Tail catch-up remains #2744.
 
 #### `turn_state`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
 | `state` | string | Coarse turn lifecycle: `thinking`, `responding`, or `idle`. |
 
-Besides riding the live event stream, this frame is also re-asserted on connect for a conversation with a turn currently running (#2712, see [Reconcile on connect](#reconnect--backfill-semantics)) — that copy carries no `event_id`.
+On legacy interactive connections, this frame is also re-asserted on connect for a conversation with a turn currently running (#2712, see [Reconcile on connect](#reconnect--backfill-semantics)) — that copy carries no `event_id`. Thread connections instead reconcile supplied current phase readings through the contract above.
 
 #### `assistant_delta`
 
@@ -1973,6 +2064,9 @@ is not something this frame offers.
 
 #### `tool_progress`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
@@ -2081,6 +2175,9 @@ ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` i
 
 #### `stall`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation that stalled. |
@@ -2088,6 +2185,10 @@ ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` i
 `stall` is the wire form of an internal-only daemon signal (a one-shot stall-onset marker; no ACP equivalent). Like `turn_state`, it is a coarse conversation-level signal and carries no `turn_id`. It is onset-only — there is no clearing event; the phone self-clears on the next turn activity.
 
 #### `api_retry`
+
+**Supplied thread state:** the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract)
+applies, including current `active: false` readings on connect/reconnect to repair
+a lost falling edge. A family clear has payload `{}` before the fresh reading.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -2111,6 +2212,10 @@ screen text — `current`/`total` are the only screen-derived data, and both are
 bounded, pre-sanitized ints.
 
 #### `compacting`
+
+**Supplied thread state:** the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract)
+applies, including current `active: false` readings on connect/reconnect to repair
+a lost falling edge. A family clear has payload `{}` before the fresh reading.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -2238,6 +2343,9 @@ line also carries three UUIDs naming entries in the **operator's own transcript*
 those are the reason the allowlist is stated here rather than left implicit.
 
 #### `resetting`
+
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -2719,6 +2827,9 @@ feed it to an HTML sink, an attribute, or a URL.
 
 #### `background_task_progress`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose turn spawned the task. |
@@ -2803,6 +2914,9 @@ which is the shape a client is most likely to bind straight into a template.
 
 #### `thinking_progress`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose turn is reasoning. |
@@ -2883,6 +2997,9 @@ is invalid on both surfaces. The daemon's separate stall signal is
 both directions.
 
 #### `rate_limited`
+
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3029,6 +3146,9 @@ hostile — status value costing at most one misleading row.
 
 #### `model_announced`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose turn carried the announcement. |
@@ -3109,6 +3229,9 @@ child **run** itself is. A client wanting both decodes both; neither subsumes th
 other.
 
 #### `session_facts`
+
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3322,6 +3445,9 @@ The **producer** is **#657**. Until a server-side workspace-change source exists
 
 #### `model_list`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty-three turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though it rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
 
 | Field | Type | Meaning |
@@ -3397,6 +3523,9 @@ A selectable published value sent on [`set_session_settings`](#set_session_setti
 **SECURITY.** `resolved_model`, `value`, `display_name` and **every string in `effort_levels`** are claude-authored strings that crossed the subprocess trust boundary. They are safe to **render as inert text** and must never be fed to an HTML sink, an attribute, or a URL. The daemon **bounds them but does not sanitize them** — nothing on this path strips control characters or terminal escape sequences — so they stay untrusted, model-influenced text all the way to the client, and **the render boundary that owes the sanitization is the client's, not the daemon's**. The frame is a **report, never a control input**, with one amendment the sibling frames do not need: `value` is the first field in this family a client is meant to send **back**, and publishing it does not make it trusted. It is still claude's text arriving on an inbound path, and the daemon re-validates it (property 3 above) rather than trusting that it came from a list the daemon itself published.
 
 #### `mcp_status`
+
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
 
 Direction **binary → phone** (outbound v2 only; the v1 inbound type predicate
 rejects it). This is the single conversation-scoped MCP server snapshot shared by
@@ -3632,6 +3761,9 @@ step-3 refusal, by design.
 
 #### `context_usage`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 Direction **binary → phone** (outbound v2 only; the v1 inbound type predicate
 rejects it, and it is never added to `inboundAppTypeSet`). This is the
 single conversation-scoped context-window breakdown shared by a later
@@ -3858,6 +3990,9 @@ post-turn frame does that.
 
 #### `slash_command_list`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 Direction **binary → phone** (outbound v2 slash-command inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty-three turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though the live-lane emission rides the same interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on; the connect-time copy deliberately carries none. It carries the `commands` array claude returns from a `control_request` with subtype `initialize`, the same reply [`model_list`](#model_list) is drawn from, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of the commands this session *in this working directory* will accept, not a delta. `model_list` inventories the **identities** claude will run as; this one inventories the **verbs**.
 
 | Field | Type | Meaning |
@@ -3913,6 +4048,9 @@ Four things a client will otherwise get wrong:
 
 #### `reply_suggestion`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 Direction **binary → phone** (outbound v2 session state; gated by the negotiated `interactive` capability — see [Capability negotiation](#capability-negotiation-v2)). Native publication (#2831) and the last-exchange fallback (#2832) share this **conversation/session state frame, distinct from the twenty-three turn-stream events above**: it carries no `turn_id`, opens no turn and emits no `turn_state`. Text comes from the parser's internal `turnevent.PromptSuggestion` or the fallback; the wire shape does not identify the source.
 
 | Field | Type | Meaning |
@@ -3936,7 +4074,7 @@ Persistent stream spawns still request `--prompt-suggestions`, unless the child'
 
 A client replaces its held suggestion state keyed by **`conversation_id` and `session_id` together**, ignores a frame whose `revision` is not higher than the one held for that pair, and discards cached suggestions on a fresh handshake (`hello`/`hello_ack`). State is daemon-memory-only; a restarted daemon's revision counter does not resume above its previous value.
 
-**Connect-time reconcile and revision ordering** (#2830, wired to the native owner in #2831). On a successful handshake an interactive connection receives current state for every conversation with published suggestion state, including a literal `"suggested_reply":null` for cleared conversations. A conversation that never published contributes no frame. Reconnect therefore receives the state that stands now, including a clear made by another device. Both live and reconciled frames carry **no `event_id`** and are excluded from the replay ring and durable history. Delivery is **monotonic per conversation per connection**: the daemon drops frames at or below the highest `revision` already delivered for that conversation on that connection. A stale snapshot cannot overwrite a newer live clear. The watermark resets on a fresh connection. A Codex conversation's suggestion is withheld from a connection without [`multi_agent`](#capability-negotiation-v2), on both delivery paths.
+**Legacy connect-time reconcile and revision ordering** (#2830, wired to the native owner in #2831). On a successful handshake an interactive connection without `thread` receives current state for every conversation with published suggestion state, including a literal `"suggested_reply":null` for cleared conversations. A conversation that never published contributes no frame. Reconnect therefore receives the state that stands now, including a clear made by another device. Both live and reconciled frames carry **no `event_id`** and are excluded from the replay ring and durable history. Delivery is **monotonic per conversation per connection**: the daemon drops frames at or below the highest `revision` already delivered for that conversation on that connection. A stale snapshot cannot overwrite a newer live clear. The watermark resets on a fresh connection. A Codex conversation's suggestion is withheld from a connection without [`multi_agent`](#capability-negotiation-v2), on both delivery paths.
 
 #### Reconnect replay & resync (consumer, #647)
 
@@ -4010,6 +4148,11 @@ When the supervised claude surfaces a modal — a permission prompt, a plan-appr
 
 #### `modal_shown`
 
+**Supplied thread state:** the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract)
+applies. Connect/reconnect supplies only outstanding prompts with their original
+answer IDs; re-delivery does not change answerability. Handle a `{}` family clear
+before decoding the ordinary payload below.
+
 Direction **binary → phone** (outbound v2 modal-surfaced event; not in `v1TypeSet` — an old phone never receives it).
 
 | Field | Type | Meaning |
@@ -4065,6 +4208,9 @@ Direction **phone → binary** (inbound v2 control). Intercepted before `dispatc
 
 #### `modal_dismissed`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 Direction **binary → phone** (outbound v2 modal-resolution event; not in `v1TypeSet` — an old phone never receives it).
 
 | Field | Type | Meaning |
@@ -4086,6 +4232,11 @@ The batch is modelled **whole, in one frame**, and that is a decision rather tha
 **Reconcile on (re)connect.** On any (re)connection the daemon re-asserts every still-outstanding batch by **unicasting `question_shown` with the original `question_batch_id`** (#1979 landed the reconcile, #1980 wired the daemon's batch store to it) — this is match-and-replace by stable id (see [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)): a re-sent `question_shown` for a known `question_batch_id` updates that batch in place and **never double-shows**. Answer semantics are **unchanged under re-delivery**: the one-time `question_batch_id` nonce is minted once, at raise time, and the daemon consumes its own parked copy exactly once, so a batch re-sent across any number of reconnects stays answerable **exactly once** — the reconcile mints no nonce, retires no batch, and **re-arms no approval window**. A batch answered or [dismissed](#question_dismissed) while the client was away is **not** re-sent: it is simply absent from the next reconcile, which is [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)' reset-on-reconnect rule rather than a separate mechanism. The reconcile is **enumerate-all, not conversation-scoped** — every outstanding batch is unicast to the opening connection, each carrying its own `conversation_id` to filter display by, exactly as the raise-time broadcast does. Correlate a reconciled batch by `question_batch_id` and **never by its position** in the burst: the daemon walks an unordered store, so arrival order is not a contract.
 
 #### `question_shown`
+
+**Supplied thread state:** the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract)
+applies. Connect/reconnect supplies only outstanding prompts with their original
+answer IDs; re-delivery does not change answerability. Handle a `{}` family clear
+before decoding the ordinary payload below.
 
 Direction **binary → phone** (outbound v2 clarifying-question batch; not in `v1TypeSet` — an old phone never receives it). Interactive-capability-gated, like its neighbours.
 
@@ -4137,6 +4288,9 @@ Naming a gap as a gap is deliberate for the two rows that are still gaps: a boun
 **SECURITY.** `question`, `header` and **every option's `label` and `description`** are Claude- or Codex-authored strings that crossed the subprocess trust boundary to a client render surface. This is [§ Security model](#security-model)'s threat 1 (prompt injection, `severity: high`, `mitigation: partial`) arriving on a remote render surface. Render them as inert text, never as HTML, an attribute or a URL. The shared bridge bounds the displayed batch as a whole at 16 KiB but does not sanitize individual strings; no control-character or terminal-escape stripping happens on this path. The client owes render sanitization. The frame is a **report, never a control input**. There is **no `truncated_fields` here**, so an over-long field is rejected fail-closed rather than silently cut and presented as complete.
 
 #### `question_dismissed`
+
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
 
 Direction **binary → phone** (outbound v2 question-batch resolution event; not in `v1TypeSet` — an old phone never receives it). Interactive-capability-gated, like the batch it retires. Declared by **#1974**; **#1973** landed the no-answer terminal paths that emit it, **#1990** the refusal and **#1991** the answer, so all three of the batch's terminal outcomes now emit it.
 
@@ -5531,6 +5685,9 @@ still bound to Codex; ordinary delivery resumes after commitment.
 
 #### `session_settings_updated`
 
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
+
 Direction **binary → phone** (outbound). The daemon's confirmation that a `set_session_settings` was applied. It carries only the `session_id` it confirms; the request↔reply correlation rides `in_reply_to` (#845). The reply does not echo the applied settings or carry a model field. To confirm the published model selection, request [`session_settings`](#session_settings) for the conversation after this acknowledgement.
 
 | Field | Type | Meaning |
@@ -5573,6 +5730,9 @@ Answered by `session_settings` below, correlated by `in_reply_to`.
 ```
 
 #### `session_settings`
+
+Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including envelope session tags and `{}` family clears before fresh state.
 
 Direction **binary → phone** (outbound). The resolved session's model override expressed as its published menu row, saved effort, Claude's confirmed applied effort when available, the current child's last confirmed permission posture when available, and the context-window reading. Every original field is always present (no omission tag), so **each original zero value is a real answer rather than an omitted field**. Optional reports and unavailable applied effort are omitted as described below.
 
@@ -6101,6 +6261,14 @@ The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, wi
 `entries` either populated or `[]`.
 
 ## Reconnect / Backfill semantics
+
+**Connection mode:** the legacy two-mode behavior below is unchanged. A thread
+connection instead reconciles supplied current live state through the
+[session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+including inactive retry/compaction and outstanding answerable prompts/questions;
+it skips the legacy connect snapshots and scoped live-state ring replay.
+Thread catch-up/pages and replay/resync replacement remain pending #2963, with
+production provider installation and activation pending #3077.
 
 Every reconnect performs a fresh Noise_IK handshake (there is no session resumption in v2), and on every (re)connection the daemon brings the client back to **current truth**. Reconciliation runs in **two modes, keyed on the kind of data — not on how long the client was away**. The axis of difference is data type, not outage length: the interactive event stream keeps a cursor backfill; control state is always a cheap current-state snapshot.
 

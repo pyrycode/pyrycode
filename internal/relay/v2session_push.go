@@ -47,6 +47,10 @@ import (
 // callers (#632 emitter, #589 coarse bridge) only debug-log the error, so the
 // collapse is invisible to them.
 func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol.Envelope) error {
+	return m.push(ctx, connID, env, nil)
+}
+
+func (m *V2SessionManager) push(ctx context.Context, connID string, env protocol.Envelope, live *LiveState) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -58,6 +62,9 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 	}
 	before := q.overflowed
 	dropped := q.enqueue(env)
+	if live != nil && !q.overflowed {
+		q.items[len(q.items)-1].live = live
+	}
 	droppedCount := q.dropped
 	// Capture both the LEVEL (still latched ⇒ keep signalling) and the EDGE
 	// (just tripped ⇒ log once) under the same hold, so neither can be read
@@ -154,6 +161,17 @@ func (m *V2SessionManager) transportDown() bool {
 // are serviced with at most one in-flight Outbound (≤ one WriteTimeout) of
 // delay. If any queue still has items after the pop, it re-signals drainCh.
 func (m *V2SessionManager) drainOnce(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	// A fresh reading parked behind its clear completes before another clear
+	// can replace the single pending slot. Each call still sends only one frame.
+	for _, s := range m.sessions {
+		if s.livePending != nil {
+			m.drainLiveOnce(ctx, true)
+			return
+		}
+	}
 	// Transport-down HOLD (#874): if the relay leg is down, pop nothing, seal
 	// nothing, re-signal nothing — leave the head un-popped and unsealed so no
 	// Noise send-nonce is burned for a frame that cannot reach the phone (a
@@ -192,6 +210,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 		env     protocol.Envelope
 		found   bool
 		barrier chan struct{}
+		live    *LiveState
 	)
 	// Go randomises map-range order, giving rough fairness across the
 	// realistically-tiny open-conn count.
@@ -204,6 +223,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 		}
 		connID = id
 		barrier = q.items[0].barrier
+		live = q.items[0].live
 		env = q.popHead()
 		found = true
 		break
@@ -227,10 +247,15 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	m.pushMu.Unlock()
 
 	if !found {
+		m.drainLiveOnce(ctx, false)
 		return
 	}
 	if barrier != nil {
 		close(barrier)
+	} else if live != nil {
+		if err := m.forwardLiveState(ctx, m.sessions[connID], *live); err != nil {
+			m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", connID)
+		}
 	} else if err := m.forwardEnvelope(ctx, connID, env); err != nil {
 		// Session vanished / not open / seal failure: drop with no app content
 		// in the log (the package's outbound-drop posture). The V2StateOpen
@@ -240,6 +265,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 			"conn_id", connID,
 			"err", err)
 	}
+	m.signalLiveDrain()
 	if more {
 		select {
 		case m.drainCh <- struct{}{}:
@@ -265,7 +291,11 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 // The seal/marshal error paths return wrapped errors (the caller decides
 // log level); they MUST NOT echo env, plaintext, ciphertext, or key
 // bytes, matching the package's no-AEAD-bytes-in-logs discipline.
-func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env protocol.Envelope) error {
+func (m *V2SessionManager) forwardEnvelope(ctx context.Context, connID string, env protocol.Envelope) error {
+	return m.forwardEnvelopeSource(ctx, connID, env, false)
+}
+
+func (m *V2SessionManager) forwardEnvelopeSource(_ context.Context, connID string, env protocol.Envelope, supplied bool) error {
 	s, ok := m.sessions[connID]
 	if !ok {
 		// A torn-down session was already deleted from the map by
@@ -279,7 +309,7 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	// Nil, not an error: drainReplayOnce abandons a conn's replay tail on an error
 	// and must instead advance past a withheld event to the ones behind it. Before
 	// the seal, so a withheld frame spends no send-nonce.
-	if m.withheldFromConn(s, env) || m.threadWithheld(s, env) {
+	if m.withheldFromConn(s, env) || (!supplied && m.threadWithheld(s, env)) {
 		return nil
 	}
 	// Reconnect-replay dedup (#647): drop a live structured envelope this conn
@@ -307,7 +337,7 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	// Recorded only after m.send, so a frame that never reached the wire does not
 	// advance the watermark.
 	suggestionConv, suggestionRev, stale := replySuggestionStale(s, env)
-	if stale {
+	if stale && !supplied {
 		return nil
 	}
 	env = m.mergedForConn(s, env)
@@ -319,6 +349,9 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 		// closed struct of strings) does not fail to marshal in practice.
 		return fmt.Errorf("marshal push envelope: %w", err)
 	}
+	if s.thread && liveStateFamily(env.Type) && len(envJSON) > protocol.MaxThreadEnvelopeBytes {
+		return errInvalidLiveState
+	}
 	ciphertext, err := s.send.Encrypt(envJSON)
 	if err != nil {
 		// Realistically unreachable under correct flynn/noise.
@@ -329,7 +362,7 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 		return fmt.Errorf("marshal push frame: %w", err)
 	}
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
-	if suggestionRev > 0 {
+	if suggestionRev > 0 && !supplied {
 		recordReplySuggestion(s, suggestionConv, suggestionRev)
 	}
 	return nil

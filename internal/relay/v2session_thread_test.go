@@ -23,7 +23,8 @@ func threadConfig(t *testing.T, frames chan protocol.RoutingEnvelope, rec *v2Rec
 	t.Helper()
 	return V2SessionConfig{Frames: frames, Outbound: rec.outbound, StaticPriv: priv,
 		Devices: v2PairedRegistry(t, v2TestToken), ServerID: v2TestServerID, Logger: silentLogger(),
-		ThreadReady: func() bool { return true },
+		ThreadReady:       func() bool { return true },
+		KnownConversation: func(id string) bool { return id != "" },
 		ThreadLastShownVersion: func(id string) (uint64, bool) {
 			switch id {
 			case "zero":
@@ -272,6 +273,8 @@ func TestV2Session_ThreadDelivery(t *testing.T) {
 					deliver = isThread && interactive && pushedConversationID(env) != "" && (multi || pushedConversationID(env) != "conv-codex")
 				} else if isThread && env.InReplyTo == nil && slices.Contains(replaced, env.Type) {
 					deliver = false
+				} else if isThread && liveStateFamily(env.Type) && (!interactive || pushedConversationID(env) == "") {
+					deliver = false
 				} else if !isThread && env.SessionStateCleared {
 					deliver = false
 				}
@@ -348,7 +351,7 @@ func TestV2Session_ThreadReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := gateFramesUntil(t, rec, v2TestConnID, recv, "workspace_updated")
-	if len(got) != 2 || got[0].Type != "tool_progress" {
+	if len(got) != 1 || got[0].Type != "workspace_updated" {
 		t.Fatalf("replay: %#v", got)
 	}
 	stop()

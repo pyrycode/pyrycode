@@ -26,6 +26,21 @@ func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) b
 	if !s.thread {
 		return env.SessionStateCleared
 	}
+	if liveStateFamily(env.Type) {
+		if !s.interactive || !validLiveTag(env.SessionID) || env.EventID != nil {
+			return true
+		}
+		id := pushedConversationID(env)
+		if (id != "" && m.liveWithheld(s, id)) || ((len(env.SessionID) > 0 || env.SessionStateCleared) && id == "") {
+			return true
+		}
+		if env.SessionStateCleared {
+			var payload map[string]json.RawMessage
+			if json.Unmarshal(env.Payload, &payload) != nil || payload == nil || len(payload) != 0 {
+				return true
+			}
+		}
+	}
 	if env.InReplyTo != nil {
 		return false
 	}
@@ -159,6 +174,9 @@ func (m *V2SessionManager) threadReply(s *V2Session, frame json.RawMessage) (jso
 	}
 	if !bytes.Equal(projected.Payload, env.Payload) {
 		frame = replaceObjectField(frame, "payload", projected.Payload)
+	}
+	if s.thread && liveStateFamily(env.Type) && len(frame) > protocol.MaxThreadEnvelopeBytes {
+		return nil, true
 	}
 	return frame, false
 }
