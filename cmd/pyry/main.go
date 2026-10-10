@@ -1133,6 +1133,13 @@ recognize is forwarded to claude verbatim. pyry's own configuration uses an
 explicit -pyry-* prefix so it never collides with claude's namespace.
 
 Usage:
+  pyry memory configure --vault default|/absolute/folder
+                        --embedding-provider local|openai --embedding-model MODEL
+                        --capture-agent claude|codex --capture-model MODEL
+                        [--knowledge-folder /absolute/folder] (repeatable)
+                        [--credential-reference REF] (OpenAI only)
+                                                replace saved memory settings offline
+  pyry memory status                            print saved memory settings as JSON
   pyry memory credential set openai              read a memory token from stdin
   pyry memory credential status openai           report configured-only JSON locally
   pyry [pyry-flags] [claude-flags-and-args...]   supervised claude session

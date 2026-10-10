@@ -1,8 +1,9 @@
-# `internal/config` — typed schema + overlay loader
+# `internal/config` — typed schema, overlay loader and atomic memory updates
 
 User-configurable values for pyry, loaded from `~/.pyry/config.json`. Fields land additively in the same struct.
 
-This package is leaf-level and uses only the standard library. `Load` parses the file; consumers validate fields according to their own needs.
+This package is leaf-level and uses only the standard library. `Load` parses the file
+and `UpdateMemory` persists managed memory settings; consumers own semantic validation.
 
 ## Surface
 
@@ -10,6 +11,7 @@ This package is leaf-level and uses only the standard library. `Load` parses the
 type Config struct {
     RelayURL              string                 `json:"relay_url"`
     MemorySearchProviders []MemorySearchProvider `json:"memory_search_providers"`
+    Memory                *MemorySettings        `json:"memory,omitempty"`
     DebugCapture          bool                   `json:"debug_capture"`
     InteractiveRunner     string                 `json:"interactive_runner"`
     StdioPermissionPrompt bool                   `json:"stdio_permission_prompt"`
@@ -17,12 +19,50 @@ type Config struct {
 
 func DefaultConfig() Config        // built-in defaults
 func Load(path string) (Config, error)
+func UpdateMemory(path string, settings MemorySettings) error
 ```
 
 `MemorySearchProvider` carries `ID`, `DisplayName`, `Agent`, `Workspace`, and
 `Enabled *bool`. The pointer distinguishes a missing `enabled` field from
 explicit `false`. See [memory search detection](memorysearch-package.md#declarations)
-for the field contract and scope. There is no `Save` or `Watch` API.
+for the field contract and scope. `UpdateMemory` writes only managed memory settings;
+there is no general `Save` or `Watch` API.
+
+### Managed memory shape
+
+`Config.Memory` holds the additive `memory` object independently of
+`memory_search_providers`, which describe search access. Neither configures the other.
+
+| Type | JSON fields | Caller-validated meaning |
+|------|-------------|--------------------------|
+| `MemorySettings` | `vault`, optional `additional_roots` (`[]string`), `embedding`, `capture` | Complete managed memory settings |
+| `MemoryVault` | `mode`, optional `path` | `default` or `separate`; a separate vault uses a caller-resolved path |
+| `MemoryEmbedding` | `provider`, `model`, optional `credential_reference` | `local` or `openai`, with an independently chosen embedding model |
+| `MemoryCapture` | `agent`, `model` | `claude` or `codex`, with an independently chosen capture model |
+
+The scalar fields are strings. Embedding provider and capture agent are independent:
+OpenAI embedding can pair with Claude capture, and local embedding with Codex capture.
+`credential_reference` is opaque, non-secret metadata from the
+[memory credential lifecycle (#3112)](https://github.com/pyrycode/pyrycode/issues/3112).
+Tokens and credential backend-selection metadata belong to that protected lifecycle.
+
+The local semantic boundary lives in
+[`cmd/pyry/memory_config.go`](../../../cmd/pyry/memory_config.go):
+`configureMemory(ctx, settings)` validates a complete replacement before calling
+`UpdateMemory`, and `memoryStatus(ctx)` validates saved choices and projects safe
+JSON. `runMemoryConfiguration` exposes these operations through offline
+`pyry memory configure` / `pyry memory status`; wizard callers can use the same
+operations without a daemon. `memoryHome` requires an existing absolute home and
+uses its `.pyry/config.json`, never `resolveConfigPath`'s cwd fallback. See the
+[user-facing flags and status shape](../../guide.md#memory-configuration).
+
+[`cmd/pyry/memory_roots.go`](../../../cmd/pyry/memory_roots.go) owns
+`validateMemorySettings` and `resolveEffectiveMemory(ctx, settings, startupWorkspaceBase)`.
+The latter returns separate `VaultPath`, read-only `AdditionalRoots`, daemon-owned
+`TranscriptPath` and normalized `SearchRoots`; indexing overlap does not change
+write destinations or ownership. Its explicit base must come from
+`resolveStartupWorkspaceBase`, independently of the seeded `default` channel or
+hosted-session cwd. These callable operations add no daemon startup wiring.
 
 ## `debug_capture` — rejected at startup since #1514
 
@@ -77,6 +117,12 @@ deny response, and proved that the requested command did not execute.
 | Field | Default |
 |-------|---------|
 | `RelayURL` | `wss://relay.pyrycode.dev` (placeholder; real domain TBD) |
+| `Memory` | `nil` (managed memory unconfigured) |
+
+`DefaultConfig` enables no managed memory. Legacy files without `memory` and files
+with `"memory": null` retain that unconfigured state. In a present memory object,
+missing `additional_roots` decodes to a nil slice, meaning zero additional roots;
+no vault mode, provider, agent or model default is filled in.
 
 When the real relay is provisioned, that ticket changes the constant. Existing users with no `~/.pyry/config.json` pick up the new default automatically on the next daemon start; users who pinned a value in their config file are unaffected (overlay-decode preserves their explicit setting).
 
@@ -99,17 +145,93 @@ Empty file (0 bytes) is **not** treated as "fresh install" — that signal is "n
 
 Wrap prefix is `config:` — matches the convention `loadRegistry` established with `registry:`.
 
+`Load` and `UpdateMemory` remain parse-only. Unsupported mode/provider/agent strings,
+blank models, unresolved paths and unverified credential references are accepted
+without host, credential or service checks. Consumers validate choices, model names,
+host paths and references before using them. `Load` ignores unknown fields in the typed
+result; [memory replacement](#memory-replacement-and-persistence) preserves their JSON
+values on disk. A present `"memory": {}` produces a non-nil `MemorySettings` with zero
+fields, so presence alone does not establish usable settings.
+
+`configureMemory`, `memoryStatus` and `resolveEffectiveMemory` apply
+`validateMemorySettings`: accepted vault/provider/agent enums, nonblank independent
+models, canonical directory access and reserved-path exclusions, plus fresh
+`resolveMemoryCredential` validation for OpenAI. Local embeddings reject a
+reference and require no credential selection. Status rejects malformed/non-object
+config and invalid saved settings with static diagnostics; it does not expose
+`Load`'s parser details or serialize `credential_reference`. Missing/null memory
+reports unconfigured, and empty additional roots project as `[]`.
+
+A default vault stores only its mode. Configure and status defer the default
+vault's directory and reserved-path checks; status leaves its path unresolved.
+`resolveEffectiveMemory` selects the explicitly supplied daemon startup base for
+default mode and the saved canonical path for separate mode, then revalidates
+vault write/traverse access and exclusions in either mode. Reserved transcripts
+and credentials are disjoint even when redirected through symlinks; transcript
+storage is derived through existing ancestors and may remain absent. A rejected
+resolution returns a zero `effectiveMemory` and never changes saved settings.
+Resolution is a snapshot, so runtime consumers must revalidate before use.
+See [reserved-root and filesystem-identity reasoning](cli-verb-dispatch.md#memory-configuration-and-effective-roots).
+Saving settings enables no runtime, and future daemon application requires restart;
+configured status supplies no [search-readiness evidence](memorysearch-package.md#effective-evidence).
+
+## Memory replacement and persistence
+
+`UpdateMemory(path, settings)` accepts an explicit config-file path and a complete
+`MemorySettings` replacement. It creates a missing config and replaces every known
+memory field on later calls while preserving unrelated top-level settings, including
+search-provider declarations, and unknown values inside `memory`, `vault`, `embedding`
+and `capture`.
+
+| Replacement input | Persisted effect |
+|-------------------|------------------|
+| Empty `Vault.Path` | Deletes the old `vault.path` key |
+| Empty `Embedding.CredentialReference` | Deletes the old `embedding.credential_reference` key |
+| Nil `AdditionalRoots` | Deletes the old `additional_roots` key |
+| Non-nil `AdditionalRoots`, including `[]string{}` | Replaces the old array; an empty slice writes `[]` |
+
+Thus switching separate to default or OpenAI to local clears stale path/reference
+keys when the caller omits those optional values. Supplying them retains them even
+with those choices: the writer does not infer semantic validity from the selected mode
+or provider. Zero-valued settings still write a memory object; this API does not remove
+the entire `memory` key.
+
+Unknown values are retained as `json.RawMessage`, preserving large integers, precise
+fractions and exponents beyond float64 range. Decoding them through `any` would round
+numbers or fail on overflow. Whitespace and key order may change during encoding;
+preservation concerns JSON values, not the original formatting.
+
+Absent/null `memory`, `vault`, `embedding` and `capture` objects may be populated.
+An existing config must be a non-null JSON object: empty, malformed and non-object
+documents are rejected unchanged. Non-null non-object values at any of those four
+memory-object locations are also rejected unchanged. These structural checks apply
+to `UpdateMemory`; `Load` retains its overlay-decode and error behavior.
+
+The writer finishes encoding before filesystem mutation, creates newly needed parent
+directories at 0700, and stages a 0600 temporary file in the destination directory.
+It writes, syncs, closes and atomically renames that file over the config. Committed
+files are 0600, including replacements of files with broader permissions; existing
+parent-directory modes are left as they are. Read, parse/structure, encode, mkdir,
+create, chmod, write (including short write), sync, close and rename failures return
+errors and preserve the previous config bytes, or leave a missing config absent.
+Cleanup closes any remaining handle and removes staging, surfacing cleanup errors too.
+The operation writes no vault contents or credential storage and starts no service.
+
 ## Out of scope (deferred to follow-up tickets)
 
-- **Path resolution.** `Load` takes a `path` string. The "where does `~/.pyry/config.json` live" question is the caller's; the daemon-startup consumer ticket will add a `resolveConfigPath()` helper alongside `resolveSocketPath` / `resolveRegistryPath` in `cmd/pyry/main.go`. Doing it here would bind the package to `os.UserHomeDir` semantics that some future caller (e.g. a `--config` override) wants to compose differently.
-- **`Save`.** Read-only. Future ticket adds the atomic-rename write primitive if/when needed.
+- **Path resolution.** `Load` takes an explicit `path` string. `cmd/pyry` callers own location policy: `resolveConfigPath` retains its fallback, while the local memory operations require `memoryHome` and refuse a cwd-relative fallback. Effective vault resolution also belongs to the caller, with an explicit daemon startup base. Keeping these choices outside `config` avoids binding the leaf package to one home or workspace policy.
+- **General `Save`.** `UpdateMemory` provides atomic replacement for managed memory settings. Writing other config fields remains outside this API.
 - **Watcher / hot reload.** Daemon reads once at startup. If hot reload becomes necessary, that's a separate seam (file watcher, signal handler) — most likely a `sync/atomic.Pointer[Config]` swapped on file events. Not bolted onto `Load`.
 - **Schema versioning.** Per the ticket: "if `Config` ever grows incompatibly, version it at that point." `encoding/json`'s default lenient handling (unknown JSON fields ignored, missing struct fields → zero) covers backward-additive changes for free.
 - **URL validation.** `RelayURL` is a `string`. Validation (scheme, parseability) is the consumer's job — `pyry pair` will validate before connecting. The config package's contract is "decode JSON into a struct"; semantic validation layers above.
 
 ## Concurrency
 
-None. `Load` is one synchronous `os.ReadFile` + one `json.Unmarshal`. No goroutines, no shared state, no mutexes; race-detector clean by construction. The daemon will call `Load` once at startup, before any goroutines spawn.
+`Load` and `UpdateMemory` are synchronous, with no goroutines, shared state or locks.
+Callers must serialize the entire read/modify/write operation for one config path,
+including updates from other processes. Atomic rename gives readers complete file
+snapshots; it does not prevent concurrent writers from losing each other's updates.
+The daemon reads config once at startup.
 
 ## Tests
 
@@ -122,10 +244,30 @@ None. `Load` is one synchronous `os.ReadFile` + one `json.Unmarshal`. No gorouti
 Each row writes its fixture to `t.TempDir()` (no checked-in golden files).
 `Config` contains a slice and is compared with `reflect.DeepEqual`.
 
+`internal/config/memory_test.go` covers the managed memory contract:
+
+- `TestLoadMemory` — legacy/null unconfigured state, no managed-memory defaults,
+  both vault modes, independent embedding/capture choices and parse-only decoding.
+- `TestUpdateMemoryReplacement` — repeated complete replacements, unrelated and
+  nested unknown values, exact numbers, optional-key deletion and array replacement.
+- `TestUpdateMemoryObjects` and `TestUpdateMemoryRejectsStructure` — populate
+  absent/null objects and reject invalid documents/object shapes without modification.
+- `TestUpdateMemoryFreshProcess` — file/new-parent modes, replacement permissions
+  and a fresh test process loading the committed settings.
+- `TestUpdateMemoryFailures` and `TestUpdateMemoryReadAndDirectoryErrors` — injected
+  staging failures, exact previous bytes or continued absence, cleanup and retry,
+  plus read and parent-directory errors.
+
+Replacement tests inspect raw key presence as well as decoded settings. A check of
+only the decoded roots' length would pass both an omitted key and a supplied empty
+array, missing a writer that persisted the wrong form. Numeric preservation checks
+compact raw JSON rather than decoding through float64, which would hide the precision
+loss the test is meant to catch.
+
 ## Related
 
 - [ADR 018](../decisions/018-config-overlay-decode.md) — overlay-decode over two-pass merge or pointer-field distinguishing absent-vs-empty
 - [`sessions-registry.md`](sessions-registry.md) — sibling on-disk JSON file (pyry-owned, atomic-rename writes)
-- `internal/sessions/registry.go:31-51` — `loadRegistry`, the reference implementation for the missing-file / wrap shape
+- `loadRegistry` in `internal/sessions/registry.go` — the reference implementation for the missing-file / wrap shape
 - [`streamsup-package.md`](streamsup-package.md) — the `"stream-json"` runner `interactive_runner` selects
 - [`codebase/1081.md`](../codebase/1081.md) — the composition-root selector + relay-leg stream-mode wiring this field drives

@@ -96,6 +96,54 @@ persistence. See the [command contract](../../guide.md#memory-credentials),
 [service-user storage requirements](../../deployment.md#memory-credentials) and
 [design](../../specs/architecture/3112-memory-credentials.md).
 
+## Memory configuration and effective roots
+
+`runMemory` retains credential dispatch and routes configure/status to
+`runMemoryConfiguration`. Callable `configureMemory`, `memoryStatus` and
+`resolveEffectiveMemory` share `validateMemorySettings`; config parsing and atomic
+replacement remain in the [config package](config-package.md#surface). Status
+projects an explicit embedding shape with a freshly validated boolean instead
+of serializing the saved embedding struct: a reference is non-secret metadata,
+but returning that struct would still disclose it. Parser/load/save diagnostics
+remain static so rejected arguments and malformed JSON cannot echo credentials.
+See the [command contract](../../guide.md#memory-configuration).
+
+### Reserved storage and index inputs
+
+Derived roots need credential exclusions just as user-supplied roots do. A safe
+vault alone cannot keep credentials out of `SearchRoots`: a `recent-transcripts`
+symlink can point at credentials or an ancestor/descendant of them. `memoryReserved`
+rejects that overlap before configure, status or effective resolution succeeds.
+`TestMemoryTranscriptCredentialOverlap` changes the alias after an initial save,
+then checks empty failed resolution, no status JSON and unchanged config bytes.
+
+Absent reserved leaves still need ancestry checks. `memoryReservedPath` peels
+missing components with `os.Lstat`, resolves the existing ancestor and requires
+a directory before restoring the suffix. A following stat would mistake a
+dangling symlink for a directory that has not been created yet, accepting an
+unresolved boundary. This operation creates no transcript or credential storage.
+
+### Path identity and normalization
+
+`filepath.EvalSymlinks` can retain caller casing on case-insensitive volumes;
+lexical exclusions and deduplication alone can therefore miss aliases to the same
+directory. `memoryDirectory` and `memoryReservedPath` use
+[`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract), whose
+casing probes are best-effort. Execute-only ancestors can prevent those probes
+from listing directory entries, so `memoryContains` also compares ancestor
+filesystem identities with `os.SameFile` when component ancestry does not match.
+Lowercasing all paths would wrongly collapse distinct case-sensitive siblings.
+
+`normalizeMemoryRoots` retains containing parents and preserves siblings such as
+`notes` and `notes-old`. `resolveEffectiveMemory` normalizes the search union while
+keeping vault destination and transcript ownership independent: a read-only
+parent root can subsume a vault subtree for indexing without becoming its write
+destination. `TestMemoryRootFilesystemIdentity` exercises identity fallback on
+every filesystem; `TestMemoryPathsCaseSensitiveSiblings` and
+`TestMemoryPathsCaseInsensitive` cover their respective filesystem behavior and
+skip when that prerequisite is absent. A skipped casing test does not establish
+the case-insensitive boundary.
+
 ## Related
 
 - [config-package.md](config-package.md) — `interactive_runner`'s `selectInteractiveRunner`, the loud-removal precedent this switch's arms mirror.
