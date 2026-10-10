@@ -27,6 +27,8 @@ type QueryResult struct {
 	Version                              uint64
 	LowerOrder, UpperOrder, Continuation uint64
 	OlderExists                          bool
+	FromVersion                          uint64 // exclusive covered bound for nonzero catch-up
+	ResetRequired                        bool   // no items or covered/page bounds; acquire a newest window
 	Err                                  error
 }
 
@@ -36,6 +38,12 @@ type queryIndex struct {
 	byID            map[uint64]int
 	ordered, active []int
 	work            func(bool)
+	touched         []int
+	touches         []uint64
+	coveredThrough  uint64
+	unprovenThrough uint64
+	suppressed      uint64
+	complete        bool
 }
 
 func newQueryIndex(items []Item, work func(bool)) *queryIndex {
@@ -94,17 +102,24 @@ func (s *Store) query(ctx context.Context, id conversations.ConversationID, uppe
 		return QueryResult{}, ErrInvalidLimit
 	}
 	limit = min(limit, MaxQueryItems)
-	s.mu.Lock()
-	w := s.workers[id]
-	if s.closed || w == nil || w.retiring {
-		s.mu.Unlock()
-		return QueryResult{}, nil
-	}
-	snap, q := w.snapshot, w.query
-	s.mu.Unlock()
+	snap, q := s.captureQuery(id)
 	if snap.State != StateUsable {
 		return QueryResult{State: snap.State, Err: snap.Err}, nil
 	}
+	return q.window(ctx, snap, upper, limit, newest)
+}
+
+func (s *Store) captureQuery(id conversations.ConversationID) (Snapshot, *queryIndex) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w := s.workers[id]
+	if s.closed || w == nil || w.retiring {
+		return Snapshot{}, nil
+	}
+	return w.snapshot, w.query
+}
+
+func (q *queryIndex) window(ctx context.Context, snap Snapshot, upper uint64, limit int, newest bool) (QueryResult, error) {
 	if newest {
 		upper = snap.Version + 1
 	}

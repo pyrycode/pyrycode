@@ -48,16 +48,15 @@ func TestDaemonLiveMappedInventoryBounds(t *testing.T) {
 			env := protocol.Envelope{ID: maxID, Type: typ, Payload: raw, InReplyTo: &maxID, EventID: &maxID, HistoryEntryID: &maxID}
 			r, ok := o.admit(src, env, "")
 			if !ok {
-				if typ == protocol.TypeMCPStatus {
-					// The existing mapping exceeds the bound; the owner must reject it.
-					t.Skip("blocked on #3091: existing MCP mapping has no full envelope byte budget")
-				}
 				tagged := env
 				tagged.SessionID = liveSessionTag(src.provenance)
 				size, _ := json.Marshal(tagged)
 				t.Fatalf("supported mapped payload rejected: %d bytes", len(size))
 			}
 			encoded, _ := json.Marshal(r.Envelope)
+			if len(encoded) > protocol.MaxThreadEnvelopeBytes {
+				t.Fatal("fresh exceeded budget")
+			}
 			t.Logf("fresh: %d bytes", len(encoded))
 			env.Payload = json.RawMessage(`{}`)
 			env.SessionStateCleared = true

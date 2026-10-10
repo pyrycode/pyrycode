@@ -35,6 +35,9 @@ type Fold struct {
 	version                   uint64
 	lastShown                 uint64
 	published                 map[uint64]bool
+	touches                   map[uint64]uint64
+	suppressed                uint64
+	unprovenThrough           uint64
 	appendedText              int
 	items                     []Item
 	successor                 history.SessionProvenance
@@ -57,6 +60,7 @@ func New(conversationID string) *Fold {
 	return &Fold{
 		conversationID:    conversationID,
 		published:         make(map[uint64]bool),
+		touches:           make(map[uint64]uint64),
 		childTurns:        make(map[childKey]*mainTurn),
 		childCalls:        make(map[childCallKey]*childCall),
 		childReports:      make(map[childCallKey]*mainOutcome),
@@ -79,6 +83,9 @@ func (f *Fold) Feed(entries []history.Entry) error {
 	for _, e := range entries {
 		if e.ID == 0 || e.ID > history.MaxEntryID || e.ID <= f.version {
 			return errors.New("thread: invalid entry order or id")
+		}
+		if e.ID != f.version+1 {
+			f.unprovenThrough = e.ID - 1
 		}
 		f.version = e.ID
 		var owner struct {

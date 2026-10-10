@@ -89,5 +89,16 @@ to bridge.
   `cmd/pyry`'s `approvalParkedReport`/`markApprovalHolds`/`approvalHoldPending`
   and [features/streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md](streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md).
 
+## Testing
+
+Stale give-up tests must establish removal before exercising the expired
+attempt. Removing on attempt two with a 1 ms deadline is scheduling-sensitive:
+synchronous retry-warning logging can exhaust the window on attempt one and
+legitimately abandon the head first. `TestQueue_Lifecycle_RetryGiveUpAndShutdown`
+removes during the first failure, explicitly calls `giveUp` with an expired
+duration, and checks rejection plus exactly one removed terminal fact. The
+`giveUpRow` cases in `head_advance_test.go` retain real retry-window coverage;
+the stale-guard proof does not depend on reaching another attempt in time.
+
 See [codebase/1000.md](../codebase/1000.md), [codebase/1007.md](../codebase/1007.md),
 [codebase/1008.md](../codebase/1008.md).

@@ -247,7 +247,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 			return err
 		}
 		progress = snapshot
-		s.publish(ctx, id, w, snapshot)
+		s.publish(ctx, id, w, snapshot, fold)
 		return nil
 	}
 	if err := publish(); err != nil {
@@ -274,8 +274,9 @@ func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRec
 	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, Items: snapshot.Items, Complete: true, Recovery: recovery})
 }
 
-func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, snapshot Snapshot) {
+func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, snapshot Snapshot, fold *Fold) {
 	index := newQueryIndex(snapshot.Items, s.queryWork)
+	index.prepareCatchUp(fold)
 	s.mu.Lock()
 	before := w.snapshot
 	s.mu.Unlock()

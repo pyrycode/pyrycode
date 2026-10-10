@@ -54,24 +54,29 @@ func messageText(item Item) string {
 	return content.Text
 }
 
-// recordShown observes resolved public identities, never provisional child state.
+// recordShown observes public touches and shown appearances after private joins.
 func (f *Fold) recordShown(first, appended int) {
 	var visible map[uint64]bool
 	if len(f.children) > 0 {
 		visible = make(map[uint64]bool)
 	}
 	for index, item := range f.items {
-		if visible == nil && index < first && index != appended {
+		if visible == nil && index < first && index != appended && item.Rev != f.version {
 			continue
 		}
-		if f.children[index] != nil && (item.Parent == 0 || !visible[item.Parent]) {
-			continue
-		}
-		if claimed, ok := f.messages[item.ID]; ok && claimed < 0 {
+		claimed, exists := f.messages[item.ID]
+		if (f.children[index] != nil && (item.Parent == 0 || !visible[item.Parent])) || (exists && claimed < 0) {
+			if f.touches[item.ID] != 0 {
+				delete(f.touches, item.ID)
+				f.suppressed = f.version
+			}
 			continue
 		}
 		if visible != nil {
 			visible[item.ID] = true
+		}
+		if f.touches[item.ID] == 0 || item.Rev == f.version {
+			f.touches[item.ID] = f.version
 		}
 		if item.Shown && (!f.published[item.ID] || index == appended) {
 			f.lastShown = f.version
