@@ -301,12 +301,56 @@ messages. `TestStoreObservationRetainedSuffixMemory` checks actual live heap
 growth for 64 single-byte appends to a 1 MiB message in a cancellable helper
 process; process isolation keeps unrelated tests' allocations out of the proof.
 
-`TestStoreReplayTailIsolation` gates real history callbacks to prove bounded
-chunks, captured-bound readiness, append/other-conversation progress, ordered
-handoff and detached snapshots. `TestStoreContinuationReopen` compares replay cut
-points and tails with a fresh fold, including hidden pending reports and
-unresolved parents. `TestStoreLifecycle` gates cancellation to prove joins,
-retirement, absence of late publication and replay of commits made while unloaded.
+`TestStoreReplayTailIsolation` retains 4,098 committed raw replay facts
+(`history.MaxPageEntries + 2`) through real history readers, with four message
+items at the beginning and across the chunk boundary; unsupported durable facts
+fill the remaining entries. It pauses after the first successful chunk feed,
+before the callback returns, proving a partially folded replay remains rebuilding
+with no published items/version. Duplicate `Load` must preserve the worker's
+identity. While A is paused, appends finish and B reaches usable publication.
+The Tail handoff snapshot equals only the captured replay bound. Messages
+committed during replay, handoff and later tail match independent full replay;
+successful delivery consumes every raw ID exactly once in order, with at least
+two replay chunks and no chunk exceeding `history.MaxPageEntries`. Mutating
+returned item fields/content must leave subsequent snapshots unchanged.
+
+Keep raw reader-bound coverage separate from growing-item folding cost.
+`resolveChildren` and `recordShown` traverse item collections per fact; an
+all-message fixture makes an isolation proof pay for thousands of growing rows
+and repeated full comparisons. Original-fixture measurements found folding
+dominated handoff work: 1.52s of 1.67s focused, and 2.24s of 2.37s under the
+unchanged parallel thread/history suite. The historical five-second expiry was
+not reproduced, so these measurements identify the dominant measured phase,
+not the exact cause of that occurrence. Bounding public items preserves raw
+delivery coverage without increasing the deadline or changing production
+folding. See the [phase evidence and synchronization revisions](../../specs/architecture/3094-store-replay-tail-isolation.md#revisions).
+
+The test's local channel waits retain five-second deadlines and name each
+barrier. They distinguish worker completion from a deadline with the last
+observed replay/checkpoint/publication phase, consumed count, chunks and snapshot
+state/version. Verbose output separates release-to-handoff folding, walk,
+checkpoint and publication timing; snapshot waits have named log context.
+Append/load work returns errors and its appended entry through a buffered result
+channel for the test goroutine to check. Failure cleanup releases both gates,
+cancels the test-owned context and joins that operation before the earlier
+`testThreadStore` cleanup joins store workers through `Store.Shutdown`.
+
+Published Tail progress does not establish completion of test-owned delivery
+bookkeeping: `Store.run` publishes inside the wrapped feed callback, while the
+wrapper records successful IDs after feed returns. A snapshot can already
+match full replay while the wrapper's count is short. A mutex protects recorded
+data but cannot await bookkeeping that has yet to acquire it. Close/replace a
+notification under the same mutex as the successful-ID count; capture the count
+and current notification atomically after final publication. If incomplete, use
+the finite worker-aware `final tail delivery bookkeeping` barrier before exact
+count/order assertions. The serial reader completes earlier callbacks before
+publishing the final chunk, so the next notification covers remaining delivery;
+the shared mutex prevents a missed wakeup.
+
+`TestStoreContinuationReopen` compares replay cut points and tails with a fresh
+fold, including hidden pending reports and unresolved parents.
+`TestStoreLifecycle` gates cancellation to prove joins, retirement, absence of
+late publication and replay of commits made while unloaded.
 
 `TestStoreFailureRetry` must commit a new tail entry before injecting failure:
 an empty tail can pass without exercising partial fold advancement or proving
