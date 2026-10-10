@@ -9,6 +9,7 @@
 - `cmd/pyry/pair.go` → `resolveConfigPath`: its cwd fallback must not be used by memory operations.
 - `cmd/pyry/workspace_base.go` → `resolveStartupWorkspaceBase`: explicit service startup context, independent of channel/session cwd.
 - `internal/config/config.go`, `internal/config/memory.go` → `Load`, memory schema, `UpdateMemory`: parse-only data and atomic replacement preserving unknown JSON.
+- `internal/canonicalpath/path.go` → `Resolve`, `canonicalCase`; `docs/knowledge/features/canonicalpath-package.md` → Path and error contract: existing-component casing is best-effort, requiring identity comparisons when an ancestor cannot be listed.
 - `docs/knowledge/features/config-package.md` → Surface and Load semantics: caller owns semantic validation.
 - `docs/knowledge/features/cli-verb-dispatch.md` → Memory credential persistence and option parsing: validate flags without echoing inputs; no credential caches.
 - `docs/knowledge/features/memorysearch-package.md` → Effective evidence: saved configuration must not claim search readiness.
@@ -43,6 +44,8 @@ Synchronous operations; no new goroutines or mutable globals. CLI process handle
 | Default resolves under distinct service startup bases | `TestEffectiveMemoryRoots` |
 | Failed validation/save followed by retry preserves old config | `TestMemoryConfigurationReplacement`, `TestMemoryConfigurationFailures` |
 | Saved OpenAI reference resolves afresh after token loss/unsafe storage | `TestMemoryConfigurationCredentials` |
+| Reserved transcript root changes to a credential alias after save | `TestMemoryTranscriptCredentialOverlap` |
+| Root aliases/casing repeat, including renamed reserved ancestors | `TestMemoryRootFilesystemIdentity`, `TestMemoryPathsCaseInsensitive`, `TestMemoryPathsCaseSensitiveSiblings` |
 
 ## Error handling
 
@@ -71,6 +74,7 @@ Pending for documentation stage:
 - [Tokens] SHOULD FIX: parser and load errors can echo reference-like input. Suppress parser output and replace errors with static diagnostics; never serialize the stored embedding struct into status. Lifecycle resolution owns protection and freshness.
 - [File operations] Canonical directory/access checks precede component ancestry exclusions; reserved-path peeling must use lstat so a broken symlink cannot look absent. `UpdateMemory` owns private atomic writes. Validation creates nothing; runtime check/use protection belongs to #3098/#3099/#3100/#3101.
 - [File operations — verifier finding 1] Resolved: the derived transcript path is also an index input. `memoryReserved` rejects canonical equality or ancestry overlap with credential storage before configure, status or effective resolution can return usable settings. `TestMemoryTranscriptCredentialOverlap` covers aliases to credential storage and its ancestors/descendants for both vault modes, empty failed resolution and unchanged saved bytes.
+- [File operations — verifier finding 2] Resolved: `memoryDirectory` and the existing ancestor in `memoryReservedPath` use `canonicalpath.Resolve` for consistent on-disk casing. `memoryContains` also compares existing ancestor identities when lexical ancestry fails, covering execute-only ancestors where casing probes are unavailable without folding distinct case-sensitive siblings. `TestMemoryPathsCaseInsensitive` covers reserved-path exclusions, canonical saved/effective roots, absent reserved leaves and execute-only ancestry; `TestMemoryRootFilesystemIdentity` exercises the fallback on every filesystem, and `TestMemoryPathsCaseSensitiveSiblings` preserves distinct directories.
 - [Subprocesses] No production subprocess or shell; test helper re-execs only this test binary with explicit arguments.
 - [Cryptography] No new crypto or secret comparisons; reuse credential lifecycle.
 - [Network and I/O] Local metadata only, no network listeners or manual memsearch operations.
@@ -85,3 +89,4 @@ Pending for documentation stage:
 
 - 2026-10-10: Final implementation and hermetic coverage exceed the initial 770-line sketch (approximately 880 lines); canonical reserved-path and POSIX access cases account for the overage. Actual GitHub lineage is #3097 → #3108 → #3117, so the grandchild sizing rule requires continued building with `needs-human:sizing`. Candidate standalone seams would have been offline configure/status and effective daemon resolution; no scope is added. Root ordering is stable in input order, with the effective vault first unless a containing read-only root subsumes it; ownership/destination fields remain independent.
 - 2026-10-10, verifier finding 1: The original security review omitted the derived transcript root's boundary with credentials. Reserved transcript and credential roots must be disjoint after resolution, including symlink aliases, so unsafe storage is rejected before any settings publication or search-root union.
+- 2026-10-10, verifier finding 2: `EvalSymlinks` alone retained input casing on case-insensitive volumes. Supplied directories and existing reserved ancestors now use `canonicalpath.Resolve`; ancestry checks additionally compare filesystem identities to cover its best-effort case probes. Normalization still retains distinct case-sensitive siblings. Filesystem-dependent tests explicitly skip when the required case behavior is unavailable; verifier coverage on a case-insensitive macOS volume remains necessary.

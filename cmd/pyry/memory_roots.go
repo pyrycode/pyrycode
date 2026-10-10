@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/config"
 	"golang.org/x/sys/unix"
 )
@@ -25,7 +26,7 @@ func memoryDirectory(path string, access uint32) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", errMemorySettings
 	}
-	real, err := filepath.EvalSymlinks(filepath.Clean(path))
+	real, err := canonicalpath.Resolve(filepath.Clean(path))
 	if err != nil {
 		return "", errMemorySettings
 	}
@@ -55,7 +56,7 @@ func memoryReservedPath(path string) (string, error) {
 		}
 		path = parent
 	}
-	real, err := filepath.EvalSymlinks(path)
+	real, err := canonicalpath.Resolve(path)
 	if err != nil {
 		return "", errMemorySettings
 	}
@@ -86,7 +87,26 @@ func memoryReserved(home string) (memoryReservedPaths, error) {
 }
 func memoryContains(parent, child string) bool {
 	relative, err := filepath.Rel(parent, child)
-	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return true
+	}
+	// Case probes are best-effort through execute-only ancestors. Compare
+	// existing directory identities so alternate casing cannot bypass exclusions.
+	info, err := os.Stat(parent)
+	if err != nil {
+		return false
+	}
+	for {
+		ancestor, err := os.Stat(child)
+		if err == nil && os.SameFile(info, ancestor) {
+			return true
+		}
+		next := filepath.Dir(child)
+		if next == child {
+			return false
+		}
+		child = next
+	}
 }
 func memoryOverlaps(a, b string) bool { return memoryContains(a, b) || memoryContains(b, a) }
 func normalizeMemoryRoots(paths []string) []string {
