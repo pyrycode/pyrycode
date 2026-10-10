@@ -74,3 +74,7 @@ Pending for the documentation stage: `docs/hosted-apps.md` under `Manifest and i
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-10
+
+## Revisions
+
+- 2026-10-10: formatted acceptance tests reached 499 lines before implementation, exceeding the sketch's test allowance; the finished implementation plus tests and plan is approximately 1120 lines. Actual parentage is #3143 → #3136 → #3121. Per the grandchild rule, applied `needs-human:sizing`, recorded the measurement and hypothetical manifest/storage split on the issue, and continued the assigned scope. No interfaces or behavior changed. The concurrency test caught a host-ID read from the replaceable snapshot outside the mutex; validation now runs inside the same mutex critical section as mutations, consistent with the planned single-lock model.
