@@ -361,12 +361,20 @@ cursor.
 
 Admission validates the complete envelope against
 `protocol.MaxThreadEnvelopeBytes` (65519 bytes), including metadata and its clear
-form; invalid or oversized input leaves retention unchanged. MCP server-count and
-error-text caps alone do not bound the other strings or JSON escaping: a hostile
-sixteen-row inventory exceeds 125 KB. The MCP fit assertion in
-`TestDaemonLiveMappedInventoryBounds` remains skipped pending
-[#3091](https://github.com/pyrycode/pyrycode/issues/3091); ordinary MCP retention,
-oversize rejection and clears are covered. An owner-only fixture would miss source
+form; invalid or oversized input leaves retention unchanged. MCP's producer limits
+(16 servers and 256 UTF-8 bytes of Error) alone do not bound the other strings or
+JSON escaping. `turnbridge.mapMCPStatus` now retains the longest whole-row prefix
+within a 63,000-byte encoded-array budget, stopping at the first rejected row.
+Retained fields stay verbatim; mapping omissions add to the producer count with
+`math.MaxInt` saturation. See [the mapping contract and envelope reserve](turnbridge-package-outbound-adapter-map-event.md).
+`TestMCPStatusDecoderAndMapperOmissions` covers both cuts together: 19 hostile
+source rows become 16 producer rows, then eight mapped rows with 11 omissions.
+
+`TestDaemonLiveMappedInventoryBounds` requires the hostile sixteen-row MCP
+reading and its `{}` family clear to be accepted and fit the complete-envelope
+limit, including escaped source metadata and maximum identity counters; MCP is
+no longer skipped. `TestDaemonLiveMetadataAndBound` separately checks rejection
+of arbitrary oversized envelopes. An owner-only fixture would miss source
 capture and shared-identity failures: `TestDaemonLiveCaptureTransitionOrdering`,
 `TestDaemonLiveReturningRoutingID`, `TestDaemonLiveNeutralMainTurnIdentity` and
 `TestDaemonLiveLegacyDelayAndIdentity` exercise those producer paths.
