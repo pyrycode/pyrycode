@@ -25,7 +25,8 @@ for the wire contract and
 [`protocol-package-types-session-settings-read-payloads.md`](protocol-package-types-session-settings-read-payloads.md)
 for the payload type.
 An optional `memory_search` report comes from `MemorySearchFor` for the
-conversation and session accepted by `RunConfigFor` (#2693). See
+conversation and session accepted by `RunConfigFor`, or named by the
+source-bearing settings reading (#2693/#3162). See
 [the wire contract](../../protocol-mobile.md#memory_search-2692) for its shape.
 
 Before #1610 the reported id
@@ -45,11 +46,44 @@ construction (#1077/#1101), so `handleRequestSnapshot` short-circuited to
 with a terminal — down with it. #2540 deleted that render arm and the
 `Snapshotter`/`SnapshotSettings`/`SnapshotUsage` seams entirely, so
 `handleRequestSnapshot` now answers only the two errors and has no reply left
-to drag anything down with. Saved fields still come through one
+to drag anything down with. Legacy saved fields come through one
 conversation-keyed `RunConfigFor` read on both runners. The separate `EffectiveEffortFor` provider remains optional at the
 relay boundary. Production wires it only when both the conversation registry
 and session pool exist; otherwise the existing reply is preserved with
 `effective_effort` omitted.
+
+## Supplied settings reads
+
+For a negotiated thread connection with `SessionSettingsReadingFor` installed,
+`handleRequestSessionSettings` consumes its `LiveState` once without consulting
+`RunConfigFor`. An unavailable result retains the zero-settings reply and never
+retries the legacy source. Non-thread connections and an absent optional
+provider retain the legacy path and bytes. Daemon installation remains #3163;
+production negotiation remains #3164. See the
+[supplied delivery contract](../../protocol-mobile.md#session-settings-v2).
+
+**Enrich the original object, not a partial DTO.** The supplied base payload can
+contain fields beyond `SessionSettingsPayload`. Rebuilding it through that type
+would silently discard those fields and change omission/null presence.
+`pushSettingsReading` uses the decoded session/model only as enrichment keys,
+then `replaceObjectField` changes only the owned optional fields in the original
+JSON. `EffectiveEffortFor` uses the supplied conversation and adds a string or
+explicit null only when available. `CapabilitiesFor` uses the base session/model
+only with negotiated `multi_agent`; `MemorySearchFor` uses the supplied
+conversation and base session, retaining the existing unknown/empty-provider
+error report. Other fields and supplied provenance survive unchanged. Explicit
+clears skip enrichment. `TestSuppliedSettingsEnrichment` compares the whole
+decrypted payload, including unrelated fields and optional-field presence.
+
+`pushLiveReply` adds the requesting envelope's correlation and queues through
+`PushLiveState`; the worker never seals. Settings reads and successful
+`UpdateSettingsReading` acknowledgements share the settings family, so generated
+clears are uncorrelated, equal-revision requests remain answerable and older
+readings cannot restore predecessor state. Failed updates retain the fixed
+legacy error mapping and produce no success reading; they never invoke
+`SettingsUpdater` as a retry. See [supplied ordering](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#supplied-live-state-ordering).
+
+## Legacy settings reads
 
 Control flow, in load-bearing order:
 
@@ -60,10 +94,10 @@ Control flow, in load-bearing order:
    `appFrameWorker`. `EffectiveEffortFor` may wait on a child round trip, so
    provider availability is deliberately *not* a dispatch gate: a nil provider
    still owes the complete saved-settings reply. Since #2646, the job also
-   carries `multiAgent`, copied from Run-owned `s.multiAgent` at this same
-   enqueue point — the worker never reads `s.multiAgent` itself, only
-   `job.multiAgent`, because Run is the only goroutine allowed to touch the
-   session's negotiated-capability state.
+   carries `multiAgent` and, for supplied provider selection, `thread`, copied
+   from Run-owned negotiated fields at this same enqueue point. The worker
+   reads only the job's immutable decisions because Run is the only goroutine
+   allowed to touch the session's negotiated-capability state.
 2. **Decode on the worker, tolerated at the payload boundary.** The handler
    re-decodes the immutable plaintext envelope to recover its correlation id.
    Failure is unreachable after `dispatchAppFrame` decoded the same bytes; it
@@ -327,8 +361,7 @@ B or cross-correlate replies; cancellation waits on the provider's received
 context and proves that no late reply is sealed. Mutation and ordinary-message
 spies keep this read path read-only.
 
-**Concurrency.** No new goroutine, channel, lock, or shared cache was added.
-Each open connection already owns one FIFO `appFrameWorker`; `RunConfigFor`,
+**Concurrency.** Each open connection owns one FIFO `appFrameWorker`; `RunConfigFor`,
 `EffectiveEffortFor`, and `MemorySearchFor` run synchronously
 there. A blocked provider delays only later frames for that connection, while
 `Run` and every other connection worker remain serviceable. Moving
@@ -336,11 +369,15 @@ there. A blocked provider delays only later frames for that connection, while
 concurrently; its production registry, pool, permission-confirmation, and
 usage readers synchronize their own state, and test doubles must do the same.
 
-The provider receives the manager's Run-derived context. A compliant provider
-returns on cancellation; `forwardToRun` also selects on that context and on
-`s.done`, so shutdown or connection teardown drops a pending unsealed reply.
-`forwardAppReply` remains the only step that touches the Noise send cipher, on
-the single-owner `Run` goroutine. The `cmd/pyry` producer takes its registry
+Settings enrichment receives the worker's connection-scoped context, derived
+from Run's context and independently cancelled on requester teardown. Deferring
+that cancellation until worker return would strand a provider blocked on
+`ctx.Done()` and keep outstanding context/MCP asks alive too. The watcher and
+the regression proof are documented under
+[connection-scoped reading cancellation](v2-session-manager-concurrency.md#connection-scoped-reading-cancellation).
+Legacy replies cross `forwardToRun`; supplied replies cross `PushLiveState`.
+Both return to the single-owner `Run` goroutine for Noise sealing and drop
+pending output on teardown. The `cmd/pyry` producer takes its registry
 and pool read locks sequentially, never nested. A lifecycle transition between
 its snapshots can make permission or applied effort unavailable, but cannot
 make saved fields describe another session.

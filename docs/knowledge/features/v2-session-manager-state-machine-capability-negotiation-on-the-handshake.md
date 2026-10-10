@@ -80,9 +80,10 @@ authoritative watermark lookup and session-state reconciliation providers are
 installed. Nil/false disables `thread`; advertisement alone is insufficient.
 `handleNoiseInit` records `s.thread` only on authenticated admission, and rekey
 preserves it. `ActiveConn.Thread` exposes the decision for open connections.
-Production leaves readiness unwired until #3077. The relay's supplied-state
-reconciliation is implemented (#3082); daemon provenance and retained readings
-remain pending #3076.
+Production leaves readiness unwired until #3164. The relay's supplied-state
+reconciliation (#3082) and on-demand handlers (#3162) are implemented; daemon
+provider installation remains #3163. Catch-up/pages and replay replacement
+remain #2963.
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
 replies, but `threadWithheld` independently gates all three thread update kinds
@@ -133,6 +134,17 @@ the wire payload is `{}` or names only a prompt/session ID. Correlation is not
 authorization: a supplied reply and its clear require interactive access, a
 known source conversation and the existing Codex gate. Withheld readings do not
 advance delivery state. See the [wire contract](../../protocol-mobile.md#session-scoped-live-state-v2-supplied-delivery-contract).
+
+Select an optional source-bearing provider once, only for a negotiated thread
+connection. Source-only context/MCP installation must pass admission without a
+legacy provider; otherwise the request is silently consumed before its provider
+can run. A selected provider's refusal must not trigger a legacy query or repeat
+a settings mutation. `pushLiveReply` adds only request correlation and returns
+the supplied `LiveState` to the bounded `PushLiveState` queue for Run-owned
+delivery. Copy `thread` and `multiAgent` into `appFrameJob` on `Run` before
+worker handoff; reading negotiated session fields from workers would violate
+their ownership. See [settings enrichment](v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md#supplied-settings-reads)
+and [connection cancellation](v2-session-manager-concurrency.md#connection-scoped-reading-cancellation).
 
 `forwardLiveState` orders session generations across all families for one
 conversation, then revisions by normalized family and `ReadingID`. Sorting

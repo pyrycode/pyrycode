@@ -204,8 +204,8 @@ type V2SessionConfig struct {
 	HistoryPage HistoryPager
 
 	// RunConfigFor reports the named conversation's run configuration as one
-	// RunConfig describing one session. It is handleRequestSessionSettings' only
-	// run-configuration source, so a client learns about the conversation it is
+	// RunConfig describing one session. It is the legacy run-configuration source
+	// for handleRequestSessionSettings, so a client learns about the conversation it is
 	// in, never the shared bootstrap session.
 	//
 	// false means the conversation is not addressable (unknown, bound to nothing,
@@ -220,6 +220,26 @@ type V2SessionConfig struct {
 	// id is a routing key, not a secret. The seam is read-only; only
 	// SettingsUpdater writes.
 	RunConfigFor func(conversationID string) (RunConfig, bool)
+
+	// Supplied reading providers replace their legacy counterparts only on thread
+	// connections. Each returns source evidence captured with the reading, never
+	// reconstructed from a current binding. False results must not be inspected or
+	// retried through a legacy provider. Context/MCP queries must honor ctx and
+	// retain their existing bounded asynchronous admission.
+	ContextUsageReadingFor func(ctx context.Context, conversationID string) (LiveState, bool)
+	MCPStatusReadingFor    func(ctx context.Context, conversationID string) (LiveState, bool)
+	// ModelListReadingFor must be a bounded in-memory read. multiAgent selects the
+	// same inventory projection as ModelListFor.
+	ModelListReadingFor func(conversationID string, multiAgent bool) (LiveState, bool)
+	// SessionSettingsReadingFor supplies the base session_settings payload. Relay
+	// enriches it once with EffectiveEffortFor, CapabilitiesFor and MemorySearchFor,
+	// using the supplied conversation and payload session/model keys. It must be a
+	// bounded read; unavailable results retain the zero-valued no-session reply.
+	SessionSettingsReadingFor func(conversationID string) (LiveState, bool)
+	// UpdateSettingsReading performs one atomic update and returns its success
+	// reading together with captured source evidence. It has SettingsUpdater's
+	// validation, bounded-operation and error contracts; errors emit no reading.
+	UpdateSettingsReading func(sessionID string, update SettingsUpdate) (LiveState, error)
 
 	// EffectiveEffortFor reports claude's applied effort for the named
 	// conversation's current child. handleRequestSessionSettings calls it once per
