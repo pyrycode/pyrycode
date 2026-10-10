@@ -65,6 +65,37 @@ See [relay supervisor wiring](relay-package.md#consumers-and-roadmap) for fatal
 error propagation and [verification guidance](development-verification.md#prove-that-tests-distinguish-the-change)
 for the real-signal regression pattern.
 
+## Memory credential persistence
+
+Updating a token in place before saving selection would change what an existing
+reference resolves to even if the metadata save then failed. `memoryCredentialStore.set`
+writes an immutable token generation and staged selection, syncs and closes
+both, then commits with one atomic selection rename. The reference stays stable;
+only the selected generation changes. Readers hold the same directory lock as
+writers through resolution, so post-commit cleanup cannot remove a generation
+while a reader still needs it. `TestMemoryCredentialFailedSave` injects a rename
+failure and checks both unchanged selection bytes and resolution of the old
+token; checking only the returned error would miss an in-place token overwrite.
+
+Non-secret metadata still controls access to a secret. `memorySelected` requires
+canonical file-backend selection and valid identifier formats, while
+`memoryCredentialStore.resolve` requires equality with the committed reference.
+Pinned no-follow directory traversal and opened-descriptor checks protect both
+selection and token files. This applies the [selection trust rule](claude-account-source.md#the-selection-file-needed-the-same-trust-check-as-the-secret-it-points-to)
+without allowing memory references to redirect to paths or Claude login entries.
+
+The [Claude file reader's before/after context checks](claude-account-source.md#the-ten-second-bound-covers-reads-that-return-not-reads-that-hang)
+alone cannot bound a stdin read waiting for EOF. `readMemoryInput` polls the
+descriptor and checks context without a detached reader; directory lock waits
+also check context. Saves remain synchronous and check context before publication,
+so a cancelled operation leaves no worker that can publish later.
+`TestMemoryCredentialCancellation` blocks stdin or the lock, then verifies the
+old token still resolves after release. Resolution in a fresh process in
+`TestMemoryCredentialProcess` prevents an in-memory cache from masking broken
+persistence. See the [command contract](../../guide.md#memory-credentials),
+[service-user storage requirements](../../deployment.md#memory-credentials) and
+[design](../../specs/architecture/3112-memory-credentials.md).
+
 ## Related
 
 - [config-package.md](config-package.md) — `interactive_runner`'s `selectInteractiveRunner`, the loud-removal precedent this switch's arms mirror.
