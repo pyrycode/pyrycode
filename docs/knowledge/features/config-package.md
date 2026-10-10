@@ -46,6 +46,24 @@ OpenAI embedding can pair with Claude capture, and local embedding with Codex ca
 [memory credential lifecycle (#3112)](https://github.com/pyrycode/pyrycode/issues/3112).
 Tokens and credential backend-selection metadata belong to that protected lifecycle.
 
+The local semantic boundary lives in
+[`cmd/pyry/memory_config.go`](../../../cmd/pyry/memory_config.go):
+`configureMemory(ctx, settings)` validates a complete replacement before calling
+`UpdateMemory`, and `memoryStatus(ctx)` validates saved choices and projects safe
+JSON. `runMemoryConfiguration` exposes these operations through offline
+`pyry memory configure` / `pyry memory status`; wizard callers can use the same
+operations without a daemon. `memoryHome` requires an existing absolute home and
+uses its `.pyry/config.json`, never `resolveConfigPath`'s cwd fallback. See the
+[user-facing flags and status shape](../../guide.md#memory-configuration).
+
+[`cmd/pyry/memory_roots.go`](../../../cmd/pyry/memory_roots.go) owns
+`validateMemorySettings` and `resolveEffectiveMemory(ctx, settings, startupWorkspaceBase)`.
+The latter returns separate `VaultPath`, read-only `AdditionalRoots`, daemon-owned
+`TranscriptPath` and normalized `SearchRoots`; indexing overlap does not change
+write destinations or ownership. Its explicit base must come from
+`resolveStartupWorkspaceBase`, independently of the seeded `default` channel or
+hosted-session cwd. These callable operations add no daemon startup wiring.
+
 ## `debug_capture` — rejected at startup since #1514
 
 `debug_capture` (#802) used to switch on a `.cast` recorder attached to the terminal spawn path. #1348 deleted that path and the recorder with it, but the config key and its plumbing (a `SessionConfig.RecordDir` field nothing read) survived as a silent no-op: an operator who set the flag, reproduced a bug and pulled a debug bundle got nothing recorded, with no error or log line.
@@ -135,6 +153,28 @@ result; [memory replacement](#memory-replacement-and-persistence) preserves thei
 values on disk. A present `"memory": {}` produces a non-nil `MemorySettings` with zero
 fields, so presence alone does not establish usable settings.
 
+`configureMemory`, `memoryStatus` and `resolveEffectiveMemory` apply
+`validateMemorySettings`: accepted vault/provider/agent enums, nonblank independent
+models, canonical directory access and reserved-path exclusions, plus fresh
+`resolveMemoryCredential` validation for OpenAI. Local embeddings reject a
+reference and require no credential selection. Status rejects malformed/non-object
+config and invalid saved settings with static diagnostics; it does not expose
+`Load`'s parser details or serialize `credential_reference`. Missing/null memory
+reports unconfigured, and empty additional roots project as `[]`.
+
+A default vault stores only its mode. Configure and status defer the default
+vault's directory and reserved-path checks; status leaves its path unresolved.
+`resolveEffectiveMemory` selects the explicitly supplied daemon startup base for
+default mode and the saved canonical path for separate mode, then revalidates
+vault write/traverse access and exclusions in either mode. Reserved transcripts
+and credentials are disjoint even when redirected through symlinks; transcript
+storage is derived through existing ancestors and may remain absent. A rejected
+resolution returns a zero `effectiveMemory` and never changes saved settings.
+Resolution is a snapshot, so runtime consumers must revalidate before use.
+See [reserved-root and filesystem-identity reasoning](cli-verb-dispatch.md#memory-configuration-and-effective-roots).
+Saving settings enables no runtime, and future daemon application requires restart;
+configured status supplies no [search-readiness evidence](memorysearch-package.md#effective-evidence).
+
 ## Memory replacement and persistence
 
 `UpdateMemory(path, settings)` accepts an explicit config-file path and a complete
@@ -179,7 +219,7 @@ The operation writes no vault contents or credential storage and starts no servi
 
 ## Out of scope (deferred to follow-up tickets)
 
-- **Path resolution.** `Load` takes a `path` string. The "where does `~/.pyry/config.json` live" question is the caller's; the daemon-startup consumer ticket will add a `resolveConfigPath()` helper alongside `resolveSocketPath` / `resolveRegistryPath` in `cmd/pyry/main.go`. Doing it here would bind the package to `os.UserHomeDir` semantics that some future caller (e.g. a `--config` override) wants to compose differently.
+- **Path resolution.** `Load` takes an explicit `path` string. `cmd/pyry` callers own location policy: `resolveConfigPath` retains its fallback, while the local memory operations require `memoryHome` and refuse a cwd-relative fallback. Effective vault resolution also belongs to the caller, with an explicit daemon startup base. Keeping these choices outside `config` avoids binding the leaf package to one home or workspace policy.
 - **General `Save`.** `UpdateMemory` provides atomic replacement for managed memory settings. Writing other config fields remains outside this API.
 - **Watcher / hot reload.** Daemon reads once at startup. If hot reload becomes necessary, that's a separate seam (file watcher, signal handler) — most likely a `sync/atomic.Pointer[Config]` swapped on file events. Not bolted onto `Load`.
 - **Schema versioning.** Per the ticket: "if `Config` ever grows incompatibly, version it at that point." `encoding/json`'s default lenient handling (unknown JSON fields ignored, missing struct fields → zero) covers backward-additive changes for free.
