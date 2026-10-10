@@ -41,14 +41,12 @@ import (
 // rather than by care. Do not give it one to write a retention diagnostic: that
 // would reopen exactly the channel the posture closes.
 type sessionModelHold struct {
-	capture func() daemonLiveSource
-	source  daemonLiveSource
-	mu      sync.Mutex
-	list    turnevent.ModelList
-	have    bool
-	// next is the downstream sink every event is forwarded to, unchanged. nil
-	// forwards nothing — a test convenience; production always supplies
-	// streamTurnSink.sinkFor's closure.
+	live   *daemonInventoryIngress
+	source daemonLiveSource
+	mu     sync.Mutex
+	list   turnevent.ModelList
+	have   bool
+	// next receives every event unchanged, after inventory storage.
 	next func(turnevent.Event)
 }
 
@@ -57,46 +55,34 @@ func newSessionModelHold(next func(turnevent.Event)) *sessionModelHold {
 	return &sessionModelHold{next: next}
 }
 
-// Sink is the decorator, used as a method value: hold.Sink is a
-// func(turnevent.Event) of exactly the shape streamsup.NewParser takes.
-//
-// ORDER IS THE CONTRACT. A ModelList is stored — replacing any prior value, so a
-// respawn's report supersedes rather than accumulates — BEFORE ev is forwarded,
-// which is what puts the retention upstream of the droppable send (see the type's
-// doc). Every event of every variant is then forwarded unchanged, ModelList
-// included: swallowing it here would change what the fan-in and the drain observe,
-// which this ticket has no reason to do.
-//
-// The mutex is a LEAF lock and is never held across the call to next. Holding it
-// across a channel send would put a new edge into the daemon's lock order for no
-// benefit; as written it participates in no ordering with Pool.mu, Session.lcMu or
-// capMu. The lock is needed rather than defensive, and the pair it is needed for is
-// ONE WRITER AND MANY READERS. This doc used to claim two overlapping writers across
-// a respawn, which is false and is corrected here rather than left standing (#2004):
-// spawnAndWait blocks on cmd.Wait, which os/exec documents as joining the goroutine
-// copying the child's stdout into a non-*os.File Stdout, so forwarder N+1 cannot
-// start until forwarder N has finished — the serialisation streamsup.Parser's own
-// doc asserts. What the lock protects against is the READER, #1857's resolver on a
-// relay-leg goroutine, running while that one writer does. (The number is corrected
-// here from #1867, which is retainedModelLists — the enumerator that CALLS the
-// resolver, not the type assertion itself.)
+// Sink atomically replaces the model inventory and its source before
+// forwarding every event unchanged. A live attachment admits the inventory under
+// the transition boundary and carries its captured envelope to fan-in. The parser
+// owns the single writer; readers receive detached copies under the hold mutex.
+// No hold mutex is held across downstream decorators or delivery.
 func (h *sessionModelHold) Sink(ev turnevent.Event) {
+	var captured *streamTurnEnvelope
 	if list, ok := ev.(turnevent.ModelList); ok {
-		var source daemonLiveSource
-		if h.capture != nil {
-			source = h.capture()
+		store := func(source daemonLiveSource) {
+			h.mu.Lock()
+			h.source = source
+			// The parser transfers ownership of the freshly allocated list.
+			h.list = list
+			h.have = true
+			h.mu.Unlock()
 		}
-		h.mu.Lock()
-		h.source = source
-		// Stored without copying: streamsup's emitModelList allocates Models fresh per
-		// emit and the parser retains no reference, so the hold takes sole ownership of
-		// what it is handed. The COPY is made on the read side instead.
-		h.list = list
-		h.have = true
-		h.mu.Unlock()
+		if h.live != nil {
+			env := h.live.prepare(ev, store)
+			captured = &env
+		} else {
+			store(daemonLiveSource{})
+		}
 	}
 	if h.next != nil {
 		h.next(ev)
+	}
+	if captured != nil {
+		h.live.sink.forwardEvent(*captured)
 	}
 }
 

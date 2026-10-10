@@ -45,11 +45,11 @@ import (
 // do not give this type a logger to write a retention diagnostic, which is the one
 // edit that would reopen the channel.
 type sessionSlashCommandHold struct {
-	capture func() daemonLiveSource
-	source  daemonLiveSource
-	mu      sync.Mutex
-	list    turnevent.SlashCommandList
-	have    bool
+	live   *daemonInventoryIngress
+	source daemonLiveSource
+	mu     sync.Mutex
+	list   turnevent.SlashCommandList
+	have   bool
 	// next is the downstream sink every event is forwarded to, unchanged. nil
 	// forwards nothing — a test convenience; production always supplies the next
 	// link of newSessionParser's chain.
@@ -61,44 +61,33 @@ func newSessionSlashCommandHold(next func(turnevent.Event)) *sessionSlashCommand
 	return &sessionSlashCommandHold{next: next}
 }
 
-// Sink is the decorator, used as a method value: hold.Sink is a func(turnevent.Event)
-// of exactly the shape streamsup.NewParser takes and of exactly the shape the next
-// link of the chain takes.
-//
-// A SlashCommandList is stored — replacing any prior value, so a respawn's inventory
-// supersedes rather than accumulates — and every event of every variant is then
-// forwarded unchanged, this variant included: swallowing it here would change what the
-// fan-in and the drain observe, which this ticket has no reason to do.
-//
-// Stored WITHOUT copying: emitSlashCommandList allocates its entry slice fresh per
-// emit and its boundAliases closure documents that its result is always a fresh
-// allocation and never the resliced input, so the hold takes sole ownership of what it
-// is handed. The COPY is made on the read side instead.
-//
-// The mutex is a LEAF lock and is never held across the call to next. Holding it
-// across a channel send would put a new edge into the daemon's lock order for no
-// benefit; as written it participates in no ordering with Pool.mu, Session.lcMu or
-// capMu. The lock is needed rather than defensive, and the pair it is needed for is
-// ONE WRITER AND MANY READERS — not two writers. Writes are serial across every
-// respawn, because spawnAndWait blocks on cmd.Wait, which os/exec documents as joining
-// the goroutine copying the child's stdout into a non-*os.File Stdout, so forwarder
-// N+1 cannot start until forwarder N has finished; streamsup.Parser's own doc asserts
-// that serialisation. What the lock protects against is #2005's resolver reading on a
-// relay-leg goroutine while that one writer runs.
+// Sink atomically replaces the slash-command inventory and its source before
+// forwarding every event unchanged. A live attachment admits the inventory under
+// the transition boundary and carries its captured envelope to fan-in. The parser
+// owns the single writer; readers receive detached copies under the hold mutex.
+// No hold mutex is held across downstream decorators or delivery.
 func (h *sessionSlashCommandHold) Sink(ev turnevent.Event) {
+	var captured *streamTurnEnvelope
 	if list, ok := ev.(turnevent.SlashCommandList); ok {
-		var source daemonLiveSource
-		if h.capture != nil {
-			source = h.capture()
+		store := func(source daemonLiveSource) {
+			h.mu.Lock()
+			h.source = source
+			h.list = list
+			h.have = true
+			h.mu.Unlock()
 		}
-		h.mu.Lock()
-		h.source = source
-		h.list = list
-		h.have = true
-		h.mu.Unlock()
+		if h.live != nil {
+			env := h.live.prepare(ev, store)
+			captured = &env
+		} else {
+			store(daemonLiveSource{})
+		}
 	}
 	if h.next != nil {
 		h.next(ev)
+	}
+	if captured != nil {
+		h.live.sink.forwardEvent(*captured)
 	}
 }
 

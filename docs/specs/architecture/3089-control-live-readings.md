@@ -1,6 +1,9 @@
 # Source-bound control and requested readings
 
 ## Files read
+- `cmd/pyry/session_model_hold.go` → `Sink`, `ModelListLive`: atomic inventory payload/source cache and decorator forwarding.
+- `cmd/pyry/session_slash_command_hold.go` → `Sink`, `SlashCommandListLive`: matching slash inventory cache and forwarding.
+- `cmd/pyry/daemon_live_inventory.go` → `cacheInventoryLocked`, `inventorySource`: original producer evidence across clears and stored fallback.
 - `cmd/pyry/daemon_live_state.go` → `admit`, `retain`, `retireLocked`, `transition`: existing generation, revision and detached cursor contract.
 - `cmd/pyry/daemon_live_source.go` → `acceptEventLocked`: stream families converge on the same owner.
 - `cmd/pyry/stream_turn_fanin.go` → `streamTurnSink`: offer mutex serializes capture with transitions.
@@ -166,3 +169,5 @@ proof remain pending #3077.
   conversations. `TestControlLiveInventoryIngressOvertaking` checks same-generation
   ordering when forwarding is delayed. No new exported API or goroutine is added;
   the recorded split-depth sizing exception continues to apply.
+  `TestControlLiveInventoryStoredEvidence` verifies unresolved stored menus through
+  both model projections and the slash provider without assigning current provenance.

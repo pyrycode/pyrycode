@@ -176,7 +176,7 @@ func TestControlLiveReworkRememberedPayloadSourceMismatch(t *testing.T) {
 	}
 }
 
-// Exercise the production atomic cache seam without owner-envelope evidence.
+// Exercise the source-bearing atomic cache seam used by inventory providers.
 type testLiveInventoryRunner struct {
 	stubRunner
 	models   *sessionModelHold
@@ -211,8 +211,10 @@ func TestControlLiveReworkAtomicInventoryCaches(t *testing.T) {
 			}
 			sid := string(pool.BootstrapID())
 			b := testControlBindings(t, "conv", sid)
-			models.capture = func() daemonLiveSource { return b.capture("conv", sid, false) }
-			commands.capture = models.capture
+			tag := newStreamSessionTag(sid)
+			b.sink.beginRuntimeProducer(tag)
+			models.live = &daemonInventoryIngress{sink: b.sink, tag: tag}
+			commands.live = models.live
 			read := func() {
 				if family == protocol.TypeModelList {
 					_, ok := modelListFor(b.reg, pool, nil, b)("conv", true)
