@@ -93,3 +93,64 @@ Declared 2026-10-10 after corrected production/instrumentation commit `5b68a1457
 `python3 /work/Projects/pyrycode-agents/dispatcher/scripts/live-claude-gate.py go --tests '^TestInteractiveStream_FallbackReplySuggestionSetThenClear$'`
 
 No retries, replacements, checkout changes or edits during the batch, regardless of failure, skip or zero execution. Each invocation retains one completed exchange, native disabled on the persistent child, a bounded nonempty fallback for `suggestConvID`, then an explicit-null clear at a higher revision after accepted input. Record E/P/F/S and launcher outcome for every invocation, plus source/lifecycle scalar observations selected by wrapper PID and wire revisions. Source category is reported metadata, never authentication proof; the launcher's preflight separately checks authenticated login. Six executed passes are required, and a skipped or retried pass is not acceptance. Historical failed batches remain unchanged. The dispatcher separately owns the full live gate.
+
+## Six-run results
+
+Exactly six sequential authenticated launcher invocations used unchanged pushed declaration commit `1918d75612d61bc05fde9086da0af271136df24a`. The tree remained clean at that hash through launch 6. All preflight checks and launcher exits succeeded. No retries, replacements, skips or checkout changes. Aggregate E/P/F/S = **6/6/0/0**. Each launch executed the named test once, with one completed exchange, disabled persistent-child native suggestions, one successful isolated fallback, a bounded nonempty reply for `suggestConvID`, and explicit-null clear revision 2 above set revision 1 after accepted input.
+
+| Run | Executed | Passed | Failed | Skipped | Launcher exit | Wrapper / child PID | Attempt ms | Approx. result receipt ms | Set / clear revisions |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 0 | 0 | 0 | 88381 / 88382 | 11506 | 10971 | 1 / 2 |
+| 2 | 1 | 1 | 0 | 0 | 0 | 89414 / 89417 | 8288 | 7831 | 1 / 2 |
+| 3 | 1 | 1 | 0 | 0 | 0 | 89832 / 89833 | 6628 | 6146 | 1 / 2 |
+| 4 | 1 | 1 | 0 | 0 | 0 | 90736 / 90737 | 8982 | 8501 | 1 / 2 |
+| 5 | 1 | 1 | 0 | 0 | 0 | 91323 / 91324 | 11598 | 11101 | 1 / 2 |
+| 6 | 1 | 1 | 0 | 0 | 0 | 91724 / 91725 | 9136 | 8618 | 1 / 2 |
+
+Result receipt time is approximate, derived from the daemon's attempt time minus recognized result age. Runs 1 and 5 recognized valid results after the old 9800-ms cutoff and completed successfully under the corrected bound. Every result stayed within the 4096-byte envelope limit despite whole-stream saturation at 4097; Wait was observed and successful, with no deadline or group cancellation.
+
+The correction is established by deterministic subprocess failures on the original deadline and passes after the production change. This fixed six-run batch is counted live proof/non-reproduction on the corrected commit, not a claim that earlier failed batches passed or that observation alone fixed anything. [#3024's 6/2/4/0 batch](https://github.com/pyrycode/pyrycode/blob/main/docs/specs/architecture/3024-fallback-stream-observation.md#six-run-results) and [PR #2896](https://github.com/pyrycode/pyrycode/pull/2896) remain untouched. [The code-traced cause and correction were posted on #2923](https://github.com/pyrycode/pyrycode/issues/2923#issuecomment-6096487983).
+
+Safe evidence below contains only source/lifecycle scalar observations, correlated by wrapper PID. Source `none` is reported metadata, not proof of authenticated readiness; authentication was checked separately by each launcher. Zero decoded retry events differs from missing retry metadata. Stderr EOF/reader flags are safe; no daemon-only tail, generated text, prompt, credential, raw stdout or raw error is retained here. Documentation and the dispatcher's separate full-module/live gates remain pending.
+
+Run 1:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=88381 elapsed_ms=11474 exit=0 output={bytes=4097 utf8=true json=true result_success=true text_valid=true result_bytes=1840} set_revision=1 clear_revision=2 stage=wire set observed child_pid=88382 spawn=true read={bytes=895 saturated=false} forward={bytes=895 saturated=false}
+daemon lifecycle (cause not inferred): pid=88381 attempt_ms=11506 child_ms=11505 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=4097 stdout_cap_exceeded=true stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true result_bytes=1840 progress_event=result progress_age_ms=535 progress_init=true progress_source=none progress_retries=0 cancel_event=unknown cancel_age_ms=unknown cancel_init=unknown cancel_source=unknown cancel_retries=unknown stderr_observed=true stderr_reader_done=true stderr_eof=true stderr_partial=false
+```
+
+Run 2:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=89414 elapsed_ms=8235 exit=0 output={bytes=4097 utf8=true json=true result_success=true text_valid=true result_bytes=1830} set_revision=1 clear_revision=2 stage=wire set observed child_pid=89417 spawn=true read={bytes=895 saturated=false} forward={bytes=895 saturated=false}
+daemon lifecycle (cause not inferred): pid=89414 attempt_ms=8288 child_ms=8287 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=4097 stdout_cap_exceeded=true stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true result_bytes=1830 progress_event=result progress_age_ms=457 progress_init=true progress_source=none progress_retries=0 cancel_event=unknown cancel_age_ms=unknown cancel_init=unknown cancel_source=unknown cancel_retries=unknown stderr_observed=true stderr_reader_done=true stderr_eof=true stderr_partial=false
+```
+
+Run 3:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=89832 elapsed_ms=6594 exit=0 output={bytes=4097 utf8=true json=true result_success=true text_valid=true result_bytes=1883} set_revision=1 clear_revision=2 stage=wire set observed child_pid=89833 spawn=true read={bytes=895 saturated=false} forward={bytes=895 saturated=false}
+daemon lifecycle (cause not inferred): pid=89832 attempt_ms=6628 child_ms=6627 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=4097 stdout_cap_exceeded=true stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true result_bytes=1883 progress_event=result progress_age_ms=482 progress_init=true progress_source=none progress_retries=0 cancel_event=unknown cancel_age_ms=unknown cancel_init=unknown cancel_source=unknown cancel_retries=unknown stderr_observed=true stderr_reader_done=true stderr_eof=true stderr_partial=false
+```
+
+Run 4:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=90736 elapsed_ms=8948 exit=0 output={bytes=4097 utf8=true json=true result_success=true text_valid=true result_bytes=1814} set_revision=1 clear_revision=2 stage=wire set observed child_pid=90737 spawn=true read={bytes=895 saturated=false} forward={bytes=895 saturated=false}
+daemon lifecycle (cause not inferred): pid=90736 attempt_ms=8982 child_ms=8981 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=4097 stdout_cap_exceeded=true stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true result_bytes=1814 progress_event=result progress_age_ms=481 progress_init=true progress_source=none progress_retries=0 cancel_event=unknown cancel_age_ms=unknown cancel_init=unknown cancel_source=unknown cancel_retries=unknown stderr_observed=true stderr_reader_done=true stderr_eof=true stderr_partial=false
+```
+
+Run 5:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=91323 elapsed_ms=11563 exit=0 output={bytes=4097 utf8=true json=true result_success=true text_valid=true result_bytes=1871} set_revision=1 clear_revision=2 stage=wire set observed child_pid=91324 spawn=true read={bytes=895 saturated=false} forward={bytes=895 saturated=false}
+daemon lifecycle (cause not inferred): pid=91323 attempt_ms=11598 child_ms=11597 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=4097 stdout_cap_exceeded=true stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true result_bytes=1871 progress_event=result progress_age_ms=497 progress_init=true progress_source=none progress_retries=0 cancel_event=unknown cancel_age_ms=unknown cancel_init=unknown cancel_source=unknown cancel_retries=unknown stderr_observed=true stderr_reader_done=true stderr_eof=true stderr_partial=false
+```
+
+Run 6:
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=91724 elapsed_ms=9103 exit=0 output={bytes=4097 utf8=true json=true result_success=true text_valid=true result_bytes=1871} set_revision=1 clear_revision=2 stage=wire set observed child_pid=91725 spawn=true read={bytes=895 saturated=false} forward={bytes=895 saturated=false}
+daemon lifecycle (cause not inferred): pid=91724 attempt_ms=9136 child_ms=9135 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=4097 stdout_cap_exceeded=true stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true result_bytes=1871 progress_event=result progress_age_ms=518 progress_init=true progress_source=none progress_retries=0 cancel_event=unknown cancel_age_ms=unknown cancel_init=unknown cancel_source=unknown cancel_retries=unknown stderr_observed=true stderr_reader_done=true stderr_eof=true stderr_partial=false
+```
