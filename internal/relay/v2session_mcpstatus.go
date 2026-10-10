@@ -82,8 +82,8 @@ func (m *V2SessionManager) handleMCPStatusRequest(ctx context.Context, s *V2Sess
 }
 
 // resolveMCPStatusRequest calls the resolver on the ask's own goroutine. ctx is the
-// conn's, ended by the worker's return, so both conn teardown and manager shutdown end
-// the wait. A resolver that returns after ctx ended is answered with NOTHING, whatever
+// conn's, canceled independently of worker progress on teardown or manager shutdown.
+// A resolver that returns after ctx ended is answered with NOTHING, whatever
 // it returned: the conn is gone, and a refusal logged for it would misreport a
 // teardown as unavailable status.
 func (m *V2SessionManager) resolveMCPStatusRequest(ctx context.Context, s *V2Session, inReplyTo uint64, conversationID string, thread bool) {

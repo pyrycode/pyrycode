@@ -192,9 +192,8 @@ func (m *V2SessionManager) handleRequestContextUsage(ctx context.Context, s *V2S
 }
 
 // resolveContextUsageRequest is steps 5 and 6 on the ask's own goroutine. ctx is the
-// conn's, ended by the worker's return, so both conn teardown and manager shutdown
-// end the seam's wait. Its emissions leave through forwardToRun like every other on
-// this path; nothing here touches s.send.
+// conn's, canceled independently of worker progress on teardown or manager shutdown.
+// Replies return to Run for sealing; nothing here touches s.send.
 //
 // A seam that returns after ctx ended is answered with NOTHING, whatever it returned:
 // the conn is gone, and a refusal logged for it would misreport a teardown as an

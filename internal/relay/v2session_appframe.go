@@ -104,10 +104,11 @@ const (
 // mcp_status_request (#2702) are checked here but their seam wait and reply
 // run on a goroutine of their own, so that reply can emit after replies to
 // frames that arrived later. Clients correlate it on in_reply_to. connCtx is
-// what ends those goroutines: it is cancelled when this worker returns, which
-// is exactly on s.done or ctx. Each verb has its own semaphore bounding how
-// many one conn can hold: asks (maxContextUsageAsksPerConn) and mcpAsks
-// (maxMCPStatusAsksPerConn).
+// what ends those goroutines and settings enrichment: a separate watcher cancels
+// it on s.done even while a handler holds the worker. Run cancellation propagates
+// through ctx, and worker return also cancels connCtx and joins the watcher.
+// Each verb has its own semaphore bounding how many one conn can hold: asks
+// (maxContextUsageAsksPerConn) and mcpAsks (maxMCPStatusAsksPerConn).
 //
 // The worker NEVER touches s.send / s.recv / keys / session state: it only
 // runs Route → handler → c.Send (a marshal + channel push, no AEAD) and
@@ -115,7 +116,19 @@ const (
 // single-owner-cipher invariant (AC-3).
 func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 	connCtx, cancelConn := context.WithCancel(ctx)
-	defer cancelConn()
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-s.done:
+			cancelConn()
+		case <-connCtx.Done():
+		}
+	}()
+	defer func() {
+		cancelConn()
+		<-watchDone
+	}()
 	asks := make(chan struct{}, maxContextUsageAsksPerConn)
 	mcpAsks := make(chan struct{}, maxMCPStatusAsksPerConn)
 	for {

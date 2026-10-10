@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -286,6 +287,93 @@ func TestSuppliedLiveReplyTeardown(t *testing.T) {
 			stop()
 			if len(rec.snapshot()) != 1 {
 				t.Fatal("teardown produced reading")
+			}
+		})
+	}
+}
+
+func TestSuppliedSettingsEnrichmentTeardown(t *testing.T) {
+	t.Parallel()
+	for _, enrichment := range []string{"effective_effort", "memory_search"} {
+		t.Run(enrichment, func(t *testing.T) {
+			started, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			releaseWorker := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(releaseWorker)
+			waitForCancellation := func(ctx context.Context) {
+				close(started)
+				<-ctx.Done()
+				close(canceled)
+				// Hold the worker until both outstanding asks have observed cancellation.
+				<-release
+			}
+			contextStarted, contextCanceled := make(chan struct{}), make(chan struct{})
+			mcpStarted, mcpCanceled := make(chan struct{}), make(chan struct{})
+			logger, logs := bufferLogger()
+			mgr, frames, rec, send, recv, stop := suppliedReplyFixture(t, threadCaps, func(c *V2SessionConfig) {
+				c.Logger = logger
+				c.SessionSettingsReadingFor = func(string) (LiveState, bool) {
+					r := liveReading(protocol.TypeSessionSettings, "source", "settings", `"origin"`, 1, 1)
+					r.Envelope.Payload = json.RawMessage(suppliedReplyCases[3].body)
+					return r, true
+				}
+				if enrichment == "effective_effort" {
+					c.EffectiveEffortFor = func(ctx context.Context, _ string) (*string, bool) {
+						waitForCancellation(ctx)
+						return strPtr("medium"), true
+					}
+				} else {
+					c.MemorySearchFor = func(ctx context.Context, _, _ string) (protocol.MemorySearchReport, error) {
+						waitForCancellation(ctx)
+						return protocol.MemorySearchReport{}, ctx.Err()
+					}
+				}
+				c.ContextUsageReadingFor = func(ctx context.Context, _ string) (LiveState, bool) {
+					close(contextStarted)
+					<-ctx.Done()
+					close(contextCanceled)
+					return liveReading(protocol.TypeContextUsage, "source", "", `null`, 1, 1), true
+				}
+				c.MCPStatusReadingFor = func(ctx context.Context, _ string) (LiveState, bool) {
+					close(mcpStarted)
+					<-ctx.Done()
+					close(mcpCanceled)
+					return liveReading(protocol.TypeMCPStatus, "source", "", `null`, 1, 1), true
+				}
+			})
+			await := func(ch <-chan struct{}, message string) {
+				t.Helper()
+				select {
+				case <-ch:
+				case <-time.After(2 * time.Second):
+					t.Fatal(message)
+				}
+			}
+			// A decrypted correlated reply first proves the authenticated connection works.
+			suppliedAsk(t, frames, send, protocol.TypeRequestModelList, 61)
+			seen := 1
+			ack, _ := suppliedWire(t, rec, recv, &seen)
+			if ack.Type != protocol.TypeError || ack.InReplyTo == nil || *ack.InReplyTo != 61 {
+				t.Fatalf("unexpected authenticated reply: %#v", ack)
+			}
+			suppliedAsk(t, frames, send, protocol.TypeRequestContextUsage, 62)
+			await(contextStarted, "context usage query did not start")
+			suppliedAsk(t, frames, send, protocol.TypeMCPStatusRequest, 63)
+			await(mcpStarted, "MCP status query did not start")
+			suppliedAsk(t, frames, send, protocol.TypeRequestSessionSettings, 64)
+			await(started, "settings enrichment did not start")
+			frames <- protocol.RoutingEnvelope{ConnID: v2TestConnID, CloseCode: 1000}
+			await(canceled, "settings enrichment survived requester teardown")
+			await(contextCanceled, "context usage query survived requester teardown")
+			await(mcpCanceled, "MCP status query survived requester teardown")
+			if conns := mgr.ActiveConns(t.Context()); len(conns) != 0 {
+				t.Fatal("connection survived teardown")
+			}
+			releaseWorker()
+			waitForLogContains(t, logs, "v2.live_reply.dropped")
+			stop()
+			if len(rec.snapshot()) != seen {
+				t.Fatal("teardown produced a reading or clear")
 			}
 		})
 	}

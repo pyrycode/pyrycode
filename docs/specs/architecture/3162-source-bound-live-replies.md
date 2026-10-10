@@ -62,3 +62,12 @@ Pending documentation stage: in `docs/protocol-mobile.md`, “Message envelope�
 
 ## Revisions
 - 2026-10-10: Final implementation keeps unrelated settings payload fields through `replaceObjectField`; a content-free queued event lets the withholding test observe completion before its FIFO delivery barrier. Final recount: approximately 765 inserted lines, zero new exported types/interfaces, zero mandatory legacy-consumer migrations and three acceptance criteria. The existing delivery state machine is unchanged; bounds/access/order proofs run in the relay race suite.
+
+### 2026-10-10: Verifier finding 1 — cancel blocked enrichment independently
+The original Concurrency model and Security review assumed worker return would cancel the connection context on teardown. A synchronous `EffectiveEffortFor` or `MemorySearchFor` wait prevents that return and also holds outstanding context/MCP asks alive.
+
+**Revised concurrency contract:** `appFrameWorker` starts one connection-scoped watcher. It selects on the immutable `s.done` channel and `connCtx.Done()`; requester teardown cancels `connCtx` independently of handler progress, and manager shutdown cancels it through the parent context. Worker return cancels the context and joins the watcher. All existing ask bounds, queue ownership and Run-owned sealing remain unchanged.
+
+**Lifecycle proof:** `TestSuppliedSettingsEnrichmentTeardown` covers both enrichment providers through authenticated encrypted requests and a decrypted correlated reply. Each case starts context-usage and MCP asks, blocks settings enrichment, closes the requester, and asserts all three contexts cancel before releasing the worker. It then verifies connection removal and absence of readings or clears. Both cases failed before the repair; run them with the race detector alongside `TestSuppliedLiveReplyTeardown`.
+
+**Security re-review:** PASS after this repair. The watcher reads only the stable teardown channel and context, changes no source evidence, and performs no crypto, network, filesystem, credential or payload logging operations. It exits on teardown, parent cancellation or worker return and is joined by the worker. The original trust/access/ordering boundaries remain intact; the concurrency MUST FIX is addressed by independent cancellation and its lifecycle proof.
