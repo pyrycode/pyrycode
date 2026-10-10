@@ -106,3 +106,12 @@ None.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-10
+
+## Revisions
+
+- 2026-10-10: the full race run exposed a test-clock error: a short wall timer
+  expired during the prior credential read before the intended blocked write
+  started. `TestMemoryOSCancellation` now signals caller cancellation/deadline
+  after the controlled tool reports the target operation has started, asserts
+  the exact context failure, and disables the race runtime's artificial child
+  exit delay. The production contract is unchanged.
