@@ -125,22 +125,20 @@ pyry (internal/streamsup)
 
 Spawn argv is `--input-format stream-json --output-format stream-json --verbose`, plus `--session-id <uuid>` on create or `--resume <uuid>` on reattach (`buildArgs`). The parsed turn events fan into a single `newStreamTurnSink` instance shared by the runner factory (`newStreamRunnerFactory`) and the one relay-leg drain.
 
-`daemonLiveState` in `cmd/pyry` retains current stream readings in memory before
-fan-in, independently of connections, legacy delivery and
+`daemonLiveState` in `cmd/pyry` retains stream/control readings and optional
+on-demand results before fan-in or legacy delivery, independently of connections and
 [folded thread items](../decisions/042-daemon-built-thread.md#decision).
 Both relay and no-relay history compositions install the owner. Captured producer
 provenance travels with source conversation, positive generation and per-family/
 reading-identity revision; transitions retire predecessor readings and supply
 successor family clears. Detached updates and finite snapshot cursors add no
 history write, item, catch-up change or last-shown version. See
-[daemon-retained live state](../features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md#daemon-retained-live-state)
+[daemon-retained live state](../features/streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#daemon-retained-live-state)
 for capture, ordering, retirement and cleanup.
 
-Relay provider installation and production activation await
-[#3077](https://github.com/pyrycode/pyrycode/issues/3077) and the control/provider
-sibling [#3089](https://github.com/pyrycode/pyrycode/issues/3089); final
-producer-to-relay protocol proof remains #3077. This daemon-local owner leaves
-production thread negotiation disabled.
+Relay provider installation, production activation and the final producer-to-relay
+protocol proof await [#3077](https://github.com/pyrycode/pyrycode/issues/3077).
+This daemon-local owner leaves production thread negotiation disabled.
 
 **Production path since 2026-07-24:** the stream-json interactive runner (`internal/streamsup`, #1081) is the only interactive path. `interactive_runner: "stream-json"` in the config file selects it — and so does an absent config file, see below.
 

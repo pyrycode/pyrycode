@@ -506,9 +506,25 @@ func sessionRetainedModelList(sess *sessions.Session) (turnevent.ModelList, bool
 // dispatch goroutine, which is new for this resolver and is why the body must stay
 // what it is. It spawns nothing, mints nothing and mutates nothing, and the locks it
 // takes are resolveBoundModelList's, acquired sequentially and never nested.
-func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary) func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
+func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary, attachments ...*daemonLiveBindings) func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
 	return func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
-		return modelListResolver(multiAgent)(convReg, pool, saved, convID)
+		b := liveAttachment(attachments)
+		payload, ok, _ := liveInventoryResult(b, convID, protocol.TypeModelList, protocol.Envelope{}, func(src daemonLiveSource) (protocol.ModelListPayload, daemonLiveSource, bool) {
+			if b == nil {
+				payload, ok := modelListResolver(multiAgent)(convReg, pool, saved, convID)
+				return payload, daemonLiveSource{}, ok
+			}
+			list, source, have := cachedModelVocabularySource(pool, saved, b, src)
+			payload, ok := mapModelList(list, src.ConversationID)
+			payload.ConversationID = src.ConversationID
+			ok = ok && have
+			if multiAgent {
+				payload.Models = append(claudeModelOptions(payload.Models), codexModelOptions(saved)...)
+				ok = len(payload.Models) > 0
+			}
+			return payload, source, ok
+		})
+		return payload, ok
 	}
 }
 

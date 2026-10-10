@@ -68,7 +68,7 @@ func TestDaemonLiveTransitions(t *testing.T) {
 			before := o.snapshot("conv")
 			o.transition(sessions.SessionTransition{ConversationID: "conv", PreviousID: "a", NewID: "z", NextAgent: "codex", Cause: cause})
 			got := testLiveReadings(t, o, "conv")
-			if len(got) != len(streamLiveFamilies) {
+			if len(got) != len(daemonLiveFamilies) {
 				t.Fatalf("clears: %d", len(got))
 			}
 			for k, r := range got {

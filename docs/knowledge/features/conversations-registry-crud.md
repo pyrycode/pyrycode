@@ -67,7 +67,7 @@ retained replay events. Installing a second observer would replace replay
 cleanup, since this is one slot, not a subscriber list. Reconnect-time pruning
 is insufficient for active background work. Test deletion and idle sweeping
 through this production callback; calling `forget` directly would pass even
-with missing wiring. See [reply cancellation and stale-result checks](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831)
+with missing wiring. See [reply cancellation and stale-result checks](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831)
 and [`eventring` ownership](eventring-package.md). `fn` must not block for long:
 the deleting goroutine waits on it, so cancellation forgets state without joining
 workers; daemon shutdown owns the join.

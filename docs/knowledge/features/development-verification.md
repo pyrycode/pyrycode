@@ -137,7 +137,7 @@ cancel-context value with `Value` returning nil and returns the triggered cause
 from `Err`, so derived contexts observe `context.DeadlineExceeded` in the
 deadline case. This test-only wrapper lets the stimulus follow child readiness;
 retain a real timer-driven deadline case separately. See
-[reply fallback lifecycle evidence](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+[reply fallback lifecycle evidence](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831).
 
 A `context.WithCancel` stand-in cannot prove OS-signal shutdown classification:
 `signal.NotifyContext` can record a signal-specific cause instead of
@@ -262,6 +262,15 @@ a struct-tag bug rather than an unescaped fixture.
 An aggregate envelope-fit test and a producer's single-field limit prove different
 things. Reference the constant in the package that owns it. A second literal in
 another package can remain green after the real limit changes.
+
+Derive hostile fixtures from the producer's actual accepted boundary and encode
+the complete envelope, including source/correlation metadata and its clear.
+Raw question input below a 16384-byte cap can expand beyond 98 KB when `<` becomes
+`\u003c`; an owner-rejection test alone would stay green while supported producer
+output is unretainable. The skipped `TestControlLiveQuestionEnvelopeBound` records
+that outstanding producer gap under [#3109](https://github.com/pyrycode/pyrycode/issues/3109);
+it supplies no passing bound evidence. See
+[daemon envelope admission](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#control-and-on-demand-readings).
 
 Compare a decoded payload whole, with `reflect.DeepEqual` against a literal expected
 struct, rather than field by field. That also catches a nil-vs-`[]` difference in a

@@ -3,7 +3,7 @@
 Body of an `Envelope` whose `Type == TypeReplySuggestion`
 ([wire contract](../../protocol-mobile.md#reply_suggestion)). Binary → phone,
 gated on the negotiated `interactive` capability. The daemon's
-[suggestion owner](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831)
+[suggestion owner](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831)
 publishes this state after eligible successful turns and clears it on accepted
 new work or session lifecycle changes (#2831, #2832). Live and connect-time copies
 carry no `event_id` and enter neither history nor replay. Native output has a

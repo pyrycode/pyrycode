@@ -325,7 +325,7 @@ func TestPublishedModelSelection_Refusals(t *testing.T) {
 }
 
 func TestPublishedModelSelection_ProductionWiring(t *testing.T) {
-	if !strings.Contains(formattedGoFunc(t, "main.go", "runSupervisor"), "runSettingsFor(convReg, pool, modelVocabulary)") {
+	if !strings.Contains(formattedGoFunc(t, "main.go", "runSupervisor"), "runSettingsFor(convReg, pool, modelVocabulary, liveBindings)") {
 		t.Fatal("published selection resolver is not wired in production")
 	}
 }

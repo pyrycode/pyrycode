@@ -511,38 +511,35 @@ func (s *streamTurnSink) sinkForProducer(tag func() string, producerKind string,
 			}
 			env.live = s.live.acceptEvent(src, ev)
 		}
-		if turnMarkFor(ev) == turnMarkClose {
-			if !s.offer(env, true) {
-				// Past the reserve a closer can still be lost, so the residual must be
-				// VISIBLE: Warn, not Debug, because the daemon's default level is
-				// LevelInfo (see the level selection in `runSupervisor`) — the same
-				// argument exitFor's own drop makes.
-				//
-				// SECURITY: content-free, and this carries "kind" where exitFor's drop
-				// does not. That is the same discipline, not a departure from it —
-				// discriminant and session id only, never assistant / thought / tool
-				// content — applied to a record that HAS a discriminant to name, which
-				// an exit envelope does not. eventKind returns the variant name alone
-				// and never Unrecognized.Kind, so nothing claude authored reaches here.
-				s.logger.Warn("relay: stream-turn close drop; sink full",
-					"event", "stream_turn.close_sink_full",
-					"kind", eventKind(ev),
-					"session_id", sessionID)
-			}
-			return
-		}
-
-		if s.offer(env, false) {
-			return
-		}
-
-		// SECURITY: content-free — the discriminant and session id only, never
-		// the event's assistant / thought / tool content.
-		s.logger.Debug("relay: stream-turn drop; sink full",
-			"event", "stream_turn.sink_full",
-			"kind", eventKind(ev),
-			"session_id", sessionID)
+		s.forwardEvent(env)
 	}
+}
+
+// forwardEvent offers an already captured event without consulting its producer.
+func (s *streamTurnSink) forwardEvent(env streamTurnEnvelope) {
+	ev, sessionID := env.ev, env.sessionID
+	if turnMarkFor(ev) == turnMarkClose {
+		if !s.offer(env, true) {
+			// A closer dropped beyond the reserve remains visible at the default
+			// log level. Only its fixed variant and session ID are logged.
+			s.logger.Warn("relay: stream-turn close drop; sink full",
+				"event", "stream_turn.close_sink_full",
+				"kind", eventKind(ev),
+				"session_id", sessionID)
+		}
+		return
+	}
+
+	if s.offer(env, false) {
+		return
+	}
+
+	// SECURITY: content-free — the discriminant and session id only, never
+	// the event's assistant / thought / tool content.
+	s.logger.Debug("relay: stream-turn drop; sink full",
+		"event", "stream_turn.sink_full",
+		"kind", eventKind(ev),
+		"session_id", sessionID)
 }
 
 // exitForTag returns the per-runner child-exit closure, tagging its envelope with
