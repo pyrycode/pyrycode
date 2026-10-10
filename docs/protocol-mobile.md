@@ -6286,9 +6286,17 @@ publication. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 for daemon, Electron and Android consumers.
 
-The additive capability is exactly `hosted_apps_v1`, advertised through
-`HelloClientPayload.capabilities` and acknowledged through
-`HelloAckPayload.capabilities` by `negotiateCapabilities`. Following
+The six discovery/lifecycle/cancellation frames below have Go declarations in
+`internal/protocol` (#3137), ahead of their producers. Discovery producers and
+handlers (#3138), resource/cancellation producers and handlers (#3123), and
+capability activation remain **pending implementation**. Declaration alone is
+not shipped hosting support: the six frames do not join `inboundAppTypeSet`, and
+`CapabilityHostedAppsV1` does not add support to `supportedV2Capabilities`.
+
+The additive capability constant `CapabilityHostedAppsV1` is exactly
+`hosted_apps_v1`. Once activated, clients will advertise it through
+`HelloClientPayload.capabilities` and the daemon will acknowledge it through
+`HelloAckPayload.capabilities` after `negotiateCapabilities`. Following
 [ADR 037](knowledge/decisions/037-capability-strings-not-version-numbers.md), it
 advertises support and grants no authorization. Advertise it only once v1
 registration, supervision and routing are wired and available. Without negotiated
@@ -6300,18 +6308,64 @@ version `1`, app `release_version` and transport `v2` are distinct.
 
 | Envelope type | Direction | Purpose/correlation |
 |---|---|---|
-| `list_apps` | Client → daemon | Discovery request; optional opaque `cursor`. |
-| `apps` | Daemon → client | Reply to list ID; `revision`, records and required nullable `next_cursor`. |
-| `app_updated` | Daemon → client | Unsolicited whole registration/state record. |
-| `app_removed` | Daemon → client | Unsolicited `{app_id, revision}` tombstone; saved data is retained. |
+| `list_apps` | Client → daemon | `ListAppsPayload`: optional opaque `cursor`; first request `{}`. Declared ahead of producer/handler (#3138). |
+| `apps` | Daemon → client | `AppsPayload`: reply to list ID; `revision`, records and required nullable `next_cursor`. Declared ahead of producer (#3138). |
+| `app_updated` | Daemon → client | `HostedAppRecord`: unsolicited whole record, omitting `in_reply_to`. Declared ahead of producer (#3138). |
+| `app_removed` | Daemon → client | `AppRemovedPayload`: unsolicited `{app_id, revision}`, omitting `in_reply_to`; saved data is retained. Declared ahead of producer (#3138). |
 | `app_asset_request` | Client → daemon | Selected app/release asset GET, with native-stamped navigation. |
 | `app_api_request` | Client → daemon | Selected app/release API method, permitted headers and base64 body. |
 | `app_response` | Daemon → client | Once per asset/API request; status, headers, byte/chunk counts and digest. |
 | `app_response_chunk` | Daemon → client | Ordered base64 body chunks replying to the same asset/API ID. |
 | `app_response_credit` | Client → daemon | Grants one next chunk via original `request_id` and `next_index`; no reply. |
-| `app_cancel` | Client → daemon | Cancels original `request_id`; `app_id` required for asset/API, omitted for list. |
-| `app_cancelled` | Daemon → client | Reply to cancel ID, echoing target/scope; no mutation-rollback guarantee. |
+| `app_cancel` | Client → daemon | `AppCancelPayload`: original target `request_id`; `app_id` required for asset/API, omitted for list. Declared ahead of producer/handler (#3123). |
+| `app_cancelled` | Daemon → client | `AppCancelPayload`: reply to cancel ID, echoing target/scope; no mutation-rollback guarantee. Declared ahead of producer (#3123). |
 | `error` | Daemon → client | Existing `ErrorPayload`; terminal bridge failure replying to the failing ID. |
+
+### Declared discovery and lifecycle payloads
+
+These Go-backed shapes use the existing `Envelope`; they declare the contract
+ahead of the pending producers above. Payload fields are required unless stated
+optional. Optional fields are omitted when unset, never emitted as null.
+
+- `ListAppsPayload` has only optional `cursor` (`string`, `omitempty`). The first
+  page request is `{}`; later requests supply a nonempty opaque cursor. Sending
+  an empty or null cursor is invalid, even though ordinary DTO decoding does
+  not reject it.
+- `AppsPayload` has `revision` (`uint64`), `items` (`[]HostedAppRecord`) and
+  `next_cursor` (`*string` without `omitempty`). `items` is always an array,
+  including `[]` for an empty page; `AppsPayload.MarshalJSON` also normalizes a
+  nil slice to `[]`. `next_cursor` is a required key: a string for another page,
+  null at the end. The envelope's `in_reply_to` is the list request ID.
+- `HostedAppRecord` is both a discovery item and the complete `app_updated`
+  payload, never a partial patch. Its exact keys are `app_id`, `title`,
+  `desired`, `state`, `active_release`, `pending_release`, `last_error` and
+  `revision`. `desired` is `available` or `stopped`; `state` is `starting`,
+  `running`, `stopped` or `failed`. Both release fields are required nullable
+  strings (`*string` without `omitempty`). `last_error` is also required and
+  nullable; a non-null value contains only `code` and a static safe `message`,
+  with no retry or contextual fields from `ErrorPayload`.
+- `AppRemovedPayload` has exactly `app_id` and `revision`, carrying a tombstone
+  that removes the registration and retains saved data. Both `app_updated`
+  and `app_removed` are notifications and omit `in_reply_to`.
+- `AppCancelPayload` serves both `app_cancel` and `app_cancelled`: required
+  `request_id` (`uint64`) names the original client list/asset/API request;
+  optional `app_id` (`string`, `omitempty`) is omitted for list work and required
+  for asset/API work in both directions. The acknowledgement echoes those
+  payload fields, while `in_reply_to` names the **cancel request ID**, not the
+  target `request_id`. For example, cancelling request 6 with envelope ID 7
+  yields `app_cancelled` with `in_reply_to: 7` and `request_id: 6`.
+
+Standalone bridge errors reuse `ErrorPayload`, replying to the failing request
+through `in_reply_to`; they are distinct from the record's two-field `last_error`.
+Envelope IDs, correlations, cancellation `request_id` and page revisions permit
+0–9007199254740991; record/tombstone revisions permit 1–9007199254740991. Go's
+`uint64` preserves the integers but does not enforce these bounds. Required-key
+presence, safe-integer bounds, cursor validity, direction and forbidden metadata
+are handler obligations pending #3138/#3123. Ordinary DTO decoding validates
+none of those rules. Shared handshake examples reuse the existing handshake
+DTOs and prove vocabulary, not live negotiation or hosting availability.
+
+### Host scope and pending resource contract
 
 App frames are **host-scoped and encrypted**, using `Envelope` inside Noise;
 the relay remains content-blind. Host identity comes from the authenticated,
@@ -6322,7 +6376,8 @@ keys or unrestricted native APIs. Apps are independent of conversation routing:
 no `interactive`/`thread` capability or active session is required, and frames
 omit `conversation_id`, `session_id`, `event_id`, `history_entry_id`,
 `session_state_cleared` and `payload_encrypted`. Replies use `in_reply_to` for the
-original request; `Envelope.ID` is connection-local, never a durable operation key.
+request they answer (the cancel ID for `app_cancelled`); `Envelope.ID` is
+connection-local, never a durable operation key.
 
 Hosted chunks decode to at most **32768 bytes** (43692 base64 bytes); measure
 every final escaped envelope against **65519 plaintext bytes / 65535 ciphertext

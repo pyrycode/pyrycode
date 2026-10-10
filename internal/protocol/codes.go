@@ -1113,3 +1113,14 @@ const TypeStopBackgroundTask = "stop_background_task"
 // CodeStopBackgroundTaskRefused merges invalid task ids and seam refusals into
 // one nonretryable answer without exposing child diagnostics or task existence.
 const CodeStopBackgroundTaskRefused = "stop_background_task.refused"
+
+// Hosted-app discovery and lifecycle vocabulary is v2-only and declared ahead
+// of its producers. These constants enable neither routing nor advertisement.
+const (
+	TypeListApps     = "list_apps"     // client → daemon, discovery request
+	TypeApps         = "apps"          // daemon → client, correlated discovery reply
+	TypeAppUpdated   = "app_updated"   // daemon → client, whole-record notification
+	TypeAppRemoved   = "app_removed"   // daemon → client, tombstone notification
+	TypeAppCancel    = "app_cancel"    // client → daemon, list or resource cancellation
+	TypeAppCancelled = "app_cancelled" // daemon → client, correlated cancellation reply
+)
