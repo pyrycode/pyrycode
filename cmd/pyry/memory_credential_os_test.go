@@ -413,6 +413,7 @@ func TestMemoryOSProcess(t *testing.T) {
 			testMemoryOSFault(t, root, "")
 			b, err = run("set", memoryNew, "")
 			testMemoryMust(t, err)
+			testMemoryCheck(t, b == "{\"reference\":\""+ref+"\"}\n", "fresh process changed file reference")
 			_, selected := testMemorySelection(t, s)
 			testMemoryCheck(t, selected.Backend == "file", "fresh process migrated existing file selection")
 			b, err = run("resolve", "", ref)

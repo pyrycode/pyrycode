@@ -115,3 +115,6 @@ None.
   after the controlled tool reports the target operation has started, asserts
   the exact context failure, and disables the race runtime's artificial child
   exit delay. The production contract is unchanged.
+- 2026-10-10: verifier finding 1 identified unused replacement output in
+  `TestMemoryOSProcess`. Assert the returned JSON contains the stable file
+  reference, covering the output contract and fixing SA4006. The design is unchanged.
