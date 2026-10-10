@@ -476,11 +476,15 @@ authentication rather than requiring an API key.
 
 A configured provider is re-read inside the deadline and replaces ambient
 OAuth/API credentials; refusal prevents the launch rather than selecting a
-different account. The ten-second attempt bound includes credential lookup,
-startup and termination: a 9800 ms context reserves termination time, group
-cancellation sends `SIGKILL`, and 100 ms cancellation Wait grace and pipe waits
-keep escaped descendants from holding the caller open. Lookup is selected
-against cancellation even if a reader ignores its context. The shared `streamrunner.Run` would add a
+different account. `replyFallbackBudget` bounds the attempt at 30 seconds,
+including credential lookup, startup, inference, completion and termination.
+`replyFallbackDeadline` starts a 29.8-second context before lookup, reserving
+200 ms for the existing 100 ms cancellation Wait grace and pipe cleanup. Group
+cancellation sends `SIGKILL`; `cmd.WaitDelay` is 100 ms, so escaped descendants
+cannot hold the caller open. Earlier parent cancellation or a parent deadline
+remains authoritative. Lookup is selected against cancellation even if a reader
+ignores its context. Lifecycle `own_deadline_elapsed` uses the same attempt
+deadline. The shared `streamrunner.Run` would add a
 five-second termination grace and treat parent cancellation as nil, so this
 private helper owns the stricter bound. Missing binary/model/authentication,
 unsupported isolation flags, child failure, cancellation or timeout produces
@@ -498,11 +502,25 @@ Wait receipt. Successful result text is trimmed, then `validReplyFallback` requi
 nonblank single-line valid UTF-8, no remaining control characters or U+2028/
 U+2029 separators, at most 240 Unicode code points and 1024 UTF-8 bytes.
 Oversized or otherwise invalid output is rejected rather than truncated.
-Exchange text, generated text, raw stdout and raw errors are never logged;
+Result receipt alone is insufficient: `replyFallback.run` requires successful
+Wait receipt and an unexpired context before returning validated text. A killed
+or unsuccessfully completed process cannot publish a reply, even if its result
+was valid before cancellation. Exchange text, generated text, raw stdout and raw
+errors are never logged;
 stderr has the destination-specific exception below. `TestReplyFallbackProcess` and
 `TestReplyFallbackProcessCancellation` exercise isolation, fresh account reads,
 refusal, output validation and process termination; `TestReplyFallbackLifecycle`
 covers final-message selection, native priority, late delivery and stale results.
+
+A fixture that checks only valid result receipt misses completion crossing the
+deadline. `TestReplyFallbackTimingBudget` separates these timings: one child
+emits its result immediately and delays successful exit for 11 seconds; another
+first emits its result after 11 seconds. Both failed at about 9.81 seconds under
+the old deadline and return valid replies under the correction.
+`TestReplyFallbackLookupBudget` proves lookup consumes the same budget without
+launching a child. Increasing only the phone wait cannot repair a production
+deadline that kills the helper before successful completion. See
+[the correction and regression evidence](../../specs/architecture/2923-fallback-timing.md#offline-results).
 
 The daemon reader recognizes decoded `system/init`, `system/api_retry` and
 `result` progress. One writer mutex serializes recognition with the first
@@ -537,7 +555,7 @@ received and withheld Wait outcomes for both parent cancellation and parent
 deadline. In received cases, the private `waitGrace` seam releases held Wait on
 grace entry and keeps timeout unavailable until receipt; withheld cases retain
 the real 100 ms timer and hold Wait beyond bounded return. Production leaves
-the seam nil, preserving the 9800 ms context and 100 ms grace. Each started
+the seam nil, preserving the 29.8-second context and 100 ms grace. Each started
 attempt must emit exactly one `reply_fallback.lifecycle` snapshot before deferred
 context cleanup. Received completion records the observed exit; withheld
 completion requires `wait_completed=false`, `exit_observed=false` and
@@ -547,8 +565,8 @@ request group termination. See [custom deadline-context propagation](development
 
 `TestReplyFallbackProcessEvidence` retains success, nonzero exit, privacy and
 actual timer-driven deadlines. Its own-deadline case holds Wait through the
-9.8-second deadline and bounded return, proving the default grace without
-assuming prompt reaping. Return-time evidence stays immutable: release held
+29.8-second deadline and return before 30 seconds, proving the default grace
+without assuming prompt reaping. Return-time evidence stays immutable: release held
 work and separately join eventual completion before inspecting `ProcessState`
 or asserting child termination. Cleanup cancels, releases gates, closes
 readiness descriptors and joins run, Wait and readiness workers even after a
@@ -599,10 +617,17 @@ runs 2/4/6 froze init-only progress and observed zero retries without a decoded
 result. The [operator disposition](https://github.com/pyrycode/pyrycode/issues/3024#issuecomment-6077408952)
 accepts this as observation evidence for [#2923](https://github.com/pyrycode/pyrycode/issues/2923).
 Earlier #2882 **6/4/2/0** (runs 2/5 FAIL), #2873 **6/5/1/0** (run 4 FAIL), and
-PR #2896 **6/3/3/0** (runs 1/3/6 FAIL) remain unresolved; see the
+PR #2896 **6/3/3/0** (runs 1/3/6 FAIL) remain failed historical observations;
+see the
 [retained historical spec](https://github.com/pyrycode/pyrycode/blob/25d778fbd0e54753bd82a6d4eca9a097c996f6f4/docs/specs/architecture/2882-fallback-stdout-evidence.md).
-An all-pass batch establishes non-reproduction only. Result/deadline and
-init-only absence need separate investigation without inferring cause.
+The correction is established by deterministic regressions, separately from
+[the #2923 declared live batch](../../specs/architecture/2923-fallback-timing.md#six-run-results):
+**6/6/0/0** on unchanged commit `1918d756`, without retries or replacements.
+All six observed successful Wait and wire set/explicit-null clear revisions
+1/2; runs 1 and 5 received valid results after the old cutoff. This is counted
+live proof/non-reproduction under the corrected budget. Observation alone does
+not fix a deadline, and these passes do not change historical failures or prove
+how long the previously killed init-only calls would have taken.
 
 The owner has one leaf mutex, released before registry reads, queue gates,
 writes, credential lookup, inference or pushes. Reset cancels pending work and

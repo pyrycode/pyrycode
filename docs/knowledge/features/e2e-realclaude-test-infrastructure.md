@@ -225,13 +225,26 @@ that never participates in the live proof.
 
 **A suggestion frame alone cannot prove its source.** `installSuggestCLI`
 refuses non-stream native-probe launches. Fallback disables native generation and
-removes `--prompt-suggestions` only on the persistent child. One exchange gets
-15 seconds: two for native output, then ten for production fallback (9.8-second
-internal deadline plus termination). Require a UTF-8 single-line nonempty reply
-for `suggestConvID`, ≤240 characters/1024 bytes, then `suggested_reply: null` at a
+removes `--prompt-suggestions` only on the persistent child.
+`TestInteractiveStream_FallbackReplySuggestionSetThenClear` completes one
+exchange, then waits up to 35 seconds after idle: two for native priority,
+30 for the production fallback including termination, and three for transport
+and scheduling. The native probe's window is independent. Require a UTF-8
+single-line nonempty reply for `suggestConvID`, ≤240 characters/1024 bytes,
+then `suggested_reply: null` at a
 higher revision after accepted input. Authenticated absence is FAIL. Both tests
 run under `make e2e-realclaude` and
 [passed a counted gate](https://github.com/pyrycode/pyrycode/issues/2856#issuecomment-6009817217).
+
+The fallback's 29.8-second internal deadline starts before credential lookup
+inside a 30-second total bound. Valid result receipt must be followed by
+successful Wait before context expiry; parent cancellation and stale-work
+guards still prohibit publication. The old 9.8-second cutoff covered both
+inference and completion, so extending only the phone wait could not fix it.
+`TestReplyFallbackTimingBudget` separately delays exit after an early result
+and delays the first result beyond the old cutoff. Both fail with the old
+deadline and pass with the correction; a receipt-only assertion would miss the
+first case. See [the isolated-attempt contract](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
 
 The fresh print-mode helper uses `--output-format stream-json --verbose`.
 Wrapper and daemon parse independently while the wrapper forwards exact stdout,
@@ -354,7 +367,7 @@ blocked-flush read and acknowledged forwarding; readiness alone missed a race,
 so wait for witnesses/`lockedBuffer` bytes and inspect I/O after Wait.
 `TestSuggestSourceCapturePresence` rejects invented observations.
 
-Historical evidence: [#2873](../../specs/architecture/2873-fallback-source-evidence.md),
+Counted evidence: [#2873](../../specs/architecture/2873-fallback-source-evidence.md),
 [PR #2892](https://github.com/pyrycode/pyrycode/pull/2892).
 Counts: executed/passed/failed/skipped.
 
@@ -370,8 +383,9 @@ Counts: executed/passed/failed/skipped.
 | [Earlier #2882 batch][fallback-history] | 6/4/2/0 |
 | [PR #2896 batch](https://github.com/pyrycode/pyrycode/pull/2896) | 6/3/3/0 |
 | [#3024 declared batch](../../specs/architecture/3024-fallback-stream-observation.md#six-run-results), `28974c1c` | 6/2/4/0 |
+| [#2923 corrected declared batch](../../specs/architecture/2923-fallback-timing.md#six-run-results), `1918d756` | 6/6/0/0 |
 
-**Internal-deadline/live-parent absence remains unresolved.** #2873 run 4
+**Historical deadline-stage failures remain recorded.** #2873 run 4
 remains FAIL: fallback/own deadline, neither parent flag, wrapper Wait/SIGKILL;
 completion, child exit/output and cause unknown. Earlier #2882 runs
 2/5 and PR #2896 runs **1, 3 and 6 remain FAIL**. The latter witnessed spawn,
@@ -384,13 +398,30 @@ froze init-only progress, zero observed retries and no decoded result. The
 [operator disposition](https://github.com/pyrycode/pyrycode/issues/3024#issuecomment-6077408952)
 accepts the batch as observation evidence feeding [#2923](https://github.com/pyrycode/pyrycode/issues/2923),
 without correction or a cause claim. Passes with saturated receipt and bounded
-results do not resolve these or historical failures. An all-pass batch means
-non-reproduction only. The separate dispatcher gate counted 1925/1925/0/27 on
+results alone do not establish a correction or change historical failures.
+An all-pass batch means non-reproduction only. The separate dispatcher gate
+counted 1925/1925/0/27 on
 `b27e23ee` with main `c7bc2ed4`; it does not replace the retained six-run batch.
 The [#3022 snapshot contract](../../specs/architecture/3022-post-wait-stdout-validation.md)
 and [wrapper witness contract](../../specs/architecture/3023-fallback-wrapper-witnesses.md)
 preserve execution, deadlines, cancellation, account/isolation, policy, staging and
 [release control](https://github.com/pyrycode/pyrycode/issues/2859).
+
+The [#2923 correction](../../specs/architecture/2923-fallback-timing.md#offline-results)
+has two deterministic subprocess witnesses that failed under the old deadline
+and pass under the new budget. Its separately declared live batch executed
+exactly six sequential authenticated launches on unchanged commit `1918d756`,
+with no retries, replacements or skips: **6/6/0/0**. Each retained one completed
+exchange with native suggestions disabled, one successful isolated fallback,
+a bounded nonempty reply for `suggestConvID`, then explicit-null clear revision
+2 above set revision 1 after accepted input. PID-correlated runs 1 and 5 first
+recognized valid results at approximately 10971 and 11101 ms, beyond the old
+9800-ms cutoff, and completed successfully at 11506 and 11598 ms. All six
+observed successful Wait without deadline/group cancellation. The spec retains
+each outcome and safe scalar source/timing evidence; launcher preflight proves
+authentication independently of reported source. Counted live non-reproduction
+supports the deterministic correction; observation alone does not establish it
+or determine how long historically killed calls would otherwise have taken.
 
 The [#2881 full gate](https://github.com/pyrycode/pyrycode/issues/2881#issuecomment-6017651019)
 at `81c7ac78f9` counted 1635/1635/0/27. Passing cannot recover witnesses or resolve
