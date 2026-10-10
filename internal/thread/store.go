@@ -51,6 +51,7 @@ type conversationWorker struct {
 	done       chan struct{}
 	retiring   bool
 	snapshot   Snapshot
+	query      *queryIndex
 	err        error // read only after done closes
 	changed    chan struct{}
 	ranges     []changeBatch
@@ -64,6 +65,7 @@ type Store struct {
 	history      *history.Store
 	forward      func(conversations.ConversationID) (storeReader, error)
 	beforeFold   func(context.Context, conversations.ConversationID) error
+	queryWork    func(bool) // optional work counter: true for preparation, false for requests
 	workers      map[conversations.ConversationID]*conversationWorker
 	closed       bool
 	initMu       sync.Mutex
@@ -163,6 +165,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 			s.records[id] = progressRecord{Epoch: progress.Epoch, Version: progress.Version, Err: result}
 			if !w.retiring && !s.closed {
 				w.snapshot = Snapshot{State: StateUnavailable, Err: ErrUnavailable}
+				w.query = nil
 				w.ranges, w.rangeBytes = nil, 0
 				w.notify()
 			}
@@ -272,6 +275,7 @@ func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRec
 }
 
 func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, snapshot Snapshot) {
+	index := newQueryIndex(snapshot.Items, s.queryWork)
 	s.mu.Lock()
 	before := w.snapshot
 	s.mu.Unlock()
@@ -288,6 +292,7 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 			w.retain(batch)
 		}
 		w.snapshot = snapshot
+		w.query = index
 		w.notify()
 	}
 }
@@ -321,6 +326,7 @@ func (s *Store) Unload(id conversations.ConversationID) error {
 	}
 	w.retiring = true
 	w.snapshot = Snapshot{}
+	w.query = nil
 	w.ranges, w.rangeBytes = nil, 0
 	w.notify()
 	w.cancel()
@@ -351,6 +357,7 @@ func (s *Store) Shutdown() error {
 	for _, w := range s.workers {
 		w.retiring = true
 		w.snapshot = Snapshot{}
+		w.query = nil
 		w.ranges, w.rangeBytes = nil, 0
 		w.notify()
 		w.cancel()

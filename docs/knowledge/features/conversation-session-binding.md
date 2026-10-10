@@ -96,6 +96,14 @@ Every open interactive `multi_agent` peer receives the three reset statuses, one
 
 ### Testing agent-switch handover
 
+Receiving every switch outcome frame does not join `relayAgentSwitcher`:
+`conversationAgentSwitcher.Switch` releases reset exclusion after publishing
+the outcome. A subsequent switch can still receive a busy refusal in that gap.
+`TestRelayAgentSwitchEncryptedFrames` uses `gatedRelaySwitch.waitCompleted` to
+await the inner adapter's return before another request or a configuration
+change. Await adapter completion separately from frame assertions; delaying
+exclusion release reproduces the race even when all expected frames arrived.
+
 A short wall-clock wrap-up deadline can turn a successful fake reply into the
 previous-note fallback. `wrapUpReply.waitOutcome` selects between completion
 and context cancellation; when both are ready, either can win. The 20 ms

@@ -123,6 +123,79 @@ partially advanced fold would repeat consumed IDs. Completion records unavailabl
 state and closes the worker's done channel under the same lock, preventing an old
 completion from overwriting its replacement.
 
+### Bounded queries
+
+`Store.HistoryPage(ctx, conversationID, upperOrder, limit) (QueryResult, error)`
+reads the newest ordered public range below an exclusive upper order.
+`Store.NewestWindow(ctx, conversationID, limit) (QueryResult, error)` reads the
+newest ordered range below the publication's consumed `Version + 1`, plus every
+active public item. Callers must already be authorized for the conversation.
+Both validate canonical IDs with `history.ErrInvalidID`, reject zero or negative
+limits with `ErrInvalidLimit`, and clamp positive limits to `MaxQueryItems = 256`.
+The limit counts ordered selection rows; lower-order ties, active extras and
+parents can make the returned item count larger than 256.
+
+Public membership is exactly `Fold.Items`, including hidden (`Shown == false`)
+and dropped items. Private unresolved children and claimed standalone delivery
+rows are omitted. Selection follows current `Item.Order`, not creation-ID order:
+an accepted queued message keeps its permanent ID when delivery gives it a later
+order. Each result retains every returned item's current full fields and content,
+deduplicated by permanent ID, with no presentation-order guarantee.
+
+For a nonempty ordered selection, `LowerOrder` is its inclusive oldest order
+and `UpperOrder` is the exclusive requested bound. Every ordered public item in
+`[LowerOrder, UpperOrder)` is returned, including all ties at the lower bound;
+cutting a tie to enforce the limit would leave a hole in the range.
+`Continuation == LowerOrder`: pass it as the next history page's exclusive
+upper order. `OlderExists` is authoritative for that publication and true exactly
+when an ordered public item exists strictly below `LowerOrder`. Neither the
+number of returned items nor the oldest returned parent can establish that flag.
+
+Both reads include complete public parent closure, including shared and
+multi-level ancestors outside the selected range. A history page includes
+unordered (`Order == 0`) rows only as required parents. A newest window also
+includes every active public row, including unordered queued messages and old
+active work outside the newest ordered range, then the parents of those rows.
+Active and parent extras do not consume the limit or change bounds, continuation
+or older-exists. If no ordered item is eligible, including a history page with
+upper order zero, `LowerOrder` and `Continuation` are zero and `OlderExists` is
+false. `UpperOrder` still carries the usable query's requested bound (or
+`Version + 1` for newest windows). Newest windows can return active extras even
+with that empty ordered range.
+
+`QueryResult` carries `State`, `Items`, `Epoch`, consumed `Version`, `LowerOrder`,
+`UpperOrder`, `Continuation`, `OlderExists` and `Err`. Items/content and range
+metadata are detached from one immutable usable publication, captured with its
+epoch/version under the store mutex; newer commits may still await folding.
+Rebuilding and unavailable queries return the existing snapshot state, with
+`ErrUnavailable` in `QueryResult.Err` for failure. Unloaded, retiring and closed
+stores return `StateNotLoaded`. Nonusable results expose no items, epoch,
+version or bounds/continuation. Validation and cancellation errors use the
+separate returned error; cancellation discards partial results and leaves the
+conversation worker running. Queries never load a conversation, wait for
+recovery or read history.
+
+`newQueryIndex` prepares permanent-ID/parent lookup, current-order sorting and
+active-row lookup from committed public items outside the global lock.
+`Store.publish` installs it atomically with the matching snapshot, rebuilding
+on recovery/retry and each successful publication. Failure, unload and shutdown
+release worker references; a reader that already captured a publication can
+finish coherently while it is replaced or retired. Binary seeks, selection,
+parent traversal and returned-content copying run outside the lock, preserving
+history-writer and other-conversation progress.
+
+Request work is `O(log N + selected range + active rows + unique parents +
+returned content bytes)`; active rows apply only to newest windows. Index
+preparation is separately `O(N log N)` per publication, in addition to fold/replay
+and checkpoint work. Bounded reads do not make recovery or publication cost
+independent of conversation length. They select complete current rows by order,
+whereas `Snapshot`/`Observe` clone full baselines and `Changes` supplies retained
+live change ranges by consumed version. A bounded result is not a complete
+baseline for applying those ranges. These daemon-internal reads implement the
+[ADR 042 update-range contract](../decisions/042-daemon-built-thread.md#update-messages);
+durable catch-up (#3087) and wire handlers/capability activation (#2963) are
+separate consumers.
+
 ### Isolation and lifecycle
 
 One goroutine owns each conversation's reader and fold, serializing `Feed`,
@@ -191,6 +264,29 @@ cancels workers; callers must finish producer draining and tail catch-up before
 invoking it to preserve final commits.
 
 ### Store verification
+
+`TestQuerySelection` and `TestQueryLimits` constrain continuous ties, empty and
+oldest bounds, hidden/dropped membership, shared/multi-level parents, active
+unordered extras, detached content and exact/clamped/nonpositive limits.
+`TestStoreQueriesUpdates` checks delivery order placement and row suppression,
+active work settling and newly public children after each committed publication.
+To prove late child resolution, repair attribution to an existing older parent:
+a newly created newer parent cannot join under the
+[parent identity rule](thread-package-agents-and-background-work.md#parent-repair).
+
+`TestStoreQueriesBounded` uses 36,000 committed entries across initial load,
+clean reopen and unload/reload. It holds the real reader at Tail, then checks
+early/middle/newest pages and newest windows against full items while counting
+actual history read bytes/segment opens, index visits and allocations. Measure
+both APIs: page-only allocation checks would miss a full baseline clone in
+newest-window reads. Keep preparation counters/timing separate from requests.
+Nested children near the beginning force `resolveChildren` to rebuild public
+visibility for subsequent facts; putting active nested extras late in history,
+but still outside the newest window, preserves query coverage without making
+replay dominate the fixture. `TestStoreQueriesLifecycle` and
+`TestStoreQueriesRetirementIsolation` force cancellation during index access and
+hold captured results across publication/retirement while writers and another
+conversation progress.
 
 `TestFoldObservations`, `TestFoldObservationChildren` and
 `TestObservationReplacement` independently apply additions, replacements and
