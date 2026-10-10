@@ -114,6 +114,23 @@ pyry (internal/streamsup)
 
 Spawn argv is `--input-format stream-json --output-format stream-json --verbose`, plus `--session-id <uuid>` on create or `--resume <uuid>` on reattach (`buildArgs`). The parsed turn events fan into a single `newStreamTurnSink` instance shared by the runner factory (`newStreamRunnerFactory`) and the one relay-leg drain.
 
+`daemonLiveState` in `cmd/pyry` retains current stream readings in memory before
+fan-in, independently of connections, legacy delivery and
+[folded thread items](../decisions/042-daemon-built-thread.md#decision).
+Both relay and no-relay history compositions install the owner. Captured producer
+provenance travels with source conversation, positive generation and per-family/
+reading-identity revision; transitions retire predecessor readings and supply
+successor family clears. Detached updates and finite snapshot cursors add no
+history write, item, catch-up change or last-shown version. See
+[daemon-retained live state](../features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md#daemon-retained-live-state)
+for capture, ordering, retirement and cleanup.
+
+Relay provider installation and production activation await
+[#3077](https://github.com/pyrycode/pyrycode/issues/3077) and the control/provider
+sibling [#3089](https://github.com/pyrycode/pyrycode/issues/3089); final
+producer-to-relay protocol proof remains #3077. This daemon-local owner leaves
+production thread negotiation disabled.
+
 **Production path since 2026-07-24:** the stream-json interactive runner (`internal/streamsup`, #1081) is the only interactive path. `interactive_runner: "stream-json"` in the config file selects it — and so does an absent config file, see below.
 
 **`interactive_runner: "pty"` is rejected at daemon startup.** It is not a rollback switch: `selectInteractiveRunner` accepts exactly `""` and `"stream-json"`, both of which select the stream runner, and gives `"pty"` its own error arm — a daemon whose config still carries that value does not start at all, rather than starting on some other path. The dedicated arm exists so an operator with the key in a config file is told the path was deleted rather than that their value is unrecognised. The empty default moved off the terminal runner in the same change, which is the load-bearing half for an absent or reset config. #1348 executed the deletion: it removed `internal/supervisor` and the terminal-driving agent-run runner from the tree, after all four of the PTY path's live interactive gates failed on clean `main` and nothing had exercised the path since the 2026-07-24 cutover.
