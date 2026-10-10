@@ -6276,6 +6276,66 @@ the rule this document already applies to an attachment's `filename`.
 The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, with
 `entries` either populated or `[]`.
 
+## Hosted apps (v2)
+
+**Defined ahead of hosting implementation.** The
+[hosted-app reference](hosted-apps.md) and
+[approved v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
+fix manifest fields, runtime/layout, resource/Fetch semantics, limits and safe
+publication. The spec owns the
+[shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
+for daemon, Electron and Android consumers.
+
+The additive capability is exactly `hosted_apps_v1`, advertised through
+`HelloClientPayload.capabilities` and acknowledged through
+`HelloAckPayload.capabilities` by `negotiateCapabilities`. Following
+[ADR 037](knowledge/decisions/037-capability-strings-not-version-numbers.md), it
+advertises support and grants no authorization. Advertise it only once v1
+registration, supervision and routing are wired and available. Without negotiated
+support, clients show Apps as unsupported and send no app requests; hosts send no
+app list/state/resource pushes. A supporting host rejects unnegotiated requests
+with `protocol.unsupported`; an older host may return `protocol.unknown_type`.
+Other host connections and conversations continue normally. Manifest contract
+version `1`, app `release_version` and transport `v2` are distinct.
+
+| Envelope type | Direction | Purpose/correlation |
+|---|---|---|
+| `list_apps` | Client → daemon | Discovery request; optional opaque `cursor`. |
+| `apps` | Daemon → client | Reply to list ID; `revision`, records and required nullable `next_cursor`. |
+| `app_updated` | Daemon → client | Unsolicited whole registration/state record. |
+| `app_removed` | Daemon → client | Unsolicited `{app_id, revision}` tombstone; saved data is retained. |
+| `app_asset_request` | Client → daemon | Selected app/release asset GET, with native-stamped navigation. |
+| `app_api_request` | Client → daemon | Selected app/release API method, permitted headers and base64 body. |
+| `app_response` | Daemon → client | Once per asset/API request; status, headers, byte/chunk counts and digest. |
+| `app_response_chunk` | Daemon → client | Ordered base64 body chunks replying to the same asset/API ID. |
+| `app_response_credit` | Client → daemon | Grants one next chunk via original `request_id` and `next_index`; no reply. |
+| `app_cancel` | Client → daemon | Cancels original `request_id`; `app_id` required for asset/API, omitted for list. |
+| `app_cancelled` | Daemon → client | Reply to cancel ID, echoing target/scope; no mutation-rollback guarantee. |
+| `error` | Daemon → client | Existing `ErrorPayload`; terminal bridge failure replying to the failing ID. |
+
+App frames are **host-scoped and encrypted**, using `Envelope` inside Noise;
+the relay remains content-blind. Host identity comes from the authenticated,
+nonrevoked paired connection. Native stamps the selected registered app and
+pinned release, and the daemon resolves their validated public root/private
+service independently. The page cannot select other apps, host paths/services,
+keys or unrestricted native APIs. Apps are independent of conversation routing:
+no `interactive`/`thread` capability or active session is required, and frames
+omit `conversation_id`, `session_id`, `event_id`, `history_entry_id`,
+`session_state_cleared` and `payload_encrypted`. Replies use `in_reply_to` for the
+original request; `Envelope.ID` is connection-local, never a durable operation key.
+
+Hosted chunks decode to at most **32768 bytes** (43692 base64 bytes); measure
+every final escaped envelope against **65519 plaintext bytes / 65535 ciphertext
+bytes**. Metadata plus exactly the declared ordered chunk count, byte length
+and SHA-256 completes a response; the initial request grants chunk 0 only.
+The [bridge tables](hosted-apps.md#client-resource-bridge) fix all other fields,
+HTTP/header rules, concurrency/reservation bounds, deadlines and credit behavior.
+Abort, disconnect, host/view switch and release replacement retire work and
+partial assembly. Reconnect renegotiates, refreshes discovery and permits fresh
+reads; late replies are discarded and uncertain mutations are never replayed
+automatically. Native web isolation does not sandbox trusted host-side services;
+see [ADR 043](knowledge/decisions/043-hosted-app-runtime-and-isolation.md).
+
 ## Reconnect / Backfill semantics
 
 **Connection mode:** the legacy two-mode behavior below is unchanged. A thread

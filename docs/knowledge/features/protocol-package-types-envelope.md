@@ -135,6 +135,30 @@ adding metadata does not overwrite the payload's own field. Checking only a
 decoded pointer, or reusing untouched raw payload bytes, would miss these
 regressions; see [protocol boundaries](development-verification.md#protocol-boundaries).
 
+## Native HTTP bridge semantics
+
+The [hosted-app contract](../../hosted-apps.md#client-resource-bridge) is defined
+ahead of hosting implementation. Android `WebResourceRequest` exposes no request
+body, and `WebResourceResponse` rejects 3xx statuses. Resource interception alone
+would silently lose POST bodies or fail redirect responses. Electron and Android
+therefore need a narrow body-capable Fetch adapter alongside resource loaders:
+Fetch returns API status 200–599 without following redirects or exposing
+`location`; resource loaders accept only 200–299/400–599. Reject raw non-GET
+resource traffic before dispatch so bypassing the adapter cannot discard a body.
+See the [Android request interface](https://developer.android.com/reference/android/webkit/WebResourceRequest)
+and [response restrictions](https://developer.android.com/reference/android/webkit/WebResourceResponse).
+
+Connection-local `Envelope.ID` cannot identify app work across reconnects.
+Pending tables must include connection/view generation and the bound app/release;
+daemon completions also belong to a process generation. Retire partial assembly
+on disconnect, host switch or release replacement, discard late replies, and
+refresh discovery before fresh reads. An abort cannot establish whether a write
+committed, so even a retryable bridge error cannot authorize automatic mutation
+replay. Hosted frames omit conversation/session/replay metadata and rely on Noise
+for encryption, not `PayloadEncrypted`. The
+[shared fixtures](../../specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
+belong to the design; executable daemon/native conformance remains downstream.
+
 ## Testing payload absence
 
 An empty, non-nil `json.RawMessage` fails envelope marshaling before a relay
