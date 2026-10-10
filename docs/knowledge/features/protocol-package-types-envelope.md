@@ -18,6 +18,10 @@ type Envelope struct {
     // HistoryEntryID — durable per-conversation history entry id.
     HistoryEntryID *uint64 `json:"history_entry_id,omitempty"`
 
+    // Live-state metadata, supplied only for thread-capable delivery.
+    SessionID           json.RawMessage `json:"session_id,omitempty"`
+    SessionStateCleared bool            `json:"session_state_cleared,omitempty"`
+
     PayloadEncrypted bool `json:"payload_encrypted,omitempty"`
 }
 ```
@@ -84,6 +88,32 @@ the distinction. `TestV2Session_Reconnect_HistoryEntryID` inspects the decrypted
 authenticated replay JSON and compares durable id 8 with ring id 2 and a fresh
 history read, so a missing key, `null`, zero or a substituted ring id cannot
 satisfy the same assertions. See [protocol boundary tests](development-verification.md#protocol-boundaries).
+
+## Live-state session metadata
+
+`Envelope.SessionID` must preserve three states: omitted means metadata was not
+supplied, JSON `null` positively means no producing session, and a nonempty JSON
+string identifies the producer. A `*string` with `omitempty` would collapse
+omitted and null into nil during decoding, then erase the explicit no-session
+fact on re-encoding. `json.RawMessage` preserves both: nil omits the key, while
+the bytes `null` emit a present null. Raw JSON does not validate the shape;
+producers and consumers must enforce null or a nonempty string. This metadata
+conveys no authorization and never replaces an existing payload session field.
+
+`SessionStateCleared: true` with payload `{}` explicitly clears this envelope
+kind's session-scoped reading. Ordinary updates omit the flag. Delivery must
+restrict these fields to thread-negotiated live state and enforce the empty
+clear payload. The fields are declared ahead of that delivery integration;
+legacy producers leave them unset and retain their existing wire bytes. See
+[the wire contract](../../protocol-mobile.md#message-envelope) and
+[ADR 042](../decisions/042-daemon-built-thread.md#decision).
+
+`TestEnvelopeSessionMetadataRoundTrip` decodes omitted/null/string metadata,
+re-marshals decoded ordinary or empty-clear payloads into their envelopes, and
+inspects emitted keys. Distinct envelope and payload session IDs prove that
+adding metadata does not overwrite the payload's own field. Checking only a
+decoded pointer, or reusing untouched raw payload bytes, would miss these
+regressions; see [protocol boundaries](development-verification.md#protocol-boundaries).
 
 ## Testing payload absence
 

@@ -291,6 +291,9 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 // must not, so the partition is the architectural seam between v1 traffic
 // and v2 traffic.
 var v2OnlyTypes = map[string]bool{
+	TypeThreadItemAdded:     true,
+	TypeThreadItemChanged:   true,
+	TypeThreadTextAppend:    true,
 	TypeRekeyRequest:        true,
 	TypeTurnState:           true,
 	TypeReplySuggestion:     true,
@@ -450,6 +453,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRenameWorkspace, TypeWorkspaceUpdated,
 		TypeRegisterPushToken,
+		// v2 thread live updates.
+		TypeThreadItemAdded, TypeThreadItemChanged, TypeThreadTextAppend,
 		// v2 control types.
 		TypeRekeyRequest,
 		// v2 interactive application events.
