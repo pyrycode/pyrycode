@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -357,6 +358,100 @@ func TestLiveStateBounds(t *testing.T) {
 	r.Envelope.Payload = json.RawMessage(`{"text":"` + strings.Repeat("x", protocol.MaxThreadEnvelopeBytes) + `"}`)
 	if err := m.PushLiveState(t.Context(), v2TestConnID, r); err == nil {
 		t.Fatal("accepted oversize reading")
+	}
+}
+
+func TestLiveStateGeneratedClearBound(t *testing.T) {
+	t.Parallel()
+	bad := liveReading("turn_state", gateClaudeConv, "", `"s"`, 1, 1)
+	bad.Envelope.Payload = json.RawMessage(`{}`)
+	raw, err := json.Marshal(bad.Envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad.Envelope.SessionID, err = json.Marshal(strings.Repeat("s", 1+protocol.MaxThreadEnvelopeBytes-len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(bad.Envelope)
+	if err != nil || len(raw) != protocol.MaxThreadEnvelopeBytes {
+		t.Fatalf("fresh fixture: bytes=%d err=%v", len(raw), err)
+	}
+	clear := bad.Envelope
+	clear.SessionStateCleared = true
+	raw, err = json.Marshal(clear)
+	if err != nil || len(raw) <= protocol.MaxThreadEnvelopeBytes {
+		t.Fatalf("clear fixture: bytes=%d err=%v", len(raw), err)
+	}
+	healthy := liveReading("turn_state", gateClaudeConv, "", `"healthy"`, 1, 1)
+	other := liveReading("compacting", gateClaudeConv, "", `"healthy"`, 1, 1)
+	for _, source := range []string{"queued", "snapshot"} {
+		t.Run(source, func(t *testing.T) {
+			readings := []LiveState{other}
+			if source == "snapshot" {
+				readings = []LiveState{bad, healthy, other}
+			}
+			m, s, rec, recv := liveFixture(t, threadCaps, func(c *V2SessionConfig) {
+				c.ThreadLiveState = func() func() (LiveState, bool) {
+					return func() (LiveState, bool) {
+						if len(readings) == 0 {
+							return LiveState{}, false
+						}
+						r := readings[0]
+						readings = readings[1:]
+						return r, true
+					}
+				}
+			})
+			if source == "queued" {
+				if err := m.PushLiveState(t.Context(), v2TestConnID, bad); !errors.Is(err, errInvalidLiveState) {
+					t.Errorf("oversized generated clear admission: %v", err)
+				}
+				if len(m.queues[v2TestConnID].items) != 0 {
+					t.Error("invalid reading entered push queue")
+				}
+				if err := m.PushLiveState(t.Context(), v2TestConnID, healthy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			seen := 1
+			got := liveDrain(t, m, rec, recv, &seen, 8)
+			if len(got) != 4 || !got[0].SessionStateCleared || got[1].SessionStateCleared ||
+				!bytes.Equal(got[1].Payload, healthy.Envelope.Payload) || got[1].Type != healthy.Envelope.Type ||
+				!got[2].SessionStateCleared || got[3].SessionStateCleared ||
+				!bytes.Equal(got[3].Payload, other.Envelope.Payload) || got[3].Type != other.Envelope.Type {
+				t.Errorf("healthy queued/snapshot readings did not drain: %d frames", len(got))
+			}
+			if s.livePending != nil || s.liveSnapshot != nil || len(m.queues[v2TestConnID].items) != 0 {
+				t.Error("pump retained undeliverable state")
+			}
+			select {
+			case <-m.drainCh:
+			default:
+			}
+			m.drainOnce(t.Context())
+			select {
+			case <-m.drainCh:
+				t.Error("exhausted pump keeps scheduling drains")
+			default:
+			}
+		})
+	}
+}
+
+func TestLiveStateClearFailure(t *testing.T) {
+	t.Parallel()
+	m, s, rec, _ := liveFixture(t, threadCaps, nil)
+	r := liveReading("turn_state", gateClaudeConv, "", `"source"`, 1, 1)
+	// A detached connection cannot deliver its clear or retain its fresh reading.
+	delete(m.sessions, s.connID)
+	err := m.forwardLiveState(t.Context(), s, r)
+	m.sessions[s.connID] = s
+	if !errors.Is(err, ErrConnNotFound) {
+		t.Fatalf("clear forwarding error: %v", err)
+	}
+	if s.livePending != nil || len(s.liveWatermarks) != 0 || len(rec.snapshot()) != 1 {
+		t.Fatal("failed clear retained delivery state or sent a frame")
 	}
 }
 

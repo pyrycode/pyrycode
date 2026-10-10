@@ -54,6 +54,21 @@ func validLiveTag(tag json.RawMessage) bool {
 	return json.Unmarshal(tag, &id) == nil && id != ""
 }
 
+func liveStateClear(e protocol.Envelope) protocol.Envelope {
+	switch e.Type {
+	case protocol.TypeModalDismissed:
+		e.Type = protocol.TypeModalShown
+	case protocol.TypeQuestionDismissed:
+		e.Type = protocol.TypeQuestionShown
+	case protocol.TypeSessionSettingsUpdated:
+		e.Type = protocol.TypeSessionSettings
+	}
+	e.Payload = json.RawMessage(`{}`)
+	e.SessionStateCleared = true
+	e.InReplyTo = nil
+	return e
+}
+
 func validateLiveState(r LiveState) error {
 	e := r.Envelope
 	if !liveStateFamily(e.Type) || r.ConversationID == "" || r.SessionGeneration == 0 || r.Revision == 0 || !validLiveTag(e.SessionID) || !json.Valid(e.Payload) {
@@ -65,12 +80,14 @@ func validateLiveState(r LiveState) error {
 			return errInvalidLiveState
 		}
 	}
-	// Reserve the actual supplied metadata; source payload budgets stay unchanged.
+	// Both the supplied reading and its generated clear must fit before admission.
 	e.EventID = nil
 	e.HistoryEntryID = nil
-	raw, err := json.Marshal(e)
-	if err != nil || len(raw) > protocol.MaxThreadEnvelopeBytes {
-		return errInvalidLiveState
+	for _, frame := range []protocol.Envelope{e, liveStateClear(e)} {
+		raw, err := json.Marshal(frame)
+		if err != nil || len(raw) > protocol.MaxThreadEnvelopeBytes {
+			return errInvalidLiveState
+		}
 	}
 	return nil
 }
@@ -126,16 +143,7 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 	if w == nil || r.SessionGeneration > w.generation {
 		w = &liveWatermark{generation: r.SessionGeneration, cleared: make(map[string]bool), revisions: make(map[liveReadingKey]uint64)}
 	}
-	family := r.Envelope.Type
-	switch family {
-	case protocol.TypeModalDismissed:
-		family = protocol.TypeModalShown
-	case protocol.TypeQuestionDismissed:
-		family = protocol.TypeQuestionShown
-	case protocol.TypeSessionSettingsUpdated:
-		family = protocol.TypeSessionSettings
-	}
-	key := liveReadingKey{family, r.ReadingID}
+	key := liveReadingKey{liveStateClear(r.Envelope).Type, r.ReadingID}
 	if r.Envelope.SessionStateCleared {
 		if w.cleared[key.family] {
 			return nil
@@ -146,19 +154,19 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 	e := r.Envelope
 	e.EventID = nil
 	e.HistoryEntryID = nil
-	if !e.SessionStateCleared && !w.cleared[key.family] {
-		fresh := r
-		s.livePending = &fresh
-		e.Type = family
-		e.Payload = json.RawMessage(`{}`)
-		e.SessionStateCleared = true
-		e.InReplyTo = nil
+	needsClear := !e.SessionStateCleared && !w.cleared[key.family]
+	if needsClear {
+		e = liveStateClear(e)
 	}
 	if e.SessionStateCleared {
 		e.Payload = json.RawMessage(`{}`)
 	}
 	if err := m.forwardEnvelopeSource(ctx, s.connID, e, true); err != nil {
 		return err
+	}
+	if needsClear {
+		fresh := r
+		s.livePending = &fresh
 	}
 	if s.liveWatermarks == nil {
 		s.liveWatermarks = make(map[string]*liveWatermark)
