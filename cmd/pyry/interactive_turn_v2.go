@@ -109,6 +109,7 @@ type assistantDeltaLane struct {
 // transport-sentinel err. Thought text is dropped by MapEvent and never
 // forwarded — thinking surfaces only as a turn_state transition.
 type interactiveTurnEmitterV2 struct {
+	liveCapture   *liveStreamCapture // selected only by the drain
 	runtimeFacts  bool
 	runtimeSealed map[string]bool
 	sup           cursorReader
@@ -199,6 +200,7 @@ type interactiveTurnEmitterV2 struct {
 // convTurnState retains one producing session's lifecycle and buffered text
 // within a conversation. Selection, flushing and closing retain that source.
 type convTurnState struct {
+	liveSource          daemonLiveSource
 	agentLifetime       string
 	agentCalls          map[string]agentHistoryFact
 	agentTasks          map[string]*agentTaskHistory
@@ -335,6 +337,9 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 		}
 	}
 	key := e.selectConversation(convID, captured, incarnation)
+	if e.liveCapture != nil {
+		e.liveSource = e.liveCapture.source
+	}
 	defer e.releaseConversation(key)
 	e.observeAgentHistory(ctx, ev)
 	if e.runtimeFacts && e.runtimeSealed[runtimeSourceKey(convID, captured.SessionID, incarnation)] {
@@ -947,6 +952,9 @@ func (e *interactiveTurnEmitterV2) startTurnIfNeeded(ctx context.Context, convID
 		return true
 	}
 	id, err := conversations.NewID()
+	if e.liveCapture != nil && e.liveCapture.mainTurnID != "" {
+		id, err = conversations.ConversationID(e.liveCapture.mainTurnID), nil
+	}
 	if err != nil {
 		// crypto/rand failure — never echo err detail beyond the sentinel.
 		e.logger.Warn("relay: interactive-turn drop; turn-id mint failed",
@@ -977,6 +985,9 @@ func (e *interactiveTurnEmitterV2) ensureDeltaLane(convID, parentID string) bool
 		return true
 	}
 	id, err := conversations.NewID()
+	if e.liveCapture != nil && e.liveCapture.parentID == parentID && e.liveCapture.laneID != "" {
+		id, err = conversations.ConversationID(e.liveCapture.laneID), nil
+	}
 	if err != nil {
 		e.logger.Warn("relay: interactive-turn drop; child turn-id mint failed",
 			"event", "interactive_turn.child_rand_err",

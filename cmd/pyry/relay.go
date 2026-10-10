@@ -491,7 +491,7 @@ func startRelay(
 	w relayWiring,
 ) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), announcePost func(protocol.AssistantDeltaPayload), pairingProvider localPairingProvider, err error) {
 	if w.relayURL == "" {
-		dropRingOnConversationDelete(w.convReg, nil, w.suggestions, w.shadow)
+		dropRingOnConversationDelete(w.convReg, nil, w.suggestions, w.streamSink, w.shadow)
 		logger.Info("relay: disabled (no URL configured)")
 		if w.streamSink != nil {
 			bcast := historyOnlyBroadcaster{}
@@ -499,6 +499,7 @@ func startRelay(
 			emitter.hist = w.hist
 			installRuntimeHistory(w.streamSink, emitter, w.busy)
 			resolve := func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }
+			w.streamSink.live = newDaemonLiveState(resolve)
 			drain := startStreamTurnDrainV2(ctx, w.streamSink, emitter, resolve, w.busy, logger)
 			transitions := startSessionTransitionStreamV2WithHarness(ctx, w.transitions, bcast, resolve, w.sessionHarness, w.busy, w.hist, logger)
 			return func() { drain(); transitions() }, nil, nil, nil, nil, nil, nil
@@ -623,10 +624,11 @@ func relay4409Threshold(logger *slog.Logger) int {
 // through Registry.Delete — has its ring entry dropped, so its retained events
 // stop pinning daemon memory. The ring is keyed by the same conversation id
 // string the registry stores. Pending reply work and suggestion state are also
-// cancelled and forgotten; shadow coordination is retired and joined.
+// cancelled and forgotten; shadow coordination is retired and joined, and the
+// stream live owner releases its conversation and producer bookkeeping.
 // A nil registry (no conversations registry in this
 // posture) leaves nothing to observe.
-func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring, suggestions *replySuggestions, shadow ...*threadShadow) {
+func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring, suggestions *replySuggestions, owners ...conversationRemovalOwner) {
 	if reg == nil {
 		return
 	}
@@ -637,8 +639,10 @@ func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.R
 		if ring != nil {
 			ring.Drop(string(id))
 		}
-		if len(shadow) > 0 {
-			shadow[0].remove(id)
+		for _, owner := range owners {
+			if owner != nil {
+				owner.remove(id)
+			}
 		}
 	})
 }
@@ -1714,7 +1718,7 @@ func startRelayV2(
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
 		// Free a removed conversation's replay events when the registry drops it
 		// (#1502); installed here because this is where the ring is born.
-		dropRingOnConversationDelete(w.convReg, emitter.ring, suggestions, w.shadow)
+		dropRingOnConversationDelete(w.convReg, emitter.ring, suggestions, w.streamSink, w.shadow)
 		replayRing = emitter.ring
 		// The durable conversation log (#2114), assigned the same way the ring is
 		// reached one line up: newInteractiveTurnEmitterV2 has 86 call sites and a
@@ -1755,6 +1759,7 @@ func startRelayV2(
 		if w.operatorMessages != nil {
 			w.streamSink.setOperatorPublisher(func(m operatorMessage) { w.operatorMessages.broadcast(ctx, mgr, emitter.ring, m) })
 		}
+		w.streamSink.live = newDaemonLiveState(conversationFor)
 		installRuntimeHistory(w.streamSink, emitter, w.busy)
 		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, conversationFor, w.busy, logger)
 	}
