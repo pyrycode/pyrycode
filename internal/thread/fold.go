@@ -33,6 +33,9 @@ type Item struct {
 type Fold struct {
 	conversationID            string
 	version                   uint64
+	lastShown                 uint64
+	published                 map[uint64]bool
+	appendedText              int
 	items                     []Item
 	successor                 history.SessionProvenance
 	lastBoundary, legacyScope uint64
@@ -53,6 +56,7 @@ type Fold struct {
 func New(conversationID string) *Fold {
 	return &Fold{
 		conversationID:    conversationID,
+		published:         make(map[uint64]bool),
 		childTurns:        make(map[childKey]*mainTurn),
 		childCalls:        make(map[childCallKey]*childCall),
 		childReports:      make(map[childCallKey]*mainOutcome),
@@ -83,9 +87,12 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		if !decode(e.Payload, &owner) || (owner.ConversationID != "" && owner.ConversationID != f.conversationID) {
 			continue
 		}
+		first := len(f.items)
+		f.appendedText = -1
 		f.restoreChildren()
 		f.feedEntry(e)
 		f.resolveChildren(e.ID)
+		f.recordShown(first, f.appendedText)
 	}
 	return nil
 }

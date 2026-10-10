@@ -156,6 +156,25 @@ same reader then tails history, consuming commits during recovery/handoff once
 in order and converging on later commits through the supplied history store's
 notifications. See [loading and replay readiness](thread-package-background-store.md#loading-and-replay-readiness).
 
+Replay also reconstructs `Snapshot.LastShownVersion` entry by entry, independent
+of replay chunking. It is the history entry ID that most recently made a shown
+item first appear in `Fold.Items`, after private joins resolve, or appended
+nonempty message text to an already publishable shown item. An unresolved child
+counts only when it first becomes publishable. Hidden additions, empty appends,
+status/activity/visibility-only changes, delivery/order-only changes, live state
+and malformed/unsupported/foreign entries do not raise it. Later revisions and
+hiding or dropping a row never replace or lower the earlier watermark.
+
+**Final item revisions cannot reconstruct unread state.** A queued send can
+first appear shown, then be dropped with a newer `Rev` and `Shown == false`;
+the earlier shown watermark still applies. Every load/retry reconstructs it
+from history rather than cached items or the maximum final shown `Rev`.
+A usable empty conversation has both `Version` and `LastShownVersion` zero.
+Consumers determine unread with `LastShownVersion > ReadUpTo`, using the
+existing single read mark in the same history-ID space; the fold/store does
+not persist read marks. See
+[ADR 042's read marks](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
+
 Each usable `Snapshot.Epoch` is a 128-bit random identifier encoded as 32 hex
 characters, separate from deterministic item equality. Across store lifetimes,
 reuse requires a compatible complete cache, matching recovery marker, completed
@@ -191,3 +210,13 @@ cancellation before recovery completes or failed/interrupted checkpoint or final
 certificate writes cannot certify clean shutdown. Lifecycle methods report
 failures explicitly; repeated/concurrent shutdown callers share one result.
 See [isolation and lifecycle](thread-package-background-store.md#isolation-and-lifecycle).
+
+Epoch reuse establishes compatible item identity; retained change-range
+continuity needs separate proof. `Store.Observe` acquires a detached complete
+baseline, and `Store.Changes` proves a range only from retained publication
+boundaries in the current worker. Unload/reload, retry and a new store lifetime retain no old
+batches, even when recovery preserves the epoch. Missing ranges or a different
+epoch explicitly return `BaselineRequired`; callers acquire a fresh baseline
+rather than infer continuity from epoch equality. See the
+[observation contract](thread-package-background-store.md#loading-and-replay-readiness)
+for bounded retention and linked delivery suppression.

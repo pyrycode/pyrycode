@@ -192,6 +192,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 			_ = json.Unmarshal(item.Content, &old)
 			_ = json.Unmarshal(e.Payload, &delta)
 			if delta.Text != "" {
+				f.appendedText = st.text
 				f.setContent(st.text, "text", old.Text+delta.Text)
 				item.Rev, item.Summary = e.ID, plainSummary(old.Text+delta.Text)
 				if item.Summary == "" {
