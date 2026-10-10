@@ -79,3 +79,7 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-10
+
+## Revisions
+
+- 2026-10-10: Final implementation and hermetic coverage exceed the initial 770-line sketch (approximately 880 lines); canonical reserved-path and POSIX access cases account for the overage. Actual GitHub lineage is #3097 → #3108 → #3117, so the grandchild sizing rule requires continued building with `needs-human:sizing`. Candidate standalone seams would have been offline configure/status and effective daemon resolution; no scope is added. Root ordering is stable in input order, with the effective vault first unless a containing read-only root subsumes it; ownership/destination fields remain independent.

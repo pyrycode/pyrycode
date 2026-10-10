@@ -22,7 +22,10 @@ var errMemorySave = errors.New("memory credential: save failed")
 func runMemory(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runMemoryCredential(ctx, args, os.Stdin, os.Stdout)
+	if len(args) > 0 && args[0] == "credential" {
+		return runMemoryCredential(ctx, args, os.Stdin, os.Stdout)
+	}
+	return runMemoryConfiguration(ctx, args, os.Stdout)
 }
 func runMemoryCredential(ctx context.Context, args []string, in *os.File, out io.Writer) error {
 	if len(args) != 3 || args[0] != "credential" || args[2] != "openai" || (args[1] != "set" && args[1] != "status") {
