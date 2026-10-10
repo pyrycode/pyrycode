@@ -120,6 +120,14 @@ escapes a completion handoff, fill its channel first so sending cannot also win;
 `TestV2Session_SwitchAgentHandoffEscapes` forces requester-close and manager-cancel
 paths separately. See [relay concurrency](v2-session-manager-concurrency.md).
 
+The same ordering trap applies to a withheld supplied live reply. A later
+inbound frame cannot prove an asynchronous provider has queued its result.
+`TestSuppliedLiveReplyWithheld` first observes the content-free
+`v2.live_reply.queued` event, then pushes a permitted reading into that same
+FIFO delivery queue and awaits its decrypted clear/fresh output. Only that
+barrier proves the withheld predecessor passed delivery without emitting;
+otherwise a forbidden late clear could arrive after a zero-frame assertion.
+
 An already-cancelled context does not force an error when a `select` can also
 observe completion: either ready case can win. Hold completion behind a
 test-owned gate when proving the cancellation path. A runner gated during

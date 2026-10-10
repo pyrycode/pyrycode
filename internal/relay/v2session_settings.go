@@ -32,56 +32,10 @@ const (
 	msgSettingsUnavailable     = "session settings unavailable"
 )
 
-// handleSetSessionSettings applies an inbound interactive set_session_settings
-// control frame (#845): it validates the untrusted model/effort at the wire
-// boundary, persists the change through the injected SettingsUpdater seam (#840's
-// atomic Pool.UpdateSettings), and replies with a deterministic
-// session_settings_updated success or a TypeError failure. Intercepted in
-// dispatchAppFrame before dispatch.Route, like handleRequestSnapshot, and runs on
-// the manager's single Run dispatch goroutine — so the s.interactive read is
-// lock-free under the package's single-owner invariant. Unlike the fire-and-forget
-// verbs (interrupt / new_session / dequeue_message) the interactive path ALWAYS
-// replies. A RUNNING session picks the change up immediately, by a mechanism the
-// seam picks on what the frame carried — a model/effort change, or ANY posture
-// change including a bypass ENABLE, is written to the live child as command text
-// or a control request (#1581, #1604, #2066); only a model or effort cleared back
-// to claude's own default live-restarts the session's supervisor (#842). The
-// enable used to restart too, because claude refused the escalation over the
-// control channel and gated it on the launch argv (#1595); #2065 put that flag on
-// every argv and #2060 measured claude accepting the re-escalation on such a
-// child, so #2066 routed it in band with the other five. Both mechanisms install
-// the recomposed argv (#833's path), so the next spawn carries it too.
-//
-// Order is load-bearing:
-//  1. Capability gate (the authz boundary): a non-interactive conn is fully inert
-//     — no decode, no seam call, NO reply. It must not even learn whether a
-//     session exists (AC #6). A bare interactive check, matching handleInterrupt —
-//     NOT a reusable inbound-gate abstraction (CODING-STYLE: over-DRY).
-//  2. Decode: this verb owes a reply, so a decode failure yields a malformed reply
-//     and persists nothing (AC #4). NEVER echo the decode error or any payload
-//     byte — encoding/json quotes attacker bytes into its error string.
-//  3. Validate model/effort/permission mode BEFORE any persistence (AC #5): an
-//     invalid value yields a malformed reply, not a persisted bad setting. YOLO
-//     needs no value check — a malformed yolo already failed step 2's type-decode,
-//     so bypass can never be inferred from a bad value (AC #4). The permission
-//     mode (#1687) adds two rejects here, both replying with the same fixed
-//     constant so no reject is distinguishable by its reply: a frame carrying BOTH
-//     a mode and a YOLO, and a mode outside validPermissionMode's closed five.
-//     Neither reject is logged — a permission mode is a settings value and #833
-//     keeps those out of the daemon log at every level, so "rejected mode X" must
-//     not be added for debuggability.
-//  4. Nil-seam guard: a nil SettingsUpdater replies "unavailable" deterministically
-//     (foreground / unwired), never a silent drop.
-//  5. Validate availability + persist: the injected adapter checks a non-empty
-//     model against the retained published vocabulary before Pool.UpdateSettings.
-//     A complete-menu absence becomes a fixed non-retryable malformed reply; an
-//     incomplete vocabulary becomes retryable model_list.unavailable. Since #2629
-//     both checks use the session's own agent's entries, and a non-empty effort
-//     the session's model does not advertise returns ErrEffortNotOffered, replied
-//     exactly as step 3 replies to a malformed effort. Otherwise
-//     UpdateSettings merges all fields under one atomic save (rollback on failure),
-//     so a partial write is impossible. ErrSessionUnknown becomes session.not_found;
-//     any remaining error becomes server-unavailable; nil becomes success.
+// handleSetSessionSettings validates an interactive request before one atomic
+// settings update. A thread connection may supply the success reading together
+// with its source evidence; all failures retain the legacy fixed error mapping.
+// Neither requested values nor provider diagnostics reach replies or logs.
 func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Session, env protocol.Envelope) {
 	if !s.interactive {
 		return // non-interactive conn: inert, no reply (AC #6 negative path)
@@ -125,7 +79,8 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 		return
 	}
 
-	if m.cfg.SettingsUpdater == nil {
+	supplied := s.thread && m.cfg.UpdateSettingsReading != nil
+	if m.cfg.SettingsUpdater == nil && !supplied {
 		// Unwired seam (foreground / pre-wire): report unavailable, never drop.
 		m.settingsReplyError(ctx, s, env.ID, protocol.CodeServerBinaryOffline, msgSettingsUnavailable, true)
 		return
@@ -134,12 +89,16 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 	// Post-validation the payload pointers pass straight through — same presence
 	// contract. UpdateSettings applies all present fields atomically (one
 	// saveLocked, rollback on failure), so any combination applies or nothing does.
-	err := m.cfg.SettingsUpdater.UpdateSettings(p.SessionID, SettingsUpdate{
-		Model:          p.Model,
-		Effort:         p.Effort,
-		YOLO:           p.YOLO,
-		PermissionMode: p.PermissionMode,
-	})
+	update := SettingsUpdate{
+		Model: p.Model, Effort: p.Effort, YOLO: p.YOLO, PermissionMode: p.PermissionMode,
+	}
+	var reading LiveState
+	var err error
+	if supplied {
+		reading, err = m.cfg.UpdateSettingsReading(p.SessionID, update)
+	} else {
+		err = m.cfg.SettingsUpdater.UpdateSettings(p.SessionID, update)
+	}
 	if errors.Is(err, ErrSessionUnknown) {
 		m.settingsReplyError(ctx, s, env.ID, protocol.CodeSessionNotFound, msgSettingsNotFound, false)
 		return
@@ -176,6 +135,11 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 			"conn_id", s.connID,
 			"session_id", p.SessionID)
 		m.settingsReplyError(ctx, s, env.ID, protocol.CodeServerBinaryOffline, msgSettingsUnavailable, true)
+		return
+	}
+
+	if supplied {
+		m.pushLiveReply(ctx, s, env.ID, reading)
 		return
 	}
 
@@ -229,42 +193,13 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 	}
 }
 
-// handleRequestSessionSettings answers an inbound request_session_settings with
-// the named conversation's saved run configuration plus Claude's independently
-// observed effective effort when available (#2516). RunConfigFor remains the
-// sole source of session id, saved model/effort, permission posture and usage;
-// EffectiveEffortFor contributes only the optional nullable wire field.
-//
-// dispatchAppFrame applies the interactive-capability gate on Run, then hands
-// the immutable plaintext to this connection's appFrameWorker. The provider may
-// wait on a child round trip, so neither it nor the saved-settings resolution may
-// run on Run. Every reply returns unsealed through forwardToRun; this function
-// never touches s.send or any other Run-owned session state.
-//
-// Order is load-bearing:
-//  1. Re-decode the envelope already recognised by dispatchAppFrame. Failure is
-//     unreachable for the same immutable bytes and cannot be correlated safely.
-//  2. Tolerate a payload decode failure. Discard even a partially decoded ID;
-//     it addresses nothing and therefore consults no provider.
-//  3. Resolve the non-empty id through RunConfigFor, honouring comma-ok. A nil or
-//     refused resolver produces the existing all-zero reply and stops before the
-//     effective-effort provider.
-//  4. For an accepted RunConfig only, consult EffectiveEffortFor exactly once.
-//     true preserves a string or explicit null; nil or false omits the field.
-//  5. For an accepted RunConfig and a multi_agent conn only (#2646), consult
-//     CapabilitiesFor once with that RunConfig's session id and model. true
-//     attaches the capability object; nil, false or an old client omits it, so
-//     such a reply is byte-identical to the one before #2646. multiAgent arrives
-//     as an argument, copied on Run into the job, because V2Session.multiAgent is
-//     Run-owned.
-//  6. For a fully decoded, accepted request, consult MemorySearchFor once with
-//     the conversation and resolved session IDs. A nil provider omits the field;
-//     a provider error reports unknown with no rows.
-//  7. Compose one correlated reply. All original fields come from the accepted
-//     RunConfig, so an applied effort can never overwrite the saved choice.
-//
-// Neither the requested id nor any settings value reaches a log or error string.
-func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *V2Session, plaintext []byte, multiAgent bool) {
+// handleRequestSessionSettings resolves one named conversation on its worker.
+// Thread providers supply the base reading and source evidence; legacy providers
+// supply RunConfig. Accepted readings receive optional effort, capabilities and
+// memory-search enrichment. Missing or refused settings retain the zero reply.
+// Negotiation arrives through arguments copied by Run. Replies remain unsealed
+// until Run consumes them; requested IDs and settings values are never logged.
+func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *V2Session, plaintext []byte, multiAgent bool, thread bool) {
 	var env protocol.Envelope
 	if err := json.Unmarshal(plaintext, &env); err != nil {
 		m.cfg.Logger.Warn("relay: v2 request_session_settings envelope did not decode",
@@ -278,6 +213,17 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 	// bytes, so it is deliberately neither logged nor sent.
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
 		p = protocol.RequestSessionSettingsPayload{}
+	}
+
+	if thread && m.cfg.SessionSettingsReadingFor != nil {
+		if p.ConversationID != "" {
+			if reading, ok := m.cfg.SessionSettingsReadingFor(p.ConversationID); ok {
+				m.pushSettingsReading(ctx, s, env.ID, reading, multiAgent)
+				return
+			}
+		}
+		// A selected provider's unavailable result cannot consult the legacy source.
+		p.ConversationID = ""
 	}
 
 	var cfg RunConfig
