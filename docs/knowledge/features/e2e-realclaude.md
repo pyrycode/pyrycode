@@ -1,6 +1,8 @@
 # `internal/e2e/realclaude` — real-`claude`-binary integration suite
 
-Sibling Go package to [`internal/e2e`](e2e-harness.md), gated by a distinct build tag so the real-`claude` trust-boundary suite is opt-in and never runs under `make test` / `make check`.
+Sibling Go package to [`internal/e2e`](e2e-harness.md). Live trust-boundary tests
+are opt-in behind a distinct build tag; credential-free retained-evidence readers
+and shared validation tests also run under `make test` / `make check`.
 
 ## Why a sibling, not part of `internal/e2e`
 
@@ -8,19 +10,22 @@ Sibling Go package to [`internal/e2e`](e2e-harness.md), gated by a distinct buil
 
 `internal/e2e/realclaude` is the package where tests DO cross that boundary. Keeping it separate means:
 
-- `make test` skips it via tag exclusion alone (no path filter).
+- `make test` excludes live tests via their build tag alone (no path filter).
 - A future `make e2e` that picks up `e2e` / `e2e_install` won't accidentally pull real-claude tests in.
 - Each suite's tag set documents its intent at the file header.
 
 ## Build tag
 
-All files in the directory carry exactly:
+Live tests carry:
 
 ```go
 //go:build e2e_realclaude
 ```
 
-Single tag, no alternation. The `e2e_install` precedent established the `e2e_<purpose>` naming.
+The `e2e_install` precedent established the `e2e_<purpose>` naming. Shared
+shadow-evidence schema/replay helpers are untagged;
+`TestThreadShadowRetainedEvidence` carries `!e2e_realclaude` so default builds
+require the committed pair without starting Claude.
 
 ## Source-citation checks
 
@@ -57,12 +62,49 @@ readers, bounded stream results and retained live failures.
 ```make
 .PHONY: e2e-realclaude
 e2e-realclaude:
-	$(GO) test -tags e2e_realclaude ./internal/e2e/realclaude/...
+	$(GO) test -tags e2e_realclaude -count=1 ./internal/e2e/realclaude/...
 ```
 
 No `-race`. These are I/O-bound trust-boundary checks, not goroutine-stress tests; flip on `-race` per-test when a future test in the directory does spin goroutines.
 
-`make check` is unchanged. CI's per-PR `make check` does not run this suite — it stays opt-in for that path.
+CI's per-PR `make check` runs offline evidence validation; live tests stay opt-in.
+
+## Retained shadow history evidence
+
+[`TestThreadShadowHistoryCapture`](../../../internal/e2e/realclaude/thread_shadow_capture_test.go)
+arms under plain `make e2e-realclaude` when either `testdata/thread_shadow_history.json`
+or `testdata/thread_shadow_expected.json` is absent, without an operator flag.
+It reuses `startStreamRunningTurnHarness` for an authenticated daemon/legacy-client
+conversation and retains raw hidden facts, observed envelopes and four versioned
+snapshots. See [scenario coverage and counted provenance](thread-package.md#shadow-lifecycle-and-evidence).
+When both files exist, the same named checks validate the pinned pair and replay
+its checkpoints; a passing run in that mode proves retained evidence, not a new capture.
+
+Successful generation requires `before_delivery`, `main_complete`,
+`after_delivery`, `session_closed` and `scenario_evidence` each to execute once
+with zero failures/skips, complete scenario evidence and a passing parent test.
+Whole-pair scenario validation needs its own counted leaf: the parent can fail
+after all checkpoint leaves pass. Zero executed or all skipped cannot establish
+capture, including when authentication is unavailable.
+
+The default credential-free `TestThreadShadowRetainedEvidence` never skips
+missing evidence. `shadowReadPair` and `shadowValidatePair` reject missing,
+malformed, incomplete, mismatched, unsafe or unpinned records. Both provenance
+blocks must match capture ID, observed Claude version, daemon commit, raw-history
+digest and named executed/failed/skipped counts, with a durable counted-report
+GitHub comment URL. Independent raw/legacy scenario, content and ownership checks
+precede fresh Store/full replay comparisons at every checkpoint. Synthetic
+rejection controls exercise those readers without becoming retained records.
+
+Generation leaves `GateReport` empty until builder recovery pins both usable
+sanitized files to the dispatcher's actual counted report. Recovery must commit
+both exact artifacts with any matching reader/schema repairs, restore the retained
+reader to `!e2e_realclaude` and leave the shared replay helper untagged, then rerun
+unconditional offline race validation, `TestThreadAgentRecordedReplay`,
+`TestThreadShellRecordedReplay` and tagged compilation/vet. A gate-generated file
+in a disposable worktree does not survive handback without that commit.
+The committed pair has completed this recovery; its report and capture identity
+are linked in the [thread overview](thread-package.md#shadow-lifecycle-and-evidence).
 
 ## CI cadence: code-review phase, no nightly workflow
 
@@ -86,7 +128,11 @@ point, just no longer invoked by CI.
 
 ## Verifying tag exclusion
 
-After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `ok ... [no test files]` line) — files with an unsatisfied build tag are dropped at the build stage, so the package compiles to an empty test binary.
+Default builds exclude files requiring `e2e_realclaude`, but still execute the
+credential-free readers and shared tests. A successful `realclaude` package line
+under `make test` therefore does not imply a live Claude run. Select
+`TestThreadShadowRetainedEvidence` without tags to check committed replay;
+select `TestThreadShadowHistoryCapture` with `e2e_realclaude` for the live-suite arm.
 
 ## Related
 

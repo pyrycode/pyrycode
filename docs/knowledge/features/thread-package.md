@@ -75,8 +75,65 @@ boundaries. `TestThreadShadowLongReplay` pauses an actual 36,000-entry refold
 while another conversation appends and publishes, then checks full-replay
 equality; `TestThreadShadowRemoval` pauses actual replay/tail work to prove joined
 retirement and continued progress elsewhere. These are deterministic wiring
-proofs. Retained authenticated real-log evidence belongs to
-[#3068](https://github.com/pyrycode/pyrycode/issues/3068) before protocol migration.
+proofs; authenticated history evidence supplements them before protocol migration.
+
+The retained pair is
+[`internal/e2e/realclaude/testdata/thread_shadow_history.json`](../../../internal/e2e/realclaude/testdata/thread_shadow_history.json)
+(raw durable history, including hidden facts and source metadata) and
+[`internal/e2e/realclaude/testdata/thread_shadow_expected.json`](../../../internal/e2e/realclaude/testdata/thread_shadow_expected.json)
+(observed legacy envelopes and exact checkpoint items/revisions).
+`TestThreadShadowHistoryCapture` drives the production daemon with a connected
+authenticated legacy client: marked text/Bash/text, ordinary acceptance during
+busy work followed by delivery and reply, an Agent child's parent-owned text,
+then reset during a third active Bash turn. Missing scenarios fail capture.
+
+| Checkpoint | Retained history version | Evidence |
+| --- | --- | --- |
+| `before_delivery` | 14 | Accepted queued item keeps creating ID 14, status `queued` and order zero. |
+| `main_complete` | 42 | Main text/tool/text and child text are retained; main foreground work is settled, while the accepted message is still queued. |
+| `after_delivery` | 48 | Linked delivery outcome keeps item ID 14 and places it at delivered message order 47. |
+| `session_closed` | 85 | Affected active work settles before the visible raw session divider, with closure content and ownership retained. |
+
+Controlled markers, exact raw-to-legacy text equality, raw acceptance/delivery
+payloads and authenticated sender fields independently constrain the expected
+rows. Raw creation, first-terminal, task-link and source/lifetime facts check
+complete text/tool/Agent content, status, activity and parent ownership. Unique
+creating IDs, valid revisions, nonzero placement and older existing parents are
+checked at each prefix. Main completion does not require unrelated background
+agents to finish. Closure must retain a settled non-success outcome before the
+divider; Claude's cancellation may record `failed` before daemon interruption,
+so the checkpoint name cannot imply `interrupted`.
+
+`TestThreadShadowRetainedEvidence` runs without credentials in default builds.
+Each checkpoint restores the sanitized raw prefix into history, loads a fresh
+`Store`, compares its exact-version snapshot with both the retained baseline and
+fresh full `Fold` replay, and joins the worker with `Shutdown`. Equality alone
+can preserve the same fold error: independent raw/legacy checks and synthetic
+mutation controls must also reject lost content, incorrect lifecycle and missing
+parents, including on already completed children.
+
+Both artifacts identify capture `shadow-1791611968246776504`, Claude Code
+2.1.280, daemon source commit `4744817f5f8628fce7a1d4187c854cbff60d7743` and the
+same SHA-256 over 86 retained raw entries. Their `GateReport` pins the
+[counted authenticated capture report](https://github.com/pyrycode/pyrycode/issues/3068#issuecomment-6094441127):
+`before_delivery`, `main_complete`, `after_delivery`, `session_closed` and
+`scenario_evidence` each executed once; all five and their parent passed, with
+zero failures or skips. Consistent sanitization preserves IDs, order, joins and
+source provenance; complete serialized bytes pass credential/host-path denial.
+The later [full live-suite report](https://github.com/pyrycode/pyrycode/issues/3068#issuecomment-6094643687)
+counts 1932 passed, zero failed and 27 skipped; with both artifacts present,
+the capture test validates/replays the pair rather than recording a new conversation.
+
+The unchanged `TestThreadAgentRecordedReplay` and
+`TestThreadShellRecordedReplay` remain separate offline parser-to-history proofs.
+Their recorded frames come from `parent_tool_use_v2.1.259.json`,
+`task_notification_v2.1.259.json` and `roster_after_finish_v2.1.280.json`.
+The shell proof adds explicitly synthetic creation/result/turn-end context;
+those additions and in-memory rejection controls are never live-history evidence.
+The earlier Agent recording has no forwarded child text or nesting-depth proof;
+the retained pair adds observed child text, without claiming arbitrary nesting
+coverage. See [recorded replay limits](thread-package-agents-and-background-work.md#agent-validation-and-testing)
+and [capture/recovery requirements](e2e-realclaude.md#retained-shadow-history-evidence).
 
 ## Cache and epochs
 

@@ -204,6 +204,13 @@ but stays inactive; late foreground calls are inactive and later reports cannot
 replace their ending. A linked background shell outlives that turn; a late task
 link can repair its provisional closure, and late launch results stay retained.
 
+Session reset can let Claude cancel a foreground call before daemon closure:
+an error `tool_result` then leaves the call `failed`, and the later cancelled
+`turn_end`/divider cannot replace that first terminal with `interrupted`.
+Assert settlement against raw terminal facts rather than a checkpoint's name;
+the [retained shadow capture](thread-package.md#shadow-lifecycle-and-evidence)
+requires this non-success closure before its divider.
+
 `main_turn_opened` records an explicit opening without a row. In legacy logs,
 the earliest valid main text, call or result/denial evidence supplies an implicit
 opening. A new explicit opening after an established opening starts a fresh
