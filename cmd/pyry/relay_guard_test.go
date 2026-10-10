@@ -261,6 +261,13 @@ var inboundTypes = map[string]string{
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
 // a request verb mis-filed as reply/push/etc. is visually obvious in review.
 var excludedTypes = map[string]string{
+	// Hosted-app declarations await discovery and resource producers.
+	"TypeListApps":     "pending handler (#3138)",
+	"TypeApps":         "reply (declared, producer pending #3138)",
+	"TypeAppUpdated":   "push (declared, producer pending #3138)",
+	"TypeAppRemoved":   "push (declared, producer pending #3138)",
+	"TypeAppCancel":    "pending handler (#3138/#3123)",
+	"TypeAppCancelled": "reply (declared, producer pending #3138/#3123)",
 	// Declared outgoing thread updates; publication is pending.
 	"TypeThreadItemAdded":   "push (declared, not yet emitted)",
 	"TypeThreadItemChanged": "push (declared, not yet emitted)",
