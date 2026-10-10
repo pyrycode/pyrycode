@@ -79,6 +79,7 @@ const streamTurnSinkCloseReserve = 32
 // "Handle cannot receive a non-event" stays a type-level fact rather than a
 // runtime branch.
 type streamTurnEnvelope struct {
+	live *liveStreamCapture
 	// incarnation identifies a Runner.Run activation, independently of the
 	// routing ID reactivation reuses. It never crosses history or wire seams.
 	incarnation uint64
@@ -129,8 +130,9 @@ type confirmedStreamStop struct {
 // must be structurally impossible. The drain stops on ctx, not on close; any
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
-	shadowProcessed   atomic.Uint64   // last fully published accepted output
-	runtimeReplayRing *eventring.Ring // installed before workers; boundaries publish on the drain
+	live              *daemonLiveState // installed before producers start
+	shadowProcessed   atomic.Uint64    // last fully published accepted output
+	runtimeReplayRing *eventring.Ring  // installed before workers; boundaries publish on the drain
 
 	runtimeNextProducer uint64                       // guarded by offerMu
 	runtimeProducers    map[string]uint64            // latest activation per routing ID, guarded by offerMu
@@ -484,6 +486,9 @@ func (s *streamTurnSink) sinkForTag(tag func() string, kind ...string) func(turn
 
 func (s *streamTurnSink) sinkForProducer(tag func() string, producerKind string, incarnation func() uint64) func(turnevent.Event) {
 	return func(ev turnevent.Event) {
+		if s.live != nil {
+			s.offerMu.Lock()
+		}
 		sessionID := tag()
 		env := streamTurnEnvelope{sessionID: sessionID, ev: ev}
 		if incarnation != nil {
@@ -491,6 +496,11 @@ func (s *streamTurnSink) sinkForProducer(tag func() string, producerKind string,
 		}
 		if producerKind != "" {
 			env.source = history.SessionProvenance{Kind: producerKind, SessionID: sessionID}
+		}
+		if s.live != nil {
+			s.offerMu.Unlock()
+			src := s.live.capture(sessionID, env.incarnation, env.source, false)
+			env.live = s.live.acceptEvent(src, ev)
 		}
 		if turnMarkFor(ev) == turnMarkClose {
 			if !s.offer(env, true) {
@@ -640,6 +650,14 @@ func startStreamTurnDrainV2(
 		}
 		var processed uint64
 		handleEnvelope := func(env streamTurnEnvelope) {
+			emitter.liveCapture = env.live
+			defer func() { emitter.liveCapture = nil }()
+			resolve := conversationFor
+			if env.live != nil {
+				resolve = func(string) (string, bool) {
+					return env.live.source.ConversationID, env.live.source.ConversationID != ""
+				}
+			}
 			unlock := busy.lockPostBoundary()
 			defer unlock()
 			if env.exit {
@@ -647,7 +665,7 @@ func startStreamTurnDrainV2(
 					if sink.noteRuntimeStop(env) {
 						return
 					}
-					id, ok := conversationFor(env.sessionID)
+					id, ok := resolve(env.sessionID)
 					if ok && id != "" {
 						sourceID := env.source.SessionID
 						if sourceID == "" {
@@ -673,7 +691,7 @@ func startStreamTurnDrainV2(
 				}
 				var teardownEpoch any
 				if busy != nil && busy.posts != nil {
-					if id, ok := conversationFor(env.sessionID); ok {
+					if id, ok := resolve(env.sessionID); ok {
 						teardownEpoch, _ = busy.posts.teardown.Load(id)
 						if teardownEpoch != nil && env.exitEpoch <= teardownEpoch.(uint64) {
 							return // exit offered before this eviction, even if TurnEnd cleared busy
@@ -695,7 +713,7 @@ func startStreamTurnDrainV2(
 				return
 			}
 			if emitter.runtimeFacts {
-				if id, ok := conversationFor(env.sessionID); ok && emitter.runtimeSealed[runtimeSourceKey(id, env.source.SessionID, env.incarnation)] {
+				if id, ok := resolve(env.sessionID); ok && emitter.runtimeSealed[runtimeSourceKey(id, env.source.SessionID, env.incarnation)] {
 					if echo, ok := env.ev.(turnevent.UserEcho); ok {
 						sink.observeEcho(env.sessionID, echo)
 					} else {
@@ -728,7 +746,7 @@ func startStreamTurnDrainV2(
 			// conversation: the emitter is the only writer of history, ring, client
 			// frames and the turn-end wake, so an event dropped here is lost for
 			// good.
-			conversationID, ok := conversationFor(env.sessionID)
+			conversationID, ok := resolve(env.sessionID)
 			if !ok || conversationID == "" {
 				// SECURITY: content-free — discriminant + session id only.
 				logger.Debug("relay: stream-turn drop; no conversation for session",

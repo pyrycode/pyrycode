@@ -75,3 +75,8 @@ Pending documentation stage:
 - [Threat model] Conversation metadata does not authorize access. Existing relay interactive/harness gates stay unchanged; encrypted wire proof and production activation are OUT OF SCOPE in #3077.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-10
+
+## Revisions
+- 2026-10-10: Source admission owns shared turn/lane identities so retention can progress while legacy delivery is held. Child assistant lanes remain distinct from the launcher's tool origin. Terminal identities retain a suppression tombstone until a new start; process stop retires all progress. The first output after a confirmed stop advances generation even when the supervisor recovers within the same Run activation and routing ID (`TestDaemonLiveProducerRecovery`). Captured boundaries retain detached clear cursors, and source updates include retained family clears before fresh readings.
+- 2026-10-10: `TestDaemonLiveMappedInventoryBounds` exposed the existing MCP mapping's absent envelope budget: sixteen fully escaped rows can exceed 125 KB. Filed #3091 in Inbox; the hostile MCP fit assertion is skipped pending its independent mapping fix. The owner rejects oversized envelopes, while ordinary MCP retention and clear bounds remain covered. Changing legacy MCP payloads is outside this ticket.
+- 2026-10-10: Final written-work count is approximately 1260 added lines including tests and the plan, above the initial 1050–1200 sketch. The grandchild sizing exception remains required. No exported type/interface or constructor signature was added.

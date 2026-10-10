@@ -11,6 +11,7 @@ import (
 )
 
 type runtimeBoundary struct {
+	live        *daemonLiveCursor
 	incarnation uint64
 	exitAfter   uint64
 	fact        sessions.SessionTransition
@@ -31,11 +32,14 @@ type streamProducerKey struct {
 // envelopes and captured boundaries keep the incarnation they already held.
 func (s *streamTurnSink) beginRuntimeProducer(tag *streamSessionTag) {
 	s.offerMu.Lock()
-	defer s.offerMu.Unlock()
 	tag.runtimeSink.Store(s)
 	s.runtimeNextProducer++
 	tag.incarnation.Store(s.runtimeNextProducer)
 	s.registerRuntimeProducerLocked(tag, tag.ID())
+	s.offerMu.Unlock()
+	if s.live != nil {
+		s.live.capture(tag.ID(), tag.incarnation.Load(), history.SessionProvenance{SessionID: tag.ID()}, true)
+	}
 }
 
 // registerRuntimeProducerLocked retains routing aliases before their first
@@ -61,6 +65,7 @@ func (s *streamTurnSink) registerRuntimeProducerLocked(tag *streamSessionTag, id
 // wait for history, fanout, the publication gate or the drain.
 func (s *streamTurnSink) queueBoundary(t sessions.SessionTransition, publish func(), done chan struct{}) {
 	s.offerMu.Lock()
+	live := s.live.transition(t)
 	incarnation := s.runtimeProducers[string(t.PreviousID)]
 	after := s.queued
 	if t.PreviousID != "" {
@@ -73,7 +78,7 @@ func (s *streamTurnSink) queueBoundary(t sessions.SessionTransition, publish fun
 		s.runtimeHolds = make(map[string]int)
 	}
 	s.runtimeHolds[t.ConversationID]++
-	s.runtimePending = append(s.runtimePending, runtimeBoundary{fact: t, after: after, publish: publish, done: done, exitAfter: s.exits.Load(), incarnation: incarnation})
+	s.runtimePending = append(s.runtimePending, runtimeBoundary{live: live, fact: t, after: after, publish: publish, done: done, exitAfter: s.exits.Load(), incarnation: incarnation})
 	s.offerMu.Unlock()
 	select {
 	case s.runtimeWake <- struct{}{}:
@@ -196,6 +201,14 @@ func (s *streamTurnSink) exitForSessionTag(tag *streamSessionTag) func() {
 		}
 		if retired := tag.retiringSource.Swap(nil); retired != nil {
 			env.source.SessionID = *retired
+		}
+		if s.live != nil {
+			sourceID := env.source.SessionID
+			if sourceID == "" {
+				sourceID = env.sessionID
+			}
+			src := s.live.capture(sourceID, env.incarnation, history.SessionProvenance{SessionID: sourceID}, false)
+			env.live = s.live.closeProducer(src)
 		}
 		if !s.offer(env, true) {
 			s.logger.Warn("relay: stream-turn exit retained; sink full", "event", "stream_turn.exit_sink_full", "session_id", env.sessionID)

@@ -499,6 +499,7 @@ func startRelay(
 			emitter.hist = w.hist
 			installRuntimeHistory(w.streamSink, emitter, w.busy)
 			resolve := func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }
+			w.streamSink.live = newDaemonLiveState(resolve)
 			drain := startStreamTurnDrainV2(ctx, w.streamSink, emitter, resolve, w.busy, logger)
 			transitions := startSessionTransitionStreamV2WithHarness(ctx, w.transitions, bcast, resolve, w.sessionHarness, w.busy, w.hist, logger)
 			return func() { drain(); transitions() }, nil, nil, nil, nil, nil, nil
@@ -1755,6 +1756,7 @@ func startRelayV2(
 		if w.operatorMessages != nil {
 			w.streamSink.setOperatorPublisher(func(m operatorMessage) { w.operatorMessages.broadcast(ctx, mgr, emitter.ring, m) })
 		}
+		w.streamSink.live = newDaemonLiveState(conversationFor)
 		installRuntimeHistory(w.streamSink, emitter, w.busy)
 		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, conversationFor, w.busy, logger)
 	}
