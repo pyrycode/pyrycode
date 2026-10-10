@@ -111,3 +111,10 @@ this new operation.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-10
+
+## Revisions
+
+- 2026-10-10: Replacement tests distinguish omitted roots from a supplied empty
+  array. Nil roots remove the old key; a non-nil empty slice writes `[]`, preserving
+  the contract that supplied arrays replace old arrays. This clarifies the earlier
+  zero-length omission choice without changing parse-only validation or atomic I/O.
