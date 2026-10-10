@@ -10,6 +10,7 @@ un-map back to a `tuidriver.Event` for `turnbridge` to re-map.
 
 ```go
 type streamTurnEnvelope struct {
+    live        *liveStreamCapture // optional source-bound readings and shared turn/lane IDs
     sessionID   string
     source      history.SessionProvenance
     incarnation uint64 // daemon-local producer activation; absent from wire/storage provenance
@@ -54,8 +55,9 @@ state, with successful enqueue positions ordering them after preceding queued
 output and before later output. The wake channel coalesces; it does not own
 the close. See [retained stop transport](streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md).
 
-**Per-event conversation attribution, not an active-conversation gate (#2739).** The drain goroutine
-resolves `conversationFor(env.sessionID)` and forwards to `emitter.handleForSource` with captured provenance and incarnation under
+**Per-event conversation attribution, not an active-conversation gate (#2739, #3088).** With the live owner installed,
+the drain uses the conversation captured before fan-in; compatibility callers without
+that capture resolve `conversationFor(env.sessionID)` on the drain. It forwards to `emitter.handleForSource` with captured provenance and incarnation under
 **that** conversation's id — never the cursor's. Only an event whose session resolves to no conversation
 at all is dropped, logged content-free as `stream_turn.no_conversation` (`kind` + `session_id` only).
 Every conversation's events reach its own history, ring and clients, whichever conversation currently
@@ -279,6 +281,102 @@ tracker](streamsup-package-per-conversation-turn-busy-tracking.md) uses, not `bo
 `boundSessionIDForActive` has no production caller left after #2739; it stays in `relay.go` for its own
 unit test only, with its removal called out as a follow-up rather than done in that ticket. See
 [codebase/1098.md](../codebase/1098.md).
+
+## Daemon-retained live state
+
+`daemonLiveState` in `cmd/pyry` owns current stream readings in memory, separately
+from [ADR 042's folded items](../decisions/042-daemon-built-thread.md#decision)
+and legacy delivery. `startRelayV2` and the no-relay `startRelay` history path each
+install one owner before workers start. It retains `turn_state`, `stall`,
+`api_retry`, `compacting`, `thinking_progress`, `tool_progress`,
+`background_task_progress`, `rate_limited`, `context_usage`, `model_announced`,
+`session_facts`, `mcp_status`, `slash_command_list` and `model_list`, including
+explicit inactive retry and compaction values. Task lifecycle/rosters and queue
+content remain thread items. Retention and cursor operations add no history
+write, folded item, catch-up change or last-shown version.
+
+**Capture and admission precede queueing.** `sinkForProducer` captures the source
+conversation, producer provenance, activation incarnation and positive generation
+before fan-in. `streamTurnEnvelope.live` carries that capture through the drain;
+`convTurnState.liveSource` keeps it with buffered source state. Detached envelope
+`session_id` is a nonempty producer string, JSON `null` for positively known
+no-session state, or omitted for unresolved provenance. Payload session fields
+stay unchanged. Delayed predecessor output keeps its original attribution even
+when a successor reuses the routing ID.
+
+Capturing the generation after releasing the routing lock would let a transition
+turn an old reading into successor state. Capture, activation, transitions
+(including same-ID notifications), exit retirement and removal serialize on
+`streamTurnSink.offerMu`, then the owner mutex. Conversation resolution runs
+outside the owner mutex; normal event mapping, fan-in, history and delivery run
+after releasing `offerMu`. The owner has no broadcaster or history dependency
+and adds no goroutine. Retaining in the legacy emitter would leave readings
+waiting behind connection enumeration: source admission progresses even while
+legacy delivery is held or the bounded fan-in refuses an event.
+
+**Ordering belongs to the conversation and reading.** A detached
+`daemonLiveReading` contains `Envelope`, `ConversationID`, `SessionGeneration`,
+`ReadingID` and `Revision`. Singleton identity is empty; tool/task progress uses
+its producing tool-call/task ID. Positive revisions increase at source admission
+per conversation/generation/family/identity, before delivery can be delayed.
+Retired generations and overtaken revisions cannot replace current readings.
+Conversations remain independent; session strings are not ordering counters.
+Same-phase successor activity reaches retention while legacy phase sends remain
+deduplicated.
+
+Reset/clear, agent switch and recovery/reactivation advance the conversation's
+generation, including same-ID activation and first output after a confirmed
+stop within the same activation. Each transition retires predecessor readings
+and admits a clear for every scoped family before fresh readings: its existing
+envelope type, `session_state_cleared: true`, payload `{}`, successor provenance
+and positive new-generation ordering. Unknown successor provenance stays omitted;
+known no-session provenance is `null`. Captured boundaries keep detached clear
+cursors, and source updates carry remaining family clears before fresh readings.
+Returning A → Z → A needs a fresh successor binding even within one activation;
+generation advancement releases cached bindings without altering queued captures.
+
+**Scope and retirement follow producing work.** Admission mints main-turn and
+child-lane identities that the legacy emitter adopts. Unassociated progress and
+denial can open a main identity without changing their lifecycle-neutral busy
+classification or emitting a phase. Main completion retires thinking and main
+tool progress; child/background progress may outlive it. Completed/failed tools,
+denials and task notifications with nonempty status retire the matching progress
+identity; a task patch does not. Late progress stays suppressed until a new start.
+Subsequent turn activity clears stalls; producer stop retires all progress.
+
+Stops release producer/turn lifecycle maps; generation changes discard predecessor
+revision maps. Conversation removal cleans the owner in both compositions. Keeping
+retired maps for stale suppression would accumulate memory across activations:
+generation/incarnation checks and detached records permit their release instead.
+A generation high-water counter seeds recreated conversations without accumulating
+deletion tombstones, and old cursors survive cleanup.
+
+**Snapshots are finite and detached.** `snapshot` pins immutable record references,
+without eagerly copying payload batches; `daemonLiveCursor.Next` returns at most
+one deep-detached reading and never follows later updates. Its captured generation,
+revision and readings remain available for consumer suppression. Cursor creation
+and consumption invoke neither broadcasters nor history scans. Supplied and returned
+payload/session bytes and correlation pointers cannot mutate retention or another
+cursor.
+
+Admission validates the complete envelope against
+`protocol.MaxThreadEnvelopeBytes` (65519 bytes), including metadata and its clear
+form; invalid or oversized input leaves retention unchanged. MCP server-count and
+error-text caps alone do not bound the other strings or JSON escaping: a hostile
+sixteen-row inventory exceeds 125 KB. The MCP fit assertion in
+`TestDaemonLiveMappedInventoryBounds` remains skipped pending
+[#3091](https://github.com/pyrycode/pyrycode/issues/3091); ordinary MCP retention,
+oversize rejection and clears are covered. An owner-only fixture would miss source
+capture and shared-identity failures: `TestDaemonLiveCaptureTransitionOrdering`,
+`TestDaemonLiveReturningRoutingID`, `TestDaemonLiveNeutralMainTurnIdentity` and
+`TestDaemonLiveLegacyDelayAndIdentity` exercise those producer paths.
+
+Relay provider installation and production activation await
+[#3077](https://github.com/pyrycode/pyrycode/issues/3077) and the control/provider
+sibling [#3089](https://github.com/pyrycode/pyrycode/issues/3089). The adapter,
+`PushLiveState`, `ThreadLiveState` installation, correlated replies and final
+producer-to-relay protocol proof remain #3077's work; retaining stream readings
+does not activate production thread delivery.
 
 ## Native reply suggestions after the result (#2831)
 

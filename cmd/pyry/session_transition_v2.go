@@ -105,6 +105,9 @@ func (e *sessionTransitionEmitterV2) Enqueue(t sessions.SessionTransition) {
 			return
 		}
 		if t.PreviousID == t.NewID || (t.Cause != "" && t.PreviousID == "") {
+			e.runtimeSink.offerMu.Lock()
+			e.runtimeSink.live.transition(t)
+			e.runtimeSink.offerMu.Unlock()
 			return
 		}
 		e.runtimeSink.queueBoundary(t, func() { e.broadcast(e.runtimeContext, t) }, nil)
