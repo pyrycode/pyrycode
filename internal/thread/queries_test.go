@@ -233,14 +233,17 @@ func TestStoreQueriesBounded(t *testing.T) {
 		if i%6 == 0 {
 			e = testMessage(0)
 		}
+		// Keep nested work outside the newest window without making every earlier
+		// fact rebuild child visibility during replay. Request measurements start
+		// only after the complete committed history has been folded and published.
 		switch i {
-		case 1:
+		case 35001:
 			e = testMain(0, "tool_use", `,"tool_use_id":"parent","name":"Agent"`)
-		case 2:
+		case 35002:
 			e = testChild(0, "tool_use", "parent", `,"tool_use_id":"nested","name":"Task"`)
-		case 3:
+		case 35003:
 			e = testChild(0, "assistant_delta", "nested", `,"text":"old active child"`)
-		case 4:
+		case 35004:
 			e = testAcceptance(0, "phone")
 		case 6:
 			e.Shown = new(bool)
@@ -271,6 +274,7 @@ func TestStoreQueriesBounded(t *testing.T) {
 				}}, err
 			}
 			defer s.Shutdown()
+			started := time.Now()
 			if err := s.Load(context.Background(), testStoreA); err != nil {
 				t.Fatal(err)
 			}
@@ -279,10 +283,12 @@ func TestStoreQueriesBounded(t *testing.T) {
 			case <-time.After(120 * time.Second):
 				t.Fatal("replay stalled")
 			}
+			t.Logf("replay and initial publication: %v", time.Since(started))
 			if phase == "unload reload" {
 				if err := s.Unload(testStoreA); err != nil {
 					t.Fatal(err)
 				}
+				started = time.Now()
 				if err := s.Load(context.Background(), testStoreA); err != nil {
 					t.Fatal(err)
 				}
@@ -291,6 +297,7 @@ func TestStoreQueriesBounded(t *testing.T) {
 				case <-time.After(120 * time.Second):
 					t.Fatal("reload stalled")
 				}
+				t.Logf("reload and publication: %v", time.Since(started))
 			}
 			snap := s.Snapshot(testStoreA)
 			if epoch != "" && snap.Epoch != epoch {
