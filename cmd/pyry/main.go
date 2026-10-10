@@ -117,6 +117,8 @@ func runArgs(args []string) error {
 			return runMCPApprove(args[2:])
 		case "mcp-files":
 			return runMCPFiles(args[2:])
+		case "memory":
+			return runMemory(args[2:])
 		// Verbs #1348 deleted. Duplicate constant cases are a compile error, so
 		// a future edit that tries to revive either one as a live verb fails the
 		// build rather than silently shadowing a working route.
@@ -1127,6 +1129,8 @@ recognize is forwarded to claude verbatim. pyry's own configuration uses an
 explicit -pyry-* prefix so it never collides with claude's namespace.
 
 Usage:
+  pyry memory credential set openai              read a memory token from stdin
+  pyry memory credential status openai           report configured-only JSON locally
   pyry [pyry-flags] [claude-flags-and-args...]   supervised claude session
   pyry [pyry-flags] -- [claude-args-with-dashes] (use -- if claude args begin
                                                   with -pyry-* by accident)

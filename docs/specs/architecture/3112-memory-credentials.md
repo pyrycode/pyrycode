@@ -103,3 +103,7 @@ None. References and generation IDs use crypto/rand; no service calls or new dep
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-10
+
+## Revisions
+
+2026-10-10: The reusable set/status operations are methods on `memoryCredentialStore`; the command and future wizard share that store rather than duplicate local wrappers. `selected` centralizes fresh reads and their deadline. No persistence or reference contract changes.
