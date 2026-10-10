@@ -18,6 +18,7 @@ type ConversationSummary struct {
     IsMuted        bool      `json:"is_muted"` // no omitempty (#2571): mirrors IsArchived; see write-payloads doc for the direct-marshal test this field needed.
     ReadUpTo       uint64    `json:"read_up_to"` // no omitempty (#2779): the stored durable read mark, including 0.
     LatestEntryID  uint64    `json:"latest_entry_id"` // no omitempty: newest displayable durable entry id, 0 if none; exclusions below.
+    LastShownVersion *uint64 `json:"last_shown_version,omitempty"` // declared thread watermark; nil omits, pointer to zero emits 0.
     ArchivedAt     *time.Time `json:"archived_at"` // *time.Time + no omitempty (#2698): always serialized; null for an active row and for one archived before this field existed.
     Cwd            string    `json:"cwd"`
     WorkspaceLabel *string   `json:"workspace_label"` // *string + no omitempty, same discipline as Name — but here it's a client-visible contract, not only a round-trip property (see below).
@@ -54,11 +55,14 @@ const (
   `ReadUpTo` is `Conversation.ReadUpTo` copied verbatim — the host operator's
   durable read mark, shared by every paired client and device. `LatestEntryID`
   is resolved per row, after `multi_agent` filtering, through
-  `historyLatestReader.LatestDisplayableEntryID(conv.ID)` (`*history.Store` in
-  production). It excludes exactly `turn_state`, `stall`, `api_retry`,
-  `compacting`, and `session_transition`; every other stored type counts,
-  including unknown and empty types. Missing, empty and status-only history
-  yields `0`. [`MarkConversationRead`](relay-package-handlers.md#markconversationread-cannot-copy-setconversationmuteds-best-effort-save-2780)
+  `historyLatestReader.LatestDisplayableEntryID(conv.ID)` (`legacyHistoryReader` over `*history.Store` in
+  production). This remains the legacy displayable-entry watermark:
+  known legacy types follow their wire-type counting rules, validated runtime
+  facts projected as receipts count at their original IDs, and unsupported
+  entries use the conservative stored-visibility fallback. A raw hidden entry
+  can still count in the legacy view. Missing logs or no qualifying entries
+  yield `0`; see [legacy counting](../../protocol-mobile.md#marking-a-conversation-read).
+  [`MarkConversationRead`](relay-package-handlers.md#markconversationread-cannot-copy-setconversationmuteds-best-effort-save-2780)
   uses the same query for `max(held, min(up_to, latest))`, so reading the last
   displayable entry clears unread despite trailing statuses, while existing
   higher marks never decrease. Status entries remain stored and served in the
@@ -68,6 +72,17 @@ const (
   surviving row fails the whole correlated reply with retryable
   `history.unavailable`; see [the list handler](relay-package-handlers.md#listconversations-gains-a-third-required-parameter-the-history-dependency-is-not-optional-2779).
 - **`ArchivedAt` (#2698) is the archive-time stamp, projected verbatim from `Conversation.ArchivedAt` by `ListConversationsWithAgents`.** Pointer without `omitempty`, the same discipline as `WorkspaceLabel`: the key is always serialized, and `nil` is genuinely ambiguous on the wire between "active" and "archived before this field existed" — a client resolves that ambiguity by falling back to `LastUsedAt` for ordering, not by asking the daemon to disambiguate. Re-archiving a row never invents a stamp for it (see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `SetArchived`): stamping a legacy archived row on re-archive would reorder it to the top of every client's Archive screen, which is exactly the bug the registry-level test `TestRegistry_SetArchived_LegacyArchivedStaysUnstamped` exists to catch before it reaches this payload.
+- **`LastShownVersion` is an optional thread watermark, declared ahead of its producer.**
+  Adding a shown item or appending text to one raises it; taking the maximum
+  current item revision would also count hidden or state-only changes and
+  falsely report new shown content. Nil omits the key, while a non-nil pointer
+  to zero emits numeric `0`; a plain `uint64` with `omitempty` would lose that
+  known-zero state. `TestConversationLastShownVersion` marshals the decoded DTO
+  back into its envelope and checks absent/zero/nonzero alongside distinct
+  `read_up_to` and `latest_entry_id` values and a stored session binding.
+  Existing producers leave it nil. It neither changes the durable read mark nor
+  replaces the legacy displayable-entry watermark, and `CurrentSessionID`
+  remains the stored binding. See [the summary contract](../../protocol-mobile.md#conversations).
 - **`WorkspaceLabel` (#2208) is resolved per row from that row's own `Cwd`, never inherited.** It belongs to the workspace, not the conversation — N rows sharing one `Cwd` carry one label — and is filled by `internal/relay/handlers.ListConversations` via a `ConversationLister.WorkspaceLabel(cwd string) (string, bool)` read method, widened onto the narrow interface for this handler alone. Presence comes from that method's second return, never from `label != ""`: the registry keeps a stored empty label distinct from an absent one (see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `WorkspaceLabel`), and deriving the pointer from the string would collapse the two into the same `null`.
 - **`Agent` (#2643) is the one field on this row gated by a client capability rather than always sent.** It names the agent running the conversation's bound session — `AgentClaude` or `AgentCodex`, a closed two-value wire vocabulary — and is `""` (so `omitempty` drops the key) unless the requesting conn negotiated `protocol.CapabilityMultiAgent`. For a negotiating client the value is never empty: `internal/relay/handlers.AgentOf` (exported for a second caller in #2644, see below) reads the session's harness through a `SessionHarnessFunc` (built over `sessions.Pool.HarnessFor`, #2629) and falls back to `AgentClaude` for a conversation with no bound session, a nil reader, or a session id the pool doesn't hold — fail-open, so a harness miss still shows the row rather than hiding it. **For a non-negotiating client the row is not merely unlabelled — a `conversations` reply omits every row whose agent is `AgentCodex` entirely**, so the list such a client sees is byte-identical to the one it saw before Codex conversations existed; that filtering, not just the empty `agent` key, is what "detection only" does not cover for this capability (see [handshake payloads](protocol-package-handshake-control-payloads.md)). `ListConversations(reg, hist)` is a thin wrapper over `ListConversationsWithAgents(reg, nil, hist)`, so a caller with no session pool gets the agent-blind reply without a `SessionHarnessFunc` to supply; the filtered history reader is required in both forms; a nil `harnessFor` makes `AgentOf` read every row as `AgentClaude`, which is exactly the pre-#2643 shape. See [`dispatch-package.md`](dispatch-package.md) for where the negotiated decision is carried per-conn (`Conn.MultiAgent()`), and [ADR 039](../decisions/039-capability-belongs-to-agent-and-model-together.md) for the general "resolve the session's own agent through `Pool.HarnessFor` first" pattern this handler follows. #2644 reuses the identical resolution rule to withhold *pushed* frames (not just this reply) about a Codex conversation from a non-negotiating conn — see [Capability negotiation on the handshake](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md).
 - **Fixture key order does not prove DTO serialization.** Go's `encoding/json`
