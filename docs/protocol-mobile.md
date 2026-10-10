@@ -380,7 +380,7 @@ Envelope-level fields beyond the v1 set:
 |---|---|---|---|
 | `event_id` | int | no (omitempty) | In-memory event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present on ring-backed interactive structured-stream frames and operator messages (binary → phone), including their reconnect replay; absent on session transitions and frames without ring recording. See [Interactive events](#interactive-events-v2-capability-gated). Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
 | `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present after a successful history append on direct live interactive-turn, session-transition and operator-message envelopes (#2861); reconnect replay of history-backed ring events carries that original append's id (#2909). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients **must fall back to history/list** for a durable read-mark target. |
-| `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082).** Omitted means no provenance was supplied; explicit `null` positively means no producing session; a nonempty string names the producing session. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. Daemon provenance/retention and production installation/activation remain pending #3076/#3077. |
+| `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082/#3162).** Omitted means no provenance was supplied; explicit `null` positively means no producing session; a nonempty string names the producing session. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. Daemon provider installation remains #3163; production negotiation remains #3164. |
 | `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears the family's session-scoped readings before fresh readings for the supplied session. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
 
 The relay strips supplied session metadata from non-thread connections and
@@ -400,6 +400,8 @@ substitutes the conversation's newer session binding. Fresh replies retain
 handle `session_state_cleared: true` before decoding the ordinary payload schema,
 because a clear's `{}` intentionally has none of that schema's required fields.
 Supplied thread live state carries neither `event_id` nor `history_entry_id`.
+Repeated equal-revision requests remain answerable; strictly older revisions
+and overtaken session generations are suppressed even when correlated.
 Ordering, access gates and connect reconciliation follow the
 [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract).
 
@@ -1752,11 +1754,30 @@ contract covers permission prompts and question batches (`modal_shown` /
 items; their transient progress remains live state.
 
 **Implementation boundary:** the relay delivery/reconciliation contract is
-implemented using supplied providers and fakes. Actual daemon provenance and
-retained current readings remain pending #3076; provider installation and
-production activation remain pending #3077. Production still does not negotiate
+implemented using supplied providers and fakes (#3082/#3162). The relay's five
+on-demand handler paths consume optional source-bearing providers; daemon
+provider installation remains #3163 and production negotiation remains #3164.
+Production `ThreadReady` remains unset, so production still does not negotiate
 `thread`. The behavior below applies when those source providers and readiness
 are supplied, and does not claim that existing daemon emitters have migrated.
+
+**Supplied on-demand replies.** On a thread connection, an installed optional
+provider is selected once for `request_context_usage`, `mcp_status_request`,
+`request_model_list`, `request_session_settings` or `set_session_settings`.
+It returns a `LiveState` whose conversation, session tag, generation, reading
+identity and revision survive enrichment, queueing and sealing unchanged.
+The relay adds `in_reply_to` equal to the requesting envelope's `id` and delivers
+through `PushLiveState`, including when only the source-bearing provider is
+installed. It never derives provenance from the request, payload or current
+conversation binding. Settings reads retain the enrichment described in
+[Session settings](#session-settings-v2).
+
+A selected provider's unavailable result keeps the handler's existing refusal
+or zero-settings response; a failed settings update keeps its existing error
+mapping and emits no success reading. Neither outcome retries a legacy provider
+or repeats the query or mutation. A non-thread connection, or a handler without
+its optional provider, retains its legacy reply path and bytes. Existing typed
+providers and `SettingsUpdater` remain compatible.
 
 Each supplied push or on-demand reply keeps its producing session metadata:
 omitted `session_id` means no provenance was supplied, explicit `null` positively
@@ -1808,8 +1829,8 @@ each fit **65519 bytes** after JSON escaping and metadata; ordinary live state
 does not use thread-item continuation encoding.
 
 These frames carry no replay or history identity, contribute no thread items or
-catch-up data, and never advance `last_shown_version`. Connections without
-`thread` retain their existing stream, snapshots and replay/resync, receive no
+catch-up data, and never advance `last_shown_version` or read watermarks.
+Connections without `thread` retain their existing stream, snapshots and replay/resync, receive no
 envelope session metadata and receive no explicit clear frames. This work does
 not replace legacy replay/resync with catch-up; thread catch-up/pages and that
 replacement remain #2963.
@@ -3448,7 +3469,17 @@ The **producer** is **#657**. Until a server-side workspace-change source exists
 Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
 including envelope session tags and `{}` family clears before fresh state.
 
-Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty-three turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though it rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
+For a negotiated thread connection with `ModelListReadingFor` installed,
+`request_model_list` consumes that provider once, passing the negotiated
+`multi_agent` decision so the supplied inventory keeps the existing projection.
+The fresh `model_list` preserves supplied source metadata and payload fields,
+is correlated to the request, and carries no ring/history identity. Generated
+clears are uncorrelated; equal-revision requests are answered, while older
+revisions or generations are suppressed. An unavailable result keeps
+`model_list.unavailable` without retrying `ModelListFor`. Without the optional
+provider, or without `thread`, the legacy path and bytes below remain unchanged.
+
+Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty-three turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though its legacy live publication rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3635,6 +3666,17 @@ envelope id. A resolver result is forwarded unchanged as the existing
 [`mcp_status`](#mcp_status) payload, including its daemon-authored
 `conversation_id`, server order and `dropped_servers` value.
 
+On a negotiated thread connection, an installed `MCPStatusReadingFor` is
+consumed once instead of the payload-only resolver, even when that legacy
+resolver is absent. Its supplied reply follows the
+[live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract):
+source metadata and the complete payload are preserved, generated clears are
+uncorrelated and precede the correlated fresh reply, equal revisions remain
+answerable, and older revisions or generations are suppressed. An unavailable
+reading keeps `mcp_status.unavailable` and never retries the legacy resolver.
+Non-thread connections or an absent optional provider retain the legacy path
+and bytes. The existing validation, four-ask bound and cancellation still apply.
+
 The daemon resolves the conversation's current session from its registry and
 queries that session's live child afresh. It uses the registry record's canonical
 conversation id in the answer. Eligibility comes from the exact child's spawn:
@@ -3664,8 +3706,9 @@ Three rejects are possible, each sent as one `error` envelope correlated by
 
 No reject sends an empty or stale `mcp_status`. A conn that did not negotiate
 `interactive` receives nothing, and the daemon consults neither membership nor
-the resolver. A relay with no `MCPStatusFor` resolver configured is equally inert
-and consumes the type before decoding its payload, so it does not fall through to
+the resolver. A relay with neither an applicable supplied provider nor
+`MCPStatusFor` configured is equally inert and consumes the type before decoding
+its payload, so it does not fall through to
 an unknown-type response. Ticket #2382 wires the daemon's hosted-conversation
 resolver.
 
@@ -3930,6 +3973,18 @@ category through that API instead, which is worth its cost only when an
 operator is actually looking at the screen — exactly what an inbound request
 means. No second outbound shape is minted: the answer is [`context_usage`](#context_usage),
 correlated by `in_reply_to`.
+
+On a negotiated thread connection, an installed `ContextUsageReadingFor` is
+consumed once, including when the legacy `ContextUsageFor` is absent. The
+supplied conversation, session tag, generation, reading identity, revision and
+complete payload survive asynchronous delivery. Under the
+[live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+generated clears are uncorrelated and precede the correlated fresh reply;
+equal-revision requests remain answerable, while an overtaken revision or
+generation is suppressed. An unavailable result keeps
+`context_usage.unavailable` without consulting the legacy provider. Without
+`thread` or the optional provider, the existing legacy path and bytes remain.
+Validation, the four-ask bound and teardown cancellation are unchanged.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -5454,6 +5509,35 @@ error. Refusal diagnostics use static reasons only.
 ### Session settings (v2)
 
 A paired client sends `set_session_settings` to change one session's **per-session settings** — its model, reasoning effort, permission mode, and YOLO (bypass-permissions) — and the daemon confirms with `session_settings_updated` (#597 Phase 3, #844, permission mode #1687). This section defines only the wire vocabulary; the handler that intercepts the request — gating on the negotiated `interactive` capability, validating, and persisting the change via `sessions.Pool.UpdateSettings` (#840) — is sibling #845.
+
+On a negotiated thread connection, installed `SessionSettingsReadingFor` and
+`UpdateSettingsReading` providers supply the read and successful-write replies,
+respectively (#3162). Each selected provider is consumed once and can be
+installed without its legacy counterpart. Supplied source metadata and payload
+fields are preserved through `PushLiveState`; only request correlation is added.
+Both reply types share the `session_settings` clear family: an automatically
+generated `{}` clear is uncorrelated and precedes the fresh correlated reply.
+Equal-revision requests remain answerable; strictly older revisions and
+overtaken generations are suppressed under the
+[live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract).
+
+A supplied settings read provides the base payload. Relay enrichment preserves
+unrelated fields and the existing presence/error rules: available applied effort
+is a string or explicit null, unavailable effort adds no field; capabilities
+are added only for negotiated `multi_agent` with an available provider;
+`memory_search` uses the supplied report, or `unknown` with `providers: []` on
+provider error. Effective effort uses the supplied conversation; capabilities
+use the base payload's session/model; memory search uses the supplied
+conversation and base session. Envelope provenance stays independent of those
+payload keys. Explicit supplied clears need no enrichment queries.
+
+An unavailable supplied read retains the all-zero no-session reply. A failed
+supplied mutation retains every existing error mapping and emits no success
+reading or generated clear. Neither falls back to a legacy provider or repeats
+the operation. Without `thread` or the relevant optional provider, the legacy
+reply path, bytes, enrichment and `SettingsUpdater` contract remain unchanged.
+Daemon provider installation remains #3163, production negotiation #3164, and
+thread catch-up/pages and replay replacement #2963.
 
 #### `set_session_settings`
 

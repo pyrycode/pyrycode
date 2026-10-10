@@ -1,6 +1,6 @@
 # Concurrency
 
-**One owner goroutine + transient `time.AfterFunc` callbacks routed through a wake channel.** `Run` is the only goroutine the manager owns long-term. It reads `cfg.Frames`, looks up (or lazily creates) `m.sessions[env.ConnID]`, processes the frame synchronously, and ALSO pops `wakeSignal` values from a per-manager buffered channel `m.wake` and dispatches them via `handleWake`. `m.sessions` is mutated exclusively by `Run`; no mutex.
+**One owner goroutine + workers and transient callbacks.** `Run` owns mutable session state and Noise ciphers. It reads `cfg.Frames`, looks up (or lazily creates) `m.sessions[env.ConnID]`, dispatches the frame, and ALSO pops `wakeSignal` values from a per-manager buffered channel `m.wake` and dispatches them via `handleWake`. `m.sessions` is mutated exclusively by `Run`; no mutex.
 
 The #450 timer plumbing introduces transient `time.AfterFunc`-spawned goroutines (one per fire, never per session — `time.AfterFunc` only spawns when the timer fires). The callbacks DO NOT touch session state directly: they push a `wakeSignal{s, kind}` onto `m.wake` and exit. The single-owner-goroutine invariant for `s.send` / `s.recv` / `s.state` / `s.device` / `s.peerStatic` / `s.interactive` / `s.awaitingRekeyReply` / `s.rekeyTimer` / `s.rekeyReplyTimer` / `s.idleTimer` (#774) / `s.lastActivityAt` (#774) / `s.replayThrough` (#647/#663) / `s.replayQueue` (#777, the paced-replay tail drained one frame per `Run` pass by `drainReplayOnce`) is structurally preserved — only `Run` reads or writes those fields. The callback closure selects on `(m.wake <- signal, <-runCtx.Done())` so a fired-but-undelivered wake on a shutting-down `Run` exits via the ctx branch without leaking; pinned by `TestV2Session_RekeyInitiator_TimerCleanup_NoGoroutineLeak`. `Run` derives `runCtx, cancelRun := context.WithCancel(ctx); defer cancelRun()` so a `Frames`-channel-close exit (which doesn't cancel `ctx`) still cancels `runCtx` and unblocks any pending callback.
 
@@ -221,6 +221,29 @@ before-decode inert gate. Capability advertisement is separate (#2797).
 **A zero-value enum member needs a producer that names it, or staticcheck flags it dead even though the type "handles" it by default.** The first cut of this widening leaned on `appFrameRoute`'s zero value implicitly — the v1 `enqueueAppFrame` call built `appFrameJob{plaintext: plaintext}` with no `kind`, and the worker caught it with a bare `default:` rather than a `case appFrameRoute:`. `staticcheck`'s `U1000` correctly called `appFrameRoute` unused: nothing in the source named the identifier, so the compiler couldn't see that the zero value was meaningful rather than accidental, and the doc-block claim that "the routing decision lives in one place" rested on a member neither producer nor consumer mentioned. The fix is to name it at both ends — the v1 call passes `kind: appFrameRoute` explicitly and the worker gains its own `case appFrameRoute:` — which makes `default:` genuinely unreachable in normal operation while still being the safe catch for a kind added without an arm. The general lesson: when a tagged-dispatch enum's zero value is meant to be a real, load-bearing case (not just "unset"), give it an explicit producer and an explicit consumer arm rather than trusting Go's zero-value default to stand in for both — the compiler cannot verify that a default arm and an elided zero-value case actually agree on what they mean.
 
 `V2Session.State()` is a plain field read. Safe today because no cross-goroutine reads exist. Both the push surface (#571, rewritten #610) and the #588 enumeration surface deliberately keep it that way: the #610 `Push` reads only `m.queues` under `pushMu` (never `s.state`), while `forwardEnvelope` reads `s.state` **on the `Run` goroutine** during the drain, and `handleActiveConns` reads `s.state` (and `s.interactive`, #626) **on the `Run` goroutine** (funneled through `m.snapshot`) — neither via a cross-goroutine `State()` call. So the broadcast/enumeration layer that this comment once anticipated (the [#589](../codebase/589.md) assistant-turn fan-out, built on #571's `Push` + #588's `ActiveConns`) introduces **no** new reader of `s.state` off the owner goroutine, and `State()` still needs no `atomic.Int32`/mutex. Should a future slice read `s.state` directly from a producer goroutine *outside* the funnel, that accessor will need the atomic/mutex then — not pre-emptively refactored.
+
+## Connection-scoped reading cancellation
+
+Cancellation must be independent of FIFO worker progress. Settings enrichment
+calls `EffectiveEffortFor` and `MemorySearchFor` synchronously; a provider
+waiting on `ctx.Done()` prevents `appFrameWorker` from returning. Cancelling
+only in the worker's defer would therefore strand that provider after requester
+teardown, along with outstanding context/MCP asks sharing its context.
+
+`appFrameWorker` derives `connCtx` from Run's context and starts one watcher
+selecting on the stable `s.done` channel and `connCtx.Done()`. Requester teardown
+cancels immediately through the watcher; manager shutdown cancels through the
+parent. Worker return cancels the context and joins the watcher. Neither the
+watcher nor provider goroutines read negotiated session fields or seal replies:
+`appFrameJob` carries the copied `thread`/`multiAgent` decisions, and supplied
+readings return through `PushLiveState` to Run-owned gates, ordering and sealing.
+
+`TestSuppliedSettingsEnrichmentTeardown` blocks each enrichment provider while
+both context-usage and MCP asks are outstanding, closes the authenticated
+requester, and requires all three contexts to cancel before releasing the
+worker. It then checks removal and absence of readings or clears. Merely checking
+connection removal or reply silence would pass while providers still survived.
+See [settings enrichment](v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md#supplied-settings-reads).
 
 ## Supplied current-state delivery
 
