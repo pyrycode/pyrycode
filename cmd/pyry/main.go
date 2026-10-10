@@ -579,6 +579,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// relayWiring.hist, which the #2114 producers reach it through.
 	conversationHistory := history.New(resolveInstanceDirPath(*name))
 	reconcileStartupHistory(conversationHistory, convReg, logger, time.Now().UTC())
+	stopTranscripts := startMemoryTranscripts(ctx, cfg.Memory, workspaceBase, conversationHistory, convReg, logger)
+	defer stopTranscripts()
 	shadow := newThreadShadow(conversationHistory, convReg, thread.NewStore(conversationHistory), logger)
 	defer func() { _ = shadow.shutdown() }() // shadow failures log fixed diagnostics
 	// #2499's carry-forward, the fifth value in this block built BEFORE

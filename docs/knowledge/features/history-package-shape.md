@@ -192,3 +192,104 @@ the final one undetected. `TestForwardCommitNotifications` obstructs the segment
 the next append will actually use; a full active segment rolls, bypassing an
 obstruction at its old filename. These fixtures prove positioned reads and
 failed-append silence rather than relying only on successful delivery counts.
+
+## Memory transcript view
+
+[`startMemoryTranscripts`](../../../cmd/pyry/memory_transcripts.go) consumes
+registered hosted-chat history to produce the user-only Markdown view described
+in [Recent conversation transcripts](../../guide.md#recent-conversation-transcripts).
+`runSupervisor` supplies saved settings and the `resolveStartupWorkspaceBase`
+result; `resolveEffectiveMemory` validates the effective destination. Absent
+settings create no storage, and invalid settings disable export with fixed,
+content-free diagnostics. Export is independent of clients, capture schedules
+and search installation.
+
+Discovery runs immediately and every `memoryTranscriptInterval` (ten seconds),
+starting a serialized worker per registered conversation, including new chats.
+Each worker owns a positioned `ForwardReader`, a `thread.Fold` and delivery
+timestamps. It polls with `Walk` to catch commits from other store instances
+that cannot wake this store's `Tail`, including commits during replay or export.
+The scheduling contract is eligible text within 60 seconds with readable history
+and writable storage. Replay, publication and worker joins stay outside chat
+delivery/publication paths; startup cleanup cancels and joins discovery and all
+workers. History or fold failure retries from a fresh reader without publishing
+an incomplete replay.
+
+### Recorded attribution and stable identity
+
+[`memoryTranscriptReader.files`](../../../cmd/pyry/memory_transcript_fold.go)
+selects delivered `user_message` items with nonzero `Order`, excluding explicit
+`NoChild` records. It decodes only `text` from inert `Content`, preserving recorded
+whitespace; normalized `Summary` and whole payload JSON cannot supply the text.
+Assistant output, notices, injected instructions and background capture work do
+not become conversational user messages. Registry membership and title are
+display inputs; the current binding supplies no provenance. Attribution comes
+from saved delivery metadata or the fold's
+[recorded successor fallback](thread-package-main-thread-folding.md#recorded-provenance-and-successor-fallback).
+Unresolved attribution remains explicitly unknown, grouped in a namespace
+separate from named sessions even when an opaque routing ID resembles that
+namespace.
+
+Message identity is conversation ID plus delivery `Item.Order`; source time is
+the corresponding raw delivery `Entry.TS`, retained by `memoryTranscriptReader.feed`.
+Using `Item.ID` would change an already exported message when a later
+[acceptance outcome](thread-package-main-thread-folding.md#accepted-sends-and-durable-outcomes)
+suppresses the standalone delivery row in favor of the acceptance item. A
+persisted delivered message is independently eligible while its linked outcome
+is absent; later reconciliation yields the same single exported message,
+identity and timestamp. Queued, dropped and lost acceptances export no text.
+
+The transcript basename hashes structured conversation, recorded routing session,
+replacement-generation start and unknown-attribution state. Titles, text and
+opaque session IDs never form paths. Replaying surviving history reconstructs
+the same transcript/message identities and complete text without duplicates.
+
+### Closure and exported-message boundaries
+
+A divider with distinct recorded predecessor and successor routing IDs closes
+the predecessor and starts a new logical generation, including when a previously
+used routing ID returns. The fold's
+[raw/legacy pairing](thread-package-main-thread-folding.md#boundary-pairing-and-legacy-scope)
+counts companion dividers once. Idle/capacity eviction, disconnect, restart
+without a recorded successor and same-ID respawn do not establish closure;
+a restart with a recorded distinct successor does. Unknown groups without a
+proven predecessor boundary stay open.
+
+`Closing entry` records the fixed closure ID and is absent while open.
+`Last delivered entry` independently records the greatest delivery `Order`
+represented. Late predecessor text updates its own transcript and delivered
+boundary, even beyond the closing ID, without moving closure or entering/closing
+the successor. Treating closure as the exported-message watermark would miss
+late text and leave an older downstream capture receipt looking current.
+Open transcripts retain the complete session without age or intermediate-capture
+cutoffs; closed files remain available.
+
+### Derived publication and storage confinement
+
+Each successful replay renders complete snapshots, independently of publication
+progress. Missing files rebuild; publication failure preserves the previous
+complete file and retries the full snapshot on a later pass without skipping text.
+[`publishMemoryTranscript`](../../../cmd/pyry/memory_transcript_files.go) writes
+a private temporary file in the destination directory, syncs and closes it, then
+atomically renames it. Directory traversal and leaf operations use held directory
+descriptors without following symlinks. Unsafe existing targets, including
+symlinks, nonregular files, shared-mode files and hard links, are rejected. New
+directories are 0700 and files 0600.
+
+Canonicalizing a destination can erase evidence of a storage symlink before a
+no-follow publisher sees it. Startup therefore also compares the effective path
+with the fixed transcript location beneath the canonical service-user home;
+a redirect disables export. This keeps derived publication out of source history,
+vault notes and additional roots. Neither replay nor export modifies history,
+and diagnostics expose only fixed event/reason strings, never text, payloads,
+paths or opaque IDs.
+
+`TestMemoryTranscriptReplay` covers identity/timestamp stability across split
+reconciliation and exact text; `TestMemoryTranscriptSessions` covers pairing,
+unknown attribution, replacements and late predecessor boundaries.
+`TestMemoryTranscriptWorker` exercises production discovery/ticks, interleaved
+Claude/Codex histories, direct-writer catch-up, reconstruction with unchanged
+source bytes and joined cancellation during replay/publication.
+`TestMemoryTranscriptActivation` covers inactive settings and storage redirects;
+`TestMemoryTranscriptStorage` covers permissions, target rejection and interrupted
+publication followed by retry.
