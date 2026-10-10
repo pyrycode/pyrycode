@@ -56,10 +56,11 @@ None. Thirty seconds is the ticket's permitted upper bound and gives inference/c
 
 ## Documentation handoff
 
-Pending documentation stage:
-- Update `docs/knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md`, “One isolated Haiku attempt”, with the chosen attempt/termination bound and completion eligibility.
-- Update `docs/knowledge/features/e2e-realclaude-test-infrastructure.md`, “A suggestion frame alone cannot prove its source”, with the aligned live window, correction and counted proof.
-- Retain historical failed batches and the distinction between corrected deterministic behavior, live non-reproduction and observation alone; preserve the daemon-only stderr privacy contract.
+Completed documentation stage:
+
+- Updated [the stream supervision overview](../../knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md), “One isolated Haiku attempt”, with the 29.8-second deadline, 30-second total lookup/termination bound, successful completion eligibility and separate result/exit timing witnesses.
+- Updated [the live test infrastructure overview](../../knowledge/features/e2e-realclaude-test-infrastructure.md), “A suggestion frame alone cannot prove its source”, with the 35-second live window, deterministic correction and counted six-run proof.
+- Both overviews retain historical failed batches, distinguish corrected deterministic behavior from live non-reproduction and observation alone, and preserve the daemon-only stderr privacy contract.
 
 ## Security review
 
