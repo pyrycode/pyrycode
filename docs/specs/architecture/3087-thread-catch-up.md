@@ -9,6 +9,7 @@
 - `internal/thread/sends.go` → `sendFact`: claimed delivery suppression differs from hiding.
 - `internal/history/forward.go` → `Walk`, `Tail`: complete chronological replay independent of chunk boundaries.
 - `internal/thread/queries_test.go`, `store_test.go`: counted 36,000-entry fixtures and lifecycle barriers.
+- `internal/thread/agent_validation_test.go` → `testAgentNeutralFact`: whole-fold neutrality comparison must include consumed coverage metadata.
 - `docs/knowledge/features/thread-package.md` § Cache and epochs: final revisions cannot reconstruct first publication; cache items never seed continuation.
 - `docs/knowledge/features/thread-package-background-store.md` § Bounded queries: readiness, query costs and captured publication ownership.
 - `CODING-STYLE.md`, `docs/knowledge/features/development-verification.md`, ADR 042 § Update messages: contracts and evidence requirements.
@@ -64,3 +65,4 @@ Pending documentation stage: `docs/knowledge/features/thread-package.md`, “Cac
 
 ## Revisions
 - 2026-10-10: `TestCatchUpMissingHistory` exposed that complete reading of surviving history does not prove continuity across missing IDs. Record the greatest missing ID during `Feed` and reset queries crossing that floor; queries after the floor remain usable. Keep delivery suppression observation in `sendFact` so unchanged-row watermark scanning retains its fast path.
+- 2026-10-10: The full race suite found `testAgentNeutralFact` manually advancing only the expected fold's version across a skipped ID. Consume a neutral no-item entry instead so its whole-fold comparison includes progress/coverage metadata while still proving unusable identity facts do not change items, joins or attribution.
