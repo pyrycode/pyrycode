@@ -23,6 +23,7 @@ pyrycode/
 ├── internal/config/           User-configurable values (Phase 3 foundation)
 │   ├── config.go              Config struct, DefaultConfig, Load (overlay-decode over defaults)
 │   └── config_test.go         Same-package, table-driven
+├── internal/memoryruntime/    Callable isolated Linux/OpenAI installer; verified artifacts and permanent generations, no daemon wiring
 ├── internal/memorysearch/     Read-only search access detection for a selected agent and canonical workspace
 │   ├── detect.go              Detect merges scoped declarations and effective launch evidence
 │   └── detect_test.go         Provider, availability, and isolation fixtures

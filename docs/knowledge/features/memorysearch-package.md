@@ -99,6 +99,11 @@ are sorted by ID.
 | `unavailable` | Installed providers are confirmed disabled or failed, with no unresolved check and no usable provider. They remain in `Providers`, so clients can avoid an install prompt. |
 | `absent` | Every applicable check completed and found no installed provider. An empty provider list with missing evidence is `unknown`, not `absent`. |
 
+The [managed runtime installer](memoryruntime-package.md) verifies installation
+only. Its returned launch locations and `ready` progress stage do not establish
+index readiness or access by the selected agent/workspace; the evidence rules
+above still apply.
+
 `Detect` does not start an agent, execute a CLI, index content, or change config.
 It only inspects bounded launch evidence and CLI file metadata. The
 [architecture spec](../../specs/architecture/2689-memory-search-detection.md)
