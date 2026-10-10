@@ -41,12 +41,20 @@ func (o *daemonLiveState) acceptEvent(src daemonLiveSource, ev turnevent.Event) 
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	return o.acceptEventLocked(src, ev)
+}
+
+func (o *daemonLiveState) acceptEventLocked(src daemonLiveSource, ev turnevent.Event) *liveStreamCapture {
+	cap := &liveStreamCapture{source: src}
+	c := o.conversations[src.ConversationID]
+	if c == nil || c.generation != src.SessionGeneration || c.stopped {
+		return cap
+	}
 	t := o.turns[src]
 	if t == nil {
 		t = &liveSourceTurn{lanes: make(map[string]string), launchers: make(map[string]string), tools: make(map[string]string), childTools: make(map[string]bool), doneTools: make(map[string]bool), doneTasks: make(map[string]bool)}
 		o.turns[src] = t
 	}
-	cap := &liveStreamCapture{source: src}
 	if c := o.conversations[src.ConversationID]; c != nil && c.generation == src.SessionGeneration {
 		for _, family := range streamLiveFamilies {
 			if r := c.readings[liveReadingKey{family, ""}]; r != nil && r.Envelope.SessionStateCleared {
@@ -85,7 +93,12 @@ func (o *daemonLiveState) acceptEvent(src daemonLiveSource, ev turnevent.Event) 
 		}
 		cap.parentID, cap.laneID = parent, lane
 	}
-	if !child && turnMarkFor(ev) == turnMarkOpen && t.main == "" {
+	opensMain := turnMarkFor(ev) == turnMarkOpen
+	switch ev.(type) {
+	case turnevent.ToolProgress, turnevent.ToolCallDenied:
+		opensMain = true
+	}
+	if !child && opensMain && t.main == "" {
 		t.main = mintLiveTurn()
 	}
 	if !child {
@@ -198,14 +211,15 @@ func (o *daemonLiveState) acceptEvent(src daemonLiveSource, ev turnevent.Event) 
 // closeProducer retires progress that cannot outlive its process. A delayed
 // predecessor stop carries its original source and cannot clear a successor.
 func (o *daemonLiveState) closeProducer(src daemonLiveSource) *liveStreamCapture {
-	cap := o.acceptEvent(src, turnevent.TurnEnd{})
-	if cap == nil {
+	if o == nil || src.SessionGeneration == 0 {
 		return nil
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	cap := o.acceptEventLocked(src, turnevent.TurnEnd{})
 	if c := o.conversations[src.ConversationID]; c != nil && c.generation == src.SessionGeneration {
-		o.stopped[src.producer] = true
+		c.stopped = true
+		o.releaseSourcesLocked(src.ConversationID)
 		for key := range c.readings {
 			if key.family == protocol.TypeToolProgress || key.family == protocol.TypeThinkingProgress || key.family == protocol.TypeBackgroundTaskProgress {
 				o.retireLocked(src, key)

@@ -36,10 +36,10 @@ func (s *streamTurnSink) beginRuntimeProducer(tag *streamSessionTag) {
 	s.runtimeNextProducer++
 	tag.incarnation.Store(s.runtimeNextProducer)
 	s.registerRuntimeProducerLocked(tag, tag.ID())
-	s.offerMu.Unlock()
 	if s.live != nil {
 		s.live.capture(tag.ID(), tag.incarnation.Load(), history.SessionProvenance{SessionID: tag.ID()}, true)
 	}
+	s.offerMu.Unlock()
 }
 
 // registerRuntimeProducerLocked retains routing aliases before their first
@@ -195,6 +195,9 @@ func (s *streamTurnSink) sinkForSessionTag(tag *streamSessionTag, kind string) f
 
 func (s *streamTurnSink) exitForSessionTag(tag *streamSessionTag) func() {
 	return func() {
+		if s.live != nil {
+			s.offerMu.Lock()
+		}
 		env := streamTurnEnvelope{sessionID: tag.ID(), incarnation: tag.incarnation.Load(), exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()}
 		if source := tag.lastSource.Load(); source != nil {
 			env.source = *source
@@ -209,6 +212,7 @@ func (s *streamTurnSink) exitForSessionTag(tag *streamSessionTag) func() {
 			}
 			src := s.live.capture(sourceID, env.incarnation, history.SessionProvenance{SessionID: sourceID}, false)
 			env.live = s.live.closeProducer(src)
+			s.offerMu.Unlock()
 		}
 		if !s.offer(env, true) {
 			s.logger.Warn("relay: stream-turn exit retained; sink full", "event", "stream_turn.exit_sink_full", "session_id", env.sessionID)

@@ -130,6 +130,7 @@ type confirmedStreamStop struct {
 // must be structurally impossible. The drain stops on ctx, not on close; any
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
+	liveCaptureReady  func()           // optional scheduling seam, called outside locks
 	live              *daemonLiveState // installed before producers start
 	shadowProcessed   atomic.Uint64    // last fully published accepted output
 	runtimeReplayRing *eventring.Ring  // installed before workers; boundaries publish on the drain
@@ -317,7 +318,12 @@ func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
 // The wake is a level trigger, never the owner of the notification.
 func (s *streamTurnSink) runnerStopped(sessionID string) {
 	s.offerMu.Lock()
-	s.retainExitLocked(streamTurnEnvelope{sessionID: sessionID, incarnation: s.runtimeProducers[sessionID], exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()})
+	env := streamTurnEnvelope{sessionID: sessionID, incarnation: s.runtimeProducers[sessionID], exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()}
+	if s.live != nil {
+		src := s.live.capture(sessionID, env.incarnation, history.SessionProvenance{SessionID: sessionID}, false)
+		env.live = s.live.closeProducer(src)
+	}
+	s.retainExitLocked(env)
 	s.offerMu.Unlock()
 }
 
@@ -498,8 +504,11 @@ func (s *streamTurnSink) sinkForProducer(tag func() string, producerKind string,
 			env.source = history.SessionProvenance{Kind: producerKind, SessionID: sessionID}
 		}
 		if s.live != nil {
-			s.offerMu.Unlock()
 			src := s.live.capture(sessionID, env.incarnation, env.source, false)
+			s.offerMu.Unlock()
+			if s.liveCaptureReady != nil {
+				s.liveCaptureReady()
+			}
 			env.live = s.live.acceptEvent(src, ev)
 		}
 		if turnMarkFor(ev) == turnMarkClose {

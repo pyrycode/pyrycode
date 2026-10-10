@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -36,6 +37,7 @@ type liveConversation struct {
 	generation  uint64
 	session     string
 	incarnation uint64
+	stopped     bool
 	readings    map[liveReadingKey]*daemonLiveReading
 	revisions   map[liveRevisionKey]uint64
 	scopes      map[liveReadingKey]string
@@ -44,12 +46,12 @@ type liveConversation struct {
 // The owner has no delivery, history or filesystem dependencies. Its mutex is
 // never held while resolving a conversation, publishing or operating fan-in.
 type daemonLiveState struct {
-	mu            sync.Mutex
-	resolve       func(string) (string, bool)
-	conversations map[string]*liveConversation
-	sources       map[streamProducerKey]daemonLiveSource
-	turns         map[daemonLiveSource]*liveSourceTurn
-	stopped       map[streamProducerKey]bool
+	mu             sync.Mutex
+	resolve        func(string) (string, bool)
+	conversations  map[string]*liveConversation
+	sources        map[streamProducerKey]daemonLiveSource
+	turns          map[daemonLiveSource]*liveSourceTurn
+	nextGeneration uint64 // seeds recreated conversations without deletion tombstones
 }
 
 var streamLiveFamilies = []string{
@@ -61,7 +63,7 @@ var streamLiveFamilies = []string{
 }
 
 func newDaemonLiveState(resolve func(string) (string, bool)) *daemonLiveState {
-	return &daemonLiveState{resolve: resolve, conversations: make(map[string]*liveConversation), sources: make(map[streamProducerKey]daemonLiveSource), turns: make(map[daemonLiveSource]*liveSourceTurn), stopped: make(map[streamProducerKey]bool)}
+	return &daemonLiveState{resolve: resolve, conversations: make(map[string]*liveConversation), sources: make(map[streamProducerKey]daemonLiveSource), turns: make(map[daemonLiveSource]*liveSourceTurn)}
 }
 func (o *daemonLiveState) capture(sid string, incarnation uint64, p history.SessionProvenance, activation bool) daemonLiveSource {
 	if o == nil || o.resolve == nil {
@@ -70,15 +72,6 @@ func (o *daemonLiveState) capture(sid string, incarnation uint64, p history.Sess
 	key := streamProducerKey{sid, incarnation}
 	o.mu.Lock()
 	if bound, ok := o.sources[key]; ok {
-		if o.stopped[key] && p.Kind != "" {
-			c := o.conversations[bound.ConversationID]
-			if c != nil && c.generation == bound.SessionGeneration {
-				o.advanceLocked(bound.ConversationID, c, sid, p)
-				bound.SessionGeneration = c.generation
-				c.incarnation = incarnation
-			}
-			delete(o.stopped, key)
-		}
 		if p.Kind != "" {
 			bound.provenance = p
 			o.sources[key] = bound
@@ -100,23 +93,24 @@ func (o *daemonLiveState) capture(sid string, incarnation uint64, p history.Sess
 	c := o.conversations[conv]
 	if c == nil {
 		c = o.newConversationLocked(conv, sid)
-	} else if activation && (c.session != sid || (c.incarnation != 0 && c.incarnation != incarnation)) {
-		if incarnation < c.incarnation {
-			return daemonLiveSource{}
-		}
+	} else if incarnation < c.incarnation {
+		return daemonLiveSource{}
+	} else if (activation && (c.session != sid || c.incarnation != incarnation || c.stopped)) || (c.stopped && p.Kind != "") {
 		o.advanceLocked(conv, c, sid, p)
 	}
 	src := daemonLiveSource{ConversationID: conv, SessionGeneration: c.generation, provenance: p, producer: key}
 	if c.session != sid {
-		src.SessionGeneration = 0
-	} else {
-		c.incarnation = max(c.incarnation, incarnation)
+		return daemonLiveSource{}
 	}
-	o.sources[key] = src
+	c.incarnation = max(c.incarnation, incarnation)
+	if !c.stopped {
+		o.sources[key] = src
+	}
 	return src
 }
 func (o *daemonLiveState) newConversationLocked(conv, sid string) *liveConversation {
-	c := &liveConversation{generation: 1, session: sid, readings: make(map[liveReadingKey]*daemonLiveReading), revisions: make(map[liveRevisionKey]uint64), scopes: make(map[liveReadingKey]string)}
+	o.nextGeneration++
+	c := &liveConversation{generation: o.nextGeneration, session: sid, readings: make(map[liveReadingKey]*daemonLiveReading), revisions: make(map[liveRevisionKey]uint64), scopes: make(map[liveReadingKey]string)}
 	o.conversations[conv] = c
 	return c
 }
@@ -134,27 +128,38 @@ func (o *daemonLiveState) transition(t sessions.SessionTransition) *daemonLiveCu
 	defer o.mu.Unlock()
 	c := o.conversations[t.ConversationID]
 	if c == nil {
-		c = o.newConversationLocked(t.ConversationID, string(t.PreviousID))
-	}
-	incarnation := c.incarnation
-	o.advanceLocked(t.ConversationID, c, string(t.NewID), p)
-	if t.PreviousID == t.NewID && t.NewID != "" {
-		key := streamProducerKey{string(t.NewID), incarnation}
-		if src, ok := o.sources[key]; ok {
-			src.SessionGeneration = c.generation
-			src.provenance = p
-			o.sources[key] = src
-			c.incarnation = incarnation
+		// Resolve outside the owner lock so a late deletion notification cannot
+		// recreate an already removed conversation.
+		o.mu.Unlock()
+		sid := string(t.PreviousID)
+		if sid == "" {
+			sid = string(t.NewID)
+		}
+		conv, ok := "", false
+		if o.resolve != nil {
+			conv, ok = o.resolve(sid)
+		}
+		o.mu.Lock()
+		if !ok || conv != t.ConversationID {
+			return &daemonLiveCursor{}
+		}
+		c = o.conversations[t.ConversationID]
+		if c == nil {
+			c = o.newConversationLocked(t.ConversationID, string(t.PreviousID))
 		}
 	}
+	o.advanceLocked(t.ConversationID, c, string(t.NewID), p)
 	return o.snapshotLocked(t.ConversationID)
 }
 
 func (o *daemonLiveState) advanceLocked(conv string, c *liveConversation, sid string, p history.SessionProvenance) {
 	c.generation++
+	o.nextGeneration = max(o.nextGeneration, c.generation)
 	c.session = sid
-	c.incarnation = 0
+	c.stopped = false
+	o.releaseSourcesLocked(conv)
 	c.readings = make(map[liveReadingKey]*daemonLiveReading)
+	c.revisions = make(map[liveRevisionKey]uint64)
 	c.scopes = make(map[liveReadingKey]string)
 	src := daemonLiveSource{ConversationID: conv, SessionGeneration: c.generation, provenance: p}
 	for _, family := range streamLiveFamilies {
@@ -230,7 +235,7 @@ func (o *daemonLiveState) admit(src daemonLiveSource, e protocol.Envelope, id st
 }
 func (o *daemonLiveState) admitLocked(src daemonLiveSource, e protocol.Envelope, id, scope string) (daemonLiveReading, bool) {
 	c := o.conversations[src.ConversationID]
-	if c == nil || src.SessionGeneration == 0 {
+	if c == nil || src.SessionGeneration == 0 || src.SessionGeneration != c.generation || c.stopped {
 		return daemonLiveReading{}, false
 	}
 	e.SessionID = liveSessionTag(src.provenance)
@@ -251,6 +256,39 @@ func (o *daemonLiveState) admitLocked(src daemonLiveSource, e protocol.Envelope,
 	return detachLiveReading(r), true
 }
 
+// releaseSourcesLocked drops owner bookkeeping; queued captures and cursors own
+// their values independently. The conversation's incarnation rejects old runners.
+func (o *daemonLiveState) releaseSourcesLocked(conv string) {
+	for key, src := range o.sources {
+		if src.ConversationID == conv {
+			delete(o.sources, key)
+		}
+	}
+	for src := range o.turns {
+		if src.ConversationID == conv {
+			delete(o.turns, src)
+		}
+	}
+}
+
+type conversationRemovalOwner interface {
+	remove(conversations.ConversationID)
+}
+
+func (s *streamTurnSink) remove(id conversations.ConversationID) {
+	if s == nil || s.live == nil {
+		return
+	}
+	// Same lock order as capture/transition, including registry resolution.
+	s.offerMu.Lock()
+	defer s.offerMu.Unlock()
+	o := s.live
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.releaseSourcesLocked(string(id))
+	delete(o.conversations, string(id))
+}
+
 // retain is the delayed-admission seam: an older generation or an overtaken
 // revision cannot replace the current record, including after retirement.
 func (o *daemonLiveState) retain(r daemonLiveReading) bool {
@@ -260,7 +298,7 @@ func (o *daemonLiveState) retain(r daemonLiveReading) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	c := o.conversations[r.ConversationID]
-	if c == nil || r.SessionGeneration != c.generation {
+	if c == nil || r.SessionGeneration != c.generation || c.stopped {
 		return false
 	}
 	key := liveReadingKey{r.Envelope.Type, r.ReadingID}

@@ -491,7 +491,7 @@ func startRelay(
 	w relayWiring,
 ) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), announcePost func(protocol.AssistantDeltaPayload), pairingProvider localPairingProvider, err error) {
 	if w.relayURL == "" {
-		dropRingOnConversationDelete(w.convReg, nil, w.suggestions, w.shadow)
+		dropRingOnConversationDelete(w.convReg, nil, w.suggestions, w.streamSink, w.shadow)
 		logger.Info("relay: disabled (no URL configured)")
 		if w.streamSink != nil {
 			bcast := historyOnlyBroadcaster{}
@@ -624,10 +624,11 @@ func relay4409Threshold(logger *slog.Logger) int {
 // through Registry.Delete — has its ring entry dropped, so its retained events
 // stop pinning daemon memory. The ring is keyed by the same conversation id
 // string the registry stores. Pending reply work and suggestion state are also
-// cancelled and forgotten; shadow coordination is retired and joined.
+// cancelled and forgotten; shadow coordination is retired and joined, and the
+// stream live owner releases its conversation and producer bookkeeping.
 // A nil registry (no conversations registry in this
 // posture) leaves nothing to observe.
-func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring, suggestions *replySuggestions, shadow ...*threadShadow) {
+func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring, suggestions *replySuggestions, owners ...conversationRemovalOwner) {
 	if reg == nil {
 		return
 	}
@@ -638,8 +639,10 @@ func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.R
 		if ring != nil {
 			ring.Drop(string(id))
 		}
-		if len(shadow) > 0 {
-			shadow[0].remove(id)
+		for _, owner := range owners {
+			if owner != nil {
+				owner.remove(id)
+			}
 		}
 	})
 }
@@ -1715,7 +1718,7 @@ func startRelayV2(
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
 		// Free a removed conversation's replay events when the registry drops it
 		// (#1502); installed here because this is where the ring is born.
-		dropRingOnConversationDelete(w.convReg, emitter.ring, suggestions, w.shadow)
+		dropRingOnConversationDelete(w.convReg, emitter.ring, suggestions, w.streamSink, w.shadow)
 		replayRing = emitter.ring
 		// The durable conversation log (#2114), assigned the same way the ring is
 		// reached one line up: newInteractiveTurnEmitterV2 has 86 call sites and a
