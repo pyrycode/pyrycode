@@ -1,5 +1,13 @@
 package protocol
 
+// Thread live updates are declared outgoing vocabulary, not yet emitted.
+// They are not v1 application requests and must stay out of inboundAppTypeSet.
+const (
+	TypeThreadItemAdded   = "thread_item_added"
+	TypeThreadItemChanged = "thread_item_changed"
+	TypeThreadTextAppend  = "thread_text_append"
+)
+
 // Error codes: wire values for the "code" field of an ErrorPayload
 // (docs/protocol-mobile.md § Error codes, which publishes each code's
 // retryability). Names follow Code<Category><Reason> for the dotted

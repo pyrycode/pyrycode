@@ -261,6 +261,10 @@ var inboundTypes = map[string]string{
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
 // a request verb mis-filed as reply/push/etc. is visually obvious in review.
 var excludedTypes = map[string]string{
+	// Declared outgoing thread updates; publication is pending.
+	"TypeThreadItemAdded":   "push (declared, not yet emitted)",
+	"TypeThreadItemChanged": "push (declared, not yet emitted)",
+	"TypeThreadTextAppend":  "push (declared, not yet emitted)",
 	// handshake — consumed on the Noise_IK v2 handshake path
 	// (v2session_handshake.go), never reaches dispatchAppFrame. Borderline
 	// (hello is phone→binary), called out explicitly per AC #4: classifying it

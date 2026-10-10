@@ -47,6 +47,9 @@ type ConversationSummary struct {
 	// LatestEntryID is the newest durable history entry excluding turn_state,
 	// stall, api_retry, compacting, and session_transition, or zero if none exists.
 	LatestEntryID uint64 `json:"latest_entry_id"`
+	// LastShownVersion is raised by adding a shown thread item or appending text
+	// to one, not by every item revision. Nil omits it; a pointer to zero emits 0.
+	LastShownVersion *uint64 `json:"last_shown_version,omitempty"`
 	// ArchivedAt is when the conversation was archived (#2698), so a client
 	// orders its Archive screen newest-archived first. A pointer without
 	// omitempty, like WorkspaceLabel below: the key is always serialized, and

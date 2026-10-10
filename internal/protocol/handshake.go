@@ -2,6 +2,10 @@ package protocol
 
 import "time"
 
+// CapabilityThread declares support for daemon-built thread items and tagged
+// live state (ADR 042). It is vocabulary only, not yet advertised or negotiated.
+const CapabilityThread = "thread"
+
 // CapabilityInteractive is the wire vocabulary string a phone advertises in
 // its hello.payload.capabilities to opt into the v2 interactive event
 // stream, and that the daemon echoes in hello_ack.payload.capabilities when

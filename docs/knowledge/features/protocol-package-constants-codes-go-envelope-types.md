@@ -25,6 +25,30 @@ Wire values for `Envelope.Type` (spec § Message types). Two architectural parti
 
 These six live in their **own** const block (not merged into the `TypeRekeyRequest` block) so the doc comment can distinguish control envelopes from application events — but both are "v2-only" for the partition's purpose. `TypeStall` (#638) is the wire form of an internal-only `turnevent.Stall` signal; on the wire it is just another v2 capability-gated event, so it lives in this block with its ACP-shaped siblings (the internal-vs-ACP distinction is an adapter concern, invisible to the phone). `CapabilityInteractive = "interactive"` (the wire-vocabulary constant a phone advertises to opt into this stream) lives in `handshake.go` next to the `Capabilities` field, not here.
 
+**v2 daemon thread update contracts**
+
+`TypeThreadItemAdded = "thread_item_added"`,
+`TypeThreadItemChanged = "thread_item_changed"` and
+`TypeThreadTextAppend = "thread_text_append"` are outbound v2 declarations,
+not yet emitted. They stay outside `inboundAppTypeSet`; declaring outgoing
+vocabulary must not admit it into the inbound handler chain.
+`TestThreadKinds`, `TestTypeConstants_V1V2Partition` and
+`TestEveryInboundV2TypeHasHandler` pin that boundary. See the
+[full item and update schemas](../../protocol-mobile.md#daemon-thread-updates-v2-declarations-only).
+
+`ThreadItem` carries the fold's facts as pure data. Mapping stays in consumers:
+the fold already imports protocol, so importing `internal/thread` here would
+reverse the dependency and create a cycle. `Content` and `Changes` retain inert
+raw JSON so unknown fields survive, and absent patch keys remain distinct from
+explicit empty/false/zero/null replacements. A content patch replaces the whole
+value; decoding it into a partial content struct would discard unknown facts.
+Consumers own numeric bounds, stable identity/kind and patch applicability.
+`TestThreadItemAddedRoundTrip`, `TestThreadItemOptionalFacts`,
+`TestThreadChangesRoundTrip` and `TestThreadTextAppendRoundTrip` re-encode decoded
+DTOs with distinct item/order/revision/version values and inspect emitted JSON.
+Negotiation/publication, bounded encoding and catch-up/pages remain downstream;
+the declarations perform no validation, fold I/O or patch application.
+
 **v2 PTY-derived status-peer types** (#1074; spec `docs/protocol-mobile.md` § api_retry / § compacting):
 
 | Group | Constants |
