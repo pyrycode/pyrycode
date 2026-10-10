@@ -6,6 +6,8 @@
 - `docs/hosted-apps.md` → Manifest and identity: current contract reference.
 - `internal/identity/server_id.go` → `ParseServerID`: canonical lowercase UUIDv4 validation, reused for host and app UUID shape.
 - `internal/conversations/registry.go` → `Registry`, `writeRegistrySnapshot`, `AdvanceReadUpTo`: atomic storage and persistence-before-observation precedents.
+- `internal/apps/storage.go` → `Open`, `validateSnapshot`: stored identities and revisions must come from exact required keys, before semantic validation.
+- `internal/apps/storage_test.go` → `TestStorageExactKeys`, `TestStorageAliasShadowing`: absent keys and case aliases at every storage level, including later aliases masking invalid canonical values.
 - `docs/knowledge/features/identity-package.md` → corruption and error taxonomy: never repair corrupt storage implicitly or echo unvalidated IDs.
 - `docs/knowledge/features/conversations-package.md` → value copying and concurrency: mutable nested values require independent snapshots.
 - `docs/knowledge/features/development-verification.md` → Protocol boundaries: test missing, null and wrong types distinctly.
@@ -63,7 +65,7 @@ Pending for the documentation stage: `docs/hosted-apps.md` under `Manifest and i
 
 **Findings:**
 
-- [Trust boundaries] `ValidateManifest` and `Open` enforce strict JSON and semantic validation; immutable canonical manifests cannot be mutated through returned snapshots. SHOULD FIX: reject excessive JSON nesting before recursive parsing to bound stack usage.
+- [Trust boundaries] Resolved MUST FIX from re-review: `DisallowUnknownFields` accepts case aliases and cannot establish an exact storage schema. `Open` uses `validStorageSchema`/`storageObject` to require exact mandatory keys and allow only exact optional keys in snapshots, records, tombstones and last-error objects before decoding. Existing files decode into a zero-value snapshot; a missing stored host never inherits the caller's identity. `ValidateManifest` independently validates exact manifest keys. `strictJSON` rejects duplicate keys, nulls and excessive nesting; immutable canonical manifests cannot be mutated through returned snapshots.
 - [Tokens/secrets and cryptography] No credentials, randomness or cryptographic operations; IDs are routing identifiers validated by `ParseServerID`, never minted here.
 - [File operations] Fixed registry filename beneath a caller-selected absolute private root; manifest paths never become filesystem paths. Atomic rename replaces a registry symlink rather than writing its target. Root selection and protection against a hostile same-OS-account root owner are outside this leaf package (#3139); publication containment belongs to #3125.
 - [Subprocesses] No commands run; command arrays must equal the fixed contract values.
@@ -78,3 +80,4 @@ Pending for the documentation stage: `docs/hosted-apps.md` under `Manifest and i
 ## Revisions
 
 - 2026-10-10: formatted acceptance tests reached 499 lines before implementation, exceeding the sketch's test allowance; the finished implementation plus tests and plan is approximately 1120 lines. Actual parentage is #3143 → #3136 → #3121. Per the grandchild rule, applied `needs-human:sizing`, recorded the measurement and hypothetical manifest/storage split on the issue, and continued the assigned scope. No interfaces or behavior changed. The concurrency test caught a host-ID read from the replaceable snapshot outside the mutex; validation now runs inside the same mutex critical section as mutations, consistent with the planned single-lock model.
+- 2026-10-10 (verifier finding 1): the initial security review missed Go's case-insensitive struct decoding. Require exact required/optional storage keys before decoding and initialize caller identity only when storage is missing. Re-review corrected the trust-boundary finding above. `TestStorageExactKeys` covers all required omissions and optional omissions, aliases and unknown keys at each storage level; `TestStorageAliasShadowing` covers missing host/revision and later aliases hiding invalid IDs, revisions and last-error values. Both tests proved the reported acceptance failures before the repair and assert rejected files remain byte-identical. No exported interfaces, lifecycle behavior or storage encoding changed.
