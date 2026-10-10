@@ -100,16 +100,33 @@ the bytes `null` emit a present null. Raw JSON does not validate the shape;
 producers and consumers must enforce null or a nonempty string. This metadata
 conveys no authorization and never replaces an existing payload session field.
 
-`SessionStateCleared: true` with payload `{}` explicitly clears this envelope
-kind's session-scoped reading. Ordinary updates omit the flag. Delivery must
+`SessionStateCleared: true` with payload `{}` explicitly clears the normalized
+family's session-scoped readings before fresh state. Ordinary updates omit the
+flag. Delivery must
 restrict these fields to thread-negotiated live state and enforce the empty
 clear payload. Relay projection strips both keys from non-thread connections,
 even if a supplied frame includes them, and omits explicit clear frames entirely. Legacy
-producers retain their existing wire bytes; authoritative session reconciliation
-and production activation remain pending #3082/#3076/#3077. See
+producers retain their existing wire bytes. Relay-owned supplied-state delivery
+and reconciliation are implemented (#3082); actual daemon provenance/retention
+and provider installation/production activation remain pending #3076/#3077. See
 [relay delivery](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection),
 [the wire contract](../../protocol-mobile.md#message-envelope) and
 [ADR 042](../decisions/042-daemon-built-thread.md#decision).
+
+Validate the exact generated clear as well as the fresh reading against
+`MaxThreadEnvelopeBytes`, with JSON escaping and session metadata included.
+Even a fresh `{}` reading exactly at the cap can produce an oversized clear:
+`session_state_cleared: true` adds bytes. `validateLiveState` measures both
+envelopes using the same `liveStateClear` family normalization as delivery.
+Rejecting only at seal time can strand the drain pump if an undeliverable fresh
+reading is retained behind its failed clear. The relay retains pending fresh
+state only after the clear succeeds, so invalid queued/snapshot input cannot
+block healthy readings. `TestLiveStateGeneratedClearBound` proves rejection,
+subsequent delivery and pump exhaustion; `TestLiveStateClearFailure` proves no
+pending state or watermark survives a failed clear. `TestLiveStateBounds` uses
+`turnbridge.MapEvent` near-cap slash-command payloads and worst JSON escaping,
+so producer budget changes cannot hide behind a hand-built small fixture.
+Ordinary live state does not use the thread-item continuation codec.
 
 `TestEnvelopeSessionMetadataRoundTrip` decodes omitted/null/string metadata,
 re-marshals decoded ordinary or empty-clear payloads into their envelopes, and
