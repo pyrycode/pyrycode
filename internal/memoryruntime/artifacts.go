@@ -157,7 +157,7 @@ func extract(ctx context.Context, home *os.Root, generation, source string) erro
 			if err := privateDir(root, name); err != nil {
 				return err
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if parent := path.Dir(name); parent != "." {
 				if err := privateDir(root, parent); err != nil {
 					return err
