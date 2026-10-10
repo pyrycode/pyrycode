@@ -139,9 +139,8 @@ func TestStoreQueriesUpdates(t *testing.T) {
 		testChild(10, "tool_use", "nested", `,"tool_use_id":"read","name":"Read"`),
 		testChild(11, "turn_end", "nested", `,"stop_reason":"end_turn"`),
 	}
-	var committed []history.Entry
 	for i, e := range entries {
-		committed = append(committed, testStoreAppend(t, h, testStoreA, e)...)
+		testStoreAppend(t, h, testStoreA, e)
 		snap := testStoreWait(t, s, testStoreA, StateUsable, uint64(i+1))
 		page, err := s.HistoryPage(context.Background(), testStoreA, snap.Version+1, MaxQueryItems)
 		if err != nil || page.Epoch != snap.Epoch || page.Version != snap.Version {
