@@ -344,7 +344,11 @@ func (m *V2SessionManager) forwardAppReply(s *V2Session, reply protocol.RoutingE
 			"conn_id", s.connID)
 		return
 	}
-	ciphertext, err := s.send.Encrypt(m.agentTaggedReply(s, reply.Frame))
+	frameJSON, withheld := m.threadReply(s, m.agentTaggedReply(s, reply.Frame))
+	if withheld {
+		return
+	}
+	ciphertext, err := s.send.Encrypt(frameJSON)
 	if err != nil {
 		// Realistically unreachable under correct flynn/noise. Drop the
 		// reply rather than emit the unencrypted frame.

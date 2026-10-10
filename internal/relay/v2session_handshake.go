@@ -102,19 +102,19 @@ type InnerFrameV2Decoded struct {
 // backing array at runtime.
 var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent, protocol.CapabilityStopBackgroundTask}
 
-// negotiateCapabilities returns the phone's advertised set ∩
-// supportedV2Capabilities, in supported-set order. It iterates the supported
-// set (not the advertised one), so the result is a subset of supported by
-// construction: duplicates collapse, an unsupported/spoofed advertisement is
-// dropped, and an advertise-nothing / only-unsupported set yields nil (the
-// omitempty ack field then drops the key, preserving v1 byte-stability, and
-// the recorded interactive flag fails closed to false).
-func negotiateCapabilities(advertised []string) []string {
+// negotiateCapabilities intersects advertisements with supported capabilities,
+// in supported-set order, then grants thread only when readiness is supplied.
+// Duplicates collapse and unsupported names grant nothing. A nil result omits
+// the ack field and preserves the fail-closed capability flags.
+func negotiateCapabilities(advertised []string, threadReady ...bool) []string {
 	var out []string
 	for _, name := range supportedV2Capabilities {
 		if slices.Contains(advertised, name) {
 			out = append(out, name)
 		}
+	}
+	if len(threadReady) > 0 && threadReady[0] && slices.Contains(advertised, protocol.CapabilityThread) {
+		out = append(out, protocol.CapabilityThread)
 	}
 	return out
 }
@@ -230,7 +230,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// as s.interactive below. Computed before the ack literal so the same
 	// negotiated slice is the single source of truth for both the echo and the
 	// flag — ack and flag can never disagree.
-	negotiated := negotiateCapabilities(helloPayload.Capabilities)
+	negotiated := negotiateCapabilities(helloPayload.Capabilities, m.cfg.ThreadReady != nil && m.cfg.ThreadReady())
 
 	// Reload the on-disk registry so a device paired after daemon startup
 	// authenticates without a restart (#782). Fail closed on a read error:
@@ -489,6 +489,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// The multi_agent decision (#2643), recorded from the same slice for the same
 	// reasons and, like s.interactive, left untouched by a re-key.
 	s.multiAgent = slices.Contains(negotiated, protocol.CapabilityMultiAgent)
+	s.thread = slices.Contains(negotiated, protocol.CapabilityThread)
 	// Retain what the client reported about ITSELF, for the session's appended
 	// system prompt (#2148). Recorded here, on the accept path and before the
 	// session becomes enumerable, for s.interactive's reason: an unauthenticated

@@ -14,14 +14,16 @@ var supportedV2Capabilities = []string{
     protocol.CapabilityStopBackgroundTask,
 }
 
-// advertised ∩ supportedV2Capabilities, in supported-set order. Iterates the
-// SUPPORTED set (not the advertised one), so the result is a subset of supported
-// by construction: dedups, drops the unsupported/spoofed, and yields nil for
-// advertise-nothing / only-unsupported.
-func negotiateCapabilities(advertised []string) []string {
+// Intersect advertisements with the supported set in its order, then grant
+// thread only with supplied readiness. Dedup and drop unknown strings; nil
+// means no capabilities were negotiated.
+func negotiateCapabilities(advertised []string, threadReady ...bool) []string {
     var out []string
     for _, name := range supportedV2Capabilities { // `name`, not `cap` (builtin)
         if slices.Contains(advertised, name) { out = append(out, name) }
+    }
+    if len(threadReady) > 0 && threadReady[0] && slices.Contains(advertised, protocol.CapabilityThread) {
+        out = append(out, protocol.CapabilityThread)
     }
     return out
 }
@@ -29,7 +31,7 @@ func negotiateCapabilities(advertised []string) []string {
 
 **Iterating the supported set (not the advertised set) is the security primitive** — "a spoofed capability can never be granted" is a structural property of the loop shape, deterministic, not a runtime guard a later refactor could bypass (Threat 1 / AC#3). A pure receiver-less function, directly table-testable for the whole negotiation matrix.
 
-**Echo + record, single source of truth.** `negotiated := negotiateCapabilities(helloPayload.Capabilities)` is computed **before** the `hello_ack` literal, and `Capabilities: negotiated` is added to the existing `HelloAckPayload{…}`. The ack is sealed via `WriteResp` **before** the token check, so it is built on *every* handshake — `omitempty` keeps the key absent for a no-capability phone (v1 byte-stability, AC#5). The per-conn `interactive bool` (a new `V2Session` field beside `device`/`peerStatic`, same set-once / single-owner-goroutine discipline) is set in the token-OK tail, **between `s.device = &device` and `s.state = V2StateOpen`**, via `s.interactive = slices.Contains(negotiated, protocol.CapabilityInteractive)` — derived from the *same* `negotiated` slice the ack echoed, so the echoed capability and the recorded flag can never disagree.
+**Echo + record, single source of truth.** `negotiated := negotiateCapabilities(helloPayload.Capabilities, m.cfg.ThreadReady != nil && m.cfg.ThreadReady())` is computed **before** the `hello_ack` literal, and `Capabilities: negotiated` is added to the existing `HelloAckPayload{…}`. The ack is sealed via `WriteResp` **before** the token check, so it is built on *every* handshake — `omitempty` keeps the key absent for a no-capability phone (v1 byte-stability, AC#5). The per-conn `interactive bool` (a new `V2Session` field beside `device`/`peerStatic`, same set-once / single-owner-goroutine discipline) is set in the token-OK tail, **between `s.device = &device` and `s.state = V2StateOpen`**, via `s.interactive = slices.Contains(negotiated, protocol.CapabilityInteractive)` — derived from the *same* `negotiated` slice the ack echoed, so the echoed capability and the recorded flag can never disagree.
 
 **Fail-closed, two independent gates.** The flag is written **only** on the token-OK branch (after `Devices.Validate`, before `V2StateOpen`); every other path leaves it at its `false` zero value (advertise-nothing / `null` / `[]` / only-unsupported → `negotiated == nil` → `false`). And `handleActiveConns` filters on `V2StateOpen` — so even if the flag were mis-set, a non-open (un-authenticated) session is never enumerated, and the negotiated flag of an un-authenticated peer is never observable. Belt-and-suspenders of different fabric — two deterministic code-level gates, the same shape #588/#589 established. Re-key (`handleRekeyInit`) preserves `s.interactive` by never touching it, like `device`/`peerStatic`.
 
@@ -57,7 +59,7 @@ advertisement containing a duplicate and an unknown string. See the
 [wire contract](../../protocol-mobile.md#stop-background-task-v2) and
 [background-task payloads](protocol-package-background-task-event-payloads.md).
 
-**#2644 gives `multi_agent` a second gate, at the push choke point rather than a reply.** `forwardEnvelope` — the one seal path every pushed frame reaches (the push-queue drain, reconnect replay, the resync marker) — calls `withheldFromConn(s, env)` (`v2session_agentgate.go`) before sealing; a conn without `s.multiAgent` gets nothing for a frame whose `pushedConversationID` resolves, through the reused resolution rule (`handlers.agentOf` exported to `AgentOf` for this second caller), to a Codex-bound conversation. Handler replies (`forwardAppReply`) are exempt by construction, not by a check — a reply is never withheld, so a client that already learned a Codex conversation id from an accepted request still gets replies naming it.
+**#2644 gives `multi_agent` a second gate, at the push choke point rather than a reply.** `forwardEnvelope` — the one seal path every pushed frame reaches (the push-queue drain, reconnect replay, the resync marker) — calls `withheldFromConn(s, env)` (`v2session_agentgate.go`) before sealing; a conn without `s.multiAgent` gets nothing for a frame whose `pushedConversationID` resolves, through the reused resolution rule (`handlers.agentOf` exported to `AgentOf` for this second caller), to a Codex-bound conversation. Ordinary handler replies (`forwardAppReply`) retain their existing exemption, so a client that already learned a Codex conversation id from an accepted request still gets ordinary replies naming it. Thread item updates and continuations are gated independently at both sealing boundaries, even when correlated; see [thread delivery and summary projection](#thread-delivery-and-summary-projection).
 
 A withheld frame **must** make `forwardEnvelope` return `nil`, not an error: `drainReplayOnce` abandons a conn's whole replay tail on an error, and only releases the held live stream once the tail finishes draining. An error return would look correct against a test that checks one withheld event, while silently dropping every Claude event queued behind it.
 
@@ -70,3 +72,52 @@ Resolution reuses the list's fail-open rule rather than a stricter one: an unkno
 **The obvious gate — `env.InReplyTo == nil` means "this is a push, not a reply" — is wrong, and a green test would have hidden it.** `reconcileModelLists` also sends its already-merged connect-time snapshot with `InReplyTo` nil, so a first cut of `mergedForConn` gating on that alone ran the seam a *second* time over an already-tagged list on every capable reconnect: a Codex row got re-tagged `agent: claude`, and the Codex rows were appended again, doubling them. A test that only pushed one live frame to one capable conn stayed green; the bug needed a test that also exercises the reconcile path with the same seam wired, which is what `TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision` was rewritten to do. The fix gates on `env.EventID != nil` instead — every live push (`interactiveTurnEmitterV2`'s per-conn envelope) and every ring replay carries one; both #2651 paths (the `request_model_list` reply and the reconcile snapshot) leave it nil and pass through `mergedForConn` untouched. `EventID`-presence, not `InReplyTo`-absence, is the load-bearing signal for "has this frame been through the merge already."
 
 `negotiateCapabilities` is O(k·n) in the supported-set size k; ADR 037 flagged the third capability as "a reasonable point to reconsider a set lookup." #2172 asked the question at k=3 and answered no: a `map[string]struct{}` would cost a package-level allocation and an init-order dependency to save three string comparisons on a once-per-connection path, and would lose the ordering guarantee `slices.Equal` in both handshake test tables depends on (emit order is supported-set order). See [ADR 037](../decisions/037-capability-strings-not-version-numbers.md) for the cross-repo convention this ticket established: any future user-facing wire feature adds its own capability string the same way, purely for client-side build detection, and decides independently whether it also becomes a gate. #2124 and #2125 shipped the on-demand model list itself without following that convention, and the omission was expensive to a second repo: pyrycode-desktop#1169 burned three rework cycles because, from the client, a stale daemon (one built before #2172) and a broken feature both present identically as "this chat has no published levels" — the capability string is what lets a client tell the two apart at connect time instead of by watching a live-gate spec fail.
+
+### Thread delivery and summary projection
+
+`ThreadReady` is a daemon-supplied attestation that live publication,
+authoritative watermark lookup and session-state reconciliation providers are
+installed. Nil/false disables `thread`; advertisement alone is insufficient.
+`handleNoiseInit` records `s.thread` only on authenticated admission, and rekey
+preserves it. `ActiveConn.Thread` exposes the decision for open connections.
+Production leaves readiness unwired until #3077, after retained state and
+session-state reconciliation (#3076/#3082).
+
+**Correlation is not item authorization.** `withheldFromConn` exempts ordinary
+replies, but `threadWithheld` independently gates all three thread update kinds
+and their continuations at `forwardEnvelope` and `forwardAppReply`, before
+Noise encryption. A frame must name its conversation, and the connection must
+be open, thread-capable, interactive and pass the existing Codex restriction.
+A missing conversation ID fails closed for items. Neither `thread` alone nor
+`in_reply_to` grants interactive or multi-agent access. Unsolicited content
+replaced by the thread is suppressed on live, replay and connect-reconcile
+paths, while transient progress and ordinary replies retain their access rules.
+Suppression returns normally: an error would abandon replay and strand buffered
+live traffic even if a one-frame denial test passed. See the
+[wire filtering contract](../../protocol-mobile.md#daemon-thread-updates-v2-supplied-delivery-contract)
+and [replay drain](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
+
+**Project fields without round-tripping a partial DTO.** `conversation_updated`
+has supplied fields that `ConversationUpdatedPayload` does not represent,
+including binding and legacy watermark fields. Rebuilding the row through that
+DTO would silently discard those fields and introduce absent zero/null fields.
+`agentTaggedForConn` and `threadSummary` therefore use `replaceObjectField` to
+edit only the projected fields, preserving unrelated encoded values and
+presence. Fresh payload bytes isolate each connection from shared pushes and
+replay; unchanged legacy replies retain their original bytes.
+
+`ThreadLastShownVersion` is the only authority for every `conversations` row
+and every pushed or replied `conversation_updated`. Usable zero emits numeric
+`0`; missing/rebuilding/unavailable state removes even a stale supplied value.
+Item revisions and partial recovery cannot substitute for that reading. Thread
+unread is `last_shown_version > read_up_to`; stored binding, durable read mark
+and legacy watermark keep their meanings and presence. Non-thread delivery
+strips the reading and envelope session metadata and omits clear frames entirely.
+`TestV2Session_ThreadSummaries` checks distinct readings, zero/unavailable,
+legacy literal bytes and unrelated field presence, including the combination
+with agent tagging. `TestV2Session_ThreadDelivery` covers item denial even in
+handler replies, and `TestV2Session_ThreadReplay` checks suppression followed by
+permitted replay and live traffic. Continuation payload/order and the envelope
+budget are pinned by `TestV2Session_ThreadContinuations`; projection must not
+grow the codec's supplied `SessionID`. See the
+[summary contract](../../protocol-mobile.md#conversations).

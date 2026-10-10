@@ -35,6 +35,14 @@ import (
 // MUST NOT be logged, wrapped into an error or emitted on any wire surface, the
 // same contract internal/keys and internal/noise state for those bytes.
 type V2SessionConfig struct {
+	// ThreadReady must attest installation of live publication, authoritative
+	// watermark lookup and session-state reconciliation. Nil/false disables thread;
+	// production must leave it unset until all three providers are installed.
+	ThreadReady func() bool
+	// ThreadLastShownVersion returns only an authoritative usable reading. False
+	// covers missing, rebuilding and unavailable state; zero with true is usable.
+	ThreadLastShownVersion func(conversationID string) (uint64, bool)
+
 	// WorkspaceBase is a caller-resolved base advertised only to admitted peers
 	// in the encrypted hello_ack. Nil uses WorkspaceRoot(); a supplied absolute
 	// value is reported verbatim, while empty or relative values omit the key

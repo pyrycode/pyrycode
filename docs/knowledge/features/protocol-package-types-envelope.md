@@ -103,8 +103,11 @@ conveys no authorization and never replaces an existing payload session field.
 `SessionStateCleared: true` with payload `{}` explicitly clears this envelope
 kind's session-scoped reading. Ordinary updates omit the flag. Delivery must
 restrict these fields to thread-negotiated live state and enforce the empty
-clear payload. The fields are declared ahead of that delivery integration;
-legacy producers leave them unset and retain their existing wire bytes. See
+clear payload. Relay projection strips both keys from non-thread connections,
+even if a supplied frame includes them, and omits explicit clear frames entirely. Legacy
+producers retain their existing wire bytes; authoritative session reconciliation
+and production activation remain pending #3082/#3076/#3077. See
+[relay delivery](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection),
 [the wire contract](../../protocol-mobile.md#message-envelope) and
 [ADR 042](../decisions/042-daemon-built-thread.md#decision).
 

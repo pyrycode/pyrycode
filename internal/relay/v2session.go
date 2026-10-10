@@ -298,6 +298,8 @@ type V2Session struct {
 	// re-key by never being touched. Surfaced into every per-frame
 	// *dispatch.Conn by routeAppFrame, so a handler reads it as c.MultiAgent().
 	multiAgent bool
+	// thread is the authenticated admission decision, retained through rekey.
+	thread bool
 
 	// clientName, clientVersion and clientFeatures are the device_name,
 	// client_version and client_features the phone reported for ITSELF in its hello,

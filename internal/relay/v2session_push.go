@@ -279,7 +279,7 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	// Nil, not an error: drainReplayOnce abandons a conn's replay tail on an error
 	// and must instead advance past a withheld event to the ones behind it. Before
 	// the seal, so a withheld frame spends no send-nonce.
-	if m.withheldFromConn(s, env) {
+	if m.withheldFromConn(s, env) || m.threadWithheld(s, env) {
 		return nil
 	}
 	// Reconnect-replay dedup (#647): drop a live structured envelope this conn
@@ -312,6 +312,7 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	}
 	env = m.mergedForConn(s, env)
 	env = m.agentTaggedForConn(s, env)
+	env = m.threadProjected(s, env)
 	envJSON, err := json.Marshal(env)
 	if err != nil {
 		// Defensive: a well-typed envelope (e.g. a message envelope, a
