@@ -323,7 +323,31 @@ token to set through stdin; see the [guide](guide.md#memory-credentials) for
 input limits, JSON output and replacement behavior. Running them as another
 operator account provisions that account's storage instead of the service's.
 
-The file backend keeps tokens and persisted non-secret selection metadata under
+For a user with no committed memory selection, set prefers macOS Keychain or
+Linux Secret Service after a disposable random-item write/read/delete probe
+establishes usable unattended access. Tool presence alone is insufficient.
+OS adapters require Python 3 available on the command's PATH; Linux also
+requires `libglib-2.0.so.0` and `libgio-2.0.so.0`, access to that user's session
+bus and an existing unlocked default Secret Service collection. These runtime
+dependencies are optional for file-backed credentials.
+
+Keychain interaction is disabled for every operation. Secret Service operations
+require an unlocked collection and, for reads/deletes, an unlocked selected item;
+they never request unlocking, create a collection or invoke a prompt. Provision
+OS-store access for the service user's execution environment before initial
+setup if you want OS storage. Availability in an operator's desktop session
+does not establish access from the service environment.
+
+An unavailable runtime, absent session bus, locked store or denied probe selects
+the protected file fallback for headless setup before the new token is submitted
+to a backend. Probe cancellation or timeout aborts set instead. A failed token
+write never triggers fallback, including on initial setup. After selection is
+committed, locked, denied, missing or invalid selected storage makes set, status
+and resolution fail with sanitized diagnostics; operations do not prompt,
+switch stores or reuse a cached secret. Every operation, including the initial
+probe, is bounded by ten seconds and honors caller cancellation.
+
+All backends keep persisted non-secret selection metadata under
 `~/.pyry/memory/credentials/`, outside vaults and ordinary settings. `HOME` must
 be owned by the invoking service user and not writable by group or others.
 Each storage directory (`~/.pyry/`, `~/.pyry/memory/` and
@@ -335,17 +359,23 @@ descriptors; it refuses unsafe existing storage without changing permissions or
 overwriting it. An existing `~/.pyry/` with broader permissions also fails this
 check.
 
-Selection metadata persists the file backend and an opaque memory reference;
-it contains no token or arbitrary path. The reference remains stable when the
-token is replaced. Failed replacements preserve the previously committed
-selection and token, while unsafe storage continues to make status and
-resolution fail until the problem is corrected.
+The file fallback also stores tokens in that protected directory. Selection
+metadata persists the chosen backend and an opaque memory reference; it contains
+no token or arbitrary path. Fresh processes retain that choice despite
+availability changes, and existing file selections stay file-backed without
+migration. The reference remains stable when the token is replaced. OS writes
+receive secrets through stdin. Replacements stage a separate secret before
+committing selection; failed writes or selection commits preserve the previously
+committed selection and token. Once the failure clears, the same reference
+resolves to the old token. Unsafe storage continues to make status and resolution
+fail until the problem is corrected.
 
 Memory credentials belong to the local service user and are independent of the
 daemon's [Claude account source](#claude-account-source) and the operator's
 interactive Claude login. Memory references cannot select Claude account/login
-entries. This lifecycle uses protected file storage; OS-store access and
-preference will be added by [#3113](https://github.com/pyrycode/pyrycode/issues/3113).
+entries: OS item names are generated in the dedicated `pyry.memory.openai.`
+namespace, and resolution accepts only the committed lifecycle-issued memory
+reference.
 
 ## See also
 

@@ -409,7 +409,23 @@ arguments. Input is capped at **4096 bytes including any trailing newline**;
 oversize input is rejected rather than truncated. One trailing LF or CRLF is
 removed, then the token must be nonempty printable non-space ASCII. Thus a token
 with a trailing LF can contain at most 4095 bytes, or 4094 with CRLF. Validation
-is local, requires no particular key prefix, and makes no OpenAI request.
+is local, requires no particular key prefix, and makes no OpenAI request. The
+same limit applies to file, Keychain and Secret Service storage; there is no
+smaller platform framing cap. Printable quotes and metacharacters are preserved.
+
+For a service user with no committed selection, set prefers macOS Keychain or
+Linux Secret Service only after an unattended write/read/delete probe using a
+disposable random memory entry succeeds. If the probe finds the OS store
+unusable, set chooses the protected file fallback before submitting your token
+to a backend. Probe cancellation or timeout aborts set. Once a backend is chosen
+for the write, a failed write never triggers fallback.
+
+OS storage requires Python 3; Linux also needs the GLib/GIO shared libraries,
+access to the service user's session bus and an existing unlocked default
+Secret Service collection. Missing runtime support selects files only during
+initial setup. Operations never initiate an unlock or collection-creation
+prompt. OS-store writes stream the token through stdin, keeping secrets out of
+child command-line arguments and public diagnostics.
 
 A successful set prints only JSON containing a non-secret reference, shaped like
 `{"reference":"memory:openai:<opaque identifier>"}`. Retain that reference: it
@@ -424,23 +440,30 @@ afresh. Configured means the stored token passes local validation; it does not
 prove OpenAI accepts it. Unsafe storage, malformed selection, or a selected token
 that is missing, inaccessible or invalid causes a sanitized error and nonzero
 exit, rather than an unconfigured result or reuse of a cached token.
+Locked or denied access to a selected OS store also fails without prompting or
+switching backends.
 
 Set, status and internal resolution have a ten-second operation deadline,
 including waiting for set's stdin or the storage lock. They honor cancellation
 and any shorter caller deadline; the CLI also honors SIGINT and SIGTERM. Rejected
-input, unsafe storage, cancellation, timeout or a failed save leaves the prior
-committed credential and reference intact. Once the failure clears, the same
+input, unsafe storage, cancellation, timeout, a failed backend write or a failed
+selection commit leaves the prior committed credential and reference intact.
+Replacement writes a separate candidate before committing selection; it does
+not overwrite the selected secret first. Once the failure clears, the same
 reference resolves to the old token; a successful replacement selects the new
 token. A cancelled or timed-out save cannot publish later.
 
-Secrets and protected selection metadata live in
-`~/.pyry/memory/credentials/`, outside vaults and ordinary settings. Storage
-directories are service-user-owned with mode 0700, and regular files have mode
-0600 from creation. Existing unsafe storage is refused without being repaired or
-overwritten. Memory credentials are separate from the daemon's Claude account
-and the operator's interactive login. See [deployment requirements](deployment.md#memory-credentials).
-This lifecycle currently uses protected files; OS-store access and preference
-are deferred to [#3113](https://github.com/pyrycode/pyrycode/issues/3113).
+Protected non-secret selection metadata lives in
+`~/.pyry/memory/credentials/`, outside vaults and ordinary settings; file-backed
+tokens live there too. The committed backend choice persists across processes
+and availability changes. Existing file selections remain file-backed even
+when an OS store becomes usable. Storage directories are service-user-owned
+with mode 0700, and regular files have mode 0600 from creation. Existing unsafe
+storage is refused without being repaired or overwritten. OS entries use a
+dedicated memory namespace. Memory credentials are separate from the daemon's
+Claude account and the operator's interactive login; only lifecycle-issued
+memory references can resolve them. See
+[deployment requirements](deployment.md#memory-credentials).
 
 ## Memory configuration
 
