@@ -31,7 +31,17 @@ func TestMemoryOSTool(t *testing.T) {
 	_, _ = f.Write(append(b, byte(10)))
 	_ = f.Close()
 	op, name, token := "", "", ""
-	if len(args) == 1 && args[0] == "-i" {
+	unattended := len(args) == 6 && args[0] == "-I" && args[1] == "-c"
+	if unattended {
+		if args[2] != memoryOSScript || (args[3] != "keychain" && args[3] != "secret-service") {
+			os.Exit(9)
+		}
+		op, name = args[4], args[5]
+		if op == "write" {
+			input, _ := io.ReadAll(os.Stdin)
+			token = string(input)
+		}
+	} else if len(args) == 1 && args[0] == "-i" {
 		input, _ := io.ReadAll(os.Stdin)
 		fields := strings.Fields(string(input))
 		if len(fields) != 7 || fields[0] != "add-generic-password" || fields[1] != "-a" || fields[2] != "pyry-memory" || fields[3] != "-s" || fields[5] != "-X" || len(input) >= 4096 {
@@ -63,6 +73,15 @@ func TestMemoryOSTool(t *testing.T) {
 	}
 	fault, _ := os.ReadFile(filepath.Join(root, "fault"))
 	current, _ := os.ReadFile(filepath.Join(root, name))
+	if string(fault) == "locked" || string(fault) == "prompt-required" {
+		if token == memoryOld || token == memoryNew {
+			_ = os.WriteFile(filepath.Join(root, "user-token-submitted"), nil, 0600)
+		}
+		if unattended {
+			os.Exit(8)
+		}
+		_ = os.WriteFile(filepath.Join(root, "prompt"), nil, 0600)
+	}
 	if string(fault) == "write-after" && op == "write" && token == memoryNew {
 		_ = os.WriteFile(filepath.Join(root, name), []byte(token), 0600)
 	}
@@ -97,6 +116,14 @@ func TestMemoryOSTool(t *testing.T) {
 		if string(fault) == "invalid" {
 			b = []byte("invalid secret")
 		}
+		if !unattended && args[0] == "find-generic-password" {
+			for _, c := range b {
+				if c < 0x20 || c > 0x7e {
+					b = []byte(hex.EncodeToString(b))
+					break
+				}
+			}
+		}
 		_, _ = os.Stdout.Write(b)
 	case "delete":
 		if os.Remove(path) != nil {
@@ -118,6 +145,7 @@ func testMemoryOS(t *testing.T, platform string) (memoryCredentialStore, string)
 	// Shell only launches the test binary; it never sees streamed credential data.
 	launcher := "#!/bin/sh\nexec '" + strings.ReplaceAll(os.Args[0], "'", "'\\''") + "' -test.run='^TestMemoryOSTool$' -- \"$@\"\n"
 	testMemoryMust(t, os.WriteFile(filepath.Join(dir, tool), []byte(launcher), 0700))
+	testMemoryMust(t, os.WriteFile(filepath.Join(dir, "python3"), []byte(launcher), 0700))
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	t.Setenv("PATH", dir)
 	t.Setenv("PYRY_MEMORY_OS_TOOL", "1")
@@ -130,19 +158,37 @@ func testMemoryOSFault(t *testing.T, root, fault string) {
 	t.Helper()
 	testMemoryMust(t, os.WriteFile(filepath.Join(root, "fault"), []byte(fault), 0600))
 }
-func testMemoryOSNoLeak(t *testing.T, s memoryCredentialStore, root string) {
+func testMemoryOSNoLeak(t *testing.T, s memoryCredentialStore, root string, tokens ...string) {
 	t.Helper()
 	path, _ := testMemorySelection(t, s)
 	metadata, _ := os.ReadFile(path)
 	args, _ := os.ReadFile(filepath.Join(root, "argv"))
-	for _, value := range []string{memoryOld, memoryNew, hex.EncodeToString([]byte(memoryOld)), hex.EncodeToString([]byte(memoryNew))} {
-		testMemoryCheck(t, !bytes.Contains(metadata, []byte(value)) && !bytes.Contains(args, []byte(value)), "secret in metadata or argv")
+	var fields map[string]string
+	testMemoryMust(t, json.Unmarshal(metadata, &fields))
+	var values []string
+	for _, value := range fields {
+		values = append(values, value)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(args))
+	for {
+		var argv []string
+		err := decoder.Decode(&argv)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		testMemoryMust(t, err)
+		values = append(values, argv...)
+	}
+	for _, token := range append(tokens, memoryOld, memoryNew) {
+		for _, value := range values {
+			testMemoryCheck(t, !strings.Contains(value, token) && !strings.Contains(value, hex.EncodeToString([]byte(token))), "secret in metadata or argv")
+		}
 	}
 }
 
 func TestMemoryOSPreference(t *testing.T) {
 	for _, platform := range []string{"darwin", "linux"} {
-		for _, fault := range []string{"", "all", "read", "delete"} {
+		for _, fault := range []string{"", "all", "read", "delete", "locked", "prompt-required"} {
 			t.Run(platform+"/"+fault, func(t *testing.T) {
 				s, root := testMemoryOS(t, platform)
 				testMemoryOSFault(t, root, fault)
@@ -156,6 +202,12 @@ func TestMemoryOSPreference(t *testing.T) {
 					}
 				}
 				testMemoryCheck(t, sel.Backend == want, "wrong initial backend")
+				if fault == "locked" || fault == "prompt-required" {
+					for _, marker := range []string{"prompt", "user-token-submitted"} {
+						_, err := os.Stat(filepath.Join(root, marker))
+						testMemoryCheck(t, errors.Is(err, os.ErrNotExist), "probe prompted or submitted user token before fallback")
+					}
+				}
 				testMemoryOSFault(t, root, "")
 				testMemoryResolve(t, s, ref, memoryOld)
 				testMemoryCheck(t, testMemorySet(t, s, memoryNew) == ref, "changed stable reference")
@@ -181,7 +233,7 @@ func TestMemoryOSReplacement(t *testing.T) {
 			}
 			argvAfter, _ := os.ReadFile(filepath.Join(root, "argv"))
 			testMemoryCheck(t, bytes.Equal(argvBefore, argvAfter), "unissued reference read a backend")
-			for _, fault := range []string{"write", "write-after", "read", "new-read", "invalid", "commit", "unsafe", "input"} {
+			for _, fault := range []string{"write", "write-after", "read", "new-read", "invalid", "locked", "prompt-required", "commit", "unsafe", "input"} {
 				t.Run(fault, func(t *testing.T) {
 					faulty := s
 					input := memoryNew
@@ -208,7 +260,7 @@ func TestMemoryOSReplacement(t *testing.T) {
 					testMemoryResolve(t, s, ref, memoryOld)
 				})
 			}
-			for _, fault := range []string{"read", "invalid"} {
+			for _, fault := range []string{"read", "invalid", "locked", "prompt-required"} {
 				testMemoryOSFault(t, root, fault)
 				_, err := s.resolve(context.Background(), ref)
 				testMemoryReject(t, err)
@@ -217,6 +269,8 @@ func TestMemoryOSReplacement(t *testing.T) {
 				testMemoryOSFault(t, root, "")
 				testMemoryResolve(t, s, ref, memoryOld)
 			}
+			_, markerErr := os.Stat(filepath.Join(root, "prompt"))
+			testMemoryCheck(t, errors.Is(markerErr, os.ErrNotExist), "selected backend prompted")
 			secret := filepath.Join(root, "pyry.memory.openai."+sel.Generation)
 			testMemoryMust(t, os.Rename(secret, secret+".backup"))
 			_, err := s.status(context.Background())
@@ -319,20 +373,20 @@ func TestMemoryOSFraming(t *testing.T) {
 	for _, platform := range []string{"darwin", "linux"} {
 		t.Run(platform, func(t *testing.T) {
 			s, root := testMemoryOS(t, platform)
-			for _, token := range []string{"'\"\\`$();&|<>!", strings.Repeat("x", 1900)} {
+			for _, token := range []string{"'\"\\`$();&|<>!", "deadbeef0123456789", strings.Repeat("x", 1900), strings.Repeat("x", 4094)} {
 				ref := testMemorySet(t, s, token+"\r\n")
 				testMemoryResolve(t, s, ref, token)
+				testMemoryOSNoLeak(t, s, root, token)
+			}
+			for _, input := range []string{strings.Repeat("x", 4096), strings.Repeat("x", 4095) + "\n"} {
+				ref := testMemorySet(t, s, input)
+				testMemoryResolve(t, s, ref, strings.TrimSuffix(input, "\n"))
 			}
 			ref := testMemorySet(t, s, memoryOld)
-			token := strings.Repeat("x", 1901)
+			token := strings.Repeat("x", 4097)
 			_, err := s.set(context.Background(), testMemoryInput(t, token))
-			if platform == "darwin" {
-				testMemoryReject(t, err)
-				testMemoryResolve(t, s, ref, memoryOld)
-			} else {
-				testMemoryMust(t, err)
-				testMemoryResolve(t, s, ref, token)
-			}
+			testMemoryReject(t, err)
+			testMemoryResolve(t, s, ref, memoryOld)
 			testMemoryOSNoLeak(t, s, root)
 		})
 	}
@@ -398,9 +452,11 @@ func TestMemoryOSProcess(t *testing.T) {
 			b, err = run("status", "", "")
 			testMemoryMust(t, err)
 			testMemoryCheck(t, b == "{\"configured\":true}\n", "configured output")
-			testMemoryOSFault(t, root, "all")
-			b, err = run("status", "", "")
-			testMemoryCheck(t, err != nil && !strings.Contains(b, memoryOld) && !strings.Contains(b, memoryNew), "selected store failure leaked or fell back")
+			for _, fault := range []string{"all", "locked", "prompt-required"} {
+				testMemoryOSFault(t, root, fault)
+				b, err = run("status", "", "")
+				testMemoryCheck(t, err != nil && !strings.Contains(b, memoryOld) && !strings.Contains(b, memoryNew), "selected store failure leaked or fell back")
+			}
 			testMemoryOSFault(t, root, "")
 			testMemoryResolve(t, s, ref, memoryNew)
 			s = testMemoryStore(t)

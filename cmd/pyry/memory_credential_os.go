@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"io"
 	"os"
 	"os/exec"
@@ -12,10 +11,6 @@ import (
 
 	"golang.org/x/sys/unix"
 )
-
-// Hexadecimal framing keeps metacharacters out of security's command parser.
-// 1900 token bytes plus framing fit below its 4096-byte input-line buffer.
-const maxMemoryKeychainTokenBytes = 1900
 
 func (s memoryCredentialStore) platform() string {
 	if s.goos != "" {
@@ -62,26 +57,14 @@ func memoryOSCommand(ctx context.Context, tool string, args []string, input io.R
 	return output.Bytes(), nil
 }
 func memoryOSWrite(ctx context.Context, backend, generation string, secret io.Reader) error {
-	name := memoryOSName(generation)
-	if backend == "keychain" {
-		b, err := io.ReadAll(io.LimitReader(secret, maxMemoryKeychainTokenBytes+1))
-		if err != nil || len(b) > maxMemoryKeychainTokenBytes {
-			return errMemorySelection
-		}
-		command := "add-generic-password -a pyry-memory -s " + name + " -X " + hex.EncodeToString(b) + "\n"
-		_, err = memoryOSCommand(ctx, "security", []string{"-i"}, strings.NewReader(command), false)
-		return err
-	}
-	_, err := memoryOSCommand(ctx, "secret-tool", []string{"store", "--label=Pyry memory OpenAI", "service", name}, secret, false)
+	_, err := memoryOSCommand(ctx, "python3", memoryOSArgs(backend, "write", generation), secret, false)
 	return err
 }
+func memoryOSArgs(backend, operation, generation string) []string {
+	return []string{"-I", "-c", memoryOSScript, backend, operation, memoryOSName(generation)}
+}
 func memoryOSRead(ctx context.Context, backend, generation string) (string, error) {
-	tool, args := "secret-tool", []string{"lookup", "service", memoryOSName(generation)}
-	if backend == "keychain" {
-		tool = "security"
-		args = []string{"find-generic-password", "-a", "pyry-memory", "-s", memoryOSName(generation), "-w"}
-	}
-	b, err := memoryOSCommand(ctx, tool, args, nil, true)
+	b, err := memoryOSCommand(ctx, "python3", memoryOSArgs(backend, "read", generation), nil, true)
 	if err != nil {
 		return "", err
 	}
@@ -89,18 +72,13 @@ func memoryOSRead(ctx context.Context, backend, generation string) (string, erro
 		return "", errMemorySelection
 	}
 	token, failure := parseTokenBytes(b)
-	if failure != "" {
+	if failure != "" || token != string(b) {
 		return "", errMemorySelection
 	}
 	return token, nil
 }
 func memoryOSDelete(ctx context.Context, backend, generation string) error {
-	tool, args := "secret-tool", []string{"clear", "service", memoryOSName(generation)}
-	if backend == "keychain" {
-		tool = "security"
-		args = []string{"delete-generic-password", "-a", "pyry-memory", "-s", memoryOSName(generation)}
-	}
-	_, err := memoryOSCommand(ctx, tool, args, nil, false)
+	_, err := memoryOSCommand(ctx, "python3", memoryOSArgs(backend, "delete", generation), nil, false)
 	return err
 }
 
