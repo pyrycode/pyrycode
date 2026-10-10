@@ -78,3 +78,7 @@ Pending documentation stage: update `docs/protocol-mobile.md`, “Daemon thread 
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-10
+
+## Revisions
+
+2026-10-10: The implementation fits in one production file. Tests required more receiver-model coverage than forecast; the final work remains below 800 lines with two exported structs and no migrations. With the boundary fixture's escaped session metadata and maximum stamps, ordinary overhead is 510/486/470 bytes and reserved continuation overhead is 641/675/674 bytes for added/changed/append respectively; variable routing metadata changes these measured budgets. The contract is unchanged.
