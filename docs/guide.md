@@ -19,6 +19,7 @@ This guide walks through using `pyry` from first install to running it as a long
 - [Control verbs](#control-verbs)
 - [Multiple instances](#multiple-instances)
 - [Memory credentials](#memory-credentials)
+- [Memory configuration](#memory-configuration)
 - [CLI transparency](#cli-transparency)
 - [Common workflows](#common-workflows)
 - [Troubleshooting](#troubleshooting)
@@ -440,6 +441,126 @@ overwritten. Memory credentials are separate from the daemon's Claude account
 and the operator's interactive login. See [deployment requirements](deployment.md#memory-credentials).
 This lifecycle currently uses protected files; OS-store access and preference
 are deferred to [#3113](https://github.com/pyrycode/pyrycode/issues/3113).
+
+## Memory configuration
+
+Save and inspect managed memory settings locally on the daemon host, as the user
+who runs the service. Both commands are noninteractive and work without a running
+daemon. For example, substitute your chosen model names in:
+
+```bash
+pyry memory configure --vault default \
+  --embedding-provider local --embedding-model EMBEDDING_MODEL \
+  --capture-agent codex --capture-model CAPTURE_MODEL
+pyry memory status
+```
+
+All five main choices are required on every configure call:
+
+| Flag | Accepted value |
+|------|----------------|
+| `--vault` | `default` or an absolute path to an existing local directory |
+| `--embedding-provider` | `local` or `openai` |
+| `--embedding-model` | Nonblank embedding model name |
+| `--capture-agent` | `claude` or `codex` |
+| `--capture-model` | Nonblank capture model name |
+
+Optionally repeat `--knowledge-folder /absolute/folder` to add read-only knowledge
+roots. For OpenAI embeddings, also supply `--credential-reference REF`, using the
+current reference returned by [memory credential set](#memory-credentials).
+Options accept both `--flag value` and `--flag=value`. Only `--knowledge-folder`
+may repeat; unsupported flags, positional arguments and missing values are errors.
+Embedding and capture choices are independent: either embedding provider can pair
+with either capture agent. Model names are checked for nonblank values, without
+checking model availability or contacting a provider.
+
+Each configure call **replaces all known memory settings** in
+`~/.pyry/config.json`. Omitting knowledge-folder flags clears previous additional
+roots. Switching to `default` clears the saved vault path; switching to `local`
+clears a previous credential reference and rejects a supplied reference, even an
+empty one. Unrelated settings and unknown JSON values are preserved, although JSON
+formatting may change. An unavailable home is an error; there is no config fallback
+relative to the current directory. A successful save prints exactly
+`{"configured":true}` followed by a newline. Failed validation or saving exits
+nonzero, emits no success JSON and preserves the previous config bytes.
+
+### Vaults and knowledge roots
+
+There are exactly two vault modes. `--vault default` saves only
+`{"mode":"default"}`: it records no path or configure-process working directory.
+Effective resolution later uses the daemon's resolved startup workspace base,
+independently of the seeded `default` channel or any hosted session's working
+directory. The concrete default path and its usability checks are deferred until
+that resolution.
+
+`--vault /absolute/folder` saves mode `separate` with its canonical path. The
+directory must already exist and be writable and traversable by the invoking
+service user. Additional knowledge folders must already exist and be readable
+and traversable; they are read-only inputs, not capture destinations. Relative
+paths, files, unavailable directories and unresolved symlinks are rejected.
+Paths are cleaned and symlinks resolved before validation and persistence.
+Duplicate or nested additional roots collapse to their parent by path components;
+siblings such as `notes` and `notes-old` remain distinct.
+
+Transcript storage is automatic at `~/.pyry/memory/recent-transcripts`, with
+existing ancestors and symlinks resolved. It is daemon-owned and cannot be chosen
+with a flag. It may not exist yet; configuring or inspecting settings does not
+create it. Effective search roots combine the vault, additional roots and
+transcripts, indexing overlapping subtrees once while retaining the vault write
+destination and transcript ownership separately.
+
+The vault cannot equal, contain or sit inside either transcript storage or
+`~/.pyry/memory/credentials`. Additional roots cannot equal, contain or sit inside
+credential storage. Transcript and credential storage must also be disjoint,
+including through symlink aliases. Missing reserved directories are checked
+through existing ancestors; broken symlinks and file ancestors are errors. These
+checks apply to separate vaults immediately and to the default vault at effective
+resolution. Configuration neither creates nor seeds vaults, and leaves existing
+vault files and instructions unchanged.
+
+### Status and credentials
+
+`pyry memory status` takes no arguments and prints JSON followed by a newline.
+Missing config, legacy config without memory, or `"memory":null` returns only
+`{"configured":false}`. A configured local/default example, with an illustrative
+service-user home, is:
+
+```json
+{
+  "configured": true,
+  "vault": {"mode": "default"},
+  "additional_roots": [],
+  "embedding": {
+    "provider": "local",
+    "model": "EMBEDDING_MODEL",
+    "credential_configured": false
+  },
+  "capture": {"agent": "codex", "model": "CAPTURE_MODEL"},
+  "transcript_path": "/home/service/.pyry/memory/recent-transcripts"
+}
+```
+
+The command emits compact JSON. A separate vault instead includes its saved path,
+for example `"vault":{"mode":"separate","path":"/home/service/vault"}`.
+`additional_roots` is always an array, empty when absent. Status validates saved
+choices and paths but reports those saved choices; the effective default vault
+path stays unresolved and is omitted.
+
+OpenAI requires a current lifecycle-issued reference that resolves successfully
+on configure and freshly on every status call. Settings store only the validated
+reference, never the token. Status replaces `credential_reference` with
+`credential_configured:true` after successful resolution. Local embeddings report
+`credential_configured:false` without requiring a stored credential. Missing,
+invalid or unresolvable OpenAI references, unsafe or unavailable credential
+storage, malformed config and invalid saved choices cause sanitized errors and
+nonzero exit with no success JSON. Configure/status output and diagnostics expose
+no tokens, references or credential backend/source metadata.
+
+Saving settings alone does not install or start memory. Future daemon application
+will occur after restart when runtime support is added. Configured status makes
+no installation, indexing or capture-readiness claim. These operations do not
+launch, modify or take over manual memsearch; existing client search availability
+continues to depend on its own evidence.
 
 ## CLI transparency
 
