@@ -77,3 +77,11 @@ Pending documentation stage:
 - Threat model: child text stays untrusted, native/source observations never establish authentication. Publication/thread-delivery redesign is outside this ticket, with no newly discovered defect requiring deferral.
 
 **Reviewer:** builder (self-review per the security-review checklist). **Date:** 2026-10-10.
+
+## Revisions
+
+2026-10-10: Both new subprocess regressions failed at approximately 9.81 seconds on the unchanged production deadline before implementation. The existing held-Wait race witness is `TestReplyFallbackCancellationEvidence` (the planning table used an incorrect shorthand). The production correction changes only the named budget/deadline and its lifecycle threshold; the live fallback wait is 35 seconds. Hung-child lifecycle assertions now check the 29.8-second deadline and return before 30 seconds.
+
+## Offline results
+
+Both delayed-result/completion regressions failed on the original 9.8-second production deadline (2 executed / 0 passed / 2 failed / 0 skipped). After correction, the complete touched `cmd/pyry` race suite passed (102.392 seconds), including both timing cases, 29.8-second lookup expiry, hung-child/held-Wait cleanup, existing cancellation, validation, lifecycle and privacy witnesses. Tagged offline `TestSuggest` race tests passed (27.103 seconds). `go vet ./...`, tagged live-package vet, binary build to scratch and `git diff --check` passed. Full-module hermetic and live gates remain dispatcher-owned.
