@@ -60,3 +60,6 @@ Pending documentation stage: `docs/protocol-mobile.md`, “Message envelope” a
 - Threat model: hostile content remains client-sanitized; provenance is attribution, never authorization. Actual daemon source attribution is intentionally #3076, readiness installation #3077.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-10
+
+## Revisions
++- 2026-10-10: shown/dismissed prompt types and session-settings counterparts share family ordering; their independently addressable reading IDs remain separate. Correlated replies at the already delivered revision still answer the request; strictly older replies are suppressed. Supported size fixtures use `turnbridge.MapEvent` so producer budget changes remain visible. Final recount: approximately 800 inserted lines, one exported type, no mandatory call-site migrations.

@@ -532,6 +532,18 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// bounding the CipherStates' lifetime under connect/disconnect churn.
 	s.idleTimer = m.armIdleTimer(ctx, s, idleTimeout)
 
+	if s.thread {
+		if s.interactive && m.cfg.ThreadLiveState != nil {
+			s.liveSnapshot = m.cfg.ThreadLiveState()
+			m.signalLiveDrain()
+		}
+		// Thread state comes from current source readings, never legacy snapshots.
+		if helloPayload.LastEventID != nil {
+			m.replayMissed(ctx, s, *helloPayload.LastEventID)
+		}
+		return
+	}
+
 	// Connect-time modal reconcile (#877): re-send the still-outstanding
 	// modal_shown set to this conn so a phone that connected/reconnected after a
 	// permission prompt was raised is brought to current modal truth, rather than

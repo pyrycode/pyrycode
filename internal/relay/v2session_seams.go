@@ -35,6 +35,13 @@ import (
 // MUST NOT be logged, wrapped into an error or emitted on any wire surface, the
 // same contract internal/keys and internal/noise state for those bytes.
 type V2SessionConfig struct {
+	// ThreadLiveState returns a detached current-state cursor, including inactive
+	// retry/compaction and only outstanding prompts/questions with answer IDs.
+	// Factory and cursor run on Run and must be nonblocking, hold no resources
+	// needing closure, and never consult replay. Each cursor call yields one
+	// source-bound reading; false ends it. Nil supplies no readings.
+	ThreadLiveState func() func() (LiveState, bool)
+
 	// ThreadReady must attest installation of live publication, authoritative
 	// watermark lookup and session-state reconciliation. Nil/false disables thread;
 	// production must leave it unset until all three providers are installed.

@@ -27,6 +27,7 @@ import (
 // the Run goroutine, in order, only for the frames that are actually sent.
 type queuedEnv struct {
 	env       protocol.Envelope
+	live      *LiveState
 	droppable bool // env.Type == protocol.TypeAssistantDelta
 	// barrier is an internal FIFO completion marker, never a wire envelope.
 	barrier chan struct{}

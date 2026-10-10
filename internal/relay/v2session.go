@@ -300,6 +300,10 @@ type V2Session struct {
 	multiAgent bool
 	// thread is the authenticated admission decision, retained through rekey.
 	thread bool
+	// Supplied live-state progress is Run-owned and ends with this connection.
+	liveSnapshot   func() (LiveState, bool)
+	livePending    *LiveState
+	liveWatermarks map[string]*liveWatermark
 
 	// clientName, clientVersion and clientFeatures are the device_name,
 	// client_version and client_features the phone reported for ITSELF in its hello,
@@ -1270,6 +1274,9 @@ func (m *V2SessionManager) teardown(s *V2Session) bool {
 	// from m.sessions just below, so drainReplayOnce's scan can no longer find
 	// it; niling matches the timer-cleanup pattern and releases the slice for GC.
 	s.replayQueue = nil
+	s.liveSnapshot = nil
+	s.livePending = nil
+	s.liveWatermarks = nil
 	delete(m.sessions, s.connID)
 	// Symmetric with the create in handleNoiseInit: drop the per-session push
 	// buffer. Any buffered-but-undrained envelopes are discarded — the conn is
