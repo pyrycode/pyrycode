@@ -60,7 +60,7 @@ Search with QMD using its current tool schema. Start with [the short index](INDE
 
 ## Features
 
-- [Hosted apps](../hosted-apps.md): v1 contract and implemented manifest validation/durable registration; runtime/layout, encrypted resource bridge and publication/data guarantees.
+- [Hosted apps](../hosted-apps.md): v1 contract and implemented manifest validation, durable registration/lifecycle, restart normalization and committed changes; runtime/layout, encrypted resource bridge and publication/data guarantees.
 - [Development verification](features/development-verification.md): shared source-reading, protocol, capture and test-evidence practices.
 - [First spec scaffolding backfill preview](../specs/2929-backfill-preview.json): reviewed checkout/evidence identities, exact section ranges and retention reasons for #2929's initial mechanical application.
 
@@ -74,7 +74,7 @@ paragraph breaks instead, and the document stops being retrievable.
 
 | File | Topic |
 |------|-------|
-| [apps-package.md](features/apps-package.md) | `internal/apps` — exact manifest/storage schemas, stored host identity, committed title/release preservation, permanent tombstones, snapshot locking and corruption-test fixtures. |
+| [apps-package.md](features/apps-package.md) | `internal/apps` — exact manifest/storage schemas, atomic lifecycle updates, durable restart normalization, ordered detached changes, permanent tombstones, snapshot locking and storage-test fixtures. |
 | [streamsup-package-testing.md](features/streamsup-package-testing.md) | `internal/streamsup` test-harness patterns, discriminating concurrency tests, and content-free log assertions split from the package overview. |
 | [streamsup-package-turn-io-envelope-write-stdout-parser.md](features/streamsup-package-turn-io-envelope-write-stdout-parser.md) | `internal/streamsup` turn envelopes, stdout parser mappings, control-response correlation, and content-safe partial-message handling. |
 | [streamsup-package-per-conversation-turn-busy-tracking.md](features/streamsup-package-per-conversation-turn-busy-tracking.md) | Stream-json per-conversation busy tracking, initial-thinking openers, inbound-delivery exclusion, and total published-lifecycle closure. |
