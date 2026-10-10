@@ -46,8 +46,25 @@ Consumers own numeric bounds, stable identity/kind and patch applicability.
 `TestThreadItemAddedRoundTrip`, `TestThreadItemOptionalFacts`,
 `TestThreadChangesRoundTrip` and `TestThreadTextAppendRoundTrip` re-encode decoded
 DTOs with distinct item/order/revision/version values and inspect emitted JSON.
-Negotiation/publication, bounded encoding and catch-up/pages remain downstream;
-the declarations perform no validation, fold I/O or patch application.
+Negotiation/publication and catch-up/pages remain downstream; bounded encoding
+is available through `EncodeThreadUpdate`. The DTO declarations perform no
+validation, fold I/O or patch application.
+
+Split the serialized logical update, not just kind-specific content: a large
+`summary` or other metadata can exceed the cap even when content fits. This
+also preserves unknown JSON and patch omission versus explicit clears without
+a known-kind field list. `ThreadUpdatePart` fragments require ordered, complete
+assembly before committing item fields, `rev` and `version`; changes/appends
+still require the original `base_rev`. Fragment progress never becomes history
+progress. See the
+[assembly contract](../../protocol-mobile.md#bounded-thread-encoding-and-assembly).
+
+Measure the whole escaped envelope: fragment strings escape logical JSON again,
+so an ordinary-payload size check can leave continuations over cap. Reserve
+later numeric/timestamp/boolean stamps and supply variable `SessionID` before
+encoding. If repeated metadata leaves no fragment room, return a content-free
+error and no partial sequence. See the
+[measured budgets](../../protocol-mobile.md#thread-update-byte-budgets).
 
 **v2 PTY-derived status-peer types** (#1074; spec `docs/protocol-mobile.md` § api_retry / § compacting):
 
