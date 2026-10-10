@@ -1,5 +1,3 @@
-//go:build e2e_realclaude || thread_shadow_evidence
-
 package realclaude
 
 import (
