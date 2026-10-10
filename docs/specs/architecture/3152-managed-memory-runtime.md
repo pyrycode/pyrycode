@@ -79,3 +79,9 @@ Pending documentation stage: `docs/deployment.md`, new “Managed memory runtime
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-10
+
+## Revisions
+
+- 2026-10-10: The completed package is approximately 1,800 written lines including plan/evidence, with three exported types and zero consumer changes. Security and lifecycle remain one deliverable under the already-recorded grandchild/floor exception; the 790-line estimate did not cover the complete test surface. Linux and non-Linux process-configuration files keep the Linux parent-death contract without breaking macOS compilation.
+- 2026-10-10: `validateWheel` now rejects unsafe ZIP member paths, links and oversized contents before pip runs, extending archive confinement to dependencies as well as Python. Cache entries retain wheel basenames inside hash-named directories because pip parses wheel filenames. The publication and installation contracts are unchanged.
+- 2026-10-10: Real smoke exposed setuptools-vendored duplicate metadata. `probe` queries each shipped distribution name directly rather than enumerating all visible distribution records; compatibility and exact-version probes remain mandatory. `TestManagedCommandBoundary` exposed `bytes.Buffer.ReadFrom` bypassing a custom output writer; the bounded buffer no longer embeds that type. `TestParentDeathStopsCommand` proves interruption terminates the managed child, in addition to `TestInterruptedRetry` proving installer recovery.
