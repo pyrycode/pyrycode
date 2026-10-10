@@ -18,6 +18,7 @@ This guide walks through using `pyry` from first install to running it as a long
 - [Environment knobs](#environment-knobs)
 - [Control verbs](#control-verbs)
 - [Multiple instances](#multiple-instances)
+- [Memory credentials](#memory-credentials)
 - [CLI transparency](#cli-transparency)
 - [Common workflows](#common-workflows)
 - [Troubleshooting](#troubleshooting)
@@ -390,6 +391,55 @@ The read is bounded to ten seconds at startup, matching the per-attempt deadline
 **A successful read doesn't prove the token works.** It means the daemon handed claude a syntactically acceptable token, not that Claude has accepted it — `claude` itself still decides. Other, higher-priority Claude authentication settings (an API key, a different credential helper) can still override the subscription OAuth token this feature sets. See [Claude Code's authentication documentation](https://code.claude.com/docs/en/authentication) for how Claude resolves credentials.
 
 Only the claude child's environment is affected. The daemon's own environment, any Codex child, and other subprocesses never see this token.
+
+## Memory credentials
+
+Manage an OpenAI memory credential locally on the daemon host, as the user who
+runs the service. These commands work without a running daemon and do not prompt:
+
+```bash
+pyry memory credential set openai < /path/to/protected/openai-token
+pyry memory credential status openai
+```
+
+`set` reads the secret only from stdin, through end-of-file. You can also pipe
+the output of a secret manager into it. Keep token values out of command-line
+arguments. Input is capped at **4096 bytes including any trailing newline**;
+oversize input is rejected rather than truncated. One trailing LF or CRLF is
+removed, then the token must be nonempty printable non-space ASCII. Thus a token
+with a trailing LF can contain at most 4095 bytes, or 4094 with CRLF. Validation
+is local, requires no particular key prefix, and makes no OpenAI request.
+
+A successful set prints only JSON containing a non-secret reference, shaped like
+`{"reference":"memory:openai:<opaque identifier>"}`. Retain that reference: it
+stays the same across successful replacements and resolves internally to the
+current token, including in a fresh process. There is no command to print the
+secret. Extra arguments and unsupported verbs or providers are rejected without
+echoing their values.
+
+`status` prints only `{"configured":false}` when no selection has been committed,
+or `{"configured":true}` after reading and validating the selected credential
+afresh. Configured means the stored token passes local validation; it does not
+prove OpenAI accepts it. Unsafe storage, malformed selection, or a selected token
+that is missing, inaccessible or invalid causes a sanitized error and nonzero
+exit, rather than an unconfigured result or reuse of a cached token.
+
+Set, status and internal resolution have a ten-second operation deadline,
+including waiting for set's stdin or the storage lock. They honor cancellation
+and any shorter caller deadline; the CLI also honors SIGINT and SIGTERM. Rejected
+input, unsafe storage, cancellation, timeout or a failed save leaves the prior
+committed credential and reference intact. Once the failure clears, the same
+reference resolves to the old token; a successful replacement selects the new
+token. A cancelled or timed-out save cannot publish later.
+
+Secrets and protected selection metadata live in
+`~/.pyry/memory/credentials/`, outside vaults and ordinary settings. Storage
+directories are service-user-owned with mode 0700, and regular files have mode
+0600 from creation. Existing unsafe storage is refused without being repaired or
+overwritten. Memory credentials are separate from the daemon's Claude account
+and the operator's interactive login. See [deployment requirements](deployment.md#memory-credentials).
+This lifecycle currently uses protected files; OS-store access and preference
+are deferred to [#3113](https://github.com/pyrycode/pyrycode/issues/3113).
 
 ## CLI transparency
 
