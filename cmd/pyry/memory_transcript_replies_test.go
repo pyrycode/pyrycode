@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -353,5 +354,124 @@ func TestMemoryTranscriptReplyObservedChild(t *testing.T) {
 		`main_turn_interrupted {"turn_id":"t","turn_opened_entry_id":5,"cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`, replyEnd)
 	if b := testReplyBody(t, testTranscriptView(t, e), "question"); strings.Contains(b, "Speaker: assistant") {
 		t.Fatal(b)
+	}
+}
+
+func TestMemoryTranscriptReplyTerminalBeforeOpening(t *testing.T) {
+	for _, source := range []string{"claude", "codex", "legacy"} {
+		for _, terminal := range []struct{ name, fact string }{
+			{"ending", replyEnd},
+			{"interruption", `main_turn_interrupted {"turn_id":"t","cause":"child_exit","occurred_at":"2026-01-01T00:00:00Z"}`},
+		} {
+			for _, chunk := range []int{1, 4} {
+				t.Run(fmt.Sprintf("%s/%s/chunk%d", source, terminal.name, chunk), func(t *testing.T) {
+					entries := testReplyEntries(terminal.fact, replyUser, replyOpen, replyText, replyEnd)
+					for i := range entries {
+						if source == "legacy" {
+							entries[i].Session = nil
+						} else {
+							entries[i].Session.Kind = source
+						}
+					}
+					w := newMemoryTranscriptReader(nil, "chat")
+					for start := 0; start < 4; start += chunk {
+						testMemoryMust(t, w.feed(entries[start:min(start+chunk, 4)]))
+					}
+					before := w.files(conversations.Conversation{ID: "chat"})
+					body := testReplyBody(t, before, "question")
+					if strings.Contains(body, "Speaker: assistant") || !strings.Contains(body, "Last text entry: 2\n") {
+						t.Fatalf("terminal before opening qualified fresh text: %s", body)
+					}
+					if !reflect.DeepEqual(before, testTranscriptView(t, entries[:4])) {
+						t.Fatal("withholding differs on reconstruction")
+					}
+					testMemoryMust(t, w.feed(entries[4:]))
+					after := w.files(conversations.Conversation{ID: "chat"})
+					body = testReplyBody(t, after, "answer")
+					for _, want := range []string{"Speaker: assistant", "Message: chat/4\nTimestamp: 1970-01-01T00:00:04Z", "Last delivered entry: 2\nLast text entry: 4\n"} {
+						if !strings.Contains(body, want) {
+							t.Fatalf("missing %q after fresh ending: %s", want, body)
+						}
+					}
+					if !reflect.DeepEqual(after, testTranscriptView(t, entries)) {
+						t.Fatal("completion differs on reconstruction")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestMemoryTranscriptReplyReplacementPermission(t *testing.T) {
+	for _, established := range []bool{false, true} {
+		for _, boundary := range []string{"session_divider", "session_transition"} {
+			for _, chunk := range []int{1, 10} {
+				t.Run(fmt.Sprintf("established%t/%s/chunk%d", established, boundary, chunk), func(t *testing.T) {
+					facts := []string{replyUser}
+					if established {
+						facts = append(facts, replyOpen, replyText, replyEnd, `message {"role":"user","text":"unmatched question"}`)
+					}
+					closing := len(facts) + 1
+					facts = append(facts,
+						boundary+` {"cause":"operator_reset","reason":"clear","previous_session_id":"A","new_session_id":"B","occurred_at":"2026-01-01T00:00:00Z"}`,
+						boundary+` {"cause":"agent_switch","reason":"clear","previous_session_id":"B","new_session_id":"A","occurred_at":"2026-01-02T00:00:00Z"}`,
+						`main_turn_opened {"turn_id":"fresh","occurred_at":"2026-01-02T00:00:00Z"}`,
+						`assistant_delta {"turn_id":"fresh","text":"successor reply excluded"}`,
+						`turn_end {"turn_id":"fresh","stop_reason":"end_turn"}`)
+					entries := testReplyEntries(facts...)
+					w := newMemoryTranscriptReader(nil, "chat")
+					for start := 0; start < len(entries); start += chunk {
+						testMemoryMust(t, w.feed(entries[start:min(start+chunk, len(entries))]))
+					}
+					before := w.files(conversations.Conversation{ID: "chat"})
+					for _, body := range before {
+						if strings.Contains(body, "excluded") {
+							t.Fatalf("pending predecessor exchange qualified successor: %s", body)
+						}
+					}
+					if !reflect.DeepEqual(before, testTranscriptView(t, entries)) {
+						t.Fatal("replacement differs on reconstruction")
+					}
+					if !established {
+						return
+					}
+					lateID := uint64(len(entries) + 1)
+					entries = append(entries,
+						testTranscriptEntry(lateID, "assistant_delta", `{"turn_id":"t","text":"late "}`, "A"),
+						testTranscriptEntry(lateID+1, "assistant_delta", `{"turn_id":"t","text":"tail  \n"}`, "A"))
+					testMemoryMust(t, w.feed(entries[len(entries)-2:len(entries)-1]))
+					testMemoryMust(t, w.feed(entries[len(entries)-1:]))
+					after := w.files(conversations.Conversation{ID: "chat"})
+					for name, body := range before {
+						if !strings.Contains(body, "question") && after[name] != body {
+							t.Fatal("late predecessor text changed successor file")
+						}
+					}
+					body := testReplyBody(t, after, "late tail  \n")
+					for _, want := range []string{"answer", fmt.Sprintf("Closing entry: %d\n", closing), "Last delivered entry: 5\n", fmt.Sprintf("Last text entry: %d\n", lateID+1), fmt.Sprintf("Message: chat/%d\nTimestamp: %s", lateID, time.Unix(int64(lateID), 0).UTC().Format(time.RFC3339Nano))} {
+						if !strings.Contains(body, want) {
+							t.Fatalf("missing %q after late predecessor text: %s", want, body)
+						}
+					}
+					if !reflect.DeepEqual(after, testTranscriptView(t, entries)) {
+						t.Fatal("late predecessor reconstruction differs")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestMemoryTranscriptReplyPendingAcrossUnloading(t *testing.T) {
+	for _, cause := range []string{"idle_sleep", "capacity_eviction", "daemon_restart", "recovery"} {
+		t.Run(cause, func(t *testing.T) {
+			entries := testReplyEntries(replyUser,
+				fmt.Sprintf(`session_divider {"cause":%q,"previous_session_id":"A","new_session_id":"A","occurred_at":"2026-01-01T00:00:00Z"}`, cause),
+				replyOpen, replyText, replyEnd)
+			body := testReplyBody(t, testTranscriptView(t, entries), "question")
+			if !strings.Contains(body, "answer") || !strings.Contains(body, "State: open\n") || strings.Contains(body, "Closing entry:") {
+				t.Fatal(body)
+			}
+		})
 	}
 }

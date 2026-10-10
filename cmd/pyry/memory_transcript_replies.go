@@ -189,11 +189,18 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 		}
 		if boundaries[e.ID] {
 			var p struct {
-				Cause string `json:"cause"`
+				Cause, Reason string
+				Previous      string `json:"previous_session_id"`
+				Next          string `json:"new_session_id"`
 			}
 			_ = json.Unmarshal(e.Payload, &p)
 			if e.Type != "session_divider" || p.Cause != "daemon_restart" {
 				r.scope++
+			}
+			if p.Cause != "idle_sleep" && p.Cause != "capacity_eviction" && p.Reason != "idle_evict" && p.Previous != "" && p.Next != "" && p.Previous != p.Next {
+				// Only lifetimes already joined to a user retain exchange permission
+				// across a logical replacement, including reuse of a recorded source.
+				clear(r.pending)
 			}
 			continue
 		}
@@ -237,7 +244,7 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 				continue
 			}
 		} else {
-			if st == nil || (e.Type == "main_turn_opened" && st.opening != 0) {
+			if st == nil || e.Type == "main_turn_opened" {
 				st = &memoryReplyLifetime{key: key}
 				r.turns[key] = st
 			}
