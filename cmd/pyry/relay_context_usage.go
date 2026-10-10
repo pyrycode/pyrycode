@@ -648,8 +648,3 @@ func (r *contextUsageRecorder) snapshot(id conversations.ConversationID) (conver
 	}
 	return last, daemonLiveSource{}, true
 }
-
-func (r *contextUsageRecorder) source(id conversations.ConversationID) (daemonLiveSource, bool) {
-	_, source, ok := r.snapshot(id)
-	return source, ok && source.SessionGeneration > 0
-}
