@@ -126,3 +126,29 @@ proof remain pending #3077.
   `TestControlLiveResetRevision`, `TestControlLiveStreamRequestOrdering`,
   `TestControlLivePromptProducers`, and `TestControlLiveStoredAndConvergedReadings`.
   Final written work is approximately 1300 lines, under the recorded sizing exception.
+
+- 2026-10-10: Rework finding 1: `contextUsageResolver.prepare` reserves the
+  query/fallback revision under the transition boundary before launching work;
+  collapsed requests reuse the original flight reservation. An overtaken fallback
+  remains a legacy reply and cannot supersede stream admission.
+- 2026-10-10: Rework finding 2: `contextUsageRecorder.snapshot` reads stored bytes
+  and their matching source evidence under one mutex. Fallback carries that
+  pair from one lookup, preserving the legacy latest-memory answer. Reservation
+  generation is immutable even when the returned cache has a different source.
+- 2026-10-10: Rework finding 3: `sessionModelHold.ModelListLive` and
+  `sessionSlashCommandHold.SlashCommandListLive` return atomic payload/source
+  snapshots. The factory captures before writing each cache; model capability
+  projection carries the unprojected source. Optional legacy caches use bounded
+  producer inventory evidence in the existing owner, preserved across clears and
+  removed with the conversation. Restored disk values still have no evidence.
+- 2026-10-10: Rework finding 4: `activeSessionStarter.start` captures and reserves
+  reset ordering with synchronous target resolution, before workspace resolution
+  and asynchronous handoff; `resetThenRotate` receives the bound operation.
+  `TestControlLiveReworkContextFallbackOvertakesStream`,
+  `TestControlLiveReworkRememberedPayloadSourceMismatch`,
+  `TestControlLiveReworkModelCacheRetaggedAfterSameIDTransition`,
+  `TestControlLiveReworkMergedModelSourceLost`,
+  `TestControlLiveReworkAtomicInventoryCaches`, and
+  `TestControlLiveReworkResetCaptureAfterDispatch` cover these interleavings under
+  the race detector. Lock order remains boundary, recorder/resolver or cache, then
+  owner; worker waits and registry persistence remain outside the boundary.

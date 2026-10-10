@@ -45,9 +45,11 @@ import (
 // do not give this type a logger to write a retention diagnostic, which is the one
 // edit that would reopen the channel.
 type sessionSlashCommandHold struct {
-	mu   sync.Mutex
-	list turnevent.SlashCommandList
-	have bool
+	capture func() daemonLiveSource
+	source  daemonLiveSource
+	mu      sync.Mutex
+	list    turnevent.SlashCommandList
+	have    bool
 	// next is the downstream sink every event is forwarded to, unchanged. nil
 	// forwards nothing — a test convenience; production always supplies the next
 	// link of newSessionParser's chain.
@@ -85,7 +87,12 @@ func newSessionSlashCommandHold(next func(turnevent.Event)) *sessionSlashCommand
 // relay-leg goroutine while that one writer runs.
 func (h *sessionSlashCommandHold) Sink(ev turnevent.Event) {
 	if list, ok := ev.(turnevent.SlashCommandList); ok {
+		var source daemonLiveSource
+		if h.capture != nil {
+			source = h.capture()
+		}
 		h.mu.Lock()
+		h.source = source
 		h.list = list
 		h.have = true
 		h.mu.Unlock()
@@ -141,4 +148,14 @@ func cloneSlashCommandList(list turnevent.SlashCommandList) turnevent.SlashComma
 		out.Commands[i].TruncatedFields = slices.Clone(out.Commands[i].TruncatedFields)
 	}
 	return out
+}
+
+// SlashCommandListLive returns the menu and its producing capture as one snapshot.
+func (h *sessionSlashCommandHold) SlashCommandListLive() (turnevent.SlashCommandList, daemonLiveSource, bool) {
+	if h == nil {
+		return turnevent.SlashCommandList{}, daemonLiveSource{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return cloneSlashCommandList(h.list), h.source, h.have
 }

@@ -32,14 +32,15 @@ func liveDismissal(typ string) bool {
 // daemonLiveOperation reserves ordering before asynchronous work. A completion
 // keeps correlation fields but cannot overwrite a later reservation or update.
 type daemonLiveOperation struct {
-	owner    *daemonLiveState
-	source   daemonLiveSource
-	key      liveReadingKey
-	revision uint64
+	owner      *daemonLiveState
+	source     daemonLiveSource
+	key        liveReadingKey
+	revision   uint64
+	generation uint64 // generation in which ordering was reserved
 }
 
 func (o *daemonLiveState) begin(src daemonLiveSource, typ, id string) daemonLiveOperation {
-	op := daemonLiveOperation{owner: o, source: src, key: liveReadingKey{liveFamily(typ), id}}
+	op := daemonLiveOperation{owner: o, source: src, key: liveReadingKey{liveFamily(typ), id}, generation: src.SessionGeneration}
 	if o == nil {
 		return op
 	}
@@ -68,7 +69,7 @@ func (op daemonLiveOperation) complete(e protocol.Envelope) (daemonLiveReading, 
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	c := o.conversations[op.source.ConversationID]
-	if c == nil || (c.stopped && !liveControlFamily(e.Type)) || c.generation != op.source.SessionGeneration || c.revisions[liveRevisionKey{c.generation, op.key}] != op.revision {
+	if c == nil || (c.stopped && !liveControlFamily(e.Type)) || c.generation != op.source.SessionGeneration || c.generation != op.generation || c.revisions[liveRevisionKey{c.generation, op.key}] != op.revision {
 		return detachLiveReading(r), false
 	}
 	if previous := c.readings[op.key]; previous != nil && previous.Revision == op.revision {
@@ -166,8 +167,12 @@ func liveAttachment(attachments []*daemonLiveBindings) *daemonLiveBindings {
 
 // liveResolve holds the boundary only for synchronous binding resolution.
 func liveResolve[T any](b *daemonLiveBindings, conv, typ string, resolve func() (T, bool)) (T, bool, daemonLiveOperation) {
+	return liveResolveSource(b, conv, typ, func(daemonLiveSource) (T, bool) { return resolve() })
+}
+
+func liveResolveSource[T any](b *daemonLiveBindings, conv, typ string, resolve func(daemonLiveSource) (T, bool)) (T, bool, daemonLiveOperation) {
 	if b == nil || b.sink == nil || b.sink.live == nil || b.reg == nil {
-		v, ok := resolve()
+		v, ok := resolve(daemonLiveSource{})
 		return v, ok, daemonLiveOperation{}
 	}
 	b.sink.offerMu.Lock()
@@ -182,36 +187,8 @@ func liveResolve[T any](b *daemonLiveBindings, conv, typ string, resolve func() 
 	if typ != "" {
 		op = b.sink.live.begin(src, typ, "")
 	}
-	v, ok := resolve()
+	v, ok := resolve(src)
 	return v, ok, op
-}
-
-// cachedSource uses only matching retained bytes as evidence. A stored menu
-// restored without source metadata stays unresolved, even with a current binding.
-func (op daemonLiveOperation) cachedSource(payload any) daemonLiveOperation {
-	if op.owner == nil {
-		return op
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return op
-	}
-	op.owner.mu.Lock()
-	defer op.owner.mu.Unlock()
-	op.source.provenance = history.SessionProvenance{}
-	if c := op.owner.conversations[op.source.ConversationID]; c != nil && c.generation == op.source.SessionGeneration {
-		if r := c.readings[op.key]; r != nil && string(r.Envelope.Payload) == string(raw) {
-			var sid *string
-			if len(r.Envelope.SessionID) > 0 && json.Unmarshal(r.Envelope.SessionID, &sid) == nil {
-				if sid == nil {
-					op.source.provenance.Kind = "none"
-				} else {
-					op.source.provenance.SessionID = *sid
-				}
-			}
-		}
-	}
-	return op
 }
 
 // liveSettingsUpdater preserves the legacy adapter and its constructor shape.
@@ -251,18 +228,32 @@ func liveControlFamily(typ string) bool {
 // liveInventoryReading exposes source-bearing menus without changing legacy
 // provider signatures. The resolving closure keeps capability filtering intact.
 func liveInventoryReading[T any](b *daemonLiveBindings, conv, typ string, e protocol.Envelope, resolve func() (T, bool)) (T, bool, daemonLiveReading) {
-	payload, ok, op := liveResolve(b, conv, typ, resolve)
+	return liveInventoryResult(b, conv, typ, e, func(src daemonLiveSource) (T, daemonLiveSource, bool) {
+		payload, ok := resolve()
+		return payload, b.inventorySource(src, typ, payload), ok
+	})
+}
+
+func liveInventoryResult[T any](b *daemonLiveBindings, conv, typ string, e protocol.Envelope, resolve func(daemonLiveSource) (T, daemonLiveSource, bool)) (T, bool, daemonLiveReading) {
+	type result struct {
+		payload T
+		source  daemonLiveSource
+	}
+	v, ok, op := liveResolveSource(b, conv, typ, func(src daemonLiveSource) (result, bool) {
+		payload, source, ok := resolve(src)
+		return result{payload, source}, ok
+	})
 	if !ok {
-		return payload, false, daemonLiveReading{}
+		return v.payload, false, daemonLiveReading{}
 	}
-	raw, err := json.Marshal(payload)
+	op.source = v.source
+	raw, err := json.Marshal(v.payload)
 	if err != nil {
-		return payload, false, daemonLiveReading{}
+		return v.payload, false, daemonLiveReading{}
 	}
-	e.Type = typ
-	e.Payload = raw
-	reading, _ := op.cachedSource(payload).complete(e)
-	return payload, true, reading
+	e.Type, e.Payload = typ, raw
+	reading, _ := op.complete(e)
+	return v.payload, true, reading
 }
 func runSettingsReading(bound boundRunSettings, cfg relay.RunConfig, e protocol.Envelope) (daemonLiveReading, bool) {
 	raw, err := json.Marshal(protocol.SessionSettingsPayload{SessionID: cfg.SessionID, Model: cfg.Model, Effort: cfg.Effort, YOLO: cfg.YOLO, PermissionMode: cfg.PermissionMode, UsedTokens: cfg.UsedTokens, WindowTokens: cfg.WindowTokens})

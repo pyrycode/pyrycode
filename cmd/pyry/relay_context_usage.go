@@ -434,29 +434,39 @@ func (r *contextUsageResolver) get(ctx context.Context, conversationID string) (
 		return protocol.ContextUsagePayload{}, false, daemonLiveReading{}
 	}
 	type resolved struct {
-		querier contextUsageQuerier
 		id      conversations.ConversationID
+		querier contextUsageQuerier
+		flight  *contextUsageFlight
+		launch  bool
+		op      daemonLiveOperation
 	}
-	v, ok, op := liveResolve(r.live, conversationID, "", func() (resolved, bool) { q, id, ok := r.resolve(conversationID); return resolved{q, id}, ok })
+	v, ok, _ := liveResolveSource(r.live, conversationID, "", func(src daemonLiveSource) (resolved, bool) {
+		q, id, ok := r.resolve(conversationID)
+		if !ok {
+			return resolved{}, false
+		}
+		f, launch, op := r.prepare(q, id, src)
+		return resolved{id, q, f, launch, op}, true
+	})
 	if !ok {
 		return protocol.ContextUsagePayload{}, false, daemonLiveReading{}
 	}
-	if payload, fresh, reading := r.fresh(ctx, v.querier, v.id, op.source); fresh {
-		return payload, true, reading
-	}
-	payload, ok := r.remembered(v.id)
-	if !ok {
-		return payload, false, daemonLiveReading{}
-	}
-	src := op.source
-	src.provenance = history.SessionProvenance{}
-	if r.rec != nil {
-		if previous, found := r.rec.source(v.id); found {
-			src = previous
+	if v.flight != nil {
+		if v.launch {
+			go r.fly(v.flight, v.querier, v.id)
+		}
+		if payload, fresh := v.flight.await(ctx); fresh {
+			return payload, true, detachLiveReading(v.flight.reading)
 		}
 	}
-	if r.live != nil {
-		op = r.live.sink.live.begin(src, protocol.TypeContextUsage, "")
+	payload, found, stored := r.remembered(v.id)
+	if !found {
+		return payload, false, daemonLiveReading{}
+	}
+	op := v.op
+	op.source.provenance = history.SessionProvenance{}
+	if stored.SessionGeneration > 0 {
+		op.source = stored
 	}
 	reading, _ := op.result(protocol.TypeContextUsage, payload)
 	return payload, true, reading
@@ -480,10 +490,10 @@ func (r *contextUsageResolver) get(ctx context.Context, conversationID string) (
 // The id is stamped from the CANONICAL value resolution returned, so the reported
 // conversation_id is the daemon's own record rather than an echo of the request, and
 // the address taken is of this frame's own copy of the stored time.
-func (r *contextUsageResolver) remembered(canonicalID conversations.ConversationID) (protocol.ContextUsagePayload, bool) {
-	reading, ok := r.rec.last(canonicalID)
+func (r *contextUsageResolver) remembered(canonicalID conversations.ConversationID) (protocol.ContextUsagePayload, bool, daemonLiveSource) {
+	reading, source, ok := r.rec.snapshot(canonicalID)
 	if !ok {
-		return protocol.ContextUsagePayload{}, false
+		return protocol.ContextUsagePayload{}, false, daemonLiveSource{}
 	}
 	asOf := reading.AsOf
 	return protocol.ContextUsagePayload{
@@ -493,72 +503,36 @@ func (r *contextUsageResolver) remembered(canonicalID conversations.Conversation
 		MaxTokens:      reading.MaxTokens,
 		Percentage:     reading.Percentage,
 		AsOf:           &asOf,
-	}, true
+	}, true, source
 }
 
-// fresh is the collapse map and the round trip: one reading claude produces now, or
-// false. It is Get's body from #2431 with one gate in front of it.
-//
-// THE NIL-QUERIER CHECK IS THE FIRST STATEMENT AND MUST STAY THERE, before the mutex
-// and before any map access. Since #2461 the resolve seam returns true with a nil
-// querier for a hosted conversation with nothing to ask, so this is the only thing
-// standing between that state and fly, which dereferences the querier unconditionally
-// — a nil interface call, a panic on a goroutine, on a path a paired client reaches by
-// asking about any dormant conversation. A flight installed here would also be keyed to
-// a conversation no round trip can ever settle.
-// TestContextUsageResolver_MemoryInstallsNoFlight asserts the map stays empty rather
-// than asserting the reply, because the reply looks the same either way.
-func (r *contextUsageResolver) fresh(ctx context.Context, querier contextUsageQuerier, canonicalID conversations.ConversationID, src daemonLiveSource) (protocol.ContextUsagePayload, bool, daemonLiveReading) {
-	if querier == nil {
-		return protocol.ContextUsagePayload{}, false, daemonLiveReading{}
-	}
-
+// prepare reserves ordering before query deferral or asynchronous work. Joiners
+// reuse the flight's reservation, including its failure fallback.
+func (r *contextUsageResolver) prepare(q contextUsageQuerier, id conversations.ConversationID, src daemonLiveSource) (*contextUsageFlight, bool, daemonLiveOperation) {
 	r.mu.Lock()
-	if f, exists := r.flights[canonicalID]; exists && f.op.source == src {
-		select {
-		case <-f.done:
-			// Settled. Inside the window its result answers this ask too; past the
-			// window it is stale and we fall through to install a successor.
-			if r.clock().Sub(f.settled) < contextUsageCollapseWindow {
-				payload, settledOK := f.payload, f.ok
-				r.mu.Unlock()
-				return payload, settledOK, detachLiveReading(f.reading)
+	defer r.mu.Unlock()
+	if q != nil {
+		if f := r.flights[id]; f != nil && f.op.source == src {
+			select {
+			case <-f.done:
+				if r.clock().Sub(f.settled) < contextUsageCollapseWindow {
+					return f, false, f.op
+				}
+			default:
+				return f, false, f.op
 			}
-		default:
-			// Still in flight: join it. This is AC-2's in-flight side, and the whole
-			// reason the check-and-install below happens under ONE lock acquisition —
-			// splitting them would let two asks each install a flight and each write to
-			// the child.
-			r.mu.Unlock()
-			payload, ok := f.await(ctx)
-			if !ok {
-				return payload, false, daemonLiveReading{}
-			}
-			return payload, true, detachLiveReading(f.reading)
 		}
 	}
 	op := daemonLiveOperation{source: src}
 	if r.live != nil {
 		op = r.live.sink.live.begin(src, protocol.TypeContextUsage, "")
 	}
-	f := &contextUsageFlight{done: make(chan struct{}), op: op}
-	r.flights[canonicalID] = f
-	r.mu.Unlock()
-
-	// THE INSTALLER AWAITS LIKE ANY OTHER CALLER rather than running the round trip
-	// inline, and the uniformity is the point. A flight belongs to every ask that
-	// joins it, so no caller — including the one that happened to install it — may
-	// hold it open or be held open by it. Running it inline here would leave the
-	// installer unable to leave on its own context while joiners could, so one
-	// client's disconnect would be answered differently depending on which of them
-	// asked first. The goroutine's exit is bounded twice over: WaitIdle by the daemon
-	// context and the query by contextUsageQueryTimeout, so it cannot outlive either.
-	go r.fly(f, querier, canonicalID)
-	payload, ok := f.await(ctx)
-	if !ok {
-		return payload, false, daemonLiveReading{}
+	if q == nil {
+		return nil, false, op
 	}
-	return payload, true, detachLiveReading(f.reading)
+	f := &contextUsageFlight{done: make(chan struct{}), op: op}
+	r.flights[id] = f
+	return f, true, op
 }
 
 // fly performs one round trip and settles the flight, on its OWN goroutine — see the
@@ -657,16 +631,25 @@ type contextUsageEvidence struct {
 	source  daemonLiveSource
 }
 
-func (r *contextUsageRecorder) source(id conversations.ConversationID) (daemonLiveSource, bool) {
+// snapshot pairs a stored reading with evidence for those exact bytes under
+// the recorder mutex. Restored registry values without evidence remain unresolved.
+func (r *contextUsageRecorder) snapshot(id conversations.ConversationID) (conversations.ContextUsageReading, daemonLiveSource, bool) {
 	if r == nil || r.reg == nil {
-		return daemonLiveSource{}, false
+		return conversations.ContextUsageReading{}, daemonLiveSource{}, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	saved, ok := r.evidence[id]
-	if !ok {
-		return daemonLiveSource{}, false
-	}
 	last, ok := r.last(id)
-	return saved.source, ok && last == saved.reading && saved.source.SessionGeneration > 0
+	if !ok {
+		return last, daemonLiveSource{}, false
+	}
+	if saved, found := r.evidence[id]; found && last == saved.reading {
+		return last, saved.source, true
+	}
+	return last, daemonLiveSource{}, true
+}
+
+func (r *contextUsageRecorder) source(id conversations.ConversationID) (daemonLiveSource, bool) {
+	_, source, ok := r.snapshot(id)
+	return source, ok && source.SessionGeneration > 0
 }

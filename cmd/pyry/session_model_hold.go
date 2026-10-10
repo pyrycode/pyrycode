@@ -41,9 +41,11 @@ import (
 // rather than by care. Do not give it one to write a retention diagnostic: that
 // would reopen exactly the channel the posture closes.
 type sessionModelHold struct {
-	mu   sync.Mutex
-	list turnevent.ModelList
-	have bool
+	capture func() daemonLiveSource
+	source  daemonLiveSource
+	mu      sync.Mutex
+	list    turnevent.ModelList
+	have    bool
 	// next is the downstream sink every event is forwarded to, unchanged. nil
 	// forwards nothing — a test convenience; production always supplies
 	// streamTurnSink.sinkFor's closure.
@@ -80,7 +82,12 @@ func newSessionModelHold(next func(turnevent.Event)) *sessionModelHold {
 // resolver, not the type assertion itself.)
 func (h *sessionModelHold) Sink(ev turnevent.Event) {
 	if list, ok := ev.(turnevent.ModelList); ok {
+		var source daemonLiveSource
+		if h.capture != nil {
+			source = h.capture()
+		}
 		h.mu.Lock()
+		h.source = source
 		// Stored without copying: streamsup's emitModelList allocates Models fresh per
 		// emit and the parser retains no reference, so the hold takes sole ownership of
 		// what it is handed. The COPY is made on the read side instead.
@@ -189,4 +196,14 @@ func newSessionParser(next func(turnevent.Event), logger *slog.Logger) (*streams
 		tasks:    tasks,
 		windows:  windows,
 	}
+}
+
+// ModelListLive returns the menu and its producing capture as one snapshot.
+func (h *sessionModelHold) ModelListLive() (turnevent.ModelList, daemonLiveSource, bool) {
+	if h == nil {
+		return turnevent.ModelList{}, daemonLiveSource{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return cloneModelList(h.list), h.source, h.have
 }

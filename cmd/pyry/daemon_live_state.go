@@ -51,6 +51,7 @@ type daemonLiveState struct {
 	resolve        func(string) (string, bool)
 	conversations  map[string]*liveConversation
 	sources        map[streamProducerKey]daemonLiveSource
+	inventories    map[liveInventoryKey]liveInventoryCache
 	turns          map[daemonLiveSource]*liveSourceTurn
 	nextGeneration uint64 // seeds recreated conversations without deletion tombstones
 }
@@ -297,6 +298,11 @@ func (s *streamTurnSink) remove(id conversations.ConversationID) {
 	defer o.mu.Unlock()
 	o.releaseSourcesLocked(string(id))
 	delete(o.conversations, string(id))
+	for key := range o.inventories {
+		if key.conversation == string(id) {
+			delete(o.inventories, key)
+		}
+	}
 }
 
 // retain is the delayed-admission seam: an older generation or an overtaken

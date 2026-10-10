@@ -133,8 +133,22 @@ type slashCommandLister interface {
 // re-read, no retry.
 func resolveBoundSlashCommandList(convReg *conversations.Registry, pool *sessions.Pool, convID string, attachments ...*daemonLiveBindings) (protocol.SlashCommandListPayload, bool) {
 	if b := liveAttachment(attachments); b != nil {
-		payload, ok, _ := liveInventoryReading(b, convID, protocol.TypeSlashCommandList, protocol.Envelope{}, func() (protocol.SlashCommandListPayload, bool) {
-			return resolveBoundSlashCommandList(convReg, pool, convID)
+		payload, ok, _ := liveInventoryResult(b, convID, protocol.TypeSlashCommandList, protocol.Envelope{}, func(src daemonLiveSource) (protocol.SlashCommandListPayload, daemonLiveSource, bool) {
+			if src.provenance.SessionID == "" {
+				return protocol.SlashCommandListPayload{}, src, false
+			}
+			if sess, err := pool.Lookup(sessions.SessionID(src.provenance.SessionID)); err == nil {
+				if lister, ok := sess.Runner().(interface {
+					SlashCommandListLive() (turnevent.SlashCommandList, daemonLiveSource, bool)
+				}); ok {
+					list, source, have := lister.SlashCommandListLive()
+					_, mapped, ok := turnbridge.MapEvent(list, turnbridge.TurnContext{ConversationID: src.ConversationID})
+					p, typed := mapped.(protocol.SlashCommandListPayload)
+					return p, inventoryResultSource(src, source), have && ok && typed
+				}
+			}
+			payload, ok := resolveBoundSlashCommandList(convReg, pool, convID)
+			return payload, b.inventorySource(src, protocol.TypeSlashCommandList, payload), ok
 		})
 		return payload, ok
 	}

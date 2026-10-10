@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
@@ -278,9 +279,14 @@ var _ relay.LateSessionStarter = activeSessionStarter{}
 // puts it on all three exits at once, which is the argument reportNewSessionOutcome
 // records for itself: the fourth edit would forget one.
 func (a activeSessionStarter) resetThenRotate(release func(), outcome func(error),
-	runner sessions.Runner, oldID sessions.SessionID, convID, spawnDir string, refused bool) {
+	runner sessions.Runner, oldID sessions.SessionID, convID, spawnDir string, refused bool, bound ...*resettingEmitterV2) {
 	defer release()
-	resetting := a.resetting.bound(convID, string(oldID))
+	var resetting *resettingEmitterV2
+	if len(bound) > 0 {
+		resetting = bound[0]
+	} else {
+		resetting = a.resetting.bound(convID, string(oldID))
+	}
 	resetting.wrappingUp(convID)
 	// The bool is an OUTCOME, not an error: a wrap-up that produced no note does not
 	// fail the reset, and nothing below branches on it. It exists so the phase change
@@ -454,7 +460,20 @@ func (a activeSessionStarter) start(conversationID string, outcome func(error)) 
 		}()
 	}
 
-	runner, oldID, recordedCwd, ok := a.resolveBound(convID)
+	var bindings *daemonLiveBindings
+	if a.resetting != nil {
+		bindings = a.resetting.live
+	}
+	type resetTarget struct {
+		runner sessions.Runner
+		id     sessions.SessionID
+		cwd    string
+	}
+	target, ok, resetOp := liveResolve(bindings, convID, protocol.TypeResetting, func() (resetTarget, bool) {
+		runner, id, cwd, ok := a.resolveBound(convID)
+		return resetTarget{runner, id, cwd}, ok
+	})
+	runner, oldID, recordedCwd := target.runner, target.id, target.cwd
 	// used carries the dormant arm's PROOF forward rather than re-deriving it: a
 	// revived session reached this line only because everRan already answered true
 	// for it, and the liveness guard below would otherwise ask the same question a
@@ -529,10 +548,11 @@ func (a activeSessionStarter) start(conversationID string, outcome func(error)) 
 		// containment resolveSpawnDir's own doc requires. The refusal it answers
 		// travels WITH the tail rather than being answered from here; resetThenRotate
 		// mints #2443's value under the rotation that makes it true.
+		resetting := a.resetting.boundOperation(resetOp)
 		spawnDir, refused := a.resolveSpawnDir(convID, recordedCwd)
 		tailRelease := release
 		release = nil
-		go a.resetThenRotate(tailRelease, outcome, runner, oldID, convID, spawnDir, refused)
+		go a.resetThenRotate(tailRelease, outcome, runner, oldID, convID, spawnDir, refused, resetting)
 		// DEFERRED, AND THE ONLY ARM THAT IS: this frame owes the client a reply it
 		// cannot yet make true. The only reply this verb has is #2443's, and that value
 		// asserts a COMPLETED rotation — one that is ninety seconds away here and may

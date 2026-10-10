@@ -263,8 +263,7 @@ func TestControlLiveStoredAndConvergedReadings(t *testing.T) {
 	b := testControlBindings(t, "conv", "a")
 	src := b.capture("conv", "a", false)
 	payload := protocol.SlashCommandListPayload{ConversationID: "conv"}
-	raw, _ := json.Marshal(payload)
-	b.sink.live.admit(src, protocol.Envelope{Type: protocol.TypeSlashCommandList, Payload: raw}, "")
+	b.sink.live.acceptEvent(src, turnevent.SlashCommandList{})
 	n := uint64(17)
 	_, ok, reading := liveInventoryReading(b, "conv", protocol.TypeSlashCommandList, protocol.Envelope{InReplyTo: &n}, func() (protocol.SlashCommandListPayload, bool) { return payload, true })
 	if !ok || string(reading.Envelope.SessionID) != `"a"` || *reading.Envelope.InReplyTo != 17 {

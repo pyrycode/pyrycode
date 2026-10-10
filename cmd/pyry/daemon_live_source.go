@@ -46,6 +46,7 @@ func (o *daemonLiveState) acceptEvent(src daemonLiveSource, ev turnevent.Event) 
 
 func (o *daemonLiveState) acceptEventLocked(src daemonLiveSource, ev turnevent.Event) *liveStreamCapture {
 	cap := &liveStreamCapture{source: src}
+	o.cacheInventoryLocked(src, ev)
 	c := o.conversations[src.ConversationID]
 	if c == nil || c.generation != src.SessionGeneration || c.stopped {
 		return cap

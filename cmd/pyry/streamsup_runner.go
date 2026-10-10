@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/canonicalpath"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
@@ -813,6 +814,15 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 			parserSink = vocab.sinkFor(parserSink)
 		}
 		parser, held := newSessionParser(parserSink, cfg.Logger)
+		captureInventory := func() daemonLiveSource {
+			if sink.live == nil {
+				return daemonLiveSource{}
+			}
+			sink.offerMu.Lock()
+			defer sink.offerMu.Unlock()
+			return sink.live.capture(tag.ID(), tag.incarnation.Load(), history.SessionProvenance{Kind: "claude", SessionID: tag.ID()}, false)
+		}
+		held.models.capture, held.commands.capture = captureInventory, captureInventory
 		scfg.Stdout = parser
 		exitSink := sink.exitForSessionTag(tag)
 		// The hold outlives respawns; invalidate joins before either exit path
@@ -1171,3 +1181,10 @@ func stripSessionIDFlags(args []string) []string {
 var _ sessions.Runner = streamRunner{}
 var _ confirmedPermissionModeReader = streamRunner{}
 var _ memorySearchLauncher = streamRunner{}
+
+func (a streamRunner) ModelListLive() (turnevent.ModelList, daemonLiveSource, bool) {
+	return a.models.ModelListLive()
+}
+func (a streamRunner) SlashCommandListLive() (turnevent.SlashCommandList, daemonLiveSource, bool) {
+	return a.commands.SlashCommandListLive()
+}

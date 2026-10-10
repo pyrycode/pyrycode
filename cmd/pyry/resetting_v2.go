@@ -264,3 +264,12 @@ func (e *resettingEmitterV2) bound(conv, sid string) *resettingEmitterV2 {
 	}
 	return &resettingEmitterV2{ctx: e.ctx, logger: e.logger, bcast: e.bcast, live: e.live, source: &src, operation: &op, parent: e}
 }
+
+// boundOperation carries the dispatch reservation through every reset phase.
+func (e *resettingEmitterV2) boundOperation(op daemonLiveOperation) *resettingEmitterV2 {
+	if e == nil {
+		return nil
+	}
+	src := op.source
+	return &resettingEmitterV2{ctx: e.ctx, logger: e.logger, live: e.live, source: &src, operation: &op, parent: e}
+}
