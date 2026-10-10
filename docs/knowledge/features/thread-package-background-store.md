@@ -163,20 +163,60 @@ false. `UpperOrder` still carries the usable query's requested bound (or
 `Version + 1` for newest windows). Newest windows can return active extras even
 with that empty ordered range.
 
+`Store.CatchUp(ctx, conversationID, epoch, afterVersion, limit) (QueryResult, error)`
+requires the same caller authorization and canonical ID validation. For a
+nonzero saved version V and a matching epoch, it returns current full states of
+every public item touched in `(V, H]`, every active public item, and complete
+public parent closure, once per permanent ID; H is the captured publication's
+consumed `Version`. Touches include revision/state changes and first public
+appearance, even when a child's creation and final revision predate V. Hidden
+and dropped rows remain public; unresolved private children and claimed delivery
+rows do not. Entries producing no items still advance H. V need not be a retained
+live-publication boundary; V equal to H immediately returns active rows/parents.
+Nonzero catch-up ignores `limit`, including nonpositive values, and never
+truncates the required items to an ordered-window size.
+
+`MaxCatchUpGap = 1024` is an inclusive history-ID-distance bound: `H - V == 1024`
+is allowed, while 1025 requires reset. Nonzero reads reset for an empty or
+mismatched epoch, V greater than H, an oversized gap, incomplete or mismatched
+publication evidence, a missing history ID after V, a missing required public
+parent, or suppression of a previously public row after V. Reading every
+surviving entry does not prove continuity: `Fold.Feed` records the greatest
+missing ID, and only queries with V at or beyond that floor avoid crossing it.
+Projection suppression also survives replay: linking a delivery to its permanent
+acceptance item removes the standalone public delivery row. Clients have no
+remove operation, so current remaining states cannot repair that earlier view.
+Changing `Shown` to false or dropping a queued send retains its row and does
+not itself require reset.
+
+For `afterVersion == 0`, an empty or matching epoch selects `NewestWindow` from
+the same captured publication, including its page metadata, active extras and
+parents. Positive-limit validation and the 256 ordered-row clamp still apply;
+a nonempty mismatched epoch requires reset. This window is not subject to the
+catch-up gap bound.
+
 `QueryResult` carries `State`, `Items`, `Epoch`, consumed `Version`, `LowerOrder`,
-`UpperOrder`, `Continuation`, `OlderExists` and `Err`. Items/content and range
-metadata are detached from one immutable usable publication, captured with its
+`UpperOrder`, `Continuation`, `OlderExists`, `FromVersion`, `ResetRequired` and
+`Err`. Successful nonzero catch-up certifies `(FromVersion, Version]` for its
+epoch and leaves all page fields zero. A reset carries `StateUsable`, current
+epoch/version and `ResetRequired: true`, with no items, covered range or page
+metadata; the separate error is nil. Acquire a fresh newest window rather than
+apply a partial catch-up. Items/content and range metadata are detached from
+one immutable usable publication, captured with its
 epoch/version under the store mutex; newer commits may still await folding.
 Rebuilding and unavailable queries return the existing snapshot state, with
 `ErrUnavailable` in `QueryResult.Err` for failure. Unloaded, retiring and closed
 stores return `StateNotLoaded`. Nonusable results expose no items, epoch,
-version or bounds/continuation. Validation and cancellation errors use the
-separate returned error; cancellation discards partial results and leaves the
+version, covered range, reset flag or page metadata. Validation and cancellation
+errors use the separate returned error; cancellation discards partial results and leaves the
 conversation worker running. Queries never load a conversation, wait for
 recovery or read history.
 
 `newQueryIndex` prepares permanent-ID/parent lookup, current-order sorting and
 active-row lookup from committed public items outside the global lock.
+`prepareCatchUp` adds sorted latest-public-touch lookup and copies coverage and
+suppression evidence reconstructed entry by entry, independently of replay
+chunking. Final `Item.Rev` alone misses an older child becoming public later.
 `Store.publish` installs it atomically with the matching snapshot, rebuilding
 on recovery/retry and each successful publication. Failure, unload and shutdown
 release worker references; a reader that already captured a publication can
@@ -185,16 +225,18 @@ parent traversal and returned-content copying run outside the lock, preserving
 history-writer and other-conversation progress.
 
 Request work is `O(log N + selected range + active rows + unique parents +
-returned content bytes)`; active rows apply only to newest windows. Index
+returned content bytes)`; catch-up selects touched rows by version, and active
+rows apply to catch-up and newest windows. No request scans the conversation,
+reads history or clones a full `Snapshot`/`Observe` baseline. Index
 preparation is separately `O(N log N)` per publication, in addition to fold/replay
 and checkpoint work. Bounded reads do not make recovery or publication cost
-independent of conversation length. They select complete current rows by order,
-whereas `Snapshot`/`Observe` clone full baselines and `Changes` supplies retained
+independent of conversation length. `HistoryPage`/`NewestWindow` select current
+rows by order; `CatchUp` selects current states by reconstructed touch version.
+`Snapshot`/`Observe` clone full baselines and `Changes` supplies retained
 live change ranges by consumed version. A bounded result is not a complete
 baseline for applying those ranges. These daemon-internal reads implement the
 [ADR 042 update-range contract](../decisions/042-daemon-built-thread.md#update-messages);
-durable catch-up (#3087) and wire handlers/capability activation (#2963) are
-separate consumers.
+wire handlers/capability activation (#2963) remain downstream.
 
 ### Isolation and lifecycle
 
@@ -239,9 +281,11 @@ unresolved children and private pending evidence needed by later joins. Full
 replay restores that state before following the tail again.
 Compatible recovery metadata preserves the epoch on reload in the same lifetime;
 reload retains no earlier change batches, so epoch equality alone cannot prove
-continuity from a pre-unload baseline. Use the reloaded publication as a new
-baseline or require `Changes` to prove the requested range. Unload alone never
-marks the lifetime clean. `Unload` validates IDs, returns
+continuity from a pre-unload baseline. After usable recovery, `CatchUp` can
+prove an in-bound saved version through reconstructed history evidence even
+without those batches. Live `Changes` still needs retained ranges or a new
+complete `Observe` baseline. Unload alone never marks the lifetime clean.
+`Unload` validates IDs, returns
 `history.ErrInvalidID` for invalid ones and reports generic persistence/recovery
 errors; repeated calls preserve the recorded result until another load.
 
@@ -264,6 +308,26 @@ cancels workers; callers must finish producer draining and tail catch-up before
 invoking it to preserve final commits.
 
 ### Store verification
+
+`TestCatchUpPublications` spans more than 64 separate publications after live
+range eviction, including no-item progress, arbitrary saved versions and an
+immediate H read. `TestCatchUpContracts` checks exact/above gap boundaries,
+epochs, future versions, missing query evidence and zero-version window parity.
+`TestCatchUpEvidence` checks late public appearance despite older revisions,
+hidden/dropped membership, detached content and suppression across clean restart
+with whole/single-entry replay. `TestCatchUpMissingHistory` distinguishes crossing
+a missing ID from starting at or beyond it.
+
+`TestCatchUpBoundedRecovery` counts actual history reads, item/index visits and
+allocations over 36,000 committed entries, separately measuring cold recovery
+and publication preparation. It repeats queries after clean restart and compatible
+unload/reload with a previously returned epoch/version and no retained live
+ranges. Its reference includes repeated touches, old active work, shared/multi-level
+parents and a late-publication child: revision-only selection would silently
+miss that child. `TestCatchUpReadiness` and `TestCatchUpIsolation` check unavailable
+recovery/retry and cancellation during actual index work, holding a captured
+publication through replacement, retirement and shutdown while writers and
+another conversation progress.
 
 `TestQuerySelection` and `TestQueryLimits` constrain continuous ties, empty and
 oldest bounds, hidden/dropped membership, shared/multi-level parents, active

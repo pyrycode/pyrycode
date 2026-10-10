@@ -373,8 +373,16 @@ func TestQueue_Lifecycle_RetryGiveUpAndShutdown(t *testing.T) {
 			}
 			if mode == "stale give up" {
 				cfg.Pending = func(error) bool {
-					if calls == 2 {
-						q.Remove("c", 1)
+					q.mu.Lock()
+					c := q.convs["c"]
+					head := c.items[0]
+					q.mu.Unlock()
+					if !q.Remove("c", head.id) {
+						t.Error("Remove refused the waiting head")
+					}
+					// An expired attempt for a removed head must not abandon it.
+					if q.giveUp("c", c, head, cfg.GiveUpAfter, errWedged) {
+						t.Error("stale give-up abandoned a removed head")
 					}
 					return false
 				}

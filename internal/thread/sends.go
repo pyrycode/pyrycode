@@ -71,6 +71,10 @@ func (f *Fold) sendFact(e history.Entry) bool {
 		item.Session, item.Agent, item.NoChild = message.Session, message.Agent, message.NoChild
 		// Preserve internal indexes held by main work; suppress only the public row.
 		f.messages[p.DeliveryEntryID] = -1
+		if f.touches[p.DeliveryEntryID] != 0 {
+			delete(f.touches, p.DeliveryEntryID)
+			f.suppressed = e.ID
+		}
 	} else {
 		item.Shown = status == "lost"
 	}
