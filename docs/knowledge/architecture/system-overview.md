@@ -46,6 +46,10 @@ pyrycode/
 │   ├── id_test.go             Format / uniqueness / validity table
 │   ├── registry.go            Registry: mutex-guarded conversation list + Load / Save (atomic temp+rename + 0o600/0o700, snapshot-then-write) / Create / Get / List(filter) / Update(id, fn); ListFilter (IsPromoted *bool)
 │   └── registry_test.go       Same-package; round-trip + atomic-rename + ordering + concurrent-readwrite race probe + List filter + Update hit/miss/pointer-stability
+├── internal/apps/             Standalone hosted-app manifest validation + durable host-scoped registrations
+│   ├── manifest.go            ValidateManifest: strict v1 JSON + canonical local identity; no filesystem or command checks
+│   ├── registry.go            Registry: serialized register/update/remove/list, host/record revisions and permanent tombstones
+│   └── storage.go             Open + exact storage schema validation + atomic registry.json writes
 ├── internal/pair/             QR pairing payload encode/decode + render (Phase 3 foundation)
 │   ├── payload.go             Payload struct, Encode (JSON → base64url no-pad), Decode (5-stage rejection), ErrInvalidPayload sentinel
 │   ├── payload_test.go        Same-package, table-driven; round-trip + format + stable-field-order + decode rejection table
@@ -96,6 +100,13 @@ go list -deps ./internal/control | grep -qx github.com/pyrycode/pyrycode/interna
 # the edge that does not exist — exits 0
 ! go list -deps ./internal/sessions/... | grep -qx github.com/pyrycode/pyrycode/internal/streamsup
 ```
+
+Hosted-app registration is a standalone leaf: `internal/apps` imports
+`internal/identity` for canonical UUID validation and stores registrations outside
+conversation/session state. Daemon consumers, lifecycle reconciliation and
+publication remain later work; this package establishes no readiness. See the
+[apps package overview](../features/apps-package.md) for its persistence and
+concurrency boundaries.
 
 ## Data Flow
 
