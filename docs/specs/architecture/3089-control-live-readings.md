@@ -152,3 +152,17 @@ proof remain pending #3077.
   `TestControlLiveReworkResetCaptureAfterDispatch` cover these interleavings under
   the race detector. Lock order remains boundary, recorder/resolver or cache, then
   owner; worker waits and registry persistence remain outside the boundary.
+
+- 2026-10-10: Rework finding 1 on `22c904f4`: inventory holds must not capture
+  independently of downstream fan-in. A shared inventory ingress captures source,
+  incarnation and generation once, atomically stores the hold payload/source and
+  admits the bounded inventory under `offerMu`, establishing family revisions
+  before forwarding. The immutable envelope carries that admission through all
+  remaining decorators and fan-in; the ordinary sink skips these already captured
+  inventory events. Persistence and delivery remain outside the boundary. Existing
+  nil attachments preserve the legacy parser chain. `TestControlLiveInventoryIngress`
+  exercises the real parser and factory-built holds across same-ID and changed-ID
+  transitions, identical fresh inventories, both model projections and independent
+  conversations. `TestControlLiveInventoryIngressOvertaking` checks same-generation
+  ordering when forwarding is delayed. No new exported API or goroutine is added;
+  the recorded split-depth sizing exception continues to apply.
