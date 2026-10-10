@@ -263,6 +263,17 @@ already terminal children alone cannot prove reopening. `TestChildReclassificati
 keeps active text and an unfinished ordinary call there, then checks both
 reopen after the late link and close on a genuine task final.
 
+**An ownership rejection test needs completed children as well.** Ancestor
+interruption can expose a detached unfinished child through a status mismatch,
+while an independently completed child keeps the same status with a missing
+parent. `TestThreadShadowPairRejectsChildOwnership` checks done child tools and
+finished nested Agent/Task rows against parent calls derived independently from
+raw facts; it rejects zero and wrong older parents and a main tool gaining one.
+`TestThreadShadowRawOwnerLateRepair` preserves supported report-only repair.
+These synthetic controls complement the
+[retained authenticated checkpoints](thread-package.md#shadow-lifecycle-and-evidence);
+Store/full-replay equality alone cannot detect a shared parenting error.
+
 `cmd/pyry.TestThreadAgentRecordedReplay` runs offline in the standard gate. It
 passes the committed `parent_tool_use_v2.1.259.json` through `streamsup.NewParser`
 and interactive raw-history emission into `Fold`. The test requires #2191's
