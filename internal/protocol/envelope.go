@@ -43,6 +43,16 @@ type Envelope struct {
 	// append's ID; absent or failed storage omits it. This conveys no authorization.
 	HistoryEntryID *uint64 `json:"history_entry_id,omitempty"`
 
+	// SessionID is live-state metadata supplied only for thread-capable delivery.
+	// Nil omits metadata; JSON null positively means no producing session; a JSON
+	// nonempty string names the producing session. RawMessage preserves omission
+	// versus null when decoding and re-encoding. Producers/consumers enforce this
+	// shape; it conveys no authorization and does not replace payload session fields.
+	SessionID json.RawMessage `json:"session_id,omitempty"`
+	// SessionStateCleared with payload {} clears this kind's session-scoped reading.
+	// Ordinary updates omit the flag. Delivery consumers enforce the empty payload.
+	SessionStateCleared bool `json:"session_state_cleared,omitempty"`
+
 	PayloadEncrypted bool `json:"payload_encrypted,omitempty"`
 }
 

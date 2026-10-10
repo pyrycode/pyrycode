@@ -346,6 +346,7 @@ func TestHelloAckPayload_WorkspaceRootRoundTrip(t *testing.T) {
 // which daemon build it is talking to. Add a line here with every new capability.
 func TestCapability_Constants_MatchSpec(t *testing.T) {
 	got := map[string]string{
+		"CapabilityThread":             CapabilityThread,
 		"CapabilityInteractive":        CapabilityInteractive,
 		"CapabilityQuestion":           CapabilityQuestion,
 		"CapabilityModelList":          CapabilityModelList,
@@ -353,6 +354,7 @@ func TestCapability_Constants_MatchSpec(t *testing.T) {
 		"CapabilityStopBackgroundTask": CapabilityStopBackgroundTask,
 	}
 	want := map[string]string{
+		"CapabilityThread":             "thread",
 		"CapabilityInteractive":        "interactive",
 		"CapabilityQuestion":           "question",
 		"CapabilityModelList":          "model_list",
