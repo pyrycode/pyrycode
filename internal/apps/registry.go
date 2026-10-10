@@ -2,6 +2,7 @@ package apps
 
 import (
 	"errors"
+	"reflect"
 	"sort"
 	"sync"
 )
@@ -10,13 +11,14 @@ const maxRevision uint64 = 9007199254740991
 const maxApps = 256
 
 var (
-	ErrInvalidIdentity = errors.New("apps: invalid identity")
-	ErrInvalidStorage  = errors.New("apps: invalid storage")
-	ErrConflict        = errors.New("apps: conflicting registration")
-	ErrNotFound        = errors.New("apps: registration not found")
-	ErrRemoved         = errors.New("apps: identity removed")
-	ErrCapacity        = errors.New("apps: registration capacity reached")
-	ErrExhausted       = errors.New("apps: revision exhausted")
+	ErrInvalidIdentity  = errors.New("apps: invalid identity")
+	ErrInvalidStorage   = errors.New("apps: invalid storage")
+	ErrConflict         = errors.New("apps: conflicting registration")
+	ErrNotFound         = errors.New("apps: registration not found")
+	ErrRemoved          = errors.New("apps: identity removed")
+	ErrCapacity         = errors.New("apps: registration capacity reached")
+	ErrExhausted        = errors.New("apps: revision exhausted")
+	ErrInvalidLifecycle = errors.New("apps: invalid lifecycle")
 )
 
 // LastError holds a safe lifecycle failure, never process output or file paths.
@@ -42,10 +44,11 @@ type Record struct {
 // Registry serializes durable mutations and readers. Open one owner per root;
 // concurrent independent owners or processes writing the same root are unsupported.
 type Registry struct {
-	mu       sync.Mutex
-	root     string
-	snapshot snapshot
-	persist  func(string, snapshot) error
+	mu        sync.Mutex
+	root      string
+	snapshot  snapshot
+	persist   func(string, snapshot) error
+	consumers map[*func(Change)]struct{}
 }
 
 // List returns detached records in app_id order and their committed host revision.
@@ -57,21 +60,29 @@ func (r *Registry) List() ([]Record, uint64) {
 }
 
 // Register persists a caller-minted local identity; equal manifests are no-ops.
-func (r *Registry) Register(data []byte) (bool, error) { return r.change("register", "", data) }
+func (r *Registry) Register(data []byte) (bool, error) { return r.change("register", "", data, nil) }
 
 // UpdateManifest replaces only the manifest of an existing matching identity.
 func (r *Registry) UpdateManifest(appID string, data []byte) (bool, error) {
-	return r.change("update", appID, data)
+	return r.change("update", appID, data, nil)
 }
 
 // Remove tombstones the identity permanently, retaining all source/build/data files.
 // Removing an existing tombstone again is a no-op.
-func (r *Registry) Remove(appID string) (bool, error) { return r.change("remove", appID, nil) }
-func (r *Registry) change(action, appID string, data []byte) (bool, error) {
+func (r *Registry) Remove(appID string) (bool, error) { return r.change("remove", appID, nil, nil) }
+func (r *Registry) change(action, appID string, data []byte, update *lifecycleUpdate) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if update != nil {
+		if !validID(update.serverID) {
+			return false, ErrInvalidIdentity
+		}
+		if update.serverID != r.snapshot.ServerID {
+			return false, ErrForeignHost
+		}
+	}
 	var manifest Manifest
-	if action != "remove" {
+	if action == "register" || action == "update" {
 		m, e := ValidateManifest(data, r.snapshot.ServerID)
 		if e != nil {
 			return false, e
@@ -103,7 +114,7 @@ func (r *Registry) change(action, appID string, data []byte) (bool, error) {
 	if index < 0 && action != "register" {
 		return false, ErrNotFound
 	}
-	if index >= 0 && action != "remove" {
+	if index >= 0 && (action == "register" || action == "update") {
 		if r.snapshot.Records[index].Manifest == manifest {
 			return false, nil
 		}
@@ -114,16 +125,27 @@ func (r *Registry) change(action, appID string, data []byte) (bool, error) {
 	if index < 0 && len(r.snapshot.Records) >= maxApps {
 		return false, ErrCapacity
 	}
+	next := cloneSnapshot(r.snapshot)
+	if update != nil {
+		applyLifecycle(&next.Records[index], update.fields)
+		if e := validateSnapshot(next); e != nil {
+			return false, ErrInvalidLifecycle
+		}
+		if reflect.DeepEqual(next.Records[index], r.snapshot.Records[index]) {
+			return false, nil
+		}
+	}
 	if r.snapshot.Revision == maxRevision {
 		return false, ErrExhausted
 	}
-	next := cloneSnapshot(r.snapshot)
 	next.Revision++
 	switch action {
 	case "register":
 		next.Records = append(next.Records, Record{AppID: appID, Manifest: manifest, Title: manifest.Title(), Desired: "available", State: "stopped", Revision: next.Revision})
 	case "update":
 		next.Records[index].Manifest = manifest
+		next.Records[index].Revision = next.Revision
+	case "lifecycle":
 		next.Records[index].Revision = next.Revision
 	case "remove":
 		next.Records = append(next.Records[:index], next.Records[index+1:]...)
@@ -134,16 +156,14 @@ func (r *Registry) change(action, appID string, data []byte) (bool, error) {
 		return false, e
 	}
 	r.snapshot = next
+	r.notify(appID)
 	return true, nil
 }
 func cloneSnapshot(s snapshot) snapshot {
 	s.Records = append([]Record{}, s.Records...)
 	s.Tombstones = append([]tombstone{}, s.Tombstones...)
 	for i := range s.Records {
-		if s.Records[i].LastError != nil {
-			copy := *s.Records[i].LastError
-			s.Records[i].LastError = &copy
-		}
+		s.Records[i] = cloneRecord(s.Records[i])
 	}
 	return s
 }

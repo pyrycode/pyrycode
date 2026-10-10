@@ -15,7 +15,7 @@ func testStorageDocument(t *testing.T) map[string]any {
 		"server_id": testHost, "revision": 2,
 		"records": []any{map[string]any{
 			"app_id": testApp, "manifest": testMap(t), "title": "App",
-			"desired": "available", "state": "stopped", "revision": 1,
+			"desired": "stopped", "state": "stopped", "revision": 1,
 			"active_release": "1.0.0", "pending_release": "2.0.0",
 			"last_error": map[string]any{"code": "app.io_failed", "message": "Failure"},
 		}},

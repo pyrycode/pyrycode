@@ -1,9 +1,10 @@
 # Hosted apps
 
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
-defines the hosting design. Strict manifest validation and durable registration
-are implemented in the standalone `internal/apps` package; daemon integration,
-publication, the template and native viewers remain later work. This reference
+defines the hosting design. Strict manifest validation, durable registration,
+lifecycle mutations and restart normalization are implemented in the standalone
+`internal/apps` package; daemon integration, publication, the template and native
+viewers remain later work. This reference
 preserves the contract's fields, limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 used by daemon, desktop and mobile consumers. Runtime and isolation choices are
@@ -82,40 +83,74 @@ There are at most 256 live registrations; admission of a 257th fails unchanged.
 `Registry.Register` commits the manifest title, `desired: available` and
 `state: stopped`, with active/pending releases and last error unset. Re-registering
 a semantically identical validated manifest is a no-op regardless of JSON
-formatting or key order; a conflicting manifest fails unchanged.
+formatting, key order or subsequent lifecycle changes; a conflicting manifest
+fails unchanged.
 `Registry.UpdateManifest` requires an existing matching host/app identity and
 replaces only its stored manifest, preserving the committed title, active release
 and other lifecycle fields. An identical update is a no-op. A changed manifest
 title or release version never commits a display-title change or activates a
 release by itself. Registration alone proves neither publication nor readiness.
 
+`Registry.UpdateLifecycle(serverID, appID, fields)` atomically replaces the
+committed title, desired/observed state, active/pending releases and safe last
+error of an existing local registration. Identity and manifest stay unchanged;
+revisions remain registry-assigned. Foreign, unknown or tombstoned identities
+cannot be updated. `Lifecycle` is a complete replacement, with empty release strings and
+nil `LastError` meaning unset. Title/release bounds and record validation apply,
+including an active release for `running`. Callers supply confirmed observations
+and static safe errors; the package starts no processes and checks no health.
+
 Missing `APPS_ROOT/registry.json` opens empty at host revision 0. Each changed
-registration, manifest update or removal advances the durable host sequence once
-and stamps the affected record or tombstone with that revision, in
-1–9007199254740991. No-ops leave it unchanged, including at exhaustion; exhaustion
+registration, manifest update, lifecycle mutation or removal advances the durable
+host sequence once and stamps the affected record or tombstone with that revision
+in 1–9007199254740991. No-ops leave it unchanged, including at exhaustion; exhaustion
 refuses further changes without wrapping. Persistence completes before readers
-can observe the candidate snapshot. Failed writes preserve committed records,
-tombstones and revision. Stable serialization uses sorted records/tombstones,
-0700 registry directories and 0600 files, with a same-directory temporary file,
-sync, close and rename. Reopen preserves committed fields and revisions without
-advancing the sequence. Corrupt, invalid or foreign-host storage is rejected
+can observe the candidate snapshot or consumers receive a change. Failed writes
+preserve committed records, tombstones and revision and emit no notifications.
+Stable serialization uses sorted records/tombstones, 0700 registry directories
+and 0600 files, with a same-directory temporary file,
+sync, close and rename. Corrupt, invalid or foreign-host storage is rejected
 without rewriting its bytes.
+
+`Open` validates storage, then recomputes observed state before exposing the
+registry: every `available` record with an active release becomes `starting`;
+every unpublished or intentionally stopped record becomes `stopped`, regardless
+of stored state. Identity, manifest, committed title, desired intent, releases,
+safe errors and tombstones are preserved. Only records whose state changes
+receive new revisions, assigned in stable `app_id` order. Other record and
+tombstone revisions stay unchanged. All normalization changes persist in one
+snapshot write before opening succeeds. Insufficient remaining revisions or a
+failed write returns no registry and leaves the committed file unchanged. An
+unchanged reopen performs no write and advances no revision, even at exhaustion.
+Stored `running` never proves publication or current readiness.
+
+`Registry.Subscribe(func(Change))` delivers future committed changes in increasing
+host revision order across concurrent mutations. Each consumer receives its own
+detached whole record, or a removal tombstone carrying server/app identity and
+revision with nil `Record`. Later changes and consumer edits cannot alter earlier
+deliveries. No notification escapes for a no-op, rejected mutation or failed
+write. Opening exposes the fully committed normalized baseline through
+`Registry.List`; subscriptions replay neither that baseline nor previous-process
+changes, and store no durable events or conversation history. Callbacks run
+synchronously under the registry mutex and must return promptly without calling
+any registry method, including unsubscribe. The returned unsubscribe is
+idempotent. Discovery wire mapping and relay/daemon consumers remain #3138/#3139.
 
 `Registry.Remove` deletes only the registration and durably tombstones its
 identity. Source, build and data files remain byte-for-byte intact. Registration
 and updates cannot revive that identity, including after reopen; removing an
 existing tombstone again is a no-op. Removal frees a live-registration slot, and
-tombstones do not count toward the limit. Lifecycle mutations, restart
-normalization and their committed revisions/notifications remain pending #3144;
-opening this store preserves lifecycle fields without treating them as readiness
-evidence. See the [apps package overview](knowledge/features/apps-package.md)
+tombstones do not count toward the limit. Use one registry owner per root;
+after reopening, stop using the previous owner because its stale snapshot could
+overwrite normalization revisions. See the
+[apps package overview](knowledge/features/apps-package.md)
 for storage, concurrency and regression-test constraints.
 
 ### Registration and observed state
 
-A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration is not proof of readiness. New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
+A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists caller-supplied observations; health checks and process/retry reconciliation remain separate work (#3122). New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
 
-Discovery records have these exact fields; unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality does not change record nullability.
+The discovery wire contract has these exact fields; its mapping remains #3138. Unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality and the package's unset storage values do not change record nullability.
 
 | Record field | JSON type | Meaning |
 |---|---|---|
@@ -125,14 +160,16 @@ Discovery records have these exact fields; unknown wire fields are ignored for a
 | `state` | string | `starting`, `running`, `stopped` or `failed`, observed state. |
 | `active_release` | string or null | Previously confirmed release; null until first successful publish. |
 | `pending_release` | string or null | Candidate being validated/started; null otherwise. |
-| `last_error` | object or null | Null on clean operation; otherwise `code` (error vocabulary below) and static `message` (1–160 bytes). No paths, logs or stacks. |
+| `last_error` | object or null | Null on clean operation; otherwise `code` (error vocabulary below) and static `message` (1–160 UTF-8 bytes). No paths, logs or stacks. |
 | `revision` | integer | Durable host-wide change sequence, 1–9007199254740991; this record's latest change. |
 
 `running` requires an active release and confirmed health. `starting` covers reconciliation when no active process is ready. `stopped` covers intentional stop or a not-yet-published registration. `failed` means desired availability cannot be met. If the old service keeps running during candidate build, state stays `running` with a pending release. During exclusive migration/cutover state becomes `starting`, requests are quiesced, and the active release still denotes the last confirmed release. Successful cutover atomically updates active release/title, clears pending/error and reports running. Failed candidate startup/build restores running on the previous release with `last_error` set; an initially failed publish has null active release and state failed. A stopped registration may retain its active release; opening it shows stopped and does not silently start it.
 
-The host change sequence advances for registration, desired/state/release/error changes and removal; persist before announcing. It never resets on reconnect/restart or wraps; exhaustion refuses changes rather than reusing revisions. Updates are whole records. `app_removed` carries a tombstone revision and removes only the registration; deletion does not silently erase data, and explicit data deletion is outside v1. No event-ring or conversation-history replay is used for apps.
+The registry validates `running`'s active release; confirmed health is the caller's obligation. A successful cutover supplies the new title/active release, `state: running`, unset pending release and unset error together in one `UpdateLifecycle`. `LastError` accepts only the [contract error codes](#errors) and a static message of 1–160 UTF-8 bytes with no controls or leading/trailing whitespace. Callers must choose safe metadata: validation cannot establish that text is safe by its provenance. Raw parser, process or I/O diagnostics never become `last_error`; package errors are returned separately from transport codes.
 
-Observed state is recomputed after daemon restart: a persisted running record is never readiness evidence. Mark an available app with an active release starting before launching/probing it; a registration without a published release stays stopped until initial publish. Crash/health-failure reconciliation uses exponential retry delays of 1, 2, 4, 8, 16, then 30 seconds, resets after 60 seconds healthy, and stops immediately when desired becomes stopped. Every launched process has a new private generation even when app ID/release/port are reused.
+The host change sequence advances for registration, manifest/title/desired/state/release/error changes and removal, including restart state normalization; persist before announcing. It never resets on reconnect/restart or wraps; exhaustion refuses changes rather than reusing revisions. Semantic no-ops advance nothing. Committed package updates are ordered detached whole records, and removals are identity/revision tombstones as described above. The wire contract's `app_removed` carries a tombstone revision and removes only the registration; deletion does not silently erase data, and explicit data deletion is outside v1. No event-ring or conversation-history replay is used for apps.
+
+`Open` durably normalizes observed state before any launch/probe or reader exposure: available apps with active releases become starting; unpublished or intentionally stopped apps become stopped. Only changed states receive new revisions; unchanged reopen adds none. Health checks and process reconciliation (#3122) must then establish fresh readiness. The remaining reconciliation contract uses exponential retry delays of 1, 2, 4, 8, 16, then 30 seconds, resets after 60 seconds healthy, and stops immediately when desired becomes stopped. Every launched process has a new private generation even when app ID/release/port are reused.
 
 ## Runtime and layout
 

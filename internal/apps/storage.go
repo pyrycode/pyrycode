@@ -24,8 +24,13 @@ type snapshot struct {
 
 // Open accepts a canonical host identity and absolute private app root.
 // Missing storage is empty; invalid storage is never repaired or rewritten.
-// Persisted lifecycle fields are preserved, not normalized into readiness.
+// Observed states are normalized and committed before exposure; stored running
+// never proves readiness. Intent, releases and safe error metadata are preserved.
 func Open(root, serverID string) (*Registry, error) {
+	return openRegistry(root, serverID, writeSnapshot)
+}
+
+func openRegistry(root, serverID string, persist func(string, snapshot) error) (*Registry, error) {
 	if !validID(serverID) {
 		return nil, ErrInvalidIdentity
 	}
@@ -60,7 +65,10 @@ func Open(root, serverID string) (*Registry, error) {
 	} else {
 		s = snapshot{ServerID: serverID, Records: []Record{}, Tombstones: []tombstone{}}
 	}
-	return &Registry{root: root, snapshot: s, persist: writeSnapshot}, nil
+	if e := normalizeSnapshot(root, &s, persist); e != nil {
+		return nil, e
+	}
+	return &Registry{root: root, snapshot: s, persist: persist}, nil
 }
 
 func validStorageSchema(value any) bool {
