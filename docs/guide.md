@@ -503,10 +503,11 @@ Duplicate or nested additional roots collapse to their parent by path components
 siblings such as `notes` and `notes-old` remain distinct.
 
 Transcript storage is automatic at `~/.pyry/memory/recent-transcripts`, with
-existing ancestors and symlinks resolved. It is daemon-owned and cannot be chosen
-with a flag. It may not exist yet; configuring or inspecting settings does not
-create it. Effective search roots combine the vault, additional roots and
-transcripts, indexing overlapping subtrees once while retaining the vault write
+existing ancestors and symlinks resolved when validating settings. It is
+daemon-owned and cannot be chosen with a flag. It may not exist yet; configuring
+or inspecting settings does not create it. Effective search roots combine the
+vault, additional roots and transcripts, indexing overlapping subtrees once while
+retaining the vault write
 destination and transcript ownership separately.
 
 The vault cannot equal, contain or sit inside either transcript storage or
@@ -517,6 +518,49 @@ through existing ancestors; broken symlinks and file ancestors are errors. These
 checks apply to separate vaults immediately and to the default vault at effective
 resolution. Configuration neither creates nor seeds vaults, and leaves existing
 vault files and instructions unchanged.
+
+### Recent conversation transcripts
+
+After saving valid memory settings, restart the daemon to activate automatic
+Markdown export at `~/.pyry/memory/recent-transcripts`. The daemon resolves the
+settings against its startup workspace and discovers registered chats, including
+chats created later. With readable history and writable transcript storage,
+eligible committed text appears within 60 seconds of persistence. Export runs
+without a connected client, an indexer or a scheduled knowledge-capture run.
+Unconfigured memory creates no transcript storage. Invalid settings or export
+failures leave ordinary chat operational and produce content-free diagnostics.
+
+Transcripts contain delivered conversational user text from Claude and Codex
+chats, preserving the complete recorded text and whitespace in delivery order.
+They include conversation ID and title, recorded session and agent identity,
+stable message IDs, source timestamps and speaker. Queued, dropped and lost
+acceptances, assistant output, injected or reset wrap-up instructions, background
+memory-capture executions and non-user events are excluded. Unresolved historical
+session attribution is explicitly unknown. Completed assistant text is pending
+[#3151](https://github.com/pyrycode/pyrycode/issues/3151).
+
+Files are grouped by logical session. A recorded reset/clear, agent switch or
+other replacement with a distinct successor routing session closes the
+predecessor and starts the successor. Idle or capacity eviction, disconnect,
+restart or respawn retaining the routing session does not close it. A restart
+without a recorded successor also leaves it open; a recorded distinct successor
+is a replacement. Each file reports open/closed state, a closing history entry
+only when closed, and the last delivered-message entry represented. Late text
+attributed to the predecessor updates that file without changing its closing
+entry or entering the successor.
+
+Open transcripts retain the complete session without an age limit or a cutoff
+after intermediate knowledge capture. Closed files are retained too. Persisted
+conversation history remains the source of truth: reopening surviving history
+rebuilds missing derived files with the same transcript and message identities.
+Publication replaces each file atomically; failed publication preserves the
+previous complete file and retries. New private directories use mode 0700 and
+files 0600. Export rejects symlink redirects away from its daemon-owned storage
+and never modifies source history, vault notes or additional knowledge roots.
+
+Export alone does not make these files searchable by an agent. Search additionally
+requires the [managed index](https://github.com/pyrycode/pyrycode/issues/3099) and
+[agent search integration](https://github.com/pyrycode/pyrycode/issues/3103).
 
 ### Status and credentials
 
@@ -556,11 +600,11 @@ storage, malformed config and invalid saved choices cause sanitized errors and
 nonzero exit with no success JSON. Configure/status output and diagnostics expose
 no tokens, references or credential backend/source metadata.
 
-Saving settings alone does not install or start memory. Future daemon application
-will occur after restart when runtime support is added. Configured status makes
-no installation, indexing or capture-readiness claim. These operations do not
-launch, modify or take over manual memsearch; existing client search availability
-continues to depend on its own evidence.
+Configured status makes no installation, indexing or capture-readiness claim.
+Saved valid settings activate transcript export after daemon restart as described
+above; saving settings does not install the managed index or start knowledge
+capture. Configure/status do not launch, modify or take over manual memsearch;
+existing client search availability continues to depend on its own evidence.
 
 ## CLI transparency
 
