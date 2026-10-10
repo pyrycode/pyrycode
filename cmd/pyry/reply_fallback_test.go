@@ -95,8 +95,14 @@ func TestReplyFallbackHelperProcess(t *testing.T) {
 			time.Sleep(time.Second)
 		}
 	}
+	if delay, err := time.ParseDuration(os.Getenv("PYRY_REPLY_RESULT_DELAY")); err == nil {
+		time.Sleep(delay)
+	}
 	if os.Getenv("PYRY_REPLY_RAW_MODE") != "1" {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"type": "result", "result": os.Getenv("PYRY_REPLY_OUTPUT"), "is_error": os.Getenv("PYRY_REPLY_ERROR") == "1"})
+	}
+	if delay, err := time.ParseDuration(os.Getenv("PYRY_REPLY_EXIT_DELAY")); err == nil {
+		time.Sleep(delay)
 	}
 	code, _ := strconv.Atoi(os.Getenv("PYRY_REPLY_EXIT"))
 	os.Exit(code)
@@ -311,7 +317,14 @@ func TestReplyFallbackProcessEvidence(t *testing.T) {
 					cancel(deadline.Err())
 				}
 			}
-			a.awaitReturn(t, 12*time.Second)
+			a.awaitReturn(t, replyFallbackBudget)
+			if mode == "own deadline" {
+				record := a.record(t)
+				elapsed, ok := record["attempt_ms"].(float64)
+				if !ok || elapsed < float64(replyFallbackDeadline.Milliseconds()) || elapsed >= float64(replyFallbackBudget.Milliseconds()) {
+					t.Fatal("hung child exceeded the total budget or used the wrong own deadline")
+				}
+			}
 			if mode == "success" {
 				if a.err != nil || a.text != "private-generated-sentinel" {
 					t.Fatal("success execution contract changed")

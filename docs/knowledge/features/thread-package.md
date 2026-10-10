@@ -214,9 +214,30 @@ See [isolation and lifecycle](thread-package-background-store.md#isolation-and-l
 Epoch reuse establishes compatible item identity; retained change-range
 continuity needs separate proof. `Store.Observe` acquires a detached complete
 baseline, and `Store.Changes` proves a range only from retained publication
-boundaries in the current worker. Unload/reload, retry and a new store lifetime retain no old
-batches, even when recovery preserves the epoch. Missing ranges or a different
-epoch explicitly return `BaselineRequired`; callers acquire a fresh baseline
-rather than infer continuity from epoch equality. See the
+boundaries in the current worker, limited to 64 batches and 1 MiB. Unload/reload,
+retry and a new store lifetime retain no old batches, even when recovery
+preserves the epoch. Missing live ranges or a different epoch explicitly return
+`BaselineRequired`; live consumers acquire a fresh complete baseline.
+
+`Store.CatchUp` proves reconnect continuity separately from committed history
+and the current fold. Clean epoch reuse supports persisted nonzero versions
+within `MaxCatchUpGap = 1024` history IDs only after recovery becomes usable
+and the requested range passes coverage/suppression checks. Compatible
+unload/reload offers the same reconstructed continuity without retained live
+batches; epoch equality alone remains insufficient. Saved versions need not
+coincide with publication boundaries. Catch-up evidence and indexes remain
+disposable, history-derived query data, reconstructed on every load/retry;
+cached items never establish the range or seed continuation.
+
+Recovery records public touches and appearances entry by entry, independently
+of replay chunks. A child's first public appearance may follow its final `Rev`,
+so revision-only selection loses it after restart. Reading all surviving history
+also cannot establish continuity across missing IDs; the greatest missing ID
+sets a floor for usable nonzero catch-up. Suppression of an earlier public
+projection requires reset because clients cannot remove it, while hidden/dropped
+rows still belong to `Fold.Items`. See the
+[bounded query contract](thread-package-background-store.md#bounded-queries)
+for full-state/active/parent closure, reset metadata and zero-version windows,
+and the
 [observation contract](thread-package-background-store.md#loading-and-replay-readiness)
 for bounded retention and linked delivery suppression.

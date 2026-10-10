@@ -835,8 +835,9 @@ func TestInteractiveStream_FallbackReplySuggestionSetThenClear(t *testing.T) {
 		logSource()
 		t.Fatal("exchange did not complete")
 	}
-	// Includes the two-second native window and ten-second production attempt.
-	if !w.pumpUntil(t, frames, 15*time.Second, func() bool { return w.setRev != 0 }) {
+	// Includes two seconds for native priority, the 30-second total fallback
+	// budget and three seconds for transport and scheduling.
+	if !w.pumpUntil(t, frames, 35*time.Second, func() bool { return w.setRev != 0 }) {
 		logSource()
 		t.Fatal("production Haiku fallback absent after completed exchange")
 	}

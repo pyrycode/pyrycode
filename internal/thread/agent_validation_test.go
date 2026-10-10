@@ -14,7 +14,7 @@ func testAgentNeutralFact(t *testing.T, initial []history.Entry, bad history.Ent
 	testFeed(t, f, initial...)
 	testFeed(t, want, initial...)
 	testFeed(t, f, bad)
-	want.version = bad.ID
+	testFeed(t, want, testEntry(bad.ID, "unknown", `{}`))
 	if !reflect.DeepEqual(f, want) {
 		t.Fatal("unusable identity changed items, pending joins or attribution")
 	}
