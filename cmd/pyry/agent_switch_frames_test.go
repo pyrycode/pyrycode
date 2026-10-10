@@ -117,9 +117,10 @@ func (w *switchWire) read() (string, protocol.Envelope) {
 }
 
 type gatedRelaySwitch struct {
-	inner   relay.AgentSwitcher
-	entered chan context.Context
-	release chan struct{}
+	inner     relay.AgentSwitcher
+	entered   chan context.Context
+	release   chan struct{}
+	completed chan struct{}
 }
 
 func (g gatedRelaySwitch) SwitchAgent(ctx context.Context, p protocol.SwitchAgentPayload) relay.AgentSwitchOutcome {
@@ -133,7 +134,21 @@ func (g gatedRelaySwitch) SwitchAgent(ctx context.Context, p protocol.SwitchAgen
 	case <-ctx.Done():
 		return relay.AgentSwitchOutcome{}
 	}
-	return g.inner.SwitchAgent(ctx, p)
+	result := g.inner.SwitchAgent(ctx, p)
+	select {
+	case g.completed <- struct{}{}:
+	case <-ctx.Done():
+	}
+	return result
+}
+
+func (g gatedRelaySwitch) waitCompleted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.completed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("switch adapter did not finish")
+	}
 }
 
 func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
@@ -153,7 +168,7 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 	capture := &questionLogCapture{completed: make(chan struct{}, 1)}
 	logger := slog.New(slog.NewTextHandler(capture, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	adapter := &relayAgentSwitcher{switcher: sw}
-	gate := gatedRelaySwitch{inner: adapter, entered: make(chan context.Context, 1), release: make(chan struct{}, 1)}
+	gate := gatedRelaySwitch{inner: adapter, entered: make(chan context.Context, 1), release: make(chan struct{}, 1), completed: make(chan struct{}, 1)}
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil }, StaticPriv: key.Bytes(), Devices: paired, ServerID: string(identity.NewServerID()), Logger: logger, AgentSwitcher: gate, CodexConversation: codexConversation(reg, func(id string) (string, bool) {
 		h, err := pool.HarnessFor(sessions.SessionID(id))
 		return h, err == nil
@@ -283,6 +298,9 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 			t.Fatal("unpersisted outcome")
 		}
 		oldID = row.CurrentSessionID
+		// Outcome frames can precede release of the reset exclusion. Join the
+		// adapter before issuing another switch or changing its configuration.
+		gate.waitCompleted(t)
 	}
 	// Refusal is correlated and silent apart from its static error.
 	w.request("requester", protocol.SwitchAgentPayload{ConversationID: switchConvID, Agent: "codex", Model: "ZZPRIVATEFAILUREMARKERZZ"})
@@ -294,6 +312,7 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 	if id != "requester" || e.Type != protocol.TypeError || e.InReplyTo == nil || *e.InReplyTo != 2871 || refusal.Message != relay.MsgSettingsModelNotOffered || refusal.Retryable {
 		t.Fatalf("refusal=%+v / %+v", e, refusal)
 	}
+	gate.waitCompleted(t)
 	// Persistence fails after wrap-up: all status edges close, with no new row.
 	path := sw.registryPath
 	adapter.switcher.registryPath = filepath.Join(t.TempDir(), "ZZPRIVATEFAILUREMARKERZZ", "row.json")
@@ -321,6 +340,7 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 	if row.CurrentSessionID != oldID {
 		t.Fatal("failure changed binding")
 	}
+	gate.waitCompleted(t)
 	adapter.switcher.registryPath = path
 	// A bootstrap-backed old row makes cleanup deterministically refuse removal.
 	// A nonempty Switch ID must still publish its committed row, with no refusal.
@@ -377,6 +397,7 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 			}
 		}
 	}
+	gate.waitCompleted(t)
 	capture.mu.Lock()
 	logs := capture.buf.String()
 	capture.mu.Unlock()
