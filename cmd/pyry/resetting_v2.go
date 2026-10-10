@@ -187,7 +187,7 @@ func (e *resettingEmitterV2) emit(convID string, active bool, phase, handoff str
 		return
 	}
 
-	src := daemonLiveSource{}
+	var src daemonLiveSource
 	if e.source != nil {
 		src = *e.source
 	} else {
