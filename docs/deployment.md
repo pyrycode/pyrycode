@@ -313,6 +313,40 @@ chmod 600 ~/.config/pyry/elli-claude-token
 
 **Client visibility.** A paired client can ask the daemon which account source it uses and whether its latest read is working — see [`guide.md` § Claude account source](guide.md#claude-account-source) and [`protocol-mobile.md` § Claude account source](protocol-mobile.md#claude-account-source) ([#2816](https://github.com/pyrycode/pyrycode/issues/2816), [#2838](https://github.com/pyrycode/pyrycode/issues/2838), [#2839](https://github.com/pyrycode/pyrycode/issues/2839)).
 
+## Memory credentials
+
+Provision memory credentials on the daemon host by running
+`pyry memory credential set openai` and `pyry memory credential status openai`
+as the **local service user**, with `HOME` pointing to that user's home directory.
+These local commands need neither a daemon nor an interactive prompt. Feed the
+token to set through stdin; see the [guide](guide.md#memory-credentials) for
+input limits, JSON output and replacement behavior. Running them as another
+operator account provisions that account's storage instead of the service's.
+
+The file backend keeps tokens and persisted non-secret selection metadata under
+`~/.pyry/memory/credentials/`, outside vaults and ordinary settings. `HOME` must
+be owned by the invoking service user and not writable by group or others.
+Each storage directory (`~/.pyry/`, `~/.pyry/memory/` and
+`~/.pyry/memory/credentials/`) must be owned by that user with exactly mode 0700.
+Token and selection files must be service-user-owned regular files with exactly
+mode 0600. Directories and files are created with these permissions immediately.
+The lifecycle rejects symlinks and checks ownership, type and mode on opened
+descriptors; it refuses unsafe existing storage without changing permissions or
+overwriting it. An existing `~/.pyry/` with broader permissions also fails this
+check.
+
+Selection metadata persists the file backend and an opaque memory reference;
+it contains no token or arbitrary path. The reference remains stable when the
+token is replaced. Failed replacements preserve the previously committed
+selection and token, while unsafe storage continues to make status and
+resolution fail until the problem is corrected.
+
+Memory credentials belong to the local service user and are independent of the
+daemon's [Claude account source](#claude-account-source) and the operator's
+interactive Claude login. Memory references cannot select Claude account/login
+entries. This lifecycle uses protected file storage; OS-store access and
+preference will be added by [#3113](https://github.com/pyrycode/pyrycode/issues/3113).
+
 ## See also
 
 - [`guide.md`](guide.md) — full user guide
