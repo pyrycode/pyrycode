@@ -230,3 +230,107 @@ func shadowRawAgent(h shadowHistory, cp shadowCheckpoint, item thread.Item, sour
 	}
 	return nil
 }
+
+// shadowLifetimes maps each retained entry to the producer lifetime current in
+// its own source at that point, so parent joins can be checked per lifetime.
+func shadowLifetimes(h shadowHistory, version uint64) map[uint64]string {
+	current := map[history.SessionProvenance]string{}
+	out := map[uint64]string{}
+	for _, entry := range h.Entries {
+		if entry.ID > version {
+			break
+		}
+		var source history.SessionProvenance
+		if entry.Session != nil {
+			source = *entry.Session
+		}
+		var p struct {
+			Lifetime string `json:"lifetime_id"`
+		}
+		_ = json.Unmarshal(entry.Payload, &p)
+		if p.Lifetime != "" {
+			current[source] = p.Lifetime
+		}
+		out[entry.ID] = current[source]
+	}
+	return out
+}
+
+// shadowRawParentCall reads the parent call that raw facts record for a row,
+// independently of Item.Parent. Text carries it on its creating delta. Work
+// carries it on its creation, and later supported evidence naming the same
+// call in the same source can repair it; the newest recorded parent wins.
+func shadowRawParentCall(h shadowHistory, version uint64, item thread.Item) string {
+	read := func(entry history.Entry) (call, parent string) {
+		var p struct {
+			Use        string `json:"tool_use_id"`
+			Call       string `json:"tool_call_id"`
+			Parent     string `json:"parent_tool_use_id"`
+			ParentCall string `json:"parent_tool_call_id"`
+		}
+		_ = json.Unmarshal(entry.Payload, &p)
+		call, parent = p.Use, p.ParentCall
+		if call == "" {
+			call = p.Call
+		}
+		if parent == "" {
+			parent = p.Parent
+		}
+		return call, parent
+	}
+	source := h.Entries[item.ID-1]
+	call, parent := read(source)
+	if item.Kind == "assistant_message" || call == "" {
+		return parent
+	}
+	for _, entry := range h.Entries {
+		if entry.ID > version {
+			break
+		}
+		if !reflect.DeepEqual(entry.Session, source.Session) {
+			continue
+		}
+		if c, p := read(entry); c == call && p != "" {
+			parent = p
+		}
+	}
+	return parent
+}
+
+// shadowRawOwner requires Item.Parent to be exactly the older visible agent
+// whose recorded launch the raw parent call names, in the same source and
+// producer lifetime, and zero when raw facts name no parent. Completed and
+// running rows are checked alike, so ancestor closure cannot mask a lost owner.
+func shadowRawOwner(h shadowHistory, cp shadowCheckpoint, item thread.Item, older map[uint64]thread.Item, lifetimes map[uint64]string) error {
+	call := shadowRawParentCall(h, cp.Version, item)
+	if call == "" {
+		if item.Parent != 0 {
+			return errors.New("row gained a parent its raw facts do not record")
+		}
+		return nil
+	}
+	want := uint64(0)
+	for id, candidate := range older {
+		if candidate.Kind != "agent" || id >= item.ID || candidate.Session != item.Session || candidate.Agent != item.Agent {
+			continue
+		}
+		var launch protocol.ToolUsePayload
+		if json.Unmarshal(h.Entries[id-1].Payload, &launch) != nil || launch.ToolUseID != call {
+			continue
+		}
+		if a, b := lifetimes[id], lifetimes[item.ID]; a != "" && b != "" && a != b {
+			continue
+		}
+		// One group keeps its first launch for a call ID.
+		if want == 0 || id < want {
+			want = id
+		}
+	}
+	if want == 0 {
+		return errors.New("child row shown without its recorded older parent")
+	}
+	if item.Parent != want {
+		return errors.New("child row lost or changed its recorded parent")
+	}
+	return nil
+}

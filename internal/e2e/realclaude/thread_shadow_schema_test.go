@@ -226,6 +226,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 			return fmt.Errorf("raw checkpoint version=%d: %w", cp.Version, err)
 		}
 		ids := map[uint64]thread.Item{}
+		lifetimes := shadowLifetimes(h, cp.Version)
 		orders := map[uint64]bool{}
 		foundQueue, foundChild, settled, foundDivider := false, false, false, false
 		var foldedMain strings.Builder
@@ -249,17 +250,15 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 					return errors.New("work turn differs from raw creation")
 				}
 			}
+			if item.Kind == "agent" || item.Kind == "tool_call" || item.Kind == "assistant_message" {
+				if err := shadowRawOwner(h, cp, item, ids, lifetimes); err != nil {
+					return err
+				}
+			}
 			if item.Parent != 0 {
 				parent, ok := ids[item.Parent]
 				if !ok || parent.ID >= item.ID || parent.Kind != "agent" || parent.Session != item.Session || parent.Agent != item.Agent {
 					return errors.New("child parent or source ownership invalid")
-				}
-				var child protocol.AssistantDeltaPayload
-				_ = json.Unmarshal(source.Payload, &child)
-				var launch protocol.ToolUsePayload
-				_ = json.Unmarshal(parent.Content, &launch)
-				if item.Kind == "assistant_message" && child.ParentToolUseID != launch.ToolUseID {
-					return errors.New("child attached to wrong recorded parent")
 				}
 				if bytes.Contains(item.Content, []byte("SHADOW_CHILD")) {
 					foundChild = true

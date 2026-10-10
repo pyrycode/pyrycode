@@ -226,3 +226,116 @@ func TestThreadShadowRawAgentLifecycle(t *testing.T) {
 		})
 	}
 }
+
+// Completed parent-attributed work must keep the parent its raw facts name.
+// The children are already terminal, so ancestor interruption cannot be what
+// rejects a detached or misattached row. Synthetic controls, never artifacts.
+func TestThreadShadowPairRejectsChildOwnership(t *testing.T) {
+	children := []testShadowFact{
+		{"tool_use", `{"turn_id":"child","parent_tool_use_id":"agent","tool_use_id":"nested","name":"Task","input":{"prompt":"controlled"}}`},
+		{"tool_result", `{"turn_id":"child","parent_tool_use_id":"agent","tool_use_id":"nested","result_summary":"controlled nested","is_error":false}`},
+		{"tool_use", `{"turn_id":"child","parent_tool_use_id":"agent","tool_use_id":"read","name":"Read","input":{"file_path":"$HOST_PATH"}}`},
+		{"tool_result", `{"turn_id":"child","parent_tool_use_id":"agent","tool_use_id":"read","result_summary":"controlled read","is_error":false}`},
+	}
+	find := func(t *testing.T, items []thread.Item, call string) int {
+		t.Helper()
+		for i, item := range items {
+			var content struct {
+				Call string `json:"tool_use_id"`
+			}
+			_ = json.Unmarshal(item.Content, &content)
+			if content.Call == call && (item.Kind == "agent" || item.Kind == "tool_call") {
+				return i
+			}
+		}
+		return -1
+	}
+	_, e := testShadowPairWith(t, children)
+	for cp := 1; cp < len(shadowChecks); cp++ {
+		items := e.Checkpoints[cp].Items
+		agent, nested, read := find(t, items, "agent"), find(t, items, "nested"), find(t, items, "read")
+		if agent < 0 || nested < 0 || read < 0 || items[nested].Parent != items[agent].ID || items[read].Parent != items[agent].ID ||
+			items[nested].Kind != "agent" || items[nested].Active || items[nested].Status != "finished" || items[read].Active || items[read].Status != "done" {
+			t.Fatalf("%s: synthetic children did not settle under the controlled agent", shadowChecks[cp])
+		}
+		for _, tc := range []struct {
+			name   string
+			call   string
+			parent func([]thread.Item) uint64
+		}{
+			{"tool_missing_parent", "read", func([]thread.Item) uint64 { return 0 }},
+			{"tool_wrong_older_agent", "read", func(items []thread.Item) uint64 { return items[nested].ID }},
+			{"nested_agent_missing_parent", "nested", func([]thread.Item) uint64 { return 0 }},
+			{"nested_agent_wrong_older_parent", "nested", func([]thread.Item) uint64 { return 2 }},
+			{"main_tool_gains_parent", "closure-bash", func(items []thread.Item) uint64 { return items[agent].ID }},
+		} {
+			if tc.call == "closure-bash" && shadowChecks[cp] != "session_closed" {
+				continue // closure work is created only before the divider
+			}
+			t.Run(shadowChecks[cp]+"/"+tc.name, func(t *testing.T) {
+				h, e := testShadowPairWith(t, children)
+				items := e.Checkpoints[cp].Items
+				target := find(t, items, tc.call)
+				if target < 0 {
+					t.Fatal("synthetic mutation target missing")
+				}
+				if items[target].Parent == tc.parent(items) {
+					t.Fatal("mutation does not change ownership")
+				}
+				items[target].Parent = tc.parent(items)
+				if shadowValidatePair(h, e, false) == nil {
+					t.Fatal("changed child ownership accepted")
+				}
+			})
+		}
+	}
+}
+
+// A parent supplied only on a later report is a supported repair: the owner
+// check accepts the fold's repaired parent and still rejects losing it.
+func TestThreadShadowRawOwnerLateRepair(t *testing.T) {
+	h := shadowHistory{Conversation: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+	for i, f := range []testShadowFact{
+		{"tool_use", `{"turn_id":"main","tool_use_id":"agent","name":"Agent","input":{}}`},
+		{"tool_use", `{"turn_id":"main","tool_use_id":"older","name":"Agent","input":{}}`},
+		{"tool_use", `{"turn_id":"child","tool_use_id":"read","name":"Read","input":{"file_path":"$HOST_PATH"}}`},
+		{"tool_result", `{"turn_id":"child","parent_tool_use_id":"agent","tool_use_id":"read","result_summary":"controlled read","is_error":false}`},
+	} {
+		var p map[string]any
+		if err := json.Unmarshal([]byte(f.payload), &p); err != nil {
+			t.Fatal(err)
+		}
+		p["conversation_id"] = h.Conversation
+		raw, _ := json.Marshal(p)
+		h.Entries = append(h.Entries, history.Entry{ID: uint64(i + 1), Type: f.typ, Payload: raw, Session: &history.SessionProvenance{SessionID: "session", Kind: "claude"}})
+	}
+	fold := thread.New(h.Conversation)
+	if err := fold.Feed(h.Entries); err != nil {
+		t.Fatal(err)
+	}
+	cp := shadowCheckpoint{Version: fold.Version(), Items: fold.Items()}
+	lifetimes := shadowLifetimes(h, cp.Version)
+	check := func(items []thread.Item) error {
+		older := map[uint64]thread.Item{}
+		for _, item := range items {
+			if err := shadowRawOwner(h, cp, item, older, lifetimes); err != nil {
+				return err
+			}
+			older[item.ID] = item
+		}
+		return nil
+	}
+	if len(cp.Items) != 3 || cp.Items[2].ID != 3 || cp.Items[2].Parent != 1 {
+		t.Fatal("synthetic late report did not repair the child's parent")
+	}
+	if err := check(cp.Items); err != nil {
+		t.Fatalf("supported late parent repair rejected: %v", err)
+	}
+	for _, parent := range []uint64{0, 2} {
+		items := append([]thread.Item(nil), cp.Items...)
+		items[2].Parent = parent
+		if check(items) == nil {
+			t.Fatalf("repaired child with parent %d accepted", parent)
+		}
+	}
+}
