@@ -34,7 +34,7 @@ not yet emitted. They stay outside `inboundAppTypeSet`; declaring outgoing
 vocabulary must not admit it into the inbound handler chain.
 `TestThreadKinds`, `TestTypeConstants_V1V2Partition` and
 `TestEveryInboundV2TypeHasHandler` pin that boundary. See the
-[full item and update schemas](../../protocol-mobile.md#daemon-thread-updates-v2-declarations-only).
+[full item and update schemas](../../protocol-mobile.md#daemon-thread-updates-v2-supplied-delivery-contract).
 
 `ThreadItem` carries the fold's facts as pure data. Mapping stays in consumers:
 the fold already imports protocol, so importing `internal/thread` here would

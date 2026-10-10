@@ -54,7 +54,7 @@ The `Token string \`json:"token,omitempty"\`` field appended to `protocol.HelloC
 
 The `handshakeComplete` substate is observably distinct from `open` even though both can be set inside the same `noise_init` handler — the externally-controlled `state` field exists so the gating test pins the "handler chain unreachable from `handshakeComplete`" invariant deterministically (AC #4) and so any future refactor that splits the dispatch loop cannot silently remove the invariant.
 
-Capability-shaped records belong at the per-connection seal boundary. `conversation_updated` has both push and reply producers; tagging any producer cannot know the conn's negotiated `multi_agent` decision, while mutating a shared pushed payload would leak the capable shape into replay or an older conn. `agentTaggedForConn` therefore builds a per-conn copy, and a registry miss stays untagged: `AgentOf`'s Claude fallback is truthful only after the row itself resolves.
+Capability-shaped records belong at the per-connection seal boundary for both pushes and replies. `agentTaggedForConn` and thread projection copy shared payloads; a registry miss stays untagged because `AgentOf`'s Claude fallback is truthful only after the row resolves. Preserve unrelated JSON fields and their presence instead of rebuilding a partial DTO. See [thread delivery and summary projection](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
 
 ## Security and log discipline
 
