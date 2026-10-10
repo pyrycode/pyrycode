@@ -111,10 +111,10 @@ func TestMemoryTranscriptSessions(t *testing.T) {
 			t.Fatal(body)
 		}
 	}
-	entries = append(entries, divider(10, "agent_switch", "B", "A"), testTranscriptEntry(11, "message", `{"role":"user","text":"reused"}`, "A"))
+	entries = append(entries, divider(10, "agent_switch", "B", "A"), testTranscriptEntry(11, "message", `{"role":"user","text":"reused"}`, "A"), divider(12, "daemon_restart", "A", "C"))
 	files = testTranscriptView(t, entries)
-	if len(files) != 4 {
-		t.Fatalf("reused routing session collapsed: %v", files)
+	if len(files) != 5 {
+		t.Fatalf("recorded routing replacement lost: %v", files)
 	}
 	if len(testTranscriptView(t, []history.Entry{entries[0], testTranscriptEntry(2, "message", `{"role":"user","text":"named"}`, "unknown/0")})) != 2 {
 		t.Fatal("opaque routing ID collided with unknown namespace")

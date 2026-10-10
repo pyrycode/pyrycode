@@ -71,7 +71,7 @@ func (w *memoryTranscriptReader) files(c conversations.Conversation) map[string]
 			if json.Unmarshal(item.Content, &p) != nil {
 				continue
 			}
-			if p.Cause == "idle_sleep" || p.Cause == "capacity_eviction" || p.Cause == "daemon_restart" || p.Reason == "idle_evict" || p.Previous == "" || p.Next == "" || p.Previous == p.Next {
+			if p.Cause == "idle_sleep" || p.Cause == "capacity_eviction" || p.Reason == "idle_evict" || p.Previous == "" || p.Next == "" || p.Previous == p.Next {
 				continue
 			}
 			predecessor := group(p.Previous, 0, false)
