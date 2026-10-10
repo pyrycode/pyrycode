@@ -61,3 +61,6 @@ Pending documentation stage: `docs/knowledge/features/thread-package.md`, “Cac
 - Threat model: no new relay capability is enabled; authentication, capability negotiation and encrypted wire replies remain #2963.
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-10
+
+## Revisions
+- 2026-10-10: `TestCatchUpMissingHistory` exposed that complete reading of surviving history does not prove continuity across missing IDs. Record the greatest missing ID during `Feed` and reset queries crossing that floor; queries after the floor remain usable. Keep delivery suppression observation in `sendFact` so unchanged-row watermark scanning retains its fast path.
