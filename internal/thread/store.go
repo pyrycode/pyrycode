@@ -2,6 +2,7 @@ package thread
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"sync"
@@ -28,15 +29,16 @@ var (
 	ErrUnavailable    = errors.New("thread: conversation view is unavailable")
 )
 
-// Snapshot is a detached view. Only StateUsable carries Items, Version and Epoch;
+// Snapshot is a detached view. Only StateUsable carries items, versions and epoch;
 // ErrUnavailable describes recoverable failure without exposing source errors.
 type Snapshot struct {
-	Active  bool // includes private unresolved work omitted from Items
-	State   SnapshotState
-	Items   []Item
-	Version uint64
-	Epoch   string
-	Err     error
+	Active           bool // includes private unresolved work omitted from Items
+	State            SnapshotState
+	Items            []Item
+	Version          uint64
+	LastShownVersion uint64 // latest first shown publication or nonempty shown text append
+	Epoch            string
+	Err              error
 }
 
 type storeReader interface {
@@ -45,11 +47,14 @@ type storeReader interface {
 }
 
 type conversationWorker struct {
-	cancel   context.CancelFunc
-	done     chan struct{}
-	retiring bool
-	snapshot Snapshot
-	err      error // read only after done closes
+	cancel     context.CancelFunc
+	done       chan struct{}
+	retiring   bool
+	snapshot   Snapshot
+	err        error // read only after done closes
+	changed    chan struct{}
+	ranges     []changeBatch
+	rangeBytes int
 }
 
 // Store follows raw history for caller-authorized conversations. Construct it
@@ -129,7 +134,7 @@ func (s *Store) start(ctx context.Context, id conversations.ConversationID, retr
 		return nil
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
-	w = &conversationWorker{cancel: cancel, done: make(chan struct{}), snapshot: Snapshot{State: StateRebuilding}}
+	w = &conversationWorker{cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), snapshot: Snapshot{State: StateRebuilding}}
 	s.workers[id] = w
 	s.records[id] = progressRecord{Err: ErrUnavailable}
 	go s.run(workerCtx, id, w)
@@ -158,6 +163,8 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 			s.records[id] = progressRecord{Epoch: progress.Epoch, Version: progress.Version, Err: result}
 			if !w.retiring && !s.closed {
 				w.snapshot = Snapshot{State: StateUnavailable, Err: ErrUnavailable}
+				w.ranges, w.rangeBytes = nil, 0
+				w.notify()
 			}
 		}
 		close(w.done)
@@ -229,7 +236,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		snapshot := Snapshot{State: StateUsable, Items: fold.Items(), Version: fold.Version(), Epoch: epoch}
+		snapshot := Snapshot{State: StateUsable, Items: fold.Items(), Version: fold.Version(), LastShownVersion: fold.lastShown, Epoch: epoch}
 		for _, item := range fold.items {
 			snapshot.Active = snapshot.Active || item.Active
 		}
@@ -266,9 +273,22 @@ func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRec
 
 func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, snapshot Snapshot) {
 	s.mu.Lock()
+	before := w.snapshot
+	s.mu.Unlock()
+	var batch changeBatch
+	if before.State == StateUsable {
+		batch.observation = difference(before, snapshot)
+		encoded, _ := json.Marshal(batch.observation.Changes)
+		batch.bytes = len(encoded)
+	}
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.workers[id] == w && !w.retiring && !s.closed && ctx.Err() == nil {
+		if before.State == StateUsable {
+			w.retain(batch)
+		}
 		w.snapshot = snapshot
+		w.notify()
 	}
 }
 
@@ -281,14 +301,7 @@ func (s *Store) Snapshot(id conversations.ConversationID) Snapshot {
 		snapshot = w.snapshot
 	}
 	s.mu.Unlock()
-	if snapshot.Items != nil {
-		items := make([]Item, len(snapshot.Items))
-		copy(items, snapshot.Items)
-		for i := range items {
-			items[i].Content = append([]byte(nil), items[i].Content...)
-		}
-		snapshot.Items = items
-	}
+	snapshot.Items = copyItems(snapshot.Items)
 	return snapshot
 }
 
@@ -308,6 +321,8 @@ func (s *Store) Unload(id conversations.ConversationID) error {
 	}
 	w.retiring = true
 	w.snapshot = Snapshot{}
+	w.ranges, w.rangeBytes = nil, 0
+	w.notify()
 	w.cancel()
 	s.mu.Unlock()
 	<-w.done
@@ -336,6 +351,8 @@ func (s *Store) Shutdown() error {
 	for _, w := range s.workers {
 		w.retiring = true
 		w.snapshot = Snapshot{}
+		w.ranges, w.rangeBytes = nil, 0
+		w.notify()
 		w.cancel()
 		workers = append(workers, w)
 	}
