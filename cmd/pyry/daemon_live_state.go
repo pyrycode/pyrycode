@@ -21,6 +21,7 @@ type daemonLiveReading struct {
 	SessionGeneration uint64
 	ReadingID         string
 	Revision          uint64
+	Answerable        *bool
 }
 type liveReadingKey struct{ family, id string }
 type liveRevisionKey struct {
@@ -162,7 +163,7 @@ func (o *daemonLiveState) advanceLocked(conv string, c *liveConversation, sid st
 	c.revisions = make(map[liveRevisionKey]uint64)
 	c.scopes = make(map[liveReadingKey]string)
 	src := daemonLiveSource{ConversationID: conv, SessionGeneration: c.generation, provenance: p}
-	for _, family := range streamLiveFamilies {
+	for _, family := range daemonLiveFamilies {
 		o.admitLocked(src, protocol.Envelope{Type: family, Payload: json.RawMessage(`{}`), SessionStateCleared: true}, "", "")
 	}
 }
@@ -195,10 +196,14 @@ func detachLiveEnvelope(e protocol.Envelope) protocol.Envelope {
 }
 func detachLiveReading(r daemonLiveReading) daemonLiveReading {
 	r.Envelope = detachLiveEnvelope(r.Envelope)
+	if r.Answerable != nil {
+		v := *r.Answerable
+		r.Answerable = &v
+	}
 	return r
 }
 func validDaemonLiveEnvelope(e protocol.Envelope) bool {
-	if len(e.Payload) > protocol.MaxThreadEnvelopeBytes || len(e.SessionID) > protocol.MaxThreadEnvelopeBytes || !slices.Contains(streamLiveFamilies, e.Type) || !json.Valid(e.Payload) {
+	if len(e.Payload) > protocol.MaxThreadEnvelopeBytes || len(e.SessionID) > protocol.MaxThreadEnvelopeBytes || !slices.Contains(daemonLiveFamilies, liveFamily(e.Type)) || !json.Valid(e.Payload) {
 		return false
 	}
 	if len(e.SessionID) > 0 && !bytes.Equal(e.SessionID, []byte("null")) {
@@ -235,7 +240,7 @@ func (o *daemonLiveState) admit(src daemonLiveSource, e protocol.Envelope, id st
 }
 func (o *daemonLiveState) admitLocked(src daemonLiveSource, e protocol.Envelope, id, scope string) (daemonLiveReading, bool) {
 	c := o.conversations[src.ConversationID]
-	if c == nil || src.SessionGeneration == 0 || src.SessionGeneration != c.generation || c.stopped {
+	if c == nil || src.SessionGeneration == 0 || src.SessionGeneration != c.generation || (c.stopped && !liveControlFamily(e.Type)) {
 		return daemonLiveReading{}, false
 	}
 	e.SessionID = liveSessionTag(src.provenance)
@@ -245,13 +250,18 @@ func (o *daemonLiveState) admitLocked(src daemonLiveSource, e protocol.Envelope,
 	if !validDaemonLiveEnvelope(e) {
 		return daemonLiveReading{}, false
 	}
-	key := liveReadingKey{e.Type, id}
+	key := liveReadingKey{liveFamily(e.Type), id}
 	rk := liveRevisionKey{src.SessionGeneration, key}
 	c.revisions[rk]++
-	r := daemonLiveReading{detachLiveEnvelope(e), src.ConversationID, src.SessionGeneration, id, c.revisions[rk]}
+	r := daemonLiveReading{Envelope: detachLiveEnvelope(e), ConversationID: src.ConversationID, SessionGeneration: src.SessionGeneration, ReadingID: id, Revision: c.revisions[rk]}
 	if src.SessionGeneration == c.generation {
-		c.readings[key] = &r
-		c.scopes[key] = scope
+		if liveDismissal(e.Type) {
+			delete(c.readings, key)
+			delete(c.scopes, key)
+		} else {
+			c.readings[key] = &r
+			c.scopes[key] = scope
+		}
 	}
 	return detachLiveReading(r), true
 }
@@ -301,14 +311,18 @@ func (o *daemonLiveState) retain(r daemonLiveReading) bool {
 	if c == nil || r.SessionGeneration != c.generation || c.stopped {
 		return false
 	}
-	key := liveReadingKey{r.Envelope.Type, r.ReadingID}
+	key := liveReadingKey{liveFamily(r.Envelope.Type), r.ReadingID}
 	rk := liveRevisionKey{r.SessionGeneration, key}
 	if r.Revision <= c.revisions[rk] {
 		return false
 	}
 	r = detachLiveReading(r)
 	c.revisions[rk] = r.Revision
-	c.readings[key] = &r
+	if liveDismissal(r.Envelope.Type) {
+		delete(c.readings, key)
+	} else {
+		c.readings[key] = &r
+	}
 	return true
 }
 func (o *daemonLiveState) retireLocked(src daemonLiveSource, key liveReadingKey) {

@@ -98,3 +98,31 @@ proof remain pending #3077.
 - Threat model: authenticated relay handlers and capability gates remain unchanged; generation/revision checks prevent stale local state resurrection.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-10
+
+## Revisions
+- 2026-10-10: Preserve the legacy two-field `settingsUpdaterAdapter` through an
+  embedding daemon-local `liveSettingsUpdater`; `UpdateLive` exposes the correlated
+  result. `GetLive`, `resolveBoundMCPStatusReading`, `liveInventoryReading`, and
+  `runSettingsReading` expose detached provider results for #3077. Prompt readings
+  include detached answerability metadata, outside their unchanged payload.
+- 2026-10-10: Reset operations reserve and conditionally advance family revisions
+  across phases, so an overtaken same-generation reset cannot restore its falling
+  edge. Bound resets share the parent emitter's delivery counter and broadcaster.
+  Native suggestions use the stream capture for their payload session as well as
+  retained metadata. No-relay wiring does not start absent prompts or queries.
+- 2026-10-10: The actual supported question-boundary test exposed 16384 raw bytes
+  expanding to a 98081-byte payload. Filed #3109 in Backlog with priority:low;
+  `TestControlLiveQuestionEnvelopeBound` remains skipped pending the producer fix.
+  The existing MCP envelope budget assertion remains skipped on #3091. Both are
+  pre-existing producer-budget gaps; this owner rejects oversize envelopes.
+- 2026-10-10: Permission answerability follows `RemoteAnswerable`: an
+  interaction-required permission remains fail-closed for remote answers, so its
+  retained eligibility is `!RequiresUserInteraction`. Question batches retain
+  their separate, existing remotely answerable contract.
+- 2026-10-10: Files-read map correction: `streamTurnSink` and `offerMu` live in
+  `cmd/pyry/stream_turn_drain.go`. Also read and bound the reset lifetime in
+  `cmd/pyry/conversation_agent_switch.go` → `conversationAgentSwitcher.Switch`.
+  Additional race scenarios are `TestControlLiveFallbackSource`,
+  `TestControlLiveResetRevision`, `TestControlLiveStreamRequestOrdering`,
+  `TestControlLivePromptProducers`, and `TestControlLiveStoredAndConvergedReadings`.
+  Final written work is approximately 1300 lines, under the recorded sizing exception.

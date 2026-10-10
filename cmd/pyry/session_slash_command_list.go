@@ -131,7 +131,13 @@ type slashCommandLister interface {
 // (we refuse), and both are correct because a slash-command list is a property of
 // one child's initialize reply and a rotation's fresh child reports its own. No
 // re-read, no retry.
-func resolveBoundSlashCommandList(convReg *conversations.Registry, pool *sessions.Pool, convID string) (protocol.SlashCommandListPayload, bool) {
+func resolveBoundSlashCommandList(convReg *conversations.Registry, pool *sessions.Pool, convID string, attachments ...*daemonLiveBindings) (protocol.SlashCommandListPayload, bool) {
+	if b := liveAttachment(attachments); b != nil {
+		payload, ok, _ := liveInventoryReading(b, convID, protocol.TypeSlashCommandList, protocol.Envelope{}, func() (protocol.SlashCommandListPayload, bool) {
+			return resolveBoundSlashCommandList(convReg, pool, convID)
+		})
+		return payload, ok
+	}
 	conv, ok := convReg.Get(conversations.ConversationID(convID))
 	if !ok || conv.CurrentSessionID == "" {
 		return protocol.SlashCommandListPayload{}, false
@@ -275,12 +281,12 @@ func resolveBoundSlashCommandList(convReg *conversations.Registry, pool *session
 // deleted, rebound or rotated inside it either resolves to the inventory of the
 // session bound a moment ago or refuses, and both are correct. No re-read, no retry,
 // no re-list.
-func retainedSlashCommandLists(convReg *conversations.Registry, pool *sessions.Pool) func() []protocol.SlashCommandListPayload {
+func retainedSlashCommandLists(convReg *conversations.Registry, pool *sessions.Pool, attachments ...*daemonLiveBindings) func() []protocol.SlashCommandListPayload {
 	return func() []protocol.SlashCommandListPayload {
 		convs := convReg.List()
 		out := make([]protocol.SlashCommandListPayload, 0, len(convs))
 		for _, c := range convs {
-			payload, ok := resolveBoundSlashCommandList(convReg, pool, string(c.ID))
+			payload, ok := resolveBoundSlashCommandList(convReg, pool, string(c.ID), attachments...)
 			if !ok {
 				continue
 			}

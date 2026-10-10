@@ -506,9 +506,12 @@ func sessionRetainedModelList(sess *sessions.Session) (turnevent.ModelList, bool
 // dispatch goroutine, which is new for this resolver and is why the body must stay
 // what it is. It spawns nothing, mints nothing and mutates nothing, and the locks it
 // takes are resolveBoundModelList's, acquired sequentially and never nested.
-func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary) func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
+func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary, attachments ...*daemonLiveBindings) func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
 	return func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
-		return modelListResolver(multiAgent)(convReg, pool, saved, convID)
+		payload, ok, _ := liveInventoryReading(liveAttachment(attachments), convID, protocol.TypeModelList, protocol.Envelope{}, func() (protocol.ModelListPayload, bool) {
+			return modelListResolver(multiAgent)(convReg, pool, saved, convID)
+		})
+		return payload, ok
 	}
 }
 

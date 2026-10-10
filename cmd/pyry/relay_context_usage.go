@@ -6,7 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"encoding/json"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
@@ -94,6 +96,8 @@ const (
 // exactly the five stored fields, so there is no field to forget to strip and no
 // ordering in which they reach disk. Do not "complete" it from the event.
 type contextUsageRecorder struct {
+	mu       sync.Mutex
+	evidence map[conversations.ConversationID]contextUsageEvidence
 	// reg is the conversation registry. nil leaves the recorder inert, which is
 	// the foreground / PTY posture and the reason every emitter and resolver test
 	// that constructs without one stays green.
@@ -140,7 +144,7 @@ type contextUsageRecorder struct {
 // error; its encode arm cannot carry the reading, since this struct holds no
 // floats, no channels and no custom marshaller, and encoding/json substitutes
 // invalid UTF-8 rather than reporting it.
-func (r *contextUsageRecorder) record(id conversations.ConversationID, u turnevent.ContextUsage) {
+func (r *contextUsageRecorder) record(id conversations.ConversationID, u turnevent.ContextUsage, sources ...daemonLiveSource) {
 	if r == nil || r.reg == nil {
 		return
 	}
@@ -148,15 +152,26 @@ func (r *contextUsageRecorder) record(id conversations.ConversationID, u turneve
 	if r.now != nil {
 		now = r.now
 	}
-	if !r.reg.SetLastContextUsage(id, conversations.ContextUsageReading{
+	reading := conversations.ContextUsageReading{
 		Model:       u.Model,
 		TotalTokens: u.TotalTokens,
 		MaxTokens:   u.MaxTokens,
 		Percentage:  u.Percentage,
-		AsOf:        now(),
-	}) {
+		AsOf:        now().UTC(),
+	}
+	r.mu.Lock()
+	if !r.reg.SetLastContextUsage(id, reading) {
+		r.mu.Unlock()
 		return
 	}
+	if r.evidence == nil {
+		r.evidence = make(map[conversations.ConversationID]contextUsageEvidence)
+	}
+	delete(r.evidence, id)
+	if len(sources) > 0 {
+		r.evidence[id] = contextUsageEvidence{reading, sources[0]}
+	}
+	r.mu.Unlock()
 	if err := r.reg.Save(r.path); err != nil {
 		// Warn for appendConversationHistory's reason: the in-memory row keeps the
 		// new reading and the next settle retries, but until then a restart reads
@@ -277,6 +292,8 @@ func contextUsageResolve(convReg *conversations.Registry, pool *sessions.Pool) c
 // readers do not need the resolver's mutex to read them, and why nothing may write them
 // after the close.
 type contextUsageFlight struct {
+	op      daemonLiveOperation
+	reading daemonLiveReading
 	done    chan struct{}
 	payload protocol.ContextUsagePayload
 	ok      bool
@@ -298,6 +315,7 @@ func (f *contextUsageFlight) await(ctx context.Context) (protocol.ContextUsagePa
 // contextUsageResolver is the ContextUsageFor seam's production implementation: the
 // mid-turn deferral, the per-conversation collapse, and one round trip to the child.
 type contextUsageResolver struct {
+	live *daemonLiveBindings
 	// base owns every flight. See fly for why it is not the caller's context.
 	base    context.Context
 	resolve contextUsageResolveFunc
@@ -387,17 +405,61 @@ func (r *contextUsageResolver) clock() time.Time {
 // A nil receiver and an unwired resolve seam both refuse, so an unwired daemon is inert
 // rather than a crash — the posture every optional seam in this binary keeps.
 func (r *contextUsageResolver) Get(ctx context.Context, conversationID string) (protocol.ContextUsagePayload, bool) {
-	if r == nil || r.resolve == nil {
-		return protocol.ContextUsagePayload{}, false
-	}
-	querier, canonicalID, ok := r.resolve(conversationID)
+	payload, ok, _ := r.get(ctx, conversationID)
+	return payload, ok
+}
+
+// GetLive exposes detached daemon results for the thread adapter. Correlation
+// belongs to each request, including equal-state requests sharing one flight.
+func (r *contextUsageResolver) GetLive(ctx context.Context, conversationID string, e protocol.Envelope) (daemonLiveReading, bool) {
+	payload, ok, reading := r.get(ctx, conversationID)
 	if !ok {
-		return protocol.ContextUsagePayload{}, false
+		return daemonLiveReading{}, false
 	}
-	if payload, fresh := r.fresh(ctx, querier, canonicalID); fresh {
-		return payload, true
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return daemonLiveReading{}, false
 	}
-	return r.remembered(canonicalID)
+	e.Type = protocol.TypeContextUsage
+	if e.TS.IsZero() {
+		e.TS = reading.Envelope.TS
+	}
+	e.Payload = raw
+	e.SessionID = reading.Envelope.SessionID
+	reading.Envelope = detachLiveEnvelope(e)
+	return reading, true
+}
+func (r *contextUsageResolver) get(ctx context.Context, conversationID string) (protocol.ContextUsagePayload, bool, daemonLiveReading) {
+	if r == nil || r.resolve == nil {
+		return protocol.ContextUsagePayload{}, false, daemonLiveReading{}
+	}
+	type resolved struct {
+		querier contextUsageQuerier
+		id      conversations.ConversationID
+	}
+	v, ok, op := liveResolve(r.live, conversationID, "", func() (resolved, bool) { q, id, ok := r.resolve(conversationID); return resolved{q, id}, ok })
+	if !ok {
+		return protocol.ContextUsagePayload{}, false, daemonLiveReading{}
+	}
+	if payload, fresh, reading := r.fresh(ctx, v.querier, v.id, op.source); fresh {
+		return payload, true, reading
+	}
+	payload, ok := r.remembered(v.id)
+	if !ok {
+		return payload, false, daemonLiveReading{}
+	}
+	src := op.source
+	src.provenance = history.SessionProvenance{}
+	if r.rec != nil {
+		if previous, found := r.rec.source(v.id); found {
+			src = previous
+		}
+	}
+	if r.live != nil {
+		op = r.live.sink.live.begin(src, protocol.TypeContextUsage, "")
+	}
+	reading, _ := op.result(protocol.TypeContextUsage, payload)
+	return payload, true, reading
 }
 
 // remembered answers from the summary #2460 stored on the conversation's registry row:
@@ -446,13 +508,13 @@ func (r *contextUsageResolver) remembered(canonicalID conversations.Conversation
 // a conversation no round trip can ever settle.
 // TestContextUsageResolver_MemoryInstallsNoFlight asserts the map stays empty rather
 // than asserting the reply, because the reply looks the same either way.
-func (r *contextUsageResolver) fresh(ctx context.Context, querier contextUsageQuerier, canonicalID conversations.ConversationID) (protocol.ContextUsagePayload, bool) {
+func (r *contextUsageResolver) fresh(ctx context.Context, querier contextUsageQuerier, canonicalID conversations.ConversationID, src daemonLiveSource) (protocol.ContextUsagePayload, bool, daemonLiveReading) {
 	if querier == nil {
-		return protocol.ContextUsagePayload{}, false
+		return protocol.ContextUsagePayload{}, false, daemonLiveReading{}
 	}
 
 	r.mu.Lock()
-	if f, exists := r.flights[canonicalID]; exists {
+	if f, exists := r.flights[canonicalID]; exists && f.op.source == src {
 		select {
 		case <-f.done:
 			// Settled. Inside the window its result answers this ask too; past the
@@ -460,7 +522,7 @@ func (r *contextUsageResolver) fresh(ctx context.Context, querier contextUsageQu
 			if r.clock().Sub(f.settled) < contextUsageCollapseWindow {
 				payload, settledOK := f.payload, f.ok
 				r.mu.Unlock()
-				return payload, settledOK
+				return payload, settledOK, detachLiveReading(f.reading)
 			}
 		default:
 			// Still in flight: join it. This is AC-2's in-flight side, and the whole
@@ -468,10 +530,18 @@ func (r *contextUsageResolver) fresh(ctx context.Context, querier contextUsageQu
 			// splitting them would let two asks each install a flight and each write to
 			// the child.
 			r.mu.Unlock()
-			return f.await(ctx)
+			payload, ok := f.await(ctx)
+			if !ok {
+				return payload, false, daemonLiveReading{}
+			}
+			return payload, true, detachLiveReading(f.reading)
 		}
 	}
-	f := &contextUsageFlight{done: make(chan struct{})}
+	op := daemonLiveOperation{source: src}
+	if r.live != nil {
+		op = r.live.sink.live.begin(src, protocol.TypeContextUsage, "")
+	}
+	f := &contextUsageFlight{done: make(chan struct{}), op: op}
 	r.flights[canonicalID] = f
 	r.mu.Unlock()
 
@@ -484,7 +554,11 @@ func (r *contextUsageResolver) fresh(ctx context.Context, querier contextUsageQu
 	// asked first. The goroutine's exit is bounded twice over: WaitIdle by the daemon
 	// context and the query by contextUsageQueryTimeout, so it cannot outlive either.
 	go r.fly(f, querier, canonicalID)
-	return f.await(ctx)
+	payload, ok := f.await(ctx)
+	if !ok {
+		return payload, false, daemonLiveReading{}
+	}
+	return payload, true, detachLiveReading(f.reading)
 }
 
 // fly performs one round trip and settles the flight, on its OWN goroutine — see the
@@ -528,6 +602,9 @@ func (r *contextUsageResolver) fly(f *contextUsageFlight, querier contextUsageQu
 	// Deferred so a panic below cannot strand joiners waiting on a channel that never
 	// closes. The writes precede the close, which is the barrier every reader gates on.
 	defer func() {
+		if ok {
+			f.reading, _ = f.op.result(protocol.TypeContextUsage, payload)
+		}
 		f.payload, f.ok, f.settled = payload, ok, r.clock()
 		close(f.done)
 		// #2460: remember this reading. AFTER the close, deliberately — every asker
@@ -536,7 +613,7 @@ func (r *contextUsageResolver) fly(f *contextUsageFlight, querier contextUsageQu
 		// never the absence of one: a refusal that wrote would blank a client's
 		// display on a transient child failure. Nothing touches f past the close.
 		if ok {
-			r.rec.record(canonicalID, usage)
+			r.rec.record(canonicalID, usage, f.op.source)
 		}
 	}()
 
@@ -573,4 +650,23 @@ func (r *contextUsageResolver) fly(f *contextUsageFlight, querier contextUsageQu
 		return
 	}
 	payload, ok = reading, true
+}
+
+type contextUsageEvidence struct {
+	reading conversations.ContextUsageReading
+	source  daemonLiveSource
+}
+
+func (r *contextUsageRecorder) source(id conversations.ConversationID) (daemonLiveSource, bool) {
+	if r == nil || r.reg == nil {
+		return daemonLiveSource{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	saved, ok := r.evidence[id]
+	if !ok {
+		return daemonLiveSource{}, false
+	}
+	last, ok := r.last(id)
+	return saved.source, ok && last == saved.reading && saved.source.SessionGeneration > 0
 }

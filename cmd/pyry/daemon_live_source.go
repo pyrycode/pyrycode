@@ -56,7 +56,7 @@ func (o *daemonLiveState) acceptEventLocked(src daemonLiveSource, ev turnevent.E
 		o.turns[src] = t
 	}
 	if c := o.conversations[src.ConversationID]; c != nil && c.generation == src.SessionGeneration {
-		for _, family := range streamLiveFamilies {
+		for _, family := range daemonLiveFamilies {
 			if r := c.readings[liveReadingKey{family, ""}]; r != nil && r.Envelope.SessionStateCleared {
 				cap.updates = append(cap.updates, detachLiveReading(*r))
 			}

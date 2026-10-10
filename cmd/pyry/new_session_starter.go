@@ -280,13 +280,14 @@ var _ relay.LateSessionStarter = activeSessionStarter{}
 func (a activeSessionStarter) resetThenRotate(release func(), outcome func(error),
 	runner sessions.Runner, oldID sessions.SessionID, convID, spawnDir string, refused bool) {
 	defer release()
-	a.resetting.wrappingUp(convID)
+	resetting := a.resetting.bound(convID, string(oldID))
+	resetting.wrappingUp(convID)
 	// The bool is an OUTCOME, not an error: a wrap-up that produced no note does not
 	// fail the reset, and nothing below branches on it. It exists so the phase change
 	// can say whether the successor starts with a note.
 	wroteNote := a.reset.wrapUp(convID)
-	a.resetting.restarting(convID, wroteNote)
-	defer a.resetting.done(convID)
+	resetting.restarting(convID, wroteNote)
+	defer resetting.done(convID)
 	rotate := a.rotate
 	if a.rotateWithHandoff != nil {
 		outcome := "skipped"

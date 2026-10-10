@@ -17,6 +17,7 @@ const maxPromptAnswerProjection = 16 * 1024
 type promptHistoryOwner struct {
 	conversationID, sessionID string
 	source                    history.SessionProvenance
+	live                      daemonLiveSource
 	tool, class               string
 	questions                 []protocol.Question
 }
@@ -60,6 +61,7 @@ func (b *streamApprovalBridge) promptOwner(req permbridge.Request, conversationI
 			owner.source = history.SessionProvenance{Kind: kind, SessionID: req.SessionID}
 		}
 	}
+	owner.live = b.live.capture(conversationID, req.SessionID, false)
 	return owner
 }
 
