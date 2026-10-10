@@ -78,7 +78,9 @@ func (m *V2SessionManager) agentTaggedForConn(s *V2Session, env protocol.Envelop
 	if !s.multiAgent || m.cfg.ConversationAgent == nil || env.Type != protocol.TypeConversationUpdated {
 		return env
 	}
-	var p protocol.ConversationUpdatedPayload
+	var p struct {
+		ID string `json:"id"`
+	}
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
 		return env
 	}
@@ -86,12 +88,11 @@ func (m *V2SessionManager) agentTaggedForConn(s *V2Session, env protocol.Envelop
 	if !ok {
 		return env
 	}
-	p.Agent = agent
-	payload, err := json.Marshal(p)
+	payload, err := json.Marshal(agent)
 	if err != nil {
 		return env
 	}
-	env.Payload = payload
+	env.Payload = replaceObjectField(env.Payload, "agent", payload)
 	return env
 }
 

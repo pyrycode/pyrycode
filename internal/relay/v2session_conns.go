@@ -60,6 +60,7 @@ func retainedClientField(v string, maxBytes int) string {
 type ActiveConn struct {
 	ConnID          string
 	Interactive     bool
+	Thread          bool
 	DeviceName      string
 	ClientVersion   string
 	ClientFeatures  string
@@ -132,6 +133,7 @@ func (m *V2SessionManager) handleActiveConns() []ActiveConn {
 			ac := ActiveConn{
 				ConnID:         connID,
 				Interactive:    s.interactive,
+				Thread:         s.thread,
 				DeviceName:     s.clientName,
 				ClientVersion:  s.clientVersion,
 				ClientFeatures: s.clientFeatures,

@@ -66,3 +66,6 @@ Pending documentation stage: in `docs/protocol-mobile.md`, “Capability negotia
 - Threat model: preserve Noise confidentiality/authentication against relay MITM and misrouting; thread grants no execution or agent access. Prompt injection and relay metadata privacy remain the existing protocol's residual risks. Production activation is OUT OF SCOPE (#3077).
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-10
+
+## Revisions
+2026-10-10: Preserve conversation fields by editing individual JSON fields rather than round-tripping an incomplete summary DTO in `agentTaggedForConn`. This keeps supplied binding/watermark fields and avoids adding absent fields. The authority and capability contracts are unchanged. `TestV2Session_ThreadContinuations` covers repeated updates/continuations for all three kinds; `TestV2Session_ThreadAuthenticationFailure` covers rejected admission. A mutation run removing forwarding projection/filtering failed the legacy byte, authoritative-zero and delivery assertions as intended.
