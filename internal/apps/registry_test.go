@@ -77,7 +77,7 @@ func TestRegistryMutations(t *testing.T) {
 	if c, e = r.UpdateManifest(testID(9), testInput(testID(9))); c || !errors.Is(e, ErrNotFound) {
 		t.Fatal(c, e)
 	}
-	// Simulate lifecycle fields committed by the next slice, then preserve them.
+	// Preserve committed fields independently of a manifest candidate.
 	r.mu.Lock()
 	r.snapshot.Records[0].ActiveRelease = "1.0.0"
 	r.snapshot.Records[0].PendingRelease = "2.0.0"
@@ -100,9 +100,11 @@ func TestRegistryMutations(t *testing.T) {
 		t.Fatal(e)
 	}
 	got, v := reopened.List()
-	if v != rev || !reflect.DeepEqual(got, again) || !bytes.Equal(before, testBytes(t, path)) {
-		t.Fatal("reopen changed state")
+	again[0].State, again[0].Revision = "stopped", rev+1
+	if v != rev+1 || !reflect.DeepEqual(got, again) || bytes.Equal(before, testBytes(t, path)) {
+		t.Fatal("reopen did not commit stopped intent")
 	}
+	r = reopened
 	c, e = r.Remove(testApp)
 	testChange(t, c, e)
 	path = filepath.Join(r.root, "registry.json")
@@ -115,7 +117,7 @@ func TestRegistryMutations(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if rows, v := reopened.List(); len(rows) != 0 || v != 4 || len(reopened.snapshot.Tombstones) != 1 || reopened.snapshot.Tombstones[0].Revision != 4 || !bytes.Equal(removedBytes, testBytes(t, path)) {
+	if rows, v := reopened.List(); len(rows) != 0 || v != 5 || len(reopened.snapshot.Tombstones) != 1 || reopened.snapshot.Tombstones[0].Revision != 5 || !bytes.Equal(removedBytes, testBytes(t, path)) {
 		t.Fatal("removal/no-op lost revision or tombstone")
 	}
 	if c, e = reopened.Register([]byte(testManifest)); c || !errors.Is(e, ErrRemoved) {
