@@ -441,7 +441,7 @@ type's own doc marks `Text` as claude-authored and untrusted: the decode gate
 checks shape, not content, so control characters and bidi marks other than the
 rejected line breaks pass through unchanged. The parser only recognises the
 line and emits neutral text; the daemon's
-[native suggestion owner](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831)
+[native suggestion owner](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831)
 decides eligibility, publishes current state and invalidates it on new work or
 session lifecycle changes. Its message-ID tracking is separate from the
 stateless parser because delivery confirmation can follow the result.

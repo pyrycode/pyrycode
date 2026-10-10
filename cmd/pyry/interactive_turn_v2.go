@@ -468,7 +468,7 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 		e.emitMapped(ctx, convID, ev)
 		e.transitionTo(ctx, convID, turnbridge.StateIdle)
 		e.endTurn()
-		e.suggestions.turnEnded(convID, v)
+		e.suggestions.turnEnded(convID, v, e.liveSource)
 		// After the fan-out: connected phones already have the turn_end; the
 		// waker reaches the ones that do not.
 		e.waker.Trigger(convID, pushWakeTurnEnd)
@@ -928,14 +928,14 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 		// making a second one — there is no state in which the row and the frame
 		// disagree about which conversation reported. An id the registry does not
 		// hold writes nothing and saves nothing; see record.
-		e.usageRec.record(conversations.ConversationID(convID), v)
+		e.usageRec.record(conversations.ConversationID(convID), v, e.liveSource)
 	case turnevent.PromptSuggestion:
 		// claude's native suggested next reply (#2831). It arrives AFTER the turn
 		// it follows has closed, so, like ContextUsage, it opens no turn and emits
 		// no turn_state. It is not an event-stream frame either: the owner decides
 		// whether the turn that just ended may publish it and sends current state
 		// on its own goroutine, outside the ring and the history.
-		e.suggestions.suggest(convID, v.Text)
+		e.suggestions.suggest(convID, v.Text, e.liveSource)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -970,7 +970,7 @@ func (e *interactiveTurnEmitterV2) startTurnIfNeeded(ctx context.Context, convID
 	if e.runtimeFacts {
 		e.recordRuntimeFact(ctx, historyTurnOpened, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, OccurredAt: time.Now().UTC()})
 	}
-	e.suggestions.turnStarted(convID)
+	e.suggestions.turnStarted(convID, e.liveSource)
 	return true
 }
 

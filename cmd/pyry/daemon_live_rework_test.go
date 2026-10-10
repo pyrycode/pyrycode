@@ -144,7 +144,7 @@ func TestDaemonLiveCompletedActivationStorage(t *testing.T) {
 		t.Fatalf("completed activations retained: sources=%d turns=%d", len(o.sources), len(o.turns))
 	}
 	c := o.conversations["conv"]
-	if len(c.revisions) > len(streamLiveFamilies)+1 {
+	if len(c.revisions) > len(daemonLiveFamilies)+1 {
 		t.Fatalf("retired generations retained %d revisions", len(c.revisions))
 	}
 	if r, ok := cursor.Next(); !ok || r.SessionGeneration != old.SessionGeneration {

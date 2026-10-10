@@ -58,6 +58,10 @@ import (
 // call, and every arm past conversations.ValidID logs a string already known to be
 // 36 bytes.
 type resettingEmitterV2 struct {
+	parent    *resettingEmitterV2
+	live      *daemonLiveBindings
+	source    *daemonLiveSource
+	operation *daemonLiveOperation
 	// ctx is the daemon context, captured at construction the way
 	// attachmentOfferEmitterV2 captures its own: once cancelled, ActiveConns answers
 	// empty and a racing Push returns its error, so a late edge fans out to nobody
@@ -159,13 +163,13 @@ func (e *resettingEmitterV2) emit(convID string, active bool, phase, handoff str
 	if e == nil {
 		return
 	}
-	e.mu.Lock()
-	bcast := e.bcast
-	e.mu.Unlock()
-	if bcast == nil {
-		return
+	root := e
+	if e.parent != nil {
+		root = e.parent
 	}
-
+	root.mu.Lock()
+	bcast := root.bcast
+	root.mu.Unlock()
 	payloadJSON, err := json.Marshal(protocol.ResettingPayload{
 		ConversationID: convID,
 		Active:         active,
@@ -183,16 +187,32 @@ func (e *resettingEmitterV2) emit(convID string, active bool, phase, handoff str
 		return
 	}
 
+	var src daemonLiveSource
+	if e.source != nil {
+		src = *e.source
+	} else {
+		src = e.live.capture(convID, "", false)
+	}
+	if e.operation != nil {
+		e.operation.result(protocol.TypeResetting, json.RawMessage(payloadJSON))
+		next := e.operation.next()
+		e.operation = &next
+	} else {
+		e.live.offer(src, protocol.TypeResetting, json.RawMessage(payloadJSON), "")
+	}
+	if bcast == nil {
+		return
+	}
 	ctx := e.ctx
 	ts := time.Now().UTC()
 	for _, c := range bcast.ActiveConns(ctx) {
 		if !c.Interactive {
 			continue // the #607 capability gate — non-interactive conns never see the structured stream
 		}
-		e.mu.Lock()
-		e.nextID++
-		id := e.nextID
-		e.mu.Unlock()
+		root.mu.Lock()
+		root.nextID++
+		id := root.nextID
+		root.mu.Unlock()
 		env := protocol.Envelope{
 			ID:      id,
 			Type:    protocol.TypeResetting,
@@ -228,4 +248,28 @@ func startResettingStreamV2(re *resettingEmitterV2, bcast interactiveBroadcaster
 		cleanedUp = true
 		re.detach()
 	}
+}
+
+// bound fixes the source for all phases of one reset operation.
+func (e *resettingEmitterV2) bound(conv, sid string) *resettingEmitterV2 {
+	if e == nil {
+		return nil
+	}
+	src := e.live.capture(conv, sid, false)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	op := daemonLiveOperation{}
+	if e.live != nil && e.live.sink != nil {
+		op = e.live.sink.live.begin(src, protocol.TypeResetting, "")
+	}
+	return &resettingEmitterV2{ctx: e.ctx, logger: e.logger, bcast: e.bcast, live: e.live, source: &src, operation: &op, parent: e}
+}
+
+// boundOperation carries the dispatch reservation through every reset phase.
+func (e *resettingEmitterV2) boundOperation(op daemonLiveOperation) *resettingEmitterV2 {
+	if e == nil {
+		return nil
+	}
+	src := op.source
+	return &resettingEmitterV2{ctx: e.ctx, logger: e.logger, live: e.live, source: &src, operation: &op, parent: e}
 }

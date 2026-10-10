@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -193,46 +194,69 @@ type mcpStatusQuerier interface {
 // bound to its caller (actuateMCP's doc says why), and the relay passes the conn's
 // ctx, which has no deadline — so without this a live child that never answers
 // would hold the ask, and its per-conn slot, until the connection closed (#2702).
-func resolveBoundMCPStatus(
+func resolveBoundMCPStatus(ctx context.Context, reg *conversations.Registry, pool *sessions.Pool, conv string, attachments ...*daemonLiveBindings) (protocol.MCPStatusPayload, bool) {
+	payload, ok, _ := resolveBoundMCPStatusReading(ctx, reg, pool, conv, protocol.Envelope{}, attachments...)
+	return payload, ok
+}
+
+func resolveBoundMCPStatusReading(
 	ctx context.Context,
 	convReg *conversations.Registry,
 	pool *sessions.Pool,
 	convID string,
-) (protocol.MCPStatusPayload, bool) {
-	runner, canonicalID, ok := resolveBoundRunner(convReg, pool, convID)
+	envelope protocol.Envelope,
+	attachments ...*daemonLiveBindings,
+) (protocol.MCPStatusPayload, bool, daemonLiveReading) {
+	type resolved struct {
+		runner sessions.Runner
+		id     conversations.ConversationID
+	}
+	v, ok, op := liveResolve(liveAttachment(attachments), convID, protocol.TypeMCPStatus, func() (resolved, bool) {
+		runner, id, ok := resolveBoundRunner(convReg, pool, convID)
+		return resolved{runner, id}, ok
+	})
+	runner, canonicalID := v.runner, v.id
 	if !ok {
-		return protocol.MCPStatusPayload{}, false
+		return protocol.MCPStatusPayload{}, false, daemonLiveReading{}
 	}
 	querier, ok := runner.(mcpStatusQuerier)
 	if !ok {
-		return protocol.MCPStatusPayload{}, false
+		return protocol.MCPStatusPayload{}, false, daemonLiveReading{}
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, mcpStatusQueryTimeout)
 	defer cancel()
 	status, ok := querier.QueryMCPStatus(queryCtx)
 	if !ok {
-		return protocol.MCPStatusPayload{}, false
+		return protocol.MCPStatusPayload{}, false, daemonLiveReading{}
 	}
 	typ, mapped, ok := turnbridge.MapEvent(status, turnbridge.TurnContext{ConversationID: string(canonicalID)})
 	if !ok || typ != protocol.TypeMCPStatus {
-		return protocol.MCPStatusPayload{}, false
+		return protocol.MCPStatusPayload{}, false, daemonLiveReading{}
 	}
 	payload, ok := mapped.(protocol.MCPStatusPayload)
 	if !ok {
-		return protocol.MCPStatusPayload{}, false
+		return protocol.MCPStatusPayload{}, false, daemonLiveReading{}
 	}
-	return payload, true
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return protocol.MCPStatusPayload{}, false, daemonLiveReading{}
+	}
+	envelope.Type = protocol.TypeMCPStatus
+	envelope.Payload = raw
+	reading, _ := op.complete(envelope)
+	return payload, true, reading
 }
 
 func mcpStatusFor(
 	convReg *conversations.Registry,
 	pool *sessions.Pool,
+	attachments ...*daemonLiveBindings,
 ) func(context.Context, string) (protocol.MCPStatusPayload, bool) {
 	if convReg == nil || pool == nil {
 		return nil
 	}
 	return func(ctx context.Context, convID string) (protocol.MCPStatusPayload, bool) {
-		return resolveBoundMCPStatus(ctx, convReg, pool, convID)
+		return resolveBoundMCPStatus(ctx, convReg, pool, convID, attachments...)
 	}
 }
 
@@ -341,6 +365,7 @@ func resolveBoundSession(convReg *conversations.Registry, pool *sessions.Pool, c
 // swap a visible edit. That is the reasoning relayWiring's own doc records for
 // named-field wiring (#917).
 type boundRunSettings struct {
+	liveOp    daemonLiveOperation
 	sessionID string
 	model     string
 	effort    string
