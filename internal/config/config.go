@@ -16,6 +16,10 @@ type Config struct {
 	RelayURL              string                 `json:"relay_url"`
 	MemorySearchProviders []MemorySearchProvider `json:"memory_search_providers"`
 
+	// Memory is nil when managed memory is unconfigured. Search declarations
+	// remain independent; consumers validate these settings before using them.
+	Memory *MemorySettings `json:"memory,omitempty"`
+
 	// DebugCapture once recorded the daemon's interactive session to a .cast
 	// file (#802). The recorder was removed with the terminal runner in #1348,
 	// and since #1514 the daemon refuses to start when this is true, so an
