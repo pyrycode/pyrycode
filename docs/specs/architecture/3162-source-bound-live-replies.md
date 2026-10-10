@@ -59,3 +59,6 @@ Pending documentation stage: in `docs/protocol-mobile.md`, â€œMessage envelopeâ€
 - Threat model: authenticated paired-device trust remains unchanged; hostile rendered content remains the client's responsibility. Actual daemon provenance installation is deliberately #3163 and production activation #3164.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-10
+
+## Revisions
+- 2026-10-10: Final implementation keeps unrelated settings payload fields through `replaceObjectField`; a content-free queued event lets the withholding test observe completion before its FIFO delivery barrier. Final recount: approximately 765 inserted lines, zero new exported types/interfaces, zero mandatory legacy-consumer migrations and three acceptance criteria. The existing delivery state machine is unchanged; bounds/access/order proofs run in the relay race suite.

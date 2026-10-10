@@ -45,7 +45,7 @@ var (
 // teardown. The cost is ordering — this reply can arrive after replies to frames
 // sent later, and clients correlate on in_reply_to. ctx is the conn-scoped context
 // appFrameWorker derives, and asks is that worker's semaphore of waiting-ask slots.
-func (m *V2SessionManager) handleMCPStatusRequest(ctx context.Context, s *V2Session, asks chan struct{}, plaintext []byte) {
+func (m *V2SessionManager) handleMCPStatusRequest(ctx context.Context, s *V2Session, asks chan struct{}, plaintext []byte, thread bool) {
 	var env protocol.Envelope
 	if err := json.Unmarshal(plaintext, &env); err != nil {
 		// Unreachable after dispatchAppFrame matched these bytes. There is no
@@ -77,7 +77,7 @@ func (m *V2SessionManager) handleMCPStatusRequest(ctx context.Context, s *V2Sess
 	}
 	go func() {
 		defer func() { <-asks }()
-		m.resolveMCPStatusRequest(ctx, s, env.ID, req.ConversationID)
+		m.resolveMCPStatusRequest(ctx, s, env.ID, req.ConversationID, thread)
 	}()
 }
 
@@ -86,7 +86,20 @@ func (m *V2SessionManager) handleMCPStatusRequest(ctx context.Context, s *V2Sess
 // the wait. A resolver that returns after ctx ended is answered with NOTHING, whatever
 // it returned: the conn is gone, and a refusal logged for it would misreport a
 // teardown as unavailable status.
-func (m *V2SessionManager) resolveMCPStatusRequest(ctx context.Context, s *V2Session, inReplyTo uint64, conversationID string) {
+func (m *V2SessionManager) resolveMCPStatusRequest(ctx context.Context, s *V2Session, inReplyTo uint64, conversationID string, thread bool) {
+	if thread && m.cfg.MCPStatusReadingFor != nil {
+		reading, ok := m.cfg.MCPStatusReadingFor(ctx, conversationID)
+		if ctx.Err() != nil {
+			return
+		}
+		if !ok {
+			m.rejectMCPStatusRequest(ctx, s, inReplyTo, rejectMCPStatusUnavailable, "resolver has no current status")
+			return
+		}
+		m.pushLiveReply(ctx, s, inReplyTo, reading)
+		return
+	}
+
 	payload, ok := m.cfg.MCPStatusFor(ctx, conversationID)
 	if ctx.Err() != nil {
 		m.cfg.Logger.Debug("relay: v2 mcp_status request abandoned; session tearing down",

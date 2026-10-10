@@ -36,8 +36,10 @@ type appFrameJob struct {
 	// multiAgent is the conn's negotiated multi_agent decision, copied from the
 	// Run-owned V2Session.multiAgent when the job is built on Run, so a worker
 	// handler reads it without touching session state (#2646). Only the
-	// session-settings read consults it.
+	// settings read consults it.
 	multiAgent bool
+	// thread is copied on Run so supplied providers never read negotiated state off Run.
+	thread bool
 }
 
 // appFrameKind names the off-Run handlers, one member per dispatchAppFrame case
@@ -175,14 +177,14 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// trip. Saved settings resolution and reply composition share this
 				// worker placement, and the unsealed reply returns through
 				// forwardToRun so the worker never touches s.send.
-				m.handleRequestSessionSettings(ctx, s, job.plaintext, job.multiAgent)
+				m.handleRequestSessionSettings(connCtx, s, job.plaintext, job.multiAgent, job.thread)
 			case appFrameMCPStatusRequest:
 				// The resolver may wait on a child round trip. That wait does NOT
 				// stall this conn's later frames (#2702): the handler checks
 				// membership here and hands the wait to a goroutine of its own. Its
 				// reply and every reject return through forwardToRun, so nothing
 				// seals under s.send off Run.
-				m.handleMCPStatusRequest(connCtx, s, mcpAsks, job.plaintext)
+				m.handleMCPStatusRequest(connCtx, s, mcpAsks, job.plaintext, job.thread)
 			case appFrameMCPReconnect:
 				// The actuator waits on a child round trip, so this stalls only the
 				// addressed conn's later frames. Its reply and every reject return
@@ -201,7 +203,7 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// hands the wait to a goroutine of its own, so its reply may emit
 				// after later frames' replies. Its reply and every reject return
 				// through forwardToRun, so nothing seals under s.send off Run.
-				m.handleRequestContextUsage(connCtx, s, asks, job.plaintext)
+				m.handleRequestContextUsage(connCtx, s, asks, job.plaintext, job.thread)
 			case appFrameRoute:
 				// The v1 application dispatch chain, unchanged: build the outbound
 				// channel, call dispatch.Route, forward its replies to Run.

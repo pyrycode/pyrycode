@@ -1033,7 +1033,7 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			}
 			// multiAgent is Run-owned, so it travels in the job rather than being
 			// read on the worker (#2646).
-			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameSessionSettingsRequest, multiAgent: s.multiAgent})
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameSessionSettingsRequest, multiAgent: s.multiAgent, thread: s.thread})
 			return
 		case protocol.TypeRequestModelList:
 			// Inline on Run (#2125), beside its shape twin above rather than with
@@ -1048,10 +1048,10 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// A live resolver may wait on a child round trip, so accepted requests
 			// run on this conn's worker. Both inert gates stay here on Run: neither
 			// posture decodes the payload or consults membership.
-			if m.cfg.MCPStatusFor == nil || !s.interactive {
+			if (m.cfg.MCPStatusFor == nil && (!s.thread || m.cfg.MCPStatusReadingFor == nil)) || !s.interactive {
 				return
 			}
-			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameMCPStatusRequest})
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameMCPStatusRequest, thread: s.thread})
 			return
 		case protocol.TypeRequestContextUsage:
 			// The read-and-wait arm's twin (#2431), on the worker for the same reason
@@ -1059,10 +1059,10 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// ends AND waits on a child round trip. Both inert gates stay here on Run:
 			// neither posture decodes the payload or consults membership, and holding
 			// them here is what keeps a frame that fails either off the queue entirely.
-			if m.cfg.ContextUsageFor == nil || !s.interactive {
+			if (m.cfg.ContextUsageFor == nil && (!s.thread || m.cfg.ContextUsageReadingFor == nil)) || !s.interactive {
 				return
 			}
-			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameContextUsageRequest})
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameContextUsageRequest, thread: s.thread})
 			return
 		case protocol.TypeMCPReconnect:
 			// The WRITE half of the MCP pair (#2419), on the worker for the same

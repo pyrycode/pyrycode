@@ -140,6 +140,16 @@ func (m *V2SessionManager) handleRequestModelList(ctx context.Context, s *V2Sess
 		return
 	}
 
+	if s.thread && m.cfg.ModelListReadingFor != nil {
+		reading, ok := m.cfg.ModelListReadingFor(p.ConversationID, s.multiAgent)
+		if !ok {
+			m.rejectModelListRequest(ctx, s, env.ID, rejectModelListUnavailable, "no vocabulary is retained for this conversation", p.ConversationID)
+			return
+		}
+		m.pushLiveReply(ctx, s, env.ID, reading)
+		return
+	}
+
 	if m.cfg.ModelListFor == nil {
 		// Step 4, the unwired half of the merge. The id is loggable from here on.
 		m.rejectModelListRequest(ctx, s, env.ID, rejectModelListUnavailable, "no model-list source is wired", p.ConversationID)
