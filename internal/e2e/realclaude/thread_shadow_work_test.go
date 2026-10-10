@@ -339,3 +339,51 @@ func TestThreadShadowRawOwnerLateRepair(t *testing.T) {
 		}
 	}
 }
+
+// A live reset lets Claude cancel the closure call before the divider, which
+// records an error result and a cancelled turn end rather than the daemon's
+// interruption facts. That settles the work; a call that ran to success does
+// not. Synthetic controls, never live artifacts.
+func TestThreadShadowPairClosureSettlement(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		isError bool
+		accept  bool
+	}{{"cancelled_by_claude", true, true}, {"ran_to_success", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, e := testShadowUserPair(t)
+			replace := func(id uint64, typ string, payload map[string]any) {
+				payload["conversation_id"] = h.Conversation
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if h.Entries[id-1].Type != "main_tool_interrupted" && h.Entries[id-1].Type != "main_turn_interrupted" {
+					t.Fatal("synthetic closure facts moved")
+				}
+				h.Entries[id-1].Type, h.Entries[id-1].Payload = typ, raw
+			}
+			replace(15, "tool_result", map[string]any{"turn_id": "closure", "tool_use_id": "closure-bash", "is_error": tc.isError, "result_summary": "controlled closure"})
+			replace(16, "turn_end", map[string]any{"turn_id": "closure", "stop_reason": "cancelled"})
+			h.Provenance.HistorySHA256 = shadowDigest(h.Entries)
+			e.Provenance = h.Provenance
+			for i := range e.Checkpoints {
+				fold := thread.New(h.Conversation)
+				if err := fold.Feed(h.Entries[:e.Checkpoints[i].Version]); err != nil {
+					t.Fatal(err)
+				}
+				e.Checkpoints[i].Items = fold.Items()
+			}
+			err := shadowValidatePair(h, e, false)
+			if tc.accept && err != nil {
+				t.Fatalf("closure cancelled before the divider rejected: %v", err)
+			}
+			if !tc.accept && err == nil {
+				t.Fatal("closure work that ran to success accepted as settled")
+			}
+			if !tc.accept && err.Error() != "closure did not retain divider and settle active work before it" {
+				t.Fatalf("rejected for an unrelated reason: %v", err)
+			}
+		})
+	}
+}

@@ -307,7 +307,15 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 			if cp.Name == "session_closed" && item.Active && item.Session == h.Entries[end-1].Session.SessionID {
 				return errors.New("session divider left active old-session work")
 			}
-			if cp.Name == "session_closed" && item.Status == "interrupted" && item.Rev > outcome && item.Rev < divider {
+			// Closure work created after delivery must have been cut short before
+			// the divider. The daemon's own interruption facts give "interrupted";
+			// a live reset first lets Claude cancel the call, which records an
+			// error result and so "failed" (observed 2026-10-10, Claude 2.1.280).
+			// shadowRawRows has already matched that status to the first raw
+			// terminal, so a call that ran to success cannot satisfy this.
+			work := item.Kind == "tool_call" || item.Kind == "agent"
+			cut := item.Status == "interrupted" || (work && item.ID > outcome && item.Status != "done" && item.Status != "finished" && item.Status != "running" && item.Status != "stopping")
+			if cp.Name == "session_closed" && cut && !item.Active && item.Rev > outcome && item.Rev < divider {
 				settled = true
 			}
 			ids[item.ID] = item
