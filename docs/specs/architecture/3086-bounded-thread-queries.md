@@ -77,3 +77,7 @@ Pending documentation stage: `docs/knowledge/features/thread-package-background-
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-10
+
+## Revisions
+
+- 2026-10-10: Find the first tied lower-order row with a second binary seek, preserving the range contract while bounding work before cancellable copying. Extend `TestStoreQueriesRetirementIsolation` to hold a consumer during publication and retirement; verify its captured epoch/version remains coherent while same-conversation writers and another worker progress. The 36,000-entry fixture now measures both read bytes and segment opens with active queued/nested extras after fresh history-store reopen.
