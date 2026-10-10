@@ -674,9 +674,9 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`mint_pairing`** | phone → binary | no | **New in v2. Security-sensitive — its reply is a bearer credential.** Inbound control — an already-paired client asks the daemon to mint a pairing for **another** device, naming an optional `device_name` and nothing else (#2126). It is the pairing flow's second entry point: `pyry pair` needs a shell on the daemon's host, which a browser build of the desktop client and a second person's client do not have. **A write verb, not a read** — it creates a credential and a registry record, which is why it is named for its action rather than filed under the `request_*` family. **Nothing a client sends is input to what is minted**, and there is deliberately **no field for the remote-permissions flag**: a minted device is always unprivileged. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`pairing_minted`](#pairing_minted). **Answered since #2127** — by a privileged-device gate, a mint under the `devices.json` lock, and a `pairing_minted` reply; every other device is refused `pairing.not_permitted` with nothing created. See [Minting a pairing from a paired client](#minting-a-pairing-from-a-paired-client). |
 | **`pairing_minted`** | binary → phone | no | **New in v2.** Outbound reply to a [`mint_pairing`](#mint_pairing), correlated by `in_reply_to` (#2126). Carries the same daemon-encoded pairing that bare `pyry pair` receives through local control and renders as the QR symbol and paste fallback — one opaque base64url string a client hands to its existing pairing dialog unchanged — and **nothing else**: the four fields inside it are not repeated as loose keys, and no field of the request is echoed back. **The string is a plaintext bearer credential**: never logged, no decoded field of it logged, and it must never leave the AEAD-sealed envelope. Unicast to the conn that asked; never broadcast. Emitted by the mint handler since #2127. See [Minting a pairing from a paired client](#minting-a-pairing-from-a-paired-client). |
 | **`reply_suggestion`** | binary → phone | no | **New in v2** (interactive, capability-gated). Next-reply state for a conversation/session pair after an eligible successful turn: native first, then one Haiku fallback after a two-second native window (#2831, #2832). Broadcast to attached interactive clients. A higher revision with explicit `suggested_reply: null` clears it; reconnect reconciles current state, including clears. No `event_id`, replay or history. Unavailable fallback stays silent. See [`reply_suggestion`](#reply_suggestion). |
-| **`thread_item_added`** | binary → phone | no | **Declared but not yet emitted** (#3072). Full daemon-built item with `conversation_id`, `epoch`, `version`. The `thread` capability is declared but not yet advertised. See [daemon thread updates](#daemon-thread-updates-v2-declarations-only). |
-| **`thread_item_changed`** | binary → phone | no | **Declared but not yet emitted** (#3072). In-place field replacements with `item_id`, `base_rev`, `rev`, `changes` and the common conversation/epoch/version fields. See [`thread_item_changed`](#thread_item_changed). |
-| **`thread_text_append`** | binary → phone | no | **Declared but not yet emitted** (#3072). Message text suffix with `item_id`, `base_rev`, `rev`, `text` and the common conversation/epoch/version fields. See [`thread_text_append`](#thread_text_append). |
+| **`thread_item_added`** | binary → phone | no | **Declared but not yet emitted; activation pending #3077.** Full daemon-built item with `conversation_id`, `epoch`, `version`; oversized updates use bounded assembly parts (#3073). The `thread` capability is declared but not yet advertised. See [daemon thread updates](#daemon-thread-updates-v2-declarations-only). |
+| **`thread_item_changed`** | binary → phone | no | **Declared but not yet emitted; activation pending #3077.** In-place field replacements with `item_id`, `base_rev`, `rev`, `changes` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_item_changed`](#thread_item_changed). |
+| **`thread_text_append`** | binary → phone | no | **Declared but not yet emitted; activation pending #3077.** Message text suffix with `item_id`, `base_rev`, `rev`, `text` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_text_append`](#thread_text_append). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -687,9 +687,11 @@ outgoing contracts in `internal/protocol`; **none is emitted yet**, and the
 literal capability `thread` is **declared but not yet advertised**. These
 declarations neither negotiate a connection nor change existing traffic.
 [ADR 042](knowledge/decisions/042-daemon-built-thread.md) defines the migration:
-negotiation belongs to #3075, publication to #3077, bounded encoding and
-continuations to #3073, and catch-up/page request and reply kinds to #2963.
-The full item contract below is shared with those later catch-up/pages.
+negotiation belongs to #3075 and publication remains pending #3077. The pure
+bounded codec and continuation representation landed in #3073; catch-up/page
+request and reply kinds remain pending #2963 and can reuse the full-item
+added-payload assembly representation below. The codec activates no emission
+and changes no legacy serialization or limits.
 
 All three payloads have these required common fields:
 
@@ -754,10 +756,127 @@ keeps `session` and omits `agent`; unknown attribution omits both and leaves
 `no_child` absent. Positively no child sends `no_child: true`. Neither unknown
 nor no-child attribution invents a Claude agent or an active-session fallback.
 
+Full items are preserved in their entirety by the bounded encoding below,
+including kind, placement, oversized `summary` or other metadata, accumulated
+tool/agent content and unknown nested JSON. No field is truncated or discarded.
+A fitting addition keeps one ordinary full `item`; an oversized addition carries
+fragments of the serialized added payload until complete assembly recovers it.
+
+#### Bounded thread encoding and assembly
+
+`EncodeThreadUpdate(Envelope, any) ([][]byte, error)` accepts detached
+`ThreadItemAddedPayload`, `ThreadItemChangedPayload` or `ThreadTextAppendPayload`
+values. It selects the corresponding envelope `type` and replaces `payload`.
+It performs no I/O or logging, leaves inputs unchanged and returns independently
+owned serialized envelopes. Callers MUST NOT mutate inputs concurrently.
+Encoding preserves inert JSON; consumers still own semantic validation.
+
+Every complete application envelope MUST fit **65519 serialized bytes** before
+Noise encryption, including envelope fields and all JSON escaping. The external
+relay `RoutingEnvelope` is outside this cap. Checking a source event's size is
+insufficient because folded text and accumulated content can grow across events.
+An update fitting the reserved envelope budget retains its ordinary wire shape,
+without `continuation` or `data`. Otherwise the original envelope type carries
+`ThreadUpdatePart` payloads; the first part and every continuation share this shape:
+
+| Part field | Type | Meaning |
+|---|---|---|
+| `conversation_id`, `epoch`, `version` | as above | Repeated logical update routing and target conversation version. |
+| `item_id` | number | Original item identity; for an addition, its `item.id`. |
+| `base_rev` | number | Required for changed/append parts; omitted for added parts. Original application precondition. |
+| `rev` | number | Original target revision; for an addition, its `item.rev`. |
+| `continuation` | object | Required on every assembly part; fields below. MUST be detected before ordinary DTO decoding. |
+| `data` | string | Nonempty UTF-8 fragment of the serialized **entire logical payload**, including routing and all item/patch/text fields. |
+
+| `continuation` field | Type | Meaning |
+|---|---|---|
+| `update_id` | string | 64 lowercase hexadecimal characters: SHA-256 of the envelope type, one NUL byte, then the serialized logical payload bytes. Assembly identity/integrity only; Noise provides authentication. |
+| `index` | number | Zero-based consecutive part index; zero starts assembly. |
+| `offset` | number | Zero-based byte offset in the logical payload after decoding the `data` strings. |
+| `total_bytes` | number | Total byte length of the serialized logical payload, repeated on every part. |
+| `final` | bool | Present on every part. Only the last part is `true`; it requests completion checks, not unconditional application. |
+
+Decode each `data` JSON string, concatenate its UTF-8 bytes in order, then decode
+the resulting JSON as the original DTO. A fragment may contain incomplete JSON;
+the surrounding application envelope is always complete JSON. No fragment is
+itself an item, field patch or message-text suffix. Item kind and placement remain
+inside the assembled payload. Progress fields describe assembly only: they MUST
+NOT generate history entries or substitute for item `rev` or conversation `version`.
+
+Consumers MUST buffer without applying fields or advancing completed revisions
+or versions, and enforce these completion rules:
+
+1. Start at index/offset zero. Accept only the next index and the exact byte
+   offset equal to the buffered length. Require the same type, `update_id`,
+   `total_bytes`, conversation, epoch, item identity, target version/revision and
+   `base_rev` presence/value throughout. Reject empty fragments or length overflow.
+2. On `final: true`, require exact `total_bytes`, a matching digest over the
+   concatenated bytes and valid original DTO JSON. Its decoded routing and
+   revision fields MUST match the repeated metadata; added `item.id` and
+   `item.rev` supply those checks for a full item.
+3. Validate the logical update, including stable identity/kind and message-only
+   append applicability. A change or append still requires the currently
+   completed item's revision to equal its original `base_rev`. Only then apply
+   the complete update atomically and record its original target `rev` and
+   conversation `version`. Full-item additions/catch-up use the original item
+   identity and revision, never fragment indices.
+
+A missing middle part followed by the final part fails the index/offset check;
+an out-of-order part, metadata/digest disagreement, corrupt payload or wrong
+`base_rev` likewise fails assembly/application. Discard incomplete assembly,
+retain completed item fields/revision/version and require catch-up before
+resuming. A fresh catch-up state discards the failed buffer. An absent final
+part leaves the update incomplete; receiver buffering limits/timeouts belong
+to the client implementation. Replaying a completed change or append fails its
+old `base_rev`, so a text suffix cannot be applied twice.
+
+#### Thread update byte budgets
+
+The codec measures serialized ordinary and part envelopes. Fragment `data`
+strings escape the serialized logical JSON a second time, so raw content/patch
+values, routing strings and every other variable field count at their actual
+escaped cost. Splits use valid UTF-8 boundaries. An empty-part measurement
+includes 20-digit uint64 progress numbers and `final: false` (longer than `true`);
+the remaining budget is for escaped `data` bytes, excluding its already-counted
+string quotes.
+
+Sizing reserves 20 decimal digits each for envelope `id`, `in_reply_to`,
+`event_id` and `history_entry_id`, a maximum-width valid RFC3339Nano `ts`, and
+both optional boolean flags (`session_state_cleared`, `payload_encrypted`),
+even when omitted in the supplied envelope. Callers may stamp those reserved
+fields after encoding within their existing wire semantics. They MUST supply
+all variable envelope session metadata (`session_id`) before encoding, MUST
+NOT enlarge it afterwards, and MUST NOT alter the encoded `type` or `payload`.
+Reserving a field's size does not change its protocol meaning.
+
+`TestThreadUpdateBudgets` measures a size-only boundary fixture with conversation
+`c`, epoch `e`, maximum-width uint64 numbers/stamps and escaped `session_id` JSON
+`"\u0000\u003c\u2028"`. Ordinary overhead includes the fixed payload shape with
+empty summary/text (or empty summary replacement), not just the envelope:
+
+| Type | Ordinary overhead (bytes) | Reserved empty-part overhead (bytes) | Escaped `data` budget (bytes) |
+|---|---:|---:|---:|
+| `thread_item_added` | 510 | 641 | 64878 |
+| `thread_item_changed` | 486 | 675 | 64844 |
+| `thread_text_append` | 470 | 674 | 64845 |
+
+These are measured examples, **not universal content limits**: repeated routing
+and session metadata change the available room. An ordinary envelope exactly
+fitting the reserved budget stays ordinary; one byte beyond it triggers parts.
+If repeated metadata leaves no room for the next complete UTF-8 fragment,
+`ErrThreadUpdateMetadataTooLarge` returns **nil output**, even if earlier parts
+could fit. Unsupported update types, invalid UTF-8, malformed raw JSON or
+unencodable timestamp/session JSON return `ErrInvalidThreadUpdate` with nil
+output. Both errors are fixed, content-free sentinels: no source values or host
+paths, and no usable partial sequence on any failure.
+
 #### `thread_item_added`
 
-**Declared but not yet emitted.** Required `item` carries one full item in
-addition to the common `conversation_id`, `epoch`, `version` fields.
+**Declared but not yet emitted; activation pending #3077.** In the ordinary
+shape, required `item` carries one full item in addition to the common
+`conversation_id`, `epoch`, `version` fields. An oversized addition uses
+[assembly parts](#bounded-thread-encoding-and-assembly) under this same type;
+apply the recovered full item only after complete validation.
 
 ```json
 {
@@ -773,8 +892,8 @@ addition to the common `conversation_id`, `epoch`, `version` fields.
 
 #### `thread_item_changed`
 
-**Declared but not yet emitted.** Adds these required fields to the common
-conversation/epoch/version fields:
+**Declared but not yet emitted; activation pending #3077.** The ordinary shape
+adds these required fields to the common conversation/epoch/version fields:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -790,6 +909,11 @@ recursive merge. Raw patch values, including unknown fields, stay inert JSON;
 consumers validate and apply them. Apply only when the held item revision
 equals `base_rev`; otherwise request catch-up rather than guessing.
 
+Oversized changes use [assembly parts](#bounded-thread-encoding-and-assembly)
+under this same type. Assembly preserves omitted keys and all explicit clears;
+apply no partial patch. After completion, apply the original replacements and
+record `rev`/`version` atomically only if the original `base_rev` still matches.
+
 ```json
 {
   "conversation_id": "conv-a", "epoch": "epoch-b", "version": 808,
@@ -800,11 +924,18 @@ equals `base_rev`; otherwise request catch-up rather than guessing.
 
 #### `thread_text_append`
 
-**Declared but not yet emitted.** Required `item_id`, `base_rev` and `rev` have
-the same meanings as on a change. Required string `text` is only the suffix
-added to a message item's text, including an explicit empty string when
-supplied; it is not the full resulting text. Apply only when the held revision
-equals `base_rev`, then record `rev`; a mismatch requires catch-up.
+**Declared but not yet emitted; activation pending #3077.** In the ordinary
+shape, required `item_id`, `base_rev` and `rev` have the same meanings as on a
+change. Required string `text` is only the suffix added to a message item's
+text, including an explicit empty string when supplied; it is not the full
+resulting text. Apply only when the held revision equals `base_rev`, then
+record `rev` and conversation `version`; a mismatch requires catch-up.
+
+An oversized suffix uses [assembly parts](#bounded-thread-encoding-and-assembly)
+under this same type. Their `data` fragments are serialized logical payload
+fragments, never text to append directly. Append the recovered `text` exactly
+once after complete assembly and the original `base_rev` check; incomplete or
+rejected assembly changes neither message text nor completed `rev`/`version`.
 
 ```json
 {
