@@ -171,3 +171,8 @@ proof remain pending #3077.
   the recorded split-depth sizing exception continues to apply.
   `TestControlLiveInventoryStoredEvidence` verifies unresolved stored menus through
   both model projections and the slash provider without assigning current provenance.
+- 2026-10-10: Composition check: `runSupervisor` constructs the bootstrap runner
+  before installing the live owner. Its ingress attachment is therefore installed
+  unconditionally and remains inert until the owner is present, preserving nil
+  defaults without missing bootstrap inventories. `TestControlLiveInventoryLateOwner`
+  checks both families against that construction order and rejects double forwarding.

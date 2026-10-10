@@ -780,11 +780,8 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// The reset follower runs after inventory retention and before fan-in,
 		// using this runner's tag and the pool's adoption callback.
 		downstream := sink.sinkForSessionTag(tag, "claude")
-		var inventory *daemonInventoryIngress
-		if sink.live != nil {
-			inventory = &daemonInventoryIngress{sink: sink, tag: tag}
-			downstream = inventory.downstream(downstream)
-		}
+		inventory := &daemonInventoryIngress{sink: sink, tag: tag}
+		downstream = inventory.downstream(downstream)
 		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, downstream, cfg.Logger)
 		contextUsage := newTurnEndContextUsageRequester(follow.Sink, cfg.Logger)
 		// #2450 chains the vocabulary persister at the head of the same run of

@@ -15,11 +15,14 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
-func testInventoryIngress(t *testing.T) (*daemonLiveBindings, *sessions.Pool, streamRunner) {
+func testInventoryIngress(t *testing.T, lateOwner ...bool) (*daemonLiveBindings, *sessions.Pool, streamRunner) {
 	t.Helper()
 	reg := &conversations.Registry{}
 	sink := newStreamTurnSink(128, discardLogger())
-	sink.live = newDaemonLiveState(func(sid string) (string, bool) { return conversationForSession(reg, sid) })
+	owner := newDaemonLiveState(func(sid string) (string, bool) { return conversationForSession(reg, sid) })
+	if len(lateOwner) == 0 || !lateOwner[0] {
+		sink.live = owner
+	}
 	vocab := newModelVocabularyStore(filepath.Join(t.TempDir(), "models.json"))
 	t.Cleanup(vocab.Close)
 	factory := newStreamRunnerFactory(sink, "", vocab, streamApprovalConfig{})
@@ -34,6 +37,7 @@ func testInventoryIngress(t *testing.T) (*daemonLiveBindings, *sessions.Pool, st
 	if err != nil {
 		t.Fatal(err)
 	}
+	sink.live = owner // production installs the owner after bootstrap construction, before workers
 	return &daemonLiveBindings{sink: sink, reg: reg}, pool, pool.Default().Runner().(streamRunner)
 }
 
@@ -230,5 +234,32 @@ func TestControlLiveInventoryStoredEvidence(t *testing.T) {
 		if reading.Revision == 0 || len(reading.Envelope.SessionID) != 0 {
 			t.Fatalf("stored %s acquired current producer evidence: revision=%d source=%s", family, reading.Revision, reading.Envelope.SessionID)
 		}
+	}
+}
+
+func TestControlLiveInventoryLateOwner(t *testing.T) {
+	for _, family := range []string{protocol.TypeModelList, protocol.TypeSlashCommandList} {
+		t.Run(family, func(t *testing.T) {
+			b, pool, runner := testInventoryIngress(t, true)
+			parser := streamsup.NewParser(runner.models.Sink, discardLogger())
+			if _, err := parser.Write(testInventoryLine(family, "bootstrap")); err != nil {
+				t.Fatal(err)
+			}
+			forwarded := <-b.sink.ch
+			var cached daemonLiveSource
+			if family == protocol.TypeModelList {
+				_, cached, _ = runner.ModelListLive()
+			} else {
+				_, cached, _ = runner.SlashCommandListLive()
+			}
+			if forwarded.live == nil || cached.SessionGeneration == 0 || cached != forwarded.live.source || cached.provenance.SessionID != string(pool.BootstrapID()) {
+				t.Fatalf("bootstrap inventory missed the late-installed owner: cache=%+v", cached)
+			}
+			select {
+			case <-b.sink.ch:
+				t.Fatal("bootstrap inventory forwarded twice")
+			default:
+			}
+		})
 	}
 }

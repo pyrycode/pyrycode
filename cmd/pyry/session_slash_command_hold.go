@@ -77,8 +77,7 @@ func (h *sessionSlashCommandHold) Sink(ev turnevent.Event) {
 			h.mu.Unlock()
 		}
 		if h.live != nil {
-			env := h.live.prepare(ev, store)
-			captured = &env
+			captured = h.live.prepare(ev, store)
 		} else {
 			store(daemonLiveSource{})
 		}

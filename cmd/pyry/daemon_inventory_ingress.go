@@ -23,8 +23,12 @@ func daemonInventoryEvent(ev turnevent.Event) bool {
 // prepare stores the payload/source pair and admits its family under the
 // transition boundary. store only updates an in-memory hold. Persistence and
 // forwarding run after the boundary, using this immutable envelope.
-func (i *daemonInventoryIngress) prepare(ev turnevent.Event, store func(daemonLiveSource)) streamTurnEnvelope {
+func (i *daemonInventoryIngress) prepare(ev turnevent.Event, store func(daemonLiveSource)) *streamTurnEnvelope {
 	s := i.sink
+	if s.live == nil {
+		store(daemonLiveSource{})
+		return nil
+	}
 	s.offerMu.Lock()
 	defer s.offerMu.Unlock()
 	id := i.tag.ID()
@@ -34,14 +38,14 @@ func (i *daemonInventoryIngress) prepare(ev turnevent.Event, store func(daemonLi
 	src := s.live.capture(id, env.incarnation, env.source, false)
 	store(src)
 	env.live = s.live.acceptEvent(src, ev)
-	return env
+	return &env
 }
 
 // downstream leaves ordinary events on the legacy path. Inventory envelopes
 // have already been captured and are offered by their hold after decorators run.
 func (i *daemonInventoryIngress) downstream(next func(turnevent.Event)) func(turnevent.Event) {
 	return func(ev turnevent.Event) {
-		if !daemonInventoryEvent(ev) {
+		if i.sink.live == nil || !daemonInventoryEvent(ev) {
 			next(ev)
 		}
 	}
