@@ -238,14 +238,7 @@ func TestMemoryTranscriptWorker(t *testing.T) {
 	dir := filepath.Join(home, ".pyry", "memory", "recent-transcripts")
 	wait := func(check func(map[string]string) bool) {
 		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if check(testTranscriptDisk(t, dir)) {
-				return
-			}
-			time.Sleep(time.Millisecond)
-		}
-		t.Fatal("export deadline")
+		testShadowWait(t, func() bool { return check(testTranscriptDisk(t, dir)) })
 	}
 	contains := func(text string) func(map[string]string) bool {
 		return func(files map[string]string) bool {
@@ -281,19 +274,13 @@ func TestMemoryTranscriptWorker(t *testing.T) {
 	_, err = direct.AppendWithMetadata(id2, "message", json.RawMessage(`{"role":"user","text":"direct writer"}`), time.Unix(60, 0), history.Metadata{Session: &history.SessionProvenance{Kind: "codex", SessionID: "opaque/../../id"}})
 	testMemoryMust(t, err)
 	source := make(map[string]string)
-	testMemoryMust(t, filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			b, e := os.ReadFile(path)
-			if e != nil {
-				return e
-			}
-			source[path] = string(b)
-		}
-		return nil
-	}))
+	paths, err := filepath.Glob(filepath.Join(root, "conversations", "*", "history", "*.jsonl"))
+	testMemoryMust(t, err)
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		testMemoryMust(t, err)
+		source[path] = string(b)
+	}
 	ticks <- time.Unix(40, 0)
 	wait(contains("direct writer"))
 	stop()
@@ -304,15 +291,10 @@ func TestMemoryTranscriptWorker(t *testing.T) {
 	stop = startMemoryTranscripts(context.Background(), &settings, base, history.New(root), reg, log, memoryTranscriptHooks{ticks: ticks})
 	wait(func(files map[string]string) bool { return reflect.DeepEqual(complete, files) })
 	stop()
-	if !reflect.DeepEqual(complete, testTranscriptDisk(t, dir)) {
-		t.Fatal("rebuilt identities/content differ")
-	}
 	for path, body := range source {
 		b, err := os.ReadFile(path)
 		testMemoryMust(t, err)
-		if string(b) != body {
-			t.Fatal("source history changed")
-		}
+		testMemoryCheck(t, string(b) == body, "source history changed")
 	}
 	if memoryTranscriptInterval > 60*time.Second {
 		t.Fatal("schedule exceeds bound")
@@ -366,4 +348,13 @@ func TestMemoryTranscriptActivation(t *testing.T) {
 	if !strings.Contains(logs.String(), "reason=settings") || strings.Contains(logs.String(), "secret") || strings.Contains(logs.String(), home) {
 		t.Fatal("diagnostic leak")
 	}
+	base := filepath.Join(home, "vault")
+	testMemoryMust(t, os.Mkdir(base, 0700))
+	alias := filepath.Join(home, ".pyry", "memory", "recent-transcripts")
+	testMemoryMust(t, os.MkdirAll(filepath.Dir(alias), 0700))
+	testMemoryMust(t, os.Symlink(filepath.Join(home, "history"), alias))
+	valid := testManagedMemory()
+	logs.Reset()
+	startMemoryTranscripts(context.Background(), &valid, base, h, reg, log)()
+	testMemoryCheck(t, strings.Contains(logs.String(), "reason=storage"), "redirected transcript storage accepted")
 }

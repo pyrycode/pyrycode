@@ -109,13 +109,10 @@ func (w *memoryTranscriptReader) files(c conversations.Conversation) map[string]
 		} else {
 			fmt.Fprintf(&b, "Session: %s\n", quote(g.session))
 		}
-		state := "open"
-		if g.closed != 0 {
-			state = "closed"
-		}
-		fmt.Fprintf(&b, "State: %s\n", state)
-		if g.closed != 0 {
-			fmt.Fprintf(&b, "Closing entry: %d\n", g.closed)
+		if g.closed == 0 {
+			b.WriteString("State: open\n")
+		} else {
+			fmt.Fprintf(&b, "State: closed\nClosing entry: %d\n", g.closed)
 		}
 		fmt.Fprintf(&b, "Last delivered entry: %d\n", g.last)
 		for _, item := range g.messages {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -31,6 +32,14 @@ func startMemoryTranscripts(parent context.Context, settings *config.MemorySetti
 	effective, err := resolveEffectiveMemory(parent, *settings, base)
 	if err != nil {
 		failure("settings")
+		return func() {}
+	}
+	home, err := memoryHome()
+	if err == nil {
+		home, err = memoryReservedPath(home)
+	}
+	if err != nil || effective.TranscriptPath != filepath.Join(home, ".pyry", "memory", "recent-transcripts") {
+		failure("storage")
 		return func() {}
 	}
 	var hook memoryTranscriptHooks

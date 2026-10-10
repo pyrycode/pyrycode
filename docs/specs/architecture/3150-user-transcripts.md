@@ -67,3 +67,4 @@ Pending documentation stage:
 
 ## Revisions
 - 2026-10-10: final sizing is 362 production, 369 tests/helpers and 69 plan lines (800 total); no interface or lifecycle contract changed. Composition tests use a separate valid startup vault because a vault containing transcript storage is rejected by the existing resolver.
+- 2026-10-10: security review found that destination canonicalization can hide a storage symlink before no-follow publication. Startup also compares the effective destination to the canonical home's fixed daemon-owned transcript location; redirects disable export with a content-free storage diagnostic. Reuse the existing polling helper and compare all source segment bytes; final sizing is 368 production + 360 tests/helpers + 70 plan lines = 798 written lines.
