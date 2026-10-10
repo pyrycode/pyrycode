@@ -1,16 +1,17 @@
 # Hosted apps
 
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
-is defined ahead of hosting implementation. This reference preserves its fields,
-limits and guarantees; it does not claim that the daemon, template or native
-viewers already implement them. The spec owns the
+defines the hosting design. Strict manifest validation and durable registration
+are implemented in the standalone `internal/apps` package; daemon integration,
+publication, the template and native viewers remain later work. This reference
+preserves the contract's fields, limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 used by daemon, desktop and mobile consumers. Runtime and isolation choices are
 recorded in [ADR 043](knowledge/decisions/043-hosted-app-runtime-and-isolation.md).
 
 ## Manifest and identity
 
-MUST, MUST NOT and SHOULD are normative. This contract defines hosted apps v1 ahead of hosting implementation. React content runs in an isolated native viewer; compiled TypeScript services run as trusted code under the daemon's OS account. There is no new conversation type, public marketplace, arbitrary WebSocket tunnel or claim of an OS sandbox. V1 dashboard freshness uses bounded API polling.
+MUST, MUST NOT and SHOULD are normative. The implemented registration boundary is described below; the remaining hosting behavior defines the v1 contract. React content runs in an isolated native viewer; compiled TypeScript services run as trusted code under the daemon's OS account. There is no new conversation type, public marketplace, arbitrary WebSocket tunnel or claim of an OS sandbox. V1 dashboard freshness uses bounded API polling.
 
 Three versions answer different questions:
 
@@ -27,6 +28,15 @@ The stable link is exactly `pyrycode://hosts/<server_id>/apps/<app_id>` (no cred
 ### Manifest validation
 
 `app.json` is UTF-8 JSON, at most 16384 bytes, containing one object, no duplicate keys or trailing values. All table fields are required unless marked optional. Required fields cannot be null. Optional fields are omitted when unset; explicit null is invalid. Reject unknown manifest fields in v1 (including nested objects), so misspelled build/entry fields cannot silently pass. A future incompatible manifest requires a new contract version; its capability is negotiated separately.
+
+`internal/apps.ValidateManifest` enforces these syntax rules, required/optional
+manifest fields, JSON types, string bounds and fixed v1 values listed below,
+including exact key spelling at every nesting level. Both registration and
+explicit manifest updates use this validation. The package accepts caller-minted canonical lowercase
+UUIDv4 identities and requires the manifest's `server_id` to equal the supplied,
+persisted local host identity; it neither mints IDs nor restamps foreign manifests.
+Validation reads no package or compiled files, runs no commands and establishes
+neither publication nor readiness. Those checks belong to #3125.
 
 | Field | JSON type | V1 constraint |
 |---|---|---|
@@ -58,7 +68,48 @@ The stable link is exactly `pyrycode://hosts/<server_id>/apps/<app_id>` (no cred
 | `build.test` | array of strings | Exactly `["npm", "test"]`. |
 | `build.compile` | array of strings | Exactly `["npm", "run", "build"]`. |
 
-These fixed paths are release-relative, not native service addresses. Tools validate that every required entry is a regular file inside its selected root; entry/public-asset/migration paths permit no symlink component, `..`, absolute path or device file. Locked runtime dependencies may contain package-internal symlinks only when their entire resolution remains inside that build's `node_modules`; publication validates and inventories those targets. Frontend output MUST contain only public assets: no source secrets, SQL database, service code, lockfile, environment file or `node_modules`. Validation covers runtime version, manifest identity, lockfile, command exit status, compiled entries and migration filenames. A release version is unique per app: a reused version with different bytes is rejected, and publishing identical previously recorded bytes is an idempotent no-op. New updates increase the version numerically; rollback may reactivate an older recorded release.
+These fixed paths are release-relative, not native service addresses. Publication validation (#3125) must check that every required entry is a regular file inside its selected root; entry/public-asset/migration paths permit no symlink component, `..`, absolute path or device file. Locked runtime dependencies may contain package-internal symlinks only when their entire resolution remains inside that build's `node_modules`; publication validates and inventories those targets. Frontend output MUST contain only public assets: no source secrets, SQL database, service code, lockfile, environment file or `node_modules`. Publication validation covers runtime version, manifest identity, lockfile, command exit status, compiled entries and migration filenames. A release version is unique per app: a reused version with different bytes is rejected, and publishing identical previously recorded bytes is an idempotent no-op. New updates increase the version numerically; rollback may reactivate an older recorded release.
+
+### Durable registration
+
+`internal/apps.Open` accepts an absolute `APPS_ROOT` and canonical local host ID;
+daemon root selection remains #3139. Registrations are independent of
+conversations and keyed by `(server_id, app_id)`. Separate roots for different
+hosts may hold the same `app_id` independently. `Registry.List` returns detached
+records in stable `app_id` order together with their committed host revision.
+There are at most 256 live registrations; admission of a 257th fails unchanged.
+
+`Registry.Register` commits the manifest title, `desired: available` and
+`state: stopped`, with active/pending releases and last error unset. Re-registering
+a semantically identical validated manifest is a no-op regardless of JSON
+formatting or key order; a conflicting manifest fails unchanged.
+`Registry.UpdateManifest` requires an existing matching host/app identity and
+replaces only its stored manifest, preserving the committed title, active release
+and other lifecycle fields. An identical update is a no-op. A changed manifest
+title or release version never commits a display-title change or activates a
+release by itself. Registration alone proves neither publication nor readiness.
+
+Missing `APPS_ROOT/registry.json` opens empty at host revision 0. Each changed
+registration, manifest update or removal advances the durable host sequence once
+and stamps the affected record or tombstone with that revision, in
+1–9007199254740991. No-ops leave it unchanged, including at exhaustion; exhaustion
+refuses further changes without wrapping. Persistence completes before readers
+can observe the candidate snapshot. Failed writes preserve committed records,
+tombstones and revision. Stable serialization uses sorted records/tombstones,
+0700 registry directories and 0600 files, with a same-directory temporary file,
+sync, close and rename. Reopen preserves committed fields and revisions without
+advancing the sequence. Corrupt, invalid or foreign-host storage is rejected
+without rewriting its bytes.
+
+`Registry.Remove` deletes only the registration and durably tombstones its
+identity. Source, build and data files remain byte-for-byte intact. Registration
+and updates cannot revive that identity, including after reopen; removing an
+existing tombstone again is a no-op. Removal frees a live-registration slot, and
+tombstones do not count toward the limit. Lifecycle mutations, restart
+normalization and their committed revisions/notifications remain pending #3144;
+opening this store preserves lifecycle fields without treating them as readiness
+evidence. See the [apps package overview](knowledge/features/apps-package.md)
+for storage, concurrency and regression-test constraints.
 
 ### Registration and observed state
 
