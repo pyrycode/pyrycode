@@ -149,7 +149,7 @@ print(json.dumps(dict([(name,m.version(name)) for name in json.loads(sys.argv[1]
 		return nil, fmt.Errorf("CLI version: %w", ErrProbe)
 	}
 	if _, err := run(ctx, dir, python, "-I", "-B", "-m", "pip", "--isolated", "check"); err != nil {
-		return nil, ErrProbe
+		return nil, fmt.Errorf("dependency compatibility: %w: %w", ErrProbe, err)
 	}
 	return versions, nil
 }
