@@ -119,6 +119,7 @@ func TestStoreReplayTailIsolation(t *testing.T) {
 	})
 	var mu sync.Mutex
 	var seen []uint64
+	deliveryChanged := make(chan struct{})
 	phase := "opening replay reader"
 	var foldTime time.Duration
 	var replayDone, checkpointDone time.Time
@@ -181,6 +182,8 @@ func TestStoreReplayTailIsolation(t *testing.T) {
 					for _, e := range chunk {
 						seen = append(seen, e.ID)
 					}
+					close(deliveryChanged)
+					deliveryChanged = make(chan struct{})
 				}
 				mu.Unlock()
 				if err == nil && first {
@@ -294,6 +297,13 @@ func TestStoreReplayTailIsolation(t *testing.T) {
 	snap.Items[0].Content[0] = 'X'
 	snap.Items[0].Summary = "mutated"
 	testStoreEqual(t, s.Snapshot(testStoreA), testStoreA, entries)
+	// Tail publishes inside feed; its successful delivery bookkeeping follows.
+	mu.Lock()
+	consumed, delivery := len(seen), deliveryChanged
+	mu.Unlock()
+	if consumed < len(entries) {
+		await("final tail delivery bookkeeping", delivery)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(seen) != len(entries) {

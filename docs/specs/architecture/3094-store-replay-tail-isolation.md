@@ -81,3 +81,20 @@ Move the replay pause after the first successful feed but before its callback re
 An external overlay forcing A's checkpoint replacement to fail produced the expected `replay to tail handoff: worker exited; phase=checkpointing replay consumed=4098 chunks=2 state=3 version=0` failure and exited normally after cleanup. This verifies diagnostics distinguish checkpoint failure from elapsed folding rather than waiting out the generic barrier deadline.
 
 Final-code failure overlays also verify cleanup: forced checkpoint replacement fails immediately with the checkpoint phase (0.83s total); a reader held until cancellation fails at the finite initial barrier deadline and joins normally (5.59s total, within a 15s process timeout). The final focused race run executed and passed all 20 repetitions without retrying failures. Successful replay handoff phases are now measured in milliseconds rather than seconds.
+
+### 2026-10-10 — verifier finding 1: await successful delivery bookkeeping
+
+`Store.run` publishes Tail progress inside the reader's feed callback, before the test wrapper records successful delivery. Publication therefore does not synchronize the wrapper's final count. A cancellation-aware external overlay pausing after the final successful feed reproduced `consumed 4100, want 4101` while all snapshot assertions passed; cleanup joined normally.
+
+Signal successful bookkeeping by closing and replacing a notification channel under the same mutex as `seen`. After observing the final publication, atomically capture the consumed count and current notification. If the count is incomplete, await that notification using the existing five-second, worker-aware `final tail delivery bookkeeping` barrier before asserting exact count/order. The sole worker has completed every earlier callback before publishing the final chunk, so one notification completes the remaining bookkeeping. The predicate and notification share a mutex to prevent missed wakeups; no lock spans feed, filesystem operations or waits. Successful-feed and bounded-chunk checks remain unchanged.
+
+Validate with a deterministic external overlay that holds final bookkeeping until the test has observed publication and captured the incomplete count; release that gate immediately before the new finite wait. A second overlay holds bookkeeping until cancellation to prove the new deadline and cleanup. Re-run the 20 focused race repetitions, parallel thread/history packages, vet and build. The dispatcher re-runs the standard `make check` gate on the pushed rework; its prior green applies only to `9b349075`.
+
+The forced-gap overlay executed and passed once, explicitly observing `consumed=4100 want=4101` before releasing bookkeeping. The held-gate overlay failed at the named five-second bookkeeping deadline with `phase=paused final tail bookkeeping consumed=4100 chunks=3 state=2 version=4101` and completed cancellation/join cleanup in 7.281s under a 15-second process timeout. These deliberate failure checks are separate from the unmodified passing test runs.
+
+Security review remains PASS: notifications carry no payload, no production input or I/O path changes, and bookkeeping closes channels only while holding its existing mutex. Failure cleanup cancels the worker and joins through store shutdown. Total written work remains below 800 lines; no exports, consumer migrations or acceptance criteria are added.
+
+## Documentation handoff
+
+- Pending documentation stage: update `docs/knowledge/features/thread-package-background-store.md` § Store verification with the bounded public-item fixture retaining 4,098 raw replay facts, pause after successful partial folding, duplicate-worker identity proof, named phase diagnostics and release/cancel/join cleanup.
+- Pending documentation stage: carry forward the measurement lesson in that section: distinguish raw reader-bound coverage from incidental growing-item folding cost, and distinguish published progress from completion of test-owned bookkeeping.
