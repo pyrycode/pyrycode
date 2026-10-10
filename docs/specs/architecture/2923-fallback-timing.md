@@ -85,3 +85,11 @@ Pending documentation stage:
 ## Offline results
 
 Both delayed-result/completion regressions failed on the original 9.8-second production deadline (2 executed / 0 passed / 2 failed / 0 skipped). After correction, the complete touched `cmd/pyry` race suite passed (102.392 seconds), including both timing cases, 29.8-second lookup expiry, hung-child/held-Wait cleanup, existing cancellation, validation, lifecycle and privacy witnesses. Tagged offline `TestSuggest` race tests passed (27.103 seconds). `go vet ./...`, tagged live-package vet, binary build to scratch and `git diff --check` passed. Full-module hermetic and live gates remain dispatcher-owned.
+
+## Six-run declaration
+
+Declared 2026-10-10 after corrected production/instrumentation commit `5b68a14577ab2ad2a6f8f1825944aaf51c914704` and green builder-owned offline checks. The commit containing this declaration will be pushed and its exact hash announced before launch 1. It is the unchanged checkout for exactly six sequential authenticated launches numbered 1–6 of:
+
+`python3 /work/Projects/pyrycode-agents/dispatcher/scripts/live-claude-gate.py go --tests '^TestInteractiveStream_FallbackReplySuggestionSetThenClear$'`
+
+No retries, replacements, checkout changes or edits during the batch, regardless of failure, skip or zero execution. Each invocation retains one completed exchange, native disabled on the persistent child, a bounded nonempty fallback for `suggestConvID`, then an explicit-null clear at a higher revision after accepted input. Record E/P/F/S and launcher outcome for every invocation, plus source/lifecycle scalar observations selected by wrapper PID and wire revisions. Source category is reported metadata, never authentication proof; the launcher's preflight separately checks authenticated login. Six executed passes are required, and a skipped or retried pass is not acceptance. Historical failed batches remain unchanged. The dispatcher separately owns the full live gate.
