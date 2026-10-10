@@ -108,7 +108,8 @@ func difference(before, after Snapshot) Observation {
 				if name == "Content" {
 					previous, text := messageText(prior), messageText(item)
 					if strings.HasPrefix(text, previous) && len(text) > len(previous) {
-						c.TextAppend = text[len(previous):]
+						// Retained suffixes must not pin the accumulated message allocation.
+						c.TextAppend = strings.Clone(text[len(previous):])
 						var fields map[string]json.RawMessage
 						_ = json.Unmarshal(item.Content, &fields)
 						fields["text"], _ = json.Marshal(previous)

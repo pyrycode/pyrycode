@@ -2,7 +2,11 @@ package thread
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +14,64 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 )
+
+func TestStoreObservationRetainedSuffixMemory(t *testing.T) {
+	const helperEnv = "PYRYCODE_TEST_RETAINED_SUFFIX_MEMORY"
+	if os.Getenv(helperEnv) != "1" {
+		t.Parallel()
+		// Isolate heap accounting from concurrent tests and their workers.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStoreObservationRetainedSuffixMemory$", "-test.v")
+		cmd.Env = append(os.Environ(), helperEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("suffix memory helper: %v\n%s", err, output)
+		}
+		t.Logf("%s", output)
+		return
+	}
+
+	runtime.GC()
+	var start runtime.MemStats
+	runtime.ReadMemStats(&start)
+	w := &conversationWorker{}
+	content, err := json.Marshal(map[string]string{"text": strings.Repeat("a", maxChangeBytes)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := Snapshot{State: StateUsable, Version: 1, Items: []Item{{ID: 1, Rev: 1, Kind: "assistant_message", Content: content}}}
+	for i := uint64(2); i <= maxChangeBatches+1; i++ {
+		raw, err := json.Marshal(map[string]string{"text": strings.Repeat("a", maxChangeBytes) + strings.Repeat("b", int(i-1))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		after := Snapshot{State: StateUsable, Version: i, Items: []Item{{ID: 1, Rev: i, Kind: "assistant_message", Content: raw}}}
+		observation := difference(before, after)
+		if observation.BaselineRequired || len(observation.Changes) != 1 || observation.Changes[0].TextAppend != "b" {
+			t.Fatal("expected one applicable single-byte suffix")
+		}
+		encoded, err := json.Marshal(observation.Changes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.retain(changeBatch{observation: observation, bytes: len(encoded)})
+		before = after
+	}
+	runtime.GC()
+	var end runtime.MemStats
+	runtime.ReadMemStats(&end)
+	growth := int64(end.HeapAlloc) - int64(start.HeapAlloc)
+	t.Logf("retained batches=%d accounted bytes=%d live heap growth=%d", len(w.ranges), w.rangeBytes, growth)
+	if len(w.ranges) != maxChangeBatches || w.rangeBytes > maxChangeBytes {
+		t.Fatal("expected all tiny suffix batches within the retention cap")
+	}
+	runtime.KeepAlive(w)
+	// Allow transient JSON buffers, but never one full message per suffix.
+	if growth > 8*maxChangeBytes {
+		t.Fatal("tiny suffixes retain full messages beyond the memory bound")
+	}
+}
 
 func TestStoreObservationRetention(t *testing.T) {
 	s, h := testThreadStore(t)

@@ -79,3 +79,7 @@ Pending documentation stage: in `docs/knowledge/features/thread-package.md` § C
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-10
+
+## Revisions
+
+- 2026-10-10, verifier finding 1: `difference` must clone each text suffix before returning or retaining it. Encoded suffix sizes cannot bound memory while suffixes share the accumulated message's backing allocation. `TestStoreObservationRetainedSuffixMemory` isolates heap accounting in a cancellable helper process and retains 64 single-byte appends to a 1 MiB message, checking actual live heap growth as well as the retention counters. The observation contract and retention limits are unchanged.
