@@ -284,12 +284,26 @@ another package can remain green after the real limit changes.
 
 Derive hostile fixtures from the producer's actual accepted boundary and encode
 the complete envelope, including source/correlation metadata and its clear.
-Raw question input below a 16384-byte cap can expand beyond 98 KB when `<` becomes
-`\u003c`; an owner-rejection test alone would stay green while supported producer
-output is unretainable. The skipped `TestControlLiveQuestionEnvelopeBound` records
-that outstanding producer gap under [#3109](https://github.com/pyrycode/pyrycode/issues/3109);
-it supplies no passing bound evidence. See
+Raw question input below a 16384-byte cap can expand beyond the envelope cap when
+`<` becomes `\u003c`; an owner-rejection test alone would stay green while supported
+producer output is unretainable. `TestParseEnvelopeBound` binary-searches acceptance
+for literal `<`, `>` and `&` in each content field and a four-question/four-option
+batch. It checks the largest accepted input and first rejected input, asserts that
+the raw guard did not mask encoded rejection, and marshals actual shown/clear
+envelopes with worst-case metadata. `TestControlLiveQuestionEnvelopeBound` is
+enabled: it checks accepted-boundary owner admission and authenticated answer/refusal
+through the original batch ID, with repeated snapshots and one-shot resolution.
+`TestParseEnvelopeBoundaryRegistryIdentity` checks lookup/snapshot identity and
+content retention at the boundary. See
+[question producer bounds](questionbridge-package.md#bounds) and
 [daemon envelope admission](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#control-and-on-demand-readings).
+
+An outer `Encoder.SetEscapeHTML(false)` does not prevent a protocol value's custom
+`MarshalJSON` from pre-escaping its strings via `json.Marshal`. A boundary fixture
+must contain literal HTML-sensitive characters in the raw tool input to expose
+sixfold expansion; already escaped input can reach the raw cap first and leave
+the encoded guard untested. `testEscapingQuestionInput` restores those literals
+after marshalling its protocol-shaped fixture (#3109).
 
 Compare a decoded payload whole, with `reflect.DeepEqual` against a literal expected
 struct, rather than field by field. That also catches a nil-vs-`[]` difference in a

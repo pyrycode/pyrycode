@@ -6,9 +6,9 @@ vocabulary](protocol-package-constants-codes-go-envelope-types.md)). The
 committed fixtures and the `docs/protocol-mobile.md` § Question (v2) write-up
 landed in #1964; the fail-closed parse landed in #1965
 ([`internal/questionbridge`](questionbridge-package.md)); #1974 declared the
-sibling frame that retires a batch, `QuestionDismissedPayload` (below). Nothing
-constructs any of these types on a live path yet — the producer of both frames
-is #1973, still ahead, the nonce mint is #1975. The same declare-then-emit sequencing repeats again — pyrycode-desktop#849 mirroring #1405→#1410, #1616→#1638, #1704→#1848 and #1726→#1727.
+sibling frame that retires a batch, `QuestionDismissedPayload` (below).
+`streamApprovalBridge.Surface` produces shown batches; `questionbridge.Registry.Record`
+mints their batch IDs. Producer acceptance also bounds encoded envelopes (#3109).
 
 ```go
 type QuestionShownPayload struct {
@@ -53,10 +53,13 @@ rationale for each choice below — cite them rather than re-deriving.
   § Question (v2) states it as **documented 12, observed 14** and tells a
   client to size for 14, naming runes (not bytes) as the unit and flagging
   that the observed header is pure ASCII, so nothing committed yet separates
-  the two units — a coincidence, not a measurement of the byte case. **#1965
-  landed with no header bound of its own** — the header is bounded only
-  transitively, by `questionbridge`'s single pre-decode byte cap over the
-  whole input. See [questionbridge-package.md](questionbridge-package.md).
+  the two units — a coincidence, not a measurement of the byte case.
+  **There is no individual header cap.** The header is bounded transitively
+  by both `questionbridge.Parse` limits: 16384 raw input bytes before decode
+  and 61423 JSON payload bytes with daemon IDs unset, reserving 4096 bytes
+  for metadata so the full shown envelope and its clear fit the 65519-byte
+  cap. The captured 14-rune header remains supported. See
+  [producer bounds and metadata assumptions](questionbridge-package.md#bounds).
 - **No `TruncatedFields`, unlike `SlashCommand` and `ModelOption`.** Deliberate:
   a producer cutting an over-long question/header/label/description has
   nowhere to report it, so #1965's parse rejects an over-long input
@@ -341,6 +344,6 @@ nesting depth, not from the sibling with the closest type count.
 - [Envelope types § v2 question-batch vocabulary](protocol-package-constants-codes-go-envelope-types.md) — `TypeQuestionShown`'s and `TypeQuestionDismissed`'s frame-family security argument, nesting fact, and naming-trap record (#1962, #1974)
 - [Slash-command-list payload](protocol-package-slash-command-list-payload.md) — the closest structural analogue: nested list payload declared ahead of its producer, same value-receiver + type-alias marshaller idiom
 - [Model-list payload](protocol-package-model-list-payload.md) — the two-normalisers-with-different-reasons counter-example this payload's shared-reason case contrasts with
-- [questionbridge-package.md](questionbridge-package.md) — the fail-closed bounded parse (#1965), landed with no consumer
+- [questionbridge-package.md](questionbridge-package.md) — fail-closed parsing, encoded-envelope bounds and daemon-minted batch identity
 - [Inbound question control](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md) — #1984's `dispatchAppFrame` interception and `QuestionResolver` seam, landed with nothing wired behind it
 - **Resolved by #2605** (2026-09-24): the privileged per-device bit (#702) does not extend to a question answer — `questionResolverV2` gates on `devices.MayAnswerPrompt`/`AuthorizePromptAnswer`, any authenticated device, same as `modal_answer`. Resolution against the daemon's parked batch — #1990 and #1991 (both landed) are the refusal and answer primitives — is wired behind that gate by #1986
