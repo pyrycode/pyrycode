@@ -712,6 +712,12 @@ func secapPrompt(nonce int64) string {
 // every message still read green, so the scanner is built after the auth helper and
 // the skipped classes ship in the record.
 func TestRealClaude_StreamEventCapture(t *testing.T) {
+	tttCapture(t)
+}
+
+// TestRealClaude_StreamEventSerialCapture retains the text-then-tool-then-text
+// probe and its separate fixture family.
+func TestRealClaude_StreamEventSerialCapture(t *testing.T) {
 	// THE GATE IS THE FIXTURE'S ABSENCE, which is #2089's break from the env-gated
 	// siblings. Under the sibling shape `make e2e-realclaude` never sets the
 	// variable, so the probe skips on the ENV check before it ever reaches the

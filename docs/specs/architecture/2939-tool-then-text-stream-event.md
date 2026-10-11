@@ -77,3 +77,8 @@ Pending documentation stage: in `docs/knowledge/features/streamsup-package-turn-
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-11
+
+## Revisions
+
+- 2026-10-11: The forced isolated capture ran on Claude 2.1.280 with observed `claude-sonnet-5`, permission `default`, explicit Bash admission and no model/effort override; init omitted effort. The first diagnostic run executed and failed in the fixture writer (1 executed / 0 passed / 1 failed / 0 skipped). A second run retained 30 ordered rows through result with zero loss, no tail and no rejection (1 executed / 1 passed / 0 failed / 0 skipped). This does not establish the mobile cause. Add `TestParser_ToolThenTextIsolatedCapture` to retain that observed valid behavior, and hand off the named mobile drive's rejecting ordered capture with `needs-live-artifacts`; production parser behavior stays unchanged until a rejecting guard is demonstrated. Historical mobile settings remain unknown.
+- 2026-10-11: Offline redaction negatives exposed two instrument traps: a root path's slug can corrupt negative JSON numbers, and global short-identity replacement can change string-valued indices. Ignore nondynamic root paths and substitute identities only in identity-valued JSON fields, decoding numbers with `UseNumber`. Final evidence must come from a fresh forced capture after these instrument corrections.
