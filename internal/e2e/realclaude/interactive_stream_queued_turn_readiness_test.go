@@ -157,7 +157,7 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 		}
 	}()
 	t.Cleanup(func() { stop(); <-done })
-	subjects := map[string]int{streamModalBootstrapUUID: 0}
+	subjects := map[string]int{streamModalBootstrapUUID: 0, streamModalConvID: 0}
 	t.Cleanup(func() {
 		r.Witnesses = append(r.Witnesses, readinessReadObservations(private, subjects)...)
 		for subject, ordinal := range subjects {
@@ -201,7 +201,7 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 	}
 	runTarget := func(t *testing.T) {
 		p.t = t
-		targetOrdinal := p.ordinal + 1
+		targetOrdinal := p.nextOrdinal + 1
 		for i := targetOrdinal; i <= targetOrdinal; i++ {
 			created := time.Now().UTC()
 			conv := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, uint64(100+i*2), nil)

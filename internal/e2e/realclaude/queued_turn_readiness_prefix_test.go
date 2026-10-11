@@ -86,18 +86,19 @@ func readinessOpeningTypes() []string {
 }
 
 type readinessReplay struct {
-	t         *testing.T
-	h         *perConvHarness
-	r         *readinessCapture
-	subjects  map[string]int
-	reconnect func()
-	seq       uint64
-	conv      string
-	ordinal   int
-	hold      *httptest.Server
-	release   func()
-	requested chan struct{}
-	row       *readinessReplayRow
+	t           *testing.T
+	h           *perConvHarness
+	r           *readinessCapture
+	subjects    map[string]int
+	reconnect   func()
+	seq         uint64
+	conv        string
+	ordinal     int
+	nextOrdinal int
+	hold        *httptest.Server
+	release     func()
+	requested   chan struct{}
+	row         *readinessReplayRow
 }
 
 func (p *readinessReplay) send(kind string, payload any) {
@@ -116,8 +117,18 @@ func (p *readinessReplay) opening() {
 	}
 }
 
+func (p *readinessReplay) bind(conv, session string) int {
+	ordinal, known := p.subjects[conv]
+	if !known {
+		p.nextOrdinal++
+		ordinal = p.nextOrdinal
+	}
+	p.subjects[conv], p.subjects[session] = ordinal, ordinal
+	p.conv, p.ordinal = conv, ordinal
+	return ordinal
+}
+
 func (p *readinessReplay) create() {
-	p.ordinal++
 	p.seq++
 	p.conv = createConversationViaPhone(p.t, p.h.phone, p.h.initSend, p.h.initRecv, p.seq, nil)
 	reg, err := conversations.Load(filepath.Join(p.h.home, ".pyry", "test", "conversations.json"))
@@ -128,7 +139,7 @@ func (p *readinessReplay) create() {
 	if !ok || c.CurrentSessionID == "" {
 		p.t.Fatal("replay session missing")
 	}
-	p.subjects[p.conv], p.subjects[c.CurrentSessionID] = p.ordinal, p.ordinal
+	p.bind(p.conv, c.CurrentSessionID)
 	p.opening()
 }
 

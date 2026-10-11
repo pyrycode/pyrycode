@@ -1,0 +1,309 @@
+{
+  "schema": 1,
+  "ticket": 3071,
+  "historical_checkpoint": "d4bffd77c49b0343e9a8e02c8a60be29faa0106a",
+  "mobile_source": "90d0407f06f70e325701603602d67fd2bcb96308",
+  "mobile_merge": "4a5e624f6f630e75069c2ce729c63fcc2eb748e2",
+  "pinned_source_sha256": {
+    "e2e-emulator.sh": "516eef7a6b431179cc61a435b3677c8727a812d1a8baa492e9dcfb6f84e6fc42",
+    "InteractiveStreamE2ETest.kt": "2aaeb86708140328d572453fadfdcf6a3181b2017304adbc0fc64f16568516a2",
+    "ThreadViewModel.kt": "a1b78dfd08e73d5079128962db59983ee832701afc2341e4a04b32fc5edc33a7",
+    "RemoteConversationRepository.kt": "d09ff44535b4ec429ae705b9ced8817a4130a1fdc9eed546a67f29ce61312a1e"
+  },
+  "source_merge_comparison_sha256": "06f1490675f7982c90ae54a3edd161459f324b32787ca611885e5c6705b523e0",
+  "scope": "candidate main-daemon effects and synthetic startup; replay rows enumerate omissions; original executed spacing/configuration unknown",
+  "pending": "cause-backed host repair, failing-before/passing-after regression, full host gate and mobile #2010 full gate",
+  "totals": {
+    "executed": 43,
+    "passed": 41,
+    "failed": 2,
+    "skipped": 0
+  },
+  "runs": [
+    {
+      "invocation": "python3 \"$AGENTS_REPO_PATH/dispatcher/scripts/live-claude-gate.py\" go --tests '^TestInteractiveStreamQueuedTurnReadiness$'",
+      "authentication": "launcher loggedIn preflight admitted actual named tests",
+      "outcomes": [
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix",
+          "status": "fail"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/fresh",
+          "status": "pass"
+        }
+      ],
+      "counts": {
+        "executed": 2,
+        "passed": 1,
+        "failed": 1,
+        "skipped": 0
+      },
+      "classification": "diagnostic driver outcomes; not original mobile results or failing-before host repair proof"
+    },
+    {
+      "invocation": "python3 \"$AGENTS_REPO_PATH/dispatcher/scripts/live-claude-gate.py\" go --tests '^TestInteractiveStreamQueuedTurnReadiness$'",
+      "authentication": "launcher loggedIn preflight admitted actual named tests",
+      "outcomes": [
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix",
+          "status": "fail"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/fresh",
+          "status": "pass"
+        }
+      ],
+      "counts": {
+        "executed": 2,
+        "passed": 1,
+        "failed": 1,
+        "skipped": 0
+      },
+      "classification": "diagnostic driver outcomes; not original mobile results or failing-before host repair proof"
+    },
+    {
+      "invocation": "python3 \"$AGENTS_REPO_PATH/dispatcher/scripts/live-claude-gate.py\" go --tests '^TestInteractiveStreamQueuedTurnReadiness$'",
+      "authentication": "launcher loggedIn preflight admitted actual named tests",
+      "outcomes": [
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_pingPrompt_footerShowsContextUsage",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_backgroundAgent_followsBottomUntilFinished",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_finishedReply_systemCopyCopiesSelectedWord",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_peerQueue_staysConsistentAcrossClients",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_twoHostsArchive_staysPerHost",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_deleteConversation_removesFromListAndClosesThread",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_twoHostsCollidingConversationId_stayPerHost",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_secondHostRenameAndUnpair_leavesFirstHostUntouched",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_offlineRead_reconcilesPeerTurnOnReconnect",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_stopBackgroundTask_completesThenRepliesAgain",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_claudeOfferedFile_opensAndSavesAfterRestart",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_muteChannel_roundTripsThroughTheHost",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_reopenAfterReconnect_footerShowsContextUsageBeforeAnyTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_permissionHeldTool_statusAreaNamesRunningTool",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_diagnosticBundles_stayOnTheirOwningHosts",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_sessionError_recoversDroppedAndRetainedBacklog",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_toolPrompt_rendersToolStepInThread",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_compactWithAttachment_compactsAndClearsTheStrip",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_permissionPrompts_heldPerConversation",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_pingPrompt_statusSheetShowsRunningModel",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_createEditArchiveChannel_readsPromptBack",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_modelChange_roundTripsAndStaysPerConversation",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_reconnect_footerReadingsAndModelChangeSurvive",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_interruptedUpload_retriesIntoOneMessageWithItsBytes",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_sendQueuedNow_reachesRunningTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_inheritedEffort_footerShowsAppliedValueAfterTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_chosenEffort_appliesFromTheFirstTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_directShareShortcut_arrivesAtPeerWithItsBytes",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_questionAnswer_reachesTheAskingConversation",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_markdownLink_opensLiveNoteInReader",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_permissionAnswer_reachesOnlyTheAskingConversation",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_attentionDot_followsARealTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_collidingConversationId_phoneFileStaysOnItsHost",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_newSession_rendersSessionBoundaryDelimiter",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_backgroundTask_countsInActionsMenuAndPanel",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_scannerConfirm_waitsForHostThenOpensList",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_interruptedRetrieval_retryLoadsThePeersFile",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/target",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/fresh",
+          "status": "pass"
+        }
+      ],
+      "counts": {
+        "executed": 39,
+        "passed": 39,
+        "failed": 0,
+        "skipped": 0
+      },
+      "classification": "diagnostic driver outcomes; not original mobile results or failing-before host repair proof"
+    }
+  ],
+  "Artifacts": [
+    {
+      "Path": "20261011T142437Z-fresh.json",
+      "SHA256": "a5309327073403ae5fa5f186a7d6de5a17698a851f212347d458065b2b9af0aa",
+      "Source": "b1376c5ac90005e481634f26e3684e6b642920da",
+      "Counts": {
+        "executed": 1,
+        "failed": 0,
+        "passed": 1,
+        "skipped": 0
+      },
+      "Conclusion": "non-reproduction under candidate replay and synthetic startup; no host cause or repair established"
+    },
+    {
+      "Path": "20261011T142437Z-prefix.json",
+      "SHA256": "7983e98cf9ee6da235705fdf5ff1a09b3a64c50eea55c828a4c3d0a0d68b95a6",
+      "Source": "b1376c5ac90005e481634f26e3684e6b642920da",
+      "Counts": {
+        "executed": 1,
+        "failed": 1,
+        "passed": 0,
+        "skipped": 0
+      },
+      "Conclusion": "diagnostic incomplete; cause unknown"
+    },
+    {
+      "Path": "20261011T143149Z-fresh.json",
+      "SHA256": "f8a791c6f66384f8b181455e7d64aaeda574f6bdaaf345f5e68e3dfe96ba208b",
+      "Source": "b76125e44859d4b93bc0ba51e572e8b275875a55",
+      "Counts": {
+        "executed": 1,
+        "failed": 0,
+        "passed": 1,
+        "skipped": 0
+      },
+      "Conclusion": "non-reproduction under candidate replay and synthetic startup; no host cause or repair established"
+    },
+    {
+      "Path": "20261011T143149Z-prefix.json",
+      "SHA256": "e5ea271856a60cf6d629375eb24cc69c857f33586dc48f383c3a85f4becc06af",
+      "Source": "b76125e44859d4b93bc0ba51e572e8b275875a55",
+      "Counts": {
+        "executed": 1,
+        "failed": 1,
+        "passed": 0,
+        "skipped": 0
+      },
+      "Conclusion": "diagnostic incomplete; cause unknown"
+    },
+    {
+      "Path": "20261011T143902Z-fresh.json",
+      "SHA256": "ff5bb3cb23cbc785ab2403f1018339e92cd8e68085fd08757828768ceba13dac",
+      "Source": "3d42e909d2dc903566bbd317584bee26c961f263",
+      "Counts": {
+        "executed": 1,
+        "failed": 0,
+        "passed": 1,
+        "skipped": 0
+      },
+      "Conclusion": "non-reproduction under candidate replay and synthetic startup; no host cause or repair established"
+    },
+    {
+      "Path": "20261011T143902Z-prefix.json",
+      "SHA256": "5d13062fb669a1596076d96170bb5a69bcd1c0c36ea472c393aade67f1f7fa79",
+      "Source": "3d42e909d2dc903566bbd317584bee26c961f263",
+      "Counts": {
+        "executed": 38,
+        "failed": 0,
+        "passed": 38,
+        "skipped": 0
+      },
+      "Conclusion": "non-reproduction under candidate replay and synthetic startup; no host cause or repair established"
+    }
+  ]
+}
