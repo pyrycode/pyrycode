@@ -92,8 +92,8 @@ func TestSuggestionEnqueuerIdentity(t *testing.T) {
 			t.Fatal("delivery leaked")
 		}
 	}
-	if page := newHistoryPager(store, discardLogger())(testConvID, "", 100); len(page.Entries) != 0 {
-		t.Fatalf("legacy facts: %+v", page)
+	if page := newHistoryPager(store, discardLogger())(testConvID, "", 100); len(page.Entries) != 3 {
+		t.Fatalf("legacy receipts: %+v", page)
 	}
 }
 
@@ -101,13 +101,15 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 	t.Parallel()
 	for _, outcome := range []string{"delivered", "send_now", "removed", "give_up", "retry", "refused", "shutdown"} {
 		t.Run(outcome, func(t *testing.T) {
-			store := history.New(t.TempDir())
+			dir := t.TempDir()
+			store := history.New(dir)
 			h := testSendHistory(store)
+			ome, bcast, ring := testQueuedReceiptEmitter(h)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			terminal := make(chan struct{}, 1)
 			pushes := make(chan operatorMessage, 2)
-			delivered := operatorMessageHistory(store, func(m operatorMessage) { pushes <- m }, nil, discardLogger(), h)
+			delivered := operatorMessageHistory(store, func(m operatorMessage) { ome.broadcast(ctx, bcast, ring, m); pushes <- m }, nil, discardLogger(), h)
 			attempts := make(chan struct{}, 1)
 			var q *msgqueue.Queue
 			tries := 0
@@ -180,6 +182,11 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 					t.Fatal("terminal missing")
 				}
 			}
+			ome.broadcast(ctx, bcast, ring, operatorMessage{})
+			testQueuedReceiptIdentity(t, store, bcast, ring)
+			// Repeated drains retain exactly one publication per durable identity.
+			ome.broadcast(ctx, bcast, ring, operatorMessage{})
+			testQueuedReceiptIdentity(t, store, bcast, ring)
 			entries := historyEntries(t, store, testConvID)
 			want := 2
 			if outcome == "delivered" || outcome == "send_now" || outcome == "retry" {
@@ -214,6 +221,12 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 				if err != nil || watermark != entries[0].ID {
 					t.Fatalf("watermark %d %v", watermark, err)
 				}
+				for _, reader := range []*history.Store{store, history.New(dir)} {
+					latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conversations.ConversationID(testConvID))
+					if err != nil || latest != last.ID {
+						t.Fatalf("hidden drop legacy target=%d,%v", latest, err)
+					}
+				}
 			}
 		})
 	}
@@ -224,6 +237,7 @@ func TestQueuedSendHistoryPlacement(t *testing.T) {
 		t.Run(map[bool]string{false: "echo", true: "idle"}[idle], func(t *testing.T) {
 			store := history.New(t.TempDir())
 			h := testSendHistory(store)
+			ome, bcast, ring := testQueuedReceiptEmitter(h)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			sink := newStreamTurnSink(16, discardLogger())
@@ -237,7 +251,7 @@ func TestQueuedSendHistoryPlacement(t *testing.T) {
 				placementRecord(c, m, source...)
 			}
 			pushes := make(chan operatorMessage, 2)
-			sink.setOperatorPublisher(func(m operatorMessage) { pushes <- m })
+			sink.setOperatorPublisher(func(m operatorMessage) { ome.broadcast(ctx, bcast, ring, m); pushes <- m })
 			written := make(chan struct{})
 			release := make(chan struct{})
 			confirmed := make(chan struct{})
@@ -277,6 +291,7 @@ func TestQueuedSendHistoryPlacement(t *testing.T) {
 			close(releaseConfirm)
 			<-enqueued
 			<-confirmed
+			testQueuedReceiptIdentity(t, store, bcast, ring)
 			entries := historyEntries(t, store, testConvID)
 			if len(entries) != 3 || entries[0].Type != historySendAccepted || entries[1].Type != protocol.TypeMessage || entries[2].Type != historySendDelivered {
 				t.Fatalf("ordering: %+v", entries)
@@ -341,7 +356,8 @@ func TestQueuedSendHistoryFailures(t *testing.T) {
 				store = history.New(path)
 			}
 			h := newQueuedSendHistory(store, bufLogger(&logs), nil)
-			m := msgqueue.QueuedMessage{ID: 1, Text: "private-message", DeviceID: "private-sender"}
+			ome, bcast, ring := testQueuedReceiptEmitter(h)
+			m := msgqueue.QueuedMessage{ID: 1, Text: "private-message", DeviceID: "private-sender", TS: historyTS}
 			h.accepted(testConvID, m)
 			if !nilStore {
 				if err := os.Remove(path); err != nil {
@@ -351,10 +367,14 @@ func TestQueuedSendHistoryFailures(t *testing.T) {
 			pushes := 0
 			operatorMessageHistory(store, func(m operatorMessage) {
 				pushes++
+				ome.broadcast(context.Background(), bcast, ring, m)
 				if (m.historyEntryID == nil) != nilStore {
 					t.Error("wrong legacy identity")
 				}
 			}, nil, bufLogger(&logs), h)(testConvID, m)
+			if len(bcast.pushes) != 2 || bcast.pushes[0].env.Type != protocol.TypeMessage || len(ome.pending) != 0 {
+				t.Fatal("failed acceptance minted a receipt or lost legacy delivery")
+			}
 			if pushes != 1 {
 				t.Fatal("publication lost")
 			}
@@ -413,7 +433,7 @@ func TestQueuedSendHistoryLossRetryAndUnbound(t *testing.T) {
 	reg := &conversations.Registry{}
 	reg.Create(conversations.Conversation{ID: conversations.ConversationID(testConvID)})
 	h := newQueuedSendHistory(store, discardLogger(), channelPostSession(reg, nil))
-	h.accepted(testConvID, msgqueue.QueuedMessage{ID: 1, Text: "pending"})
+	h.accepted(testConvID, msgqueue.QueuedMessage{ID: 1, Text: "pending", TS: historyTS})
 	accepted := historyEntries(t, store, testConvID)
 	if accepted[0].Session == nil || accepted[0].Session.Kind != "none" || accepted[0].Session.SessionID != "" {
 		t.Fatalf("unbound source: %+v", accepted)
@@ -432,8 +452,11 @@ func TestQueuedSendHistoryLossRetryAndUnbound(t *testing.T) {
 		t.Fatalf("retry loss: %+v", all)
 	}
 	for _, e := range all[:2] {
-		if legacyHistoryType(e.Type) || legacyRuntimeFact(e.Type) {
-			t.Fatalf("legacy eligible: %s", e.Type)
+		if legacyHistoryType(e.Type) {
+			t.Fatalf("raw legacy eligible: %s", e.Type)
+		}
+		if _, ok := legacyRuntimeReceipt(testConvID, e.Type, e.Payload, &e.ID, e.TS); !ok {
+			t.Fatalf("legacy receipt missing: %s", e.Type)
 		}
 	}
 }

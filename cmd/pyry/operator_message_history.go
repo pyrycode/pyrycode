@@ -50,9 +50,9 @@ func operatorMessageHistory(store *history.Store, push func(operatorMessage), pl
 			ts := time.Now().UTC()
 			historyEntryID := appendConversationHistory(store, logger, "operator_message.history_append_err",
 				convID, protocol.TypeMessage, payload, ts, captured)
-			sends.delivered(convID, msg.ID, ref, historyEntryID, ts, captured)
+			receipt := sends.delivered(convID, msg.ID, ref, historyEntryID, ts, captured)
 			if push != nil {
-				push(operatorMessage{convID: convID, payload: payload, ts: ts, historyEntryID: historyEntryID})
+				push(operatorMessage{convID: convID, payload: payload, ts: ts, historyEntryID: historyEntryID, receipt: receipt})
 			}
 		}
 		place.attach(convID, msg.ID, commit)

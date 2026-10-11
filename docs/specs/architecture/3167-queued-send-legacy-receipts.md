@@ -73,3 +73,6 @@ Pending: target the repaired daemon commit from Mobile #2070 / PR #2045 with the
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-11
+
+## Revisions
++- 2026-10-11: Added `TestQueuedLegacyReceipts_SendNowDelayedConfirmation` and `TestQueuedLegacyReceipts_StorageFailure` alongside the existing fixtures. The earlier failure fixture repairs storage before delivery, so it alone cannot prove failed user/drop appends preserve eligible delivery without minting receipts. Added explicit hidden-drop legacy targets and overlapping page/live/replay checkpoints. Contracts and production design are unchanged; final written work remains below 800 lines.
