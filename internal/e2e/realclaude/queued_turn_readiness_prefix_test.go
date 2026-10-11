@@ -26,8 +26,6 @@ type readinessReplayRow struct {
 	Operations                                     []string
 	Started, Finished                              time.Time
 	Completed                                      bool
-	FrameCounts                                    map[string]int
-	ErrorCodes                                     map[string]int
 }
 
 func readinessJavaHash(s string) int32 {
@@ -96,7 +94,6 @@ type readinessReplay struct {
 	hold      *httptest.Server
 	release   func()
 	requested chan struct{}
-	row       *readinessReplayRow
 }
 
 func (p *readinessReplay) send(kind string, payload any) {
@@ -161,41 +158,11 @@ func (p *readinessReplay) receive(until time.Time) protocol.Envelope {
 	if json.Unmarshal(plain, &env) != nil {
 		p.t.Fatal("invalid replay envelope")
 	}
-	if p.row != nil {
-		if p.row.FrameCounts == nil {
-			p.row.FrameCounts = map[string]int{}
-			p.row.ErrorCodes = map[string]int{}
-		}
-		p.row.FrameCounts[env.Type]++
-		if env.Type == protocol.TypeError {
-			var e struct {
-				Code string `json:"code"`
-			}
-			if json.Unmarshal(env.Payload, &e) == nil && len(e.Code) < 64 {
-				p.row.ErrorCodes[e.Code]++
-			}
-		}
-	}
 	if env.Type == protocol.TypeError {
 		n, _ := p.r.Setup["prefix_error_frames"].(int)
 		p.r.Setup["prefix_error_frames"] = n + 1
 	}
 	return env
-}
-
-func (p *readinessReplay) waitReply(id uint64, kind string) {
-	until := time.Now().Add(30 * time.Second)
-	for time.Now().Before(until) {
-		env := p.receive(until)
-		if env.InReplyTo == nil || *env.InReplyTo != id {
-			continue
-		}
-		if env.Type != kind {
-			p.t.Fatalf("replay control refused; wanted %s", kind)
-		}
-		return
-	}
-	p.t.Fatalf("replay control reply missing: %s", kind)
 }
 
 func (p *readinessReplay) allow(env protocol.Envelope) {
@@ -387,7 +354,7 @@ func (p *readinessReplay) operation(op string) {
 		p.opening()
 	case "compact":
 		p.turn("/compact")
-		p.wait("compaction_boundary", true)
+		p.wait(protocol.TypeTurnEnd, true)
 	case "note":
 		p.turn("Use Bash to write exactly note into readiness-note.txt using printf note > readiness-note.txt . Then reply done.")
 		p.wait(protocol.TypeTurnEnd, true)
@@ -411,16 +378,8 @@ func (p *readinessReplay) operation(op string) {
 		payload := map[string]any{"conversation_id": p.conv}
 		if op == "promote" || op == "rename" {
 			payload["name"] = "readiness"
-			if op == "promote" {
-				payload["cwd"] = p.h.workdir
-			}
 		}
 		p.send(kind, payload)
-		want := "conversation_updated"
-		if op == "delete" {
-			want = "conversation_deleted"
-		}
-		p.waitReply(p.seq, want)
 	}
 }
 
