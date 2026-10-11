@@ -377,6 +377,141 @@ entries: OS item names are generated in the dedicated `pyry.memory.openai.`
 namespace, and resolution accepts only the committed lifecycle-issued memory
 reference.
 
+## Managed memory runtime
+
+`internal/memoryruntime.Install(ctx, Options)` supplies an isolated, resumable
+installer for OpenAI mode. It is independently callable inside Pyrycode; this
+slice has no daemon or CLI setup wiring. It neither starts managed memory nor
+migrates or stops the existing pyrybox memsearch watcher. The daemon consumer,
+provider/model initialization and single production database owner belong to
+[#3148](https://github.com/pyrycode/pyrycode/issues/3148). macOS support awaits
+[#3153](https://github.com/pyrycode/pyrycode/issues/3153), and local embeddings
+await [#3154](https://github.com/pyrycode/pyrycode/issues/3154).
+
+### Supported target and pinned stack
+
+The sole supported target is **Linux amd64 (x86_64), Ubuntu 24.04, glibc 2.39
+or newer, OpenAI mode**. Setup checks the distribution and release as well as
+architecture and libc; other Linux distributions/releases, architectures,
+operating systems and modes return a recoverable unsupported error before
+setup. The committed smoke ran on Ubuntu 24.04.5 amd64 with glibc 2.39.
+
+The managed interpreter is standalone **CPython 3.12.11, build 20250918**,
+with bundled bootstrap **pip 24.3.1**. The shipped
+[Linux artifact lock](../internal/memoryruntime/linux-amd64.lock.json) fixes the
+Python archive and every wheel's URL, filename and SHA-256 digest. Its complete
+32-wheel dependency closure is:
+
+| Distribution | Exact version |
+| --- | --- |
+| annotated-types | 0.8.0 |
+| anyio | 4.15.1 |
+| certifi | 2026.7.22 |
+| click | 8.5.0 |
+| distro | 1.9.0 |
+| grpcio | 1.84.0 |
+| h11 | 0.16.0 |
+| httpcore | 1.0.9 |
+| httpx | 0.28.1 |
+| idna | 3.20 |
+| jiter | 0.17.0 |
+| memsearch | 0.4.21 |
+| milvus-lite | 2.5.1 |
+| numpy | 2.5.4 |
+| openai | 1.109.1 |
+| pandas | 3.0.6 |
+| pathspec | 1.1.1 |
+| protobuf | 7.36.2 |
+| pydantic | 2.14.0 |
+| pydantic-core | 2.50.0 |
+| pymilvus | 2.5.16 |
+| python-dateutil | 2.9.0.post0 |
+| python-dotenv | 1.2.4 |
+| setuptools | 80.9.0 |
+| six | 1.17.0 |
+| sniffio | 1.3.1 |
+| tomli-w | 1.2.0 |
+| tqdm | 4.70.1 |
+| typing-extensions | 4.16.0 |
+| typing-inspection | 0.4.4 |
+| ujson | 6.0.0 |
+| watchdog | 6.0.0 |
+
+Setup verifies artifacts against these shipped hashes before extraction or
+execution, then installs only verified local wheels. It performs no moving
+dependency resolution, source builds or build-dependency installation. It
+requires no system Python or credentials, installs no local embedding extra,
+initializes no embedding provider and downloads no model weights. User/system
+Python, existing memsearch installations and shell profiles remain unchanged.
+
+### Private storage and resumable setup
+
+Run the callable installer as the service-account user with `Mode: "openai"`.
+`Options.Home` selects an existing absolute, canonical home owned by that user;
+an omitted home uses `os.UserHomeDir`. Storage belongs to that account:
+
+| Location under the service-account home | Purpose |
+| --- | --- |
+| `~/.pyry/memory/runtime/cache/<sha256>/<artifact-filename>` | Verified Python archive and wheel downloads, rehashed before reuse |
+| `~/.pyry/memory/runtime/install-<random>/` | Permanent runtime generation, including managed Python, memsearch and a private subprocess home |
+| `~/.pyry/memory/runtime/current.json` | Published generation, artifact-lock identity and tree seal; no credentials |
+| `~/.pyry/memory/runtime/install.lock` | Cross-process installation exclusion |
+
+This root is separate from `~/.pyry/memory/credentials/`, recent transcripts,
+vaults and `~/.memsearch`. New directories are created at 0700 and metadata at
+0600. Setup rejects symlink destinations, foreign ownership, group/other-writable
+directories and hardlinked or group/other-accessible mutable files. It refuses
+unsafe existing storage without repairing its permissions or following aliases.
+The home and its ancestors must also pass ownership and write-access checks.
+
+Call `Install` again after cancellation, interruption or a recoverable failure.
+Verified downloads survive for reuse; incomplete/corrupt downloads are retried
+from the beginning, without byte-range continuation. Unpublished generations
+are ignored, and a retry creates a fresh generation. The installer retains old
+generations and does not move their absolute launch paths, so replacement keeps
+previously returned verified locations usable. It publishes a new generation
+only after imports, exact versions, the memsearch CLI version, dependency
+compatibility and the tree seal succeed. Repeat calls verify the current seal
+and rerun probes before returning the same generation.
+
+Concurrent calls, including separate processes for the same account, serialize
+through the installation lock. A waiting caller can cancel without cancelling
+the holder. `Failure` reports a finite stage with a sanitized retry message;
+`errors.Is` preserves cancellation/deadline classification. The optional
+synchronous progress callback reports `waiting`, `verify`, `download`,
+`extract`, `install`, `publish` and `ready`; it must return promptly and must
+not reenter `Install`.
+
+Success returns absolute `Runtime.Launch` (memsearch) and `Runtime.Python`
+locations plus exact verified versions. **Installation readiness establishes
+only a verified runtime.** Setup creates no production database, watcher or
+index and establishes no agent search access. The read-only
+[memory-search detector](knowledge/features/memorysearch-package.md) continues
+to assess access for the selected agent and workspace independently.
+
+### Opt-in installer smoke
+
+From the repository root on the supported target, run:
+
+```bash
+PYRY_MEMORY_SMOKE_EVIDENCE="$PWD/internal/memoryruntime/smoke-linux-amd64.json" \
+  go test -tags memory_runtime_smoke -run '^TestSmoke$' -count=1 -v ./internal/memoryruntime
+```
+
+This network/download test is outside `make check`. It installs into a temporary
+home, verifies imports and exact versions, CLI version, dependency compatibility
+and repeated setup, then opens and closes Milvus Lite in a separate temporary
+database. It needs no credentials or model downloads. The
+[committed executed evidence](../internal/memoryruntime/smoke-linux-amd64.json)
+records the invocation, OS/distribution, architecture, libc, every component
+version and seven named checks, all passed. Skipped or unexecuted checks do not
+establish support. When recapturing evidence for a change, review and commit the
+generated file; a passing run alone does not preserve it.
+
+For the integrity, publication and probe design, see the
+[package overview](knowledge/features/memoryruntime-package.md) and
+[artifact-lock decision](knowledge/decisions/044-memory-runtime-lock-and-generations.md).
+
 ## See also
 
 - [`guide.md`](guide.md) — full user guide
