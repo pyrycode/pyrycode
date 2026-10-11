@@ -45,12 +45,17 @@ func hostedJSON(d *json.Decoder, depth int, invalid *bool, ambiguous *bool) (any
 			key := k.(string)
 			v, e := hostedJSON(d, depth+1, invalid, ambiguous)
 			if e != nil {
-				return nil, e
+				return obj, e
 			}
 			if _, exists := obj[key]; exists {
 				*invalid = true
 				if depth == 0 && key == "id" {
 					*ambiguous = true
+				}
+				if depth == 0 && key == "type" {
+					if typ, ok := obj[key].(string); ok && hostedType(typ) {
+						continue
+					}
 				}
 			}
 			obj[key] = v
@@ -115,7 +120,7 @@ func parseHostedRequest(raw []byte) (req hostedRequest, recognized, correlatable
 		}
 	}
 	req.id, correlatable = hostedUint(obj["id"])
-	correlatable = correlatable && !ambiguous
+	correlatable = correlatable && !ambiguous && err == nil
 	_, trailing := d.Token()
 	if err != nil || trailing != io.EOF || invalid || !utf8.Valid(raw) || len(raw) > protocol.MaxThreadEnvelopeBytes || !correlatable {
 		return

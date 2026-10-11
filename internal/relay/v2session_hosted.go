@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/apps"
+	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -32,11 +33,14 @@ type hostedPage struct {
 	cursor  *hostedWalk
 }
 type hostedOutput struct {
-	typ     string
-	payload any
-	reply   uint64
-	page    *hostedPage
-	wire    *protocol.RoutingEnvelope
+	typ          string
+	payload      any
+	reply        uint64
+	page         *hostedPage
+	wire         *protocol.RoutingEnvelope
+	env          *protocol.Envelope
+	newSend      *noise.CipherState
+	deliveryDone <-chan error
 }
 type hostedState struct {
 	deliveryCtx context.Context
@@ -46,7 +50,7 @@ type hostedState struct {
 	queue       []*hostedOutput
 	active      *hostedOutput
 	cancel      context.CancelFunc
-	nextID      uint64
+	rekey       bool
 }
 type hostedResult struct {
 	s        *V2Session
@@ -62,12 +66,16 @@ func (m *V2SessionManager) routeHosted(ctx context.Context, s *V2Session, raw []
 	if !recognized {
 		return false
 	}
+	m.drainHostedDelivery(ctx, s)
+	if s.state != V2StateOpen {
+		return true
+	}
 	if !m.hostedAuthorized(s) {
 		m.closeWith(ctx, s, StatusUnauthorized, nil)
 		return true
 	}
 	if s.hosted == nil {
-		s.hosted = &hostedState{nextID: 2}
+		s.hosted = &hostedState{}
 	}
 	if !correlated {
 		m.closeWith(ctx, s, StatusProtocolMismatch, nil)
@@ -119,7 +127,7 @@ func (m *V2SessionManager) routeHosted(ctx context.Context, s *V2Session, raw []
 			m.hostedError(ctx, s, req.id, "app.invalid_request", false)
 			return true
 		}
-		if !time.Now().Before(cursor.expires) {
+		if !m.hostedNow().Before(cursor.expires) {
 			h.walk = nil
 			m.hostedError(ctx, s, req.id, "apps.changed", true)
 			return true
@@ -131,6 +139,7 @@ func (m *V2SessionManager) routeHosted(ctx context.Context, s *V2Session, raw []
 	h.pending = page
 	h.reading = true
 	go func() {
+		defer m.cfg.Logger.Debug("relay: hosted reader exited", "event", "v2.hosted.reader_exited", "conn_id", s.connID)
 		records, revision := m.cfg.HostedAppsDiscovery.List()
 		result := hostedResult{s: s, page: page, records: records, revision: revision}
 		select {
@@ -180,6 +189,7 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 		return
 	}
 	h.queue = append(h.queue, o)
+	m.cfg.Logger.Debug("relay: hosted output queued", "event", "v2.hosted.queued", "conn_id", s.connID, "type", o.typ)
 	m.hostedDeliver(ctx, s)
 }
 func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
@@ -200,18 +210,31 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 	wire := protocol.RoutingEnvelope{ConnID: s.connID}
 	if o.wire != nil {
 		wire = *o.wire
+		if o.newSend != nil {
+			s.send = o.newSend
+		}
 	} else {
-		if h.nextID > hostedMaxID {
+		if s.nextID > hostedMaxID {
 			m.closeWith(ctx, s, StatusSessionGone, nil)
 			return
 		}
-		payload, err := json.Marshal(o.payload)
-		if err != nil {
-			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
-			return
+		var env protocol.Envelope
+		if o.env != nil {
+			env = *o.env
+		} else {
+			payload, err := json.Marshal(o.payload)
+			if err != nil {
+				m.closeWith(ctx, s, StatusProtocolMismatch, nil)
+				return
+			}
+			env = protocol.Envelope{Type: o.typ, TS: time.Now().UTC(), Payload: payload, InReplyTo: &o.reply}
 		}
-		raw, err := json.Marshal(protocol.Envelope{ID: h.nextID, Type: o.typ, TS: time.Now().UTC(), Payload: payload, InReplyTo: &o.reply})
-		h.nextID++
+		if s.nextID < 2 {
+			s.nextID = 2
+		}
+		env.ID = s.nextID
+		raw, err := json.Marshal(env)
+		s.nextID++
 		if err != nil {
 			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
 			return
@@ -232,6 +255,8 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 	h.cancel = cancel
 	h.deliveryCtx = deliveryCtx
 	send := m.cfg.HostedAppsSend
+	deliveryDone := make(chan error, 1)
+	o.deliveryDone = deliveryDone
 	// Unsupported peers also need a cancellable control lane. With no installed
 	// adapter the legacy callback is isolated to this one worker; it is never replaced.
 	go func() {
@@ -241,15 +266,34 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		} else {
 			err = m.cfg.Outbound(wire)
 		}
+		deliveryDone <- err
 		select {
-		case m.hostedDone <- hostedResult{s: s, output: o, err: err}:
-		case <-ctx.Done():
-		case <-s.done:
+		case m.hostedDeliveryDone <- struct{}{}:
+		default:
 		}
 	}()
 }
+
+// drainHostedDelivery observes a returned delivery before admitting later work.
+// Coalesced wakeups do not retain completion goroutines or delay finished pages.
+func (m *V2SessionManager) drainHostedDelivery(ctx context.Context, s *V2Session) {
+	if s.hosted == nil || s.hosted.active == nil {
+		return
+	}
+	o := s.hosted.active
+	select {
+	case err := <-o.deliveryDone:
+		m.handleHostedDone(ctx, hostedResult{s: s, output: o, err: err})
+	default:
+	}
+}
 func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResult) {
 	s := res.s
+	kind := "delivery"
+	if res.page != nil {
+		kind = "read"
+	}
+	defer m.cfg.Logger.Debug("relay: hosted operation completed", "event", "v2.hosted.completed", "conn_id", s.connID, "kind", kind)
 	if s.state != V2StateOpen || m.sessions[s.connID] != s {
 		return
 	}
@@ -273,6 +317,13 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 		if res.output.page != nil && h.pending == res.output.page {
 			h.pending = nil
 		}
+		if res.output.newSend != nil {
+			h.rekey = false
+			s.rekeyComplete(m, ctx)
+		}
+		if res.output.env != nil && res.output.env.Type == protocol.TypeRekeyRequest {
+			s.rekeyReplyTimer = m.armRekeyReplyTimer(ctx, s)
+		}
 		m.hostedDeliver(ctx, s)
 		return
 	}
@@ -285,7 +336,7 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 		return
 	}
 	cursor := res.page.cursor
-	if cursor != nil && (cursor.revision != res.revision || !time.Now().Before(cursor.expires)) {
+	if cursor != nil && (cursor.revision != res.revision || !m.hostedNow().Before(cursor.expires)) {
 		h.pending = nil
 		h.walk = nil
 		m.hostedError(ctx, s, res.page.id, "apps.changed", true)
@@ -333,10 +384,26 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 			return
 		}
 		token := base64.RawURLEncoding.EncodeToString(random[:])
-		h.walk = &hostedWalk{token: token, host: m.cfg.ServerID, last: last, revision: res.revision, expires: time.Now().Add(30 * time.Second)}
+		h.walk = &hostedWalk{token: token, host: m.cfg.ServerID, last: last, revision: res.revision, expires: m.hostedNow().Add(30 * time.Second)}
 		payload.NextCursor = &token
 	}
 	m.hostedEnqueue(ctx, s, &hostedOutput{typ: protocol.TypeApps, payload: payload, reply: res.page.id, page: res.page})
+}
+
+func (m *V2SessionManager) hostedNow() time.Time {
+	if m.cfg.hostedNow != nil {
+		return m.cfg.hostedNow()
+	}
+	return time.Now()
+}
+
+// hostedEnvelope admits plaintext before sealing. IDs and Noise nonces are
+// allocated only when the ordered lane selects this envelope for delivery.
+func (m *V2SessionManager) hostedEnvelope(ctx context.Context, s *V2Session, env protocol.Envelope) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.hostedEnqueue(ctx, s, &hostedOutput{env: &env})
 }
 func (m *V2SessionManager) retireHosted(s *V2Session) {
 	if h := s.hosted; h != nil {

@@ -103,7 +103,7 @@ type InnerFrameV2Decoded struct {
 var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent, protocol.CapabilityStopBackgroundTask}
 
 // negotiateCapabilities intersects advertisements with supported capabilities,
-// in supported-set order, then grants thread only when readiness is supplied.
+// in supported-set order, then grants thread and hosted apps only with readiness.
 // Duplicates collapse and unsupported names grant nothing. A nil result omits
 // the ack field and preserves the fail-closed capability flags.
 func negotiateCapabilities(advertised []string, readiness ...bool) []string {
@@ -140,7 +140,7 @@ func WorkspaceRoot() string {
 // docs/specs/architecture/445-internal-relay-v2-inner-frame-handshake-token-gating.md.
 // A noise_init arriving in V2StateOpen is a phone-initiated re-key
 // (docs/protocol-mobile.md § Re-key); it is routed to handleRekeyInit,
-// which runs IK responder again and atomically swaps s.send / s.recv.
+// which runs IK responder again and orders send-key changes through noise_resp.
 // noise_init in V2StateHandshakeComplete remains a state-machine
 // violation (CipherStates are held but uncommitted; a fresh handshake
 // at that point is indistinguishable from a wire-protocol violation).
@@ -494,8 +494,9 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	s.multiAgent = slices.Contains(negotiated, protocol.CapabilityMultiAgent)
 	s.thread = slices.Contains(negotiated, protocol.CapabilityThread)
 	s.hostedApps = slices.Contains(negotiated, protocol.CapabilityHostedAppsV1)
-	if s.hostedApps {
-		s.hosted = &hostedState{nextID: 2}
+	s.nextID = 2
+	if m.cfg.HostedAppsSend != nil || m.cfg.HostedAppsDiscovery != nil || slices.Contains(helloPayload.Capabilities, protocol.CapabilityHostedAppsV1) {
+		s.hosted = &hostedState{}
 	}
 	// Retain what the client reported about ITSELF, for the session's appended
 	// system prompt (#2148). Recorded here, on the accept path and before the

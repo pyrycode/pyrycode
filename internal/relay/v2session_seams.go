@@ -35,6 +35,8 @@ import (
 // MUST NOT be logged, wrapped into an error or emitted on any wire surface, the
 // same contract internal/keys and internal/noise state for those bytes.
 type V2SessionConfig struct {
+	// hostedNow is a test clock for cursor lifetime; production uses time.Now.
+	hostedNow func() time.Time
 	// HostedAppsDiscovery supplies committed registrations for this authenticated host.
 	// Nil disables hosted capability admission.
 	HostedAppsDiscovery HostedAppsDiscovery
