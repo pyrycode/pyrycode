@@ -81,3 +81,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-11
+
+## Revisions
+
+- 2026-10-11: Recovery testing showed that JSON decoding turns absent `Payload.Metadata` into a raw `null` value. `validRecord` compares the encoded empty pending batch rather than Go slice identity, while still rejecting nonzero orphan payloads. This preserves the planned zero-pending contract across reopening. Final written work is approximately 750 lines, with two exported types and no consumer migrations.
