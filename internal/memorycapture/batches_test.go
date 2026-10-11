@@ -1,6 +1,7 @@
 package memorycapture
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 var testID = Identity{Vault: "/vault", Conversation: "chat", Generation: "generation-1"}
@@ -404,6 +406,96 @@ func TestRecordIntegrity(t *testing.T) {
 			got, _ := os.ReadFile(file)
 			if string(got) != string(raw) {
 				t.Fatal("corrupt evidence overwritten")
+			}
+		})
+	}
+}
+
+func TestSplitUTF8InputRejectedBeforePublication(t *testing.T) {
+	tests := []struct {
+		name string
+		pair func(*Identity, *Payload) (*string, *string)
+	}{
+		{"vault-conversation", func(id *Identity, _ *Payload) (*string, *string) { return &id.Vault, &id.Conversation }},
+		{"conversation-generation", func(id *Identity, _ *Payload) (*string, *string) { return &id.Conversation, &id.Generation }},
+		{"agent-model", func(_ *Identity, p *Payload) (*string, *string) { return &p.Agent, &p.Model }},
+		{"message-id-revision", func(_ *Identity, p *Payload) (*string, *string) { return &p.Messages[0].ID, &p.Messages[0].Revision }},
+		{"message-revision-text", func(_ *Identity, p *Payload) (*string, *string) { return &p.Messages[0].Revision, &p.Messages[0].Text }},
+		{"message-text-timestamp", func(_ *Identity, p *Payload) (*string, *string) { return &p.Messages[0].Text, &p.Messages[0].Timestamp }},
+		{"message-timestamp-speaker", func(_ *Identity, p *Payload) (*string, *string) {
+			return &p.Messages[0].Timestamp, &p.Messages[0].Speaker
+		}},
+		{"message-speaker-agent", func(_ *Identity, p *Payload) (*string, *string) { return &p.Messages[0].Speaker, &p.Messages[0].Agent }},
+		{"message-agent-session", func(_ *Identity, p *Payload) (*string, *string) { return &p.Messages[0].Agent, &p.Messages[0].Session }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			s := testStore(t, home)
+			id, p := testID, testPayload()
+			left, right := tt.pair(&id, &p)
+			*left += "\xc3"
+			*right = "\xa9" + *right
+			if utf8.ValidString(*left) || utf8.ValidString(*right) || !utf8.ValidString(*left+*right) {
+				t.Fatal("fixture must be invalid fields whose concatenation is valid")
+			}
+			if b, err := s.Publish(context.Background(), id, p); b != nil || !errors.Is(err, ErrInvalid) {
+				t.Fatalf("invalid fields executable: %#v %v", b, err)
+			}
+			entries, err := os.ReadDir(filepath.Join(home, ".pyry/memory/capture"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if filepath.Ext(entry.Name()) == ".json" {
+					t.Fatalf("invalid fields published record %s", entry.Name())
+				}
+			}
+		})
+	}
+}
+
+func TestRawInvalidUTF8RecordRejectedWithoutOverwrite(t *testing.T) {
+	home := t.TempDir()
+	s := testStore(t, home)
+	ctx := context.Background()
+	p := testPayload()
+	p.Messages[0].Text = "\ufffd"
+	b, err := s.Publish(ctx, testID, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(home, ".pyry/memory/capture", recordName(testID))
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt := bytes.Replace(raw, []byte("\ufffd"), []byte{0xff}, 1)
+	if bytes.Equal(corrupt, raw) || utf8.Valid(corrupt) {
+		t.Fatal("fixture must replace a stored replacement rune with malformed bytes")
+	}
+	if err = os.WriteFile(file, corrupt, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []string{"Pending", "Publish", "Report"} {
+		t.Run(operation, func(t *testing.T) {
+			reopened := testStore(t, home)
+			var got *Batch
+			var err error
+			switch operation {
+			case "Pending":
+				got, err = reopened.Pending(ctx, testID)
+			case "Publish":
+				got, err = reopened.Publish(ctx, testID, testPayload())
+			case "Report":
+				err = reopened.Report(ctx, testID, b.ID, []string{"new.md"})
+			}
+			if got != nil || !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("malformed record accepted: %#v %v", got, err)
+			}
+			after, err := os.ReadFile(file)
+			if err != nil || !bytes.Equal(after, corrupt) {
+				t.Fatalf("malformed record overwritten: %v", err)
 			}
 		})
 	}

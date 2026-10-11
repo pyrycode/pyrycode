@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -201,7 +202,7 @@ func readRecord(dir int, name string, id Identity) (_ *record, _ []byte, _ *os.F
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if len(raw) > maxRecord {
+	if len(raw) > maxRecord || !utf8.Valid(raw) {
 		return nil, nil, nil, ErrCorrupt
 	}
 	var r record

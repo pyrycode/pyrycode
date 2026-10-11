@@ -79,14 +79,22 @@ func batchID(id Identity, p Payload) string {
 	}{id, p})
 }
 func validIdentity(id Identity) bool {
-	return filepath.IsAbs(id.Vault) && filepath.Clean(id.Vault) == id.Vault && id.Conversation != "" && id.Generation != "" && utf8.ValidString(id.Vault+id.Conversation+id.Generation) && !strings.ContainsRune(id.Vault+id.Conversation+id.Generation, 0)
+	return filepath.IsAbs(id.Vault) && filepath.Clean(id.Vault) == id.Vault && id.Conversation != "" && id.Generation != "" && validUTF8(id.Vault, id.Conversation, id.Generation) && !strings.ContainsRune(id.Vault+id.Conversation+id.Generation, 0)
 }
 func validPayload(p Payload) bool {
-	if p.Agent == "" || p.Model == "" || !utf8.ValidString(p.Agent+p.Model) || len(p.Metadata) > 0 && (!json.Valid(p.Metadata) || !utf8.Valid(p.Metadata)) {
+	if p.Agent == "" || p.Model == "" || !validUTF8(p.Agent, p.Model) || len(p.Metadata) > 0 && (!json.Valid(p.Metadata) || !utf8.Valid(p.Metadata)) {
 		return false
 	}
 	for _, m := range p.Messages {
-		if m.ID == "" || m.Revision == "" || !utf8.ValidString(m.ID+m.Revision+m.Text+m.Timestamp+m.Speaker+m.Agent+m.Session) {
+		if m.ID == "" || m.Revision == "" || !validUTF8(m.ID, m.Revision, m.Text, m.Timestamp, m.Speaker, m.Agent, m.Session) {
+			return false
+		}
+	}
+	return true
+}
+func validUTF8(fields ...string) bool {
+	for _, field := range fields {
+		if !utf8.ValidString(field) {
 			return false
 		}
 	}
