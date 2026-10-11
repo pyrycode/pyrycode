@@ -1,15 +1,16 @@
 # `internal/apps` — durable host-app registrations
 
 This package owns strict manifest validation, durable registrations and callable
-committed-release process ownership independent of conversations. The
-[hosted-app reference](../../hosted-apps.md#manifest-and-identity)
+health-confirmed committed-release process ownership independent of conversations.
+The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
 owns the field tables and registration behavior; the
 [v1 contract](../../specs/architecture/3120-hosted-app-contract.md) owns the broader
 hosting design. Registration and stored `running` prove neither publication nor
 readiness. The registry commits lifecycle observations and normalizes restart
-state. Process spawn proves only starting; daemon wiring (#3204), health/readiness
-(#3206), automatic recovery (#3207), publication (#3125) and encrypted resource
-activation (#3123) remain separate responsibilities.
+state. Process spawn proves only starting; the owner confirms health before
+exposing private targets. Daemon wiring (#3204), automatic recovery (#3207),
+publication (#3125) and encrypted resource activation (#3123) remain separate
+responsibilities.
 
 ## Validation and stored identity
 
@@ -162,15 +163,61 @@ ephemeral port unique across the owner's live/in-flight generations; it closes
 before spawn for service binding, while private port ownership lasts until
 retirement. Failed launch releases it and the next explicit attempt excludes
 the app's immediately previous reservation. This cannot exclude unrelated OS
-processes during handoff; collision detection and automatic retries remain
-downstream. Ports and generations never enter registry/discovery.
+processes during handoff; a bind failure or failed health confirmation retires
+ownership and cleans up the group. Automatic retries remain downstream. Ports
+and generations never enter registry/discovery.
 
-Start returns after spawn/failure, never health confirmation or running. Failed
+Start returns after spawn/failure without waiting for health confirmation. Failed
 intent/starting writes launch nothing; a final revision/cancellation check and
 spawn share the registry lock, preventing a newer commit from slipping between
-them. Late exits cannot overwrite newer records or retire replacements. Current
-validation/spawn failures persist `app.unavailable` / `Service could not start`;
-unexpected exits persist `app.unavailable` / `Service exited unexpectedly`.
+them. The launch worker starts health supervision after spawn: immediately probe
+`GET /_pyry/health`, then every 250 ms for at most 15 seconds from spawn. Each
+request, including reply reads, has a one-second timeout bounded by the remaining
+startup deadline and a 4096-byte reply cap. `probeHealth` requires HTTP 200 and
+JSON with `ready:true`, exact `app_id` and the committed `ActiveRelease` as
+`release_version`. Missing/foreign identity, false or malformed readiness,
+duplicate/trailing JSON, oversized replies, non-200 status and timeouts never
+confirm health. Proxies, redirects and connection reuse are disabled.
+
+`confirmRunning` checks generation/context/liveness under registry-then-owner
+locks and durably commits running with a cleared error through the shared
+`Registry.CommitObservation` implementation before marking the generation healthy.
+Title, desired intent and active/pending releases remain committed values.
+A newer app revision, even a title or pending-release change during startup,
+rejects confirmation; stale generation results cannot publish readiness either.
+Rejected or failed running persistence retires the generation and cleans up its
+group. Save the returned running record for subsequent failure/exit/shutdown
+observations: using the starting revision would reject a real exit as stale and
+leave discovery running. Metadata-only commits after confirmation can retain
+target validity, but subsequent observations still cannot overwrite newer commits.
+
+While running, probes occur every five seconds. Success resets consecutive
+failures; one or two failures alone preserve established readiness. The third
+retires it, conditionally commits failed if still current, and stops the owned
+group. `supervise` measures intervals from probe start rather than adding request
+duration to the polling delay, which would stretch the specified cadence. The
+absolute 15-second startup bound covers the readiness decision; cleanup retains
+its separate five-second grace. Startup failure/timeout, unexpected exit and bind
+collision also retire targets and reservations; a later explicit launch gets a
+fresh endpoint. Late probes/exits cannot affect a replacement.
+
+`Owner.Lookup(serverID, appID)` returns an opaque `Target` only for a local,
+still-registered app committed available/running with a matching active release
+and a live, health-confirmed owned generation. Persisted running alone supplies
+no target. `Target.Do` preserves the caller's path/query but replaces its authority
+with the private endpoint. Validity is checked on use, again at connection
+admission, after response headers and before/after body reads. A retained handle
+checked only at lookup could reach a replacement when app/release/port recur;
+private generation ownership, not endpoint equality, prevents that. Post-read
+validation prevents newly read bytes being returned after retirement. Removal,
+stopped intent/state, active-release changes and retirement reject use. Requests
+and response-body reads share caller and generation cancellation; callers must
+close response bodies. Proxies, redirects and connection reuse remain disabled;
+resource authorization and transfer limits belong to consumers (#3123).
+
+Current validation/spawn failures persist `app.unavailable` / `Service could not start`;
+health failures use `Service health check failed`, and unexpected exits
+use `Service exited unexpectedly`, only while their app revision is current.
 Child output is discarded. Local diagnostics carry operation context and preserve
 `errors.Is`, but no output, paths or endpoints enter metadata. Cleanup still runs
 when lifecycle persistence fails; `Stop` returns synchronous failures and
@@ -181,12 +228,15 @@ its owned group, then conditionally commits observed stopped. SIGTERM allows up
 to five seconds before SIGKILL of surviving group members and direct-child wait,
 including when descendants outlive the leader. Repeated stop is harmless; a failed
 intent write still cancels/cleans up and returns failure without claiming changed
-intent. A final observation persistence failure leaves durable intent intact
+intent. Targets are retired before further use even when persistence fails.
+A final observation persistence failure leaves durable intent intact
 without claiming observed stopped. `Owner.Shutdown` closes launch admission, cancels all generations
 and joins workers, conditionally observing stopped without changing desired intent.
 Cancelling the initiating start context retires its generation; a coalesced caller
-can cancel its own wait independently. No startup scan, subscriptions, probes,
-automatic retries or publisher cutover policy run in the owner. See
+can cancel its own wait independently. Callable health supervision adds no startup
+scan, subscriptions or automatic retries (#3207). Daemon wiring (#3204),
+publication/migration/activation/rollback (#3125) and encrypted resource capability
+activation (#3123) remain downstream; exclusive cutover is publisher-owned. See
 [startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
 
 `Open` validates storage before `normalizeSnapshot`. Every available record with
@@ -270,6 +320,13 @@ original reader returns. Starting a replacement reader on every cancel would
 accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ## Testing
+
+Retained-handle rejection before a request does not exercise retirement during
+an in-flight response-body read. `TestOwnerTargetRetirement` covers the former;
+the stalled-body cancellation and before/after-read guards in `targetBody.Read`
+need a separate controlled-response regression. Likewise, endpoint reuse in
+`TestOwnerTargetReuse` does not force a delayed target dial across retirement;
+connection-admission validation remains essential even when those tests pass.
 
 The template's `React renders caller title as literal text` test calls
 `App({title})` directly before server rendering. Keep `App` hook-free and put
