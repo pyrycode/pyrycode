@@ -200,10 +200,7 @@ const permissionDaemonModel = "haiku"
 // which is argued at the caller, not here.
 func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, model string, operatorBypass bool) *bootstrapDaemon {
 	t.Helper()
-	bin := os.Getenv("PYRY_E2E_READINESS_BIN")
-	if bin == "" {
-		bin = ensurePyryBuilt(t) // builds with real HOME; runs with isolated HOME
-	}
+	bin := ensurePyryBuilt(t) // builds with real HOME (warm cache); runs with isolated HOME
 	socket := shortSocketPath(t)
 	stderr := &lockedBuffer{}
 

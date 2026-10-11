@@ -9,7 +9,6 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
-	"github.com/pyrycode/pyrycode/internal/streamsup"
 )
 
 // inboundActivateTimeout caps the drain's per-attempt wait for an idle-evicted
@@ -264,10 +263,8 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 			return err
 		}
 		activateCtx, cancelActivate := context.WithTimeout(ctx, inboundActivateTimeout)
-		streamsup.ObserveReadiness("activate_begin", convID, true)
 		err = w.Activate(activateCtx)
 		cancelActivate()
-		streamsup.ObserveReadiness("activate_end", convID, err == nil)
 		if err != nil {
 			return err
 		}
@@ -277,19 +274,15 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 		// errStreamTurnHold rides the same wrap and this statement is its only
 		// producer, so markApprovalHolds can tell a hold apart from every other
 		// delivery failure without widening this seam; the rendered text is unchanged.
-		streamsup.ObserveReadiness("idle_begin", convID, true)
 		if err := busy.waitIdleForDelivery(ctx, convID, hold); err != nil {
-			streamsup.ObserveReadiness("idle_end", convID, false)
 			return fmt.Errorf("%w: %w", errStreamTurnHold, err)
 		}
-		streamsup.ObserveReadiness("idle_end", convID, true)
 		undo, finished, err := busy.beginDelivery(ctx, convID)
 		if err != nil {
 			return err
 		}
 		defer finished()
 		writeErr := writeOperatorTurn(ctx, convID, payload, w, place, false)
-		streamsup.ObserveReadiness("turn_write", convID, writeErr == nil)
 		if writeErr != nil {
 			// Returned VERBATIM (unwrapped): msgqueue classifies ErrNoLiveSession,
 			// ErrTrustModalPending and turncommit.ErrDropped by errors.Is, and the undo
