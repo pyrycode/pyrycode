@@ -17,6 +17,26 @@ actually belongs to rather than repeated here.
   `Banner` row for the production mechanics (`interactiveTurnEmitterV2.Handle`'s lifecycle-inert
   arm and its `TurnEnd` peer's drop-outside-an-open-turn behaviour) — this file is what turned that
   reading of the source into a measurement.
+- **The first banner need not be the hook refusal (#3188).** Queued acceptance/delivery
+  receipts can arrive before hook execution; an early empty witness does not prove the hook
+  never ran. `awaitBanner` waits within the existing deadline for this conversation's
+  `oslcapBlockReason`, retaining preceding receipts, then checks the `blocked` witness.
+  `hookBannerCheckWindow` separately validates the refusal and queued-send/opening receipts by
+  joining `history_entry_id` and timestamp to raw `Store.Page` facts. Legacy history pages
+  erase the fact types into indistinguishable empty info banners. The complete window requires
+  one intact refusal, both sends' acceptance/delivery receipts and the liveness opening;
+  ignoring empty banners would hide duplicates or missing receipts. Every receipt needs the
+  five nonnull banner fields, the empty info payload and nonzero durable/replay IDs and timestamp.
+  Acceptance precedes delivery in live and durable order. Only the opening follows the liveness
+  ack and precedes assistant text; queued receipts may arrive on either side of the ack.
+  Retained frames also prove no refused assistant text or turn lifecycle before that ack,
+  alongside the unread settle budget, correlated ack, nonempty reply, terminal idle and
+  `passed` witness. See [legacy receipt eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
+- **A client message ID does not identify a durable acceptance.** A delivery must reference
+  the exact acceptance entry whose receipt the window observed, as well as a matching durable
+  user message. Matching only by client message ID accepted an unobserved acceptance when the
+  ID was reused; `TestHookBannerReceiptWindow`'s reused-message-ID negative control catches
+  that false proof.
 - **A rig cannot reach a daemon-spawned child through a flag the daemon also composes, and the
   failure is silent, not an error.** The first live lap spent a full run learning that pyry's own
   `--settings` always wins a collision with an operator pass-through one. See
