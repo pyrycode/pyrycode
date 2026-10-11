@@ -189,10 +189,18 @@ An actually empty binding is explicit `kind: none` with no session ID. Unknown
 or unavailable source facts remain absent. Delivery retains the
 [receiving-session snapshot](#operator-delivery-provenance-2983), even after
 rebinding; startup never substitutes a replacement session for the acceptance.
-Hidden drops do not raise unread watermarks. All four fact types stay excluded
-from legacy history pages, live publication and reconnect replay, including
-nonvisual receipts. `shown: true` supplies visibility for the future thread;
-it does not authorize legacy transport or implement a thread fold/protocol.
+Hidden drops do not raise the raw displayable watermark. All four raw payloads
+stay off legacy history, live publication and reconnect replay. After a
+successful append, `legacyRuntimeReceipt` projects validated facts as empty
+info banners at their original durable IDs and timestamps (#3167). Acceptance
+requires `accepted_at`; outcomes require `occurred_at`, `accepted_entry_id` and
+the exact reason in the table, with `delivery_entry_id` also required for
+delivery. Sender/message fields remain optional. Malformed/unknown facts stay
+holes. Receipts carry no send text, attachments, sender fields or raw facts and
+confer no sight or lifecycle changes. The shared legacy list/read target counts
+valid receipts even for hidden removal/give-up; raw visibility, provenance,
+watermarks and ID allocation remain unchanged. See
+[legacy validation and publication](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 
 **Gate placement itself on acceptance completion.** Queue callback ordering
 cannot protect the earlier echo/idle commit: placement can reach the producer
@@ -204,6 +212,19 @@ observer mutex; acceptance never waits for the stream drain. The operator
 message retains its stream position, timestamp and exactly-once legacy push;
 `delivery_entry_id` points to that delivery-order record. Later confirmation
 acknowledges placement without appending or publishing again.
+
+**Keep receipt notification off the peer fan-out lock (#3167).** Acceptance
+appends and enqueues its receipt before releasing `ready`; placement waits for
+that barrier. If notification acquired `operatorMessageEmitterV2`'s fan-out
+mutex, a stalled peer could block acceptance and therefore placement.
+`notifyReceipt` instead uses a separate mutex for a bounded mailbox and a
+nonblocking wake. `Run` and synchronous `broadcast` drain pending receipts under
+the fan-out mutex before publishing the user and its linked delivery receipt as
+one ordered batch. Receipt notification never acquires that mutex or performs
+peer I/O; fan-out holds the mailbox mutex only while taking pending items. A full
+mailbox logs a content-free discriminant and leaves durable paging as recovery. Both
+ordinary and send-now delivery retain user-before-outcome chronology across
+delayed echo/idle confirmation, without duplicate content or receipts.
 
 **Use the arbitrated terminal outcome, not a removal return value.** An
 in-flight `Remove` returning true can express a deferred request. Confirmed
@@ -218,17 +239,19 @@ producers or inbound traffic start. `readStartupSends` resolves acceptance
 entry IDs against durable delivery/drop/loss facts; old operator messages
 without acceptances stay untouched. Failed/incomplete reads or malformed send
 facts infer no loss for that conversation. `closeStartupSends` appends losses
-without re-enqueueing, live publication or replay backfill. A successfully
-recorded loss resolves the acceptance on subsequent starts; a failed loss
-write remains eligible for another startup attempt. See
+without re-enqueueing, live publication or replay backfill. Valid losses become
+receipts when paged. A successfully recorded loss resolves the acceptance on
+subsequent starts; a failed loss write remains eligible for another startup
+attempt. See
 [the queue durability boundary](msgqueue-package.md#durability-boundary-in-scope-vs-out)
 and [ADR 042](../decisions/042-daemon-built-thread.md).
 
 Storage remains best effort: nil/failed history preserves queue acceptance,
-delivery/removal and eligible legacy push. Failed acceptance writes release
-the placement gate without inventing an ID or any linked outcome. Delivery
-linkage additionally requires a successful operator-message append. A failed
-outcome append can leave a durable acceptance unresolved. Startup loss records
+delivery/removal and eligible legacy push. Nil/failed appends mint no receipt
+identity. Failed acceptance writes release the placement gate without inventing
+an ID or any linked outcome. Delivery linkage additionally requires a successful
+operator-message append. A failed outcome append can leave a durable acceptance
+unresolved. Startup loss records
 that missing durable resolution; the existing
 [shutdown/confirmed-write gap](msgqueue-package-lifecycle.md#concurrency-model)
 means it cannot prove the agent never received the bytes. This is no durable

@@ -9,6 +9,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 const (
@@ -32,6 +33,38 @@ type queuedSendFact struct {
 	Reason          string    `json:"reason,omitempty"`
 }
 
+func queuedSendHistoryType(typ string) bool {
+	switch typ {
+	case historySendAccepted, historySendDelivered, historySendDropped, historySendLost:
+		return true
+	default:
+		return false
+	}
+}
+
+func validQueuedSendFact(convID, typ string, raw json.RawMessage) bool {
+	var p queuedSendFact
+	if json.Unmarshal(raw, &p) != nil || p.ConversationID != convID {
+		return false
+	}
+	if typ == historySendAccepted {
+		return !p.AcceptedAt.IsZero()
+	}
+	if p.OccurredAt.IsZero() || p.AcceptedEntryID == 0 {
+		return false
+	}
+	switch typ {
+	case historySendDelivered:
+		return p.DeliveryEntryID != 0 && p.Reason == "delivered"
+	case historySendDropped:
+		return p.Reason == "removed" || p.Reason == "give_up"
+	case historySendLost:
+		return p.Reason == "daemon_restart"
+	default:
+		return false
+	}
+}
+
 type queuedSendKey struct {
 	convID  string
 	queueID uint64
@@ -44,11 +77,12 @@ type queuedSendReference struct {
 // References exist only for this daemon run. A placement may arrive before the
 // acceptance callback, but cannot append or publish until that append completes.
 type queuedSendHistory struct {
-	store  *history.Store
-	logger *slog.Logger
-	source func(conversations.ConversationID) *history.SessionProvenance
-	mu     sync.Mutex
-	refs   map[queuedSendKey]*queuedSendReference
+	store   *history.Store
+	logger  *slog.Logger
+	publish func(operatorMessage)
+	source  func(conversations.ConversationID) *history.SessionProvenance
+	mu      sync.Mutex
+	refs    map[queuedSendKey]*queuedSendReference
 }
 
 func newQueuedSendHistory(store *history.Store, logger *slog.Logger, source func(conversations.ConversationID) *history.SessionProvenance) *queuedSendHistory {
@@ -88,8 +122,28 @@ func (h *queuedSendHistory) append(typ string, p queuedSendFact, at time.Time, s
 func (h *queuedSendHistory) accepted(c string, m msgqueue.QueuedMessage) {
 	source := h.observedSource(c)
 	ref := h.reference(c, m.ID)
-	ref.id = h.append(historySendAccepted, queuedSendFact{ConversationID: c, DeviceID: m.DeviceID, MessageID: m.MessageID, Text: m.Text, AttachmentIDs: m.AttachmentIDs, AcceptedAt: m.TS, ClientSentAt: formatClientSentAt(m.ClientSentAt)}, m.TS, source)
+	p := queuedSendFact{ConversationID: c, DeviceID: m.DeviceID, MessageID: m.MessageID, Text: m.Text, AttachmentIDs: m.AttachmentIDs, AcceptedAt: m.TS, ClientSentAt: formatClientSentAt(m.ClientSentAt)}
+	ref.id = h.append(historySendAccepted, p, m.TS, source)
+	h.notify(h.receipt(historySendAccepted, p, m.TS, ref.id))
 	close(ref.ready)
+}
+
+func (h *queuedSendHistory) receipt(typ string, p queuedSendFact, at time.Time, id *uint64) *operatorMessage {
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return nil
+	}
+	payload, ok := legacyRuntimeReceipt(p.ConversationID, typ, raw, id, at)
+	if !ok {
+		return nil
+	}
+	return &operatorMessage{convID: p.ConversationID, typ: protocol.TypeBanner, payload: payload, ts: at, historyEntryID: id}
+}
+
+func (h *queuedSendHistory) notify(receipt *operatorMessage) {
+	if receipt != nil && h.publish != nil {
+		h.publish(*receipt)
+	}
 }
 
 func (h *queuedSendHistory) beforeDelivery(c string, id uint64) *queuedSendReference {
@@ -101,14 +155,18 @@ func (h *queuedSendHistory) beforeDelivery(c string, id uint64) *queuedSendRefer
 	return ref
 }
 
-func (h *queuedSendHistory) delivered(c string, id uint64, ref *queuedSendReference, deliveryID *uint64, at time.Time, source history.SessionProvenance) {
+func (h *queuedSendHistory) delivered(c string, id uint64, ref *queuedSendReference, deliveryID *uint64, at time.Time, source history.SessionProvenance) *operatorMessage {
 	if h == nil {
-		return
+		return nil
 	}
+	var receipt *operatorMessage
 	if ref.id != nil && deliveryID != nil {
-		h.append(historySendDelivered, queuedSendFact{ConversationID: c, AcceptedEntryID: *ref.id, DeliveryEntryID: *deliveryID, OccurredAt: at, Reason: string(msgqueue.TerminalDelivered)}, at, source)
+		p := queuedSendFact{ConversationID: c, AcceptedEntryID: *ref.id, DeliveryEntryID: *deliveryID, OccurredAt: at, Reason: string(msgqueue.TerminalDelivered)}
+		entryID := h.append(historySendDelivered, p, at, source)
+		receipt = h.receipt(historySendDelivered, p, at, entryID)
 	}
 	h.forget(c, id)
+	return receipt
 }
 
 func (h *queuedSendHistory) forget(c string, id uint64) {
@@ -127,7 +185,9 @@ func (h *queuedSendHistory) terminal(c string, m msgqueue.QueuedMessage, outcome
 	ref := h.beforeDelivery(c, m.ID)
 	if ref.id != nil {
 		at := time.Now().UTC()
-		h.append(historySendDropped, queuedSendFact{ConversationID: c, AcceptedEntryID: *ref.id, OccurredAt: at, Reason: string(outcome)}, at, source)
+		p := queuedSendFact{ConversationID: c, AcceptedEntryID: *ref.id, OccurredAt: at, Reason: string(outcome)}
+		entryID := h.append(historySendDropped, p, at, source)
+		h.notify(h.receipt(historySendDropped, p, at, entryID))
 	}
 	h.forget(c, m.ID)
 }

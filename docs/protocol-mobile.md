@@ -1045,8 +1045,12 @@ wire types: `turn_state`, `stall`, `api_retry`, `compacting` and
 eligible legacy type counts regardless of absent/false/true stored `shown`,
 including normal, failed or stopped `turn_end` and nonvisual metadata. Validated
 runtime facts projected as info-banner receipts also count at their original
-durable IDs, including receipt-only logs and runtime tails. Unsupported entries,
-including invalid runtime facts, retain the conservative visibility fallback:
+durable IDs, including receipt-only logs and runtime tails. This includes
+validated `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`
+receipts (#3167), even hidden removal/give-up outcomes. Their
+[validation](#a-history-entry) is shared by paging and the legacy list/read
+target. Unsupported entries, including malformed queued/runtime facts and
+unknown types, retain the conservative visibility fallback:
 absent/true counts, false excludes. Neither exclusion nor fallback counting
 certifies a harmless receipt. Missing/empty logs and logs with no qualifying
 entry yield `0`; an all-hidden raw log can still have a nonzero legacy target.
@@ -1063,8 +1067,9 @@ on the next list even if excluded statuses follow it; new counted entries make
 **Accounting is not presentation.** A list watermark, fetched history or a live/
 replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
 Submit a checkpoint only from explicit foreground presentation evidence. Known
-nonvisual receipts can account for intervening durable IDs, but unknown,
-malformed or unidentified receipts and unaccounted numeric holes remain barriers.
+nonvisual receipts, including queued-send receipts, can account for intervening
+durable IDs, but unknown, malformed or unidentified receipts and unaccounted
+numeric holes remain barriers.
 The daemon's clamp bounds the requested mark; it does not establish that the
 operator saw the content. Raw history and its metadata-aware watermark remain
 unchanged for future thread consumers.
@@ -6100,9 +6105,12 @@ timeline reducer it already runs for the live stream.
 | `payload` | object | Eligible stored payload bytes unchanged, or the nonvisual receipt shape below. |
 | `ts` | string (RFC 3339) | The original durable entry timestamp, also retained by receipts. |
 
-**Known runtime facts use nonvisual receipts (#3026).** Only
+**Known runtime and queued-send facts use nonvisual receipts (#3026, #3167).**
 `main_turn_opened`, `main_tool_interrupted`, `main_turn_interrupted` and
-`session_divider` project into legacy history as `type: "banner"` with this
+`session_divider`, validated
+[agent/task facts](knowledge/features/history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
+and `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`
+project into legacy history as `type: "banner"` with this
 payload (all five keys are required and nonnull):
 
 ```json
@@ -6116,21 +6124,41 @@ payload (all five keys are required and nonnull):
 ```
 
 The receipt retains the raw fact's original `id` and `ts`; it is not a new
-durable append or a second ID space. Runtime payloads and metadata stay off
-legacy transports. Projection validates matching conversation ownership,
-occurrence time and required identities: a turn ID for opening/turn interruption,
-also a tool-call ID for tool interruption, and a cause plus predecessor session
+durable append or a second ID space. Raw fact payloads and metadata stay off
+legacy transports. Opening/interruption/divider projection validates matching
+conversation ownership, occurrence time and required identities: a turn ID for
+opening/turn interruption, also a tool-call ID for tool interruption, and a cause plus predecessor session
 for a divider. A `daemon_restart` divider needs no predecessor/successor session
 IDs. Missing durable identity or timestamp and malformed facts produce no
 receipt; arbitrary unknown types remain excluded without being certified harmless.
+
+**Queued-send validation preserves the same boundary.** Every queued receipt
+requires matching `conversation_id`, a nonzero successful durable entry ID and
+a nonzero entry timestamp, plus these raw fact fields:
+
+| Raw fact | Additional required validation |
+| --- | --- |
+| `send_accepted` | Nonzero `accepted_at`. |
+| `send_delivered` | Nonzero `occurred_at`, `accepted_entry_id` and `delivery_entry_id`; exactly `reason: "delivered"`. |
+| `send_dropped` | Nonzero `occurred_at` and `accepted_entry_id`; exactly `reason: "removed"` or `"give_up"`. |
+| `send_lost` | Nonzero `occurred_at` and `accepted_entry_id`; exactly `reason: "daemon_restart"`. |
+
+Legacy callers' sender/message fields remain optional. Unknown/malformed facts,
+missing required fields and unsupported outcome reasons produce no receipt.
+Receipts carry only the five banner fields above: no send text, attachments,
+sender fields, raw references or facts. Raw facts, provenance/visibility metadata,
+raw store watermarks and durable ID allocation remain unchanged, including
+hidden removal/give-up outcomes. Raw visibility does not authorize transport
+or certify accounting.
 
 Unchanged mobile decoding/reduction understands this info banner as nonvisual
 accounting. It draws no content and changes no turn, permission, model or status
 state. Accounting grants no presentation of unseen content. Unknown, malformed
 or unidentified receipts and unaccounted holes remain read-evidence barriers;
 an all-receipt page cannot establish sight. The projection consumes exactly one
-bounded raw page and preserves its opaque `cursor` and `at_start`, including
-all-runtime pages; it never scans ahead to fill a page after excluding facts.
+bounded raw page and preserves its raw-page limit, opaque `cursor` and
+`at_start`, including receipt-only and mixed valid/invalid pages; it never scans
+ahead to fill a page after excluding facts.
 
 **A direct live envelope's `history_entry_id` is this entry's `id` (#2861).**
 After a successful append, interactive-turn emission, session-transition
@@ -6138,9 +6166,14 @@ broadcast and operator-message history commit/publication attach that same
 per-conversation id to every interactive recipient's direct envelope. Reconnect
 replay of history-backed interactive-turn, runtime-receipt and operator-message
 ring events carries the original append's id too (#2909), without appending another entry.
-Running runtime facts, including dividers, publish the same receipt bytes and
-original durable ID/timestamp to live recipients and the replay ring. Startup
-reconciliation receipts are available through history, without populating the
+Running runtime and queued-send facts, including dividers, publish the same
+receipt bytes and original durable ID/timestamp to live recipients and the
+replay ring. Queued acceptance is recorded and its receipt enqueued before
+placement can proceed; the delivered user message precedes its linked delivery
+receipt in serialized publication. Ordinary and send-now delivery preserve that
+chronology through delayed echo/idle confirmation, and later confirmation adds
+no message or receipt. Startup reconciliation receipts, including `send_lost`,
+are available through history, without populating the
 ring or sending live frames. Existing recipient and agent/isolation gates apply.
 Channel posts still omit it; ordinary `session_transition` frames are not
 ring-replayed. Use it as
@@ -6150,9 +6183,9 @@ has read through that entry. It is independent of the envelope's connection
 absent or failed history storage, and non-history-backed frames (live or replayed)
 omit `history_entry_id` entirely, never as `null` or `0`. Eligible legacy delivery
 and existing ring recording proceed even when history cannot be appended;
-failed or absent storage cannot mint a runtime receipt. Obtain a durable target
-only with presentation evidence, using a served entry's `id`; a list watermark
-alone is not a read checkpoint.
+failed or absent storage cannot mint a runtime or queued-send receipt. Obtain a
+durable target only with presentation evidence, using a served entry's `id`;
+a list watermark alone is not a read checkpoint.
 
 **The entry's `id` is not an `event_id`.** [`event_id`](#reconnect-replay--resync-consumer-647)
 is the in-memory ring's id: per-process, reset by a daemon restart, and meaningful
@@ -6165,9 +6198,10 @@ reports `latest_entry_id` using the shared
 [legacy list/read watermark](#marking-a-conversation-read): eligible wire types
 count regardless of stored `shown`, except `turn_state`, `stall`, `api_retry`,
 `compacting` and `session_transition`, which never count. Validated runtime
-info-banner receipts count at their original IDs, including receipt-only pages
-and tails. Unsupported entries keep conservative absent/true visibility counting
-and false exclusion without certifying receipt accounting. **History pages still
+info-banner receipts, including all four queued-send facts, count at their
+original IDs, including hidden drops, receipt-only pages and tails. Unsupported
+entries keep conservative absent/true visibility counting and false exclusion
+without certifying receipt accounting. **History pages still
 contain eligible hidden/status entries and validated runtime receipts, and all
 entries use the original durable ID sequence.** Neither `shown` nor session
 metadata is serialized on this legacy route; raw visibility cannot distinguish
@@ -6242,9 +6276,11 @@ an event emitted with no connected recipient; replay creates no new history entr
 The pair (`conversation_id`, `history_entry_id`) also identifies the same entry
 across devices and daemon restarts.
 
-This join also applies to the four known runtime facts' info-banner receipts:
-history, live publication and reconnect replay carry the same projected bytes,
-original durable ID and timestamp. Their `banner` wire type contributes to the
+This join also applies to known runtime and queued-send info-banner receipts,
+including `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`:
+receipts published while running carry the same projected bytes, original
+durable ID and timestamp in history, live publication and reconnect replay.
+Startup loss is page-only. Their `banner` wire type contributes to the
 same legacy latest target on every lane, regardless of the raw fact's `shown`.
 Repeated or overlapping delivery accounts for that ID once, duplicates no
 content and cannot lower latest/read marks or grant additional sight. Do not
@@ -6257,6 +6293,15 @@ daemon-confirmed persisted mark. These are separate facts.
 Fetched pages and replay alone establish no presentation. The
 [completed-turn controls](#marking-a-conversation-read) compare client-derived
 latest, presented checkpoint and confirmation across all three lanes.
+
+Each history request projects one bounded raw page with its original IDs,
+timestamps, opaque `cursor`, raw-page limit and `at_start`. Receipt-only,
+mixed valid/invalid, repeated and overlapping pages retain those bounds;
+projection never scans ahead to replace filtered facts. Use `at_start` to
+terminate paging, since an empty projected page need not be the beginning.
+Keep one page per physical pull; page arrival does not itself request another
+catch-up page or grant sight. Startup `send_lost` receipts have no live/replay
+backfill; history supplies their durable identities.
 
 **Without `history_entry_id`, fall back to (`type`, `ts`).** An entry in a page
 and its twin on the live or replay lane carry the same `type` and the same `ts`,
