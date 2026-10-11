@@ -255,3 +255,20 @@ zero admission consumer migrations or rejection states. The existing one-consume
 sizing floor remains applicable. Refresh support hashes and the clean host revision
 in a metadata-only contract commit. The eight-file live-artifact recovery and exact
 Documentation handoff above remain pending with their existing owners.
+
+Rework result: accepted-only failed/incomplete targets preserve their bound session
+and witnessed child even when Start follows enqueue; separate enqueue identity fields
+retain the earlier unknown child. Reply comparisons require producing session and turn
+identity, and unknown delta attribution remains unknown. The validator rejects a
+successor Start or matching child completion before delivery and mismatched persistence
+epoch/session/child boundaries. Wired sampler/census regressions exclude retired or
+unidentified child lifetimes and retain only the replacement's resources after PID reuse.
+The private reader now decodes the observer's actual `process_start` spelling; otherwise
+every real daemon would have been silently omitted before attribution was checked.
+
+These regressions failed on the pre-repair diagnostic support under race detection.
+Scoped ordinary and tagged streamsup race checks, tagged readiness/source-citation checks,
+ordinary vet, tagged realclaude vet and the production daemon build pass. No Android,
+authenticated host rerun, host cause or production admission repair is claimed. The
+original evidence remains immutable, and the concrete dispatcher acquisition/recovery
+and documentation handoffs above are still pending.

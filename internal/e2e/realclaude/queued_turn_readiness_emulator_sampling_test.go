@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -118,13 +119,9 @@ func readinessSampleEmulator(ctx context.Context, input readinessEmulatorInput, 
 			}
 			sample := readinessResources(ctx, o.Process, input.Observations)
 			sample["binary_sha256"] = binaries[key]
-			current := map[int]readinessCPUCounter{}
-			if values, ok := sample["private_cpu_ticks"].(map[int]uint64); ok {
-				for pid, ticks := range values {
-					current[pid] = readinessCPUCounter{ticks, readinessProcIdentity(pid)}
-				}
-			}
+			current, _ := sample["private_cpu_counters"].(map[int]readinessCPUCounter)
 			delete(sample, "private_cpu_ticks")
+			delete(sample, "private_cpu_counters")
 			ticks, known := readinessInterval(previous[key], current)
 			now := time.Now().UTC()
 			sample["interval_cpu_ticks"], sample["interval_cpu_known"] = ticks, known
@@ -136,29 +133,24 @@ func readinessSampleEmulator(ctx context.Context, input readinessEmulatorInput, 
 			last[key] = now
 			// Each witnessed live child receives a separate current lifetime sample.
 			var children []map[string]any
-			childOrdinals := map[string]int{}
-			for _, w := range observations {
-				if w.Owner == o.Owner && w.Epoch == o.Epoch && w.Child != "" {
-					readinessOrdinal(childOrdinals, w.Child)
-				}
-			}
-			for _, w := range observations {
-				if w.Owner == o.Owner && w.Epoch == o.Epoch && w.Boundary == "child_started" && w.OK {
-					if c, ok := current[w.Value]; ok {
-						b, _ := os.ReadFile(filepath.Join("/proc", strconv.Itoa(w.Value), "status"))
-						var rss uint64
-						for _, line := range strings.Split(string(b), "\n") {
-							if strings.HasPrefix(line, "VmRSS:") {
-								v := strings.Fields(line)
-								if len(v) > 1 {
-									rss, _ = strconv.ParseUint(v[1], 10, 64)
-								}
-							}
+			for _, w := range readinessLiveChildren(observations, o.Process, current, now) {
+				c := current[w.Value]
+				b, _ := os.ReadFile(filepath.Join("/proc", strconv.Itoa(w.Value), "status"))
+				var rss uint64
+				for _, line := range strings.Split(string(b), "\n") {
+					if strings.HasPrefix(line, "VmRSS:") {
+						v := strings.Fields(line)
+						if len(v) > 1 {
+							rss, _ = strconv.ParseUint(v[1], 10, 64)
 						}
-						childTicks, childKnown := readinessInterval(previous[key], map[int]readinessCPUCounter{w.Value: c})
-						children = append(children, map[string]any{"private_child": w.Child, "cpu_ticks_lifetime": c.Ticks, "rss_kib": rss, "interval_cpu_ticks": childTicks, "interval_cpu_known": childKnown})
 					}
 				}
+				// RSS is a separate read: discard it if the process lifetime changed.
+				if readinessProcIdentity(w.Value) != w.ChildStart {
+					continue
+				}
+				childTicks, childKnown := readinessInterval(previous[key], map[int]readinessCPUCounter{w.Value: c})
+				children = append(children, map[string]any{"private_child": w.Child, "cpu_ticks_lifetime": c.Ticks, "rss_kib": rss, "interval_cpu_ticks": childTicks, "interval_cpu_known": childKnown})
 			}
 			sample["children"] = children
 			previous[key] = current
@@ -178,6 +170,43 @@ func readinessSampleEmulator(ctx context.Context, input readinessEmulatorInput, 
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// Attribution requires a successful owned spawn, its kernel lifetime and no
+// witnessed completion or replacement. Historical PID membership proves none of these.
+func readinessLiveChildren(observations []readinessPrivateObservation, daemonPID int, current map[int]readinessCPUCounter, at time.Time) []readinessPrivateObservation {
+	daemon, ok := current[daemonPID]
+	if !ok || daemon.Identity == "" {
+		return nil
+	}
+	observations = append([]readinessPrivateObservation(nil), observations...)
+	sort.SliceStable(observations, func(a, b int) bool { return observations[a].At.Before(observations[b].At) })
+	live := map[string]readinessPrivateObservation{}
+	for _, o := range observations {
+		if o.Process != daemonPID || o.ProcessStart != daemon.Identity || o.Owner == "" || o.Epoch == "" || o.Child == "" || o.At.IsZero() || o.At.After(at) {
+			continue
+		}
+		key := o.Owner + "/" + o.Epoch + "/" + o.Subject
+		switch o.Boundary {
+		case "child_started":
+			if o.OK {
+				live[key] = o
+			}
+		case "child_wait_complete":
+			if live[key].Child == o.Child {
+				delete(live, key)
+			}
+		}
+	}
+	var children []readinessPrivateObservation
+	for _, o := range live {
+		c, ok := current[o.Value]
+		if ok && o.Value != daemonPID && o.ChildStart != "" && c.Identity == o.ChildStart {
+			children = append(children, o)
+		}
+	}
+	sort.Slice(children, func(a, b int) bool { return children[a].At.Before(children[b].At) })
+	return children
 }
 
 func readinessSnapshotEmulator(o readinessPrivateObservation, observations []readinessPrivateObservation, out io.Writer, seen map[string]string, at time.Time) error {

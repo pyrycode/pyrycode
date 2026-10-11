@@ -27,7 +27,9 @@ type readinessEmulatorInput struct {
 type readinessPrivateObservation struct {
 	At                                                   time.Time `json:"at"`
 	Boundary, Subject, Child, Phase, Kind, Device, Owner string
-	Epoch, ProcessStart, Outcome                         string
+	Epoch, Outcome                                       string
+	ProcessStart                                         string `json:"process_start"`
+	ChildStart                                           string `json:"child_start"`
 	OwnerHome                                            string `json:"owner_home"`
 	Instance                                             string
 	Value, Process                                       int
@@ -209,7 +211,11 @@ func readinessExportEmulator(input readinessEmulatorInput, dir string) error {
 	for _, target := range provenance.Targets {
 		for boundary, at := range map[string]time.Time{"target_enqueued": target.Enqueued, "durable_target_delivery": target.Delivered, "target_main_turn_opened": target.Opened} {
 			if !at.IsZero() {
-				r.Witnesses = append(r.Witnesses, readinessWitness{At: at, Boundary: boundary, OwnerOrdinal: target.OwnerOrdinal, RestartEpoch: target.RestartEpoch, Ordinal: target.ConversationOrdinal, SessionOrdinal: target.SessionOrdinal, ChildOrdinal: target.ChildOrdinal, OK: true})
+				epoch, session, child := target.RestartEpoch, target.SessionOrdinal, target.ChildOrdinal
+				if boundary == "target_enqueued" {
+					epoch, session, child = target.EnqueueRestartEpoch, target.EnqueueSessionOrdinal, target.EnqueueChildOrdinal
+				}
+				r.Witnesses = append(r.Witnesses, readinessWitness{At: at, Boundary: boundary, OwnerOrdinal: target.OwnerOrdinal, RestartEpoch: epoch, Ordinal: target.ConversationOrdinal, SessionOrdinal: session, ChildOrdinal: child, OK: true})
 			}
 		}
 	}

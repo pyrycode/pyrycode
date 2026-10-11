@@ -76,3 +76,25 @@ func TestReadinessObservationMatching(t *testing.T) {
 		}
 	}
 }
+
+func TestReadinessChildStartIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "observations.jsonl")
+	t.Setenv("PYRY_E2E_READINESS_RECORD", path)
+	readinessChildEnv(nil, "identity-session")
+	ObserveReadiness("child_started", "identity-session", true, os.Getpid())
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var witness struct {
+		Child      string `json:"child"`
+		ChildStart string `json:"child_start"`
+		Start      string `json:"process_start"`
+	}
+	if json.Unmarshal(b, &witness) != nil || witness.Child == "" || witness.ChildStart != readinessKernelStart(os.Getpid()) || witness.Start != readinessProcessStart {
+		t.Fatal("spawn observation lost kernel lifetime identity")
+	}
+	if readinessProcessStart != "" && witness.ChildStart == "" {
+		t.Fatal("known kernel start exported as unknown")
+	}
+}

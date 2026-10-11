@@ -55,8 +55,10 @@ var readinessSubjects sync.Map
 var readinessFileMu sync.Mutex
 
 // Kernel start ticks let the resource sidecar exclude a reused PID.
-var readinessProcessStart = func() string {
-	b, e := os.ReadFile("/proc/self/stat")
+var readinessProcessStart = readinessKernelStart(os.Getpid())
+
+func readinessKernelStart(pid int) string {
+	b, e := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if e != nil {
 		return ""
 	}
@@ -69,7 +71,7 @@ var readinessProcessStart = func() string {
 		return ""
 	}
 	return f[19]
-}()
+}
 
 var readinessEpoch = strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 
@@ -82,19 +84,23 @@ func ObserveReadiness(boundary, subject string, ok bool, value ...int) {
 		return
 	}
 	r := struct {
-		At       time.Time `json:"at"`
-		Boundary string    `json:"boundary"`
-		Subject  string    `json:"subject"`
-		OK       bool      `json:"ok"`
-		Value    int       `json:"value,omitempty"`
-		Process  int       `json:"process"`
-		Child    string    `json:"child,omitempty"`
+		At         time.Time `json:"at"`
+		Boundary   string    `json:"boundary"`
+		Subject    string    `json:"subject"`
+		OK         bool      `json:"ok"`
+		Value      int       `json:"value,omitempty"`
+		Process    int       `json:"process"`
+		Child      string    `json:"child,omitempty"`
+		ChildStart string    `json:"child_start,omitempty"`
 	}{At: time.Now().UTC(), Boundary: boundary, Subject: subject, OK: ok, Process: os.Getpid()}
 	if child, ok := readinessChildren.Load(subject); ok {
 		r.Child = child.(string)
 	}
 	if len(value) > 0 {
 		r.Value = value[0]
+		if boundary == "child_started" && ok {
+			r.ChildStart = readinessKernelStart(r.Value)
+		}
 	}
 	readinessAppend(r)
 }

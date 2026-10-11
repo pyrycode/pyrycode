@@ -66,6 +66,7 @@ type readinessEmulatorProvenance struct {
 
 type readinessEmulatorTarget struct {
 	OwnerOrdinal, RestartEpoch, ConversationOrdinal, SessionOrdinal, ChildOrdinal int
+	EnqueueRestartEpoch, EnqueueSessionOrdinal, EnqueueChildOrdinal               int
 	Enqueued, Delivered, Opened, Confirmed                                        time.Time
 	PromptMatches, ReplyMatches, ExactlyOnce, CurrentChild                        *bool
 	Within90Seconds                                                               *bool
@@ -314,7 +315,7 @@ func readinessValidateEmulator(dir string, m readinessRuntimeManifest) error {
 	for _, t := range p.Targets {
 		sampled := false
 		for _, sample := range resources {
-			if sample.OwnerOrdinal == t.OwnerOrdinal && sample.RestartEpoch == t.RestartEpoch && sample.At.Sub(t.Enqueued) >= -5*time.Second && sample.At.Sub(t.Enqueued) <= 5*time.Second {
+			if sample.OwnerOrdinal == t.OwnerOrdinal && sample.RestartEpoch == t.EnqueueRestartEpoch && sample.At.Sub(t.Enqueued) >= -5*time.Second && sample.At.Sub(t.Enqueued) <= 5*time.Second {
 				sampled = true
 			}
 		}
@@ -341,8 +342,12 @@ func readinessValidateEmulator(dir string, m readinessRuntimeManifest) error {
 				continue
 			}
 			found := false
+			epoch, session, child := t.RestartEpoch, t.SessionOrdinal, t.ChildOrdinal
+			if boundary == "target_enqueued" {
+				epoch, session, child = t.EnqueueRestartEpoch, t.EnqueueSessionOrdinal, t.EnqueueChildOrdinal
+			}
 			for _, w := range boundaries {
-				if w.OwnerOrdinal == t.OwnerOrdinal && w.Ordinal == t.ConversationOrdinal && w.Boundary == boundary && w.At.Equal(at) && w.OK {
+				if w.OwnerOrdinal == t.OwnerOrdinal && w.RestartEpoch == epoch && w.SessionOrdinal == session && w.ChildOrdinal == child && w.Ordinal == t.ConversationOrdinal && w.Boundary == boundary && w.At.Equal(at) && w.OK {
 					found = true
 				}
 			}
@@ -363,9 +368,23 @@ func readinessValidateEmulator(dir string, m readinessRuntimeManifest) error {
 			if !witnessed {
 				return fmt.Errorf("target confirmation belongs to another child")
 			}
+			var started time.Time
+			for _, w := range boundaries {
+				if w.OwnerOrdinal == t.OwnerOrdinal && w.RestartEpoch == t.RestartEpoch && w.SessionOrdinal == t.SessionOrdinal && w.ChildOrdinal == t.ChildOrdinal && w.Boundary == "child_started" && w.OK && !w.At.After(t.Confirmed) && (started.IsZero() || w.At.After(started)) {
+					started = w.At
+				}
+			}
+			for _, w := range boundaries {
+				if w.OwnerOrdinal != t.OwnerOrdinal || w.RestartEpoch != t.RestartEpoch || w.SessionOrdinal != t.SessionOrdinal || w.At.After(t.Delivered) || w.At.Before(started) {
+					continue
+				}
+				if w.Boundary == "child_started" && w.OK && w.ChildOrdinal != t.ChildOrdinal || w.Boundary == "child_wait_complete" && w.ChildOrdinal == t.ChildOrdinal {
+					return fmt.Errorf("confirmed child retired before delivery")
+				}
+			}
 			chain := map[string]time.Time{}
 			for _, w := range boundaries {
-				if w.OwnerOrdinal == t.OwnerOrdinal && w.RestartEpoch == t.RestartEpoch && w.SessionOrdinal == t.SessionOrdinal && w.ChildOrdinal == t.ChildOrdinal && w.OK && !w.At.After(t.Delivered) {
+				if w.OwnerOrdinal == t.OwnerOrdinal && w.RestartEpoch == t.RestartEpoch && w.SessionOrdinal == t.SessionOrdinal && w.ChildOrdinal == t.ChildOrdinal && w.OK && !w.At.After(t.Delivered) && !w.At.Before(started) {
 					chain[w.Boundary] = w.At
 				}
 			}
@@ -373,6 +392,9 @@ func readinessValidateEmulator(dir string, m readinessRuntimeManifest) error {
 				if chain[boundary].IsZero() {
 					return fmt.Errorf("current-child admission observation missing")
 				}
+			}
+			if !chain["gate_released"].Equal(t.Confirmed) {
+				return fmt.Errorf("target confirmation chain mismatch")
 			}
 			// Stdin completion and stdout forwarding use independent goroutines. An
 			// acknowledgment can be observed before the permission writer returns.

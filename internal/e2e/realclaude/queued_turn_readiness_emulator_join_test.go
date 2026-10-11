@@ -178,7 +178,27 @@ func (j *readinessEmulatorJoins) targets(states []readinessPrivateState, prompt 
 			return nil, fmt.Errorf("target acceptance identity invalid")
 		}
 		t := readinessEmulatorTarget{OwnerOrdinal: j.owners[s.Owner], RestartEpoch: j.epochs[s.Owner+"/"+s.Epoch], ConversationOrdinal: j.conversations[s.Owner+"/"+s.Conversation], Enqueued: accepted.AcceptedAt}
-		var session, child, reply string
+		session := readinessEntrySession(s.Entry)
+		if session == "" {
+			session = j.sessionAt(s.Owner, s.Epoch, s.Conversation, t.Enqueued)
+		}
+		t.SessionOrdinal = j.sessions[s.Owner+"/"+session]
+		child, confirmed := j.childAt(s.Owner, s.Epoch, session, t.Enqueued)
+		t.ChildOrdinal = j.children[s.Owner+"/"+s.Epoch+"/"+child]
+		t.EnqueueRestartEpoch, t.EnqueueSessionOrdinal, t.EnqueueChildOrdinal = t.RestartEpoch, t.SessionOrdinal, t.ChildOrdinal
+		t.Confirmed = confirmed
+		// Pending delivery can still retain a later witnessed spawn for this session.
+		observedThrough := t.Enqueued
+		for _, o := range j.observations {
+			if o.Owner == s.Owner && o.Epoch == s.Epoch && o.Subject == session && o.At.After(observedThrough) {
+				observedThrough = o.At
+			}
+		}
+		child, t.Confirmed = j.childAt(s.Owner, s.Epoch, session, observedThrough)
+		t.ChildOrdinal = j.children[s.Owner+"/"+s.Epoch+"/"+child]
+		var reply, turn, turnEpoch string
+		attributable := true
+		replyKnown := true
 		terminal := false
 		var messageID uint64
 		messages, deliveries, openings := 0, 0, 0
@@ -196,6 +216,8 @@ func (j *readinessEmulatorJoins) targets(states []readinessPrivateState, prompt 
 			}
 			var payload struct {
 				MessageID       string `json:"message_id"`
+				TurnID          string `json:"turn_id"`
+				ParentID        string `json:"parent_tool_call_id"`
 				Role            string `json:"role"`
 				Text            string `json:"text"`
 				AcceptedEntryID uint64 `json:"accepted_entry_id"`
@@ -210,54 +232,56 @@ func (j *readinessEmulatorJoins) targets(states []readinessPrivateState, prompt 
 					messages++
 					messageID = h.ID
 					t.PromptMatches = readinessBool(payload.Text == prompt)
-					if h.Session != nil {
-						session = h.Session.SessionID
-					}
+					session, turnEpoch = readinessEntrySession(h), e.Epoch
+				} else if payload.Role == "user" && messageID > 0 && readinessEntrySession(h) == session && e.Epoch == turnEpoch {
+					attributable = false
 				}
 			case "send_delivered":
 				if payload.AcceptedEntryID == s.Entry.ID && messageID > 0 && payload.DeliveryEntryID == messageID {
+					if e.Epoch != turnEpoch || readinessEntrySession(h) != session {
+						return nil, fmt.Errorf("target delivery provenance contradicts message")
+					}
 					deliveries++
 					t.Delivered = h.TS
 					t.RestartEpoch = j.epochs[e.Owner+"/"+e.Epoch]
 				}
 			case "main_turn_opened":
-				if messageID > 0 {
-					openings++
-					if openings == 1 {
-						t.Opened = h.TS
+				if messageID > 0 && attributable && session != "" && readinessEntrySession(h) == session && e.Epoch == turnEpoch && payload.TurnID != "" {
+					if turn == "" {
+						turn, t.Opened = payload.TurnID, h.TS
+					}
+					if payload.TurnID == turn {
+						openings++
 					}
 				}
 			case "turn_end":
-				if openings == 1 {
+				if turn != "" && payload.TurnID == turn && session != "" && readinessEntrySession(h) == session && e.Epoch == turnEpoch {
 					terminal = true
 				}
 			case "assistant_delta":
-				if openings == 1 {
+				producingSession := readinessEntrySession(h)
+				if !terminal && turn != "" && payload.ParentID == "" && (payload.TurnID == turn && producingSession == "" || payload.TurnID == "" && (producingSession == session || producingSession == "")) {
+					replyKnown = false
+				}
+				if !terminal && turn != "" && payload.TurnID == turn && payload.ParentID == "" && session != "" && readinessEntrySession(h) == session && e.Epoch == turnEpoch {
 					reply += payload.Text
 				}
 			}
 		}
 		if !t.Opened.IsZero() {
-			if terminal {
+			if terminal && replyKnown {
 				t.ReplyMatches = readinessBool(strings.EqualFold(strings.TrimSpace(reply), "ping"))
 			}
 			t.ExactlyOnce = readinessBool(messages == 1 && deliveries == 1 && openings == 1)
 		}
 		t.SessionOrdinal = j.sessions[s.Owner+"/"+session]
-		for _, o := range j.observations {
-			if o.Owner == s.Owner && j.epochs[o.Owner+"/"+o.Epoch] == t.RestartEpoch && o.Subject == session && !t.Delivered.IsZero() && !o.At.After(t.Delivered) {
-				if o.Boundary == "child_started" && o.OK {
-					child = o.Child
-					t.Confirmed = time.Time{}
-				}
-				if o.Boundary == "gate_released" && o.OK && o.Child == child && child != "" {
-					t.Confirmed = o.At
-				}
+		if !t.Delivered.IsZero() {
+			epoch := readinessEpochKey(j, s.Owner, t.RestartEpoch)
+			child, t.Confirmed = j.childAt(s.Owner, epoch, session, t.Delivered)
+			t.ChildOrdinal = j.children[s.Owner+"/"+epoch+"/"+child]
+			if child != "" {
+				t.CurrentChild = readinessBool(!t.Confirmed.IsZero())
 			}
-		}
-		t.ChildOrdinal = j.children[s.Owner+"/"+readinessEpochKey(j, s.Owner, t.RestartEpoch)+"/"+child]
-		if !t.Delivered.IsZero() && child != "" {
-			t.CurrentChild = readinessBool(!t.Confirmed.IsZero())
 		}
 		if !t.Delivered.IsZero() && !t.Opened.IsZero() {
 			t.Within90Seconds = readinessBool(t.Delivered.Sub(t.Enqueued) <= 90*time.Second && t.Opened.Sub(t.Enqueued) <= 90*time.Second)
@@ -268,6 +292,41 @@ func (j *readinessEmulatorJoins) targets(states []readinessPrivateState, prompt 
 		return nil, fmt.Errorf("persisted named target missing or ambiguous")
 	}
 	return targets, nil
+}
+
+func readinessEntrySession(e *history.Entry) string {
+	if e != nil && e.Session != nil {
+		return e.Session.SessionID
+	}
+	return ""
+}
+
+// The latest successful spawn owns the session until its witnessed completion.
+func (j *readinessEmulatorJoins) childAt(owner, epoch, session string, at time.Time) (string, time.Time) {
+	var child string
+	var confirmed time.Time
+	observations := append([]readinessPrivateObservation(nil), j.observations...)
+	sort.SliceStable(observations, func(a, b int) bool { return observations[a].At.Before(observations[b].At) })
+	for _, o := range observations {
+		if session == "" || o.Owner != owner || o.Epoch != epoch || o.Subject != session || o.At.After(at) {
+			continue
+		}
+		switch o.Boundary {
+		case "child_started":
+			if o.OK {
+				child, confirmed = o.Child, time.Time{}
+			}
+		case "child_wait_complete":
+			if o.Child == child {
+				child, confirmed = "", time.Time{}
+			}
+		case "gate_released":
+			if o.OK && o.Child == child && child != "" {
+				confirmed = o.At
+			}
+		}
+	}
+	return child, confirmed
 }
 
 func readinessEpochKey(j *readinessEmulatorJoins, owner string, epoch int) string {

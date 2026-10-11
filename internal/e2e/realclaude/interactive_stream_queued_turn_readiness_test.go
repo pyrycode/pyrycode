@@ -171,23 +171,16 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		previous := map[int]uint64{}
+		previous := map[int]readinessCPUCounter{}
 		last := time.Now()
 		for {
 			now := time.Now()
 			sample := readinessResources(ctx, int(r.daemonPID.Load()), private)
-			var ticks uint64
-			known := false
-			if cpu, ok := sample["private_cpu_ticks"].(map[int]uint64); ok {
-				for pid, value := range cpu {
-					if old, ok := previous[pid]; ok && value >= old {
-						ticks += value - old
-						known = true
-					}
-				}
-				previous = cpu
-			}
+			current, _ := sample["private_cpu_counters"].(map[int]readinessCPUCounter)
+			ticks, known := readinessInterval(previous, current)
+			previous = current
 			delete(sample, "private_cpu_ticks")
+			delete(sample, "private_cpu_counters")
 			sample["interval_cpu_known"] = known
 			sample["interval_cpu_ticks"] = ticks
 			sample["interval_seconds"] = now.Sub(last).Seconds()
@@ -555,6 +548,7 @@ func readinessResources(ctx context.Context, daemonPID int, path string) map[str
 		}
 	}
 	cpuTicks := map[int]uint64{}
+	counters := map[int]readinessCPUCounter{}
 	var rss, processes, children int
 	var cpu float64
 	for pid := range selected {
@@ -563,11 +557,12 @@ func readinessResources(ctx context.Context, daemonPID int, path string) map[str
 			if stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
 				if _, tail, ok := strings.Cut(string(stat), ") "); ok {
 					f := strings.Fields(tail)
-					if len(f) > 12 {
+					if len(f) > 19 {
 						u, ue := strconv.ParseUint(f[11], 10, 64)
 						v, ve := strconv.ParseUint(f[12], 10, 64)
 						if ue == nil && ve == nil {
 							cpuTicks[pid] = u + v
+							counters[pid] = readinessCPUCounter{Ticks: u + v, Identity: f[19]}
 						}
 					}
 				}
@@ -579,18 +574,10 @@ func readinessResources(ctx context.Context, daemonPID int, path string) map[str
 		}
 	}
 	b, _ := os.ReadFile(path)
-	seen := map[int]bool{}
-	for _, line := range bytes.Split(b, []byte{'\n'}) {
-		var o struct {
-			Boundary string `json:"boundary"`
-			Value    int    `json:"value"`
-		}
-		if json.Unmarshal(line, &o) == nil && o.Boundary == "child_started" && selected[o.Value] && rows[o.Value] != nil {
-			seen[o.Value] = true
-		}
-	}
-	children = len(seen)
+	observations, _ := readinessPrivateRows[readinessPrivateObservation](b)
+	children = len(readinessLiveChildren(observations, daemonPID, counters, time.Now().UTC()))
 	r["private_cpu_ticks"] = cpuTicks
+	r["private_cpu_counters"] = counters
 	r["known"], r["processes"], r["live_claude_children"], r["descendant_rss_kib"], r["ps_lifetime_cpu_percent"] = true, processes, children, rss, cpu
 	return r
 }

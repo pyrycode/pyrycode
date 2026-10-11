@@ -194,7 +194,7 @@ func TestReadinessEmulatorTargetBoundaries(t *testing.T) {
 				}
 				return readinessPrivateState{Owner: "private-daemon", Epoch: "epoch", Conversation: "conv", Entry: &history.Entry{ID: id, Type: kind, TS: at.Add(offset), Payload: b, Session: &history.SessionProvenance{Kind: "claude", SessionID: "session"}}}
 			}
-			states := []readinessPrivateState{entry(1, "send_accepted", map[string]any{"conversation_id": "conv", "message_id": "msg", "text": prompt, "accepted_at": at}, 0), entry(2, "message", map[string]any{"conversation_id": "conv", "message_id": "msg", "role": "user", "text": prompt}, time.Second), entry(3, "send_delivered", map[string]any{"conversation_id": "conv", "accepted_entry_id": 1, "delivery_entry_id": 2}, 2*time.Second), entry(4, "main_turn_opened", map[string]any{"conversation_id": "conv"}, 3*time.Second), entry(5, "assistant_delta", map[string]any{"conversation_id": "conv", "text": "PiNg"}, 4*time.Second)}
+			states := []readinessPrivateState{entry(1, "send_accepted", map[string]any{"conversation_id": "conv", "message_id": "msg", "text": prompt, "accepted_at": at}, 0), entry(2, "message", map[string]any{"conversation_id": "conv", "message_id": "msg", "role": "user", "text": prompt}, time.Second), entry(3, "send_delivered", map[string]any{"conversation_id": "conv", "accepted_entry_id": 1, "delivery_entry_id": 2}, 2*time.Second), entry(4, "main_turn_opened", map[string]any{"conversation_id": "conv", "turn_id": "target"}, 3*time.Second), entry(5, "assistant_delta", map[string]any{"conversation_id": "conv", "text": "PiNg"}, 4*time.Second)}
 			observations := []readinessPrivateObservation{{At: at.Add(-time.Second), Owner: "private-daemon", Epoch: "epoch", Process: 7, Subject: "session", Child: "first", Boundary: "child_started", OK: true}, {At: at.Add(time.Second), Owner: "private-daemon", Epoch: "epoch", Process: 7, Subject: "session", Child: "first", Boundary: "gate_released", OK: true}}
 			switch scenario {
 			case "replacement":
@@ -238,7 +238,8 @@ func TestReadinessEmulatorTargetBoundaries(t *testing.T) {
 	}
 }
 
-func TestReadinessEmulatorSemanticValidation(t *testing.T) {
+func testReadinessEmulatorCapture(t *testing.T) (readinessEmulatorContract, *readinessCapture) {
+	t.Helper()
 	c, err := readinessReadEmulatorContract()
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +248,7 @@ func TestReadinessEmulatorSemanticValidation(t *testing.T) {
 	one, zero := 1, 0
 	idle, sweep, retention := 0.0, 3600.0, 30.0
 	suite := readinessXMLSuite{Cases: []readinessXMLCase{{Name: c.Selection[0], Class: "de.pyryco.mobile.e2e.InteractiveStreamE2ETest", Time: "3"}}}
-	p := readinessEmulatorProvenance{RunID: c.RunID, Source: c.Source, MobileSource: c.MobileSource, MobileMerge: c.MobileMerge, MobileTree: c.MobileTree, TestHash: c.TestHash, WrapperHash: c.WrapperHash, AdmissionHash: c.AdmissionHash, Clock: "runner-status-host-utc", ClockComparison: "device-clock-unavailable", ClockComparedAt: at.Add(-time.Minute), CaptureConclusion: "usable", FixtureConclusion: "unknown", HostConclusion: "unknown", TargetAcquisition: "persisted target", Methods: []readinessMethodInterval{{Name: c.Selection[0], Started: at, Ended: at.Add(3 * time.Second), Outcome: "pass", Clock: "runner-status-host-utc"}}, Settings: []readinessEffectiveSettings{{OwnerOrdinal: 1, RestartEpoch: 0, SessionOrdinal: 1, Model: "sonnet", PermissionMode: "default", Provenance: "runtime-and-persistence-readback", OperatorBypass: readinessBool(false), MCP: readinessBool(true), SkipDangerous: readinessBool(true), IdleSeconds: &idle, SweepSeconds: &sweep, RetentionDays: &retention, ActiveCap: &zero, WorkspaceRole: "test-owned-substitute", MCPRole: "test-owned-empty", HookRole: "test-owned-empty"}}, Targets: []readinessEmulatorTarget{{OwnerOrdinal: 1, ConversationOrdinal: 1, SessionOrdinal: 1, ChildOrdinal: 1, Enqueued: at, Delivered: at.Add(time.Second), Opened: at.Add(2 * time.Second), Confirmed: at, CurrentChild: readinessBool(true), Within90Seconds: readinessBool(true)}}}
+	p := readinessEmulatorProvenance{RunID: c.RunID, Source: c.Source, MobileSource: c.MobileSource, MobileMerge: c.MobileMerge, MobileTree: c.MobileTree, TestHash: c.TestHash, WrapperHash: c.WrapperHash, AdmissionHash: c.AdmissionHash, Clock: "runner-status-host-utc", ClockComparison: "device-clock-unavailable", ClockComparedAt: at.Add(-time.Minute), CaptureConclusion: "usable", FixtureConclusion: "unknown", HostConclusion: "unknown", TargetAcquisition: "persisted target", Methods: []readinessMethodInterval{{Name: c.Selection[0], Started: at, Ended: at.Add(3 * time.Second), Outcome: "pass", Clock: "runner-status-host-utc"}}, Settings: []readinessEffectiveSettings{{OwnerOrdinal: 1, RestartEpoch: 0, SessionOrdinal: 1, Model: "sonnet", PermissionMode: "default", Provenance: "runtime-and-persistence-readback", OperatorBypass: readinessBool(false), MCP: readinessBool(true), SkipDangerous: readinessBool(true), IdleSeconds: &idle, SweepSeconds: &sweep, RetentionDays: &retention, ActiveCap: &zero, WorkspaceRole: "test-owned-substitute", MCPRole: "test-owned-empty", HookRole: "test-owned-empty"}}, Targets: []readinessEmulatorTarget{{OwnerOrdinal: 1, ConversationOrdinal: 1, SessionOrdinal: 1, ChildOrdinal: 1, EnqueueSessionOrdinal: 1, EnqueueChildOrdinal: 1, Enqueued: at, Delivered: at.Add(time.Second), Opened: at.Add(2 * time.Second), Confirmed: at, CurrentChild: readinessBool(true), Within90Seconds: readinessBool(true)}}}
 	results, counts, err := readinessEmulatorResults(&suite, p.Methods, c.Selection)
 	if err != nil {
 		t.Fatal(err)
@@ -263,11 +264,17 @@ func TestReadinessEmulatorSemanticValidation(t *testing.T) {
 	for boundary, when := range map[string]time.Time{"target_enqueued": at, "durable_target_delivery": at.Add(time.Second), "target_main_turn_opened": at.Add(2 * time.Second)} {
 		r.Witnesses = append(r.Witnesses, readinessWitness{At: when, Boundary: boundary, OwnerOrdinal: 1, Ordinal: 1, SessionOrdinal: 1, ChildOrdinal: 1, OK: true})
 	}
+	return c, r
+}
+
+func TestReadinessEmulatorSemanticValidation(t *testing.T) {
+	c, r := testReadinessEmulatorCapture(t)
+	at := r.Witnesses[0].At
 	dir := filepath.Join(t.TempDir(), "run")
 	if err := readinessExportRuntime(dir, c.RunID, r, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"stale confirmation", "wrong reply owner", "wrong count", "missing selected result", "late comparison", "resource owner"} {
+	for _, scenario := range []string{"stale confirmation", "wrong reply owner", "wrong count", "missing selected result", "late comparison", "resource owner", "replacement child before delivery", "completed child before delivery", "persistence epoch", "persistence session", "persistence child"} {
 		t.Run(scenario, func(t *testing.T) {
 			path := filepath.Join(dir, "setup.json")
 			b, err := os.ReadFile(path)
@@ -295,6 +302,38 @@ func TestReadinessEmulatorSemanticValidation(t *testing.T) {
 				b = []byte(`[]`)
 			case "late comparison":
 				b = bytes.ReplaceAll(b, []byte(at.Add(time.Second).Format(time.RFC3339Nano)), []byte(at.Add(91*time.Second).Format(time.RFC3339Nano)))
+			case "replacement child before delivery", "completed child before delivery", "persistence epoch", "persistence session", "persistence child":
+				path = filepath.Join(dir, "boundary-events.jsonl")
+				var witnesses []readinessWitness
+				if err := readinessStream(dir, "boundary-events.jsonl", &witnesses); err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(scenario, "persistence") {
+					for i := range witnesses {
+						if witnesses[i].Boundary != "durable_target_delivery" {
+							continue
+						}
+						switch scenario {
+						case "persistence epoch":
+							witnesses[i].RestartEpoch++
+						case "persistence session":
+							witnesses[i].SessionOrdinal++
+						case "persistence child":
+							witnesses[i].ChildOrdinal++
+						}
+					}
+				} else {
+					w := readinessWitness{At: at.Add(500 * time.Millisecond), Boundary: "child_started", OwnerOrdinal: 1, Ordinal: 1, SessionOrdinal: 1, ChildOrdinal: 2, OK: true}
+					if scenario == "completed child before delivery" {
+						w.Boundary, w.ChildOrdinal = "child_wait_complete", 1
+					}
+					witnesses = append(witnesses, w)
+				}
+				b = nil
+				for _, witness := range witnesses {
+					row, _ := json.Marshal(witness)
+					b = append(b, append(row, '\n')...)
+				}
 			case "resource owner":
 				path = filepath.Join(dir, "resource-samples.jsonl")
 				b, _ = os.ReadFile(path)
