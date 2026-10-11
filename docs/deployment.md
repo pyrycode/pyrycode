@@ -384,23 +384,32 @@ installer for OpenAI mode. It is independently callable inside Pyrycode; this
 slice has no daemon or CLI setup wiring. It neither starts managed memory nor
 migrates or stops the existing pyrybox memsearch watcher. The daemon consumer,
 provider/model initialization and single production database owner belong to
-[#3148](https://github.com/pyrycode/pyrycode/issues/3148). macOS support awaits
-[#3153](https://github.com/pyrycode/pyrycode/issues/3153), and local embeddings
+[#3148](https://github.com/pyrycode/pyrycode/issues/3148). Local embeddings
 await [#3154](https://github.com/pyrycode/pyrycode/issues/3154).
 
-### Supported target and pinned stack
+### Supported targets and pinned stack
 
-The sole supported target is **Linux amd64 (x86_64), Ubuntu 24.04, glibc 2.39
-or newer, OpenAI mode**. Setup checks the distribution and release as well as
-architecture and libc; other Linux distributions/releases, architectures,
-operating systems and modes return a recoverable unsupported error before
-setup. The committed smoke ran on Ubuntu 24.04.5 amd64 with glibc 2.39.
+Both supported targets use **OpenAI mode**:
+
+| Platform | Architecture | Minimum requirements | Executed smoke host |
+| --- | --- | --- | --- |
+| macOS | Apple Silicon arm64 (aarch64) | macOS 26.6.2 or newer | macOS 26.6.2, build 25G83, arm64 |
+| Linux | amd64 (x86_64) | Ubuntu 24.04, glibc 2.39 or newer | Ubuntu 24.04.5 amd64, glibc 2.39 |
+
+The macOS minimum is the oldest version with executed smoke evidence; wheel
+availability alone does not establish support for an older OS or Intel Mac.
+Setup checks architecture and the macOS version, or the Linux distribution,
+release and libc. Older or malformed macOS versions, other Linux
+distributions/releases, unsupported architectures/operating systems and other
+modes return a recoverable unsupported error before setup.
 
 The managed interpreter is standalone **CPython 3.12.11, build 20250918**,
-with bundled bootstrap **pip 24.3.1**. The shipped
-[Linux artifact lock](../internal/memoryruntime/linux-amd64.lock.json) fixes the
-Python archive and every wheel's URL, filename and SHA-256 digest. Its complete
-32-wheel dependency closure is:
+with bundled bootstrap **pip 24.3.1** on both targets. The shipped
+[macOS artifact lock](../internal/memoryruntime/macos-arm64.lock.json) and
+[Linux artifact lock](../internal/memoryruntime/linux-amd64.lock.json) fix each
+target's Python archive and every wheel's URL, filename and SHA-256 digest.
+They share the following complete 32-wheel dependency closure, including
+**memsearch 0.4.21**, **pymilvus 2.5.16** and **Milvus Lite 2.5.1**:
 
 | Distribution | Exact version |
 | --- | --- |
@@ -491,7 +500,15 @@ to assess access for the selected agent and workspace independently.
 
 ### Opt-in installer smoke
 
-From the repository root on the supported target, run:
+Run the smoke natively from the repository root on the supported target.
+On macOS arm64:
+
+```bash
+PYRY_MEMORY_SMOKE_EVIDENCE="$PWD/internal/memoryruntime/smoke-macos-arm64.json" \
+  go test -tags memory_runtime_smoke -run '^TestSmoke$' -count=1 -v ./internal/memoryruntime
+```
+
+On Ubuntu 24.04 amd64:
 
 ```bash
 PYRY_MEMORY_SMOKE_EVIDENCE="$PWD/internal/memoryruntime/smoke-linux-amd64.json" \
@@ -501,12 +518,14 @@ PYRY_MEMORY_SMOKE_EVIDENCE="$PWD/internal/memoryruntime/smoke-linux-amd64.json" 
 This network/download test is outside `make check`. It installs into a temporary
 home, verifies imports and exact versions, CLI version, dependency compatibility
 and repeated setup, then opens and closes Milvus Lite in a separate temporary
-database. It needs no credentials or model downloads. The
-[committed executed evidence](../internal/memoryruntime/smoke-linux-amd64.json)
-records the invocation, OS/distribution, architecture, libc, every component
-version and seven named checks, all passed. Skipped or unexecuted checks do not
-establish support. When recapturing evidence for a change, review and commit the
-generated file; a passing run alone does not preserve it.
+database. It needs no credentials or model downloads. The committed
+[macOS evidence](../internal/memoryruntime/smoke-macos-arm64.json) and
+[Linux evidence](../internal/memoryruntime/smoke-linux-amd64.json) record the
+invocation, architecture, every component version and named results, plus
+macOS version/build or Linux distribution/libc. Each records **seven checks
+executed and seven passed**. Skipped or unexecuted checks do not establish
+support. When recapturing evidence for a change, review and commit the generated
+file; a passing run alone does not preserve it.
 
 For the integrity, publication and probe design, see the
 [package overview](knowledge/features/memoryruntime-package.md) and
