@@ -78,6 +78,16 @@ func liveDrain(t *testing.T, mgr *V2SessionManager, rec *v2Recorder, recv *noise
 		if mgr.sessions[v2TestConnID].thread && (env.EventID != nil || env.HistoryEntryID != nil) {
 			t.Fatal("live state has replay/history identity")
 		}
+		if mgr.sessions[v2TestConnID].thread {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			var conversation string
+			if json.Unmarshal(fields["conversation_id"], &conversation) != nil || conversation == "" {
+				t.Fatal("live state lacks conversation routing identity")
+			}
+		}
 		out = append(out, env)
 	}
 	*seen = len(rec.snapshot())
@@ -365,6 +375,7 @@ func TestLiveStateGeneratedClearBound(t *testing.T) {
 	t.Parallel()
 	bad := liveReading("turn_state", gateClaudeConv, "", `"s"`, 1, 1)
 	bad.Envelope.Payload = json.RawMessage(`{}`)
+	bad.Envelope.ConversationID, _ = json.Marshal(bad.ConversationID)
 	raw, err := json.Marshal(bad.Envelope)
 	if err != nil {
 		t.Fatal(err)

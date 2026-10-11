@@ -62,3 +62,6 @@ Pending documentation stage:
 - Threat model: paired callers cannot reroute one retained reading by supplying another identity; hostile relay cannot inspect/alter authenticated metadata. Production negotiation remains OUT OF SCOPE under #3164; history/catch-up under #2963. Existing prompt-injection and server-identity protections are unchanged.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-11
+
+## Revisions
+- 2026-10-11: focused identity tests live in `internal/relay/v2session_live_identity_test.go` rather than growing the general live-state file. `TestLiveStateConversationIdentityDetached` proves routing-buffer ownership; `TestLiveStateRoutingBounds` and `TestLiveStateReadingRoutingBound` separately exercise clear/read admission overhead; `TestLiveStateProjectedRoutingBound` proves the final model projection fits exactly at the cap and rejects cap-plus-one without encryption or revision advancement. Existing `TestLiveStateGeneratedClearBound` now includes routing identity so its fresh fixture still fits and its generated clear alone exceeds the cap. The written-work count remains approximately 445 lines including this plan, within all sizing limits.

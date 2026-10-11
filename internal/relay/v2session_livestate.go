@@ -80,11 +80,28 @@ func validateLiveState(r LiveState) error {
 	if !liveStateFamily(e.Type) || r.ConversationID == "" || r.SessionGeneration == 0 || r.Revision == 0 || !validLiveTag(e.SessionID) || !json.Valid(e.Payload) {
 		return errInvalidLiveState
 	}
+	var payload struct {
+		ConversationID json.RawMessage `json:"conversation_id"`
+	}
+	_ = json.Unmarshal(e.Payload, &payload) // Non-object payloads supply no identity.
+	for _, identity := range []json.RawMessage{e.ConversationID, payload.ConversationID} {
+		if len(identity) == 0 {
+			continue
+		}
+		var id string
+		if json.Unmarshal(identity, &id) != nil || id == "" || id != r.ConversationID {
+			return errInvalidLiveState
+		}
+	}
+	if len(e.ConversationID) == 0 {
+		e.ConversationID, _ = json.Marshal(r.ConversationID)
+	}
 	if e.SessionStateCleared {
 		var p map[string]json.RawMessage
 		if json.Unmarshal(e.Payload, &p) != nil || p == nil || len(p) != 0 {
 			return errInvalidLiveState
 		}
+		e = liveStateClear(e)
 	}
 	// Both the supplied reading and its generated clear must fit before admission.
 	e.EventID = nil
@@ -114,6 +131,7 @@ func (m *V2SessionManager) PushLiveState(ctx context.Context, connID string, r L
 	}
 	r.Envelope.Payload = bytes.Clone(r.Envelope.Payload)
 	r.Envelope.SessionID = bytes.Clone(r.Envelope.SessionID)
+	r.Envelope.ConversationID = bytes.Clone(r.Envelope.ConversationID)
 	if r.Envelope.InReplyTo != nil {
 		id := *r.Envelope.InReplyTo
 		r.Envelope.InReplyTo = &id
@@ -138,6 +156,7 @@ func (m *V2SessionManager) liveWithheld(s *V2Session, conversation string) bool 
 // reading for another Run pass, preserving transport hold and single-writer crypto.
 func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r LiveState) error {
 	if !s.thread {
+		r.Envelope.ConversationID = nil
 		return m.forwardEnvelope(ctx, s.connID, r.Envelope)
 	}
 	if !r.Envelope.SessionStateCleared && (r.Envelope.Type == protocol.TypeModalShown || r.Envelope.Type == protocol.TypeQuestionShown) && r.Answerable != nil && !*r.Answerable {
@@ -174,6 +193,9 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 		return nil
 	}
 	e := r.Envelope
+	if len(e.ConversationID) == 0 {
+		e.ConversationID, _ = json.Marshal(r.ConversationID)
+	}
 	e.EventID = nil
 	e.HistoryEntryID = nil
 	needsClear := !e.SessionStateCleared && !w.cleared[key.family]
@@ -181,7 +203,7 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 		e = liveStateClear(e)
 	}
 	if e.SessionStateCleared {
-		e.Payload = json.RawMessage(`{}`)
+		e = liveStateClear(e)
 	}
 	if err := m.forwardEnvelopeSource(ctx, s.connID, e, &r); err != nil {
 		return err
