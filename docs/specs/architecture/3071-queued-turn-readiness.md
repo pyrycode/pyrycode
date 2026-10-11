@@ -107,3 +107,59 @@ Concrete run ID: `3071-emulator-20261011`. Coupled exporter/readers: `readinessE
 | `/tmp/pyry-3071-live-records/3071-emulator-20261011/named-results.json` | `/work/Projects/.pyrycode-worktrees/pyrycode/builder-3071/internal/e2e/realclaude/testdata/queued_turn_readiness/runtime/3071-emulator-20261011/named-results.json` |
 | `/tmp/pyry-3071-live-records/3071-emulator-20261011/emulator-results.xml` | `/work/Projects/.pyrycode-worktrees/pyrycode/builder-3071/internal/e2e/realclaude/testdata/queued_turn_readiness/runtime/3071-emulator-20261011/emulator-results.xml` |
 | `/tmp/pyry-3071-live-records/3071-emulator-20261011/manifest.json` | `/work/Projects/.pyrycode-worktrees/pyrycode/builder-3071/internal/e2e/realclaude/testdata/queued_turn_readiness/runtime/3071-emulator-20261011/manifest.json` |
+
+### 2026-10-11: complete actual-client capture preparation before admission
+
+Files read for this revision: `readinessExportEmulator`, `readinessExportRuntime`,
+`readinessValidateRuntime`, `readinessResources`, `readinessFoldTurn`,
+`ObserveReadiness`, `ObserveReadinessRequest`, `newInboundDeliver`,
+`queuedSendHistory.accepted`/`delivered`, and `TestReadinessEmulatorCaptureContract`.
+The historical four-arm batch remains immutable and is not rerun. No other fetched
+feature branch overlaps these capture files. No production repair is selected.
+
+Design: preserve private owner/process-lifetime joins independently from conversation,
+session, child and full-width request identifiers. Export owner and session ordinals
+and explicit unknown joins. Add a private capture-input record for witnessed runner
+method intervals/status, clock comparison, effective settings and persistence witnesses;
+these are distinct from XML, which supplies outcomes and retains available durations.
+The sampler retains registry/history snapshots while each owned daemon is alive, so
+replacement/deletion/restart cannot erase an earlier binding. Fold only the named target's
+accepted entry, delivered receipt, main-turn and exact reply; `turn_write` stays separate.
+Incomplete targets retain known timestamps with absent comparisons unknown.
+
+Contract: every selected method appears once, unreached methods are incomplete, duplicate
+and unexpected names fail. Resource intervals are scoped to owner/process lifetime and
+current descendants, with per-child samples and separately retained lifetime CPU. Portable
+emulator readers validate semantics as well as hashes and require the concrete run on the
+live-artifact return. Input setup records are typed/allowlisted; payloads, private paths,
+raw argv and identifiers never enter the portable output. Source and tooling pins remain
+separate. Runner status times identify their observation clock; XML order never creates
+method intervals or request associations. Missing original configuration stays unknown.
+
+Concurrency: existing admission goroutines are unchanged. The bounded sampler has one
+owner, snapshots read-only persistence, exits on completion/cancellation and joins before
+export. Its interval state is independent per daemon lifetime; no observation releases a gate.
+
+State transitions and tests: `TestReadinessEmulatorOwnership` covers reused IDs on separate
+daemons and daemon restart; `TestReadinessEmulatorResults` covers partial/duplicate/unexpected
+selection and durations; `TestReadinessEmulatorEvidence` covers chronology, current-child
+confirmation, durable receipts and unknown comparisons; `TestReadinessEmulatorIntervals`
+covers daemon/child replacement and independent interval CPU. Run these with tagged race
+checks before handoff. Capture defects, fixture waiting, non-reproduction and demonstrated
+host defects retain separate conclusions; zero executed records cannot satisfy recovery.
+
+Sizing: approximately 900 additional source/test/plan lines plus contract edits; the existing
+ticket already exceeds the ceiling. All additions have this investigation as their single
+consumer; the shared handbacks floor continues to win. No new exported type/interface,
+consumer signature migration or admission rejection state is planned. Three acceptance criteria.
+
+Security review of this revision: PASS. Trust boundary is typed private-file decoding with
+bounded inputs and fixed public categories. SHOULD FIX: allowlist setup fields, validate
+method names and deny-scan all new files before publishing. Authentication remains wrapper
+owned; file modes remain 0700/0600, source hashes use SHA-256, no shell or network entry
+point is added, and sampler cancellation bounds all new work. Observation failure remains
+inert. Admission/token/permission contracts are unchanged. Reviewer: builder; 2026-10-11.
+
+Documentation handoff remains pending at the existing exact path/section above, including
+effective setup and clock/host/client observation boundaries. Dispatcher admission of
+`3071-emulator-20261011` and the eight recovery/destination files above remains pending.
