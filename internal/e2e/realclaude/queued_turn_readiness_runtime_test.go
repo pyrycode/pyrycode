@@ -28,9 +28,16 @@ type readinessRequestEvent struct {
 	At                                                                time.Time `json:"at"`
 	Phase, Type, Device, Method                                       string
 	RequestOrdinal, ReplyToOrdinal, ConversationOrdinal, RestartEpoch int
+	OwnerOrdinal, SessionOrdinal                                      int    `json:",omitempty"`
+	Outcome                                                           string `json:",omitempty"`
 }
 
-type readinessNamedResult struct{ Name, Status, Reason string }
+type readinessNamedResult struct {
+	Name, Status, Reason string
+	Started, Ended       time.Time `json:",omitzero"`
+	DurationSeconds      *float64  `json:",omitempty"`
+	Clock                string    `json:",omitempty"`
+}
 
 type readinessRuntimeManifest struct {
 	RunID, SourceRevision, Checkpoint, Conclusion string
@@ -130,6 +137,9 @@ func readinessExportRuntime(dir, runID string, r *readinessCapture, denied []str
 	sort.SliceStable(r.Witnesses, func(i, j int) bool { return r.Witnesses[i].At.Before(r.Witnesses[j].At) })
 	setup := map[string]any{"configuration": r.Setup, "arm": r.Arm, "claude_version": r.ClaudeVersion, "target_turns": r.Turns, "replay_methods": r.Replay, "history": r.PrefixHistory, "kernel_arrival": "unknown"}
 	files := map[string][]byte{}
+	if r.emulatorXML != nil {
+		files["emulator-results.xml"] = r.emulatorXML
+	}
 	encode := func(name string, value any) error {
 		b, e := json.Marshal(value)
 		files[name] = append(b, '\n')
@@ -160,7 +170,7 @@ func readinessExportRuntime(dir, runID string, r *readinessCapture, denied []str
 		files[name] = out.Bytes()
 	}
 	manifest := readinessRuntimeManifest{RunID: runID, SourceRevision: r.DaemonCommit, Checkpoint: "255e86ae643c13f7bd36affb99b4ae786ad5ee95", Conclusion: r.Conclusion, Dirty: r.Dirty, SHA256: map[string]string{}, SourceSHA256: map[string]string{}, Counts: r.Counts}
-	for _, name := range []string{"interactive_stream_queued_turn_readiness_test.go", "queued_turn_readiness_prefix_test.go", "queued_turn_readiness_effects_test.go", "queued_turn_readiness_dependency_test.go", "queued_turn_readiness_runtime_test.go", "queued_turn_readiness_emulator_test.go", "../../streamsup/readiness_observation_live.go", "../../dispatch/dispatch.go"} {
+	for _, name := range []string{"interactive_stream_queued_turn_readiness_test.go", "queued_turn_readiness_prefix_test.go", "queued_turn_readiness_effects_test.go", "queued_turn_readiness_dependency_test.go", "queued_turn_readiness_runtime_test.go", "queued_turn_readiness_emulator_test.go", "../../streamsup/readiness_observation_live.go", "../../dispatch/dispatch.go", "queued_turn_readiness_emulator_join_test.go", "queued_turn_readiness_emulator_semantics_test.go", "queued_turn_readiness_emulator_sampling_test.go", "queued_turn_readiness_emulator_contract_test.go"} {
 		if b, e := os.ReadFile(name); e == nil {
 			manifest.SourceSHA256[name] = fmt.Sprintf("%x", sha256.Sum256(b))
 		}
@@ -244,6 +254,9 @@ func readinessValidateRuntime(dir string) error {
 			return fmt.Errorf("unpinned runtime file")
 		}
 	}
+	if m.RunID == readinessEmulatorRun || m.SHA256["emulator-results.xml"] != "" {
+		return readinessValidateEmulator(dir, m)
+	}
 	return nil
 }
 
@@ -251,6 +264,15 @@ func TestReadinessRuntimeRetained(t *testing.T) {
 	dirs, err := filepath.Glob(filepath.Join("testdata", "queued_turn_readiness", "runtime", "*"))
 	if err != nil || len(dirs) == 0 {
 		t.Fatal("new runtime evidence missing")
+	}
+	contract, err := readinessReadEmulatorContract()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("PYRY_E2E_READINESS_REQUIRE_EMULATOR") == "1" || contract.Status == "executed; builder recovery required" || contract.Status == "recovered" {
+		if err := readinessValidateRuntime(filepath.Join("testdata", "queued_turn_readiness", "runtime", readinessEmulatorRun)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, dir := range dirs {
 		if err := readinessValidateRuntime(dir); err != nil {

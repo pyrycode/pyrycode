@@ -54,6 +54,25 @@ func (w *readinessForwarder) Write(b []byte) (int, error) {
 var readinessSubjects sync.Map
 var readinessFileMu sync.Mutex
 
+// Kernel start ticks let the resource sidecar exclude a reused PID.
+var readinessProcessStart = func() string {
+	b, e := os.ReadFile("/proc/self/stat")
+	if e != nil {
+		return ""
+	}
+	_, tail, ok := strings.Cut(string(b), ") ")
+	if !ok {
+		return ""
+	}
+	f := strings.Fields(tail)
+	if len(f) <= 19 {
+		return ""
+	}
+	return f[19]
+}()
+
+var readinessEpoch = strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+
 // ObserveReadiness records isolated live-test boundaries. Subject identifiers
 // stay in a private join file; the capture exports only ordinals and booleans.
 // Observation failures never change delivery; the capture rejects missing data.
@@ -97,10 +116,15 @@ func readinessAppend(record any) {
 	}
 	for _, arg := range os.Args[1:] {
 		if name, ok := strings.CutPrefix(arg, "-pyry-name="); ok {
-			fields["owner"] = name
+			home, _ := os.UserHomeDir()
+			fields["owner"] = home + "/" + name
+			fields["owner_home"] = home
+			fields["instance"] = name
 			break
 		}
 	}
+	fields["epoch"] = readinessEpoch
+	fields["process_start"] = readinessProcessStart
 	readinessFileMu.Lock()
 	defer readinessFileMu.Unlock()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -156,7 +180,7 @@ func readinessChildEnv(env []string, session string) []string {
 	if os.Getenv("PYRY_E2E_READINESS_RECORD") == "" {
 		return env
 	}
-	child := strconv.Itoa(os.Getpid()) + "-" + strconv.FormatUint(readinessChildSequence.Add(1), 10)
+	child := readinessEpoch + "-" + strconv.FormatUint(readinessChildSequence.Add(1), 10)
 	readinessChildren.Store(session, child)
 	return append(env, "PYRY_E2E_READINESS_CHILD="+child)
 }
@@ -182,6 +206,14 @@ func ObserveReadinessRequest(phase, device string, env protocol.Envelope, ok boo
 	if env.InReplyTo != nil {
 		reply = *env.InReplyTo
 	}
+	outcome := "unknown"
+	if phase == "outbound_queued" && env.InReplyTo != nil {
+		if env.Type == protocol.TypeError {
+			outcome = "refused"
+		} else {
+			outcome = "correlated_reply"
+		}
+	}
 	record := struct {
 		At      time.Time `json:"at"`
 		Phase   string    `json:"phase"`
@@ -192,6 +224,7 @@ func ObserveReadinessRequest(phase, device string, env protocol.Envelope, ok boo
 		ReplyTo uint64    `json:"reply_to,omitempty"`
 		Process int       `json:"process"`
 		OK      bool      `json:"ok"`
-	}{time.Now().UTC(), phase, kind, device, scope.ConversationID, env.ID, reply, os.Getpid(), ok}
+		Outcome string    `json:"outcome"`
+	}{time.Now().UTC(), phase, kind, device, scope.ConversationID, env.ID, reply, os.Getpid(), ok, outcome}
 	readinessAppend(record)
 }

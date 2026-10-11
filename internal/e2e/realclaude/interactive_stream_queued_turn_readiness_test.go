@@ -25,15 +25,17 @@ import (
 )
 
 type readinessWitness struct {
-	At           time.Time `json:"at"`
-	Boundary     string    `json:"boundary"`
-	Ordinal      int       `json:"ordinal"`
-	OK           bool      `json:"ok"`
-	Subject      string    `json:"-"`
-	ChildKey     string    `json:"-"`
-	Value        int       `json:"-"`
-	ChildOrdinal int       `json:"child_ordinal,omitempty"`
-	RestartEpoch int       `json:"restart_epoch"`
+	At             time.Time `json:"at"`
+	Boundary       string    `json:"boundary"`
+	Ordinal        int       `json:"ordinal"`
+	OK             bool      `json:"ok"`
+	Subject        string    `json:"-"`
+	ChildKey       string    `json:"-"`
+	Value          int       `json:"-"`
+	ChildOrdinal   int       `json:"child_ordinal,omitempty"`
+	RestartEpoch   int       `json:"restart_epoch"`
+	OwnerOrdinal   int       `json:"owner_ordinal,omitempty"`
+	SessionOrdinal int       `json:"session_ordinal,omitempty"`
 }
 
 type readinessTurn struct {
@@ -58,6 +60,7 @@ type readinessCapture struct {
 	Startup                                            []readinessStartupEvent
 	Requests                                           []readinessRequestEvent
 	Results                                            []readinessNamedResult
+	emulatorXML                                        []byte
 	privateDeny                                        []string
 	FailureReason                                      string
 }

@@ -163,3 +163,54 @@ inert. Admission/token/permission contracts are unchanged. Reviewer: builder; 20
 Documentation handoff remains pending at the existing exact path/section above, including
 effective setup and clock/host/client observation boundaries. Dispatcher admission of
 `3071-emulator-20261011` and the eight recovery/destination files above remains pending.
+
+### Capture-preparation implementation and remaining handoff
+
+The finished preparation adds approximately 1,800 source/test/plan lines before
+contract metadata. The forecast increased because semantic validation needs independent
+fixtures for ownership, full result inventory, persisted receipts and current-child
+ordering, rather than checking file hashes alone. These are all one-consumer support
+for the same investigation; the sizing floor still applies, with zero new exported
+types/interfaces and no admission consumer migration or rejection branch.
+
+`readinessRunnerIntervals` reads the admitted runner's timestamped instrumentation
+status stream. Times are explicitly runner-host receipts; XML preserves available
+durations and never supplies method order or client send/receipt times. A missing
+terminal XML record can retain a witnessed terminal status; unreached methods remain
+incomplete. No retry substitutes for the single acquisition.
+
+`readinessSampleEmulator` joins process kernel start identity and owned HOME/instance,
+checks each running executable against the rebuilt binary, retains registry/history
+snapshots across restart and samples independent current descendant CPU/RSS intervals.
+`readinessNewJoins` preserves separate owner, lifetime, session, conversation, child
+and connection/request namespaces. The target fold follows the matching accepted
+entry and delivery receipt; it never uses `turn_write` as durable delivery. Absent
+reply completion leaves its exact-content comparison unknown. The reader requires
+current-child Start, permission-write, forwarder/parser complete-line, processing and
+gate-release witnesses when confirmation is claimed. Permission write completion
+and stdout observations are independent goroutines, so their relative order is not
+invented. Exported target persistence boundaries also have their own witnessed times.
+
+Effective runtime/configuration readbacks are a separate private typed input joined
+by owner/lifetime/session; persistence-only samples cannot supply unknown runtime
+values. Missing original configuration and unresolved startup roles remain explicit.
+The isolated dispatcher must timestamp its existing runner status stream, record the
+clock comparison and readbacks, and join/stop the sidecar before export. This stage
+creates no Android execution or new startup fixture. `needs-live-artifacts` remains.
+
+`TestReadinessRuntimeRetained` requires the concrete run when the recovery environment
+`PYRY_E2E_READINESS_REQUIRE_EMULATOR=1` is set (and when the contract is executed or
+recovered). The contract's return checks set it; existing Go directories cannot satisfy
+that check. Missing/unusable or zero-executed returned evidence is a blocker. Before
+admission, it remains an explicit live-artifact handoff. The clean instrumented binary
+revision and support hashes are pinned by a subsequent metadata-only contract commit.
+
+Focused offline evidence tests failed against the pre-preparation reader for accepting
+missing/contradictory emulator evidence, duplicate/unselected results and zero executed
+counts. Tagged race tests now cover those cases plus reused daemon/PID/child identities,
+runner intervals, exact result inventory, partial outcomes, independent resource intervals,
+current-child replacement and persisted delivery chronology. No cause-backed host red/green
+or before/after live proof is claimed. Diagnosis, one localized repair and ordinary targeted
+host proof follow the dispatcher acquisition; the full mobile gate remains with #2010 and
+the subsequent full host gate with the dispatcher. The Documentation handoff above remains
+pending, including client/host boundaries and effective setup provenance.

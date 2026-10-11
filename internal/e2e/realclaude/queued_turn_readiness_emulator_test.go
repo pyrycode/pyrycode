@@ -11,20 +11,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 )
 
 type readinessEmulatorInput struct {
-	RunID, SourceRevision, Binary, Observations, XML, Resources string
-	Homes                                                       []string
+	RunID, SourceRevision, Binary, Observations, XML, Resources  string
+	Evidence, Persistence, Readbacks, RunnerStatus, TargetPrompt string
+	Homes                                                        []string
 }
 
 type readinessPrivateObservation struct {
 	At                                                   time.Time `json:"at"`
 	Boundary, Subject, Child, Phase, Kind, Device, Owner string
+	Epoch, ProcessStart, Outcome                         string
+	OwnerHome                                            string `json:"owner_home"`
+	Instance                                             string
 	Value, Process                                       int
 	Request                                              uint64 `json:"request"`
 	ReplyTo                                              uint64 `json:"reply_to"`
@@ -50,6 +55,11 @@ type readinessXMLSuite struct {
 }
 
 func readinessExportEmulator(input readinessEmulatorInput, dir string) error {
+	if _, e := os.Stat(filepath.Join(dir, "manifest.json")); e == nil {
+		return fmt.Errorf("emulator run already exported; preserve executed evidence")
+	} else if !os.IsNotExist(e) {
+		return fmt.Errorf("emulator destination unavailable")
+	}
 	if filepath.Base(input.RunID) != input.RunID || input.RunID == "." || len(input.SourceRevision) != 40 {
 		return fmt.Errorf("invalid capture identity")
 	}
@@ -58,11 +68,11 @@ func readinessExportEmulator(input readinessEmulatorInput, dir string) error {
 		return fmt.Errorf("host observations unavailable")
 	}
 	x, err := os.ReadFile(input.XML)
-	if err != nil || len(x) > 16<<20 {
+	if err != nil && !os.IsNotExist(err) || len(x) > 16<<20 {
 		return fmt.Errorf("Android named results unavailable")
 	}
 	var suite readinessXMLSuite
-	if xml.Unmarshal(x, &suite) != nil || len(suite.Cases) == 0 {
+	if len(x) > 0 && xml.Unmarshal(x, &suite) != nil {
 		return fmt.Errorf("Android named results unreadable")
 	}
 	r := &readinessCapture{DaemonCommit: input.SourceRevision, Arm: "emulator", Setup: map[string]any{"capture_kind": "actual-client diagnostic", "client_send_boundary": "unknown; host_received is after decrypted dispatch", "phone_receipt_projection": "unknown", "kernel_arrival": "unknown", "binary_revision_verified": true}, Counts: map[string]int{"executed": 0, "passed": 0, "failed": 0, "skipped": 0}, Conclusion: "actual-client diagnostic; localize before selecting a repair"}
@@ -87,145 +97,161 @@ func readinessExportEmulator(input readinessEmulatorInput, dir string) error {
 				modified = s.Value == "true"
 			}
 		}
-		if revision != input.SourceRevision || modified || !strings.Contains(tags, "e2e_realclaude") {
+		if revision != input.SourceRevision || modified || !slices.Contains(strings.FieldsFunc(tags, func(r rune) bool { return r == ',' || r == ' ' }), "e2e_realclaude") {
 			return fmt.Errorf("tested binary is not clean pinned instrumented source")
 		}
 	} else {
 		return fmt.Errorf("tested binary missing")
 	}
 	denied := append(append([]string{}, input.Homes...), input.Observations, input.XML, os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), os.Getenv("ANTHROPIC_API_KEY"))
-	conversations, children, devices, owners := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
-	processEpoch := map[int]int{}
-	ownerProcesses := map[string]map[int]int{}
-	requestOrdinals := map[string]int{}
-	for _, line := range bytes.Split(raw, []byte{'\n'}) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var o readinessPrivateObservation
-		if json.Unmarshal(line, &o) != nil || o.At.IsZero() {
-			return fmt.Errorf("host observation malformed")
-		}
-		if o.Owner == "" {
-			o.Owner = "unknown"
-		}
-		if owners[o.Owner] == 0 {
-			owners[o.Owner] = len(owners) + 1
-			ownerProcesses[o.Owner] = map[int]int{}
-		}
-		processes := ownerProcesses[o.Owner]
-		if _, ok := processes[o.Process]; !ok {
-			processes[o.Process] = len(processes)
-		}
-		processEpoch[o.Process] = processes[o.Process]
-		key := o.Owner + "/" + o.Subject
-		if o.Subject != "" && conversations[key] == 0 {
-			conversations[key] = len(conversations) + 1
-		}
-		if o.Child != "" && children[o.Child] == 0 {
-			children[o.Child] = len(children) + 1
-		}
-		denied = append(denied, o.Subject, o.Child, o.Device)
-		if o.Boundary != "" {
-			r.Witnesses = append(r.Witnesses, readinessWitness{At: o.At, Boundary: o.Boundary, Ordinal: conversations[key], ChildOrdinal: children[o.Child], RestartEpoch: processEpoch[o.Process], OK: o.OK})
-			continue
-		}
-		if o.Phase != "host_received" && o.Phase != "outbound_queued" {
-			return fmt.Errorf("unknown request observation phase")
-		}
-		if devices[o.Device] == 0 {
-			devices[o.Device] = len(devices) + 1
-		}
-		requestKey := o.Owner + "/" + o.Device + "/" + strconv.FormatUint(o.Request, 10)
-		ordinal := 0
-		if o.Phase == "host_received" {
-			if requestOrdinals[requestKey] == 0 {
-				requestOrdinals[requestKey] = len(requestOrdinals) + 1
+	contract, e := readinessReadEmulatorContract()
+	if e != nil || input.RunID != contract.RunID || input.SourceRevision != contract.Source {
+		return fmt.Errorf("capture differs from admitted contract")
+	}
+	evidence, e := os.ReadFile(input.Evidence)
+	if e != nil || len(evidence) > 16<<20 {
+		return fmt.Errorf("effective setup and runner intervals unavailable")
+	}
+	var provenance readinessEmulatorProvenance
+	if json.Unmarshal(evidence, &provenance) != nil {
+		return fmt.Errorf("capture provenance unreadable")
+	}
+	status, e := os.ReadFile(input.RunnerStatus)
+	if e != nil || len(status) > 64<<20 {
+		return fmt.Errorf("witnessed runner status unavailable")
+	}
+	provenance.Methods, e = readinessRunnerIntervals(status, contract.Selection)
+	if e != nil {
+		return e
+	}
+	persisted, e := os.ReadFile(input.Persistence)
+	if e != nil || len(persisted) > 128<<20 {
+		return fmt.Errorf("persisted lifecycle snapshots unavailable")
+	}
+	states, e := readinessPrivateRows[readinessPrivateState](persisted)
+	if e != nil {
+		return e
+	}
+	readbacks, e := os.ReadFile(input.Readbacks)
+	if e != nil || len(readbacks) > 16<<20 {
+		return fmt.Errorf("resolved configuration readbacks unavailable")
+	}
+	resolved, e := readinessPrivateRows[readinessPrivateState](readbacks)
+	if e != nil {
+		return e
+	}
+	states = append(states, resolved...)
+	observations, e := readinessPrivateRows[readinessPrivateObservation](raw)
+	if e != nil {
+		return e
+	}
+	sort.SliceStable(observations, func(a, b int) bool { return observations[a].At.Before(observations[b].At) })
+	joins, e := readinessNewJoins(observations, states)
+	if e != nil {
+		return e
+	}
+	if e = joins.fold(r); e != nil {
+		return e
+	}
+	provenance.Settings = nil
+	for _, state := range states {
+		denied = append(denied, state.Owner, state.Epoch, state.Conversation, state.Session)
+		if state.Entry != nil {
+			if state.Entry.Session != nil {
+				denied = append(denied, state.Entry.Session.SessionID)
 			}
-			ordinal = requestOrdinals[requestKey]
+			var private struct {
+				Text      string `json:"text"`
+				MessageID string `json:"message_id"`
+				DeviceID  string `json:"device_id"`
+			}
+			if json.Unmarshal(state.Entry.Payload, &private) == nil {
+				denied = append(denied, private.Text, private.MessageID, private.DeviceID)
+			}
 		}
-		reply := requestOrdinals[o.Owner+"/"+o.Device+"/"+strconv.FormatUint(o.ReplyTo, 10)]
-		r.Requests = append(r.Requests, readinessRequestEvent{At: o.At, Phase: o.Phase, Type: o.Kind, Device: fmt.Sprintf("connection-%d", devices[o.Device]), Method: "unattributed; XML does not establish request-method timing", RequestOrdinal: ordinal, ReplyToOrdinal: reply, ConversationOrdinal: conversations[key], RestartEpoch: processEpoch[o.Process]})
-	}
-	if len(r.Witnesses) == 0 || len(r.Requests) == 0 {
-		return fmt.Errorf("host boundaries or request witnesses missing")
-	}
-	suite.Failures, suite.Skipped = 0, 0
-	for i := range suite.Cases {
-		c := &suite.Cases[i]
-		if !strings.HasPrefix(c.Name, "interactiveTurn_") || strings.ContainsAny(c.Name, " /\\\n\r") || c.Class != "de.pyryco.mobile.e2e.InteractiveStreamE2ETest" {
-			return fmt.Errorf("unexpected Android test identity")
+		if state.Settings != nil {
+			settings := *state.Settings
+			settings.OwnerOrdinal = joins.owners[state.Owner]
+			settings.RestartEpoch = joins.epochs[state.Owner+"/"+state.Epoch]
+			settings.SessionOrdinal = joins.sessions[state.Owner+"/"+state.Session]
+			provenance.Settings = append(provenance.Settings, settings)
 		}
-		status, reason := "pass", ""
-		r.Counts["executed"]++
-		if c.Failure != nil || c.Error != nil {
-			status, reason = "fail", "assertion failure; raw message excluded"
-			r.Counts["failed"]++
-			suite.Failures++
-		} else if c.Skipped != nil {
-			status, reason = "skip", "Android reported skipped; raw message excluded"
-			r.Counts["executed"]--
-			r.Counts["skipped"]++
-			suite.Skipped++
-		} else {
-			r.Counts["passed"]++
-		}
-		r.Results = append(r.Results, readinessNamedResult{Name: c.Name, Status: status, Reason: reason})
-		c.Time = "" // Retain only separately witnessed experiment times.
 	}
+	for _, o := range observations {
+		denied = append(denied, o.Subject, o.Child, o.Device, o.Owner, o.Epoch)
+	}
+	// Tiny protocol message IDs are not secrets: scanning their substrings would
+	// reject all timestamps. Private authored payloads and identity joins remain denied.
+	safeDenied := denied[:0]
+	for _, value := range denied {
+		if len(value) >= 8 {
+			safeDenied = append(safeDenied, value)
+		}
+	}
+	denied = append(safeDenied, input.TargetPrompt, input.Evidence, input.Persistence, input.Readbacks, input.RunnerStatus)
+	provenance.Targets, e = joins.targets(states, input.TargetPrompt, provenance.Methods)
+	if e != nil {
+		return e
+	}
+	r.Results, r.Counts, e = readinessEmulatorResults(&suite, provenance.Methods, contract.Selection)
+	if e != nil {
+		return e
+	}
+	provenance.TargetAcquisition = "not reached"
+	for _, method := range provenance.Methods {
+		if method.Name == "interactiveTurn_pingPrompt_streamsPingReplyIntoThread" {
+			provenance.TargetAcquisition = "enqueue unwitnessed"
+		}
+	}
+	if len(provenance.Targets) > 0 {
+		provenance.TargetAcquisition = "persisted target"
+	}
+	for _, target := range provenance.Targets {
+		for boundary, at := range map[string]time.Time{"target_enqueued": target.Enqueued, "durable_target_delivery": target.Delivered, "target_main_turn_opened": target.Opened} {
+			if !at.IsZero() {
+				r.Witnesses = append(r.Witnesses, readinessWitness{At: at, Boundary: boundary, OwnerOrdinal: target.OwnerOrdinal, RestartEpoch: target.RestartEpoch, Ordinal: target.ConversationOrdinal, SessionOrdinal: target.SessionOrdinal, ChildOrdinal: target.ChildOrdinal, OK: true})
+			}
+		}
+	}
+	r.Setup["xml_available"] = len(x) > 0
+	r.Setup["emulator_evidence"] = provenance
+	r.Setup["complete_65_method_result_set"] = r.Counts["incomplete"] == 0
 	suite.Name = "queued-turn-readiness"
-	suite.Tests = len(suite.Cases)
+	suite.Tests, suite.Failures, suite.Skipped = len(suite.Cases), r.Counts["failed"], r.Counts["skipped"]
 	portable, e := xml.Marshal(suite)
 	if e != nil {
 		return e
 	}
-	r.Setup["complete_65_method_result_set"] = len(suite.Cases) == 65
+	r.emulatorXML = append(portable, '\n')
 	if input.Resources != "" {
 		b, e := os.ReadFile(input.Resources)
 		if e != nil {
 			return fmt.Errorf("resource samples missing")
 		}
-		for _, line := range bytes.Split(b, []byte{'\n'}) {
-			if len(line) == 0 {
-				continue
+		resources, e := readinessPrivateRows[readinessPrivateResource](b)
+		if e != nil {
+			return e
+		}
+		for _, resource := range resources {
+			if joins.owners[resource.Owner] == 0 {
+				return fmt.Errorf("unowned resource interval")
 			}
-			var sample map[string]any
-			if json.Unmarshal(line, &sample) != nil {
-				return fmt.Errorf("resource sample invalid")
+			epoch, ok := joins.epochs[resource.Owner+"/"+resource.Epoch]
+			if !ok {
+				return fmt.Errorf("resource epoch unknown")
 			}
+			sample, e := readinessSanitizeResource(resource.Sample, joins, resource.Owner, resource.Epoch)
+			if e != nil {
+				return e
+			}
+			sample["owner_ordinal"], sample["restart_epoch"] = joins.owners[resource.Owner], epoch
 			r.Resources = append(r.Resources, sample)
 		}
 	}
 	if e := readinessExportRuntime(dir, input.RunID, r, denied); e != nil {
 		return e
 	}
-	// The normalized XML retains every named outcome, excluding stdout, stack
-	// traces, failure messages, properties and device-private metadata.
-	for _, secret := range denied {
-		if secret != "" && bytes.Contains(portable, []byte(secret)) {
-			return fmt.Errorf("XML privacy scan failed")
-		}
-	}
-	if e := os.WriteFile(filepath.Join(dir, "emulator-results.xml"), append(portable, '\n'), 0600); e != nil {
-		return e
-	}
-	b, e := os.ReadFile(filepath.Join(dir, "manifest.json"))
-	if e != nil {
-		return e
-	}
-	var m readinessRuntimeManifest
-	if json.Unmarshal(b, &m) != nil {
-		return fmt.Errorf("manifest unavailable")
-	}
-	m.SHA256["emulator-results.xml"] = readinessHash(append(portable, '\n'))
-	b, e = json.Marshal(m)
-	if e != nil {
-		return e
-	}
-	if e = os.WriteFile(filepath.Join(dir, "manifest.json"), append(b, '\n'), 0600); e != nil {
-		return e
-	}
-	return readinessValidateRuntime(dir)
+	return nil
 }
 
 // TestReadinessEmulatorExport is a dispatcher recovery entry point. It does not
@@ -287,46 +313,8 @@ func TestReadinessEmulatorResources(t *testing.T) {
 		t.Fatal("resource output unavailable")
 	}
 	defer f.Close()
-	previous := map[int]uint64{}
-	last := time.Now()
-	for {
-		if _, e := os.Stat(filepath.Join(filepath.Dir(inputPath), "capture-complete")); e == nil {
-			return
-		}
-		raw, _ := os.ReadFile(input.Observations)
-		processes := map[int]bool{}
-		for _, line := range bytes.Split(raw, []byte{'\n'}) {
-			var o readinessPrivateObservation
-			if json.Unmarshal(line, &o) == nil && o.Boundary == "child_started" {
-				processes[o.Process] = true
-			}
-		}
-		now := time.Now()
-		var ticks uint64
-		intervalKnown := false
-		for pid := range processes {
-			sample := readinessResources(ctx, pid, input.Observations)
-			if values, ok := sample["private_cpu_ticks"].(map[int]uint64); ok {
-				for p, v := range values {
-					if old, known := previous[p]; known && v >= old {
-						ticks += v - old
-						intervalKnown = true
-					}
-					previous[p] = v
-				}
-			}
-			delete(sample, "private_cpu_ticks")
-			sample["interval_cpu_known"], sample["interval_cpu_ticks"], sample["interval_seconds"] = intervalKnown, ticks, now.Sub(last).Seconds()
-			if json.NewEncoder(f).Encode(sample) != nil {
-				t.Fatal("resource write failed")
-			}
-		}
-		last = now
-		select {
-		case <-ctx.Done():
-			t.Fatal("resource sampler deadline before completion")
-		case <-time.After(2 * time.Second):
-		}
+	if e := readinessSampleEmulator(ctx, input, inputPath, f); e != nil {
+		t.Fatal(e)
 	}
 }
 
