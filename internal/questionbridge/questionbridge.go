@@ -1,43 +1,15 @@
-// Package questionbridge recognises claude's clarifying-question tool call,
-// parses its batch into the outbound wire payload, and records the surfaced
-// batch under a one-time nonce it mints (Registry). It is named after its two
-// neighbours, internal/permbridge and internal/modalbridge, and sits beside them
-// rather than inside internal/protocol, which enforces no bound by design, or
-// inside modalbridge, whose whole argument (TypeQuestionShown's doc block) is
-// that a question is a distinct frame family rather than a grown modal.
+// Package questionbridge parses clarifying-question tool calls into bounded
+// outbound payloads and records surfaced batches under daemon-minted identities.
+// Parse takes a tool name and input rather than an approval request, so it holds
+// no approval correlation and depends only on protocol and the standard library.
 //
-// The input is a tool name and the opaque tool input claude blocks on across the
-// mcp-approve bridge — permbridge.Request's ToolName and Input. The parse takes
-// the PAIR rather than the Request, so it never holds a ToolUseID it has no
-// business reading and depends on internal/protocol and the standard library
-// alone.
+// Batches are rejected whole rather than truncated: this control-frame family
+// has no truncated_fields marker, so clipped text would appear complete. Raw
+// input is bounded before decode; encoded payloads reserve space for the full
+// envelope and daemon metadata. Unknown input keys remain tolerated.
 //
-// FAIL-CLOSED, AND REJECT RATHER THAN TRUNCATE. The result becomes a control
-// frame, and control frames are never dropped by the push queue (soft-overflow
-// admit), so an un-droppable frame must not be inflatable — modalbridge's
-// maxPromptBytes posture. Its MECHANISM does not carry over: boundPrompt
-// silently truncates, and this family has no truncated_fields to report a cut
-// in, so a cut would present claude's clipped text to a client as complete.
-// docs/protocol-mobile.md's Question (v2) section forbids exactly that. The cap
-// is therefore taken once, over the whole raw input, and rejects it whole.
-//
-// Fail-closed means BOUNDS, NOT UNKNOWN KEYS. The decode is a plain
-// json.Unmarshal: a claude release adding a field — the vendor docs already
-// describe an optional per-option preview, emitted only when
-// toolConfig.askUserQuestion's previewFormat is set, which pyry never sets —
-// must not turn every question into a dropped frame.
-//
-// LOG-FREE, deliberately and structurally: this package does not import
-// log/slog, so no question text, header, option label or description, and no
-// other byte of claude's tool input, can reach a log from here. permbridge
-// carries the same property for the same reason. Content-free decision logging
-// belongs at the call site, where a conversation id is in hand.
-//
-// NOTHING CALLS THIS YET. #1973 is the consumer: it wires the discriminant into
-// the stream approval surfacer, then hands the parsed batch and its conversation
-// id to Registry.Record, which mints QuestionBatchID from crypto/rand and stamps
-// both ids on. Parse leaves the pair deliberately zero because they are
-// daemon-asserted and never come from claude's tool input.
+// The package is log-free. Question content stays inert text, and Parse leaves
+// both daemon-asserted IDs unset for Registry.Record to assign.
 package questionbridge
 
 import (
@@ -53,26 +25,16 @@ import (
 // authority on what claude actually sends, and agrees.
 const ToolName = "AskUserQuestion"
 
-// maxInputBytes bounds the raw tool input. THE UNIT IS BYTES, counted over
-// Request.Input before decode — stated here because a rune count and a byte
-// count diverge on the first non-ASCII string claude emits, and nothing
-// committed anywhere separates them for this family yet.
-//
-// Sized by arithmetic rather than by measurement, since one capture is the whole
-// population: a worst-case in-contract batch — four questions, each with prose
-// text and four options carrying a prose description — comes to roughly 8 KB, so
-// 16 KiB clears legitimate output by about 2× while still capping a pathological
-// input. The committed capture's tool input is well under 1 KB. If a real batch
-// is ever seen near this figure, the constant moves and this comment records the
-// new evidence.
-//
-// This is the ONLY length bound in the package. The four claude-authored strings
-// carry no individual cap, and the header carries none in particular: the vendor
-// documents 12 characters, the one header anybody has captured is 14, and
-// internal/protocol's questions.go records that contradiction along with the
-// instruction not to enforce 12 fail-closed. Minting a different header number
-// would be a defence for a failure mode nobody has observed.
+// maxInputBytes bounds raw tool input before decode, independently of the
+// encoded-envelope bound. Individual fields have no separate length cap; the
+// captured 14-rune header remains supported.
 const maxInputBytes = 16384
+
+// maxPayloadBytes bounds the JSON payload with unset daemon IDs. The 4096-byte
+// reserve covers sixfold escaping of two 36-byte IDs and a 256-byte producing
+// session ID, envelope keys, maximum-width uint64 stamps, the longest supported
+// RFC3339Nano timestamp and boolean flags, including a session-state clear.
+const maxPayloadBytes = protocol.MaxThreadEnvelopeBytes - 4096
 
 // Batch bounds from claude's contract (https://code.claude.com/docs/en/agent-sdk/user-input).
 // The capture's one question and two options sit inside both, so neither is
@@ -125,7 +87,7 @@ type inputOption struct {
 // the canonical display order.
 //
 // Every rejection yields the ZERO payload and false, never a partial or a
-// truncated one: nothing is built until every check has passed.
+// truncated one: the batch is accepted or rejected as a whole.
 //
 // The two negative outcomes — not the question tool, and the question tool
 // rejected — are deliberately NOT distinguished. A caller that needs to tell
@@ -170,5 +132,10 @@ func Parse(toolName string, input json.RawMessage) (protocol.QuestionShownPayloa
 			MultiSelect: *q.MultiSelect,
 		})
 	}
-	return protocol.QuestionShownPayload{Questions: questions}, true
+	payload := protocol.QuestionShownPayload{Questions: questions}
+	encoded, err := json.Marshal(payload)
+	if err != nil || len(encoded) > maxPayloadBytes {
+		return protocol.QuestionShownPayload{}, false
+	}
+	return payload, true
 }

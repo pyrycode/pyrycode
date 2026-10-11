@@ -110,3 +110,7 @@ None: reserve correctness is checked against complete current envelope encoding.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-11
+
+## Revisions
+
+- 2026-10-11: Strengthened `TestControlLiveQuestionEnvelopeBound` beyond owner admission: it also surfaces the accepted boundary through the real approval bridge, repeatedly snapshots the original batch ID and answerability, then exercises authenticated answer and refusal through the original ID. Resolution must consume it once, preserve the original question/selection in the child verdict, and remove answerability. This extends the lifecycle row for that test without changing the production design.
