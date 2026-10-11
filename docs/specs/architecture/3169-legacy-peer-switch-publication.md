@@ -36,3 +36,7 @@ Run the existing encrypted-frame test before editing, then strengthen its legacy
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-11
+
+## Revisions
+
+- 2026-10-11: The strengthened four-frame-only assertion failed because an active pre-commit reset status can be sealed after the binding returns to Claude. Assert the exact four-frame committed suffix and permit only active resetting frames before it. This preserves the production contract while detecting missing, reordered or extra committed outcomes.
