@@ -219,13 +219,17 @@ func (o *Owner) Stop(appID string) error {
 	if !validID(appID) {
 		return ErrInvalidIdentity
 	}
+	// Admission, ownership capture and stopped intent share the same lock order
+	// as Start. No generation admitted before this commit can escape cancellation.
+	o.registry.mu.Lock()
 	o.mu.Lock()
 	g := o.generations[appID]
 	if g != nil {
 		g.cancel()
 	}
+	r, err := o.registry.intentLocked(context.Background(), appID, "stopped")
 	o.mu.Unlock()
-	r, err := o.registry.intent(context.Background(), appID, "stopped")
+	o.registry.mu.Unlock()
 	if g != nil {
 		<-g.done
 	}

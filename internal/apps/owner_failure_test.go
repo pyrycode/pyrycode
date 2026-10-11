@@ -243,8 +243,16 @@ func TestOwnerStartStopRaces(t *testing.T) {
 			t.Fatal(e)
 		}
 		<-done
-		if e := o.Stop(testApp); e != nil {
-			t.Fatal(e)
+		v := ownerRecord(t, r, testApp)
+		o.mu.Lock()
+		g := o.generations[testApp]
+		o.mu.Unlock()
+		if v.Desired == "stopped" && v.State == "stopped" && g != nil {
+			select {
+			case <-g.done:
+			default:
+				t.Fatal("stopped observation coexists with surviving owned work")
+			}
 		}
 	}
 	done := make(chan error, 1)

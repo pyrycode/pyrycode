@@ -74,6 +74,11 @@ func (r *Registry) Remove(appID string) (bool, error) { return r.change("remove"
 func (r *Registry) change(action, appID string, data []byte, update *lifecycleUpdate) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.changeLocked(action, appID, data, update)
+}
+
+// changeLocked validates, persists and notifies with the registry mutex held.
+func (r *Registry) changeLocked(action, appID string, data []byte, update *lifecycleUpdate) (bool, error) {
 	if update != nil {
 		if update.ctx != nil && update.ctx.Err() != nil {
 			return false, update.ctx.Err()

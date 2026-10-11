@@ -45,10 +45,14 @@ func (r *Registry) CommitObservation(serverID, appID string, expectedRevision ui
 
 func (r *Registry) intent(ctx context.Context, appID, desired string) (Record, error) {
 	r.mu.Lock()
-	serverID := r.snapshot.ServerID
-	r.mu.Unlock()
-	u := &lifecycleUpdate{serverID: serverID, observation: &Observation{Desired: desired}, ctx: ctx}
-	_, err := r.change("lifecycle", appID, nil, u)
+	defer r.mu.Unlock()
+	return r.intentLocked(ctx, appID, desired)
+}
+
+// intentLocked preserves committed fields under the caller-held registry mutex.
+func (r *Registry) intentLocked(ctx context.Context, appID, desired string) (Record, error) {
+	u := &lifecycleUpdate{serverID: r.snapshot.ServerID, observation: &Observation{Desired: desired}, ctx: ctx}
+	_, err := r.changeLocked("lifecycle", appID, nil, u)
 	return u.result, err
 }
 
