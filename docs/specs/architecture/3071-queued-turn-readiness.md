@@ -67,6 +67,7 @@ First validate observation privacy and exact matching with focused race tests. R
 ## Revisions
 
 - 2026-10-11: the first authenticated diagnostic used a nonexistent `busy` wire state to recognize turn activity. The emitter reports `thinking`/`responding`, then `idle`; use a nonempty non-idle state. Keep the first run's failed captures and counts, classified as a capture pacing defect rather than a host readiness failure. This corrects the experiment without changing production behavior or the admission deadline.
+- 2026-10-11: `fakephone.Client.ReceiveBytes` cancels its WebSocket on read timeout, so 250 ms polling severed the experiment's phone. Read with the bounded continued-observation deadline and judge the unchanged 90-second admission bound from persisted timestamps. Preserve both failed diagnostic batches; their prompt/delivery facts remain useful but their completion pacing cannot prove the requested comparison. The new test's phone error is terminal rather than a retry on a closed connection.
 
 ## Documentation handoff
 
