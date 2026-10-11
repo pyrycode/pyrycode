@@ -14,8 +14,8 @@
   "scope": "candidate main-daemon effects and synthetic startup; replay rows enumerate omissions; original executed spacing/configuration unknown",
   "pending": "cause-backed host repair, failing-before/passing-after regression, full host gate and mobile #2010 full gate",
   "totals": {
-    "executed": 43,
-    "passed": 41,
+    "executed": 82,
+    "passed": 80,
     "failed": 2,
     "skipped": 0
   },
@@ -58,6 +58,175 @@
         "executed": 2,
         "passed": 1,
         "failed": 1,
+        "skipped": 0
+      },
+      "classification": "diagnostic driver outcomes; not original mobile results or failing-before host repair proof"
+    },
+    {
+      "invocation": "python3 \"$AGENTS_REPO_PATH/dispatcher/scripts/live-claude-gate.py\" go --tests '^TestInteractiveStreamQueuedTurnReadiness$'",
+      "authentication": "launcher loggedIn preflight admitted actual named tests",
+      "outcomes": [
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_pingPrompt_footerShowsContextUsage",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_backgroundAgent_followsBottomUntilFinished",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_finishedReply_systemCopyCopiesSelectedWord",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_peerQueue_staysConsistentAcrossClients",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_twoHostsArchive_staysPerHost",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_deleteConversation_removesFromListAndClosesThread",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_twoHostsCollidingConversationId_stayPerHost",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_secondHostRenameAndUnpair_leavesFirstHostUntouched",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_offlineRead_reconcilesPeerTurnOnReconnect",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_stopBackgroundTask_completesThenRepliesAgain",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_claudeOfferedFile_opensAndSavesAfterRestart",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_muteChannel_roundTripsThroughTheHost",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_reopenAfterReconnect_footerShowsContextUsageBeforeAnyTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_permissionHeldTool_statusAreaNamesRunningTool",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_diagnosticBundles_stayOnTheirOwningHosts",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_sessionError_recoversDroppedAndRetainedBacklog",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_toolPrompt_rendersToolStepInThread",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_compactWithAttachment_compactsAndClearsTheStrip",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_permissionPrompts_heldPerConversation",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_pingPrompt_statusSheetShowsRunningModel",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_createEditArchiveChannel_readsPromptBack",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_modelChange_roundTripsAndStaysPerConversation",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_reconnect_footerReadingsAndModelChangeSurvive",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_interruptedUpload_retriesIntoOneMessageWithItsBytes",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_sendQueuedNow_reachesRunningTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_inheritedEffort_footerShowsAppliedValueAfterTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_chosenEffort_appliesFromTheFirstTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_directShareShortcut_arrivesAtPeerWithItsBytes",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_questionAnswer_reachesTheAskingConversation",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_markdownLink_opensLiveNoteInReader",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_permissionAnswer_reachesOnlyTheAskingConversation",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_attentionDot_followsARealTurn",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_collidingConversationId_phoneFileStaysOnItsHost",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_newSession_rendersSessionBoundaryDelimiter",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_backgroundTask_countsInActionsMenuAndPanel",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_scannerConfirm_waitsForHostThenOpensList",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/interactiveTurn_interruptedRetrieval_retryLoadsThePeersFile",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/prefix/target",
+          "status": "pass"
+        },
+        {
+          "test": "TestInteractiveStreamQueuedTurnReadiness/fresh",
+          "status": "pass"
+        }
+      ],
+      "counts": {
+        "executed": 39,
+        "passed": 39,
+        "failed": 0,
         "skipped": 0
       },
       "classification": "diagnostic driver outcomes; not original mobile results or failing-before host repair proof"
@@ -304,6 +473,44 @@
         "skipped": 0
       },
       "Conclusion": "non-reproduction under candidate replay and synthetic startup; no host cause or repair established"
+    },
+    {
+      "Path": "20261011T144423Z-fresh.json",
+      "SHA256": "7a40e3c3ff3e923a4724626c76c6f18bef43a27d470c1cb13e11aee466e5e399",
+      "Source": "21008357fdefa6a5884b413c15efd79a04494389",
+      "Counts": {
+        "executed": 1,
+        "failed": 0,
+        "passed": 1,
+        "skipped": 0
+      },
+      "Conclusion": "non-reproduction under candidate replay and synthetic startup; no host cause or repair established"
+    },
+    {
+      "Path": "20261011T144423Z-prefix.json",
+      "SHA256": "c320dfa7c2366cb8b7d90827b7aa016aa50038f3ad1854c02e7a4dc001e7ec96",
+      "Source": "21008357fdefa6a5884b413c15efd79a04494389",
+      "Counts": {
+        "executed": 38,
+        "failed": 0,
+        "passed": 38,
+        "skipped": 0
+      },
+      "Conclusion": "non-reproduction under candidate replay and synthetic startup; no host cause or repair established"
     }
+  ],
+  "batch_limitations": {
+    "b1376c5a": "prefix aborted on incorrect compaction terminal wait; incomplete diagnostic",
+    "b76125e4": "prefix aborted on duplicate promotion name; incomplete diagnostic",
+    "3d42e909": "all named checks passed; ordinal reuse weakens portable confirmation joins",
+    "21008357": "unique ordinal comparison non-reproduction; explicit replay/startup fidelity limits remain"
+  },
+  "checks": [
+    "go test -race ./internal/streamsup/...",
+    "go test -race ./cmd/pyry/...",
+    "focused tagged race tests for readers, observer matching, replay ordering and ordinal selection",
+    "go vet ./...",
+    "go vet -tags e2e_realclaude ./internal/e2e/realclaude/...",
+    "go build -o temporary-path ./cmd/pyry"
   ]
 }
