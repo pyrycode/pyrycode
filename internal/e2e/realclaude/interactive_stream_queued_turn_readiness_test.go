@@ -46,6 +46,7 @@ type readinessCapture struct {
 	Witnesses                                          []readinessWitness
 	Resources                                          []map[string]any
 	Replay                                             []readinessReplayRow
+	PrefixHistory                                      []readinessWitness
 }
 
 // TestInteractiveStreamQueuedTurnReadiness compares a source-derived mobile prefix
@@ -145,12 +146,23 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 	}()
 	t.Cleanup(func() { stop(); <-done })
 	subjects := map[string]int{streamModalBootstrapUUID: 0}
-	t.Cleanup(func() { r.Witnesses = append(r.Witnesses, readinessReadObservations(private, subjects)...) })
+	t.Cleanup(func() {
+		r.Witnesses = append(r.Witnesses, readinessReadObservations(private, subjects)...)
+		for subject, ordinal := range subjects {
+			for _, e := range readinessHistory(h.home, subject) {
+				switch e.Type {
+				case "send_accepted", "send_delivered", "send_dropped", "main_turn_opened", "turn_end", "compaction_boundary":
+					r.PrefixHistory = append(r.PrefixHistory, readinessWitness{At: e.TS, Boundary: e.Type, Ordinal: ordinal, OK: true})
+				}
+			}
+		}
+	})
 	r.Replay = readinessPrefix()
 	p := &readinessReplay{t: t, h: h, r: r, subjects: subjects, reconnect: reconnect, seq: 10000}
 	if preceding > 0 {
 		for n := range r.Replay {
 			row := &r.Replay[n]
+			p.row = row
 			row.Started = time.Now().UTC()
 			for _, op := range row.Operations {
 				p.operation(op)

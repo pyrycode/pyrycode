@@ -83,3 +83,7 @@ Pending documentation stage: `docs/knowledge/features/e2e-realclaude-test-infras
 - [Errors/logs] SHOULD FIX: persist only static failure categories and allowlisted measurements. Private daemon output stays in memory.
 - [Concurrency] Observe outside existing locks; join sampler before reading resources; preserve serialized cipher-state use.
 - [Threat model] Existing relay, token binding, exactly-once queue and conversation isolation protections remain unchanged; no gate bypass or timeout increase.
+
+## Revisions
+
+- 2026-10-11: first reconstructed batch at `b1376c5a` executed 2 arms (1 passed, 1 failed, 0 skipped). Prefix stopped at method 17 because its new driver incorrectly awaited `turn_end` after `/compact`; compaction emits its own `compaction_boundary`. Fresh admission opened within 4.478 seconds. Retain this as incomplete diagnostic/capture failure, never failing-before host evidence. Correct the terminal edge, include required promote cwd and await source mutation replies so the replay does not count invalid writes as completed effects. The unchanged enqueue deadline and permission gate remain intact.
