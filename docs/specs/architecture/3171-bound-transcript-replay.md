@@ -113,3 +113,14 @@ worker/publication proof requirements.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-11
+
+## Revisions
+
+- 2026-10-11: Use `-json` rather than `-v` in the documentation handoff's full-proof command so execution and replay-work counts can be collected directly. This changes reporting only; the original scenario selector, assertions and unchanged ten-minute package timeout remain the same. The executed command below passed at implementation commit `e097c4b303f6d43222bef01e5ff8810e2de62cdc`, exercising 594 helper scenarios, 92,544 partitions, 795,264 entries and 443,904 prefixes in 129.585 package seconds (140.997 command seconds).
+
+```sh
+PYRY_TRANSCRIPT_EXHAUSTIVE=1 go test -count=1 -json -run '^(TestVerifier(RepeatedMainLauncher|RejectedRuntimeTransfer)|TestMemoryTranscriptReply(ReusedLauncherOwnership|ShellObservation|RecoveryOwnership|RecoveryValidation))$' ./cmd/pyry
+```
+
+- 2026-10-11: State transitions and identity reuse clarification: None: partition selection and its call-local counters introduce no lifecycle or identity state. The existing lifecycle/identity assertions named in that section remain unchanged and passed under the race detector in all 594 helper scenarios.
+- 2026-10-11: Baseline census at the capped timeout: 159 scenario paths had completed work, with 21,247 passed partitions, 173,432 replayed entries and 97,336 checked prefixes. A baseline scenario path can contain both completion and interruption helper invocations; resulting runs report 594 helper invocations across 564 scenario paths. The bounded/full census comparison verified identical scenario paths, interruption controls and history lengths, and independently checked each summary's partition, entry and prefix totals against the selected coverage contract.
