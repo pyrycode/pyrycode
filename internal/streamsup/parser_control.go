@@ -143,7 +143,11 @@ func (p *Parser) noteControlAck(line []byte) {
 		}
 		return
 	}
+	observed := readinessAck(p, line, "ack_processing")
 	p.postureGate.release(ack.Response.RequestID)
+	if observed {
+		readinessReleased(p)
+	}
 }
 
 // noteConfirmedPermissionModeAck updates the informational current-child hold only

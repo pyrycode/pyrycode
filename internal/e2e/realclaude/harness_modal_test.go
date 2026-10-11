@@ -200,7 +200,10 @@ const permissionDaemonModel = "haiku"
 // which is argued at the caller, not here.
 func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, model string, operatorBypass bool) *bootstrapDaemon {
 	t.Helper()
-	bin := ensurePyryBuilt(t) // builds with real HOME (warm cache); runs with isolated HOME
+	bin := os.Getenv("PYRY_E2E_READINESS_BIN")
+	if bin == "" {
+		bin = ensurePyryBuilt(t) // builds with real HOME; runs with isolated HOME
+	}
 	socket := shortSocketPath(t)
 	stderr := &lockedBuffer{}
 
@@ -216,6 +219,9 @@ func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, mod
 		// Default callers append nothing, so there is no
 		// --dangerously-skip-permissions. That is the shape the standing modal gates
 		// exercise and the single line that differs from spawnBootstrapDaemon.
+	}
+	if fixture := os.Getenv("PYRY_E2E_READINESS_MCP_CONFIG"); bin == os.Getenv("PYRY_E2E_READINESS_BIN") && fixture != "" {
+		args = append(args, "--mcp-config", fixture)
 	}
 	if operatorBypass {
 		args = append(args,
