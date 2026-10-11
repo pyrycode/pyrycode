@@ -76,3 +76,7 @@ Pending for the documentation stage: add `Template and saved preferences` to `do
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-11
+
+## Revisions
+
+- 2026-10-11: Pin TypeScript 6.0.3, the portable JavaScript compiler, rather than the newly native TypeScript 7 compiler: the native platform packages grew the lockfile from the forecast to 486 lines. The final lockfile is 125 lines, and the complete change remains below 800 written lines. TypeScript 6 requires an explicit CSS module declaration, supplied in the frontend source. No caller/build contract changes.
