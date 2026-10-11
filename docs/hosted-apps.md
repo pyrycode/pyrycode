@@ -3,8 +3,13 @@
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 defines the hosting design. Strict manifest validation, durable registration,
 lifecycle mutations and restart normalization are implemented in the standalone
-`internal/apps` package; daemon integration, publication, the template and native
-viewers remain later work. This reference
+`internal/apps` package. The relay implements authenticated paged discovery and
+list cancellation; production capability activation still requires complete
+supervision/resource integration and cancellable transport wiring. Lifecycle
+notification producers remain #3158; resource-scoped cancellation remains #3123.
+A buildable React/TypeScript scaffold is maintained under
+`templates/hosted-app/`; SQL service behavior, preference UI, daemon integration,
+publication and native viewers remain later work. This reference
 preserves the contract's fields, limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 used by daemon, desktop and mobile consumers. Runtime and isolation choices are
@@ -77,7 +82,23 @@ These fixed paths are release-relative, not native service addresses. Publicatio
 daemon root selection remains #3139. Registrations are independent of
 conversations and keyed by `(server_id, app_id)`. Separate roots for different
 hosts may hold the same `app_id` independently. `Registry.List` returns detached
-records in stable `app_id` order together with their committed host revision.
+records in stable `app_id` order together with their committed host revision,
+captured atomically under the same registry lock. Discovery maps committed record
+fields, including every desired/observed state, rather than candidate manifest
+metadata. A page contains at most 16 whole records and that snapshot's host
+revision. Each continuation re-reads an atomic snapshot and rejects revision
+drift with retryable `apps.changed`; clients must restart rather than combine
+pages from different revisions.
+
+Host selection comes from the authenticated, nonrevoked paired connection.
+Two hosts with the same `app_id` expose their own registrations independently;
+an app ID or cursor cannot route to another host. The opaque continuation binds
+host, captured revision and last app ID in connection-owned state, expires
+30 seconds after issuance, and becomes invalid on reconnect. Exchanged host
+cursors fail with nonretryable `app.invalid_request`. See
+[discovery paging and cancellation](protocol-mobile.md#paging-cancellation-and-validation)
+for pending-page capacity, retirement and wire errors.
+
 There are at most 256 live registrations; admission of a 257th fails unchanged.
 
 `Registry.Register` commits the manifest title, `desired: available` and
@@ -134,7 +155,8 @@ write. Opening exposes the fully committed normalized baseline through
 changes, and store no durable events or conversation history. Callbacks run
 synchronously under the registry mutex and must return promptly without calling
 any registry method, including unsubscribe. The returned unsubscribe is
-idempotent. Discovery wire mapping and relay/daemon consumers remain #3138/#3139.
+idempotent. Discovery wire mapping is implemented in the relay; lifecycle
+notification producers remain #3158 and daemon installation remains #3139.
 
 `Registry.Remove` deletes only the registration and durably tombstones its
 identity. Source, build and data files remain byte-for-byte intact. Registration
@@ -150,7 +172,7 @@ for storage, concurrency and regression-test constraints.
 
 A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists caller-supplied observations; health checks and process/retry reconciliation remain separate work (#3122). New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
 
-The discovery wire contract has these exact fields; its mapping remains #3138. Unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality and the package's unset storage values do not change record nullability.
+The implemented discovery mapping has these exact fields. Unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality and the package's unset storage values do not change record nullability.
 
 | Record field | JSON type | Meaning |
 |---|---|---|
@@ -203,7 +225,18 @@ APPS_ROOT/
 
 `build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The registry maps app/release identities to validated roots and digests; network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; activation/data restoration have a recoverable journal. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
-The template owns `npm run typecheck` (TypeScript checks both frontend and service without emitting), `npm test` (noninteractive, deterministic tests against temporary SQL files), and `npm run build` (frontend bundle, compiled service/migration JS and copied SQL). No runtime TS loader, Node type stripping or dev server is part of publication. Install/build scripts execute as trusted app code; publishing from a channel uses the existing assistant/operator authorization boundary. These commands are argv arrays executed in the selected source/staging tree, not shell text assembled from wire fields.
+The template owns `npm run typecheck` (TypeScript checks both frontend and service
+without emitting), `npm test` (noninteractive, deterministic tests), and
+`npm run build` (frontend bundle and compiled service/migration JS). The current
+scaffold tests runtime bounds and literal React title rendering; temporary-SQL
+tests and migration SQL follow in #3141. The build leaves `sql/migrations` at
+the source/release root rather than copying it into `dist`. See
+[Template and saved preferences](#template-and-saved-preferences) for the
+implemented layout and commands. No runtime TS loader, Node type stripping or
+dev server is part of publication. Install/build scripts execute as trusted app
+code; publishing from a channel uses the existing assistant/operator authorization
+boundary. These commands are argv arrays executed in the selected source/staging
+tree, not shell text assembled from wire fields.
 
 The daemon starts `node dist/service/main.js` with cwd equal to the immutable build directory. It supplies only a documented minimal environment plus explicitly configured app-service integrations; client tokens, Noise keys and daemon-control credentials are never supplied. The mandatory values are:
 
@@ -225,15 +258,103 @@ A service is ready only when `GET /_pyry/health` returns HTTP 200 and JSON `{ "r
 
 ### Responsive React shell
 
-The reusable React shell has native-independent page header/title, wrapping tab navigation, responsive main content, labeled filters, cards/tables and a polite status/error region. Use the [approved prototype](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272) as layout/behavior reference: Computers, Projects, Boards, Runs, Performance, Allowances. Match theme using local CSS variables; readable contrast, keyboard focus, accessible controls and safe-area padding work at desktop widths and a 320-pixel phone viewport. Computer cards use three columns above 760 px and one below; boards use four columns above 760 px, two below and one below 420 px. Charts/trends stack below 650 px; wide tables scroll horizontally. Coarse-pointer controls have at least 44-pixel touch height. No global horizontal page overflow or hover-only chart interaction.
+The responsive shell and browser proof follow in #3142; the current scaffold
+renders only a title and an editable-source message. The intended reusable React
+shell has native-independent page header/title, wrapping tab navigation, responsive main content, labeled filters, cards/tables and a polite status/error region. Use the [approved prototype](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272) as layout/behavior reference: Computers, Projects, Boards, Runs, Performance, Allowances. Match theme using local CSS variables; readable contrast, keyboard focus, accessible controls and safe-area padding work at desktop widths and a 320-pixel phone viewport. Computer cards use three columns above 760 px and one below; boards use four columns above 760 px, two below and one below 420 px. Charts/trends stack below 650 px; wide tables scroll horizontally. Coarse-pointer controls have at least 44-pixel touch height. No global horizontal page overflow or hover-only chart interaction.
 
 The orchestrator's combined CPU/memory graphs have independent per-computer selectors defaulting to 24 hours. Runs puts active work above history in one tab with common project/computer filters. Performance keeps averages and model-combined trends beneath each agent role in one view. Boards show ticket labels. Ticket drain finishes all remaining stages of already-owned tickets; agent drain finishes current runs then pauses. Fleet service owns claims, runs, telemetry, participation, capacity limits, drain state and allowances. The app service adapts configured fleet APIs; it does not duplicate fleet ownership in app SQL or let browser content select integration URLs.
+
+## Template and saved preferences
+
+The standalone entry is
+[`templates/hosted-app/scaffold.mjs`](../templates/hosted-app/scaffold.mjs), with
+maintained template files in `templates/hosted-app/source/`. Run it from the
+repository root using Node.js `>=24.15.0 <25.0.0`:
+
+```sh
+node templates/hosted-app/scaffold.mjs \
+  --destination /tmp/my-hosted-app \
+  --title 'My hosted app' \
+  --server-id 11111111-1111-4111-8111-111111111111 \
+  --app-id 22222222-2222-4222-8222-222222222222 \
+  --release-version 1.0.0
+```
+
+The caller supplies the destination, title and canonical lowercase UUIDv4
+`server_id`/`app_id`; `--release-version` is optional and defaults to `1.0.0`.
+Title and release bounds match [manifest validation](#manifest-validation).
+The destination's parent must already exist. Generation writes the source tree
+directly into a new destination, refusing existing directories, files and
+symlinks, including dangling symlinks, without modifying them or their targets.
+Invalid manifest inputs fail before creating the directory. A write failure can
+leave an incomplete destination for inspection; retrying does not overwrite it.
+Titles are serialized into JSON and rendered as React text children, so valid
+quotes and HTML-like text remain literal data.
+
+Generated source includes:
+
+```text
+<destination>/
+  app.json                            v1 manifest with caller identities
+  package.json, package-lock.json      pinned dependencies and consistent lock
+  .npmrc, .gitignore                   install policy and generated-file exclusions
+  tsconfig.web.json, tsconfig.service.json
+  scripts/build.mjs
+  src/web/{main.tsx,App.tsx,style.css,assets.d.ts,title.json}
+  src/service/{main.ts,migrate.ts,runtime.mjs}
+  sql/migrations/                     initially empty
+  test/app.test.mjs
+```
+
+React/React DOM, their type definitions, Node type definitions, TypeScript and
+`esbuild-wasm` are pinned; the portable bundler is a development dependency.
+From the generated destination, run:
+
+```sh
+cd /tmp/my-hosted-app
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+`npm ci` uses the committed lockfile. `typecheck` covers both frontend and service;
+`test` runs offline without prompts. npm `devEngines`, `engines` and
+`.npmrc`'s `engine-strict=true` reject a mismatched actual Node executable before
+installation. Runtime checks also guard scaffold generation, typecheck, tests,
+build and the compiled start/migration entries; they never select another runtime.
+
+Build output is compiled ESM at `dist/service/main.js`,
+`dist/service/migrate.js` and `dist/service/runtime.mjs`, plus public-only
+`dist/web/index.html` and `dist/web/assets/main.js`/`main.css`.
+The external script and stylesheet use `/assets/…` URLs relative to the app root,
+compatible with the [viewer CSP](#electron-and-android-isolation).
+Source secrets, environment files, SQL data, service code, lockfiles and
+`node_modules` stay outside `dist/web`. `sql/migrations` remains release-relative
+beside `dist`; publication needs no runtime TypeScript loader or development server.
+
+This slice supplies buildable source. `npm start` and `npm run migrate` execute
+the compiled entries, which deliberately exit nonzero with `unfinished-service`
+diagnostics. They bind no port, create no database and claim neither health nor
+schema readiness. SQL service/migrations and saved-preference persistence follow
+in [#3141](https://github.com/pyrycode/pyrycode/issues/3141); the responsive
+preference UI and browser persistence proof follow in
+[#3142](https://github.com/pyrycode/pyrycode/issues/3142). The eventual
+[orchestrator walkthrough](#orchestrator-walkthrough) describes app-scoped saved
+preferences shared by authorized viewers.
+
+Generation alone does not register, publish or return a ready app link.
+[#3125](https://github.com/pyrycode/pyrycode/issues/3125) owns identity minting,
+daemon-selected destinations and registration/publication tools;
+[#3126](https://github.com/pyrycode/pyrycode/issues/3126) owns the channel workflow
+and readiness-confirmed links described in
+[Create, publish and update](#create-publish-and-update).
 
 ## Client resource bridge
 
 ### Capability and envelope vocabulary
 
-Add the literal `hosted_apps_v1` to the supported capability intersection in `negotiateCapabilities`, advertised by both viewers via `HelloClientPayload.capabilities` and acknowledged via `HelloAckPayload.capabilities`. The daemon advertises it only when v1 registration, supervision and resource routing are wired and available. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
+`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production supplies a general cancellable transport adapter but no discovery/readiness providers, so activation remains disabled until complete integration. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
 
 Without the negotiated capability, clients show that host's Apps feature as unsupported and send no app requests; hosts emit no app list/state/resource pushes to that peer. An old host may return existing `protocol.unknown_type`; a supporting host receiving an app request without negotiation returns `error` with `protocol.unsupported`. Other host connections/conversations continue normally. A new contract version uses a new capability and vocabulary for incompatible semantics, never reinterprets these enums.
 
@@ -258,7 +379,9 @@ For every hosted wire table, fields are required unless explicitly optional; nul
 
 `Route`/the v2 routing boundary must recognize the vocabulary and enforce direction before dispatch. A client-sent response/notification is invalid. App work is performed by bounded cancellable workers; a stalled disk/service/credit wait cannot block that connection's cancellation or unrelated message handling. No relay changes or hosted-app parsing occur on the relay.
 
-Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID; it expires after 30 seconds. Empty/null request cursors are invalid. The daemon validates it without using it as a path. If revision changed or cursor expired, return `apps.changed` and start a fresh walk; do not combine pages from different revisions. Fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated peers. At most one list walk/request is pending per connection; discovery/cancel/credit queues are bounded to 16 control envelopes per connection and remain runnable independently of resource workers. Reconnect always starts a new list walk.
+Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the atomic host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID in connection-owned state; it expires 30 seconds after issuance. Empty/null request cursors are invalid. The daemon validates it without using it as a path or host selector. If revision changed or cursor expired, return retryable `apps.changed` and require a fresh walk; do not combine pages from different revisions. One page request is pending per connection through read and delivery; a delivered page's cursor holds no worker. Further pending lists return `app.busy` with `retry_after_s: 1`. A fresh `{}` after completion replaces the previous walk. List cancellation retires only that connection's pending target; a blocked read retains capacity until it exits. The ordered discovery/control lane holds at most 16 envelopes including active delivery and cancel acknowledgements. Reconnect always starts a new list walk. See the [implemented wire behavior](protocol-mobile.md#paging-cancellation-and-validation).
+
+Lifecycle notification producers remain pending #3158. Their contract makes a fresh list authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts must emit updates in revision order to negotiated peers. Resource/credit handling and resource-scoped cancellation remain #3123, including their independent worker bounds.
 
 ### Asset/API fields and HTTP semantics
 
@@ -372,7 +495,8 @@ Store display preferences (selected tab, per-computer chart periods, project/com
 
 The [implementation responsibilities](specs/architecture/3120-hosted-app-contract.md#12-implementation-responsibilities-and-handoff)
 assign registration/discovery to #3121, service supervision to #3122, encrypted
-resource routing to #3123, the template to #3124, publishing/recovery to #3125
+resource routing to #3123, the template family to #3124 (buildable scaffold #3140,
+SQL service #3141 and responsive preference UI #3142), publishing/recovery to #3125
 and channel tools/readiness links to #3126. Desktop #1927 and mobile #2063 own
 viewers; desktop #1928 and mobile #2064 own host-scoped Apps navigation.
 The issue's [family roadmap](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100789144)

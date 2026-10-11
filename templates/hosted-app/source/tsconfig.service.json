@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext",
+    "strict": true, "allowJs": true, "checkJs": true, "types": ["node"],
+    "rootDir": "src/service", "outDir": "dist/service"
+  },
+  "include": ["src/service"]
+}

@@ -231,6 +231,16 @@ func (c *Connection) Send(env protocol.RoutingEnvelope) error {
 	return c.client.Send(raw)
 }
 
+// SendContext waits for cancellable, bounded delivery through Send's ordered
+// transport pump. The caller still owns Noise sealing and sender ID order.
+func (c *Connection) SendContext(ctx context.Context, env protocol.RoutingEnvelope) error {
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal routing envelope: %w", err)
+	}
+	return c.client.SendContext(ctx, raw)
+}
+
 // Connected reports whether the binary↔relay transport leg currently has a live
 // conn — a level poll of the underlying transport.Client for the v2 push drain's
 // pre-seal probe (V2SessionConfig.Connected, #874). A false result means Send

@@ -27,6 +27,25 @@ rejected bytes untouched. The canonical UUIDv4 check reuses
 [`identity.ParseServerID`](identity-package.md#parseserverid--validation).
 Identity is `(server_id, app_id)`; separate hosts require separate roots.
 
+## Template toolchain
+
+The [standalone source scaffold](../../hosted-apps.md#template-and-saved-preferences)
+shares the manifest contract with `ValidateManifest`; generation and a successful
+build establish neither registration nor service readiness.
+
+An npm `preinstall` hook runs too late to reject an unsupported runtime before
+dependency installation. Keep the template's npm `devEngines` runtime error
+policy, `engines` range and `.npmrc` `engine-strict=true` together with
+`assertRuntime` checks in command/compiled entries. The check concerns the actual
+executable and must not silently choose another Node version.
+
+Portable compiler/bundler choices keep the scaffold's dependency closure small
+across Linux and macOS. TypeScript 7's native platform packages expanded the
+lockfile substantially; the template pins the JavaScript TypeScript 6 compiler
+and `esbuild-wasm` instead. TypeScript 6's side-effect import checking needs the
+explicit `declare module '*.css'` in `assets.d.ts` for the frontend stylesheet
+import; removing it breaks frontend typechecking.
+
 ## Manifest updates and retention
 
 The stored manifest can describe a candidate title/release while the committed
@@ -89,7 +108,13 @@ value, not pointer identity. Each changed mutation advances the durable host
 sequence once and stamps its record or tombstone. A failed write never swaps
 committed memory or notifies consumers.
 `Registry.List` returns records and host revision from one detached snapshot,
-including independent last-error values. Use one registry owner per root;
+including independent last-error values. Discovery must preserve this atomic
+pair: reading the revision separately could label records from another commit.
+The relay maps committed `Record` fields, never candidate manifest title/release
+metadata, and rechecks the snapshot revision on each continuation. Equal app IDs
+on different host roots remain separate registrations; connection-owned cursors
+cannot select a host. See [discovery paging](../../protocol-mobile.md#paging-cancellation-and-validation).
+Use one registry owner per root;
 independent owners and cross-process writes to the same root are unsupported.
 Reopening can commit newer revisions, so transfer ownership to the reopened
 registry and stop using its predecessor. Mutating the predecessor's stale
@@ -107,9 +132,23 @@ Callbacks must return promptly and never re-enter any registry method, including
 the returned idempotent unsubscribe: doing so would deadlock on the held mutex.
 Slow callbacks also block mutations and readers. Consumers own later transport
 work; the registry adds no delivery goroutines or queues. Discovery wire mapping
-and relay/daemon installation remain #3138/#3139.
+is implemented in the relay; lifecycle notification producers remain #3158 and
+daemon installation remains #3139. Because `List` can wait on this mutex, relay
+cancellation retires its result without releasing read capacity until the
+original reader returns. Starting a replacement reader on every cancel would
+accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ## Testing
+
+The scaffold's `fresh generated app passes the toolchain` test preserves a
+sentinel in existing `node_modules` while invoking `npm ci` with an explicitly
+selected unsupported Node executable. A nonzero exit alone could pass with a
+late `preinstall` rejection after dependencies were replaced; unchanged sentinel
+bytes prove rejection precedes that mutation. This arm requires
+`HOSTED_APP_UNSUPPORTED_NODE` and `HOSTED_APP_NPM_CLI`; the default run does not
+exercise an actual alternate executable. Generated `npm test` checks version
+strings separately. Frontend and service type-error injections likewise prove
+both trees are checked, rather than trusting an exit-zero typecheck on valid files.
 
 `TestStorageExactKeys` distinguishes required omissions from optional omissions
 and rejects aliases at each storage level. `TestStorageAliasShadowing` supplies

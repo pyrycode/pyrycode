@@ -93,13 +93,15 @@ func TestV2Session_QueueReconcile_InteractiveOpen(t *testing.T) {
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
 	mgr, stop := startManager(t, V2SessionConfig{
-		Frames:            frames,
-		Outbound:          rec.outbound,
-		StaticPriv:        respPriv,
-		Devices:           reg,
-		ServerID:          v2TestServerID,
-		Logger:            silentLogger(),
-		OutstandingQueues: func() []protocol.QueueStatePayload { return []protocol.QueueStatePayload{sampleQueuePayload(convID, 1, 2)} },
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+		OutstandingQueues: func() []protocol.QueueStatePayload {
+			return []protocol.QueueStatePayload{sampleQueuePayload(convID, 1, 2)}
+		},
 	})
 	t.Cleanup(stop)
 
@@ -187,13 +189,15 @@ func TestV2Session_QueueReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
 	mgr, stop := startManager(t, V2SessionConfig{
-		Frames:            frames,
-		Outbound:          rec.outbound,
-		StaticPriv:        respPriv,
-		Devices:           reg,
-		ServerID:          v2TestServerID,
-		Logger:            silentLogger(),
-		OutstandingQueues: func() []protocol.QueueStatePayload { return []protocol.QueueStatePayload{sampleQueuePayload(convID, 1)} },
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+		OutstandingQueues: func() []protocol.QueueStatePayload {
+			return []protocol.QueueStatePayload{sampleQueuePayload(convID, 1)}
+		},
 	})
 	t.Cleanup(stop)
 
@@ -233,13 +237,15 @@ func TestV2Session_QueueReconcile_NonInteractiveNoResend(t *testing.T) {
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
 	mgr, stop := startManager(t, V2SessionConfig{
-		Frames:            frames,
-		Outbound:          rec.outbound,
-		StaticPriv:        respPriv,
-		Devices:           reg,
-		ServerID:          v2TestServerID,
-		Logger:            silentLogger(),
-		OutstandingQueues: func() []protocol.QueueStatePayload { return []protocol.QueueStatePayload{sampleQueuePayload(convID, 1)} },
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+		OutstandingQueues: func() []protocol.QueueStatePayload {
+			return []protocol.QueueStatePayload{sampleQueuePayload(convID, 1)}
+		},
 	})
 	t.Cleanup(stop)
 

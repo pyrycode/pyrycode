@@ -1142,16 +1142,17 @@ func startRelayV2(
 	}
 
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
-		Frames:        conn.Frames(),
-		Outbound:      conn.Send,
-		Connected:     conn.Connected,
-		Reconnect:     conn.Reconnected(),
-		StaticPriv:    priv[:],
-		Devices:       registry,
-		DevicesPath:   resolveDevicesPath(w.instanceName),
-		ServerID:      string(serverID),
-		Logger:        logger,
-		WorkspaceBase: &w.workspaceBase,
+		Frames:          conn.Frames(),
+		Outbound:        conn.Send,
+		OutboundContext: conn.SendContext,
+		Connected:       conn.Connected,
+		Reconnect:       conn.Reconnected(),
+		StaticPriv:      priv[:],
+		Devices:         registry,
+		DevicesPath:     resolveDevicesPath(w.instanceName),
+		ServerID:        string(serverID),
+		Logger:          logger,
+		WorkspaceBase:   &w.workspaceBase,
 		// This release's minimum app versions, both unset today (#2578).
 		MinClientVersions: relay.ShippedMinClientVersions(),
 		Handlers: map[string]dispatch.Handler{
