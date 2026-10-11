@@ -64,10 +64,6 @@ First validate observation privacy and exact matching with focused race tests. R
 - Does the established cause fit the remaining size/budget? Reassess before any repair.
 - Original cap, idle, pacing and exact argv remain unknown; do not replace them with assumptions.
 
-## Revisions
-
-- 2026-10-11: the first authenticated diagnostic used a nonexistent `busy` wire state to recognize turn activity. The emitter reports `thinking`/`responding`, then `idle`; use a nonempty non-idle state. Keep the first run's failed captures and counts, classified as a capture pacing defect rather than a host readiness failure. This corrects the experiment without changing production behavior or the admission deadline.
-
 ## Documentation handoff
 
 Pending documentation stage: `docs/knowledge/features/e2e-realclaude-test-infrastructure.md` § Test infrastructure must document the established trigger, permission-aware daemon/queue reproduction and fresh-daemon comparison, and link retained counted before/after evidence. State that process start, acknowledgment arrival, parser processing and gate release are separate observations and that mobile #2010 owns the unchanged full mobile gate. Describe a mechanism only once established.
