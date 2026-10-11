@@ -109,6 +109,9 @@ func TestHostedDiscoveryEnvelopeValidation(t *testing.T) {
 		{"null ts", strings.Replace(base, `"2026-10-10T18:00:01Z"`, "null", 1)},
 		{"invalid ts", strings.Replace(base, `"2026-10-10T18:00:01Z"`, `"tomorrow"`, 1)},
 		{"offset ts", strings.Replace(base, `18:00:01Z`, `18:00:01+02:00`, 1)},
+		{"one digit hour", strings.Replace(base, `18:00:01Z`, `8:00:01Z`, 1)},
+		{"comma fraction", strings.Replace(base, `18:00:01Z`, `18:00:01,5Z`, 1)},
+		{"empty fraction", strings.Replace(base, `18:00:01Z`, `18:00:01.Z`, 1)},
 		{"missing payload", strings.Replace(base, `,"payload":{}`, "", 1)},
 		{"alias payload", strings.Replace(base, `"payload"`, `"PAYLOAD"`, 1)},
 		{"array payload", strings.Replace(base, `"payload":{}`, `"payload":[]`, 1)},
@@ -146,6 +149,13 @@ func TestHostedDiscoveryEnvelopeValidation(t *testing.T) {
 	e, _ := p.next()
 	if e.Type != "apps" || e.InReplyTo == nil || *e.InReplyTo != hostedMaxID {
 		t.Fatalf("alias overrode canonical authority: %+v", e)
+	}
+	for _, ts := range []string{"2026-10-10T08:00:01Z", "2026-10-10T18:00:01.5Z", "2026-10-10T18:00:01.123456789Z"} {
+		p.raw(strings.Replace(base, "2026-10-10T18:00:01Z", ts, 1))
+		e, _ := p.next()
+		if e.Type != "apps" || e.InReplyTo == nil || *e.InReplyTo != 41 {
+			t.Fatalf("valid UTC timestamp %q: %+v", ts, e)
+		}
 	}
 }
 

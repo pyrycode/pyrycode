@@ -119,6 +119,7 @@ func testHostedStartCaps(t *testing.T, d HostedAppsDiscovery, caps []string, twe
 		}
 		return rec.outbound(e)
 	}}
+	cfg.OutboundContext = cfg.HostedAppsSend
 	cfg.Logger = slog.New(testHostedLog{events: events})
 	if tweak != nil {
 		tweak(&cfg)

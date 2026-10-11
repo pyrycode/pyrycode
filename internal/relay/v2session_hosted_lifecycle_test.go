@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -248,4 +249,47 @@ func TestHostedDiscoveryDelivery(t *testing.T) {
 		p.request(10, "list_apps", `{}`)
 		testHostedClose(t, p)
 	})
+}
+
+func TestHostedDiscoveryNoDeliveryAdapter(t *testing.T) {
+	for _, raw := range []string{
+		`{"id":10,"type":"list_apps","ts":"2026-10-10T18:00:01Z","payload":{}}`,
+		`{"id":10,"type":"list_apps","ts":null,"payload":{}}`,
+		`{"id":null,"type":"list_apps","ts":"2026-10-10T18:00:01Z","payload":{}}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			gate, called := make(chan struct{}), make(chan protocol.RoutingEnvelope, 8)
+			var once sync.Once
+			t.Cleanup(func() { once.Do(func() { close(gate) }) })
+			p := testHostedStart(t, nil, func(c *V2SessionConfig) {
+				c.HostedAppsReady, c.HostedAppsSend = nil, nil
+				c.OutboundContext = nil
+				out := c.Outbound
+				c.Outbound = func(e protocol.RoutingEnvelope) error {
+					var inner protocol.InnerFrameV2
+					_ = json.Unmarshal(e.Frame, &inner)
+					if inner.Type != protocol.TypeNoiseResp {
+						called <- e
+						<-gate
+					}
+					return out(e)
+				}
+			})
+			for i := 0; i < 3; i++ {
+				if i != 0 {
+					p.open([]string{protocol.CapabilityHostedAppsV1})
+				}
+				p.raw(raw)
+				p.waitEvent("v2.hosted.delivery_unavailable", "")
+				testHostedGone(t, p)
+			}
+			p.stop()
+			once.Do(func() { close(gate) })
+			select {
+			case e := <-called:
+				t.Fatalf("unsafe legacy delivery invoked: %+v", e)
+			default:
+			}
+		})
+	}
 }

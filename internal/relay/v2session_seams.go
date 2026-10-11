@@ -80,6 +80,13 @@ type V2SessionConfig struct {
 	// dropped, because the relay leg's reconnect handles recovery.
 	Outbound func(protocol.RoutingEnvelope) error
 
+	// OutboundContext is the cancellable transport path for hosted controls when
+	// HostedAppsSend is absent, including unsupported replies and terminal closes.
+	// It must return on cancellation/deadline without publishing cancelled work.
+	// Nil with no HostedAppsSend retires hosted work before sealing; Outbound
+	// cannot safely deliver it. This transport seam does not enable discovery.
+	OutboundContext func(context.Context, protocol.RoutingEnvelope) error
+
 	// Connected reports whether the relay transport leg is up. drainOnce consults
 	// it before sealing a queued envelope: false leaves the head unpopped and
 	// unsealed, so no Noise send nonce is burned on a frame that cannot arrive (a

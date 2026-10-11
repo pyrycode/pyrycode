@@ -126,7 +126,7 @@ func parseHostedRequest(raw []byte) (req hostedRequest, recognized, correlatable
 		return
 	}
 	ts, ok := obj["ts"].(string)
-	if !ok || !strings.HasSuffix(ts, "Z") {
+	if !ok || !hostedTimestamp(ts) {
 		return
 	}
 	if _, e := time.Parse(time.RFC3339Nano, ts); e != nil {
@@ -176,4 +176,42 @@ func parseHostedRequest(raw []byte) (req hostedRequest, recognized, correlatable
 	}
 	valid = true
 	return
+}
+
+// hostedTimestamp enforces RFC3339 UTC syntax before time.Parse checks dates.
+// Go's parser also accepts a one-digit hour and comma fractional separator.
+func hostedTimestamp(ts string) bool {
+	if len(ts) < 20 || ts[len(ts)-1] != 'Z' {
+		return false
+	}
+	for i := 0; i < 19; i++ {
+		var separator byte
+		switch i {
+		case 4, 7:
+			separator = '-'
+		case 10:
+			separator = 'T'
+		case 13, 16:
+			separator = ':'
+		}
+		if separator != 0 {
+			if ts[i] != separator {
+				return false
+			}
+		} else if ts[i] < '0' || ts[i] > '9' {
+			return false
+		}
+	}
+	if len(ts) == 20 {
+		return true
+	}
+	if len(ts) < 22 || ts[19] != '.' {
+		return false
+	}
+	for i := 20; i < len(ts)-1; i++ {
+		if ts[i] < '0' || ts[i] > '9' {
+			return false
+		}
+	}
+	return true
 }

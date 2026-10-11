@@ -231,6 +231,16 @@ func (c *Connection) Send(env protocol.RoutingEnvelope) error {
 	return c.client.Send(raw)
 }
 
+// SendContext writes one routing envelope with cancellable, bounded delivery.
+// The caller serializes envelopes that share a Noise cipher or sender ID domain.
+func (c *Connection) SendContext(ctx context.Context, env protocol.RoutingEnvelope) error {
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal routing envelope: %w", err)
+	}
+	return c.client.SendContext(ctx, raw)
+}
+
 // Connected reports whether the binary↔relay transport leg currently has a live
 // conn — a level poll of the underlying transport.Client for the v2 push drain's
 // pre-seal probe (V2SessionConfig.Connected, #874). A false result means Send

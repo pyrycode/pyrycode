@@ -396,6 +396,32 @@ func (c *Client) Send(frame []byte) error {
 	}
 }
 
+// SendContext writes directly to the current socket and waits for completion.
+// Cancellation bounds both writer acquisition and I/O; no frame is left in the
+// send pump after return. Calls sharing an ordering domain must be serialized.
+func (c *Client) SendContext(ctx context.Context, frame []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-c.closeCh:
+		return ErrClosed
+	default:
+	}
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return ErrNotConnected
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
+	defer cancel()
+	if err := conn.Write(writeCtx, websocket.MessageText, frame); err != nil {
+		return fmt.Errorf("send: %w", err)
+	}
+	return nil
+}
+
 // Receive blocks until the next frame arrives, ctx is cancelled, the
 // client is closed, or the underlying conn drops. Returns ErrDisconnected
 // when the conn drops (or when no conn is currently live); the caller

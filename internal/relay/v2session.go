@@ -1249,16 +1249,15 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 		return
 	}
 	if s.hosted != nil {
+		send := m.hostedSender()
+		if send == nil {
+			m.cfg.Logger.Error("relay: hosted delivery unavailable; session retired", "event", "v2.hosted.delivery_unavailable", "conn_id", s.connID)
+			return
+		}
 		go func() {
-			deliveryCtx, cancel := context.WithTimeout(context.Background(), hostedDeliveryTimeout)
+			deliveryCtx, cancel := context.WithTimeout(ctx, hostedDeliveryTimeout)
 			defer cancel()
-			var err error
-			if m.cfg.HostedAppsSend != nil {
-				err = m.cfg.HostedAppsSend(deliveryCtx, env)
-			} else {
-				err = m.cfg.Outbound(env)
-			}
-			if err != nil {
+			if err := send(deliveryCtx, env); err != nil {
 				m.cfg.Logger.Debug("relay: hosted terminal delivery failed", "event", "v2.hosted.close_failed", "conn_id", s.connID)
 			}
 		}()

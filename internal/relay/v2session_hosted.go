@@ -197,6 +197,11 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 	if h.active != nil || len(h.queue) == 0 || s.state != V2StateOpen {
 		return
 	}
+	send := m.hostedSender()
+	if send == nil {
+		m.closeWith(ctx, s, StatusSessionGone, nil)
+		return
+	}
 	if !m.hostedAuthorized(s) {
 		m.closeWith(ctx, s, StatusUnauthorized, nil)
 		return
@@ -254,24 +259,22 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 	deliveryCtx, cancel := context.WithTimeout(ctx, hostedDeliveryTimeout)
 	h.cancel = cancel
 	h.deliveryCtx = deliveryCtx
-	send := m.cfg.HostedAppsSend
 	deliveryDone := make(chan error, 1)
 	o.deliveryDone = deliveryDone
-	// Unsupported peers also need a cancellable control lane. With no installed
-	// adapter the legacy callback is isolated to this one worker; it is never replaced.
 	go func() {
-		var err error
-		if send != nil {
-			err = send(deliveryCtx, wire)
-		} else {
-			err = m.cfg.Outbound(wire)
-		}
-		deliveryDone <- err
+		deliveryDone <- send(deliveryCtx, wire)
 		select {
 		case m.hostedDeliveryDone <- struct{}{}:
 		default:
 		}
 	}()
+}
+
+func (m *V2SessionManager) hostedSender() func(context.Context, protocol.RoutingEnvelope) error {
+	if m.cfg.HostedAppsSend != nil {
+		return m.cfg.HostedAppsSend
+	}
+	return m.cfg.OutboundContext
 }
 
 // drainHostedDelivery observes a returned delivery before admitting later work.
