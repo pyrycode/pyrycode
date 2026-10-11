@@ -80,3 +80,8 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-11
+
+## Revisions
+
+- 2026-10-11: Generation identity is carried by the session's distinct inbox reference, rather than exposing a session pointer to callbacks. Retired inboxes are removed immediately. Terminal sends use a separate bounded-lifetime close context, cancelled at replacement session creation before its handshake sends anything; completion removes only its own context. This prevents a delayed close from reaching a replacement even during the new handshake.
+- 2026-10-11: Clear removed queue entries as well as releasing reservations, so cancelled pages and completed outputs retain no stale envelope references in slice backing arrays.
