@@ -1,0 +1,1054 @@
+{
+  "Test": "TestInteractiveStreamQueuedTurnReadiness/retained",
+  "Arm": "retained",
+  "DaemonCommit": "5f281b49709d47a2f4867c1a7b3f7a7243309a99",
+  "ClaudeVersion": "2.1.280",
+  "Conclusion": "diagnostic incomplete; cause unknown",
+  "Dirty": false,
+  "Setup": {
+    "active_child_cap": 0,
+    "conversation_auto_archive_days": 30,
+    "daemon_composed_bypass": true,
+    "enableAllProjectMcpServers": true,
+    "idle_timeout_seconds": 0,
+    "model": "sonnet",
+    "operator_bypass": false,
+    "original_idle_cap_pacing": "unknown",
+    "pacing": "serial completed turn then idle",
+    "preceding_turns": 32,
+    "reproduction_assumptions": true,
+    "retention": "same daemon, no removals",
+    "skipDangerousModePermissionPrompt": true,
+    "stdout_boundary": "complete line available to forwarder; kernel arrival unknown",
+    "stored_permission_mode": "default",
+    "sweep_interval_seconds": 3600
+  },
+  "Counts": {
+    "executed": 1,
+    "failed": 1,
+    "passed": 0,
+    "skipped": 0
+  },
+  "Turns": [
+    {
+      "Ordinal": 1,
+      "Created": "2026-10-11T13:05:56.175695358Z",
+      "Sent": "2026-10-11T13:05:56.182365468Z",
+      "Enqueued": "2026-10-11T13:05:56.18359795Z",
+      "Delivered": "2026-10-11T13:06:00.53329018Z",
+      "Opened": "2026-10-11T13:06:00.540333998Z",
+      "PromptMatches": true,
+      "ReplyMatches": true,
+      "ExactlyOnce": true,
+      "ConfirmedBeforeDelivery": true,
+      "Idle": false,
+      "AdmissionWithin90Seconds": true
+    }
+  ],
+  "Witnesses": [
+    {
+      "at": "2026-10-11T13:05:56.12573065Z",
+      "boundary": "child_started",
+      "ordinal": 0,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:56.125954229Z",
+      "boundary": "posture_armed",
+      "ordinal": 0,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:56.126030966Z",
+      "boundary": "permission_write",
+      "ordinal": 0,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:56.183835354Z",
+      "boundary": "activate_begin",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:56.185985989Z",
+      "boundary": "activate_end",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:56.186023501Z",
+      "boundary": "idle_begin",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:56.18604122Z",
+      "boundary": "idle_end",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:56.186082945Z",
+      "boundary": "turn_write",
+      "ordinal": 1,
+      "ok": false
+    },
+    {
+      "at": "2026-10-11T13:05:56.187045774Z",
+      "boundary": "child_started",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:56.187099319Z",
+      "boundary": "posture_armed",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:56.187145646Z",
+      "boundary": "permission_write",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.186914931Z",
+      "boundary": "activate_begin",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.187003576Z",
+      "boundary": "activate_end",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.187036681Z",
+      "boundary": "idle_begin",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.187066666Z",
+      "boundary": "idle_end",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.187183511Z",
+      "boundary": "turn_write",
+      "ordinal": 1,
+      "ok": false
+    },
+    {
+      "at": "2026-10-11T13:05:57.723682825Z",
+      "boundary": "ack_stdout_line",
+      "ordinal": 0,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.723839146Z",
+      "boundary": "ack_processing",
+      "ordinal": 0,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.723870757Z",
+      "boundary": "gate_released",
+      "ordinal": 0,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.956226558Z",
+      "boundary": "ack_stdout_line",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.95633891Z",
+      "boundary": "ack_processing",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:57.956369366Z",
+      "boundary": "gate_released",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:58.187731256Z",
+      "boundary": "activate_begin",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:58.187879201Z",
+      "boundary": "activate_end",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:58.187921613Z",
+      "boundary": "idle_begin",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:58.187948657Z",
+      "boundary": "idle_end",
+      "ordinal": 1,
+      "ok": true
+    },
+    {
+      "at": "2026-10-11T13:05:58.188503637Z",
+      "boundary": "turn_write",
+      "ordinal": 1,
+      "ok": true
+    }
+  ],
+  "Resources": [
+    {
+      "at": "2026-10-11T13:05:56.175782625Z",
+      "descendant_rss_kib": 125504,
+      "known": true,
+      "live_claude_children": 1,
+      "processes": 3,
+      "ps_lifetime_cpu_percent": 195.1
+    },
+    {
+      "at": "2026-10-11T13:05:58.194158356Z",
+      "descendant_rss_kib": 502168,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 126.4
+    },
+    {
+      "at": "2026-10-11T13:06:00.201139885Z",
+      "descendant_rss_kib": 509556,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 73.60000000000001
+    },
+    {
+      "at": "2026-10-11T13:06:02.208221384Z",
+      "descendant_rss_kib": 518200,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 52.8
+    },
+    {
+      "at": "2026-10-11T13:06:04.219932117Z",
+      "descendant_rss_kib": 741944,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 8,
+      "ps_lifetime_cpu_percent": 117.5
+    },
+    {
+      "at": "2026-10-11T13:06:06.23934107Z",
+      "descendant_rss_kib": 728764,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 8,
+      "ps_lifetime_cpu_percent": 68.39999999999999
+    },
+    {
+      "at": "2026-10-11T13:06:08.260516044Z",
+      "descendant_rss_kib": 729076,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 8,
+      "ps_lifetime_cpu_percent": 50.9
+    },
+    {
+      "at": "2026-10-11T13:06:10.267587087Z",
+      "descendant_rss_kib": 728992,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 8,
+      "ps_lifetime_cpu_percent": 42.4
+    },
+    {
+      "at": "2026-10-11T13:06:12.275592319Z",
+      "descendant_rss_kib": 729336,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 8,
+      "ps_lifetime_cpu_percent": 36.1
+    },
+    {
+      "at": "2026-10-11T13:06:14.288197752Z",
+      "descendant_rss_kib": 730544,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 8,
+      "ps_lifetime_cpu_percent": 31.500000000000004
+    },
+    {
+      "at": "2026-10-11T13:06:16.302411242Z",
+      "descendant_rss_kib": 730420,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 8,
+      "ps_lifetime_cpu_percent": 28.7
+    },
+    {
+      "at": "2026-10-11T13:06:18.313468581Z",
+      "descendant_rss_kib": 730624,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 8,
+      "ps_lifetime_cpu_percent": 25.8
+    },
+    {
+      "at": "2026-10-11T13:06:20.323948139Z",
+      "descendant_rss_kib": 520588,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 15.5
+    },
+    {
+      "at": "2026-10-11T13:06:22.333297124Z",
+      "descendant_rss_kib": 520588,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 14.5
+    },
+    {
+      "at": "2026-10-11T13:06:24.345627184Z",
+      "descendant_rss_kib": 519448,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 13.6
+    },
+    {
+      "at": "2026-10-11T13:06:26.359965458Z",
+      "descendant_rss_kib": 519380,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 12.8
+    },
+    {
+      "at": "2026-10-11T13:06:28.367242466Z",
+      "descendant_rss_kib": 519752,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 12.1
+    },
+    {
+      "at": "2026-10-11T13:06:30.382144761Z",
+      "descendant_rss_kib": 518720,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 11.6
+    },
+    {
+      "at": "2026-10-11T13:06:32.391699332Z",
+      "descendant_rss_kib": 518804,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 11
+    },
+    {
+      "at": "2026-10-11T13:06:34.399308459Z",
+      "descendant_rss_kib": 517060,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 10.5
+    },
+    {
+      "at": "2026-10-11T13:06:36.407207105Z",
+      "descendant_rss_kib": 517044,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 10
+    },
+    {
+      "at": "2026-10-11T13:06:38.43641948Z",
+      "descendant_rss_kib": 517004,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 9.7
+    },
+    {
+      "at": "2026-10-11T13:06:40.498173647Z",
+      "descendant_rss_kib": 516724,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 9.3
+    },
+    {
+      "at": "2026-10-11T13:06:42.517404864Z",
+      "descendant_rss_kib": 516156,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 8.899999999999999
+    },
+    {
+      "at": "2026-10-11T13:06:44.525815176Z",
+      "descendant_rss_kib": 516196,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 8.600000000000001
+    },
+    {
+      "at": "2026-10-11T13:06:46.536140419Z",
+      "descendant_rss_kib": 516228,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 8.3
+    },
+    {
+      "at": "2026-10-11T13:06:48.543158964Z",
+      "descendant_rss_kib": 515804,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 8.1
+    },
+    {
+      "at": "2026-10-11T13:06:50.551444915Z",
+      "descendant_rss_kib": 515852,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 7.8
+    },
+    {
+      "at": "2026-10-11T13:06:52.560575101Z",
+      "descendant_rss_kib": 515852,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 7.6
+    },
+    {
+      "at": "2026-10-11T13:06:54.575324346Z",
+      "descendant_rss_kib": 515852,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 7.4
+    },
+    {
+      "at": "2026-10-11T13:06:56.584449434Z",
+      "descendant_rss_kib": 515856,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 7.199999999999999
+    },
+    {
+      "at": "2026-10-11T13:06:58.590171206Z",
+      "descendant_rss_kib": 515864,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 7
+    },
+    {
+      "at": "2026-10-11T13:07:00.597311495Z",
+      "descendant_rss_kib": 514204,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 6.800000000000001
+    },
+    {
+      "at": "2026-10-11T13:07:02.603001347Z",
+      "descendant_rss_kib": 515236,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 6.6
+    },
+    {
+      "at": "2026-10-11T13:07:04.609466486Z",
+      "descendant_rss_kib": 515236,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 6.5
+    },
+    {
+      "at": "2026-10-11T13:07:06.618165964Z",
+      "descendant_rss_kib": 515360,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 6.3
+    },
+    {
+      "at": "2026-10-11T13:07:08.628776224Z",
+      "descendant_rss_kib": 515448,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 6.2
+    },
+    {
+      "at": "2026-10-11T13:07:10.644126161Z",
+      "descendant_rss_kib": 514364,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 6.1000000000000005
+    },
+    {
+      "at": "2026-10-11T13:07:12.66003193Z",
+      "descendant_rss_kib": 513472,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 5.9
+    },
+    {
+      "at": "2026-10-11T13:07:14.666893771Z",
+      "descendant_rss_kib": 513476,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 5.8
+    },
+    {
+      "at": "2026-10-11T13:07:16.676046042Z",
+      "descendant_rss_kib": 513424,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 5.6
+    },
+    {
+      "at": "2026-10-11T13:07:18.687165699Z",
+      "descendant_rss_kib": 513388,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 5.6000000000000005
+    },
+    {
+      "at": "2026-10-11T13:07:20.697389496Z",
+      "descendant_rss_kib": 514996,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 5.4
+    },
+    {
+      "at": "2026-10-11T13:07:22.705612898Z",
+      "descendant_rss_kib": 514508,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 5.4
+    },
+    {
+      "at": "2026-10-11T13:07:24.717144529Z",
+      "descendant_rss_kib": 514512,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 5.1
+    },
+    {
+      "at": "2026-10-11T13:07:26.729628579Z",
+      "descendant_rss_kib": 514512,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 5.1
+    },
+    {
+      "at": "2026-10-11T13:07:28.737470574Z",
+      "descendant_rss_kib": 514512,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.9
+    },
+    {
+      "at": "2026-10-11T13:07:30.745887304Z",
+      "descendant_rss_kib": 514476,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.9
+    },
+    {
+      "at": "2026-10-11T13:07:32.753289544Z",
+      "descendant_rss_kib": 514032,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.8
+    },
+    {
+      "at": "2026-10-11T13:07:34.874764901Z",
+      "descendant_rss_kib": 514052,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.699999999999999
+    },
+    {
+      "at": "2026-10-11T13:07:36.886146966Z",
+      "descendant_rss_kib": 514076,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.7
+    },
+    {
+      "at": "2026-10-11T13:07:38.899253583Z",
+      "descendant_rss_kib": 514088,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.6
+    },
+    {
+      "at": "2026-10-11T13:07:40.90828407Z",
+      "descendant_rss_kib": 514020,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.6
+    },
+    {
+      "at": "2026-10-11T13:07:42.916365064Z",
+      "descendant_rss_kib": 514116,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.5
+    },
+    {
+      "at": "2026-10-11T13:07:44.923382352Z",
+      "descendant_rss_kib": 514140,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.4
+    },
+    {
+      "at": "2026-10-11T13:07:46.934100178Z",
+      "descendant_rss_kib": 514252,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.4
+    },
+    {
+      "at": "2026-10-11T13:07:48.942220805Z",
+      "descendant_rss_kib": 514380,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.3999999999999995
+    },
+    {
+      "at": "2026-10-11T13:07:50.951796353Z",
+      "descendant_rss_kib": 514436,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.2
+    },
+    {
+      "at": "2026-10-11T13:07:52.96256294Z",
+      "descendant_rss_kib": 512428,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.2
+    },
+    {
+      "at": "2026-10-11T13:07:54.968693596Z",
+      "descendant_rss_kib": 512484,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.2
+    },
+    {
+      "at": "2026-10-11T13:07:56.973312994Z",
+      "descendant_rss_kib": 512508,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.2
+    },
+    {
+      "at": "2026-10-11T13:07:58.978601752Z",
+      "descendant_rss_kib": 506864,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.199999999999999
+    },
+    {
+      "at": "2026-10-11T13:08:00.982668478Z",
+      "descendant_rss_kib": 497352,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.2
+    },
+    {
+      "at": "2026-10-11T13:08:02.988858499Z",
+      "descendant_rss_kib": 497360,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.2
+    },
+    {
+      "at": "2026-10-11T13:08:04.993124459Z",
+      "descendant_rss_kib": 497408,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.2
+    },
+    {
+      "at": "2026-10-11T13:08:06.99805663Z",
+      "descendant_rss_kib": 497436,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.1
+    },
+    {
+      "at": "2026-10-11T13:08:09.002988512Z",
+      "descendant_rss_kib": 497284,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4.1
+    },
+    {
+      "at": "2026-10-11T13:08:11.011203668Z",
+      "descendant_rss_kib": 497284,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4
+    },
+    {
+      "at": "2026-10-11T13:08:13.020683911Z",
+      "descendant_rss_kib": 497284,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4
+    },
+    {
+      "at": "2026-10-11T13:08:15.026541625Z",
+      "descendant_rss_kib": 497272,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 4
+    },
+    {
+      "at": "2026-10-11T13:08:17.030863174Z",
+      "descendant_rss_kib": 497276,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.9
+    },
+    {
+      "at": "2026-10-11T13:08:19.035313982Z",
+      "descendant_rss_kib": 497276,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.9
+    },
+    {
+      "at": "2026-10-11T13:08:21.040203832Z",
+      "descendant_rss_kib": 497276,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.9000000000000004
+    },
+    {
+      "at": "2026-10-11T13:08:23.045210772Z",
+      "descendant_rss_kib": 497276,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.8
+    },
+    {
+      "at": "2026-10-11T13:08:25.051133487Z",
+      "descendant_rss_kib": 497248,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.8
+    },
+    {
+      "at": "2026-10-11T13:08:27.055801784Z",
+      "descendant_rss_kib": 497220,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.7
+    },
+    {
+      "at": "2026-10-11T13:08:29.060782772Z",
+      "descendant_rss_kib": 497220,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.7
+    },
+    {
+      "at": "2026-10-11T13:08:31.06727377Z",
+      "descendant_rss_kib": 497220,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.6999999999999997
+    },
+    {
+      "at": "2026-10-11T13:08:33.071882966Z",
+      "descendant_rss_kib": 497220,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.6999999999999997
+    },
+    {
+      "at": "2026-10-11T13:08:35.076015709Z",
+      "descendant_rss_kib": 497220,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.6999999999999997
+    },
+    {
+      "at": "2026-10-11T13:08:37.081272354Z",
+      "descendant_rss_kib": 497220,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.7
+    },
+    {
+      "at": "2026-10-11T13:08:39.08662601Z",
+      "descendant_rss_kib": 497220,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.6
+    },
+    {
+      "at": "2026-10-11T13:08:41.091613975Z",
+      "descendant_rss_kib": 497220,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.5000000000000004
+    },
+    {
+      "at": "2026-10-11T13:08:43.098211077Z",
+      "descendant_rss_kib": 497236,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.5
+    },
+    {
+      "at": "2026-10-11T13:08:45.110509257Z",
+      "descendant_rss_kib": 497236,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.5
+    },
+    {
+      "at": "2026-10-11T13:08:47.115855143Z",
+      "descendant_rss_kib": 497236,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.5
+    },
+    {
+      "at": "2026-10-11T13:08:49.120980302Z",
+      "descendant_rss_kib": 497780,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.5
+    },
+    {
+      "at": "2026-10-11T13:08:51.125417573Z",
+      "descendant_rss_kib": 498380,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.5
+    },
+    {
+      "at": "2026-10-11T13:08:53.131490625Z",
+      "descendant_rss_kib": 498436,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.5
+    },
+    {
+      "at": "2026-10-11T13:08:55.136951564Z",
+      "descendant_rss_kib": 498436,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.4
+    },
+    {
+      "at": "2026-10-11T13:08:57.141401587Z",
+      "descendant_rss_kib": 497948,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.3000000000000003
+    },
+    {
+      "at": "2026-10-11T13:08:59.147588024Z",
+      "descendant_rss_kib": 497428,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.3
+    },
+    {
+      "at": "2026-10-11T13:09:01.15313816Z",
+      "descendant_rss_kib": 497236,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.3
+    },
+    {
+      "at": "2026-10-11T13:09:03.157740332Z",
+      "descendant_rss_kib": 497236,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.3
+    },
+    {
+      "at": "2026-10-11T13:09:05.163833891Z",
+      "descendant_rss_kib": 497244,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.3
+    },
+    {
+      "at": "2026-10-11T13:09:07.167787873Z",
+      "descendant_rss_kib": 497244,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.3000000000000003
+    },
+    {
+      "at": "2026-10-11T13:09:09.174089005Z",
+      "descendant_rss_kib": 496740,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.1999999999999997
+    },
+    {
+      "at": "2026-10-11T13:09:11.179424565Z",
+      "descendant_rss_kib": 496200,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.2
+    },
+    {
+      "at": "2026-10-11T13:09:13.184130698Z",
+      "descendant_rss_kib": 496204,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.2
+    },
+    {
+      "at": "2026-10-11T13:09:15.189196162Z",
+      "descendant_rss_kib": 496224,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.1
+    },
+    {
+      "at": "2026-10-11T13:09:17.196760913Z",
+      "descendant_rss_kib": 496300,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.1
+    },
+    {
+      "at": "2026-10-11T13:09:19.201681662Z",
+      "descendant_rss_kib": 496292,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.1
+    },
+    {
+      "at": "2026-10-11T13:09:21.205900196Z",
+      "descendant_rss_kib": 496292,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.1
+    },
+    {
+      "at": "2026-10-11T13:09:23.209963724Z",
+      "descendant_rss_kib": 496392,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.1
+    },
+    {
+      "at": "2026-10-11T13:09:25.218780047Z",
+      "descendant_rss_kib": 496392,
+      "known": true,
+      "live_claude_children": 2,
+      "processes": 7,
+      "ps_lifetime_cpu_percent": 3.1
+    }
+  ]
+}
