@@ -111,7 +111,24 @@ enabled opening ID leaves a checkpoint hole despite presenting the reply.
 An exact live banner count includes these receipts: retain every banner and
 validate expected receipts separately from refusals rather than ignoring info
 banners, which would hide duplicate receipts. `TestInteractiveStreamHookBlockedBannerReachesTheClient`
-keeps the full refusal/liveness window and checks the opening receipt before text.
+keeps the full refusal/liveness window and separately validates the hook refusal
+and queued-send/opening receipts by durable fact identity. The first banner need
+not be the refusal: acceptance/delivery receipts can precede hook execution, so
+an early empty witness does not prove the hook never ran. `awaitBanner` waits
+within its existing deadline for the conversation's `oslcapBlockReason`, then
+checks the `blocked` witness. `hookBannerCheckWindow` joins `history_entry_id`
+and timestamp to raw `Store.Page` entries; legacy pages project these distinct
+facts into indistinguishable empty info banners. It requires exactly one intact
+refusal, both sends' `send_accepted`/`send_delivered` receipts and the liveness
+`main_turn_opened` receipt, rejecting missing, duplicate or unexpected banners.
+Each receipt needs all five nonnull payload fields, the empty info payload,
+nonzero durable/replay IDs and timestamp. Acceptance precedes its linked delivery
+in live and durable order; the delivery must reference the exact observed
+acceptance entry ID, because a reused client message ID alone can match an
+unobserved acceptance. Only the opening must follow the liveness ack and precede
+assistant text; queued receipts have no ack-order constraint. See the
+[hook-window lessons](e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md)
+for the refusal and liveness proof retained alongside receipt accounting.
 
 The common append seam uses `AppendWithMetadata` with explicit
 `Metadata.Shown`, classified from the already-marshalled payload by

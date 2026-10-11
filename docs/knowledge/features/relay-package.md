@@ -37,6 +37,7 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error)
 
 func (*Connection) Frames() <-chan protocol.RoutingEnvelope // closes on lifecycle exit
 func (*Connection) Send(env protocol.RoutingEnvelope) error  // binary→relay outbound
+func (*Connection) SendContext(ctx context.Context, env protocol.RoutingEnvelope) error // same ordered pump; waits for cancellable socket completion
 func (*Connection) CloseConn(connID string, code uint16) error // #308; close one phone conn
 func (*Connection) Connected() bool                          // #874; level poll, passthrough to transport.Client.IsConnected
 func (*Connection) Reconnected() <-chan struct{}              // #875; edge signal, fires once per fresh conn (initial + every reconnect)

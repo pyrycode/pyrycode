@@ -295,7 +295,7 @@ func (m *V2SessionManager) forwardEnvelope(ctx context.Context, connID string, e
 	return m.forwardEnvelopeSource(ctx, connID, env, false)
 }
 
-func (m *V2SessionManager) forwardEnvelopeSource(_ context.Context, connID string, env protocol.Envelope, supplied bool) error {
+func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID string, env protocol.Envelope, supplied bool) error {
 	s, ok := m.sessions[connID]
 	if !ok {
 		// A torn-down session was already deleted from the map by
@@ -352,6 +352,14 @@ func (m *V2SessionManager) forwardEnvelopeSource(_ context.Context, connID strin
 	if s.thread && liveStateFamily(env.Type) && len(envJSON) > protocol.MaxThreadEnvelopeBytes {
 		return errInvalidLiveState
 	}
+	if s.hosted != nil {
+		m.hostedEnvelope(ctx, s, env)
+		if suggestionRev > 0 && !supplied {
+			recordReplySuggestion(s, suggestionConv, suggestionRev)
+		}
+		return nil
+	}
+	s.nextID = max(s.nextID, min(env.ID, hostedMaxID)+1)
 	ciphertext, err := s.send.Encrypt(envJSON)
 	if err != nil {
 		// Realistically unreachable under correct flynn/noise.

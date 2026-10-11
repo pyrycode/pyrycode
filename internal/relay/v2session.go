@@ -263,18 +263,16 @@ const (
 // is serialised by the manager's single dispatch goroutine (the loop is
 // the lock); there is no mutex because flynn/noise's CipherStates are
 // not safe for concurrent use and the manager guarantees a single
-// writer per conn_id. The re-key responder (handleRekeyInit) atomically
-// swaps s.send / s.recv in a single tuple assignment on this same
-// goroutine; old *CipherState pointers are dropped from the struct and
-// reclaimed by GC. No explicit Wipe() of the key bytes is exposed — the
-// single-owner-goroutine invariant means no code path reads the old
-// state after the swap, which is the practical zeroisation property.
+// writer per conn_id. Rekey installs receive keys on Run; hosted send keys
+// change at the ordered noise_resp barrier after old-key output drains.
+// Old CipherState pointers become unreachable after that transition.
 type V2Session struct {
 	connID string
 	state  V2SessionState
 	resp   *noise.Responder
 	send   *noise.CipherState
 	recv   *noise.CipherState
+	nextID uint64
 
 	// device is the matched device snapshot from the handshake's
 	// token-accept branch. Surfaced into the per-frame *dispatch.Conn as
@@ -299,7 +297,9 @@ type V2Session struct {
 	// *dispatch.Conn by routeAppFrame, so a handler reads it as c.MultiAgent().
 	multiAgent bool
 	// thread is the authenticated admission decision, retained through rekey.
-	thread bool
+	thread     bool
+	hostedApps bool
+	hosted     *hostedState
 	// Supplied live-state progress is Run-owned and ends with this connection.
 	liveSnapshot   func() (LiveState, bool)
 	livePending    *LiveState
@@ -489,13 +489,14 @@ func (s *V2Session) State() V2SessionState { return s.state }
 // conn_id); v2 in this slice runs no application handlers, every frame
 // processes synchronously (~100µs Noise call or sub-µs JSON decode), so
 // single-goroutine fan-in is correct and obviously safe. The re-key
-// responder's CipherState swap (s.send, s.recv = newSend, newRecv)
-// inherits this property: a single tuple assignment on this goroutine
-// cannot be observed half-applied by any other code path, so the spec's
-// atomic-switchover requirement is structural.
+// responder and hosted delivery lane change CipherStates only on this
+// goroutine, with noise_resp ordering the old-key and new-key output.
 type V2SessionManager struct {
-	cfg      V2SessionConfig
-	sessions map[string]*V2Session
+	hostedCtx          context.Context
+	hostedDeliveryDone chan struct{}
+	hostedDone         chan hostedResult
+	cfg                V2SessionConfig
+	sessions           map[string]*V2Session
 
 	// minClientVersions is cfg.MinClientVersions parsed once by
 	// NewV2SessionManager, keyed by app name, holding only the apps with a
@@ -686,17 +687,19 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		minClientVersions[app] = parsed
 	}
 	return &V2SessionManager{
-		cfg:          cfg,
-		sessions:     make(map[string]*V2Session),
-		wake:         make(chan wakeSignal, wakeBufferSize),
-		manualRekey:  make(chan manualRekeyReq),
-		queues:       make(map[string]*pushQueue),
-		drainCh:      make(chan struct{}, 1),
-		replayCh:     make(chan struct{}, 1),
-		snapshot:     make(chan snapshotReq),
-		appReply:     make(chan appReplyMsg),
-		pushOverflow: make(chan string, wakeBufferSize),
-		bundleReady:  make(chan bundleResult, wakeBufferSize),
+		cfg:                cfg,
+		hostedDeliveryDone: make(chan struct{}, 1),
+		hostedDone:         make(chan hostedResult),
+		sessions:           make(map[string]*V2Session),
+		wake:               make(chan wakeSignal, wakeBufferSize),
+		manualRekey:        make(chan manualRekeyReq),
+		queues:             make(map[string]*pushQueue),
+		drainCh:            make(chan struct{}, 1),
+		replayCh:           make(chan struct{}, 1),
+		snapshot:           make(chan snapshotReq),
+		appReply:           make(chan appReplyMsg),
+		pushOverflow:       make(chan string, wakeBufferSize),
+		bundleReady:        make(chan bundleResult, wakeBufferSize),
 
 		newSessionDone:  make(chan newSessionResult, wakeBufferSize),
 		switchAgentDone: make(chan switchAgentResult, wakeBufferSize),
@@ -716,7 +719,17 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 // via the ctx branch on shutdown and leaves no goroutine behind.
 func (m *V2SessionManager) Run(ctx context.Context) error {
 	runCtx, cancelRun := context.WithCancel(ctx)
+	m.hostedCtx = runCtx
 	defer cancelRun()
+	defer func() {
+		for _, s := range m.sessions {
+			if s.hosted != nil {
+				m.retireHosted(s)
+			}
+		}
+	}()
+	hostedSweep := time.NewTicker(100 * time.Millisecond)
+	defer hostedSweep.Stop()
 	for {
 		select {
 		case <-runCtx.Done():
@@ -726,6 +739,20 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 				return nil
 			}
 			m.handleFrame(runCtx, env)
+		case res := <-m.hostedDone:
+			m.handleHostedDone(runCtx, res)
+		case <-m.hostedDeliveryDone:
+			for _, s := range m.sessions {
+				m.drainHostedDelivery(runCtx, s)
+			}
+		case <-hostedSweep.C:
+			for _, s := range m.sessions {
+				if s.hosted != nil && !m.hostedAuthorized(s) {
+					m.closeWith(runCtx, s, StatusUnauthorized, nil)
+				} else if s.hosted != nil && s.hosted.deliveryCtx != nil && s.hosted.deliveryCtx.Err() != nil {
+					m.closeWith(runCtx, s, StatusSessionGone, nil)
+				}
+			}
 		case w := <-m.wake:
 			m.handleWake(runCtx, w)
 		case connID := <-m.pushOverflow:
@@ -964,9 +991,15 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 	// per-frame AEAD cost. A JSON decode failure here deliberately falls
 	// through so dispatch.Route's malformed-envelope branch emits the
 	// sealed protocol.malformed reply established by #446 unchanged.
+	if m.routeHosted(ctx, s, plaintext) {
+		return
+	}
 	var probeEnv protocol.Envelope
 	if err := json.Unmarshal(plaintext, &probeEnv); err == nil {
 		switch probeEnv.Type {
+		case protocol.TypeListApps, protocol.TypeAppCancel:
+			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
+			return
 		case protocol.TypeRekeyRequest:
 			m.handleRekeyRequest(ctx, s, probeEnv)
 			return
@@ -1200,9 +1233,9 @@ func (m *V2SessionManager) handlePeerClose(env protocol.RoutingEnvelope) {
 
 // closeWith tears s down (teardown) and emits a single routing envelope
 // carrying Frame (when non-nil) and CloseCode. The atomic Frame+CloseCode is
-// what guarantees the spec's ordering MUST: phone observes the error frame
-// before the WS close (spec § Error handling, line 436). Honors ctx by
-// checking before the send; the Outbound call itself is synchronous.
+// what guarantees the phone observes an error frame before the WS close.
+// Hosted connections retire delivery immediately and send their terminal close
+// through the cancellable adapter with a deadline; legacy Outbound is synchronous.
 func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code websocket.StatusCode, frame json.RawMessage) {
 	if !m.teardown(s) {
 		return
@@ -1213,6 +1246,21 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 		CloseCode: uint16(code),
 	}
 	if ctx.Err() != nil {
+		return
+	}
+	if s.hosted != nil {
+		send := m.hostedSender()
+		if send == nil {
+			m.cfg.Logger.Error("relay: hosted delivery unavailable; session retired", "event", "v2.hosted.delivery_unavailable", "conn_id", s.connID)
+			return
+		}
+		go func() {
+			deliveryCtx, cancel := context.WithTimeout(ctx, hostedDeliveryTimeout)
+			defer cancel()
+			if err := send(deliveryCtx, env); err != nil {
+				m.cfg.Logger.Debug("relay: hosted terminal delivery failed", "event", "v2.hosted.close_failed", "conn_id", s.connID)
+			}
+		}()
 		return
 	}
 	m.send(env)
@@ -1226,6 +1274,7 @@ func (m *V2SessionManager) teardown(s *V2Session) bool {
 	if s.state == V2StateClosed {
 		return false
 	}
+	m.retireHosted(s)
 	s.state = V2StateClosed
 	// Stop per-session timers to free runtime timer-heap entries and
 	// ensure no pending callback goroutine blocks indefinitely on

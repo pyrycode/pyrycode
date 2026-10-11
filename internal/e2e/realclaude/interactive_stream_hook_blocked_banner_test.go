@@ -168,7 +168,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -256,7 +258,7 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 	sealSendMessage(t, h.phone, h.initSend, blockReqID, convID, "m-blocked", oslcapBlockPrompt(nonce))
 
 	// --- AC 1, first half: the refusal reaches the client ----------------------
-	banner := w.awaitBanner(t, h, rig, perTurnReplyBudget)
+	banner := w.awaitBanner(t, h, rig, convID, perTurnReplyBudget)
 	if banner.ConversationID != convID {
 		t.Errorf("banner conversation_id = %q, want the driving conversation %q",
 			banner.ConversationID, convID)
@@ -290,8 +292,8 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 	verdicts := oslcapHookVerdicts(rig.WitnessPath)
 	if len(verdicts) == 0 || verdicts[0] != oslcapHookBlocked {
 		t.Fatalf("the hook witness reads %q, want it to open with %q. The rig did not refuse the marked "+
-			"prompt, so whatever reached the client above was not this file's subject. An EMPTY witness means "+
-			"the hook never ran at all — see the header's WHERE THE HOOK LIVES, and the spawn argv below.\n%s",
+			"prompt, so whatever reached the client above was not this file's subject. The witness was checked "+
+			"after waiting for the actual refusal; see the hook installation and spawn argv below.\n%s",
 			verdicts, oslcapHookBlocked, hookBannerSpawnArgv(h))
 	}
 
@@ -325,36 +327,25 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 			verdicts, oslcapHookPassed)
 	}
 
-	// Every banner is retained: one refusal and one nonvisual opening receipt
-	// for the unblocked turn. Duplicates or additional producers must still fail.
-	if len(w.banners) != 2 {
-		t.Fatalf("the client saw %d banner frames across the refusal and liveness turn, want exactly one "+
-			"refusal and one runtime opening receipt", len(w.banners))
-	}
-	wantReceipt := protocol.BannerPayload{ConversationID: convID, Level: "info"}
-	if w.banners[1] != wantReceipt {
-		t.Fatalf("post-refusal banner = %#v, want nonvisual receipt %#v", w.banners[1], wantReceipt)
-	}
-	receipt := w.bannerEnvelopes[1]
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(receipt.Payload, &fields); err != nil {
-		t.Fatalf("decode receipt fields: %v", err)
-	}
-	for _, key := range []string{"conversation_id", "level", "text", "truncated", "stops_turn"} {
-		if raw, ok := fields[key]; !ok || string(raw) == "null" {
-			t.Errorf("runtime receipt missing required nonnull field %q", key)
+	// Raw pages retain fact types; legacy wire pages project them all as banners.
+	store := history.New(filepath.Join(h.home, ".pyry", "test"))
+	var entries []history.Entry
+	cursor := ""
+	for {
+		page, err := store.Page(conversations.ConversationID(convID), cursor, 128)
+		if err != nil {
+			t.Fatalf("read raw hook-window history: %v", err)
 		}
+		entries = append(entries, page.Entries...)
+		if page.AtStart {
+			break
+		}
+		cursor = page.Cursor
 	}
-	refusal := w.bannerEnvelopes[0]
-	if receipt.HistoryEntryID == nil || *receipt.HistoryEntryID == 0 || receipt.TS.IsZero() ||
-		receipt.EventID == nil || *receipt.EventID == 0 {
-		t.Fatal("runtime opening receipt has no durable/replay identity or timestamp")
+	if err := hookBannerCheckWindow(convID, liveReqID, entries, w.frames); err != nil {
+		t.Fatalf("hook refusal/liveness window: %v", err)
 	}
-	if refusal.HistoryEntryID == nil || *receipt.HistoryEntryID <= *refusal.HistoryEntryID || receipt.TS.Before(refusal.TS) {
-		t.Fatal("runtime opening receipt does not follow the durable refusal banner")
-	}
-	t.Logf("AC 1: the session answered the next unblocked prompt after the refusal (send_message #%d), and "+
-		"exactly one refusal banner and one identified nonvisual opening receipt crossed the window", liveReqID)
+	t.Logf("the session answered send_message #%d after refusal; one refusal and five identified receipts crossed the window", liveReqID)
 }
 
 // hookBannerInstallUserSettings writes the rig's settings JSON into the minted
@@ -446,8 +437,8 @@ func hookBannerSpawnArgv(h *perConvHarness) string {
 // structurally true over the whole window rather than true of whatever a coarser
 // drain happened not to have consumed already.
 type hookBannerWindow struct {
-	banners         []protocol.BannerPayload
-	bannerEnvelopes []protocol.Envelope
+	banners []protocol.BannerPayload
+	frames  []protocol.Envelope
 
 	// readTimedOut records that a receive deadline expired, which on this client is
 	// terminal rather than recoverable — see next's guard.
@@ -553,27 +544,23 @@ func (w *hookBannerWindow) next(t *testing.T, h *perConvHarness,
 				t.Fatalf("decode banner payload: %v", err)
 			}
 			w.banners = append(w.banners, p)
-			w.bannerEnvelopes = append(w.bannerEnvelopes, env)
 		}
+		w.frames = append(w.frames, env)
 		return env, true
 	}
 }
 
-// awaitBanner reads the window forward to its first banner and returns that
-// payload. Every frame before it — the blocked send's own ack, any turn_state —
-// is read through next, so it is counted and checked rather than discarded.
-//
-// The timeout's failure text is where readings (a) through (d) are made
-// decidable, because a missing banner is the shape three of the four take.
+// awaitBanner waits for this conversation's hook reason under one deadline.
+// Empty queued receipts are retained and cannot complete the refusal wait.
 func (w *hookBannerWindow) awaitBanner(t *testing.T, h *perConvHarness,
-	rig oslcapRig, timeout time.Duration) protocol.BannerPayload {
+	rig oslcapRig, convID string, timeout time.Duration) protocol.BannerPayload {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
 		env, ok := w.next(t, h, deadline)
 		if !ok {
 			verdicts := oslcapHookVerdicts(rig.WitnessPath)
-			t.Fatalf("no banner reached the client within %s of the refused send. The hook witness reads %q, "+
+			t.Fatalf("no hook refusal banner reached the client within %s of the refused send. The hook witness reads %q, "+
 				"and it decides which of these this is:\n"+
 				"  EMPTY — the hook never ran, so the child did not register it from <HOME>/.claude/"+
 				"settings.json. Either claude stopped loading user settings on a spawn carrying its own "+
@@ -590,7 +577,10 @@ func (w *hookBannerWindow) awaitBanner(t *testing.T, h *perConvHarness,
 		}
 		if env.Type == protocol.TypeBanner {
 			// next already decoded and recorded it; the last one recorded is this.
-			return w.banners[len(w.banners)-1]
+			p := w.banners[len(w.banners)-1]
+			if hookBannerIsRefusal(p, convID) {
+				return p
+			}
 		}
 	}
 }
@@ -665,10 +655,6 @@ func (w *hookBannerWindow) awaitCompletedTurn(t *testing.T, h *perConvHarness, c
 			}
 		}
 		switch env.Type {
-		case protocol.TypeBanner:
-			if !sawAck || sawDelta {
-				t.Error("the opening receipt must follow the unblocked prompt's ack and precede its assistant text")
-			}
 		case protocol.TypeAck:
 			if env.InReplyTo != nil && *env.InReplyTo == reqID {
 				sawAck = true

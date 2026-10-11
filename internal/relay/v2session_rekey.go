@@ -53,35 +53,17 @@ type manualRekeyReq struct {
 	reply  chan error
 }
 
-// handleRekeyInit runs the responder side of a phone-initiated re-key
-// handshake. Same shape as the initial handshake (NewResponder →
-// ReadInit → WriteResp → emit noise_resp) with three differences:
-//
-//  1. Early-data is empty on both directions (docs/protocol-mobile.md
-//     § Re-key). Hello validation and token re-check are skipped — they
-//     ran at initial handshake. The per-rekey identity gate is the
-//     peer-static continuity check below, not the token.
-//  2. Peer-static continuity is enforced: the new initiator's static
-//     pub (from resp.PeerStatic() after ReadInit) MUST equal
-//     s.peerStatic captured at initial handshake. Mismatch closes at
-//     4426, the same code the initial handshake uses for IK-related
-//     failure.
-//  3. CipherState swap on success: a SINGLE tuple assignment
-//     `s.send, s.recv = newSend, newRecv` on the manager's single
-//     dispatch goroutine. No half-mixed state where one direction uses
-//     new keys and the other uses old. State stays V2StateOpen;
-//     s.device and s.peerStatic are preserved. The old *CipherState
-//     pointers are dropped from the struct; Go's GC reclaims the
-//     underlying memory. An explicit Wipe() of the key bytes is NOT
-//     exposed (would require touching internal/noise's surface —
-//     deferred); the single-owner-goroutine invariant means no code
-//     path observes the old state after the swap.
-//
-// Failure paths reuse the initial handshake's close code (4426) and
-// closeWith primitive — no new close code is introduced. closeWith
-// removes the session entry, so the next inbound frame on the same
-// conn_id lazy-creates a fresh V2StateAwaitingInit session.
+// handleRekeyInit responds to a phone-initiated rekey with empty early data.
+// The authenticated peer's static key must match the original handshake or the
+// connection closes at 4426. Receive keys install on Run. Hosted send keys
+// change at the ordered noise_resp barrier; legacy keys swap before synchronous
+// response delivery. Session state and authenticated identity remain unchanged.
+// A second hosted rekey cannot overtake a pending response barrier.
 func (m *V2SessionManager) handleRekeyInit(ctx context.Context, s *V2Session, inner InnerFrameV2Decoded) {
+	if s.hosted != nil && s.hosted.rekey {
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
 	resp, err := noise.NewResponder(m.cfg.StaticPriv)
 	if err != nil {
 		// Realistically unreachable: StaticPriv length is validated at
@@ -154,10 +136,17 @@ func (m *V2SessionManager) handleRekeyInit(ctx context.Context, s *V2Session, in
 		return
 	}
 
-	// Atomic swap on the single dispatch goroutine. The old
-	// *CipherState pointers are dropped from the struct here; the GC
-	// reclaims the underlying memory once no further reference exists.
-	// State stays V2StateOpen; s.device and s.peerStatic are preserved.
+	// State stays open and authenticated identity is preserved. Hosted delivery
+	// puts the send-key change behind all previously admitted old-key frames.
+	if s.hosted != nil {
+		// Old-key output precedes noise_resp. New-key output follows it, so
+		// swapping the send cipher waits until this barrier reaches the head.
+		s.recv = newRecv
+		s.hosted.rekey = true
+		wire := protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame}
+		m.hostedEnqueue(ctx, s, &hostedOutput{wire: &wire, newSend: newSend})
+		return
+	}
 	s.send, s.recv = newSend, newRecv
 
 	m.cfg.Logger.Info("relay: v2 rekey accept",
@@ -168,27 +157,10 @@ func (m *V2SessionManager) handleRekeyInit(ctx context.Context, s *V2Session, in
 	s.rekeyComplete(m, ctx)
 }
 
-// rekeyComplete is the seam that bridges responder-side swap completion
-// back to initiator-side cadence. Called from the success tail of
-// (*V2SessionManager).handleRekeyInit after the atomic s.send / s.recv
-// swap and the v2.rekey.accept log emission.
-//
-// Behaviour:
-//   - Clears awaitingRekeyReply (no-op if not set — a spontaneous
-//     phone-initiated re-key that the binary did not request still
-//     re-bases the 1-hour cadence; any successful swap is a fresh-key
-//     moment).
-//   - Stops and nils rekeyReplyTimer (no-op if nil).
-//   - Stops and replaces rekeyTimer with a fresh one armed
-//     rekeyInterval from now.
-//
-// Runs on the manager's single dispatch goroutine (the same goroutine
-// that owns s.send / s.recv after the swap). Inherits the no-mutex /
-// no-atomic invariant from the rest of the package.
-//
-// The (m, ctx) argument shape carries the dependencies needed to
-// re-arm the 1-hour timer — m for the wake channel, ctx (Run-derived
-// runCtx) for the AfterFunc callback's escape arm.
+// rekeyComplete clears the reply window and starts a fresh scheduled cadence.
+// Run calls it after legacy response forwarding or successful hosted noise_resp
+// delivery. A spontaneous peer rekey resets the cadence too. Timer and session
+// mutations stay on the manager's Run goroutine.
 func (s *V2Session) rekeyComplete(m *V2SessionManager, ctx context.Context) {
 	s.awaitingRekeyReply = false
 	if s.rekeyReplyTimer != nil {
@@ -242,61 +214,24 @@ func (m *V2SessionManager) handleRekeyRequest(_ context.Context, s *V2Session, e
 	}
 }
 
-// emitRekeyRequest builds an AEAD-sealed rekey_request envelope under
-// s.send, wraps it as a noise_msg inner frame, forwards via m.send,
-// then sets s.awaitingRekeyReply=true and arms s.rekeyReplyTimer.
-// Called on the manager's single dispatch goroutine from two sites:
-// handleWake's wakeRekeyEmit arm passes reason="scheduled" (timer-
-// driven), and handleManualRekey passes reason="manual" (operator-
-// triggered via the control socket — docs/protocol-mobile.md § Re-key).
-// The "compromise" reason is reserved for a future caller.
+// emitRekeyRequest admits a scheduled or manual rekey request on Run.
+// Callers must establish transport availability before admission. A pending
+// reply or response barrier prevents another request.
 //
-// PRECONDITION (#912): callers MUST verify transportDown() is false before
-// calling. Sealing a rekey_request while the relay leg is down burns a Noise
-// send-nonce on a frame m.send silently drops and arms a doomed reply window;
-// both current callers (handleWake's wakeRekeyEmit arm and handleManualRekey)
-// gate on transportDown() first, and a future "compromise" caller must too.
-// The check is not enforced inside here: the two callers diverge after it
-// (scheduled re-arms a retry timer, manual returns ErrTransportDown), which a
-// guard in this primitive could not signal back.
-//
-// Envelope ID is fixed at 1: there is no rekey_ack response that would
-// correlate by InReplyTo (the spec is explicit — the next successful
-// AEAD round-trip under the new keys is the implicit ack).
-//
-// AEAD-seal failure is realistically unreachable under correct
-// flynn/noise (same posture as sealError): the only trigger
-// s.send.Encrypt can reach from here is ErrMaxNonce — send-nonce
-// exhaustion — and the three marshal branches encode closed structs.
-// On seal or marshal failure the frame is dropped and a WARN line
-// emitted; the conn is NOT closed, and the session remains in
-// V2StateOpen. But none of the four failure branches arms anything, so
-// the scheduled cadence ends there:
-//
-//   - Scheduled: no further scheduled emit is armed. s.rekeyTimer still
-//     holds the one-shot that delivered this wake — non-nil, but fired
-//     and inert, so a re-arm guarded on s.rekeyTimer == nil would never
-//     fire on this path.
-//   - Manual: handleManualRekey stopped and nil'd s.rekeyTimer before
-//     calling in, so a failed manual emit likewise leaves no cadence.
-//     Re-running pyry rekey is the operator's recovery step, not a
-//     fallback the cadence provides.
-//
-// Recovery either way is a phone-initiated re-key (handleRekeyInit →
-// rekeyComplete), which re-arms the 1-hour cadence
-// (docs/protocol-mobile.md § Re-key). The idle sweep is untouched, but
-// idleTimer re-arms on every inbound frame: it reaps a session that
-// goes quiet, not the key lifetime of one that stays busy. The
-// awaitingRekeyReply skip below is not one of these paths — it returns
-// with a rekeyReplyTimer in flight, which either closes the conn or is
-// cleared by rekeyComplete.
+// Hosted requests share the bounded plaintext delivery lane and sender counter;
+// their reply window starts after successful delivery. Delivery failure closes
+// the connection. Legacy requests seal and forward synchronously with their
+// existing control ID and arm the reply window immediately. Legacy marshal or
+// seal failure logs a warning and requires a later peer or manual rekey to
+// restart the scheduled cadence. A successful rekey is acknowledged implicitly
+// by the next authenticated round trip under the new keys.
 func (m *V2SessionManager) emitRekeyRequest(ctx context.Context, s *V2Session, reason string) {
 	// Defensive: a wakeRekeyEmit arriving while already awaiting a
 	// reply would re-emit. Skip — the in-flight emit's reply window is
 	// still ticking. (Should not happen under normal operation;
 	// rekeyTimer is one-shot and only re-armed by rekeyComplete, which
 	// clears the bool first.)
-	if s.awaitingRekeyReply {
+	if s.awaitingRekeyReply || (s.hosted != nil && s.hosted.rekey) {
 		m.cfg.Logger.Warn("relay: v2 rekey emit skipped",
 			"event", "v2.rekey.emit.skipped_already_awaiting",
 			"conn_id", s.connID)
@@ -317,6 +252,11 @@ func (m *V2SessionManager) emitRekeyRequest(ctx context.Context, s *V2Session, r
 		Type:    protocol.TypeRekeyRequest,
 		TS:      time.Now().UTC(),
 		Payload: reqPayload,
+	}
+	if s.hosted != nil {
+		s.awaitingRekeyReply = true
+		m.hostedEnvelope(ctx, s, envelope)
+		return
 	}
 	envJSON, err := json.Marshal(envelope)
 	if err != nil {
@@ -459,7 +399,7 @@ func (m *V2SessionManager) handleManualRekey(ctx context.Context, connID string)
 	if s.state != V2StateOpen {
 		return ErrSessionNotOpen
 	}
-	if s.awaitingRekeyReply {
+	if s.awaitingRekeyReply || (s.hosted != nil && s.hosted.rekey) {
 		return ErrSessionNotOpen
 	}
 	// #912: gate the manual emit on the relay transport, AFTER the

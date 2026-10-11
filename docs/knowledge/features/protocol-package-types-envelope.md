@@ -137,8 +137,22 @@ regressions; see [protocol boundaries](development-verification.md#protocol-boun
 
 ## Native HTTP bridge semantics
 
+Discovery/list cancellation validates a duplicate-free UTF-8 JSON tree before
+parsing exact canonical fields in `parseHostedRequest`. Go struct decoding
+accepts case aliases and cannot establish required-key presence, direction or
+metadata absence. Unknown additive keys must never supply authority or overwrite
+canonical values. Even false/null forbidden metadata is invalid. A usable,
+unambiguous request ID permits a static correlated `app.invalid_request`; an
+ambiguous/unusable ID requires protocol rejection. `hostedTimestamp` checks
+padded RFC3339 UTC syntax before calendar parsing: `time.Parse` alone accepts
+one-digit hours and comma fractions. Encrypted raw-input tests cover those forms,
+duplicates at nested levels and alias shadowing; a DTO round-trip cannot produce
+these failures. See [implemented discovery validation](../../protocol-mobile.md#paging-cancellation-and-validation).
+
 The [hosted-app contract](../../hosted-apps.md#client-resource-bridge) is defined
-ahead of hosting implementation. Android `WebResourceRequest` exposes no request
+ahead of resource/native implementation; discovery and list cancellation are
+implemented, while lifecycle producers remain #3158 and resource-scoped
+cancellation remains #3123. Android `WebResourceRequest` exposes no request
 body, and `WebResourceResponse` rejects 3xx statuses. Resource interception alone
 would silently lose POST bodies or fail redirect responses. Electron and Android
 therefore need a narrow body-capable Fetch adapter alongside resource loaders:
@@ -157,7 +171,8 @@ committed, so even a retryable bridge error cannot authorize automatic mutation
 replay. Hosted frames omit conversation/session/replay metadata and rely on Noise
 for encryption, not `PayloadEncrypted`. The
 [shared fixtures](../../specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
-belong to the design; executable daemon/native conformance remains downstream.
+belong to the design; complete production hosting and native conformance remain
+downstream.
 
 ## Testing payload absence
 
