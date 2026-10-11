@@ -24,6 +24,7 @@ type memoryReplyLifetime struct {
 	opening, user, terminal uint64
 	completed               bool
 	deltas                  []uint64
+	calls                   map[string]*memoryReplyOrdinaryCall
 }
 type memoryReplyChildKey struct {
 	source   history.SessionProvenance
@@ -56,6 +57,7 @@ type memoryReplyEvidence struct {
 	lifetimes    map[memoryReplyKey]string
 	tasks        map[memoryReplyChildKey]map[string]*memoryReplyTaskOwner
 	observations map[uint64][]*memoryReplyObservation
+	childCalls   map[memoryReplyChildKey]map[string]*memoryReplyOrdinaryCall
 }
 
 func newMemoryReplyEvidence(id string) *memoryReplyEvidence {
@@ -284,11 +286,12 @@ func (r *memoryReplyEvidence) promoteOwners(key memoryReplyChildKey) {
 			}
 		}
 	}
+	r.promoteOrdinaryCalls(old, key, moved)
 }
 
-// Launcher and shell owners are call-scoped, while ordinary child calls also
-// retain their turn-local evidence. Merely observing a report occupies a call
-// identity so promotion cannot overwrite an existing lifetime's owner.
+// Mapped agent owners are call-scoped; ordinary shell observations require
+// ordinaryWork's creation check. Reports occupy a call identity so promotion
+// cannot overwrite an existing lifetime's owner.
 func (r *memoryReplyEvidence) mappedOwner(e history.Entry, id memoryReplyIdentity) {
 	if e.Session != nil && e.Session.Kind != "claude" {
 		return
@@ -317,12 +320,6 @@ func (r *memoryReplyEvidence) mappedOwner(e history.Entry, id memoryReplyIdentit
 			owner.child = owner.child || parent
 			owner.created = true
 			r.observe(e.ID, key, id.Call, "")
-		case "Bash", "local_bash":
-			owner := r.callOwner(key, id.Call)
-			if !owner.created {
-				owner.child, owner.created, owner.shell = parent, true, true
-				r.observe(e.ID, key, id.Call, "")
-			}
 		}
 	case "tool_result", "tool_denied":
 		owner := r.callOwner(key, id.Call)
@@ -594,6 +591,7 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 			}
 		}
 		if child {
+			r.ordinaryWork(e, id, nil, true)
 			continue
 		}
 		source := key
@@ -618,6 +616,7 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 				delete(r.pending, source)
 			}
 		}
+		r.ordinaryWork(e, id, st, false)
 		if terminal {
 			if st.terminal == 0 {
 				st.terminal = e.ID

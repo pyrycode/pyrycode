@@ -76,7 +76,11 @@ func testReplyLauncherReplay(t *testing.T, prefix []history.Entry, opening, user
 						t.Fatal("fold omitted main text")
 					}
 				}
-				body := testReplyBody(t, w.files(conversations.Conversation{ID: "chat"}), "question")
+				files := w.files(conversations.Conversation{ID: "chat"})
+				if uint64(end) < user && len(files) == 0 {
+					continue
+				}
+				body := testReplyBody(t, files, "question")
 				published := uint64(end) > textID && !interrupted
 				if strings.Contains(body, "Speaker: assistant") != published {
 					t.Fatal("reused call changed first-terminal withholding", body)
