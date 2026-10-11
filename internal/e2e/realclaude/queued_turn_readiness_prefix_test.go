@@ -26,7 +26,6 @@ type readinessReplayRow struct {
 	Operations                                     []string
 	Started, Finished                              time.Time
 	Completed                                      bool
-	Counts                                         map[string]int
 	FrameCounts                                    map[string]int
 	ErrorCodes                                     map[string]int
 }
@@ -384,13 +383,7 @@ func (p *readinessReplay) operation(op string) {
 		p.wait(protocol.TypeTurnEnd, true)
 	case "reset":
 		p.send("new_session", map[string]any{"conversation_id": p.conv})
-		env := p.wait("session_transition", true)
-		var changed struct {
-			NewSessionID string `json:"new_session_id"`
-		}
-		if json.Unmarshal(env.Payload, &changed) == nil && changed.NewSessionID != "" {
-			p.subjects[changed.NewSessionID] = p.ordinal
-		}
+		p.wait("session_transition", true)
 		p.opening()
 	case "compact":
 		p.turn("/compact")
@@ -417,7 +410,7 @@ func (p *readinessReplay) operation(op string) {
 		}
 		payload := map[string]any{"conversation_id": p.conv}
 		if op == "promote" || op == "rename" {
-			payload["name"] = fmt.Sprintf("readiness-%d-%d", p.ordinal, p.seq)
+			payload["name"] = "readiness"
 			if op == "promote" {
 				payload["cwd"] = p.h.workdir
 			}
@@ -473,9 +466,8 @@ for line in sys.stdin:
 		if os.WriteFile(filepath.Join(dir, "settings.json"), b, 0o600) != nil {
 			t.Fatal("hook fixture unavailable")
 		}
-		t.Setenv("PYRY_E2E_READINESS_MCP_CONFIG", filepath.Join(work, ".mcp.json"))
 		r.Setup["startup_fixture_source_sha256"] = fmt.Sprintf("%x", sha256.Sum256([]byte(source)))
-		r.Setup["startup_fixture"] = map[string]any{"provenance": "test-owned hypothesis; original operator configuration unknown", "mcp_role": "stdio initialize/tools-list, no tools", "hook_role": "SessionStart scalar timestamp then successful exit", "startup_dependencies": "python3, local regular file append; no delayed release", "mcp_launch_provenance": "explicit test-owned --mcp-config; workspace auto-discovery was suppressed by daemon strict config in prior batches", "hook_timeout_seconds": 10, "workspace": "isolated HOME/work; historical HOME was daemon workdir", "source": "pinned mobile launcher reads operator configuration; resolved original MCP/hook roles unknown"}
+		r.Setup["startup_fixture"] = map[string]any{"provenance": "test-owned hypothesis; original operator configuration unknown", "mcp_role": "stdio initialize/tools-list, no tools", "hook_role": "SessionStart scalar timestamp then successful exit", "startup_dependencies": "python3, local regular file append; no delayed release", "hook_timeout_seconds": 10, "workspace": "isolated HOME/work; historical HOME was daemon workdir", "source": "pinned mobile launcher reads operator configuration; resolved original MCP/hook roles unknown"}
 
 		t.Cleanup(func() {
 			b, err := os.ReadFile(filepath.Join(work, "readiness-startup.jsonl"))

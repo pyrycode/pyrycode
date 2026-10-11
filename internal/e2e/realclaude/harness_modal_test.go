@@ -220,9 +220,6 @@ func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, mod
 		// --dangerously-skip-permissions. That is the shape the standing modal gates
 		// exercise and the single line that differs from spawnBootstrapDaemon.
 	}
-	if fixture := os.Getenv("PYRY_E2E_READINESS_MCP_CONFIG"); bin == os.Getenv("PYRY_E2E_READINESS_BIN") && fixture != "" {
-		args = append(args, "--mcp-config", fixture)
-	}
 	if operatorBypass {
 		args = append(args,
 			"--dangerously-skip-permissions",
