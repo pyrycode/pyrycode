@@ -61,7 +61,7 @@ Search with QMD using its current tool schema. Start with [the short index](INDE
 
 ## Features
 
-- [Hosted apps](../hosted-apps.md): v1 contract and implemented manifest validation, durable registration/lifecycle, restart normalization, committed changes and standalone React/TypeScript scaffold with SQLite preferences, migrations and service health; runtime/layout, encrypted resource bridge and publication/data guarantees.
+- [Hosted apps](../hosted-apps.md): v1 contract and implemented manifest validation, durable registration/lifecycle, restart normalization, committed changes and standalone React/TypeScript scaffold with responsive saved preferences, SQLite migrations, service health and generated-app browser smoke workflow/evidence; runtime/layout, encrypted resource bridge and publication/data guarantees.
 - [Development verification](features/development-verification.md): shared source-reading, protocol, capture and test-evidence practices.
 - [First spec scaffolding backfill preview](../specs/2929-backfill-preview.json): reviewed checkout/evidence identities, exact section ranges and retention reasons for #2929's initial mechanical application.
 

@@ -47,8 +47,8 @@ explicit `declare module '*.css'` in `assets.d.ts` for the frontend stylesheet
 import; removing it breaks frontend typechecking.
 
 `scaffold` copies an explicit `files` inventory rather than the whole source
-tree. New shared service modules, migration SQL and tests must enter that
-inventory; testing the maintained source tree alone can pass while generated
+tree. New shared service modules, migration SQL, browser scripts and tests must
+enter that inventory; testing the maintained source tree alone can pass while generated
 apps lack dependencies or service coverage. Verify a fresh generated app through
 install, frontend/service typecheck, tests and build. `npm test` compiles its
 service dependencies itself, so a prior build cannot mask missing test setup.
@@ -183,6 +183,21 @@ original reader returns. Starting a replacement reader on every cancel would
 accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ## Testing
+
+The template's `React renders caller title as literal text` test calls
+`App({title})` directly before server rendering. Keep `App` hook-free and put
+state in its rendered `DisplayPreferences` child; hooks in the directly invoked
+wrapper would run outside React's renderer. The test bundle uses
+`packages: 'external'` so the component and `react-dom/server` share React.
+Bundling another React copy breaks hook rendering even when the browser bundle
+works. See the [display settings reference](../../hosted-apps.md#display-settings).
+
+`startup and readiness failures` must derive a mismatched release from the
+generated manifest. A fixed `1.0.1` rejection value becomes valid when the
+[replacement-release browser proof](../../hosted-apps.md#built-ui-smoke-check)
+generates 1.0.1 with the same identities/data. Run the deterministic suite for
+both generated releases to verify the rejection case remains invalid for each
+build.
 
 The template's `case-variant ledger shadows reject and roll back all pending migrations`
 and `migration authorization reserves case-variant durable ledger names` checks
