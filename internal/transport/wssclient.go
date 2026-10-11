@@ -65,6 +65,11 @@ type Config struct {
 	// timeout). Required; nil panics at New() time.
 	Logger *slog.Logger
 
+	// TerminalUpgradeStatuses ends Connect on the first selected non-101
+	// HTTP upgrade rejection. Empty preserves retries. This policy is
+	// independent of FatalCloseThreshold.
+	TerminalUpgradeStatuses []int
+
 	// FatalCloseCodes lists WS close codes that terminate Connect's
 	// reconnect loop with ErrFatalClose. Empty (default) preserves the
 	// generic "reconnect on every drop" behaviour. The relay layer (#248)
@@ -175,14 +180,51 @@ var (
 	// is recoverable via websocket.CloseStatus(err).
 	ErrFatalClose = errors.New("transport: fatal close code")
 
-	// ErrUpgradeRejected wraps a dial error where the relay returned a
-	// non-101 HTTP response to the WebSocket upgrade (e.g. 404 on a wrong
-	// URL path), as distinct from a network-level dial failure (DNS,
-	// connection refused, TLS). Connect surfaces it loudly (WARN) on the
-	// first failed upgrade per outage; the HTTP status is in the wrapped
-	// error string. It is NOT a fatal close — the loop keeps retrying.
+	// ErrUpgradeRejected identifies a failed HTTP WebSocket handshake.
+	// UpgradeRejectionError supplies its numeric HTTP status without retaining
+	// response data. Connect retries unless TerminalUpgradeStatuses selects it.
 	ErrUpgradeRejected = errors.New("transport: websocket upgrade rejected")
 )
+
+// UpgradeRejectionError holds only the HTTP status of a rejected handshake.
+// It never retains response objects, headers, bodies or underlying dial errors.
+type UpgradeRejectionError struct {
+	StatusCode int
+}
+
+func (e *UpgradeRejectionError) Error() string {
+	return fmt.Sprintf("%s (HTTP %d)", ErrUpgradeRejected, e.StatusCode)
+}
+
+func (e *UpgradeRejectionError) Unwrap() error { return ErrUpgradeRejected }
+
+// safeTransportError rebuilds the supported error classifications without
+// retaining untrusted text or objects. CloseStatus and known sentinel matching
+// survive; peer close reasons and arbitrary library error chains do not.
+func safeTransportError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var causes []error
+	var rejection *UpgradeRejectionError
+	if errors.As(err, &rejection) {
+		causes = append(causes, &UpgradeRejectionError{StatusCode: rejection.StatusCode})
+	} else if errors.Is(err, ErrUpgradeRejected) {
+		causes = append(causes, ErrUpgradeRejected)
+	}
+	if status := websocket.CloseStatus(err); status != -1 {
+		causes = append(causes, websocket.CloseError{Code: status})
+	}
+	for _, sentinel := range []error{ErrFatalClose, ErrClosed, ErrDisconnected, ErrNotConnected, context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(err, sentinel) {
+			causes = append(causes, sentinel)
+		}
+	}
+	if len(causes) == 0 {
+		return fmt.Errorf("transport: %s failed", operation)
+	}
+	return fmt.Errorf("transport: %s failed: %w", operation, errors.Join(causes...))
+}
 
 // New returns a Client. The Client is not yet connected; call Connect.
 func New(cfg Config) *Client {
@@ -213,9 +255,10 @@ func New(cfg Config) *Client {
 	return c
 }
 
-// Connect runs the dial-and-serve lifecycle until ctx is cancelled or
-// Close is called. It returns ctx.Err() on shutdown or ErrClosed if Close
-// was called; it never returns nil. Callers run it in its own goroutine.
+// Connect runs the dial-and-serve lifecycle until cancellation, Close, a
+// selected terminal HTTP rejection or the fatal-close threshold. It returns
+// ctx.Err(), ErrClosed, UpgradeRejectionError or wrapped ErrFatalClose,
+// respectively; it never returns nil. Callers run it in its own goroutine.
 //
 // Reconnect mechanics:
 //
@@ -250,6 +293,20 @@ func (c *Client) Connect(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			select {
+			case <-c.closeCh:
+				return ErrClosed
+			default:
+			}
+			err = safeTransportError("dial", err)
+			var rejection *UpgradeRejectionError
+			if errors.As(err, &rejection) && rejection.StatusCode != http.StatusSwitchingProtocols {
+				for _, status := range c.cfg.TerminalUpgradeStatuses {
+					if status == rejection.StatusCode {
+						return err
+					}
+				}
+			}
 			// A fatal close code can surface from Dial directly when the
 			// relay closes the conn as part of (or immediately after) the
 			// upgrade response — coder/websocket returns the close error
@@ -276,10 +333,10 @@ func (c *Client) Connect(ctx context.Context) error {
 				warnedUpgrade = true
 				c.cfg.Logger.Warn("transport: relay rejected the WebSocket upgrade; "+
 					"verify the relay URL path is correct",
-					"attempt", attempt, "delay", delay, "err", err)
+					"attempt", attempt, "delay", delay, "err", err, "http_status", upgradeStatus(err))
 			} else {
 				c.cfg.Logger.Info("transport: dial failed, backing off",
-					"attempt", attempt, "delay", delay, "err", err)
+					"attempt", attempt, "delay", delay, "err", err, "http_status", upgradeStatus(err))
 			}
 			if !c.sleepCancellable(ctx, delay) {
 				if ctx.Err() != nil {
@@ -298,7 +355,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		uptime := time.Since(connectedAt)
 
 		c.cfg.Logger.Info("transport: disconnected",
-			"uptime", uptime, "err", serveErr)
+			"uptime", uptime, "err", serveErr, "close_status", websocket.CloseStatus(serveErr))
 		_ = conn.Close(websocket.StatusInternalError, "client reconnecting")
 
 		if status := c.matchFatalStatus(serveErr); status != -1 {
@@ -330,6 +387,14 @@ func (c *Client) Connect(ctx context.Context) error {
 			attempt++
 		}
 	}
+}
+
+func upgradeStatus(err error) int {
+	var rejection *UpgradeRejectionError
+	if errors.As(err, &rejection) {
+		return rejection.StatusCode
+	}
+	return 0
 }
 
 // matchFatalStatus returns err's WS close status when it is listed in
@@ -526,14 +591,12 @@ func (c *Client) realDial(ctx context.Context) (*websocket.Conn, error) {
 	opts := &websocket.DialOptions{HTTPHeader: c.cfg.Headers}
 	conn, resp, err := websocket.Dial(ctx, c.cfg.URL, opts)
 	if err != nil {
-		// coder/websocket returns a non-nil resp iff the relay answered the
-		// upgrade with a non-101 HTTP status (wrong path, misroute); a
-		// network-level failure leaves resp nil. Classify so Connect can be
-		// loud about the former and quiet-retry the latter.
+		// HTTP handshake failures have a response, including a malformed 101.
+		// Keep only its status: library errors may reflect response headers.
 		if resp != nil {
-			return nil, fmt.Errorf("%w (HTTP %d): %w", ErrUpgradeRejected, resp.StatusCode, err)
+			return nil, safeTransportError("dial", errors.Join(&UpgradeRejectionError{StatusCode: resp.StatusCode}, err))
 		}
-		return nil, fmt.Errorf("dial: %w", err)
+		return nil, safeTransportError("dial", err)
 	}
 	conn.SetReadLimit(maxFrameBytes)
 	return conn, nil
@@ -619,7 +682,7 @@ func (c *Client) recvPump(ctx context.Context, conn *websocket.Conn) error {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
-			return fmt.Errorf("recv: %w", err)
+			return safeTransportError("recv", err)
 		}
 		select {
 		case c.recvCh <- data:
@@ -652,7 +715,7 @@ func (c *Client) sendPump(ctx context.Context, conn *websocket.Conn) error {
 			stop()
 			cancel()
 			if err != nil {
-				err = fmt.Errorf("send: %w", err)
+				err = safeTransportError("send", err)
 			}
 			if req.done != nil {
 				req.done <- err
@@ -676,8 +739,9 @@ func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) error {
 			err := conn.Ping(pctx)
 			cancel()
 			if err != nil {
-				c.cfg.Logger.Warn("transport: pong timeout", "err", err)
-				return fmt.Errorf("ping: %w", err)
+				err = safeTransportError("ping", err)
+				c.cfg.Logger.Warn("transport: pong timeout", "err", err, "close_status", websocket.CloseStatus(err))
+				return err
 			}
 		}
 	}
