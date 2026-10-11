@@ -47,6 +47,7 @@ type readinessCapture struct {
 	Resources                                          []map[string]any
 	Replay                                             []readinessReplayRow
 	PrefixHistory                                      []readinessWitness
+	TargetCounts                                       map[string]int
 }
 
 // TestInteractiveStreamQueuedTurnReadiness compares a source-derived mobile prefix
@@ -106,6 +107,17 @@ func TestInteractiveStreamQueuedTurnReadiness(t *testing.T) {
 		} else {
 			r.Counts["failed"] = 1
 		}
+		if arm.preceding > 0 {
+			r.Counts = map[string]int{"executed": 0, "passed": 0, "failed": 0, "skipped": 0}
+			for _, row := range r.Replay {
+				for key, value := range row.Counts {
+					r.Counts[key] += value
+				}
+			}
+			for key, value := range r.TargetCounts {
+				r.Counts[key] += value
+			}
+		}
 		dir := filepath.Join("testdata", "queued_turn_readiness")
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal("evidence directory unavailable")
@@ -121,7 +133,7 @@ func TestInteractiveStreamQueuedTurnReadiness(t *testing.T) {
 		if err := os.Rename(path+".tmp", path); err != nil {
 			t.Fatal("evidence publish failed")
 		}
-		t.Logf("portable evidence: %s; executed=1 passed=%d failed=%d skipped=0", path, r.Counts["passed"], r.Counts["failed"])
+		t.Logf("portable evidence: %s; executed=%d passed=%d failed=%d skipped=%d", path, r.Counts["executed"], r.Counts["passed"], r.Counts["failed"], r.Counts["skipped"])
 	}
 }
 
@@ -164,120 +176,150 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 			row := &r.Replay[n]
 			p.row = row
 			row.Started = time.Now().UTC()
-			for _, op := range row.Operations {
-				p.operation(op)
+			passed := t.Run(row.Method, func(caseT *testing.T) {
+				p.t = caseT
+				for _, op := range row.Operations {
+					p.operation(op)
+				}
+			})
+			p.t = t
+			row.Counts = map[string]int{"executed": 1, "passed": 0, "failed": 0, "skipped": 0}
+			if passed {
+				row.Counts["passed"] = 1
+			} else {
+				row.Counts["failed"] = 1
 			}
-			row.Finished, row.Completed = time.Now().UTC(), true
+			row.Finished, row.Completed = time.Now().UTC(), passed
+			if !passed {
+				p.reconnect()
+			}
 			t.Logf("prefix %d %s completed, main operations=%d", n, row.Method, len(row.Operations))
 		}
 	}
 	if p.release != nil {
 		p.release()
 	}
-	targetOrdinal := p.ordinal + 1
-	for i := targetOrdinal; i <= targetOrdinal; i++ {
-		created := time.Now().UTC()
-		conv := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, uint64(100+i*2), nil)
-		reg, err := conversations.Load(filepath.Join(h.home, ".pyry", "test", "conversations.json"))
-		if err != nil {
-			t.Fatal("conversation binding unavailable")
-		}
-		c, ok := reg.Get(conversations.ConversationID(conv))
-		if !ok || c.CurrentSessionID == "" {
-			t.Fatal("fresh conversation lacks session binding")
-		}
-		subjects[conv], subjects[c.CurrentSessionID] = i, i
-		readinessDefaultPosture(t, h.home, c.CurrentSessionID)
-		turn := readinessTurn{Ordinal: i, Created: created, CreatedReply: time.Now().UTC(), ThreadOpened: time.Now().UTC()}
-		p.conv, p.ordinal = conv, i
-		p.opening()
-		turn.ControlsSent, turn.Sent = time.Now().UTC(), time.Now().UTC()
-		r.Turns = append(r.Turns, turn)
-		got := &r.Turns[len(r.Turns)-1]
-		prompt := "Reply with exactly ping. Do not use tools."
-		msg := strconv.Itoa(i)
-		sealSendMessage(t, h.phone, h.initSend, uint64(101+i*2), conv, msg, prompt)
-		// The extra 120 seconds only collects a failed admission's later boundaries.
-		until := time.Now().Add(210 * time.Second)
-		ended := false
-		busySeen, deadlineReported := false, false
-		for time.Now().Before(until) {
-			entries := readinessHistory(h.home, conv)
-			readinessFoldTurn(got, entries, conv, msg, prompt)
-			if !deadlineReported && !got.Enqueued.IsZero() && time.Since(got.Enqueued) > 90*time.Second && (got.Delivered.IsZero() || got.Opened.IsZero()) {
-				t.Errorf("ordinal %d missed unchanged 90-second enqueue admission deadline", i)
-				deadlineReported = true
-			}
-			if ended && got.Idle && got.ExactlyOnce && got.ReplyMatches {
-				break
-			}
-			raw, err := h.phone.ReceiveBytes(time.Until(until))
+	runTarget := func(t *testing.T) {
+		p.t = t
+		targetOrdinal := p.ordinal + 1
+		for i := targetOrdinal; i <= targetOrdinal; i++ {
+			created := time.Now().UTC()
+			conv := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, uint64(100+i*2), nil)
+			reg, err := conversations.Load(filepath.Join(h.home, ".pyry", "test", "conversations.json"))
 			if err != nil {
-				r.Setup["phone_read_failed"] = true
-				break
+				t.Fatal("conversation binding unavailable")
 			}
-			var frame protocol.InnerFrameV2
-			if json.Unmarshal(raw, &frame) != nil || frame.Type != protocol.TypeNoiseMsg {
-				continue
+			c, ok := reg.Get(conversations.ConversationID(conv))
+			if !ok || c.CurrentSessionID == "" {
+				t.Fatal("fresh conversation lacks session binding")
 			}
-			cipher, err := base64.StdEncoding.DecodeString(frame.Data)
-			if err != nil {
-				t.Fatal("invalid encrypted frame")
+			subjects[conv], subjects[c.CurrentSessionID] = i, i
+			readinessDefaultPosture(t, h.home, c.CurrentSessionID)
+			turn := readinessTurn{Ordinal: i, Created: created, CreatedReply: time.Now().UTC(), ThreadOpened: time.Now().UTC()}
+			p.conv, p.ordinal = conv, i
+			p.opening()
+			turn.ControlsSent, turn.Sent = time.Now().UTC(), time.Now().UTC()
+			r.Turns = append(r.Turns, turn)
+			got := &r.Turns[len(r.Turns)-1]
+			prompt := "Reply with exactly ping. Do not use tools."
+			msg := strconv.Itoa(i)
+			sealSendMessage(t, h.phone, h.initSend, uint64(101+i*2), conv, msg, prompt)
+			// The extra 120 seconds only collects a failed admission's later boundaries.
+			until := time.Now().Add(210 * time.Second)
+			ended := false
+			busySeen, deadlineReported := false, false
+			for time.Now().Before(until) {
+				entries := readinessHistory(h.home, conv)
+				readinessFoldTurn(got, entries, conv, msg, prompt)
+				if !deadlineReported && !got.Enqueued.IsZero() && time.Since(got.Enqueued) > 90*time.Second && (got.Delivered.IsZero() || got.Opened.IsZero()) {
+					t.Errorf("ordinal %d missed unchanged 90-second enqueue admission deadline", i)
+					deadlineReported = true
+				}
+				if ended && got.Idle && got.ExactlyOnce && got.ReplyMatches {
+					break
+				}
+				raw, err := h.phone.ReceiveBytes(time.Until(until))
+				if err != nil {
+					r.Setup["phone_read_failed"] = true
+					break
+				}
+				var frame protocol.InnerFrameV2
+				if json.Unmarshal(raw, &frame) != nil || frame.Type != protocol.TypeNoiseMsg {
+					continue
+				}
+				cipher, err := base64.StdEncoding.DecodeString(frame.Data)
+				if err != nil {
+					t.Fatal("invalid encrypted frame")
+				}
+				plain, err := h.initRecv.Decrypt(cipher)
+				if err != nil {
+					t.Fatal("receive nonce desynchronized")
+				}
+				var env protocol.Envelope
+				if json.Unmarshal(plain, &env) != nil {
+					t.Fatal("invalid envelope")
+				}
+				var p struct {
+					ConversationID string `json:"conversation_id"`
+					State          string `json:"state"`
+					Reason         string `json:"reason"`
+				}
+				if json.Unmarshal(env.Payload, &p) != nil {
+					continue
+				}
+				if env.Type == protocol.TypeSessionTransition && p.Reason == "eviction" {
+					r.Setup["observed_evictions"] = r.Setup["observed_evictions"].(int) + 1
+				}
+				if p.ConversationID != conv {
+					continue
+				}
+				if env.Type == protocol.TypeTurnEnd {
+					ended = true
+				}
+				if env.Type == protocol.TypeTurnState && p.State != "" && p.State != "idle" {
+					busySeen, got.Idle = true, false
+				}
+				if busySeen && env.Type == protocol.TypeTurnState && p.State == "idle" {
+					got.Idle = true
+				}
 			}
-			plain, err := h.initRecv.Decrypt(cipher)
-			if err != nil {
-				t.Fatal("receive nonce desynchronized")
+			readinessFoldTurn(got, readinessHistory(h.home, conv), conv, msg, prompt)
+			got.AdmissionWithin90Seconds = !got.Enqueued.IsZero() && !got.Delivered.IsZero() && !got.Opened.IsZero() && got.Delivered.Sub(got.Enqueued) <= 90*time.Second && got.Opened.Sub(got.Enqueued) <= 90*time.Second
+			obs := readinessReadObservations(private, subjects)
+			boundaries := map[string]time.Time{}
+			for _, o := range obs {
+				if o.Ordinal == i && o.OK {
+					boundaries[o.Boundary] = o.At
+				}
 			}
-			var env protocol.Envelope
-			if json.Unmarshal(plain, &env) != nil {
-				t.Fatal("invalid envelope")
+			got.ConfirmedBeforeDelivery = !boundaries["gate_released"].IsZero() && boundaries["gate_released"].Before(got.Delivered)
+			for _, name := range []string{"child_started", "posture_armed", "permission_write", "ack_forwarder_line", "ack_stdout_line", "ack_processing", "gate_released"} {
+				if boundaries[name].IsZero() {
+					t.Errorf("ordinal %d missing %s observation", i, name)
+				}
 			}
-			var p struct {
-				ConversationID string `json:"conversation_id"`
-				State          string `json:"state"`
-				Reason         string `json:"reason"`
+			if !got.AdmissionWithin90Seconds || !got.ExactlyOnce || !got.PromptMatches || !got.ReplyMatches || !got.ConfirmedBeforeDelivery || !got.Idle {
+				t.Errorf("ordinal %d admission=%t once=%t prompt=%t reply=%t confirmed=%t idle=%t", i, got.AdmissionWithin90Seconds, got.ExactlyOnce, got.PromptMatches, got.ReplyMatches, got.ConfirmedBeforeDelivery, got.Idle)
+				return
 			}
-			if json.Unmarshal(env.Payload, &p) != nil {
-				continue
-			}
-			if env.Type == protocol.TypeSessionTransition && p.Reason == "eviction" {
-				r.Setup["observed_evictions"] = r.Setup["observed_evictions"].(int) + 1
-			}
-			if p.ConversationID != conv {
-				continue
-			}
-			if env.Type == protocol.TypeTurnEnd {
-				ended = true
-			}
-			if env.Type == protocol.TypeTurnState && p.State != "" && p.State != "idle" {
-				busySeen, got.Idle = true, false
-			}
-			if busySeen && env.Type == protocol.TypeTurnState && p.State == "idle" {
-				got.Idle = true
-			}
+			t.Logf("ordinal %d admitted in %s, turn completed and idle", i, got.Opened.Sub(got.Enqueued))
 		}
-		readinessFoldTurn(got, readinessHistory(h.home, conv), conv, msg, prompt)
-		got.AdmissionWithin90Seconds = !got.Enqueued.IsZero() && !got.Delivered.IsZero() && !got.Opened.IsZero() && got.Delivered.Sub(got.Enqueued) <= 90*time.Second && got.Opened.Sub(got.Enqueued) <= 90*time.Second
-		obs := readinessReadObservations(private, subjects)
-		boundaries := map[string]time.Time{}
-		for _, o := range obs {
-			if o.Ordinal == i && o.OK {
-				boundaries[o.Boundary] = o.At
-			}
+	}
+	if preceding > 0 {
+		passed := t.Run("target", runTarget)
+		r.TargetCounts = map[string]int{"executed": 1, "passed": 0, "failed": 0, "skipped": 0}
+		if passed {
+			r.TargetCounts["passed"] = 1
+		} else {
+			r.TargetCounts["failed"] = 1
 		}
-		got.ConfirmedBeforeDelivery = !boundaries["gate_released"].IsZero() && boundaries["gate_released"].Before(got.Delivered)
-		for _, name := range []string{"child_started", "posture_armed", "permission_write", "ack_forwarder_line", "ack_stdout_line", "ack_processing", "gate_released"} {
-			if boundaries[name].IsZero() {
-				t.Errorf("ordinal %d missing %s observation", i, name)
-			}
-		}
-		if !got.AdmissionWithin90Seconds || !got.ExactlyOnce || !got.PromptMatches || !got.ReplyMatches || !got.ConfirmedBeforeDelivery || !got.Idle {
-			t.Errorf("ordinal %d admission=%t once=%t prompt=%t reply=%t confirmed=%t idle=%t", i, got.AdmissionWithin90Seconds, got.ExactlyOnce, got.PromptMatches, got.ReplyMatches, got.ConfirmedBeforeDelivery, got.Idle)
-			return
-		}
-		t.Logf("ordinal %d admitted in %s, turn completed and idle", i, got.Opened.Sub(got.Enqueued))
+	} else {
+		runTarget(t)
 	}
 	r.Conclusion = "non-reproduction under candidate replay and synthetic startup; no host cause or repair established"
+	if len(r.Turns) == 0 || !r.Turns[0].AdmissionWithin90Seconds {
+		r.Conclusion = "target admission failure; causal diagnosis pending"
+	}
 }
 
 func readinessDefaultPosture(t *testing.T, home, session string) {
