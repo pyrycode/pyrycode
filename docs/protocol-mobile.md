@@ -6407,8 +6407,8 @@ The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, wi
 
 ## Hosted apps (v2)
 
-**Discovery and list cancellation are implemented; production activation remains
-pending.** The
+**Discovery, committed lifecycle delivery and list cancellation are implemented
+in the relay; production activation remains pending.** The
 [hosted-app reference](hosted-apps.md) and
 [approved v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 fix manifest fields, runtime/layout, resource/Fetch semantics, limits and safe
@@ -6419,10 +6419,11 @@ for daemon, Electron and Android consumers.
 The encrypted v2 boundary recognizes the six declared discovery/lifecycle/
 cancellation types: `list_apps`, `apps`, `app_updated`, `app_removed`, `app_cancel`
 and `app_cancelled`. Only `list_apps` and `app_cancel` are client directions.
-Paged discovery and list-scoped cancellation have handlers (#3157); lifecycle
-notification producers remain pending #3158, and resource requests, credit and
-resource-scoped cancellation remain #3123. These types do not join the v1
-`inboundAppTypeSet`.
+Paged discovery and list-scoped cancellation have handlers (#3157), and committed
+lifecycle notifications have a registry-compatible relay consumer (#3158).
+Daemon subscription installation/unsubscribe ownership remains #3139; resource
+requests, credit and resource-scoped cancellation remain #3123. These types do
+not join the v1 `inboundAppTypeSet`.
 
 The additive capability constant `CapabilityHostedAppsV1` is exactly
 `hosted_apps_v1`. Clients offer it through `HelloClientPayload.capabilities`;
@@ -6447,8 +6448,8 @@ version `1`, app `release_version` and transport `v2` are distinct.
 |---|---|---|
 | `list_apps` | Client → daemon | `ListAppsPayload`: `{}` starts a walk; optional connection-owned `cursor` continues it. One pending page per connection (#3157). |
 | `apps` | Daemon → client | `AppsPayload`: reply to list ID; atomic host `revision`, at most 16 whole records sorted by `app_id`, required nullable `next_cursor` (#3157). |
-| `app_updated` | Daemon → client | `HostedAppRecord`: unsolicited whole record, omitting `in_reply_to`. Producer pending #3158. |
-| `app_removed` | Daemon → client | `AppRemovedPayload`: unsolicited `{app_id, revision}`, omitting `in_reply_to`; saved data is retained. Producer pending #3158. |
+| `app_updated` | Daemon → client | Implemented (#3158): committed `HostedAppRecord`, unsolicited whole record, omitting `in_reply_to`. |
+| `app_removed` | Daemon → client | Implemented (#3158): `AppRemovedPayload`, unsolicited `{app_id, revision}` tombstone, omitting `in_reply_to`; saved data is retained. |
 | `app_asset_request` | Client → daemon | Selected app/release asset GET, with native-stamped navigation. |
 | `app_api_request` | Client → daemon | Selected app/release API method, permitted headers and base64 body. |
 | `app_response` | Daemon → client | Once per asset/API request; status, headers, byte/chunk counts and digest. |
@@ -6460,9 +6461,9 @@ version `1`, app `release_version` and transport `v2` are distinct.
 
 ### Discovery and lifecycle payloads
 
-These Go-backed shapes use the existing `Envelope`. Lifecycle notification
-producers remain pending as described above. Payload fields are required unless
-stated optional. Optional fields are omitted when unset, never emitted as null.
+These implemented Go-backed shapes use the existing `Envelope`. Payload fields
+are required unless stated optional. Optional fields are omitted when unset,
+never emitted as null.
 
 - `ListAppsPayload` has only optional `cursor` (`string`, `omitempty`). The first
   page request is `{}`; later requests supply a nonempty opaque cursor. Sending
@@ -6504,6 +6505,24 @@ are enforced for discovery/list cancellation at the encrypted boundary.
 Resource enforcement remains #3123. Ordinary DTO decoding validates none of
 those rules.
 
+`V2SessionManager.HostedAppsChanged` accepts current-process committed registry
+changes and delivers notifications in increasing host revision order across
+concurrent commits. Updates project the whole committed record, never candidate
+manifest metadata; removals carry the committed tombstone revision. Rejected
+mutations, semantic no-ops and failed persistence produce no notification.
+Authenticated, nonrevoked paired peers that negotiated `hosted_apps_v1` are
+eligible immediately after handshake, before any list request, without
+`interactive`, `thread` or an active channel. The authenticated manager/connection
+supplies host authority; foreign-host changes disclose nothing, even when app
+IDs match. Pairing is rechecked before delivery.
+
+Lifecycle events enter neither history nor replay rings. Reconnect renegotiates
+and starts fresh discovery; no previous events are replayed. A fresh list is
+authoritative. Clients reconcile by revision, buffer newer notifications during
+a walk (at most 256, then restart), discard older notifications and restart on a
+gap. Daemon registry subscription wiring remains #3139; production capability
+activation still requires supervision/resource integration as described above.
+
 ### Paging, cancellation and validation
 
 Discovery requires an authenticated, nonrevoked paired peer and is independent
@@ -6531,15 +6550,17 @@ replaces the previous walk.
 At most one list page is pending per connection, from registry read through
 queued reply and delivery. A delivered page is finished work; its cursor retains
 no worker. Further list work while capacity is occupied receives retryable
-`app.busy` with `retry_after_s: 1`. The ordered discovery/control delivery lane
-holds at most 16 envelopes, including active delivery and cancel acknowledgements.
+`app.busy` with `retry_after_s: 1`. Lifecycle callback handoff and the ordered
+discovery/control delivery lane share at most 16 envelopes per connection in
+total, including active delivery and cancel acknowledgements.
 
 List-scoped `app_cancel` omits `app_id` and names the pending original
 `request_id` on that connection. It retires the read result or queued page and
 invalidates that walk's continuation. `app_cancelled` correlates to the cancel
 envelope ID and echoes the target ID; duplicate, unknown and finished targets
-are idempotent and do not retire other work. A blocked registry read still
-occupies its slot until it exits, so repeated cancellation cannot accumulate
+are idempotent and do not retire other work or unsubscribe lifecycle
+notifications. A blocked registry read still occupies its slot until it exits,
+so repeated cancellation cannot accumulate
 replacement readers. A valid resource-scoped cancel with `app_id` receives
 correlated `protocol.unsupported` and cannot retire discovery until #3123.
 
@@ -6549,7 +6570,13 @@ connection can continue. If cancellation targets a page whose sealed delivery
 has begun, the connection closes instead of sending a later acknowledgement
 across a Noise nonce gap. Queue overflow, delivery failure after sealing and
 delivery timeout also close the affected connection; controls are never silently
-dropped. Delivery uses a cancellable adapter with a five-second deadline.
+dropped. Lifecycle overflow cancels delivery and retires/closes only the affected
+generation so reconnect and fresh discovery can recover durable state. A stalled
+peer cannot block registry callbacks, other peers or cancellation. Disconnect,
+revocation and shutdown retire queued notifications; calls after shutdown admit
+no work. Old queued events, delivery completions and overflow/close work cannot
+deliver to or close a replacement with reused connection/request IDs. Delivery
+uses a cancellable adapter with a five-second deadline.
 
 Requests require exact-case `id`, `type`, `ts` and object `payload`, with all
 known required payload keys present and `id`/`request_id` as JSON integers in
@@ -6566,10 +6593,11 @@ override canonical fields. Invalid input with an unambiguous usable request ID
 receives static nonretryable `app.invalid_request`; unusable or ambiguous IDs
 follow the protocol-rejection/close path.
 
-Every discovery reply, error and cancel acknowledgement has a fresh sender
-connection-local safe-integer `id`, without reusing `hello_ack`'s ID, and
-`in_reply_to` naming the request it answers. App data enters neither history nor
-event rings; output omits conversation/session/replay metadata.
+Every discovery reply, lifecycle notification, error and cancel acknowledgement
+has a fresh sender connection-local safe-integer `id`, without reusing
+`hello_ack`'s ID. Replies use `in_reply_to` naming the request they answer;
+lifecycle notifications omit it. App data enters neither history nor event rings;
+output omits conversation/session/replay metadata.
 
 ### Host scope and pending resource contract
 

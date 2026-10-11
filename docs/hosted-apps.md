@@ -3,10 +3,11 @@
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 defines the hosting design. Strict manifest validation, durable registration,
 lifecycle mutations and restart normalization are implemented in the standalone
-`internal/apps` package. The relay implements authenticated paged discovery and
-list cancellation; production capability activation still requires complete
-supervision/resource integration and cancellable transport wiring. Lifecycle
-notification producers remain #3158; resource-scoped cancellation remains #3123.
+`internal/apps` package. The relay implements authenticated paged discovery,
+committed lifecycle notifications and list cancellation; production capability
+activation still requires complete supervision/resource integration and
+cancellable transport wiring. Daemon subscription installation/unsubscribe
+ownership remains #3139; resource-scoped cancellation remains #3123.
 A React/TypeScript scaffold with SQLite preferences, migrations and service
 health is maintained under `templates/hosted-app/`; preference UI, daemon
 integration, publication and native viewers remain later work. This reference
@@ -99,6 +100,25 @@ cursors fail with nonretryable `app.invalid_request`. See
 [discovery paging and cancellation](protocol-mobile.md#paging-cancellation-and-validation)
 for pending-page capacity, retirement and wire errors.
 
+The relay's `V2SessionManager.HostedAppsChanged` consumes committed registry
+changes for its authenticated host. Negotiated, authenticated, nonrevoked paired
+peers receive whole committed `app_updated` records or `app_removed`
+`{app_id, revision}` tombstones in increasing host revision order, including
+before their first list. No interactive/thread capability or active channel is
+required. Candidate manifest metadata never replaces committed display fields;
+rejected/no-op mutations and failed persistence emit nothing. Notifications omit
+reply correlation and conversation/session/replay metadata. Equal app IDs on
+different hosts do not grant cross-host access.
+
+Lifecycle handoff, discovery/control replies and active delivery share a total
+bound of 16 envelopes per connection. Overflow retires/closes the affected
+generation so clients can reconnect and refresh discovery, rather than miss an
+update while remaining connected. No lifecycle history or replay is retained;
+reconnect always starts a fresh list walk, and predecessor work cannot reach a
+replacement even when connection/request IDs are reused. Daemon subscription
+installation/unsubscribe remains #3139, and production capability activation
+still requires supervision/resource integration and cancellable transport wiring.
+
 There are at most 256 live registrations; admission of a 257th fails unchanged.
 
 `Registry.Register` commits the manifest title, `desired: available` and
@@ -155,8 +175,8 @@ write. Opening exposes the fully committed normalized baseline through
 changes, and store no durable events or conversation history. Callbacks run
 synchronously under the registry mutex and must return promptly without calling
 any registry method, including unsubscribe. The returned unsubscribe is
-idempotent. Discovery wire mapping is implemented in the relay; lifecycle
-notification producers remain #3158 and daemon installation remains #3139.
+idempotent. The relay maps discovery and committed lifecycle notifications;
+daemon subscription installation/unsubscribe ownership remains #3139.
 
 `Registry.Remove` deletes only the registration and durably tombstones its
 identity. Source, build and data files remain byte-for-byte intact. Registration
@@ -485,7 +505,7 @@ For every hosted wire table, fields are required unless explicitly optional; nul
 
 Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the atomic host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID in connection-owned state; it expires 30 seconds after issuance. Empty/null request cursors are invalid. The daemon validates it without using it as a path or host selector. If revision changed or cursor expired, return retryable `apps.changed` and require a fresh walk; do not combine pages from different revisions. One page request is pending per connection through read and delivery; a delivered page's cursor holds no worker. Further pending lists return `app.busy` with `retry_after_s: 1`. A fresh `{}` after completion replaces the previous walk. List cancellation retires only that connection's pending target; a blocked read retains capacity until it exits. The ordered discovery/control lane holds at most 16 envelopes including active delivery and cancel acknowledgements. Reconnect always starts a new list walk. See the [implemented wire behavior](protocol-mobile.md#paging-cancellation-and-validation).
 
-Lifecycle notification producers remain pending #3158. Their contract makes a fresh list authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts must emit updates in revision order to negotiated peers. Resource/credit handling and resource-scoped cancellation remain #3123, including their independent worker bounds.
+Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. Daemon subscription wiring remains #3139. Resource/credit handling and resource-scoped cancellation remain #3123, including their independent worker bounds.
 
 ### Asset/API fields and HTTP semantics
 

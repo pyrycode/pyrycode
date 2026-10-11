@@ -163,10 +163,17 @@ neither events nor consumers and replay no baseline or previous-process changes.
 Callbacks must return promptly and never re-enter any registry method, including
 the returned idempotent unsubscribe: doing so would deadlock on the held mutex.
 Slow callbacks also block mutations and readers. Consumers own later transport
-work; the registry adds no delivery goroutines or queues. Discovery wire mapping
-is implemented in the relay; lifecycle notification producers remain #3158 and
-daemon installation remains #3139. Because `List` can wait on this mutex, relay
-cancellation retires its result without releasing read capacity until the
+work; the registry adds no delivery goroutines or queues.
+`V2SessionManager.HostedAppsChanged` provides the relay consumer, with bounded
+handoff and no peer I/O, worker creation or registry re-entry. Handoff and delivery
+share a 16-envelope capacity bound per connection; separate bounds would retain
+more than the promised total when a peer stalls. Overflow retires that generation
+so fresh discovery recovers committed state, instead of silently dropping a
+revision on a current connection. Daemon subscription installation/unsubscribe
+ownership remains #3139.
+
+Because `List` can wait on this mutex, relay cancellation retires its result
+without releasing read capacity until the
 original reader returns. Starting a replacement reader on every cancel would
 accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
