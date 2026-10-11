@@ -9,10 +9,11 @@ committed lifecycle notifications and list cancellation. The daemon owns storage
 discovery subscriptions and cancellable delivery. Process-owner daemon wiring
 (#3204), health/readiness (#3206), automatic recovery (#3207) and resource routing
 (#3123) remain separate work before production capability activation.
-A React/TypeScript scaffold with SQLite preferences, migrations and service
-health is maintained under `templates/hosted-app/`; preference UI, daemon
-service integration, publication and native viewers remain later work. This
-reference preserves the contract's fields, limits and guarantees. The spec owns the
+A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
+migrations, service health and built-browser proof is maintained under
+`templates/hosted-app/`; daemon service integration, publication and native
+viewers remain later work. This reference preserves the contract's fields,
+limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 used by daemon, desktop and mobile consumers. Runtime and isolation choices are
 recorded in [ADR 043](knowledge/decisions/043-hosted-app-runtime-and-isolation.md).
@@ -381,9 +382,22 @@ The pending supervisor health contract (#3206) requires `GET /_pyry/health` to r
 
 ### Responsive React shell
 
-The responsive shell and browser proof follow in #3142; the current scaffold
-renders only a title and an editable-source message. The intended reusable React
-shell has native-independent page header/title, wrapping tab navigation, responsive main content, labeled filters, cards/tables and a polite status/error region. Use the [approved prototype](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272) as layout/behavior reference: Computers, Projects, Boards, Runs, Performance, Allowances. Match theme using local CSS variables; readable contrast, keyboard focus, accessible controls and safe-area padding work at desktop widths and a 320-pixel phone viewport. Computer cards use three columns above 760 px and one below; boards use four columns above 760 px, two below and one below 420 px. Charts/trends stack below 650 px; wide tables scroll horizontally. Coarse-pointer controls have at least 44-pixel touch height. No global horizontal page overflow or hover-only chart interaction.
+The template implements a native-independent header with literal title,
+wrapping Overview/Preferences navigation, labeled period controls, illustrative
+cards/table and a polite status region. Its local light-theme CSS provides
+safe-area padding, visible keyboard focus and controls at least 44 px high.
+Cards use three columns above 760 px and one at 760 px or narrower; the wide
+table scrolls inside its own focusable container without page overflow. The
+[built-browser proof](#built-ui-smoke-check) exercises 320×800 and 1280×800
+CSS-pixel viewports.
+
+The [approved interactive dashboard reference](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272)
+supplies responsive conventions, not production fleet data or controls. The
+broader shell's Computers, Projects, Boards, Runs, Performance and Allowances
+views remain #3127–#3132. Boards use four columns above 760 px, two below and one
+below 420 px; charts/trends stack below 650 px. Wide tables scroll locally, with
+readable contrast, keyboard focus, safe-area padding, at least 44-pixel
+coarse-pointer controls and no hover-only chart interaction.
 
 The orchestrator's combined CPU/memory graphs have independent per-computer selectors defaulting to 24 hours. Runs puts active work above history in one tab with common project/computer filters. Performance keeps averages and model-combined trends beneath each agent role in one view. Boards show ticket labels. Ticket drain finishes all remaining stages of already-owned tickets; agent drain finishes current runs then pauses. Fleet service owns claims, runs, telemetry, participation, capacity limits, drain state and allowances. The app service adapts configured fleet APIs; it does not duplicate fleet ownership in app SQL or let browser content select integration URLs.
 
@@ -422,7 +436,7 @@ Generated source includes:
   package.json, package-lock.json      pinned dependencies and consistent lock
   .npmrc, .gitignore                   install policy and generated-file exclusions
   tsconfig.web.json, tsconfig.service.json
-  scripts/build.mjs
+  scripts/{build,browser-smoke}.mjs
   src/web/{main.tsx,App.tsx,style.css,assets.d.ts,title.json}
   src/service/{main.ts,migrate.ts,health.ts,runtime.mjs}
   src/service/{environment.ts,database.ts,migrations.ts}
@@ -430,8 +444,10 @@ Generated source includes:
   test/{app,service}.test.mjs
 ```
 
-React/React DOM, their type definitions, Node type definitions, TypeScript and
-`esbuild-wasm` are pinned; the portable bundler is a development dependency.
+React/React DOM, their type definitions, Node type definitions, TypeScript,
+`esbuild-wasm` and Playwright Core 1.61.1 are pinned. The portable bundler and
+browser driver are development dependencies; installing the driver does not
+install a browser executable.
 From the generated destination, run:
 
 ```sh
@@ -459,6 +475,105 @@ Source secrets, environment files, SQL data, service code, lockfiles and
 `node_modules` stay outside `dist/web`. `sql/migrations` remains release-relative
 beside `dist`; publication needs no runtime TypeScript loader or development server.
 
+### Display settings
+
+The small example follows the
+[approved responsive dashboard reference](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272)
+with illustrative cards/table; see [Responsive React shell](#responsive-react-shell)
+for layout and accessibility rules.
+
+Each initial/fresh client loads and validates `GET /api/preferences`. Until that
+read finishes, editing is disabled. The unsaved-database defaults are Overview
+and Last 24 hours. Choose Overview or Preferences and Last hour, Last 24 hours
+or Last 7 days, then explicitly Save. The UI posts the complete
+`{version: 1, selected_tab, period}` record; both requests use app-root-relative
+`/api/preferences` with `credentials: 'omit'`.
+
+While saving, controls are disabled and the polite, atomic status region says
+“Saving…”. Only HTTP 204 changes it to “Preferences saved.”; edits clear prior
+success. Read failures or invalid records show defaults with visible load-error
+feedback. Failed, timed-out or uncertain writes retain local changes, report
+“Save not confirmed” and are never automatically replayed. Check the saved
+settings before explicitly saving again: a lost acknowledgment can follow a
+committed write. Reads/writes have 10-second deadlines. Browser storage is not
+the durable store; all viewers share the app's SQLite record.
+
+### Built-UI smoke check
+
+Install [Node.js 24 with npm](https://nodejs.org/en/download), selecting
+`>=24.15.0 <25.0.0`, and ensure both `node` and `npm` are on PATH. Install a
+Chromium executable compatible with the pinned Playwright Core 1.61.1 driver
+and its required OS libraries before running the smoke command. One installation
+option uses the [pinned Core CLI](https://github.com/microsoft/playwright/blob/v1.61.1/packages/playwright-core/package.json):
+
+```sh
+npx --yes --package=playwright-core@1.61.1 playwright-core install chromium
+```
+
+On Linux, install the browser's system libraries as described in
+[Playwright's browser setup](https://playwright.dev/docs/browsers#install-system-dependencies)
+(the CLI also supports `install --with-deps chromium`). Set `HOSTED_APP_BROWSER`
+to the absolute executable path from that installation, not its containing
+directory. Browser cache paths vary by OS and installation; the recorded
+`/opt/ms-playwright/...` evidence path is specific to that run.
+
+From the repository root, select a persistent artifact directory outside the
+temporary fixture and run the committed, noninteractive command:
+
+```sh
+node --version
+npm --version
+HOSTED_APP_BROWSER=/absolute/path/to/chromium \
+  node templates/hosted-app/smoke.mjs /tmp/hosted-app-proof
+```
+
+[`smoke.mjs`](../templates/hosted-app/smoke.mjs) calls `scaffold` for fresh named
+1.0.0 and 1.0.1 releases with the same synthetic host/app IDs. For each it runs
+`npm ci --no-audit --no-fund`, frontend/service `npm run typecheck`, deterministic
+`npm test` against temporary SQLite and `npm run build`, in that order. It then
+invokes generated `npm run smoke:browser` with the replacement release, one
+unchanged external data directory and the artifact directory. No generated
+runtime settings need editing; the script supplies the entire
+[startup environment](#startup-and-health), including `NODE_ENV=production`,
+and runs compiled migration/service/health entries.
+
+The loopback-only fixture serves the fixed `dist/web` asset inventory and
+forwards API requests to the compiled service, enforcing the exact
+[contract CSP and nosniff](#electron-and-android-isolation) on responses. The
+production service remains API/health only; `npm start` does not serve the UI.
+The browser checks defaults, explicit saves, delayed acknowledgment without
+premature success, read failures, rejected writes, uncertain committed writes
+and absence of automatic retries. Fresh browser contexts recover acknowledged
+Preferences/7d after service restart and again from the separately built 1.0.1
+replacement using unchanged identities/data, with matching health at both
+transitions. It checks CSP violations, page overflow, contrast, card columns,
+table scrolling, keyboard focus, polite feedback and coarse-pointer control
+sizes at both viewports. Waits are bounded; fixture, service and browser are
+closed and temporary generated releases/data removed on success or failure.
+Missing/unsupported Node, missing npm/browser or failed checks exit nonzero
+with diagnostics, never a successful skip.
+
+A completed run writes `commands.json` (actual commands/results),
+`browser.json` (checks, executed/passed/skipped counts, requests, startup
+environment and measurements), `versions.json` (Node/npm/browser versions and
+artifact inventory) and screenshots to the chosen output directory. Failed runs
+retain whatever evidence was produced; fixture removal leaves artifacts intact.
+Retain or commit
+that directory to make a new run reviewable after worktree cleanup. The
+[committed evidence index](../templates/hosted-app/testdata/browser-3142/README.md)
+links both layouts, focus/save/error feedback and restart/replacement images.
+That recorded run used Node 24.15.0, npm 11.11.0, Chromium 149.0.7827.55 and
+Playwright Core 1.61.1: 59/59 browser checks and 17/17 deterministic tests per
+release, zero skipped; minimum measured text contrast 5.60:1 and controls 44 px.
+
+This is synthetic fixture proof using built assets. Publication/registration
+and readiness links remain [#3125](https://github.com/pyrycode/pyrycode/issues/3125)
+and [#3126](https://github.com/pyrycode/pyrycode/issues/3126); generation alone
+does not register, publish or return a ready app link. Native isolation/chrome
+and real channel acceptance remain
+[#3133](https://github.com/pyrycode/pyrycode/issues/3133) and client tickets.
+The fixture establishes no live-Claude, native or live-channel acceptance.
+
 ### Preference API
 
 `GET /api/preferences` returns HTTP 200 JSON. With no saved record, it returns:
@@ -484,8 +599,8 @@ All viewers share one app-scoped SQL record, rather than per-client preferences.
 Opening a fresh client after process restart or replacement of the compiled
 release reads the same saved values when the app uses the same persistent
 database. SQL data stays outside replaceable source/staging/build trees and
-`dist/web`. The responsive preference UI and browser proof remain
-[#3142](https://github.com/pyrycode/pyrycode/issues/3142); see the
+`dist/web`. The [built-UI smoke check](#built-ui-smoke-check) proves fresh-client
+readback across service restart and replacement builds; see the
 [orchestrator walkthrough](#orchestrator-walkthrough) for that intended workflow.
 
 ### Migrations
