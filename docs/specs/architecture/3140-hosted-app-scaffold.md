@@ -56,7 +56,7 @@ None. SQL schema/readiness, preferences, registration/publication and viewer/bro
 
 ## Documentation handoff
 
-Pending for the documentation stage: add `Template and saved preferences` to `docs/hosted-apps.md`, describing the committed scaffold entry, caller inputs, generated layout and `npm ci`, `npm run typecheck`, `npm test`, `npm run build`. State that this slice supplies buildable source, while SQL service and preference UI follow in #3141/#3142. Scaffold generation alone does not register, publish or return a ready app link. Link the later #3125/#3126 publishing/channel workflow.
+Satisfied in [Template and saved preferences](../../hosted-apps.md#template-and-saved-preferences): committed scaffold entry, caller inputs, existing-parent/destination rules, generated layout, runtime range, install/typecheck/test/build commands, public assets and deliberately failing unfinished-service entries. The section distinguishes buildable source from SQL service and preference UI work in #3141/#3142 and links the #3125/#3126 publishing/channel workflow; generation alone does not register, publish or return a ready app link. Durable toolchain and verification lessons are folded into [the apps overview](../../knowledge/features/apps-package.md#template-toolchain).
 
 ## Security review
 
