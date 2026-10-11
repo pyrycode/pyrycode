@@ -202,7 +202,6 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 			row := &r.Replay[n]
 			p.row = row
 			row.Started = time.Now().UTC()
-			row.EpochBefore = p.epoch
 			passed := t.Run(row.Method, func(caseT *testing.T) {
 				p.t = caseT
 				for _, op := range row.Operations {
@@ -217,7 +216,6 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 				row.Counts["failed"] = 1
 			}
 			row.Finished, row.Completed = time.Now().UTC(), passed
-			row.EpochAfter = p.epoch
 			if !passed {
 				p.reconnect()
 			}

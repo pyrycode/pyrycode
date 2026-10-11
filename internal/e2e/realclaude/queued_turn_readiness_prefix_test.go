@@ -27,11 +27,9 @@ type readinessReplayRow struct {
 	Operations                                     []string
 	Started, Finished                              time.Time
 	Completed                                      bool
-	EpochBefore, EpochAfter                        int
 	Counts                                         map[string]int
 	FrameCounts                                    map[string]int
 	ErrorCodes                                     map[string]int
-	Effects                                        map[string]int
 }
 
 func readinessJavaHash(s string) int32 {
