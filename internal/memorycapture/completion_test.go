@@ -312,7 +312,7 @@ func TestAcknowledgementFailures(t *testing.T) {
 
 func TestVersionOneCompletion(t *testing.T) {
 	home := t.TempDir()
-	s := testStore(t, home)
+	testStore(t, home)
 	b := Batch{ID: batchID(testID, testPayload()), Payload: testPayload(), ChangedPaths: []string{"failed.md"}}
 	// This schema deliberately has only the original fields, independently of record.
 	legacy := struct {
@@ -330,7 +330,7 @@ func TestVersionOneCompletion(t *testing.T) {
 	if err = os.WriteFile(file, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	s = testStore(t, home)
+	s := testStore(t, home)
 	if got := testPending(t, s, testID); !reflect.DeepEqual(got, &b) {
 		t.Fatalf("legacy payload: %#v", got)
 	}
