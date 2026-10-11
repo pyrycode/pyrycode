@@ -16,7 +16,7 @@ export function migrationFiles() {
   return files;
 }
 export function ledger(db: DatabaseSync, files: ReturnType<typeof migrationFiles>, complete = false) {
-  const applied = db.prepare('SELECT version, sha256 FROM pyry_schema_migrations').all();
+  const applied = db.prepare('SELECT version, sha256 FROM main.pyry_schema_migrations').all();
   for (const row of applied) {
     if (!files.some((f) => f.version === row.version && f.sha256 === row.sha256)) throw new Error(`missing/changed applied migration: ${row.version}`);
   }
@@ -27,9 +27,10 @@ export function ledger(db: DatabaseSync, files: ReturnType<typeof migrationFiles
 const forbidden = new Set([c.SQLITE_TRANSACTION, c.SQLITE_SAVEPOINT, c.SQLITE_ATTACH, c.SQLITE_DETACH,
   c.SQLITE_PRAGMA, c.SQLITE_CREATE_VTABLE, c.SQLITE_DROP_VTABLE, c.SQLITE_COPY, c.SQLITE_CREATE_TRIGGER, c.SQLITE_CREATE_TEMP_TRIGGER]);
 export function migrationSQL(db: DatabaseSync, sql: string) {
-  // Authorization applies to SQLite operations, including obfuscated SQL and nested statements.
-  db.setAuthorizer((action, first, second) => {
-    if (forbidden.has(action) || (first === 'pyry_schema_migrations' || second === 'pyry_schema_migrations') ||
+  // Migrations affect only main; reserved identifiers follow SQLite's case-insensitive naming.
+  db.setAuthorizer((action, first, second, dbName) => {
+    if (forbidden.has(action) || (dbName !== null && dbName !== 'main') ||
+        first?.toLowerCase() === 'pyry_schema_migrations' || second?.toLowerCase() === 'pyry_schema_migrations' ||
         (action === c.SQLITE_FUNCTION && !['abs', 'coalesce', 'length', 'lower', 'upper'].includes(second ?? ''))) return c.SQLITE_DENY;
     return c.SQLITE_OK;
   });

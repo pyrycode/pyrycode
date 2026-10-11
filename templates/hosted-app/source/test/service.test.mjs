@@ -157,11 +157,61 @@ test('migration ordering, ledger validation and atomic rollback', async (t) => {
   migration(f, 'invalid.sql', 'SELECT 1;'); run(f, 'migrate', f.env, false);
 });
 
+test('case-variant ledger shadows reject and roll back all pending migrations', async (t) => {
+  for (const name of ['PYRY_SCHEMA_MIGRATIONS', 'PyRy_Schema_Migrations']) for (const kind of ['TABLE', 'VIEW']) {
+    await t.test(`${kind} ${name}`, async (t) => {
+      const f = await fixture(t); run(f, 'migrate');
+      const before = sql(f, 'SELECT version, sha256 FROM main.pyry_schema_migrations');
+      migration(f, '0002_pending.sql', 'CREATE TABLE pending (n INTEGER);');
+      const shadow = kind === 'TABLE' ? '(version INTEGER PRIMARY KEY, sha256 TEXT NOT NULL)' : 'AS SELECT version, sha256 FROM main.pyry_schema_migrations';
+      migration(f, '0003_shadow.sql', `CREATE TABLE transient (n INTEGER); CREATE TEMP ${kind} "${name}" ${shadow};`);
+      assert.match(run(f, 'migrate', f.env, false).stderr, /authoriz/i);
+      assert.equal(sql(f, "SELECT name FROM main.sqlite_schema WHERE name IN ('pending', 'transient')").length, 0);
+      assert.deepEqual(sql(f, 'SELECT version, sha256 FROM main.pyry_schema_migrations'), before);
+      migration(f, '0003_shadow.sql', 'SELECT 1;'); run(f, 'migrate'); run(f, 'migrate');
+      assert.deepEqual(sql(f, 'SELECT version FROM main.pyry_schema_migrations ORDER BY version').map((r) => r.version), [1, 2, 3]);
+    });
+  }
+});
+
+test('migration authorization reserves case-variant durable ledger names', async (t) => {
+  const f = await fixture(t); run(f, 'migrate');
+  const before = sql(f, 'SELECT version, sha256 FROM main.pyry_schema_migrations');
+  for (const name of ['PYRY_SCHEMA_MIGRATIONS', 'PyRy_Schema_Migrations']) {
+    const db = new DatabaseSync(f.env.PYRY_APP_DB_PATH);
+    db.exec(`ALTER TABLE main.pyry_schema_migrations RENAME TO old_ledger; ALTER TABLE main.old_ledger RENAME TO "${name}";`);
+    db.close();
+    migration(f, '0002_pending.sql', 'CREATE TABLE pending (n INTEGER);');
+    migration(f, '0003_forbidden.sql', `DELETE FROM main."${name}";`);
+    assert.match(run(f, 'migrate', f.env, false).stderr, /authoriz/i);
+    assert.equal(sql(f, "SELECT name FROM main.sqlite_schema WHERE name='pending'").length, 0);
+    assert.deepEqual(sql(f, 'SELECT version, sha256 FROM main.pyry_schema_migrations'), before);
+  }
+});
+
+test('runner ledger and schema checks use durable main tables despite temporary shadows', async (t) => {
+  const f = await fixture(t); run(f, 'migrate');
+  const { ledger } = await import('../dist/service/migrations.js');
+  const { schema } = await import('../dist/service/database.js');
+  const files = sql(f, 'SELECT version, sha256 FROM main.pyry_schema_migrations');
+  const db = new DatabaseSync(f.env.PYRY_APP_DB_PATH);
+  try {
+    db.exec('CREATE TEMP TABLE PyRy_Schema_Migrations (version INTEGER PRIMARY KEY, sha256 TEXT NOT NULL); CREATE TEMP TABLE preferences (bogus TEXT);');
+    assert.deepEqual(ledger(db, files, true), []);
+    assert.doesNotThrow(() => schema(db));
+    db.prepare('INSERT INTO temp.PyRy_Schema_Migrations VALUES (?, ?)').run(files[0].version, files[0].sha256);
+    db.exec('DELETE FROM main.pyry_schema_migrations');
+    assert.throws(() => ledger(db, files, true), /unmigrated/);
+    db.exec('DROP TABLE main.preferences');
+    assert.throws(() => schema(db), /schema/);
+  } finally { db.close(); }
+});
+
 test('migration SQL cannot escape its transaction or connection', async (t) => {
   const f = await fixture(t); run(f, 'migrate');
   const forbidden = ['COMMIT;', 'END;', 'ROLLBACK;', 'BEGIN;', 'SAVEPOINT own;', 'PRAGMA foreign_keys=OFF;',
     "ATTACH DATABASE 'outside.sqlite' AS other;", "VACUUM INTO 'outside.sqlite';", "SELECT load_extension('bad');",
-    'DELETE FROM pyry_schema_migrations;',
+    'DELETE FROM pyry_schema_migrations;', 'CREATE TEMP TABLE preferences (bogus TEXT);',
     'CREATE TEMP TRIGGER steal AFTER INSERT ON pyry_schema_migrations BEGIN DELETE FROM pyry_schema_migrations; END;', "CREATE TRIGGER steal AFTER INSERT ON preferences BEGIN DELETE FROM pyry_schema_migrations; END;"];
   for (const source of forbidden) {
     migration(f, '0002_forbidden.sql', 'CREATE TABLE transient (n INTEGER); ' + source);

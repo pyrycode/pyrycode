@@ -30,20 +30,20 @@ export function preferences(input: unknown) {
 }
 export function schema(db: DatabaseSync) {
   const expected = readFileSync(join(releaseRoot, 'sql/migrations/0001_preferences.sql'), 'utf8').trim().replace(/;$/, '');
-  const definition = db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get('preferences')?.sql;
+  const definition = db.prepare("SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = ?").get('preferences')?.sql;
   const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim();
   if (typeof definition !== 'string' || normalize(definition) !== normalize(expected)) throw new Error('unavailable preference schema definition');
   const tables = { preferences: ['id:INTEGER:1', 'version:INTEGER:0', 'selected_tab:TEXT:0', 'period:TEXT:0'],
     pyry_schema_migrations: ['version:INTEGER:1', 'sha256:TEXT:0'] };
   for (const [table, expected] of Object.entries(tables)) {
-    const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+    const columns = db.prepare(`PRAGMA main.table_info(${table})`).all();
     if (columns.map((c) => `${c.name}:${c.type}:${c.pk}`).join() !== expected.join() ||
         columns.some((c) => c.pk !== 1 && c.notnull !== 1)) throw new Error(`unavailable schema: ${table}`);
   }
-  const rows = db.prepare('SELECT id, version, selected_tab, period FROM preferences').all();
+  const rows = db.prepare('SELECT id, version, selected_tab, period FROM main.preferences').all();
   if (rows.length > 1 || rows.some((r) => r.id !== 1)) throw new Error('invalid preference record');
   for (const row of rows) preferences(row);
-  if (Object.values(db.prepare('PRAGMA quick_check').get() ?? {})[0] !== 'ok' || db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('database integrity check failed');
+  if (Object.values(db.prepare('PRAGMA main.quick_check').get() ?? {})[0] !== 'ok' || db.prepare('PRAGMA main.foreign_key_check').all().length) throw new Error('database integrity check failed');
 }
 export function diagnostic(entry: string, error: unknown) {
   console.error(`${entry}: ${error instanceof Error ? error.message : 'failed'}`);

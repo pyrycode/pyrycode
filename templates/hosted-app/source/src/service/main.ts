@@ -32,7 +32,7 @@ try {
       if (req.method === 'GET' && req.url === '/_pyry/health') {
         ready(); reply(res, 200, { ready: true, app_id: config.app, release_version: config.release });
       } else if (req.method === 'GET' && req.url === '/api/preferences') {
-        reply(res, 200, preferences(db.prepare('SELECT version, selected_tab, period FROM preferences WHERE id = ?').get(1) ?? { version: 1 }));
+        reply(res, 200, preferences(db.prepare('SELECT version, selected_tab, period FROM main.preferences WHERE id = ?').get(1) ?? { version: 1 }));
       } else if (req.method === 'POST' && req.url === '/api/preferences') {
         let value;
         try { value = preferences(await body(req)); } catch (error) {
@@ -41,7 +41,7 @@ try {
           return;
         }
         if (stopping || res.destroyed) return;
-        transaction(db, () => db.prepare('INSERT OR REPLACE INTO preferences (id, version, selected_tab, period) VALUES (?, ?, ?, ?)')
+        transaction(db, () => db.prepare('INSERT OR REPLACE INTO main.preferences (id, version, selected_tab, period) VALUES (?, ?, ?, ?)')
           .run(1, value.version, value.selected_tab as string, value.period as string));
         reply(res, 204);
       } else { reply(res, 404); }
