@@ -41,6 +41,132 @@ const replyOpen = `main_turn_opened {"turn_id":"t","occurred_at":"2026-01-01T00:
 const replyText = `assistant_delta {"turn_id":"t","text":"answer"}`
 const replyEnd = `turn_end {"turn_id":"t","stop_reason":"end_turn"}`
 
+func TestMemoryTranscriptReplyObservedChildReport(t *testing.T) {
+	for _, report := range []string{
+		`tool_result {"turn_id":"t","tool_use_id":"child","is_error":false}`,
+		`tool_denied {"turn_id":"t","tool_use_id":"child"}`,
+	} {
+		for _, legacy := range []bool{false, true} {
+			for _, interrupted := range []bool{false, true} {
+				for _, chunk := range []int{1, 6} {
+					t.Run(fmt.Sprintf("%s/legacy=%t/interrupted=%t/chunk=%d", strings.Split(report, " ")[0], legacy, interrupted, chunk), func(t *testing.T) {
+						terminal := replyEnd
+						if interrupted {
+							terminal = `main_turn_interrupted {"turn_id":"t","turn_opened_entry_id":4,"cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`
+						}
+						entries := testReplyEntries(replyUser,
+							`agent_call_observed {"conversation_id":"chat","lifetime_id":"11111111-1111-4111-8111-111111111111","tool_call_id":"child","tool":"Agent","parent_tool_call_id":"outer","occurred_at":"2026-01-01T00:00:00Z"}`,
+							report, replyText, terminal, replyEnd)
+						if legacy {
+							for i := range entries {
+								entries[i].Session = nil
+							}
+						}
+						w := newMemoryTranscriptReader(nil, "chat")
+						for start := 0; start < len(entries); start += chunk {
+							testMemoryMust(t, w.feed(entries[start:min(start+chunk, len(entries))]))
+						}
+						files := w.files(conversations.Conversation{ID: "chat"})
+						body := testReplyBody(t, files, "question")
+						if strings.Contains(body, "Speaker: assistant") == interrupted {
+							t.Fatal("observed child report changed main completion or exchange permission", body)
+						}
+						boundary := "Last text entry: 1\n"
+						if !interrupted {
+							boundary = "Last text entry: 4\n"
+							if !strings.Contains(body, "Message: chat/4\nTimestamp: 1970-01-01T00:00:04Z") {
+								t.Fatal("first-text identity changed", body)
+							}
+						}
+						if !strings.Contains(body, boundary) || !strings.Contains(body, "Last delivered entry: 1\n") {
+							t.Fatal("nontext facts advanced text/delivery boundaries", body)
+						}
+						if !reflect.DeepEqual(files, testTranscriptView(t, entries)) {
+							t.Fatal("chunked reconstruction differs")
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestMemoryTranscriptReplyChildCallReuse(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, chunk := range []int{1, 3, 8} {
+			t.Run(fmt.Sprintf("legacy=%t/chunk=%d", legacy, chunk), func(t *testing.T) {
+				entries := testReplyEntries(replyUser,
+					`agent_call_observed {"conversation_id":"chat","lifetime_id":"11111111-1111-4111-8111-111111111111","tool_call_id":"child","tool":"Agent","parent_tool_call_id":"outer","occurred_at":"2026-01-01T00:00:00Z"}`,
+					`tool_use {"turn_id":"t","tool_use_id":"child","name":"Agent"}`,
+					`agent_call_observed {"conversation_id":"chat","lifetime_id":"22222222-2222-4222-8222-222222222222","tool_call_id":"child","tool":"Agent","occurred_at":"2026-01-01T00:00:00Z"}`,
+					`tool_use {"turn_id":"t","tool_use_id":"child","name":"Agent"}`,
+					replyText,
+					`main_turn_interrupted {"turn_id":"t","turn_opened_entry_id":5,"cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`, replyEnd)
+				if legacy {
+					for i := range entries {
+						entries[i].Session = nil
+					}
+				}
+				w := newMemoryTranscriptReader(nil, "chat")
+				for start := 0; start < len(entries); start += chunk {
+					testMemoryMust(t, w.feed(entries[start:min(start+chunk, len(entries))]))
+				}
+				files := w.files(conversations.Conversation{ID: "chat"})
+				if strings.Contains(testReplyBody(t, files, "question"), "Speaker: assistant") {
+					t.Fatal("child exclusion crossed agent lifetime and hid the main opening")
+				}
+				if !reflect.DeepEqual(files, testTranscriptView(t, entries)) {
+					t.Fatal("chunked reconstruction differs")
+				}
+			})
+		}
+	}
+}
+
+func TestMemoryTranscriptReplyChildOwnershipScopes(t *testing.T) {
+	observation := `agent_call_observed {"conversation_id":"chat","lifetime_id":"11111111-1111-4111-8111-111111111111","tool_call_id":"child","tool":"Agent","parent_tool_call_id":"outer","occurred_at":"2026-01-01T00:00:00Z"}`
+	for _, tc := range []struct {
+		name, observation, successor string
+		change                       func([]history.Entry)
+	}{
+		{name: "foreign conversation", observation: strings.Replace(observation, `"chat"`, `"elsewhere"`, 1)},
+		{name: "invalid lifetime", observation: strings.Replace(observation, `11111111-1111-4111-8111-111111111111`, "invalid", 1)},
+		{name: "null parent", observation: strings.Replace(observation, `"outer"`, `null`, 1)},
+		{name: "lost lifetime", observation: strings.Replace(observation, `}`, `,"truncated_fields":["lifetime_id"]}`, 1)},
+		{name: "lost parent", observation: strings.Replace(observation, `}`, `,"dropped_fields":["parent_tool_call_id"]}`, 1)},
+		{name: "unexpected reference", observation: strings.Replace(observation, `}`, `,"call_observed_entry_id":1}`, 1)},
+		{name: "other session", change: func(e []history.Entry) { e[1].Session.SessionID = "B" }},
+		{name: "other agent", change: func(e []history.Entry) { e[1].Session.Kind = "codex" }},
+		{name: "legacy observation", change: func(e []history.Entry) { e[1].Session = nil }},
+		{name: "fresh result lifetime", successor: `agent_call_result {"conversation_id":"chat","lifetime_id":"22222222-2222-4222-8222-222222222222","tool_call_id":"other","status":"completed","occurred_at":"2026-01-01T00:00:00Z"}`},
+		{name: "fresh task lifetime", successor: `background_task_observed {"conversation_id":"chat","lifetime_id":"22222222-2222-4222-8222-222222222222","task_id":"other","occurred_at":"2026-01-01T00:00:00Z"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.observation == "" {
+				tc.observation = observation
+			}
+			if tc.successor == "" {
+				tc.successor = `thinking_delta {"turn_id":"t","text":"private"}`
+			}
+			entries := testReplyEntries(replyUser, tc.observation, tc.successor,
+				`tool_result {"turn_id":"t","tool_use_id":"child","is_error":false}`, replyText,
+				`main_turn_interrupted {"turn_id":"t","turn_opened_entry_id":4,"cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`, replyEnd)
+			if tc.change != nil {
+				tc.change(entries)
+			}
+			for _, chunk := range []int{1, len(entries)} {
+				w := newMemoryTranscriptReader(nil, "chat")
+				for start := 0; start < len(entries); start += chunk {
+					testMemoryMust(t, w.feed(entries[start:min(start+chunk, len(entries))]))
+				}
+				if strings.Contains(testReplyBody(t, w.files(conversations.Conversation{ID: "chat"}), "question"), "Speaker: assistant") {
+					t.Fatal("unrelated ownership hid a valid main report opening")
+				}
+			}
+		})
+	}
+}
+
 func TestMemoryTranscriptReplies(t *testing.T) {
 	entries := testReplyEntries(replyUser, replyOpen,
 		`assistant_delta {"turn_id":"t","text":"  before\n"}`,

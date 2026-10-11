@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/thread"
@@ -24,6 +25,13 @@ type memoryReplyLifetime struct {
 	completed               bool
 	deltas                  []uint64
 }
+type memoryReplyChildKey struct {
+	source   history.SessionProvenance
+	tagged   bool
+	lifetime string
+	scope    uint64
+	turn     string
+}
 type memoryReplyEvidence struct {
 	conversation string
 	scope        uint64
@@ -31,11 +39,12 @@ type memoryReplyEvidence struct {
 	openings     map[uint64]*memoryReplyLifetime
 	pending      map[memoryReplyKey]uint64
 	text         map[uint64]*memoryReplyLifetime
-	children     map[memoryReplyKey]map[string]bool
+	children     map[memoryReplyChildKey]map[string]bool
+	lifetimes    map[memoryReplyKey]string
 }
 
 func newMemoryReplyEvidence(id string) *memoryReplyEvidence {
-	return &memoryReplyEvidence{conversation: id, turns: make(map[memoryReplyKey]*memoryReplyLifetime), openings: make(map[uint64]*memoryReplyLifetime), pending: make(map[memoryReplyKey]uint64), text: make(map[uint64]*memoryReplyLifetime), children: make(map[memoryReplyKey]map[string]bool)}
+	return &memoryReplyEvidence{conversation: id, turns: make(map[memoryReplyKey]*memoryReplyLifetime), openings: make(map[uint64]*memoryReplyLifetime), pending: make(map[memoryReplyKey]uint64), text: make(map[uint64]*memoryReplyLifetime), children: make(map[memoryReplyChildKey]map[string]bool), lifetimes: make(map[memoryReplyKey]string)}
 }
 
 type memoryReplyIdentity struct {
@@ -164,6 +173,98 @@ func memoryReplyFact(e history.Entry) (memoryReplyIdentity, bool) {
 	}
 	return id, valid
 }
+
+func (r *memoryReplyEvidence) childKey(e history.Entry, turn string) memoryReplyChildKey {
+	source := r.key(e, "")
+	source.scope = 0
+	key := memoryReplyChildKey{source: source.source, tagged: source.tagged, lifetime: r.lifetimes[source], scope: r.scope, turn: turn}
+	if key.lifetime != "" {
+		key.scope = 0
+	}
+	return key
+}
+
+func (r *memoryReplyEvidence) rememberChild(key memoryReplyChildKey, call string) {
+	if call == "" {
+		return
+	}
+	if r.children[key] == nil {
+		r.children[key] = make(map[string]bool)
+	}
+	r.children[key][call] = true
+}
+
+// Durable call ownership precedes mapped reports and is independent of turn IDs.
+// Recovery references cannot replace the active source's producer lifetime.
+func (r *memoryReplyEvidence) agentFact(e history.Entry) {
+	if !agentHistoryType(e.Type) || (e.Session != nil && e.Session.Kind != "claude") {
+		return
+	}
+	var p struct {
+		Conversation string    `json:"conversation_id"`
+		Lifetime     string    `json:"lifetime_id"`
+		Call         string    `json:"tool_call_id"`
+		Use          string    `json:"tool_use_id"`
+		Task         string    `json:"task_id"`
+		Name         string    `json:"name"`
+		Tool         string    `json:"tool"`
+		Turn         string    `json:"turn_id"`
+		Parent       string    `json:"parent_tool_use_id"`
+		ParentCall   string    `json:"parent_tool_call_id"`
+		Status       string    `json:"status"`
+		Cause        string    `json:"cause"`
+		IsError      bool      `json:"is_error"`
+		CallRef      *uint64   `json:"call_observed_entry_id"`
+		TaskRef      *uint64   `json:"task_observed_entry_id"`
+		At           time.Time `json:"occurred_at"`
+		Truncated    []string  `json:"truncated_fields"`
+		Dropped      []string  `json:"dropped_fields"`
+	}
+	if !memoryReplyDecode(e.Payload, &p) || p.Conversation != r.conversation || p.At.IsZero() || !conversations.ValidID(p.Lifetime) {
+		return
+	}
+	lost := func(field string) bool {
+		return slices.Contains(p.Truncated, field) || slices.Contains(p.Dropped, field)
+	}
+	if lost("conversation_id") || lost("lifetime_id") {
+		return
+	}
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(e.Payload, &fields)
+	for field := range fields {
+		if strings.EqualFold(field, "call_observed_entry_id") || strings.EqualFold(field, "task_observed_entry_id") {
+			return
+		}
+	}
+	call, task := p.Call != "" && !lost("tool_call_id"), p.Task != "" && !lost("task_id")
+	valid := false
+	switch e.Type {
+	case historyAgentObserved:
+		valid = call && (p.Tool == "Agent" || p.Tool == "Task")
+	case historyAgentResult:
+		valid = call && (p.Status == "completed" || p.Status == "failed")
+	case historyAgentDenied:
+		valid = call && p.Status == "denied"
+	case historyTaskObserved, historyTaskLinked:
+		valid = task
+	case historyTaskOutcome:
+		valid = task && p.Status != ""
+	case historyTaskGone:
+		valid = task && call && p.Status == "gone"
+	case historyAgentSessionEnded:
+		valid = (call || task) && p.Cause != ""
+	}
+	if !valid {
+		return
+	}
+	source := r.key(e, "")
+	source.scope = 0
+	r.lifetimes[source] = p.Lifetime
+	if call && (p.Parent != "" || p.ParentCall != "") && !lost("parent_tool_use_id") && !lost("parent_tool_call_id") {
+		r.rememberChild(r.childKey(e, ""), p.Call)
+	}
+}
+
 func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item) {
 	// Public fold rows certify accepted main endings and paired boundary identities.
 	mainEnds := make(map[uint64]bool)
@@ -187,6 +288,7 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 		if !memoryReplyDecode(e.Payload, &owner) || (owner.Conversation != "" && owner.Conversation != r.conversation) {
 			continue
 		}
+		r.agentFact(e)
 		if boundaries[e.ID] {
 			var p struct {
 				Cause, Reason string
@@ -216,18 +318,14 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 			continue
 		}
 		key := r.key(e, id.Turn)
-		childKey := key
-		childKey.scope = r.scope
+		childKey := r.childKey(e, id.Turn)
 		if id.Parent != "" || id.ParentCall != "" || (e.Type == "tool_use" && !mainTools[e.ID]) {
-			if id.Call != "" {
-				if r.children[childKey] == nil {
-					r.children[childKey] = make(map[string]bool)
-				}
-				r.children[childKey][id.Call] = true
-			}
+			r.rememberChild(childKey, id.Call)
 			continue
 		}
-		if r.children[childKey][id.Call] {
+		observedKey := childKey
+		observedKey.turn = ""
+		if e.Type != "tool_use" && (r.children[childKey][id.Call] || r.children[observedKey][id.Call]) {
 			continue
 		}
 		source := key

@@ -6,6 +6,9 @@
 - `cmd/pyry/memory_transcript_files.go` → `publishMemoryTranscript`: confined private atomic publication.
 - `cmd/pyry/memory_transcripts_test.go` → replay, worker and storage tests: reuse helpers and security/lifecycle proofs.
 - `internal/thread/main.go` → `mainDecode`, `mainWork`, `closeText`: raw source/generation joins; text closure is not completion.
+- `internal/thread/agent.go` → `agentWork`, `agentLaunchIsChild`: validated durable lifetimes and retained call parents before mapped launch.
+- `internal/thread/child.go` → `childGroup`, `childWork`: lifetime/legacy ownership and parentless report exclusions.
+- `cmd/pyry/agent_history.go` → `agentHistoryType`, agent/task fact constants: reuse the existing durable fact vocabulary.
 - `internal/thread/fold.go` → `Feed`, `Items`, `decode`: malformed/foreign rejection and raw text preservation.
 - `internal/thread/boundaries.go` → `boundary`: legacy scope advances once per paired boundary, except restart.
 - `cmd/pyry/conversation_handover.go` → `switchRecentExchanges`: assistant-only intervals must not inherit a previous exchange.
@@ -38,6 +41,8 @@ Each existing worker exclusively owns reader, fold and evidence. No new goroutin
 | Assistant-only wrap-up after exchange, excluded facts | `TestMemoryTranscriptReplyExclusions` |
 | Reset/switch, late predecessor run/delta, routing reuse | `TestMemoryTranscriptReplyBoundaries` |
 | Split replay/reconstruction of evidence and stable first-text rows | `TestMemoryTranscriptReplies` |
+| Parentless child result/denial before any mapped launch; interruption then conflicting ending | `TestMemoryTranscriptReplyObservedChildReport` |
+| Reused child call/turn across producer lifetimes; scoped and malformed ownership | `TestMemoryTranscriptReplyChildCallReuse`, `TestMemoryTranscriptReplyChildOwnershipScopes` |
 Existing worker/storage tests cover restart, retry and joined shutdown; broader interleaved worker recovery remains #3161.
 
 ## Error handling
@@ -57,7 +62,7 @@ Pending for documentation stage:
 ## Security review
 **Verdict:** PASS
 **Findings:**
-- Trust boundaries: evidence validation and `Fold.Feed` reject malformed/foreign facts; raw sources, not display fallback, authorize joins. Parent-only and assistant-only lifetimes cannot inherit user permission.
+- Trust boundaries: evidence validation and `Fold.Feed` reject malformed/foreign facts; raw sources, not display fallback, authorize joins. Validated durable agent/task facts establish only their recorded source's producer lifetime. Retained child ownership uses that lifetime or legacy boundary scope, with tagged and untagged sources separate; observations can exclude parentless reports before any mapped launch. Accepted main launches remain authoritative. Parent-only and assistant-only lifetimes cannot inherit user permission.
 - Tokens/secrets: no credentials are accessed. Conversation text is intentionally retained privately; no payload reaches diagnostics.
 - File operations: existing hashed names and `publishMemoryTranscript` retain held-directory/no-follow operations, 0700 directories, 0600 files and synced atomic replacement; text and opaque IDs never become paths.
 - Subprocesses: no new subprocess or shell execution.
@@ -67,9 +72,11 @@ Pending for documentation stage:
 - Concurrency: serialized evidence has no lock ordering; existing joined cancellation and retryable snapshots preserve complete publication.
 - Threat model: local history/subprocess content is inert fenced text, never instructions to the exporter. Index/search integration is owned by #3099/#3103; broader recovery proof is #3161.
 **Reviewer:** builder (self-review per security-review checklist)
-**Date:** 2026-10-10
+**Date:** 2026-10-11
 
 ## Revisions
 - 2026-10-10: focused review added explicit child-call evidence to keep parentless child reports from establishing an implicit main opening, and tied pending-user cleanup to the first terminal only. `TestMemoryTranscriptReplyImplicitOpening`, `TestMemoryTranscriptReplyObservedChild` and `TestMemoryTranscriptReplyReuse` cover these contracts, including parent attribution retained only in a preceding observation. Final lifecycle coverage includes those tests alongside the table above; no API, worker or publication design changed.
 - 2026-10-10, verifier finding 1: every valid explicit `main_turn_opened` creates a fresh exporter lifetime, even when earlier terminal-only evidence had no opening. A terminal cannot cross that new opening generation. `TestMemoryTranscriptReplyTerminalBeforeOpening` covers Claude, Codex and legacy evidence, prior ending/interruption, chunked replay, withholding and a later qualifying ending with stable first-text identity/time.
 - 2026-10-10, verifier finding 2: logical replacement invalidates all unmatched pending user exchanges, using the same replacement contract as `memoryTranscriptReader.files`. Established lifetime-to-user associations remain available for late predecessor text. `TestMemoryTranscriptReplyReplacementPermission` covers reset then switch back to the same source, both divider/transition forms and chunked replay, excluded assistant-only successors and late predecessor deltas with immutable closure/successor files. `TestMemoryTranscriptReplyPendingAcrossUnloading` preserves tagged pending exchanges across idle sleep, capacity eviction, restart and same-session recovery. The security review remains PASS: only recorded opening generations and user-associated lifetimes authorize export; no publication, diagnostic or concurrency contract changes.
+- 2026-10-11, verifier finding 1 on `c7fdbb54`: `memoryReplyEvidence.agentFact` retains validated recorded child ownership before mapped launch evidence. Parentless child results/denials cannot establish a main opening or consume an exchange. `TestMemoryTranscriptReplyObservedChildReport` proves interrupted withholding, successful completion, stable first-text identity/time and text/delivery boundaries with tagged/legacy sources and whole/single-entry feeds.
+- 2026-10-11, verifier finding 2 on `c7fdbb54`: child exclusions now join by recorded source and active producer lifetime, falling back to legacy boundary scope only without a lifetime. Accepted main tool creations cannot be suppressed by retained exclusions. `TestMemoryTranscriptReplyChildCallReuse` covers a child call/turn reused as a main launch in a fresh lifetime with interruption referencing that launch; `TestMemoryTranscriptReplyChildOwnershipScopes` checks malformed/foreign observations and lifetime changes from agent/task facts. Security re-review remains PASS after checking all nine categories: ownership validation rejects scalar nulls, identity-loss markers and unexpected observation references; recovery references do not change the active lifetime. No credentials, paths, publication, diagnostics, I/O, cryptography or concurrency contracts change. Rework sizing: about 290 written lines, no exported types/interfaces or migrated consumers; the existing documentation handoff and #3161 recovery gate remain pending.
