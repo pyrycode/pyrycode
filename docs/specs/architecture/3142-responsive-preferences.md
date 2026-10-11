@@ -62,3 +62,6 @@ Pending documentation stage: complete `docs/hosted-apps.md` § Template and save
 - [Threat model] Native isolation/publication/live-channel conformance remains OUT OF SCOPE under #3125/#3126/#3133 and client tickets; this proof does not claim it.
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-11
+
+## Revisions
+- 2026-10-11: The replacement release's deterministic suite exposed a fixed `1.0.1` mismatch sentinel in `startup and readiness failures`. Derive a release different from the generated manifest so the existing reject assertion applies to both generated releases; no service contract changes.

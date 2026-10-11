@@ -1,3 +1,36 @@
-:root { font-family: system-ui, sans-serif; color-scheme: light dark; }
+:root {
+  font: 16px/1.5 system-ui, sans-serif; color-scheme: light;
+  --bg: #f8f9fb; --panel: #ffffff; --text: #202b39; --muted: #566578;
+  --line: #cad3df; --accent: #255daf; --soft: #e8f0fc;
+  color: var(--text); background: var(--bg);
+}
+* { box-sizing: border-box; }
 body { margin: 0; }
-main { max-width: 60rem; margin: auto; padding: 1.5rem; overflow-wrap: anywhere; }
+main {
+  max-width: 70rem; margin: auto; min-width: 0; overflow-wrap: anywhere;
+  padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+    max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+}
+h1 { font-size: 1.75rem; margin: 0; }
+h2 { font-size: 1.4rem; }
+h3 { font-size: 1.05rem; margin-top: 0; }
+.muted { color: var(--muted); }
+nav, .controls { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin: 1rem 0; }
+button, select {
+  font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+  border-radius: .4rem; padding: .5rem .8rem; max-width: 100%; min-height: 44px;
+}
+button { cursor: pointer; }
+button[aria-pressed="true"] { color: var(--accent); background: var(--soft); border-color: var(--accent); }
+button:disabled, select:disabled { cursor: wait; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+[role="status"] { color: var(--accent); min-height: 3rem; }
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: .5rem; padding: 1rem; min-width: 0; }
+.metric { font-size: 1.8rem; font-weight: 600; margin: .5rem 0; }
+.table-scroll { overflow-x: auto; max-width: 100%; margin-top: 1.5rem; }
+table { border-collapse: collapse; width: 100%; min-width: 40rem; background: var(--panel); }
+caption { text-align: left; font-weight: 600; padding: .8rem; }
+th, td { text-align: left; padding: .8rem; border-bottom: 1px solid var(--line); }
+@media (max-width: 760px) { .cards { grid-template-columns: minmax(0, 1fr); } }
+@media (pointer: coarse) { button, select { min-height: 44px; } }

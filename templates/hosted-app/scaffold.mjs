@@ -6,7 +6,7 @@ import './source/src/service/runtime.mjs';
 
 const source = fileURLToPath(new URL('./source/', import.meta.url));
 const files = ['package.json', 'package-lock.json', '.npmrc', '.gitignore',
-  'tsconfig.web.json', 'tsconfig.service.json', 'scripts/build.mjs',
+  'tsconfig.web.json', 'tsconfig.service.json', 'scripts/build.mjs', 'scripts/browser-smoke.mjs',
   'src/web/App.tsx', 'src/web/main.tsx', 'src/web/style.css', 'src/web/assets.d.ts',
   'src/service/main.ts', 'src/service/migrate.ts', 'src/service/runtime.mjs',
   'src/service/environment.ts', 'src/service/database.ts', 'src/service/migrations.ts', 'src/service/health.ts',
