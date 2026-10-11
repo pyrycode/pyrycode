@@ -1,8 +1,8 @@
 {
-  "schema": 1,
+  "schema": 2,
   "run_id": "3071-emulator-20261011",
   "status": "pending dispatcher admission; diagnostic, no host repair established",
-  "daemon_revision": "8a076f1b6b65be51b91bce5435f42dd5719fd312",
+  "daemon_revision": "5a3428a0da9074201fa8ee47f6aab62a83c895b1",
   "daemon_source_variable": "PYRYCODE_SRC",
   "build_tags": "e2e_realclaude",
   "build_environment": {
@@ -112,21 +112,26 @@
   "ownership": "Wrapper-generated e2e-auto primary and second-host instances belong to this run; peer is an independent device; bypass and answer instances remain separately owned. Header observer records private instance/process/connection joins; export uses ordinals. Never count pre-restart children as retained afterward.",
   "private_input": {
     "RunID": "3071-emulator-20261011",
-    "SourceRevision": "8a076f1b6b65be51b91bce5435f42dd5719fd312",
+    "SourceRevision": "5a3428a0da9074201fa8ee47f6aab62a83c895b1",
     "Binary": "<mobile checkout>/build/e2e-bin/pyry",
     "Observations": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/observations.jsonl",
     "XML": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/emulator-results.xml",
     "Resources": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/resource-samples.jsonl",
     "Homes": [
       "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/daemon-home"
-    ]
+    ],
+    "Evidence": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/acquisition-provenance.json",
+    "Readbacks": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/configuration-readbacks.jsonl",
+    "RunnerStatus": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/runner-status.jsonl",
+    "Persistence": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/persistence-snapshots.jsonl",
+    "TargetPrompt": "Read exact target prompt privately from the pinned mobile method; never export it"
   },
   "private_input_path": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/input.json",
   "observer_environment": {
     "PYRY_E2E_READINESS_RECORD": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/observations.jsonl"
   },
-  "resource_sampler": "go test -tags e2e_realclaude -run ^TestReadinessEmulatorResources$ -timeout 75m ./internal/e2e/realclaude; set PYRY_E2E_READINESS_EMULATOR_INPUT to private input.json; create capture-complete in its directory on wrapper completion/cancellation and join sampler",
-  "export": "After admission, retain the original named XML privately, then run TestReadinessEmulatorExport with the same private input. It does not launch Android. Both destination and recovery files are deny-scanned; full failed/skipped outcomes survive sanitized XML and named-results.json.",
+  "resource_sampler": "go test -tags e2e_realclaude -run ^TestReadinessEmulatorResources$ -timeout 75m ./internal/e2e/realclaude; set PYRY_E2E_READINESS_EMULATOR_INPUT to private input.json; start before admitted wrapper and await capture-complete on completion/cancellation; stop/join sidecar and all owned daemons before export. Private binary, observations, resources and persistence paths must be populated. Actual owned executables must equal the clean rebuilt Binary.",
+  "export": "From the clean final handoff checkout, after admitted acquisition and joined cleanup, run TestReadinessEmulatorExport with PYRY_E2E_READINESS_EMULATOR_INPUT. It validates typed provenance, runner status, resolved readbacks, persisted target and independent owned resources; exports sanitized XML durations and full named inventory including incomplete methods. It never starts Android and refuses an existing exported run. Both destination and recovery copies are deny-scanned and all pins/semantic joins are validated.",
   "recovery_paths": [
     "/tmp/pyry-3071-live-records/3071-emulator-20261011/setup.json",
     "/tmp/pyry-3071-live-records/3071-emulator-20261011/request-events.jsonl",
@@ -152,13 +157,17 @@
     "readinessExportEmulator",
     "TestReadinessRuntimeRetained",
     "TestReadinessEmulatorExportPrivacy",
-    "TestReadinessEmulatorRequestJoins"
+    "TestReadinessEmulatorRequestJoins",
+    "readinessRunnerIntervals",
+    "readinessNewJoins",
+    "readinessValidateEmulator",
+    "TestReadinessEmulatorSemanticValidation"
   ],
   "offline_checks": [
     "go test -race -tags e2e_realclaude -run ^TestReadiness ./internal/e2e/realclaude ./internal/streamsup ./internal/dispatch",
     "go vet -tags e2e_realclaude ./internal/e2e/realclaude/..."
   ],
-  "return_trip": "needs-live-artifacts stays until builder recovers these exact usable records, validates pins/privacy/named counts with coupled readers, commits and pushes them. Missing/unusable or zero-executed records are blockers, never a pass.",
+  "return_trip": "needs-live-artifacts stays until builder recovers these eight exact usable files, validates source/binary/settings/status/inventory/ownership/persistence/resource hashes and semantic joins with return_checks, commits and pushes to PR #3201. TestReadinessRuntimeRetained must require the concrete emulator run using PYRY_E2E_READINESS_REQUIRE_EMULATOR=1 on return. Missing/unusable or zero-executed records are blockers; usable partial evidence remains incomplete and never proves the full selection or a repair.",
   "remaining_unknowns": [
     "Historical actual-client pacing/configuration",
     "client emit before host receipt",
@@ -166,5 +175,86 @@
     "kernel stdout arrival",
     "MCP/SessionStart role entry where absent; named XML alone does not attribute method intervals to host requests"
   ],
-  "subsequent_owners": "Dispatcher owns subsequent full host gate; mobile #2010 owns fresh full mobile acceptance with unchanged ping/source-copy/hidden-timestamp/staged-quote/focus/keyboard/no-send assertions."
+  "subsequent_owners": "Dispatcher owns subsequent full host gate; mobile #2010 owns fresh full mobile acceptance with unchanged ping/source-copy/hidden-timestamp/staged-quote/focus/keyboard/no-send assertions.",
+  "support_sha256": {
+    "interactive_stream_queued_turn_readiness_test.go": "9ae201cc6ea9963f9a59058c1faf4cdc1aeeac546cdc00c5d6b8b72353ee3795",
+    "queued_turn_readiness_prefix_test.go": "94ac687693af774c787edec31a2826ae3610f522b0075634a80671f6c3c81906",
+    "queued_turn_readiness_effects_test.go": "01cb62812a5cd830978fbc22668da9bf42d7bfd5b072556f91f437a2006796ec",
+    "queued_turn_readiness_dependency_test.go": "c11638eebced4c1c64d8a4d1f496badfe08e7ea510e3e95d08ba1e5cd63b960c",
+    "queued_turn_readiness_runtime_test.go": "11c0260b393b28794dcc6f64217ff88f2da916929276aadb8f02719b1e57172a",
+    "queued_turn_readiness_emulator_test.go": "d8a67e7f1a49aa0226fa26797988a3689b649858b5addcd098be5828939a16cf",
+    "../../streamsup/readiness_observation_live.go": "a00a4e5f0d4726794563da3d7040d3b01b849ba6c6ae1f3ded3f6f3df7b4cc46",
+    "../../dispatch/dispatch.go": "ee7e5362434f0f3e2c7d009eead1674b601ad4c6cb90afc16ad9efbd8daf6d59",
+    "queued_turn_readiness_emulator_join_test.go": "b671f01ccb4d558a61949faefc2e89aa225d0015c0799ccae99c9a6a9fb4d545",
+    "queued_turn_readiness_emulator_semantics_test.go": "b09786ce3fdb552a8c1e53ff2ec9092bdbb0344fe1f89697bf03c0ede28d5e02",
+    "queued_turn_readiness_emulator_sampling_test.go": "e4ded505ed1f96e3b78b5684cfcde84ca1dcce1c36a0b067a80abc49cec6c1cd",
+    "queued_turn_readiness_emulator_contract_test.go": "070eb10d30a5258ec8a13b72822b93e16b1da78231a50ffa27836462e0fb89a8"
+  },
+  "exporter_checkout": "Use the final clean feature/3071 handoff checkout for exporter/readers and this updated contract. Build the instrumented host from daemon_revision in its separate clean checkout via PYRYCODE_SRC. Source support bytes are pinned below and are identical; the later commit changes capture metadata only.",
+  "instrumentation_status_capture": {
+    "path": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/runner-status.jsonl",
+    "record": {
+      "at": "<runner UTC receipt timestamp RFC3339Nano>",
+      "line": "<original instrumentation status line>"
+    },
+    "source": "Timestamp the existing admitted runner child instrumentation output as it is streamed, before buffering or XML generation. Preserve every class/test/INSTRUMENTATION_STATUS_CODE start and terminal line; no XML-derived ordering. Keep raw status private. No product, assertions or method scheduling changes.",
+    "boundaries": "Started/Ended are runner-host status receipts, not unmeasured Android device emit times. Export observed intervals/outcomes and XML durations independently. Unresolved method/request joins remain unknown.",
+    "partial": "On cancellation retain status and any available XML; observed terminal status is retained even if XML is absent. Started-but-unfinished and unreached selected methods remain incomplete. Never fabricate skips or rerun the selection."
+  },
+  "acquisition_provenance_input": {
+    "path": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/acquisition-provenance.json",
+    "record": {
+      "RunID": "3071-emulator-20261011",
+      "Source": "5a3428a0da9074201fa8ee47f6aab62a83c895b1",
+      "MobileSource": "90d0407f06f70e325701603602d67fd2bcb96308",
+      "MobileMerge": "4a5e624f6f630e75069c2ce729c63fcc2eb748e2",
+      "MobileTree": "8564ff1d87ee16944c1b99cd577449bd96b1534b",
+      "TestHash": "f6bd70c18275c04bc83d33a66202171f53b86ccc7967a9f695ec59614652bfc8",
+      "WrapperHash": "9f9875e001a360dc1c7c7c823b2d06bf292801100467df8c0d65543c3ea36766",
+      "AdmissionHash": "489aeb7abdb0178db71e61379b5326dfd4a210449d07b00606ae49297505328e",
+      "Clock": "runner-status-host-utc",
+      "ClockComparison": "host-bracketed-adb-date or device-clock-unavailable",
+      "DeviceClockOffsetMillis": null,
+      "ClockComparedAt": "<witnessed clock comparison UTC RFC3339Nano>",
+      "CaptureConclusion": "usable",
+      "FixtureConclusion": "unknown",
+      "HostConclusion": "unknown"
+    },
+    "clock_comparison": "Bracket adb device date with host UTC reads; retain measured device-minus-host offset and comparison time. If unavailable, record device-clock-unavailable with null offset. Method receipt times stay on the runner host clock. Never infer device send or phone receipt from host queuing.",
+    "derived_fields": "Methods, Settings, Targets and TargetAcquisition are derived by coupled readers from status, readbacks and persisted snapshots, not supplied claims."
+  },
+  "effective_readbacks_input": {
+    "path": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/configuration-readbacks.jsonl",
+    "record": {
+      "At": "<host witnessed readback UTC>",
+      "Owner": "<private owner from observations>",
+      "Epoch": "<private process lifetime from observations>",
+      "Process": "<actual owned daemon PID>",
+      "Kind": "settings",
+      "Conversation": "<actual conversation ID>",
+      "Session": "<bound session ID>",
+      "Settings": {
+        "Model": "<readback canonical model/family>",
+        "PermissionMode": "<stored/readback posture>",
+        "OperatorBypass": "<actual operator provenance boolean>",
+        "MCP": "<enableAllProjectMcpServers readback boolean>",
+        "SkipDangerous": "<skipDangerousModePermissionPrompt readback boolean>",
+        "IdleSeconds": "<effective runtime idle timeout>",
+        "ActiveCap": "<effective active child cap>",
+        "SweepSeconds": "<effective sweep interval>",
+        "RetentionDays": "<effective archive retention>",
+        "WorkspaceRole": "unknown/test-owned-empty/test-owned-substitute/witnessed-configured",
+        "MCPRole": "unknown/test-owned-empty/test-owned-substitute/witnessed-configured",
+        "HookRole": "unknown/test-owned-empty/test-owned-substitute/witnessed-configured",
+        "Provenance": "runtime-and-persistence-readback"
+      }
+    },
+    "source": "Read actual owned daemon runtime settings/control replies and its test-owned persisted session/configuration files; resolve runtime flag defaults against the pinned composition root and record applied overrides. Join observed owner, lifetime and bound session, never just conversation/session spelling. Readbacks are contemporaneous per owned restart/target. Never copy operator configuration or raw argv into portable evidence.",
+    "unknowns": "Do not invent effective values. Sidecar persistence-only settings cannot stand in for missing target runtime readbacks. Missing original settings stay explicit; empty/substitute roles are separately classified. MCP/SessionStart entry/readiness/completion is unknown when no actual witness exists."
+  },
+  "persistence_sidecar": "TestReadinessEmulatorResources appends private persistence-snapshots.jsonl while each owned daemon is alive, retaining registry binding and history entry identities before replacement/deletion/restart. It validates process start ticks and rebuilt executable hash, uses separate per-owner/lifetime current descendant CPU intervals and child RSS, and exits after the completion sentinel. No raw payload/ID/path survives portable export.",
+  "return_checks": [
+    "PYRY_E2E_READINESS_REQUIRE_EMULATOR=1 go test -race -tags e2e_realclaude -run ^TestReadiness ./internal/e2e/realclaude ./internal/streamsup ./internal/dispatch",
+    "go vet -tags e2e_realclaude ./internal/e2e/realclaude/..."
+  ]
 }
