@@ -231,8 +231,8 @@ func (c *Connection) Send(env protocol.RoutingEnvelope) error {
 	return c.client.Send(raw)
 }
 
-// SendContext writes one routing envelope with cancellable, bounded delivery.
-// The caller serializes envelopes that share a Noise cipher or sender ID domain.
+// SendContext waits for cancellable, bounded delivery through Send's ordered
+// transport pump. The caller still owns Noise sealing and sender ID order.
 func (c *Connection) SendContext(ctx context.Context, env protocol.RoutingEnvelope) error {
 	raw, err := json.Marshal(env)
 	if err != nil {

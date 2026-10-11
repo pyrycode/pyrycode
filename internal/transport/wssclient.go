@@ -120,10 +120,9 @@ type Client struct {
 	rngMu sync.Mutex
 	rng   *rand.Rand
 
-	// sendCh and recvCh proxy frames between caller and the currently-
-	// live underlying conn. Both are unbuffered: backpressure is the
-	// caller's problem.
-	sendCh chan []byte
+	// sendCh serializes all application writes on the current socket. Both
+	// channels are unbuffered: admission retains no backlog after cancellation.
+	sendCh chan sendRequest
 	recvCh chan []byte
 
 	closeOnce sync.Once
@@ -145,6 +144,13 @@ type Client struct {
 	// mu guards conn (nil when no live conn).
 	mu   sync.Mutex
 	conn *websocket.Conn
+}
+
+type sendRequest struct {
+	frame []byte
+	ctx   context.Context
+	conn  *websocket.Conn
+	done  chan error
 }
 
 // Sentinel errors.
@@ -197,7 +203,7 @@ func New(cfg Config) *Client {
 		stabilityReset:   stabilityResetMin,
 		closeFrameGrace:  closeFrameGrace,
 		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
-		sendCh:           make(chan []byte),
+		sendCh:           make(chan sendRequest),
 		recvCh:           make(chan []byte),
 		closeCh:          make(chan struct{}),
 		connectedCh:      make(chan struct{}, 1),
@@ -368,15 +374,37 @@ func (c *Client) retryFatalClose(ctx context.Context, status websocket.StatusCod
 // the frame. A nil return means the frame was queued for the send pump,
 // not that it has hit the wire.
 func (c *Client) Send(frame []byte) error {
+	return c.enqueueSend(context.Background(), sendRequest{frame: frame, ctx: context.Background()})
+}
+
+// SendContext shares Send's ordered pump and waits for socket write completion.
+// Cancellation and WriteTimeout bound admission and I/O. A returned call leaves
+// no queued or active write, and a request cannot migrate to a reconnected socket.
+func (c *Client) SendContext(ctx context.Context, frame []byte) error {
+	writeCtx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
+	defer cancel()
+	req := sendRequest{frame: frame, ctx: writeCtx, done: make(chan error, 1)}
+	if err := c.enqueueSend(writeCtx, req); err != nil {
+		return err
+	}
+	// Once admitted, the pump owns the request and always acknowledges it.
+	// Waiting for that acknowledgment prevents publication after this call exits.
+	return <-req.done
+}
+
+func (c *Client) enqueueSend(ctx context.Context, req sendRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case <-c.closeCh:
 		return ErrClosed
 	default:
 	}
 	c.mu.Lock()
-	live := c.conn != nil
+	req.conn = c.conn
 	c.mu.Unlock()
-	if !live {
+	if req.conn == nil {
 		return ErrNotConnected
 	}
 	// Capture connDone AFTER observing live. If a serve teardown lands
@@ -387,39 +415,15 @@ func (c *Client) Send(frame []byte) error {
 	done := c.connDone
 	c.connDoneMu.Unlock()
 	select {
-	case c.sendCh <- frame:
+	case c.sendCh <- req:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-c.closeCh:
 		return ErrClosed
 	case <-done:
 		return ErrDisconnected
 	}
-}
-
-// SendContext writes directly to the current socket and waits for completion.
-// Cancellation bounds both writer acquisition and I/O; no frame is left in the
-// send pump after return. Calls sharing an ordering domain must be serialized.
-func (c *Client) SendContext(ctx context.Context, frame []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	select {
-	case <-c.closeCh:
-		return ErrClosed
-	default:
-	}
-	c.mu.Lock()
-	conn := c.conn
-	c.mu.Unlock()
-	if conn == nil {
-		return ErrNotConnected
-	}
-	writeCtx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-	defer cancel()
-	if err := conn.Write(writeCtx, websocket.MessageText, frame); err != nil {
-		return fmt.Errorf("send: %w", err)
-	}
-	return nil
 }
 
 // Receive blocks until the next frame arrives, ctx is cancelled, the
@@ -630,12 +634,31 @@ func (c *Client) sendPump(ctx context.Context, conn *websocket.Conn) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case frame := <-c.sendCh:
-			writeCtx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-			err := conn.Write(writeCtx, websocket.MessageText, frame)
+		case req := <-c.sendCh:
+			err := req.ctx.Err()
+			if req.conn != conn {
+				err = ErrDisconnected
+			}
+			if err != nil {
+				if req.done != nil {
+					req.done <- err
+				}
+				continue
+			}
+			writeCtx, cancel := context.WithTimeout(req.ctx, c.cfg.WriteTimeout)
+			stop := context.AfterFunc(ctx, cancel)
+			c.cfg.Logger.DebugContext(writeCtx, "transport: frame accepted", "event", "transport.send.accepted")
+			err = conn.Write(writeCtx, websocket.MessageText, req.frame)
+			stop()
 			cancel()
 			if err != nil {
-				return fmt.Errorf("send: %w", err)
+				err = fmt.Errorf("send: %w", err)
+			}
+			if req.done != nil {
+				req.done <- err
+			}
+			if err != nil {
+				return err
 			}
 		}
 	}
