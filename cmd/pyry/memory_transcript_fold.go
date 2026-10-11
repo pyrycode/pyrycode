@@ -36,12 +36,12 @@ func (w *memoryTranscriptReader) feed(entries []history.Entry) error {
 		if e.Type == "message" || e.Type == "assistant_delta" {
 			w.stamps[e.ID] = e.TS
 		}
-		// Acceptance belongs to this history position. Later parent evidence may
-		// hide a launcher row without changing the main turn it already opened.
-		// Streaming text needs no snapshot; final ownership governs rendering.
+		// Recorded ownership classifies main facts at this history position.
+		// Divider snapshots preserve accepted boundary pairing; final ownership
+		// still governs text rendering.
 		var items []thread.Item
 		switch e.Type {
-		case "tool_use", "turn_end", "main_turn_interrupted", "session_divider", "session_transition":
+		case "session_divider", "session_transition":
 			items = w.fold.Items()
 		}
 		w.replies.feed(entry, items)

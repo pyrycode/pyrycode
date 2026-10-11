@@ -358,18 +358,10 @@ func (r *memoryReplyEvidence) agentFact(e history.Entry) {
 }
 
 func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item) {
-	// The reader supplies each entry's immediate fold snapshot for launches,
-	// terminals and boundaries. Later row ownership cannot retract acceptance.
-	mainEnds := make(map[uint64]bool)
-	mainTools := make(map[uint64]bool)
+	// Only divider acceptance needs a fold snapshot. Main facts are classified
+	// using recorded ownership at this history position, independent of row reuse.
 	boundaries := make(map[uint64]bool)
 	for _, item := range items {
-		if (item.Kind == "tool_call" || item.Kind == "agent") && item.Parent == 0 {
-			mainTools[item.ID] = true
-		}
-		if item.Kind == "turn_end" && item.Parent == 0 {
-			mainEnds[item.ID] = true
-		}
 		if item.Kind == "session_divider" {
 			boundaries[item.ID] = true
 		}
@@ -413,24 +405,21 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 		}
 		key := r.key(e, id.Turn)
 		childKey := r.childKey(e, id.Turn)
-		r.mappedOwner(e, id)
-		if id.Parent != "" || id.ParentCall != "" || (e.Type == "tool_use" && !mainTools[e.ID]) {
-			r.rememberChild(childKey, id.Call)
-			continue
-		}
 		observedKey := childKey
 		observedKey.turn = ""
 		callOwner := r.owners[observedKey][id.Call]
-		if e.Type != "tool_use" && (r.children[childKey][id.Call] || (callOwner != nil && callOwner.child)) {
+		child := id.Parent != "" || id.ParentCall != "" || r.children[childKey][id.Call] || (callOwner != nil && callOwner.child)
+		// Consult prior ownership before recording this fact, as childWork does.
+		// Missing or reused public rows supply no ownership evidence.
+		r.mappedOwner(e, id)
+		if child {
+			r.rememberChild(childKey, id.Call)
 			continue
 		}
 		source := key
 		source.turn = ""
 		st := r.turns[key]
 		terminal := e.Type == "turn_end" || e.Type == "main_turn_interrupted"
-		if terminal && !mainEnds[e.ID] {
-			continue
-		}
 		referenced := e.Type == "main_turn_interrupted" && id.Opening != nil
 		if referenced {
 			st = r.openings[*id.Opening]
