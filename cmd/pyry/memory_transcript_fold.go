@@ -28,15 +28,24 @@ func newMemoryTranscriptReader(h *history.Store, id conversations.ConversationID
 	return &memoryTranscriptReader{reader: r, fold: thread.New(string(id)), stamps: make(map[uint64]time.Time), replies: newMemoryReplyEvidence(string(id))}
 }
 func (w *memoryTranscriptReader) feed(entries []history.Entry) error {
-	if err := w.fold.Feed(entries); err != nil {
-		return err
-	}
-	for _, e := range entries {
+	for i, e := range entries {
+		entry := entries[i : i+1]
+		if err := w.fold.Feed(entry); err != nil {
+			return err
+		}
 		if e.Type == "message" || e.Type == "assistant_delta" {
 			w.stamps[e.ID] = e.TS
 		}
+		// Acceptance belongs to this history position. Later parent evidence may
+		// hide a launcher row without changing the main turn it already opened.
+		// Streaming text needs no snapshot; final ownership governs rendering.
+		var items []thread.Item
+		switch e.Type {
+		case "tool_use", "turn_end", "main_turn_interrupted", "session_divider", "session_transition":
+			items = w.fold.Items()
+		}
+		w.replies.feed(entry, items)
 	}
-	w.replies.feed(entries, w.fold.Items())
 	return nil
 }
 

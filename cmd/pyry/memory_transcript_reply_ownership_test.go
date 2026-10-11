@@ -15,6 +15,75 @@ const replyChildObservation = `agent_call_observed {"conversation_id":"chat","li
 const replyTaskLifetime = `background_task_observed {"conversation_id":"chat","lifetime_id":"11111111-1111-4111-8111-111111111111","task_id":"other","occurred_at":"2026-01-01T00:00:00Z"}`
 const replyChildResult = `tool_result {"turn_id":"t","tool_use_id":"child","is_error":false}`
 
+func TestMemoryTranscriptReplyLateLauncherParent(t *testing.T) {
+	for _, tool := range []string{"Agent", "Task"} {
+		for _, legacy := range []bool{false, true} {
+			for _, interrupted := range []bool{false, true} {
+				// Every partition includes whole replay, single-entry replay and all
+				// splits around the launch, late parent observation and terminals.
+				for split := 0; split < 1<<6; split++ {
+					t.Run(fmt.Sprintf("%s/legacy=%t/interrupted=%t/split=%06b", tool, legacy, interrupted, split), func(t *testing.T) {
+						terminal := replyEnd
+						if interrupted {
+							terminal = `main_turn_interrupted {"turn_id":"t","turn_opened_entry_id":3,"cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`
+						}
+						entries := testReplyEntries(replyUser, replyTaskLifetime,
+							fmt.Sprintf(`tool_use {"turn_id":"t","tool_use_id":"child","name":%q}`, tool),
+							strings.Replace(replyChildObservation, `"Agent"`, fmt.Sprintf("%q", tool), 1),
+							replyText, terminal, replyEnd)
+						if legacy {
+							for i := range entries {
+								entries[i].Session = nil
+							}
+						}
+						w := newMemoryTranscriptReader(nil, "chat")
+						start := 0
+						for end := 1; end <= len(entries); end++ {
+							if end != len(entries) && split&(1<<(end-1)) == 0 {
+								continue
+							}
+							testMemoryMust(t, w.feed(entries[start:end]))
+							start = end
+							if end >= 5 {
+								st := w.replies.text[5]
+								if st == nil || st.opening != 3 || st.user != 1 || w.replies.openings[3] != st {
+									t.Fatalf("late ownership changed accepted opening/user: %+v", st)
+								}
+							}
+							body := testReplyBody(t, w.files(conversations.Conversation{ID: "chat"}), "question")
+							published := end >= 6 && !interrupted
+							if strings.Contains(body, "Speaker: assistant") != published {
+								t.Fatal("late parent evidence changed first-terminal completion", body)
+							}
+							lastText := 1
+							if published {
+								lastText = 5
+								for _, want := range []string{"Message: chat/5\nTimestamp: 1970-01-01T00:00:05Z", "answer"} {
+									if !strings.Contains(body, want) {
+										t.Fatalf("missing stable text %q: %s", want, body)
+									}
+								}
+							}
+							if !strings.Contains(body, fmt.Sprintf("Last delivered entry: 1\nLast text entry: %d\n", lastText)) {
+								t.Fatal("ownership/terminal facts changed text boundary", body)
+							}
+						}
+						st := w.replies.text[5]
+						if st.terminal != 6 || st.completed == interrupted {
+							t.Fatalf("first accepted terminal changed: %+v", st)
+						}
+						for _, item := range w.fold.Items() {
+							if item.ID == 3 && item.Parent == 0 {
+								t.Fatal("late child owner remained a visible main launcher")
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
 // Prove both interruption-first withholding and successful completion, including
 // the implicit opening selected before the text. Later conflicting endings must
 // never mask an ownership mismatch. Chunking and reconstruction must agree.

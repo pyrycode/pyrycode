@@ -358,7 +358,8 @@ func (r *memoryReplyEvidence) agentFact(e history.Entry) {
 }
 
 func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item) {
-	// Public fold rows certify accepted main endings and paired boundary identities.
+	// The reader supplies each entry's immediate fold snapshot for launches,
+	// terminals and boundaries. Later row ownership cannot retract acceptance.
 	mainEnds := make(map[uint64]bool)
 	mainTools := make(map[uint64]bool)
 	boundaries := make(map[uint64]bool)
