@@ -5,9 +5,11 @@ package streamsup
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,14 +77,38 @@ func ObserveReadiness(boundary, subject string, ok bool, value ...int) {
 	if len(value) > 0 {
 		r.Value = value[0]
 	}
+	readinessAppend(r)
+}
+
+func readinessAppend(record any) {
+	path := os.Getenv("PYRY_E2E_READINESS_RECORD")
+	if path == "" {
+		return
+	}
+	b, e := json.Marshal(record)
+	if e != nil {
+		return
+	}
+	var fields map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.UseNumber()
+	if decoder.Decode(&fields) != nil {
+		return
+	}
+	for _, arg := range os.Args[1:] {
+		if name, ok := strings.CutPrefix(arg, "-pyry-name="); ok {
+			fields["owner"] = name
+			break
+		}
+	}
 	readinessFileMu.Lock()
 	defer readinessFileMu.Unlock()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return // Missing observations make the live capture fail.
 	}
-	_ = json.NewEncoder(f).Encode(r) // Best effort, independently checked by capture.
-	_ = f.Close()                    // Each append owns and closes its descriptor.
+	_ = json.NewEncoder(f).Encode(fields) // Best effort, independently checked by capture.
+	_ = f.Close()                         // Each append owns and closes its descriptor.
 }
 
 func readinessArm(g *PostureGate, session string) {
@@ -133,4 +159,39 @@ func readinessChildEnv(env []string, session string) []string {
 	child := strconv.Itoa(os.Getpid()) + "-" + strconv.FormatUint(readinessChildSequence.Add(1), 10)
 	readinessChildren.Store(session, child)
 	return append(env, "PYRY_E2E_READINESS_CHILD="+child)
+}
+
+// ObserveReadinessRequest retains private header joins for isolated diagnostics.
+// Payloads are never retained; portable exporters replace joins with ordinals.
+func ObserveReadinessRequest(phase, device string, env protocol.Envelope, ok bool) {
+	if os.Getenv("PYRY_E2E_READINESS_RECORD") == "" {
+		return
+	}
+	kind := env.Type
+	if phase == "host_received" && protocol.IsKnownAppType(env) != nil {
+		kind = "unknown"
+	}
+	var scope struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	_ = json.Unmarshal(env.Payload, &scope)
+	if len(scope.ConversationID) > 128 {
+		scope.ConversationID = ""
+	}
+	var reply uint64
+	if env.InReplyTo != nil {
+		reply = *env.InReplyTo
+	}
+	record := struct {
+		At      time.Time `json:"at"`
+		Phase   string    `json:"phase"`
+		Kind    string    `json:"kind"`
+		Device  string    `json:"device"`
+		Subject string    `json:"subject"`
+		Request uint64    `json:"request"`
+		ReplyTo uint64    `json:"reply_to,omitempty"`
+		Process int       `json:"process"`
+		OK      bool      `json:"ok"`
+	}{time.Now().UTC(), phase, kind, device, scope.ConversationID, env.ID, reply, os.Getpid(), ok}
+	readinessAppend(record)
 }

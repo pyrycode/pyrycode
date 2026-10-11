@@ -1,0 +1,14 @@
+{"at":"2026-10-11T17:03:39.611412736Z","child_ordinal":1,"restart_epoch":0,"role":"MCP","phase":"started"}
+{"at":"2026-10-11T17:03:39.611572224Z","child_ordinal":1,"restart_epoch":0,"role":"MCP","phase":"dependent_entry"}
+{"at":"2026-10-11T17:03:39.611623424Z","child_ordinal":1,"restart_epoch":0,"role":"MCP","phase":"dependency_completed"}
+{"at":"2026-10-11T17:03:39.611688192Z","child_ordinal":1,"restart_epoch":0,"role":"MCP","phase":"initialized"}
+{"at":"2026-10-11T17:03:39.670327552Z","child_ordinal":1,"restart_epoch":0,"role":"SessionStart","phase":"dependent_entry"}
+{"at":"2026-10-11T17:03:39.670439168Z","child_ordinal":1,"restart_epoch":0,"role":"SessionStart","phase":"dependency_completed"}
+{"at":"2026-10-11T17:03:39.670490112Z","child_ordinal":1,"restart_epoch":0,"role":"SessionStart","phase":"completed"}
+{"at":"2026-10-11T17:03:39.750917632Z","child_ordinal":2,"restart_epoch":0,"role":"MCP","phase":"started"}
+{"at":"2026-10-11T17:03:39.751057664Z","child_ordinal":2,"restart_epoch":0,"role":"MCP","phase":"dependent_entry"}
+{"at":"2026-10-11T17:03:39.751139584Z","child_ordinal":2,"restart_epoch":0,"role":"MCP","phase":"dependency_completed"}
+{"at":"2026-10-11T17:03:39.751213056Z","child_ordinal":2,"restart_epoch":0,"role":"MCP","phase":"initialized"}
+{"at":"2026-10-11T17:03:39.819614208Z","child_ordinal":2,"restart_epoch":0,"role":"SessionStart","phase":"dependent_entry"}
+{"at":"2026-10-11T17:03:39.819744512Z","child_ordinal":2,"restart_epoch":0,"role":"SessionStart","phase":"dependency_completed"}
+{"at":"2026-10-11T17:03:39.819824384Z","child_ordinal":2,"restart_epoch":0,"role":"SessionStart","phase":"completed"}

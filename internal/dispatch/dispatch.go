@@ -130,6 +130,7 @@ func (c *Conn) Send(ctx context.Context, env protocol.Envelope) error {
 	routing := protocol.RoutingEnvelope{ConnID: c.id, Frame: frame}
 	select {
 	case c.outbound <- routing:
+		observeReadinessRequest("outbound_queued", c, env, true)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -177,6 +178,7 @@ func Route(ctx context.Context, logger *slog.Logger, conn *Conn, handlers map[st
 		return
 	}
 
+	observeReadinessRequest("host_received", conn, env, true)
 	if err := protocol.IsKnownAppType(env); err != nil {
 		switch {
 		case errors.Is(err, protocol.ErrUnsupported):

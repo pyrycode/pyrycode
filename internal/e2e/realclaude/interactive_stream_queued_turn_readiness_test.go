@@ -127,7 +127,7 @@ func TestInteractiveStreamQueuedTurnReadiness(t *testing.T) {
 		} else {
 			r.Counts["failed"] = 1
 		}
-		if arm.preceding > 0 && len(r.Replay) > 0 && len(r.TargetCounts) > 0 {
+		if arm.preceding > 0 && len(r.Replay) > 0 {
 			r.Counts = map[string]int{"executed": 0, "passed": 0, "failed": 0, "skipped": 0}
 			for _, row := range r.Replay {
 				for key, value := range row.Counts {

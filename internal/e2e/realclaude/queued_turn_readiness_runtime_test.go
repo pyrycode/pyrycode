@@ -99,6 +99,8 @@ func readinessResults(r *readinessCapture) {
 				status = "pass"
 			}
 			r.Results = append(r.Results, readinessNamedResult{Name: r.Test + "/target", Status: status})
+		} else {
+			r.Results = append(r.Results, readinessNamedResult{Name: r.Test + "/target", Status: "incomplete", Reason: "arm terminated before target"})
 		}
 	} else {
 		status := "fail"
@@ -158,7 +160,7 @@ func readinessExportRuntime(dir, runID string, r *readinessCapture, denied []str
 		files[name] = out.Bytes()
 	}
 	manifest := readinessRuntimeManifest{RunID: runID, SourceRevision: r.DaemonCommit, Checkpoint: "255e86ae643c13f7bd36affb99b4ae786ad5ee95", Conclusion: r.Conclusion, Dirty: r.Dirty, SHA256: map[string]string{}, SourceSHA256: map[string]string{}, Counts: r.Counts}
-	for _, name := range []string{"interactive_stream_queued_turn_readiness_test.go", "queued_turn_readiness_prefix_test.go", "queued_turn_readiness_effects_test.go", "queued_turn_readiness_dependency_test.go", "queued_turn_readiness_runtime_test.go"} {
+	for _, name := range []string{"interactive_stream_queued_turn_readiness_test.go", "queued_turn_readiness_prefix_test.go", "queued_turn_readiness_effects_test.go", "queued_turn_readiness_dependency_test.go", "queued_turn_readiness_runtime_test.go", "queued_turn_readiness_emulator_test.go", "../../streamsup/readiness_observation_live.go", "../../dispatch/dispatch.go"} {
 		if b, e := os.ReadFile(name); e == nil {
 			manifest.SourceSHA256[name] = fmt.Sprintf("%x", sha256.Sum256(b))
 		}
@@ -197,8 +199,13 @@ func readinessValidateRuntime(dir string) error {
 		return fmt.Errorf("runtime manifest missing")
 	}
 	var m readinessRuntimeManifest
-	if json.Unmarshal(b, &m) != nil || m.RunID == "" || len(m.SourceRevision) != 40 || len(m.SHA256) != 6 {
+	if json.Unmarshal(b, &m) != nil || m.RunID == "" || len(m.SourceRevision) != 40 || (len(m.SHA256) != 6 && len(m.SHA256) != 7) {
 		return fmt.Errorf("runtime provenance incomplete")
+	}
+	for name := range m.SHA256 {
+		if filepath.Base(name) != name || (strings.HasSuffix(name, ".xml") && name != "emulator-results.xml") {
+			return fmt.Errorf("invalid runtime pin")
+		}
 	}
 	for _, name := range []string{"setup.json", "request-events.jsonl", "startup-events.jsonl", "boundary-events.jsonl", "resource-samples.jsonl", "named-results.json"} {
 		b, e := os.ReadFile(filepath.Join(dir, name))
@@ -215,6 +222,17 @@ func readinessValidateRuntime(dir string) error {
 					return fmt.Errorf("runtime stream invalid")
 				}
 			}
+		}
+	}
+	if hash, ok := m.SHA256["emulator-results.xml"]; ok {
+		b, e := os.ReadFile(filepath.Join(dir, "emulator-results.xml"))
+		if e != nil || readinessHash(b) != hash {
+			return fmt.Errorf("emulator XML missing or changed")
+		}
+	}
+	for name := range m.SHA256 {
+		if _, e := os.Stat(filepath.Join(dir, name)); e != nil {
+			return fmt.Errorf("pinned runtime file missing")
 		}
 	}
 	entries, err := os.ReadDir(dir)
@@ -240,3 +258,5 @@ func TestReadinessRuntimeRetained(t *testing.T) {
 		}
 	}
 }
+
+func readinessHash(b []byte) string { return fmt.Sprintf("%x", sha256.Sum256(b)) }

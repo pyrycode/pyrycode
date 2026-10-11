@@ -2,7 +2,10 @@
 
 package streamsup
 
-import "io"
+import (
+	"github.com/pyrycode/pyrycode/internal/protocol"
+	"io"
+)
 
 // ObserveReadiness is inert outside instrumented live-test builds.
 func ObserveReadiness(string, string, bool, ...int) {}
@@ -14,3 +17,6 @@ func readinessReleased(*Parser)                 {}
 func readinessStdout(w io.Writer, _ *Parser, _ string) io.Writer { return w }
 
 func readinessChildEnv(env []string, _ string) []string { return env }
+
+// ObserveReadinessRequest is inert outside instrumented live-test builds.
+func ObserveReadinessRequest(string, string, protocol.Envelope, bool) {}
