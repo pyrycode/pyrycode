@@ -109,6 +109,17 @@ For combined predicates, exercise each branch independently. A shared log site c
 prove which branch was taken if both inputs satisfy the first condition. Use an
 independent observable result of the path under test.
 
+A FIFO barrier proves that preceding queued work drained only after the
+asynchronous producer has finished enqueueing the work being asserted. Join
+producer completion before inserting the barrier, for both positive delivery
+and zero-frame assertions. Receipt by one fanout recipient does not establish
+that another recipient's frame was queued: a direct barrier push can interleave
+with publication. `TestRelayAgentSwitchEncryptedFrames` awaits bounded adapter
+completion, including fanout and `FlushPushes`, before the legacy-peer barrier
+in both directions. Without that ordering, Claude restoration can falsely fail
+and Codex withholding can falsely pass. See
+[agent-switch handover testing](conversation-session-binding.md#testing-agent-switch-handover).
+
 A later frame on `Frames` cannot prove that `V2SessionManager.Run` consumed an
 asynchronous result on a separate buffered channel: either ready select arm can
 win. For a silent completion, await an observation emitted after the completion

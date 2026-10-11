@@ -92,17 +92,31 @@ The returned ID is the commit signal. An empty ID with an error means the old bi
 
 `Pool.SetSwitchTransitionPublisher` installs a dedicated cancellable lane before `Pool.Run`. The ordinary observer still clears busy/suggestions but skips enqueueing switch outcomes; `sessionTransitionEmitterV2` drains the switch lane on its existing goroutine. Its single publication appends the history boundary, pushes the clear transition, then calls `announceSwitchedConversation` to read and publish the committed row. The ordinary 16-entry drop-on-full queue cannot own this outcome: losing its signal would leave a committed binding with no delimiter, history entry or row update. Queue pressure may delay a switch but cannot discard it; ordinary reset/eviction observers remain nonblocking. See [the transition observer](sessions-package-key-types-transition-observer.md) and [relay concurrency](v2-session-manager-concurrency.md).
 
-Every open interactive `multi_agent` peer receives the three reset statuses, one clear transition and the new-agent row in that order. After commitment to Codex, a peer without `multi_agent` keeps its previous row until its next filtered conversation list. Returning to Claude restores ordinary delivery only after commitment: the rising reset phases are still withheld while the binding names Codex. The protocol's [switch outcome contract](../../protocol-mobile.md#switch_agent) gives the fixed refusal vocabulary and disconnect behavior.
+Every open interactive `multi_agent` peer receives the three reset statuses, one clear transition and the new-agent row in that order. After commitment to Codex, a peer without `multi_agent` keeps its previous row until its next filtered conversation list. Returning to Claude restores ordinary delivery after commitment. Capability filtering uses the binding at sealing, so active reset statuses queued while bound to Codex can reach a legacy peer if sealing observes the restored Claude binding. They are withheld only when sealing still observes Codex. The protocol's [switch outcome contract](../../protocol-mobile.md#switch_agent) gives the fixed refusal vocabulary and disconnect behavior.
 
 ### Testing agent-switch handover
 
 Receiving every switch outcome frame does not join `relayAgentSwitcher`:
 `conversationAgentSwitcher.Switch` releases reset exclusion after publishing
 the outcome. A subsequent switch can still receive a busy refusal in that gap.
-`TestRelayAgentSwitchEncryptedFrames` uses `gatedRelaySwitch.waitCompleted` to
-await the inner adapter's return before another request or a configuration
-change. Await adapter completion separately from frame assertions; delaying
-exclusion release reproduces the race even when all expected frames arrived.
+`TestRelayAgentSwitchEncryptedFrames` uses the bounded
+`gatedRelaySwitch.waitCompleted` to await the inner adapter's return before the
+legacy peer's workspace barrier in both switch directions, and before another
+request or a configuration change. Adapter return follows fanout and
+`V2SessionManager.FlushPushes`; capable-peer receipt alone cannot prove that
+`conversationUpdateEmitterV2.announce` has enqueued the legacy peer's row update.
+An earlier barrier can overtake that update and falsely report missing Claude
+restoration, or pass a Codex withholding assertion before publication finishes.
+Await adapter completion separately from frame assertions; delaying exclusion
+release reproduces the admission race even when all expected frames arrived.
+
+Claude restoration requires the exact committed suffix: inactive `resetting`,
+`banner`, `session_transition`, then `conversation_updated`. Permit only active
+`resetting` frames before it, since their delivery depends on the binding at
+sealing. Requiring exactly four total frames rejects valid delayed active
+statuses; accepting any prefix would hide extra committed outcomes. Codex's
+committed outcome frames remain withheld. See
+[publication barriers](development-verification.md#prove-that-tests-distinguish-the-change).
 
 A short wall-clock wrap-up deadline can turn a successful fake reply into the
 previous-note fallback. `wrapUpReply.waitOutcome` selects between completion
