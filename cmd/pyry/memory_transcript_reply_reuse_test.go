@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,67 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 )
+
+func TestMemoryTranscriptReplyPartitions(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		entries    int
+		exhaustive bool
+		want       []int
+	}{
+		{"one entry", 1, false, []int{0}},
+		{"two entries", 2, false, []int{0, 1}},
+		{"every single cut", 4, false, []int{0, 7, 1, 2, 4}},
+		{"full proof", 4, true, []int{0, 1, 2, 3, 4, 5, 6, 7}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := testReplyPartitions(tc.entries, tc.exhaustive); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("partitions = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	const entries = 12
+	partitions := testReplyPartitions(entries, false)
+	if len(partitions) != entries+1 {
+		t.Fatalf("ordinary coverage has %d partitions, want %d", len(partitions), entries+1)
+	}
+	seen := make(map[int]bool)
+	for _, split := range partitions {
+		if seen[split] {
+			t.Fatalf("duplicate split=%b", split)
+		}
+		seen[split] = true
+	}
+	if !seen[0] || !seen[(1<<(entries-1))-1] {
+		t.Fatal("missing whole-history or single-entry replay")
+	}
+	for cut := 0; cut < entries-1; cut++ {
+		if !seen[1<<cut] {
+			t.Fatalf("missing two-chunk replay at cut %d", cut+1)
+		}
+	}
+}
+
+func testReplyPartitions(entries int, exhaustive bool) []int {
+	if exhaustive {
+		partitions := make([]int, 1<<(entries-1))
+		for split := range partitions {
+			partitions[split] = split
+		}
+		return partitions
+	}
+	partitions := []int{0}
+	all := (1 << (entries - 1)) - 1
+	if all != 0 {
+		partitions = append(partitions, all)
+	}
+	for cut := 0; cut < entries-1; cut++ {
+		if split := 1 << cut; split != all {
+			partitions = append(partitions, split)
+		}
+	}
+	return partitions
+}
 
 func TestVerifierRepeatedMainLauncher(t *testing.T) {
 	for _, tool := range []string{"Agent", "Task"} {
@@ -27,9 +90,10 @@ func TestVerifierRepeatedMainLauncher(t *testing.T) {
 	}
 }
 
-// Exercise every partition of the history, including whole and single-entry
-// replay. Public rows do not certify an opening; the immutable causal identity
-// and first terminal must agree with publication at every intermediate cut.
+// Ordinary replay covers whole history, single entries and every single cut.
+// PYRY_TRANSCRIPT_EXHAUSTIVE=1 exercises every partition with the same assertions.
+// Public rows do not certify an opening; the immutable causal identity and first
+// terminal must agree with publication at every selected intermediate cut.
 func testReplyLauncherReplay(t *testing.T, prefix []history.Entry, opening, user uint64, interrupted bool) {
 	t.Helper()
 	entries := append([]history.Entry(nil), prefix...)
@@ -45,8 +109,10 @@ func testReplyLauncherReplay(t *testing.T, prefix []history.Entry, opening, user
 		e.Session = prefix[len(prefix)-1].Session
 		entries = append(entries, e)
 	}
-	for split := 0; split < 1<<(len(entries)-1); split++ {
-		t.Run(fmt.Sprintf("split=%b", split), func(t *testing.T) {
+	exhaustive := os.Getenv("PYRY_TRANSCRIPT_EXHAUSTIVE") == "1"
+	partitions, replayed, prefixes := 0, 0, 0
+	for _, split := range testReplyPartitions(len(entries), exhaustive) {
+		if t.Run(fmt.Sprintf("split=%b", split), func(t *testing.T) {
 			w := newMemoryTranscriptReader(nil, "chat")
 			start := 0
 			for end := 1; end <= len(entries); end++ {
@@ -54,6 +120,8 @@ func testReplyLauncherReplay(t *testing.T, prefix []history.Entry, opening, user
 					continue
 				}
 				testMemoryMust(t, w.feed(entries[start:end]))
+				replayed += end - start
+				prefixes++
 				start = end
 				if uint64(end) >= textID {
 					st := w.replies.text[textID]
@@ -98,8 +166,11 @@ func testReplyLauncherReplay(t *testing.T, prefix []history.Entry, opening, user
 					}
 				}
 			}
-		})
+		}) {
+			partitions++
+		}
 	}
+	t.Logf("replay-work exhaustive=%t interrupted=%t entries-per-partition=%d partitions=%d entries=%d prefixes=%d", exhaustive, interrupted, len(entries), partitions, replayed, prefixes)
 }
 
 func testReplyLauncherSource(entries []history.Entry, source string) {

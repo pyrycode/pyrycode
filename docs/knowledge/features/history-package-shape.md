@@ -388,17 +388,50 @@ first-terminal precedence and source/generation isolation.
 `TestMemoryTranscriptReplyExclusions`, `TestMemoryTranscriptReplyBoundaries` and
 `TestMemoryTranscriptReplyReplacementPermission` cover exchange qualification and
 late predecessor reconstruction, including immutable closure and unchanged
-successor files. Ownership/recovery tests exercise every replay partition with
-successful completion and interruption controls; child-text controls beside
-runtime rejection prevent a guard from silently disabling legitimate transfer.
+successor files. Ordinary ownership/recovery matrices retain every source, tool,
+ownership/recovery/validation and completion/interruption scenario.
+`testReplyPartitions` selects the distinct union of whole-history replay,
+single-entry replay and every possible single-cut two-chunk replay: at most n+1
+partitions for n entries, with linear enumeration. `testReplyLauncherReplay`
+creates a fresh reader per partition and applies the same independent assertions
+at every selected intermediate prefix and the final prefix. These check accepted
+opening/user identity, first-terminal precedence, permanent interruption
+withholding, fold closure, first-text identity/time, source/generation isolation
+and separate delivery/text boundaries. Child-text controls beside runtime
+rejection prevent a guard from silently disabling legitimate transfer.
+
+`memoryTranscriptReader.feed` reduces entries individually regardless of chunk
+size; partitions change the observable prefixes. Counting scenarios alone hides
+exponential replay work. Bound partition selection rather than caching exporter
+snapshots, which would bypass chunk replay and could certify equally incomplete
+views. The helper's `replay-work` summaries report completed partitions, replayed
+entries and checked prefixes separately for each completion/interruption control.
+
+Only `PYRY_TRANSCRIPT_EXHAUSTIVE=1` enables all original 2^(n-1) partitions with
+the same readers and assertions. Ordinary checks need no opt-in. Run the full
+hermetic proof from the repository root, without credentials, agent execution or
+the live suite, under Go's unchanged default ten-minute package timeout:
+
+```sh
+PYRY_TRANSCRIPT_EXHAUSTIVE=1 go test -count=1 -json -run '^(TestVerifier(RepeatedMainLauncher|RejectedRuntimeTransfer)|TestMemoryTranscriptReply(ReusedLauncherOwnership|ShellObservation|RecoveryOwnership|RecoveryValidation))$' ./cmd/pyry
+```
+
+At `e097c4b303f6d43222bef01e5ff8810e2de62cdc` on pyrybox's Linux amd64 container
+`ced36cb6ca66`, this command passed without race in 129.585 package seconds /
+140.997 command seconds, exercising 594 helper scenarios and 92,544 partitions
+([verified execution evidence](https://github.com/pyrycode/pyrycode/pull/3179#issuecomment-6106380990)).
+
 Replay absence assertions must isolate the exchange under test: an earlier valid
 delivered exchange can already own the same transcript before a chosen cut.
 The controlled-tick `TestMemoryTranscriptReplyWorker` checks withholding followed
 by production publication within 60 seconds. `TestMemoryTranscriptPersistedReplay`
-extends that gate through persisted callbacks across `history.MaxPageEntries`,
+remains enabled in ordinary checks and extends that gate through persisted
+callbacks across `history.MaxPageEntries`,
 interleaved chats and separate-Store commits during replay/publication.
-`TestMemoryTranscriptPublicationRecovery` checks later-tick retry on the same
-worker, preservation of prior complete files and joined replacement/reconstruction.
+`TestMemoryTranscriptPublicationRecovery` also remains enabled and checks
+later-tick retry on the same worker, preservation of prior complete files and
+joined replacement/reconstruction. These persisted worker/publication proofs
+are separate from the in-memory partition matrices.
 
 A tick send proves only discovery consumed it, and `beforeRename` fires before
 replacement completes. Hold all participating workers at that hook before
