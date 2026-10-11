@@ -496,7 +496,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	s.hostedApps = slices.Contains(negotiated, protocol.CapabilityHostedAppsV1)
 	s.nextID = 2
 	if m.cfg.HostedAppsSend != nil || m.cfg.HostedAppsDiscovery != nil || slices.Contains(helloPayload.Capabilities, protocol.CapabilityHostedAppsV1) {
-		s.hosted = &hostedState{}
+		m.initHosted(ctx, s)
 	}
 	// Retain what the client reported about ITSELF, for the session's appended
 	// system prompt (#2148). Recorded here, on the accept path and before the
