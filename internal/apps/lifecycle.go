@@ -35,11 +35,18 @@ type Observation struct {
 // CommitObservation rejects an obsolete app revision without writes or events.
 // A successful no-op also returns the current detached record.
 func (r *Registry) CommitObservation(serverID, appID string, expectedRevision uint64, observation Observation) (Record, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.commitObservationLocked(serverID, appID, expectedRevision, observation)
+}
+
+// commitObservationLocked shares the public observation contract under the registry lock.
+func (r *Registry) commitObservationLocked(serverID, appID string, expectedRevision uint64, observation Observation) (Record, bool, error) {
 	if expectedRevision == 0 {
 		return Record{}, false, ErrStale
 	}
 	u := &lifecycleUpdate{serverID: serverID, expected: expectedRevision, observation: &observation}
-	changed, err := r.change("lifecycle", appID, nil, u)
+	changed, err := r.changeLocked("lifecycle", appID, nil, u)
 	return u.result, changed, err
 }
 
