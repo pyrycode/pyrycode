@@ -1,5 +1,7 @@
 package apps
 
+import "context"
+
 // Lifecycle replaces the committed display and lifecycle fields as one change.
 // Empty releases and a nil LastError mean unset. Callers supply confirmed observed
 // state and static safe errors, never raw parser, process or I/O diagnostics.
@@ -13,8 +15,41 @@ type Lifecycle struct {
 }
 
 type lifecycleUpdate struct {
-	serverID string
-	fields   Lifecycle
+	serverID    string
+	fields      Lifecycle
+	expected    uint64
+	observation *Observation
+	result      Record
+	ctx         context.Context
+}
+
+// Observation changes state/error and optionally explicit desired intent. Display
+// fields and releases are preserved. Empty Desired retains the current intent.
+// Empty State retains state/error; a supplied State replaces LastError too.
+type Observation struct {
+	Desired   string
+	State     string
+	LastError *LastError
+}
+
+// CommitObservation rejects an obsolete app revision without writes or events.
+// A successful no-op also returns the current detached record.
+func (r *Registry) CommitObservation(serverID, appID string, expectedRevision uint64, observation Observation) (Record, bool, error) {
+	if expectedRevision == 0 {
+		return Record{}, false, ErrStale
+	}
+	u := &lifecycleUpdate{serverID: serverID, expected: expectedRevision, observation: &observation}
+	changed, err := r.change("lifecycle", appID, nil, u)
+	return u.result, changed, err
+}
+
+func (r *Registry) intent(ctx context.Context, appID, desired string) (Record, error) {
+	r.mu.Lock()
+	serverID := r.snapshot.ServerID
+	r.mu.Unlock()
+	u := &lifecycleUpdate{serverID: serverID, observation: &Observation{Desired: desired}, ctx: ctx}
+	_, err := r.change("lifecycle", appID, nil, u)
+	return u.result, err
 }
 
 // UpdateLifecycle commits confirmed observations for an existing local identity.

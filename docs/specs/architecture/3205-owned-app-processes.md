@@ -75,3 +75,13 @@ Pending documentation stage: update `docs/hosted-apps.md` § Runtime and layout,
 - Threat model: no OS sandbox claim; native resource authorization belongs to #3123 and publication to #3125.
 
 **Reviewer:** builder self-review; **Date:** 2026-10-11.
+
+## Revisions
+
+2026-10-11: Concurrent-stop evidence showed that two successful intent writes can share a revision while only the first final observation changes it. Stop now treats a stale final observation as success only when the latest committed record already has stopped intent/state; newer available intent still returns ErrStale. Start admission and final spawn use registry-then-owner lock order so a detached older intent cannot retire a just-created generation. Cancelled start intent is checked inside the registry lock before mutation. Conditional observations clone caller error values.
+
+The final lifecycle matrix also covers TestOwnerInflightCurrentness (cancellation and newer lifecycle during Node validation), TestOwnerReplacement (explicit supersession), TestOwnerConcurrentStop, and TestConditionalObservationIntegrity (preservation, detached values, no-op/reject/persistence integrity). Start performs explicit replacement when its current committed release differs from the owned one; automatic registry reactions remain #3207. Written work is approximately 1,450 lines after expanded controlled-process evidence, retained under the existing split-depth exception, with two new exported types and no consumer migrations.
+
+The supported-Node test is opt-in through HOSTED_APP_NODE when the default runtime is unsupported; its default skip is not acceptance evidence. This build executes the supported arm using actual Node 24.15.0 and records the result. Other tests default to local controlled executable doubles so the verifier's hermetic gate is independent of installed Node versions. On Linux, killed orphan descendants can remain zombies under container init; tests distinguish zombies from live processes while the owner always joins its direct child.
+
+Final recount: approximately 1,580 written lines including plan and test helpers (about 550 production and 940 tests/helpers). The existing grandchild sizing exception applies. TestOwnerPostSpawnPersistenceFailure proves that final stopped-observation failure and asynchronous failed-observation failure surface without leaving a child alive; asynchronous persistence errors are returned by Shutdown. Supported-Node evidence: TestOwnerSupportedNode executed 1, passed 1 with Node 24.15.0, without a skip.
