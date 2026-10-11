@@ -80,6 +80,7 @@ func (op daemonLiveOperation) complete(e protocol.Envelope) (daemonLiveReading, 
 	} else {
 		c.readings[op.key] = &r
 	}
+	o.publisher.enqueue(&r)
 	return detachLiveReading(r), true
 }
 
@@ -147,15 +148,14 @@ func (b *daemonLiveBindings) offer(src daemonLiveSource, typ string, payload any
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	r, ok := o.admitLocked(src, protocol.Envelope{Type: typ, Payload: raw}, id, "")
-	if ok && len(answerable) > 0 {
-		v := answerable[0]
-		r.Answerable = &v
-		o.conversations[src.ConversationID].readings[liveReadingKey{liveFamily(typ), id}] = &r
-	}
+	o.admitLocked(src, protocol.Envelope{Type: typ, Payload: raw}, id, "", answerable...)
 }
-func (b *daemonLiveBindings) dismiss(src daemonLiveSource, typ, id string) {
-	b.offer(src, typ, json.RawMessage(`{}`), id)
+func (b *daemonLiveBindings) dismiss(src daemonLiveSource, typ, id string, payload ...any) {
+	var wire any = json.RawMessage(`{}`)
+	if len(payload) > 0 {
+		wire = payload[0]
+	}
+	b.offer(src, typ, wire, id)
 }
 
 func liveAttachment(attachments []*daemonLiveBindings) *daemonLiveBindings {

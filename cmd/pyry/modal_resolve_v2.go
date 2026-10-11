@@ -122,7 +122,7 @@ func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (re
 		if dev.MayAnswerPrompt() {
 			decision = "cancel"
 		}
-		handled = bridge.resolveStreamDecision(modalID, false, false, reasonRemoteDeny, decision)
+		handled = bridge.resolveStreamDecision(modalID, false, false, reasonRemoteDeny, decision, protocol.ModalDismissedPayload{ModalID: modalID, Outcome: string(audit.OutcomeCancelled), Source: string(audit.SourceRemote)})
 	} else if r.streamApprovals != nil {
 		handled = r.streamApprovals.ResolveStream(modalID, false, false, reasonRemoteDeny)
 	}
@@ -238,7 +238,16 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 	// modalID is a stream approval; a miss actuates nothing and is Warn-logged
 	// (#1546). The modal is already consumed, so the audit and dismissal still
 	// happen — aborting would orphan it.
-	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, allow, alwaysAllow, reasonRemoteDeny)
+	handled := false
+	if bridge, ok := r.streamApprovals.(*streamApprovalBridge); ok {
+		decision := "deny"
+		if allow {
+			decision = "allow"
+		}
+		handled = bridge.resolveStreamDecision(modalID, allow, alwaysAllow, reasonRemoteDeny, decision, protocol.ModalDismissedPayload{ModalID: modalID, Outcome: optionID, Source: string(audit.SourceRemote)})
+	} else if r.streamApprovals != nil {
+		handled = r.streamApprovals.ResolveStream(modalID, allow, alwaysAllow, reasonRemoteDeny)
+	}
 	if !handled {
 		r.logUnrouted("relay: modal answer reached no stream approval", "modal_answer.unrouted", modalID)
 	}
@@ -648,12 +657,9 @@ func (b *streamApprovalBridge) RefuseQuestionDiagnostic(batchID string) (bool, s
 		b.recordPromptAnswer(batchID, owner, "refusal", verdict, nil)
 	}
 
-	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID)
-	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
-		QuestionBatchID: batchID,
-		Outcome:         outcomeQuestionRefused,
-		Source:          sourceQuestionRemote,
-	}, "stream_question.refused_push_err")
+	dismissal := protocol.QuestionDismissedPayload{QuestionBatchID: batchID, Outcome: outcomeQuestionRefused, Source: sourceQuestionRemote}
+	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID, dismissal)
+	go b.broadcast(protocol.TypeQuestionDismissed, dismissal, "stream_question.refused_push_err")
 
 	return true, "resolved"
 }
@@ -773,12 +779,9 @@ func (b *streamApprovalBridge) AnswerQuestionDiagnostic(batchID string, answers 
 		b.recordPromptAnswer(batchID, owner, "answer", verdict, answers)
 	}
 
-	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID)
-	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
-		QuestionBatchID: batchID,
-		Outcome:         outcomeQuestionAnswered,
-		Source:          sourceQuestionRemote,
-	}, "stream_question.answered_push_err")
+	dismissal := protocol.QuestionDismissedPayload{QuestionBatchID: batchID, Outcome: outcomeQuestionAnswered, Source: sourceQuestionRemote}
+	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID, dismissal)
+	go b.broadcast(protocol.TypeQuestionDismissed, dismissal, "stream_question.answered_push_err")
 
 	return true, "resolved"
 }
@@ -1021,17 +1024,13 @@ func (b *streamApprovalBridge) retireQuestion(batchID string) {
 	delete(b.byQuestion, batchID)
 	delete(b.promptOwners, batchID)
 	b.mu.Unlock()
-	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID)
-
 	if _, ok := b.questions.Resolve(batchID); !ok {
 		return // the answer path already consumed + broadcast this batch's dismissal
 	}
 
-	b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
-		QuestionBatchID: batchID,
-		Outcome:         outcomeQuestionUnanswered,
-		Source:          sourceQuestionNoAnswer,
-	}, "stream_question.dismissed_push_err")
+	dismissal := protocol.QuestionDismissedPayload{QuestionBatchID: batchID, Outcome: outcomeQuestionUnanswered, Source: sourceQuestionNoAnswer}
+	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID, dismissal)
+	b.broadcast(protocol.TypeQuestionDismissed, dismissal, "stream_question.dismissed_push_err")
 }
 
 // parkedToolUseIDs snapshots every tool_use_id currently parked on a person,
@@ -1086,10 +1085,17 @@ func (b *streamApprovalBridge) ResolveStream(modalID string, allow, alwaysAllow 
 	if allow {
 		decision = "allow"
 	}
-	return b.resolveStreamDecision(modalID, allow, alwaysAllow, denyReason, decision)
+	outcome := string(turnevent.PermissionOptionKindRejectOnce)
+	if allow {
+		outcome = string(turnevent.PermissionOptionKindAllowOnce)
+		if alwaysAllow {
+			outcome = string(turnevent.PermissionOptionKindAllowAlways)
+		}
+	}
+	return b.resolveStreamDecision(modalID, allow, alwaysAllow, denyReason, decision, protocol.ModalDismissedPayload{ModalID: modalID, Outcome: outcome, Source: string(audit.SourceRemote)})
 }
 
-func (b *streamApprovalBridge) resolveStreamDecision(modalID string, allow, alwaysAllow bool, denyReason, decision string) bool {
+func (b *streamApprovalBridge) resolveStreamDecision(modalID string, allow, alwaysAllow bool, denyReason, decision string, wire ...protocol.ModalDismissedPayload) bool {
 	b.mu.Lock()
 	correlation, ok := b.byModal[modalID]
 	owner := b.promptOwners[modalID]
@@ -1097,7 +1103,9 @@ func (b *streamApprovalBridge) resolveStreamDecision(modalID string, allow, alwa
 	if !ok {
 		return false
 	}
-	defer b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID)
+	if len(wire) > 0 {
+		defer b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID, wire[0])
+	}
 	verdict := permbridge.Deny(denyReason)
 	if allow {
 		req, live := b.perm.Lookup(correlation.toolUseID)
@@ -1311,8 +1319,6 @@ func (b *streamApprovalBridge) retire(modalID string) {
 	delete(b.byModal, modalID)
 	delete(b.promptOwners, modalID)
 	b.mu.Unlock()
-	b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID)
-
 	if !ok {
 		return // a modal_answer already consumed + broadcast this modal's dismissal
 	}
@@ -1326,11 +1332,9 @@ func (b *streamApprovalBridge) retire(modalID string) {
 		Outcome:    audit.OutcomeDeniedTimeout,
 		Source:     audit.SourceTimeout,
 	})
-	b.broadcast(protocol.TypeModalDismissed, protocol.ModalDismissedPayload{
-		ModalID: modalID,
-		Outcome: string(audit.OutcomeDeniedTimeout),
-		Source:  string(audit.SourceTimeout),
-	}, "stream_approval.dismissed_push_err")
+	dismissal := protocol.ModalDismissedPayload{ModalID: modalID, Outcome: string(audit.OutcomeDeniedTimeout), Source: string(audit.SourceTimeout)}
+	b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID, dismissal)
+	b.broadcast(protocol.TypeModalDismissed, dismissal, "stream_approval.dismissed_push_err")
 }
 
 // broadcast marshals payload and fans one control envelope of envType to every

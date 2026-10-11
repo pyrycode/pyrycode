@@ -54,6 +54,9 @@ type V2SessionConfig struct {
 	// needing closure, and never consult replay. Each cursor call yields one
 	// source-bound reading; false ends it. Nil supplies no readings.
 	ThreadLiveState func() func() (LiveState, bool)
+	// LiveStateCurrent checks unsolicited captures immediately before Run delivery.
+	// It must be a bounded memory read; correlated replies keep captured evidence.
+	LiveStateCurrent func(LiveState) bool
 
 	// ThreadReady must attest installation of live publication, authoritative
 	// watermark lookup and session-state reconciliation. Nil/false disables thread;

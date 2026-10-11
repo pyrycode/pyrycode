@@ -22,6 +22,9 @@ type LiveState struct {
 	SessionGeneration uint64
 	ReadingID         string
 	Revision          uint64
+	// Answerable is captured prompt eligibility. False withholds prompt shows;
+	// nil leaves supplied eligibility unspecified.
+	Answerable *bool
 }
 
 type liveReadingKey struct{ family, id string }
@@ -102,6 +105,10 @@ func (m *V2SessionManager) PushLiveState(ctx context.Context, connID string, r L
 	if err := validateLiveState(r); err != nil {
 		return err
 	}
+	if r.Answerable != nil {
+		v := *r.Answerable
+		r.Answerable = &v
+	}
 	r.Envelope.Payload = bytes.Clone(r.Envelope.Payload)
 	r.Envelope.SessionID = bytes.Clone(r.Envelope.SessionID)
 	if r.Envelope.InReplyTo != nil {
@@ -130,11 +137,17 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 	if !s.thread {
 		return m.forwardEnvelope(ctx, s.connID, r.Envelope)
 	}
+	if !r.Envelope.SessionStateCleared && (r.Envelope.Type == protocol.TypeModalShown || r.Envelope.Type == protocol.TypeQuestionShown) && r.Answerable != nil && !*r.Answerable {
+		return nil
+	}
 	if s.state != V2StateOpen || m.liveWithheld(s, r.ConversationID) {
 		return nil
 	}
 	if err := validateLiveState(r); err != nil {
 		return err
+	}
+	if r.Envelope.InReplyTo == nil && m.cfg.LiveStateCurrent != nil && !m.cfg.LiveStateCurrent(r) {
+		return nil
 	}
 	w := s.liveWatermarks[r.ConversationID]
 	if w != nil && r.SessionGeneration < w.generation {
@@ -236,4 +249,27 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 		m.signalLiveDrain()
 		return
 	}
+}
+
+// RetireLiveState forces reconnect reconciliation after a producer handoff gap.
+// It uses the same Run-owned teardown as push-queue overflow, without I/O here.
+func (m *V2SessionManager) RetireLiveState(ctx context.Context, connID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.pushMu.Lock()
+	q, ok := m.queues[connID]
+	if ok {
+		q.overflowed = true
+	}
+	m.pushMu.Unlock()
+	if !ok {
+		return ErrConnNotFound
+	}
+	select {
+	case m.pushOverflow <- connID:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
 }

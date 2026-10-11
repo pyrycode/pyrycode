@@ -64,3 +64,11 @@ Pending documentation stage:
 - Threat model: paired hostile requests retain existing authorization and shape checks. Production thread activation/history delivery is OUT OF SCOPE, owned by #3164; catch-up/pages by #2963.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-11
+
+## Revisions
+- 2026-10-11: the permission wire proof exposed a legacy dismissal reaching thread recipients before source-bearing delivery. With `ThreadLiveState` installed, unsolicited legacy live frames are withheld from thread recipients; legacy connections remain unchanged.
+- 2026-10-11: the removed-snapshot wire proof exposed a detached cursor surviving owner removal. Add optional bounded `LiveStateCurrent` admission at Run delivery for unsolicited readings, including cursors and previously queued publication. Correlated replies preserve captured source and existing relay ordering. Publisher cleanup also releases buffered records after joining.
+- 2026-10-11: final lifecycle proofs additionally use `TestDaemonLiveRelayRetiredSnapshot`, `TestDaemonLiveRelayConnectOvertaken`, `TestDaemonLiveRelayInventory`, `TestLiveStateCapturedEligibility` and `TestRetireLiveState`. They cover removal between snapshot capture and delivery, connect/live overtaking, bootstrap parser ingress, detached eligibility and consumer queue retirement.
+- 2026-10-11: written-work recount is approximately 1000 lines including the plan and tests, matching the recorded grandchild sizing exception. New exported types/interfaces remain zero; optional metadata/config fields and the retirement method require no fixture or legacy-constructor migration.
+- 2026-10-11: cleanup cancels and joins before detaching the publisher pointer, preventing a concurrent installation from overlapping an exiting worker. No source/owner lock is held during the join.
+- 2026-10-11: `TestDaemonLiveRelayReservedQuerySnapshot` failed when delivery compared a retained reading to an uncompleted query reservation. For ordinary unsolicited readings, `LiveStateCurrent` now checks the retained record's revision; dismissal ordering uses its terminal reservation and clears still use current generation. A failed/refused query leaves prior accepted state available. `TestDaemonLivePublicationShutdownInstallation` covers concurrent installation during shutdown.

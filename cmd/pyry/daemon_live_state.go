@@ -44,8 +44,8 @@ type liveConversation struct {
 	scopes      map[liveReadingKey]string
 }
 
-// The owner has no delivery, history or filesystem dependencies. Its mutex is
-// never held while resolving a conversation, publishing or operating fan-in.
+// The owner serializes retention and bounded publication handoff. Its mutex is
+// never held across conversation resolution, recipient lookup, delivery or fan-in.
 type daemonLiveState struct {
 	mu             sync.Mutex
 	resolve        func(string) (string, bool)
@@ -53,6 +53,7 @@ type daemonLiveState struct {
 	sources        map[streamProducerKey]daemonLiveSource
 	inventories    map[liveInventoryKey]liveInventoryCache
 	turns          map[daemonLiveSource]*liveSourceTurn
+	publisher      *daemonLivePublisher
 	nextGeneration uint64 // seeds recreated conversations without deletion tombstones
 }
 
@@ -239,7 +240,7 @@ func (o *daemonLiveState) admit(src daemonLiveSource, e protocol.Envelope, id st
 	defer o.mu.Unlock()
 	return o.admitLocked(src, e, id, "")
 }
-func (o *daemonLiveState) admitLocked(src daemonLiveSource, e protocol.Envelope, id, scope string) (daemonLiveReading, bool) {
+func (o *daemonLiveState) admitLocked(src daemonLiveSource, e protocol.Envelope, id, scope string, answerable ...bool) (daemonLiveReading, bool) {
 	c := o.conversations[src.ConversationID]
 	if c == nil || src.SessionGeneration == 0 || src.SessionGeneration != c.generation || (c.stopped && !liveControlFamily(e.Type)) {
 		return daemonLiveReading{}, false
@@ -255,6 +256,10 @@ func (o *daemonLiveState) admitLocked(src daemonLiveSource, e protocol.Envelope,
 	rk := liveRevisionKey{src.SessionGeneration, key}
 	c.revisions[rk]++
 	r := daemonLiveReading{Envelope: detachLiveEnvelope(e), ConversationID: src.ConversationID, SessionGeneration: src.SessionGeneration, ReadingID: id, Revision: c.revisions[rk]}
+	if len(answerable) > 0 {
+		v := answerable[0]
+		r.Answerable = &v
+	}
 	if src.SessionGeneration == c.generation {
 		if liveDismissal(e.Type) {
 			delete(c.readings, key)
@@ -264,6 +269,7 @@ func (o *daemonLiveState) admitLocked(src daemonLiveSource, e protocol.Envelope,
 			c.scopes[key] = scope
 		}
 	}
+	o.publisher.enqueue(&r)
 	return detachLiveReading(r), true
 }
 
