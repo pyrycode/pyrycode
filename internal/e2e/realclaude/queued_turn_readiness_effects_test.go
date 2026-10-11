@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,8 +144,10 @@ func (p *readinessReplay) upload(peer, cut bool, data []byte) string {
 		p.effect("partial_upload_no_message", messages == 0)
 	}
 	p.device(peer, func() {
+		requests := map[uint64]bool{}
 		for _, chunk := range chunks {
 			p.send(protocol.TypeAttachmentChunk, chunk)
+			requests[p.seq] = true
 		}
 		until := time.Now().Add(30 * time.Second)
 		for {
@@ -155,7 +158,7 @@ func (p *readinessReplay) upload(peer, cut bool, data []byte) string {
 			if env.Type == protocol.TypeAttachmentStored && json.Unmarshal(env.Payload, &stored) == nil && stored.ID == id {
 				break
 			}
-			if env.Type == protocol.TypeError {
+			if env.Type == protocol.TypeError && env.InReplyTo != nil && requests[*env.InReplyTo] {
 				p.t.Fatal("attachment upload refused")
 			}
 		}
@@ -219,13 +222,18 @@ func (p *readinessReplay) attachmentEffect(op string) {
 		p.retrieve(false, id, data)
 	case "share-files", "collision-file":
 		id := p.upload(false, false, data)
-		p.attachmentTurn(false, []string{id}, "Reply with exactly ping. Do not use tools.")
-		p.retrieve(true, id, data)
+		ids := []string{id}
+		var image []byte
+		var imageID string
 		if op == "share-files" {
-			image, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aG1cAAAAASUVORK5CYII=")
-			id = p.upload(false, false, image)
-			p.attachmentTurn(false, []string{id}, "Describe the attached image briefly.")
-			p.retrieve(true, id, image)
+			image, _ = base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aG1cAAAAASUVORK5CYII=")
+			imageID = p.upload(false, false, image)
+			ids = append(ids, imageID)
+		}
+		p.attachmentTurn(false, ids, "Reply with exactly ping. Do not use tools.")
+		p.retrieve(true, id, data)
+		if imageID != "" {
+			p.retrieve(true, imageID, image)
 		}
 	case "compact-attachment":
 		id := p.upload(false, false, data)
@@ -246,6 +254,7 @@ func (p *readinessReplay) attachmentEffect(op string) {
 			p.t.Fatal("file offer absent")
 		}
 		p.wait(protocol.TypeTurnEnd, true)
+		p.effect("pyry_files_send_file_offered", true)
 		p.reconnect()
 		p.opening()
 		p.retrieve(false, offer.ID, data)
@@ -277,6 +286,17 @@ func (p *readinessReplay) offlineEffect() {
 	_ = p.h.phone.Close()
 	p.effect("phone_offline_peer_retained", true)
 	p.posts(name, 1)
+	p.device(true, func() {
+		until := time.Now().Add(90 * time.Second)
+		for {
+			env := p.receive(until)
+			var delta protocol.AssistantDeltaPayload
+			if env.Type == protocol.TypeAssistantDelta && json.Unmarshal(env.Payload, &delta) == nil && delta.ConversationID == p.conv && delta.Text == "readiness-post-1-119" {
+				break
+			}
+		}
+		p.effect("older_post_batch_delivery_fenced", true)
+	})
 	// Posts produce turn_end too; persistently fence the ordinary peer turn by its message identity.
 	p.device(true, func() {
 		p.turn("Reply with exactly ping. Do not use tools.")
@@ -301,6 +321,7 @@ func (p *readinessReplay) offlineEffect() {
 		p.effect("non_channel_peer_turn_completed", false)
 	})
 	p.posts(name, 2)
+	p.observePosts("before_restart")
 	p.restart()
 	p.epoch++
 	p.effect("restart_epoch_advanced", true)
@@ -308,6 +329,7 @@ func (p *readinessReplay) offlineEffect() {
 	p.send("request_history", map[string]any{"conversation_id": p.conv, "limit": 50, "cursor": ""})
 	p.waitReply(p.seq, "history_page")
 	p.effect("post_restart_history_page", true)
+	p.observePosts("after_restart")
 }
 
 func TestReadinessAttachmentChunks(t *testing.T) {
@@ -325,5 +347,29 @@ func TestReadinessAttachmentChunks(t *testing.T) {
 	}
 	if !bytes.Equal(rebuilt, data) {
 		t.Fatal("attachment bytes changed")
+	}
+}
+
+func (p *readinessReplay) observePosts(phase string) {
+	counts := map[int]int{}
+	for _, entry := range readinessHistory(p.h.home, p.conv) {
+		if entry.Type != "assistant_delta" {
+			continue
+		}
+		var delta protocol.AssistantDeltaPayload
+		if json.Unmarshal(entry.Payload, &delta) != nil {
+			continue
+		}
+		for _, batch := range []int{1, 2} {
+			if strings.HasPrefix(delta.Text, fmt.Sprintf("readiness-post-%d-", batch)) {
+				counts[batch]++
+			}
+		}
+	}
+	if p.row.Effects == nil {
+		p.row.Effects = map[string]int{}
+	}
+	for _, batch := range []int{1, 2} {
+		p.row.Effects[fmt.Sprintf("batch_%d_delivered_%s", batch, phase)] = counts[batch]
 	}
 }

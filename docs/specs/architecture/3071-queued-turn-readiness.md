@@ -82,3 +82,7 @@ Pending documentation stage: `docs/knowledge/features/e2e-realclaude-test-infras
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-11
+
+## Revisions
+
+- 2026-10-11: the restored reduced replay executed 39/39 passed with no skips; this is exploratory dirty-source non-reproduction, retained separately. The first expanded four-arm comparison at `ba1ea10f` executed 78/74 passed/4 failed/0 skipped. Every target met the 90-second bound after confirmation. Four prefix failures were capture defects: upload waits treated unrelated `context_usage.unavailable` or `mcp_status.unavailable` replies as upload refusal. Correlate error replies to actual chunk request IDs; retain that failed batch. Fence the older 120-post batch before the ordinary peer turn, record durable delivery counts around restart, and send image/document references together in the direct-share turn. No host repair is selected. The dependency service became ready after observed role entries and no fixture timeout occurred; its readiness lifecycle is test-owned and does not recover historical configuration.
