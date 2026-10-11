@@ -10,7 +10,7 @@ import (
 
 func TestServerSealRetainsOwnership(t *testing.T) {
 	t.Parallel()
-	sock := filepath.Join(t.TempDir(), "control.sock")
+	sock := filepath.Join(shortTempDir(t), "control.sock")
 	resolver := &fakeResolver{sess: &fakeSession{}}
 	s := NewServer(sock, resolver, nil, nil, nil, nil)
 	entered, release := make(chan struct{}), make(chan struct{})
