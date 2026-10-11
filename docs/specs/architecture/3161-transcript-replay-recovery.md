@@ -60,3 +60,6 @@ None. Documentation was delivered with #3159; no pending documentation or live p
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-11
+
+## Revisions
+- 2026-10-11: the unsharded package race run reached Go's default ten-minute timeout in the unchanged `TestMemoryTranscriptReplyShellObservation` partition matrix, without an assertion failure. Validation now enumerates all 1,429 top-level tests/examples/fuzz seeds and runs four disjoint race-enabled shards with a twenty-minute per-run limit; no test is excluded. The verifier still owns the unsharded full-module gate. The implementation and product contract are unchanged.
