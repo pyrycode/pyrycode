@@ -330,7 +330,6 @@ func TestControlLiveSettingsProvider(t *testing.T) {
 }
 
 func TestControlLiveQuestionEnvelopeBound(t *testing.T) {
-	t.Skip("blocked on #3109: supported question input exceeds the full envelope byte budget")
 	// Find the parser's supported boundary so a changed producer cap changes this proof.
 	input := func(n int) json.RawMessage {
 		return json.RawMessage(`{"questions":[{"question":"` + strings.Repeat("<", n) + `","header":"H","options":[{"label":"A","description":"A"},{"label":"B","description":"B"}],"multiSelect":false}]}`)
@@ -352,10 +351,82 @@ func TestControlLiveQuestionEnvelopeBound(t *testing.T) {
 	batch.QuestionBatchID = strings.Repeat("<", 36)
 	o := testLiveOwner()
 	src := o.capture("a", 1, history.SessionProvenance{Kind: "claude", SessionID: strings.Repeat("<", 256)}, true)
-	raw, _ := json.Marshal(batch)
+	raw, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
 	n := uint64(math.MaxUint64)
-	if _, ok := o.admit(src, protocol.Envelope{Type: protocol.TypeQuestionShown, Payload: raw, InReplyTo: &n, ID: n}, batch.QuestionBatchID); !ok {
+	env := protocol.Envelope{
+		Type: protocol.TypeQuestionShown, Payload: raw, InReplyTo: &n, ID: n,
+		EventID: &n, HistoryEntryID: &n,
+		TS: time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.FixedZone("", -86340)),
+	}
+	reading, ok := o.admit(src, env, batch.QuestionBatchID)
+	if !ok {
 		t.Fatalf("supported question envelope rejected: payload=%d input=%d", len(raw), len(input(low)))
+	}
+	if reading.ReadingID != batch.QuestionBatchID {
+		t.Fatal("owner changed the original answer ID")
+	}
+	for _, clear := range []bool{false, true} {
+		env = reading.Envelope
+		if clear {
+			env.Payload, env.SessionStateCleared = json.RawMessage(`{}`), true
+			if _, ok := o.admit(src, env, batch.QuestionBatchID); !ok {
+				t.Fatal("supported question clear rejected")
+			}
+		}
+		wire, err := json.Marshal(env)
+		if err != nil || len(wire) > protocol.MaxThreadEnvelopeBytes {
+			t.Fatalf("clear=%v envelope=%d error=%v", clear, len(wire), err)
+		}
+		t.Logf("clear=%v envelope=%d input=%d", clear, len(wire), len(input(low)))
+	}
+	for _, refuse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("refuse=%v", refuse), func(t *testing.T) {
+			b, _, resolver, bc := testPromptBridge(t, nil, discardLogger())
+			b.live = testControlBindings(t, testConvID, "a")
+			req := permbridge.Request{ToolName: questionbridge.ToolName, Input: input(low), ToolUseID: "boundary-answer", SessionID: "a", RequiresUserInteraction: true}
+			pending, id, retire := testPromptSurface(t, b, bc, req, time.Minute)
+			reg := b.questions.(*questionbridge.Registry)
+			found, ok := reg.Lookup(id)
+			if !ok || found.QuestionBatchID != id || found.Questions[0].Text != batch.Questions[0].Text {
+				t.Fatal("surface lost original question identity/content")
+			}
+			for range 2 {
+				snapshot := reg.Snapshot()
+				if len(snapshot) != 1 || snapshot[0].QuestionBatchID != id || snapshot[0].Questions[0].Text != found.Questions[0].Text || !b.ApprovalAnswerable(req.ToolUseID, req) {
+					t.Fatal("snapshot lost original answer identity or answerability")
+				}
+			}
+			reading := testLiveReadings(t, b.live.sink.live, testConvID)[liveReadingKey{protocol.TypeQuestionShown, id}]
+			if reading.ReadingID != id || reading.Answerable == nil || !*reading.Answerable {
+				t.Fatal("boundary batch not retained as answerable")
+			}
+			if refuse {
+				ok = resolver.ResolveRefusal(protocol.QuestionRefusedPayload{QuestionBatchID: id}, eligibleDevice(t))
+			} else {
+				ok = resolver.ResolveAnswer(protocol.QuestionAnswerPayload{QuestionBatchID: id, Answers: []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: []string{"A"}}}}, eligibleDevice(t))
+			}
+			if !ok {
+				t.Fatal("original answer ID did not resolve boundary batch")
+			}
+			verdict := pending.Await()
+			if refuse {
+				if verdict.Behavior != "deny" {
+					t.Fatal("boundary refusal did not deny")
+				}
+			} else {
+				var child answerVerdictInput
+				if json.Unmarshal(verdict.UpdatedInput, &child) != nil || verdict.Behavior != "allow" || child.Answers[found.Questions[0].Text] != "A" {
+					t.Fatal("boundary answer lost original question/selection")
+				}
+			}
+			retire()
+			if _, ok := reg.Resolve(id); ok || len(reg.Snapshot()) != 0 || b.ApprovalAnswerable(req.ToolUseID, req) {
+				t.Fatal("resolved boundary question remains answerable")
+			}
+		})
 	}
 }
 

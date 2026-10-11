@@ -3,8 +3,9 @@
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 defines the hosting design. Strict manifest validation, durable registration,
 lifecycle mutations and restart normalization are implemented in the standalone
-`internal/apps` package; daemon integration, publication, the template and native
-viewers remain later work. This reference
+`internal/apps` package. A buildable React/TypeScript scaffold is maintained under
+`templates/hosted-app/`; SQL service behavior, preference UI, daemon integration,
+publication and native viewers remain later work. This reference
 preserves the contract's fields, limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 used by daemon, desktop and mobile consumers. Runtime and isolation choices are
@@ -203,7 +204,18 @@ APPS_ROOT/
 
 `build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The registry maps app/release identities to validated roots and digests; network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; activation/data restoration have a recoverable journal. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
-The template owns `npm run typecheck` (TypeScript checks both frontend and service without emitting), `npm test` (noninteractive, deterministic tests against temporary SQL files), and `npm run build` (frontend bundle, compiled service/migration JS and copied SQL). No runtime TS loader, Node type stripping or dev server is part of publication. Install/build scripts execute as trusted app code; publishing from a channel uses the existing assistant/operator authorization boundary. These commands are argv arrays executed in the selected source/staging tree, not shell text assembled from wire fields.
+The template owns `npm run typecheck` (TypeScript checks both frontend and service
+without emitting), `npm test` (noninteractive, deterministic tests), and
+`npm run build` (frontend bundle and compiled service/migration JS). The current
+scaffold tests runtime bounds and literal React title rendering; temporary-SQL
+tests and migration SQL follow in #3141. The build leaves `sql/migrations` at
+the source/release root rather than copying it into `dist`. See
+[Template and saved preferences](#template-and-saved-preferences) for the
+implemented layout and commands. No runtime TS loader, Node type stripping or
+dev server is part of publication. Install/build scripts execute as trusted app
+code; publishing from a channel uses the existing assistant/operator authorization
+boundary. These commands are argv arrays executed in the selected source/staging
+tree, not shell text assembled from wire fields.
 
 The daemon starts `node dist/service/main.js` with cwd equal to the immutable build directory. It supplies only a documented minimal environment plus explicitly configured app-service integrations; client tokens, Noise keys and daemon-control credentials are never supplied. The mandatory values are:
 
@@ -225,9 +237,97 @@ A service is ready only when `GET /_pyry/health` returns HTTP 200 and JSON `{ "r
 
 ### Responsive React shell
 
-The reusable React shell has native-independent page header/title, wrapping tab navigation, responsive main content, labeled filters, cards/tables and a polite status/error region. Use the [approved prototype](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272) as layout/behavior reference: Computers, Projects, Boards, Runs, Performance, Allowances. Match theme using local CSS variables; readable contrast, keyboard focus, accessible controls and safe-area padding work at desktop widths and a 320-pixel phone viewport. Computer cards use three columns above 760 px and one below; boards use four columns above 760 px, two below and one below 420 px. Charts/trends stack below 650 px; wide tables scroll horizontally. Coarse-pointer controls have at least 44-pixel touch height. No global horizontal page overflow or hover-only chart interaction.
+The responsive shell and browser proof follow in #3142; the current scaffold
+renders only a title and an editable-source message. The intended reusable React
+shell has native-independent page header/title, wrapping tab navigation, responsive main content, labeled filters, cards/tables and a polite status/error region. Use the [approved prototype](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272) as layout/behavior reference: Computers, Projects, Boards, Runs, Performance, Allowances. Match theme using local CSS variables; readable contrast, keyboard focus, accessible controls and safe-area padding work at desktop widths and a 320-pixel phone viewport. Computer cards use three columns above 760 px and one below; boards use four columns above 760 px, two below and one below 420 px. Charts/trends stack below 650 px; wide tables scroll horizontally. Coarse-pointer controls have at least 44-pixel touch height. No global horizontal page overflow or hover-only chart interaction.
 
 The orchestrator's combined CPU/memory graphs have independent per-computer selectors defaulting to 24 hours. Runs puts active work above history in one tab with common project/computer filters. Performance keeps averages and model-combined trends beneath each agent role in one view. Boards show ticket labels. Ticket drain finishes all remaining stages of already-owned tickets; agent drain finishes current runs then pauses. Fleet service owns claims, runs, telemetry, participation, capacity limits, drain state and allowances. The app service adapts configured fleet APIs; it does not duplicate fleet ownership in app SQL or let browser content select integration URLs.
+
+## Template and saved preferences
+
+The standalone entry is
+[`templates/hosted-app/scaffold.mjs`](../templates/hosted-app/scaffold.mjs), with
+maintained template files in `templates/hosted-app/source/`. Run it from the
+repository root using Node.js `>=24.15.0 <25.0.0`:
+
+```sh
+node templates/hosted-app/scaffold.mjs \
+  --destination /tmp/my-hosted-app \
+  --title 'My hosted app' \
+  --server-id 11111111-1111-4111-8111-111111111111 \
+  --app-id 22222222-2222-4222-8222-222222222222 \
+  --release-version 1.0.0
+```
+
+The caller supplies the destination, title and canonical lowercase UUIDv4
+`server_id`/`app_id`; `--release-version` is optional and defaults to `1.0.0`.
+Title and release bounds match [manifest validation](#manifest-validation).
+The destination's parent must already exist. Generation writes the source tree
+directly into a new destination, refusing existing directories, files and
+symlinks, including dangling symlinks, without modifying them or their targets.
+Invalid manifest inputs fail before creating the directory. A write failure can
+leave an incomplete destination for inspection; retrying does not overwrite it.
+Titles are serialized into JSON and rendered as React text children, so valid
+quotes and HTML-like text remain literal data.
+
+Generated source includes:
+
+```text
+<destination>/
+  app.json                            v1 manifest with caller identities
+  package.json, package-lock.json      pinned dependencies and consistent lock
+  .npmrc, .gitignore                   install policy and generated-file exclusions
+  tsconfig.web.json, tsconfig.service.json
+  scripts/build.mjs
+  src/web/{main.tsx,App.tsx,style.css,assets.d.ts,title.json}
+  src/service/{main.ts,migrate.ts,runtime.mjs}
+  sql/migrations/                     initially empty
+  test/app.test.mjs
+```
+
+React/React DOM, their type definitions, Node type definitions, TypeScript and
+`esbuild-wasm` are pinned; the portable bundler is a development dependency.
+From the generated destination, run:
+
+```sh
+cd /tmp/my-hosted-app
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+`npm ci` uses the committed lockfile. `typecheck` covers both frontend and service;
+`test` runs offline without prompts. npm `devEngines`, `engines` and
+`.npmrc`'s `engine-strict=true` reject a mismatched actual Node executable before
+installation. Runtime checks also guard scaffold generation, typecheck, tests,
+build and the compiled start/migration entries; they never select another runtime.
+
+Build output is compiled ESM at `dist/service/main.js`,
+`dist/service/migrate.js` and `dist/service/runtime.mjs`, plus public-only
+`dist/web/index.html` and `dist/web/assets/main.js`/`main.css`.
+The external script and stylesheet use `/assets/…` URLs relative to the app root,
+compatible with the [viewer CSP](#electron-and-android-isolation).
+Source secrets, environment files, SQL data, service code, lockfiles and
+`node_modules` stay outside `dist/web`. `sql/migrations` remains release-relative
+beside `dist`; publication needs no runtime TypeScript loader or development server.
+
+This slice supplies buildable source. `npm start` and `npm run migrate` execute
+the compiled entries, which deliberately exit nonzero with `unfinished-service`
+diagnostics. They bind no port, create no database and claim neither health nor
+schema readiness. SQL service/migrations and saved-preference persistence follow
+in [#3141](https://github.com/pyrycode/pyrycode/issues/3141); the responsive
+preference UI and browser persistence proof follow in
+[#3142](https://github.com/pyrycode/pyrycode/issues/3142). The eventual
+[orchestrator walkthrough](#orchestrator-walkthrough) describes app-scoped saved
+preferences shared by authorized viewers.
+
+Generation alone does not register, publish or return a ready app link.
+[#3125](https://github.com/pyrycode/pyrycode/issues/3125) owns identity minting,
+daemon-selected destinations and registration/publication tools;
+[#3126](https://github.com/pyrycode/pyrycode/issues/3126) owns the channel workflow
+and readiness-confirmed links described in
+[Create, publish and update](#create-publish-and-update).
 
 ## Client resource bridge
 
@@ -372,7 +472,8 @@ Store display preferences (selected tab, per-computer chart periods, project/com
 
 The [implementation responsibilities](specs/architecture/3120-hosted-app-contract.md#12-implementation-responsibilities-and-handoff)
 assign registration/discovery to #3121, service supervision to #3122, encrypted
-resource routing to #3123, the template to #3124, publishing/recovery to #3125
+resource routing to #3123, the template family to #3124 (buildable scaffold #3140,
+SQL service #3141 and responsive preference UI #3142), publishing/recovery to #3125
 and channel tools/readiness links to #3126. Desktop #1927 and mobile #2063 own
 viewers; desktop #1928 and mobile #2064 own host-scoped Apps navigation.
 The issue's [family roadmap](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100789144)

@@ -1,0 +1,7 @@
+{
+  "contract_version": 1,
+  "runtime": { "node": ">=24.15.0 <25.0.0", "sqlite": "node:sqlite" },
+  "frontend": { "root": "dist/web", "entry": "index.html" },
+  "service": { "entry": "dist/service/main.js", "migrate": "dist/service/migrate.js", "health_path": "/_pyry/health", "migrations": "sql/migrations" },
+  "build": { "package": "package.json", "lockfile": "package-lock.json", "install": ["npm", "ci"], "typecheck": ["npm", "run", "typecheck"], "test": ["npm", "test"], "compile": ["npm", "run", "build"] }
+}

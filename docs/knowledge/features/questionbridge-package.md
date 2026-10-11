@@ -34,22 +34,53 @@ and stamps them.
 
 ## Bounds
 
-Seven reject branches, each yielding the zero payload rather than a partial
-or truncated one — the result becomes an un-droppable control frame, and
-this family has no `truncated_fields` to report a cut in (mechanism borrowed
-from `modalbridge`'s `maxPromptBytes` **posture**, not `boundPrompt`'s
-truncate-and-continue **mechanism**): a pre-decode byte cap over the raw
-input (`maxInputBytes = 16384`, taken *before* `json.Unmarshal`), a decode
-failure, 1-4 questions, 2-4 options per question, and a question missing
-`multiSelect`.
+`Parse` applies two independent byte bounds (#3109). `maxInputBytes = 16384`
+limits raw tool input *before* `json.Unmarshal`, preserving the decode resource
+guard. After validating 1-4 questions, 2-4 options per question and a present,
+non-null boolean `multiSelect`, it marshals the actual mapped
+`protocol.QuestionShownPayload` with daemon IDs unset. `maxPayloadBytes =
+protocol.MaxThreadEnvelopeBytes - 4096` allows at most **61423 encoded payload
+bytes**, including JSON escaping and payload keys. Raw `<`, `>` and `&` expand
+sixfold under `json.Marshal`, so passing the raw bound alone cannot guarantee
+delivery.
+
+The **4096-byte reserve** covers late metadata: two 36-byte conversation/batch
+IDs (432 bytes with worst-case escaping), a producing-session ID up to 256
+bytes (1536 escaped bytes), all current envelope keys, four maximum-width
+uint64 fields (`ID`, `InReplyTo`, `EventID`, `HistoryEntryID`), the longest
+supported RFC3339Nano timestamp (35 characters, fractional seconds and a
+non-UTC offset), and boolean flags. Under these assumptions every accepted
+batch's full `question_shown` envelope fits `protocol.MaxThreadEnvelopeBytes`
+(65519 bytes). Its corresponding clear, with payload `{}` and
+`session_state_cleared: true`, fits too. Full-envelope tests check the reserve
+using actual protocol types; envelope or metadata changes must preserve this
+budget. The daemon owner's admission check remains a backstop.
+
+Raw or encoded oversize, decode/shape failure or marshal error returns the
+**zero payload and `false`**, preserving callers' refusal/fallback paths.
+There is no partial batch or silent truncation: this control-frame family has
+no `truncated_fields` marker, so clipped content would appear complete.
+Accepted text, question/option order and selection semantics are unchanged.
+`Parse` leaves daemon IDs unset; `Registry.Record` assigns them afterward,
+and lookup, snapshot and one-shot resolution preserve the original answer ID.
 
 **The header carries no length bound of its own.** The vendor documents a
 12-character cap; the only committed capture has a 14-rune header, so a
 12-rune reject would reject the one real sample anyone has. `Parse` lands no
-header bound and no rune-count bound at all — the four claude-authored
-strings are bounded transitively, only by `maxInputBytes`. See [the
+header bound and no rune-count bound at all — question text, header, option
+label and description are bounded transitively by both the raw-input and
+encoded-payload limits. See [the
 payload doc's header-cap note](protocol-package-question-batch-payload.md)
 for the full resolution.
+
+Boundary fixtures must carry literal `<`, `>` and `&` in raw tool input.
+`Encoder.SetEscapeHTML(false)` around protocol values does not undo their
+custom `MarshalJSON` methods' calls to `json.Marshal`: pre-escaped fixtures
+can hit the raw guard first and leave the encoded guard untested.
+`TestParseEnvelopeBound` derives the accepted boundary for each character in
+every content field and a four-question/four-option batch, then checks the
+largest acceptance and adjacent zero-payload rejection. See
+[protocol boundary testing](development-verification.md#protocol-boundaries).
 
 ## `Registry` — parking a surfaced batch (#1975)
 
@@ -72,8 +103,8 @@ plus a wrapped error, mirroring `modalbridge.Registry.Record`'s untested RNG
 branch. `Resolve`'s read-and-delete is one critical section, which is what
 makes the one-shot consume — "exactly one broadcaster" between a resolution
 path (#1990's refusal, #1991's answer) and #1973's retire backstop —
-structural rather than agreed between tickets. `Lookup` and `Snapshot` are pure reads; nothing calls any of
-the four yet, deliberately, as #1965 landed with no caller.
+structural rather than agreed between tickets. `Lookup` and `Snapshot` are
+pure reads and retain the parked batch's answer identity.
 
 **No stored-entry type**, unlike `modalbridge.Outstanding`: the parked thing
 *is* the stamped `protocol.QuestionShownPayload`, so a second type would only
@@ -135,8 +166,8 @@ pass because there's nothing to alias.
 ## Lessons
 
 - **A fail-closed guard's "sole red" mutation result can lie when guards are
-  ordered — a later guard can shadow an earlier one.** All seven reject
-  branches here were run as `go test -overlay` mutants rather than reasoned
+  ordered — a later guard can shadow an earlier one.** The original seven
+  reject branches here were run as `go test -overlay` mutants rather than reasoned
   about. Six were sole-red immediately; the decode-failure guard was not:
   swallowing the `json.Unmarshal` error still leaves a zero decode target,
   which the question-count bound also rejects, so the original
