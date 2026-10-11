@@ -35,6 +35,19 @@ import (
 // MUST NOT be logged, wrapped into an error or emitted on any wire surface, the
 // same contract internal/keys and internal/noise state for those bytes.
 type V2SessionConfig struct {
+	// hostedNow is a test clock for cursor lifetime; production uses time.Now.
+	hostedNow func() time.Time
+	// HostedAppsDiscovery supplies committed registrations for this authenticated host.
+	// Nil disables hosted capability admission.
+	HostedAppsDiscovery HostedAppsDiscovery
+	// HostedAppsReady attests complete registration, supervision and resource routing.
+	// It must be nonblocking. Nil/false keeps production capability disabled.
+	HostedAppsReady func() bool
+	// HostedAppsSend provides ordered cancellable delivery for hosted connections.
+	// It must honor cancellation/deadlines and never publish cancelled work. Nil
+	// withholds the capability: context-free Outbound cannot promise retirement.
+	HostedAppsSend func(context.Context, protocol.RoutingEnvelope) error
+
 	// ThreadLiveState returns a detached current-state cursor, including inactive
 	// retry/compaction and only outstanding prompts/questions with answer IDs.
 	// Factory and cursor run on Run and must be nonblocking, hold no resources
@@ -66,6 +79,13 @@ type V2SessionConfig struct {
 	// (*relay.Connection).Send. Required. An error is logged at debug and
 	// dropped, because the relay leg's reconnect handles recovery.
 	Outbound func(protocol.RoutingEnvelope) error
+
+	// OutboundContext is the cancellable transport path for hosted controls when
+	// HostedAppsSend is absent, including unsupported replies and terminal closes.
+	// It must return on cancellation/deadline without publishing cancelled work.
+	// Nil with no HostedAppsSend retires hosted work before sealing; Outbound
+	// cannot safely deliver it. This transport seam does not enable discovery.
+	OutboundContext func(context.Context, protocol.RoutingEnvelope) error
 
 	// Connected reports whether the relay transport leg is up. drainOnce consults
 	// it before sealing a queued envelope: false leaves the head unpopped and

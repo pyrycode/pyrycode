@@ -363,6 +363,19 @@ func (m *V2SessionManager) forwardAppReply(s *V2Session, reply protocol.RoutingE
 	if withheld {
 		return
 	}
+	if s.hosted != nil {
+		var env protocol.Envelope
+		if err := json.Unmarshal(frameJSON, &env); err != nil {
+			m.closeWith(m.hostedCtx, s, StatusProtocolMismatch, nil)
+			return
+		}
+		m.hostedEnvelope(m.hostedCtx, s, env)
+		return
+	}
+	var sent protocol.Envelope
+	if json.Unmarshal(frameJSON, &sent) == nil {
+		s.nextID = max(s.nextID, min(sent.ID, hostedMaxID)+1)
+	}
 	ciphertext, err := s.send.Encrypt(frameJSON)
 	if err != nil {
 		// Realistically unreachable under correct flynn/noise. Drop the

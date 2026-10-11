@@ -3,7 +3,11 @@
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 defines the hosting design. Strict manifest validation, durable registration,
 lifecycle mutations and restart normalization are implemented in the standalone
-`internal/apps` package. A buildable React/TypeScript scaffold is maintained under
+`internal/apps` package. The relay implements authenticated paged discovery and
+list cancellation; production capability activation still requires complete
+supervision/resource integration and cancellable transport wiring. Lifecycle
+notification producers remain #3158; resource-scoped cancellation remains #3123.
+A buildable React/TypeScript scaffold is maintained under
 `templates/hosted-app/`; SQL service behavior, preference UI, daemon integration,
 publication and native viewers remain later work. This reference
 preserves the contract's fields, limits and guarantees. The spec owns the
@@ -78,7 +82,23 @@ These fixed paths are release-relative, not native service addresses. Publicatio
 daemon root selection remains #3139. Registrations are independent of
 conversations and keyed by `(server_id, app_id)`. Separate roots for different
 hosts may hold the same `app_id` independently. `Registry.List` returns detached
-records in stable `app_id` order together with their committed host revision.
+records in stable `app_id` order together with their committed host revision,
+captured atomically under the same registry lock. Discovery maps committed record
+fields, including every desired/observed state, rather than candidate manifest
+metadata. A page contains at most 16 whole records and that snapshot's host
+revision. Each continuation re-reads an atomic snapshot and rejects revision
+drift with retryable `apps.changed`; clients must restart rather than combine
+pages from different revisions.
+
+Host selection comes from the authenticated, nonrevoked paired connection.
+Two hosts with the same `app_id` expose their own registrations independently;
+an app ID or cursor cannot route to another host. The opaque continuation binds
+host, captured revision and last app ID in connection-owned state, expires
+30 seconds after issuance, and becomes invalid on reconnect. Exchanged host
+cursors fail with nonretryable `app.invalid_request`. See
+[discovery paging and cancellation](protocol-mobile.md#paging-cancellation-and-validation)
+for pending-page capacity, retirement and wire errors.
+
 There are at most 256 live registrations; admission of a 257th fails unchanged.
 
 `Registry.Register` commits the manifest title, `desired: available` and
@@ -135,7 +155,8 @@ write. Opening exposes the fully committed normalized baseline through
 changes, and store no durable events or conversation history. Callbacks run
 synchronously under the registry mutex and must return promptly without calling
 any registry method, including unsubscribe. The returned unsubscribe is
-idempotent. Discovery wire mapping and relay/daemon consumers remain #3138/#3139.
+idempotent. Discovery wire mapping is implemented in the relay; lifecycle
+notification producers remain #3158 and daemon installation remains #3139.
 
 `Registry.Remove` deletes only the registration and durably tombstones its
 identity. Source, build and data files remain byte-for-byte intact. Registration
@@ -151,7 +172,7 @@ for storage, concurrency and regression-test constraints.
 
 A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists caller-supplied observations; health checks and process/retry reconciliation remain separate work (#3122). New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
 
-The discovery wire contract has these exact fields; its mapping remains #3138. Unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality and the package's unset storage values do not change record nullability.
+The implemented discovery mapping has these exact fields. Unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality and the package's unset storage values do not change record nullability.
 
 | Record field | JSON type | Meaning |
 |---|---|---|
@@ -333,7 +354,7 @@ and readiness-confirmed links described in
 
 ### Capability and envelope vocabulary
 
-Add the literal `hosted_apps_v1` to the supported capability intersection in `negotiateCapabilities`, advertised by both viewers via `HelloClientPayload.capabilities` and acknowledged via `HelloAckPayload.capabilities`. The daemon advertises it only when v1 registration, supervision and resource routing are wired and available. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
+`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production supplies a general cancellable transport adapter but no discovery/readiness providers, so activation remains disabled until complete integration. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
 
 Without the negotiated capability, clients show that host's Apps feature as unsupported and send no app requests; hosts emit no app list/state/resource pushes to that peer. An old host may return existing `protocol.unknown_type`; a supporting host receiving an app request without negotiation returns `error` with `protocol.unsupported`. Other host connections/conversations continue normally. A new contract version uses a new capability and vocabulary for incompatible semantics, never reinterprets these enums.
 
@@ -358,7 +379,9 @@ For every hosted wire table, fields are required unless explicitly optional; nul
 
 `Route`/the v2 routing boundary must recognize the vocabulary and enforce direction before dispatch. A client-sent response/notification is invalid. App work is performed by bounded cancellable workers; a stalled disk/service/credit wait cannot block that connection's cancellation or unrelated message handling. No relay changes or hosted-app parsing occur on the relay.
 
-Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID; it expires after 30 seconds. Empty/null request cursors are invalid. The daemon validates it without using it as a path. If revision changed or cursor expired, return `apps.changed` and start a fresh walk; do not combine pages from different revisions. Fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated peers. At most one list walk/request is pending per connection; discovery/cancel/credit queues are bounded to 16 control envelopes per connection and remain runnable independently of resource workers. Reconnect always starts a new list walk.
+Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the atomic host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID in connection-owned state; it expires 30 seconds after issuance. Empty/null request cursors are invalid. The daemon validates it without using it as a path or host selector. If revision changed or cursor expired, return retryable `apps.changed` and require a fresh walk; do not combine pages from different revisions. One page request is pending per connection through read and delivery; a delivered page's cursor holds no worker. Further pending lists return `app.busy` with `retry_after_s: 1`. A fresh `{}` after completion replaces the previous walk. List cancellation retires only that connection's pending target; a blocked read retains capacity until it exits. The ordered discovery/control lane holds at most 16 envelopes including active delivery and cancel acknowledgements. Reconnect always starts a new list walk. See the [implemented wire behavior](protocol-mobile.md#paging-cancellation-and-validation).
+
+Lifecycle notification producers remain pending #3158. Their contract makes a fresh list authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts must emit updates in revision order to negotiated peers. Resource/credit handling and resource-scoped cancellation remain #3123, including their independent worker bounds.
 
 ### Asset/API fields and HTTP semantics
 
