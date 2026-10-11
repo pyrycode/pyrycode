@@ -69,3 +69,8 @@ Pending for documentation stage: update `docs/hosted-apps.md` § Runtime and lay
 - Threat model: trusted same-account app execution; loopback is not same-account authentication. Resource authorization/transfer limits belong to #3123; exclusive migrations/activation belong to #3125.
 
 **Reviewer:** builder self-review. **Date:** 2026-10-11.
+
+## Revisions
+
+- 2026-10-11: Added a private listener seam to force real endpoint reuse and bind collisions in controlled-child tests. Production still reserves ephemeral loopback ports and excludes the previous endpoint. The launch worker captures its cancellation function before spawn acknowledgement, preserving stop-admission instrumentation and avoiding duplicate calls to a wrapped admission canceller. Probe intervals account for request duration rather than adding it to the configured cadence. Guard response-body reads both before and after I/O so retirement cannot return newly read bytes. Explicit Start joins an already-cancelled generation before admitting a replacement.
+- Final recount: approximately 1,000 written lines including focused tests, helpers, plan and changed owner/lifecycle code; one new exported type, no consumer migrations and five acceptance criteria. The existing grandchild sizing exception remains applicable. All state-transition tests above executed under the race detector, together with the supported-Node proof (336 cases passed, zero skipped).
