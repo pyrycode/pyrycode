@@ -73,3 +73,25 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-11
+
+## Diagnosis records
+
+All launches below used unchanged baseline `7a1daa57bae0c88a0c96b2b4e62c990fa76f47ca`. The temporary observer forwarded exact stdout, inherited stdin/stderr, stayed in the daemon group and wrote only validated scalar metadata outside the worktree. These diagnostic launches are not the corrected acceptance batch; none is replaced or counted as a correction.
+
+| Launch | E/P/F/S | Launcher exit | Production wrapper / real CLI | Observations |
+| --- | --- | --- | --- | --- |
+| Initial sandboxed baseline | 0/0/0/0 | 1 | Unobserved | No test executed; not a pass. |
+| Escalated baseline | 1/0/1/0 | 1 | 213291 / 213292 | 29806-ms own-deadline kill, init, no result, no publication. |
+| Observer diagnosis 1 | 1/1/0/0 | 0 | 214041 / 214043 | Thinking block before real result at 9002 ms; successful Wait and set/clear 1/2; 9600-ms daemon attempt. |
+| Observer diagnosis 2 | 1/1/0/0 | 0 | 214604 / 214606 | Thinking block before real result at 6383 ms; successful Wait and set/clear 1/2; 6915-ms daemon attempt. |
+| Observer diagnosis 3 | 1/0/1/0 | 1 | 215094 / 215096 | Thinking estimates 50 at 1873 ms → 3750 at 29735 ms; own-deadline kill at 29801 ms, no result/Wait success/publication. |
+
+The observer PID in diagnosis 3 was 215095 (the production wrapper's recorded child); it spawned real Claude 215096. All 26 thinking-progress records before termination were bounded complete system envelopes (193–196 bytes); no result or assistant frame was observed. The daemon's recognized event stayed init. This explains how whole-stream receipt can saturate at 4097 while init remains the last recognized event, without any oversized result or forwarding failure. The historical #2939 records and #2923/#3024 batches remain unchanged. [Cause and limitations recorded on the ticket](https://github.com/pyrycode/pyrycode/issues/3200#issuecomment-6115304462).
+
+## Six-run declaration
+
+After green builder checks, push the commit containing the correction and this declaration and announce its exact hash before launch 1. Run exactly six sequential authenticated invocations of `python3 /work/Projects/pyrycode-agents/dispatcher/scripts/live-claude-gate.py go --tests '^TestInteractiveStream_FallbackReplySuggestionSetThenClear$'` on that unchanged clean checkout. Do not add the temporary diagnostic observer to these launches. Retain all E/P/F/S counts and launcher exits, safe source/lifecycle metadata and wire revisions. No retries, replacements, fake substitution or skips; acceptance requires 6/6/0/0. Each launch must preserve the seeded conversation, native-disabled persistent child, bounded nonempty UTF-8 single-line fallback and explicit-null higher-revision clear. The dispatcher's separate full live gate remains pending.
+
+## Offline validation
+
+The new focused race regression was run before production edits: default/positive thinking cases failed by withholding results until their three-second parent deadlines, the already-disabled case passed, and the environment uniqueness assertion failed (leaf E/P/F/S 4/1/3/0). After correction, all four leaves passed (4/4/0/0; package 4.102 seconds). The complete `go test -race ./cmd/pyry/...` passed in 232.332 seconds, preserving timing, cancellation, configured-account and stale-publication coverage. Tagged offline `TestSuggest` race tests passed in 28.330 seconds. `go vet ./...`, tagged live-package vet, binary build to scratch and `git diff --check` passed. No full-module or dispatcher-owned live gate is claimed passed.
