@@ -25,6 +25,9 @@ type LiveState struct {
 	// Answerable is captured prompt eligibility. False withholds prompt shows;
 	// nil leaves supplied eligibility unspecified.
 	Answerable *bool
+	// ModelListUnprojected marks canonical Claude model rows for per-recipient
+	// MergedModelOptions projection. False preserves provider-projected replies.
+	ModelListUnprojected bool
 }
 
 type liveReadingKey struct{ family, id string }
@@ -146,6 +149,12 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 	if err := validateLiveState(r); err != nil {
 		return err
 	}
+	if r.ModelListUnprojected && !r.Envelope.SessionStateCleared && !s.multiAgent {
+		var inventory protocol.ModelListPayload
+		if json.Unmarshal(r.Envelope.Payload, &inventory) == nil && len(inventory.Models) == 0 {
+			return nil // Codex-only fallback is unavailable to this recipient.
+		}
+	}
 	if r.Envelope.InReplyTo == nil && m.cfg.LiveStateCurrent != nil && !m.cfg.LiveStateCurrent(r) {
 		return nil
 	}
@@ -174,7 +183,7 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 	if e.SessionStateCleared {
 		e.Payload = json.RawMessage(`{}`)
 	}
-	if err := m.forwardEnvelopeSource(ctx, s.connID, e, true); err != nil {
+	if err := m.forwardEnvelopeSource(ctx, s.connID, e, &r); err != nil {
 		return err
 	}
 	if needsClear {

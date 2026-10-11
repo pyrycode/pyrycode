@@ -252,7 +252,8 @@ type V2SessionConfig struct {
 	ContextUsageReadingFor func(ctx context.Context, conversationID string) (LiveState, bool)
 	MCPStatusReadingFor    func(ctx context.Context, conversationID string) (LiveState, bool)
 	// ModelListReadingFor must be a bounded in-memory read. multiAgent selects the
-	// same inventory projection as ModelListFor.
+	// same inventory availability/projection as ModelListFor. A reading marked
+	// ModelListUnprojected defers capability projection to relay delivery.
 	ModelListReadingFor func(conversationID string, multiAgent bool) (LiveState, bool)
 	// SessionSettingsReadingFor supplies the base session_settings payload. Relay
 	// enriches it once with EffectiveEffortFor, CapabilitiesFor and MemorySearchFor,

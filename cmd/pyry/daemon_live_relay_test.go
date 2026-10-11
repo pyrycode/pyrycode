@@ -21,7 +21,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
-func testDaemonRelayWire(t *testing.T, b *daemonLiveBindings, wiring relayWiring, usage *contextUsageResolver, setup func(*relay.V2SessionConfig)) (*switchWire, *relay.V2SessionManager) {
+func testDaemonRelayWire(t *testing.T, b *daemonLiveBindings, wiring relayWiring, usage *contextUsageResolver, setup func(*relay.V2SessionConfig), publisher ...func(context.Context, *relay.V2SessionManager) func()) (*switchWire, *relay.V2SessionManager) {
 	t.Helper()
 	key, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -50,7 +50,12 @@ func testDaemonRelayWire(t *testing.T, b *daemonLiveBindings, wiring relayWiring
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
-	stop := startDaemonLivePublisher(ctx, b.sink.live, mgr.ActiveConns, mgr.PushLiveState, func(ctx context.Context, id string) { _ = mgr.RetireLiveState(ctx, id) }, discardLogger())
+	var stop func()
+	if len(publisher) > 0 {
+		stop = publisher[0](ctx, mgr)
+	} else {
+		stop = startDaemonLivePublisher(ctx, b.sink.live, mgr.ActiveConns, mgr.PushLiveState, func(ctx context.Context, id string) { _ = mgr.RetireLiveState(ctx, id) }, discardLogger())
+	}
 	go func() { defer close(done); _ = mgr.Run(ctx) }()
 	t.Cleanup(func() { cancel(); stop(); <-done })
 	return wire, mgr
@@ -62,6 +67,9 @@ func testDaemonWireReading(t *testing.T, w *switchWire, typ string, correlation 
 		id, e := w.read()
 		if id != "phone" {
 			t.Fatalf("unexpected recipient %s", id)
+		}
+		if e.SessionStateCleared && !bytes.Equal(e.Payload, []byte(`{}`)) {
+			t.Fatalf("clear carries reading payload: %s", e.Payload)
 		}
 		if e.Type == typ && !e.SessionStateCleared && (correlation == 0 || (e.InReplyTo != nil && *e.InReplyTo == correlation)) {
 			return e

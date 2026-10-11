@@ -468,11 +468,13 @@ func sessionRetainedModelList(sess *sessions.Session) (turnevent.ModelList, bool
 }
 
 // modelListResultFor supplies the inventory and detached source result from one
-// bounded memory resolution, preserving capability projection. Valid cached
-// results remain available when their captured source cannot replace retention.
+// bounded memory resolution. Retention is unprojected; only the legacy payload
+// return uses the requested capability projection. Valid cached results remain
+// available when their captured source cannot replace retention.
 func modelListResultFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary, attachments ...*daemonLiveBindings) func(convID string, multiAgent bool) (protocol.ModelListPayload, bool, daemonLiveReading) {
 	return func(convID string, multiAgent bool) (protocol.ModelListPayload, bool, daemonLiveReading) {
 		b := liveAttachment(attachments)
+		var projected []protocol.ModelOption
 		payload, ok, reading := liveInventoryResult(b, convID, protocol.TypeModelList, protocol.Envelope{}, func(src daemonLiveSource) (protocol.ModelListPayload, daemonLiveSource, bool) {
 			if b == nil {
 				payload, ok := modelListResolver(multiAgent)(convReg, pool, saved, convID)
@@ -483,11 +485,14 @@ func modelListResultFor(convReg *conversations.Registry, pool *sessions.Pool, sa
 			payload.ConversationID = src.ConversationID
 			ok = ok && have
 			if multiAgent {
-				payload.Models = append(claudeModelOptions(payload.Models), codexModelOptions(saved)...)
-				ok = len(payload.Models) > 0
+				projected = append(claudeModelOptions(payload.Models), codexModelOptions(saved)...)
+				ok = len(projected) > 0
 			}
 			return payload, source, ok
 		})
+		if projected != nil {
+			payload.Models = projected
+		}
 		return payload, ok, reading
 	}
 }

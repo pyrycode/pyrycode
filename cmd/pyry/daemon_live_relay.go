@@ -14,7 +14,7 @@ import (
 
 func daemonRelayReading(r daemonLiveReading) relay.LiveState {
 	r = detachLiveReading(r)
-	return relay.LiveState{Envelope: r.Envelope, ConversationID: r.ConversationID, SessionGeneration: r.SessionGeneration, ReadingID: r.ReadingID, Revision: r.Revision, Answerable: r.Answerable}
+	return relay.LiveState{Envelope: r.Envelope, ConversationID: r.ConversationID, SessionGeneration: r.SessionGeneration, ReadingID: r.ReadingID, Revision: r.Revision, Answerable: r.Answerable, ModelListUnprojected: r.Envelope.Type == protocol.TypeModelList}
 }
 
 func daemonLiveEligible(r daemonLiveReading) bool {
@@ -87,19 +87,7 @@ func startDaemonLivePublisher(base context.Context, o *daemonLiveState, active f
 				return
 			case <-p.wake:
 			}
-			conns := active(ctx)
-			if ctx.Err() != nil {
-				return
-			}
-			if p.overflow.Swap(false) {
-				// A gap requires a new handshake and snapshot, matching relay queue overflow.
-				for _, c := range conns {
-					if c.Thread {
-						retire(ctx, c.ConnID)
-					}
-				}
-				log.Warn("relay: live publication handoff overflow", "event", "daemon.live.ceiling")
-			}
+
 			for {
 				var r *daemonLiveReading
 				select {
@@ -107,14 +95,32 @@ func startDaemonLivePublisher(base context.Context, o *daemonLiveState, active f
 				default:
 					r = nil
 				}
-				if r == nil {
+				if r == nil && !p.overflow.Load() {
 					break
 				}
+				// Select the reading before enumerating. A connection admitted after
+				// this enumeration snapshots it or a subsequent queued replacement.
+				conns := active(ctx)
+				if ctx.Err() != nil {
+					return
+				}
+				if p.overflow.Swap(false) {
+					// A gap requires a new handshake and snapshot, matching relay queue overflow.
+					for _, c := range conns {
+						if c.Thread {
+							retire(ctx, c.ConnID)
+						}
+					}
+					log.Warn("relay: live publication handoff overflow", "event", "daemon.live.ceiling")
+				}
+				if r == nil {
+					continue
+				}
 				reading := daemonRelayReading(*r)
+				reading.Envelope.InReplyTo = nil
 				if !daemonLiveCurrent(o, reading) {
 					continue
 				}
-				reading.Envelope.InReplyTo = nil
 				for _, c := range conns {
 					if !c.Interactive || !c.Thread {
 						continue
