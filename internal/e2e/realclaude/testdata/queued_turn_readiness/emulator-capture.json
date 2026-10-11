@@ -1,8 +1,8 @@
 {
   "schema": 2,
   "run_id": "3071-emulator-20261011",
-  "status": "pending dispatcher admission; diagnostic, no host repair established",
-  "daemon_revision": "902bf0f5d80d03fd0143ed21558c740bd78050d2",
+  "status": "pending dispatcher admission; blocked on #3214 inherited legacy reconnect overflow; no historical readiness repair established",
+  "daemon_revision": "202c94d7411832ce7ebffa692377839be7375493",
   "daemon_source_variable": "PYRYCODE_SRC",
   "build_tags": "e2e_realclaude",
   "build_environment": {
@@ -112,7 +112,7 @@
   "ownership": "Wrapper-generated e2e-auto primary and second-host instances belong to this run; peer is an independent device; bypass and answer instances remain separately owned. Header observer records private instance/process/connection joins; export uses ordinals. Never count pre-restart children as retained afterward.",
   "private_input": {
     "RunID": "3071-emulator-20261011",
-    "SourceRevision": "902bf0f5d80d03fd0143ed21558c740bd78050d2",
+    "SourceRevision": "202c94d7411832ce7ebffa692377839be7375493",
     "Binary": "<mobile checkout>/build/e2e-bin/pyry",
     "Observations": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/observations.jsonl",
     "XML": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/emulator-results.xml",
@@ -180,9 +180,9 @@
   ],
   "subsequent_owners": "Dispatcher owns subsequent full host gate; mobile #2010 owns fresh full mobile acceptance with unchanged ping/source-copy/hidden-timestamp/staged-quote/focus/keyboard/no-send assertions.",
   "support_sha256": {
-    "interactive_stream_queued_turn_readiness_test.go": "a9a9a6087078d8e92732c5f82a62b3adc8e1f50778e582169a1d44dd18f36d20",
-    "queued_turn_readiness_prefix_test.go": "94ac687693af774c787edec31a2826ae3610f522b0075634a80671f6c3c81906",
-    "queued_turn_readiness_effects_test.go": "01cb62812a5cd830978fbc22668da9bf42d7bfd5b072556f91f437a2006796ec",
+    "interactive_stream_queued_turn_readiness_test.go": "7643f659502c2b73a5387b06b661522d634ee0e35184d36ec73a11d1cd929c58",
+    "queued_turn_readiness_prefix_test.go": "8bb598ab2b32768df4dc0cb00310384abc776e26a29d15d46d0409692a885518",
+    "queued_turn_readiness_effects_test.go": "339a6c997117a5588520ce4a3831b698b8095f585abc02dd7b8f3c93f6c93367",
     "queued_turn_readiness_dependency_test.go": "c11638eebced4c1c64d8a4d1f496badfe08e7ea510e3e95d08ba1e5cd63b960c",
     "queued_turn_readiness_runtime_test.go": "11c0260b393b28794dcc6f64217ff88f2da916929276aadb8f02719b1e57172a",
     "queued_turn_readiness_emulator_test.go": "8abeb0cac0fe4128a96a1d5d376fa978ca1467012a816df1c3b9dbf1d7f22e44",
@@ -208,7 +208,7 @@
     "path": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/acquisition-provenance.json",
     "record": {
       "RunID": "3071-emulator-20261011",
-      "Source": "902bf0f5d80d03fd0143ed21558c740bd78050d2",
+      "Source": "202c94d7411832ce7ebffa692377839be7375493",
       "MobileSource": "90d0407f06f70e325701603602d67fd2bcb96308",
       "MobileMerge": "4a5e624f6f630e75069c2ce729c63fcc2eb748e2",
       "MobileTree": "8564ff1d87ee16944c1b99cd577449bd96b1534b",
