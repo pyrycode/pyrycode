@@ -52,7 +52,7 @@ func testMemoryStore(t *testing.T) memoryCredentialStore {
 	t.Helper()
 	home := t.TempDir()
 	testMemoryMust(t, os.Chmod(home, 0700))
-	return memoryCredentialStore{home: home}
+	return memoryCredentialStore{home: home, goos: "unsupported"}
 }
 func testMemorySet(t *testing.T, s memoryCredentialStore, token string) string {
 	t.Helper()
@@ -274,6 +274,7 @@ func TestMemoryCredentialProcess(t *testing.T) {
 		os.Exit(0)
 	}
 	s := testMemoryStore(t)
+	t.Setenv("PATH", t.TempDir())
 	run := func(mode, input, ref string) (string, error) {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestMemoryCredentialProcess$")
 		cmd.Env = append(os.Environ(), "HOME="+s.home, "PYRY_MEMORY_HELPER=1", "PYRY_MEMORY_MODE="+mode, "PYRY_MEMORY_REF="+ref)

@@ -208,7 +208,7 @@ nonempty native source suggestion from one persistent child and a nonempty
 at a higher revision after an accepted follow-up send. Missing native output
 still fails with credentials present. Short conversations and cold caches can
 stay silent. A green turn or a skipped probe cannot prove
-[native suggestion publication](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+[native suggestion publication](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831).
 
 Observe native stdout before parsing to locate a missing set.
 `installSuggestCLI` forwards bytes unchanged while recording metadata in a
@@ -244,7 +244,7 @@ inference and completion, so extending only the phone wait could not fix it.
 `TestReplyFallbackTimingBudget` separately delays exit after an early result
 and delays the first result beyond the old cutoff. Both fail with the old
 deadline and pass with the correction; a receipt-only assertion would miss the
-first case. See [the isolated-attempt contract](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+first case. See [the isolated-attempt contract](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831).
 
 The fresh print-mode helper uses `--output-format stream-json --verbose`.
 Wrapper and daemon parse independently while the wrapper forwards exact stdout,

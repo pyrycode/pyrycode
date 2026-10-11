@@ -196,8 +196,9 @@ failed-append silence rather than relying only on successful delivery counts.
 ## Memory transcript view
 
 [`startMemoryTranscripts`](../../../cmd/pyry/memory_transcripts.go) consumes
-registered hosted-chat history to produce the user-only Markdown view described
-in [Recent conversation transcripts](../../guide.md#recent-conversation-transcripts).
+registered hosted-chat history to produce Markdown with delivered users and
+completed main replies, as described in
+[Recent conversation transcripts](../../guide.md#recent-conversation-transcripts).
 `runSupervisor` supplies saved settings and the `resolveStartupWorkspaceBase`
 result; `resolveEffectiveMemory` validates the effective destination. Absent
 settings create no storage, and invalid settings disable export with fixed,
@@ -206,12 +207,14 @@ and search installation.
 
 Discovery runs immediately and every `memoryTranscriptInterval` (ten seconds),
 starting a serialized worker per registered conversation, including new chats.
-Each worker owns a positioned `ForwardReader`, a `thread.Fold` and delivery
-timestamps. It polls with `Walk` to catch commits from other store instances
-that cannot wake this store's `Tail`, including commits during replay or export.
-The scheduling contract is eligible text within 60 seconds with readable history
-and writable storage. Replay, publication and worker joins stay outside chat
-delivery/publication paths; startup cleanup cancels and joins discovery and all
+Each worker owns a positioned `ForwardReader`, a `thread.Fold`, raw user/text
+timestamps and private `memoryReplyEvidence`. It polls with `Walk` to catch commits
+from other store instances that cannot wake this store's `Tail`, including commits
+during replay or export.
+The scheduling contract is user text within 60 seconds of persistence and main
+reply text within 60 seconds of its qualifying recorded `turn_end`, with readable
+history and writable storage. Replay, publication and worker joins stay outside
+chat delivery/publication paths; startup cleanup cancels and joins discovery and all
 workers. History or fold failure retries from a fresh reader without publishing
 an incomplete replay.
 
@@ -221,16 +224,18 @@ an incomplete replay.
 selects delivered `user_message` items with nonzero `Order`, excluding explicit
 `NoChild` records. It decodes only `text` from inert `Content`, preserving recorded
 whitespace; normalized `Summary` and whole payload JSON cannot supply the text.
-Assistant output, notices, injected instructions and background capture work do
-not become conversational user messages. Registry membership and title are
-display inputs; the current binding supplies no provenance. Attribution comes
+Completed main `assistant_message` runs additionally require the scoped evidence
+below. Reasoning, tool inputs/results, child-agent traffic, injected/reset-wrap-up
+instructions and their assistant-only replies, system/status events and background
+capture executions supply no conversational export text. Registry membership and
+title are display inputs; the current binding supplies no provenance. Attribution comes
 from saved delivery metadata or the fold's
 [recorded successor fallback](thread-package-main-thread-folding.md#recorded-provenance-and-successor-fallback).
 Unresolved attribution remains explicitly unknown, grouped in a namespace
 separate from named sessions even when an opaque routing ID resembles that
 namespace.
 
-Message identity is conversation ID plus delivery `Item.Order`; source time is
+User message identity is conversation ID plus delivery `Item.Order`; source time is
 the corresponding raw delivery `Entry.TS`, retained by `memoryTranscriptReader.feed`.
 Using `Item.ID` would change an already exported message when a later
 [acceptance outcome](thread-package-main-thread-folding.md#accepted-sends-and-durable-outcomes)
@@ -239,10 +244,85 @@ persisted delivered message is independently eligible while its linked outcome
 is absent; later reconciliation yields the same single exported message,
 identity and timestamp. Queued, dropped and lost acceptances export no text.
 
+Assistant identity is conversation ID plus the run's creating entry ID; its
+timestamp is that first text entry's raw `Entry.TS`. Deltas extending that run,
+tools and completion cannot move either. Text after a closed run creates a new
+row with its own first-text identity/time; subsequent deltas can extend that new
+row even after the lifetime's terminal. Assuming all late text extends the
+pre-terminal row would impose a false identity contract. See
+[main-work text splitting](thread-package-main-thread-folding.md#main-work-source-entries).
+Render only `Content.text`: all main text runs
+before/between/after tools retain exact whitespace and coalesce deltas once, in
+durable creation/delivery order. `Item.Rev` can advance for closure without any
+new text, so it cannot serve as a text watermark.
+
 The transcript basename hashes structured conversation, recorded routing session,
 replacement-generation start and unknown-attribution state. Titles, text and
 opaque session IDs never form paths. Replaying surviving history reconstructs
 the same transcript/message identities and complete text without duplicates.
+
+### Scoped reply completion and recorded ownership
+
+`memoryReplyEvidence.feed` tracks recorded source (agent and session), turn and
+opening generation (explicit or implicit), with boundary scope for legacy evidence.
+Tagged and metadata-free evidence never join through displayed successor
+fallback. Every valid explicit opening creates a fresh lifetime, including after
+terminal-only evidence; reused turn IDs cannot carry earlier completion into it.
+A supplied recovery opening reference must match its original source and turn,
+without falling back to the current scope. Malformed/foreign facts, child endings
+and unresolved references release no reply. See
+[main-work joins](thread-package-main-thread-folding.md#scoped-joins-pending-outcomes-and-closure).
+
+The first valid terminal in entry order owns the lifetime. `turn_end` permits
+export, including error/cancellation endings; `main_turn_interrupted` permanently
+withholds its text even if a conflicting ending follows. All runs remain withheld
+until qualifying completion: `Fold.closeText` also closes runs on tools or user
+delivery, so `Item.Status`/`Active` cannot certify it. Restart alone supplies no
+completion. `memoryReplyEvidence.rows` uses final fold ownership for main text,
+but immutable recorded openings and terminals for permission to export it.
+
+Each reply lifetime must associate with a delivered conversational user in its
+own recorded turn interval and source scope. Consuming the pending exchange on a
+new lifetime prevents an earlier completed exchange from qualifying assistant-only
+wrap-up work. Logical replacement clears unmatched pending exchanges, including
+when switching back to a previously used source. Established lifetime-to-user
+associations survive for late predecessor text; tagged pending exchanges survive
+background unloading or same-session restart, which do not close the session.
+The associated user's existing group anchors late replies to the original logical
+generation rather than a reused routing ID.
+
+### Causal main-work acceptance
+
+Main-work acceptance must be decided at each history position from validated
+recorded ownership, before later facts alter it. Agent/Task public rows retain
+their creating ID across turn reuse and can change ownership after parent repair;
+neither a new row nor a final snapshot proves whether a launch opened a main
+lifetime. Classifying it incorrectly can hide the opening targeted by a valid
+interruption and then export withheld text. Child ownership uses recorded source
+and producer lifetime, or legacy boundary scope, with ordinary child calls also
+isolated by turn. Runtime opening/interruption facts retain their turn authority
+despite incidental call IDs; raw-parented runtime facts remain inert. Check event
+kind and applicable DTO/identity fields before any call-map mutation: a rejected
+runtime fact must not transfer an ordinary creation into a child lane.
+
+`memoryReplyEvidence.ordinaryWork` distinguishes ordinary call creation from
+call-scoped observations. Renaming a reused Read/Agent/Task call to Bash does not
+create an original shell observation. Validate shell creation with its main DTO;
+applying the durable agent DTO instead can reject unrelated null extensions and
+lose valid evidence. Both invented and lost observations can change recovery
+ownership and bypass interruption withholding. Promotion may adopt only pending
+calls and created ordinary shells from the same uninterrupted pre-lifetime source
+scope; destination collisions, created Agent/Task owners and boundary-separated
+evidence cannot transfer. See
+[background shell ownership](thread-package-agents-and-background-work.md#background-shells).
+
+`memoryReplyEvidence.agentFact` validates task-to-call links before changing
+ownership or promoting a lifetime. `recoveryKey` requires every supplied call/task
+reference to agree on its original recorded group. Valid recovery enriches that
+group's parent ownership without replacing the active producer lifetime; duplicate
+observations cannot replace the first reference identity. An invalid fact must
+leave both ownership and active-lifetime state intact, rather than merely being
+discarded after mutation.
 
 ### Closure and exported-message boundaries
 
@@ -257,10 +337,16 @@ proven predecessor boundary stay open.
 
 `Closing entry` records the fixed closure ID and is absent while open.
 `Last delivered entry` independently records the greatest delivery `Order`
-represented. Late predecessor text updates its own transcript and delivered
-boundary, even beyond the closing ID, without moving closure or entering/closing
-the successor. Treating closure as the exported-message watermark would miss
-late text and leave an older downstream capture receipt looking current.
+represented by a user row. `Last text entry` records the greatest entry
+contributing exported user or eligible assistant text. `memoryReplyEvidence.rows` retains
+nonempty raw delta IDs within each run's creating-ID interval instead of using
+revisions; completion/tool/status facts alone advance neither text nor delivery.
+Late eligible predecessor text, including a delta extending an already exported
+assistant run, updates only its file and text boundary; late user delivery also
+updates its user-delivery boundary. Both can exceed the closing ID without
+moving closure or changing the successor's contents or closure. Treating closure
+as the exported-message watermark would miss late text and leave an older
+downstream capture receipt looking current.
 Open transcripts retain the complete session without age or intermediate-capture
 cutoffs; closed files remain available.
 
@@ -284,6 +370,8 @@ vault notes and additional roots. Neither replay nor export modifies history,
 and diagnostics expose only fixed event/reason strings, never text, payloads,
 paths or opaque IDs.
 
+### Testing replay and publication
+
 `TestMemoryTranscriptReplay` covers identity/timestamp stability across split
 reconciliation and exact text; `TestMemoryTranscriptSessions` covers pairing,
 unknown attribution, replacements and late predecessor boundaries.
@@ -293,3 +381,64 @@ source bytes and joined cancellation during replay/publication.
 `TestMemoryTranscriptActivation` covers inactive settings and storage redirects;
 `TestMemoryTranscriptStorage` covers permissions, target rejection and interrupted
 publication followed by retry.
+
+`TestMemoryTranscriptReplies`, `TestMemoryTranscriptReplyTerminals` and
+`TestMemoryTranscriptReplyScopes` cover exact runs, stable first-text identity/time,
+first-terminal precedence and source/generation isolation.
+`TestMemoryTranscriptReplyExclusions`, `TestMemoryTranscriptReplyBoundaries` and
+`TestMemoryTranscriptReplyReplacementPermission` cover exchange qualification and
+late predecessor reconstruction, including immutable closure and unchanged
+successor files. Ordinary ownership/recovery matrices retain every source, tool,
+ownership/recovery/validation and completion/interruption scenario.
+`testReplyPartitions` selects the distinct union of whole-history replay,
+single-entry replay and every possible single-cut two-chunk replay: at most n+1
+partitions for n entries, with linear enumeration. `testReplyLauncherReplay`
+creates a fresh reader per partition and applies the same independent assertions
+at every selected intermediate prefix and the final prefix. These check accepted
+opening/user identity, first-terminal precedence, permanent interruption
+withholding, fold closure, first-text identity/time, source/generation isolation
+and separate delivery/text boundaries. Child-text controls beside runtime
+rejection prevent a guard from silently disabling legitimate transfer.
+
+`memoryTranscriptReader.feed` reduces entries individually regardless of chunk
+size; partitions change the observable prefixes. Counting scenarios alone hides
+exponential replay work. Bound partition selection rather than caching exporter
+snapshots, which would bypass chunk replay and could certify equally incomplete
+views. The helper's `replay-work` summaries report completed partitions, replayed
+entries and checked prefixes separately for each completion/interruption control.
+
+Only `PYRY_TRANSCRIPT_EXHAUSTIVE=1` enables all original 2^(n-1) partitions with
+the same readers and assertions. Ordinary checks need no opt-in. Run the full
+hermetic proof from the repository root, without credentials, agent execution or
+the live suite, under Go's unchanged default ten-minute package timeout:
+
+```sh
+PYRY_TRANSCRIPT_EXHAUSTIVE=1 go test -count=1 -json -run '^(TestVerifier(RepeatedMainLauncher|RejectedRuntimeTransfer)|TestMemoryTranscriptReply(ReusedLauncherOwnership|ShellObservation|RecoveryOwnership|RecoveryValidation))$' ./cmd/pyry
+```
+
+At `e097c4b303f6d43222bef01e5ff8810e2de62cdc` on pyrybox's Linux amd64 container
+`ced36cb6ca66`, this command passed without race in 129.585 package seconds /
+140.997 command seconds, exercising 594 helper scenarios and 92,544 partitions
+([verified execution evidence](https://github.com/pyrycode/pyrycode/pull/3179#issuecomment-6106380990)).
+
+Replay absence assertions must isolate the exchange under test: an earlier valid
+delivered exchange can already own the same transcript before a chosen cut.
+The controlled-tick `TestMemoryTranscriptReplyWorker` checks withholding followed
+by production publication within 60 seconds. `TestMemoryTranscriptPersistedReplay`
+remains enabled in ordinary checks and extends that gate through persisted
+callbacks across `history.MaxPageEntries`,
+interleaved chats and separate-Store commits during replay/publication.
+`TestMemoryTranscriptPublicationRecovery` also remains enabled and checks
+later-tick retry on the same worker, preservation of prior complete files and
+joined replacement/reconstruction. These persisted worker/publication proofs
+are separate from the in-memory partition matrices.
+
+A tick send proves only discovery consumed it, and `beforeRename` fires before
+replacement completes. Hold all participating workers at that hook before
+inspecting staged files, then release and await exact disk contents; notification
+counts alone can falsely certify publication. `testTranscriptGate.publish` uses
+this ordering. Specify complete rows, whitespace, first-text identities/times and
+delivery/text/closure boundaries independently, as `testTranscriptExpected` does,
+before comparing chunked and uninterrupted reconstruction: two exporter snapshots
+can agree on the same omission. Snapshot source paths and bytes after fixture
+commits finish so recovery assertions also detect source-history changes.

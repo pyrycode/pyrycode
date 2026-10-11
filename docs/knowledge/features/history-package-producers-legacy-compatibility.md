@@ -8,7 +8,8 @@ Part of [history producers](history-package-producers.md#producers-2114-2115).
 from `turnbridge.MapEvent`/`MapState`, operator messages and session transitions.
 A new history-only type's raw payload is excluded from every connection's legacy
 history, live fan-out and reconnect replay, whether its stored `Shown` is nil,
-false or true. Only the validated runtime/startup and
+false or true. Only the validated runtime/startup,
+[queued-send facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) and
 [agent/task facts](history-package-producers-runtime-lifecycle.md#agenttask-attribution-and-reported-endings-3030)
 have a receipt projection.
 Visibility controls the raw
@@ -25,16 +26,24 @@ publication unless `legacyRuntimeReceipt` validates their receipt projection.
 Successful appends remain readable through raw `Store.Page` after reopening.
 Raw storage accepts arbitrary types; the transport vocabulary is closed independently.
 
-**Account known runtime and agent/task IDs without certifying unseen content (#3026, #3030, #3031, #3032).**
+**Account known runtime, queued-send and agent/task IDs without certifying unseen content (#3026, #3030, #3031, #3032, #3167).**
 `legacyRuntimeReceipt` handles exactly `main_turn_opened`, `main_tool_interrupted`,
 `main_turn_interrupted`, `session_divider`, `agent_call_observed`,
 `agent_call_result`, `agent_call_denied`, `background_task_observed`,
-`background_task_linked`, `background_task_outcome`, `background_task_gone` and
-`agent_ended_with_session`.
+`background_task_linked`, `background_task_outcome`, `background_task_gone`,
+`agent_ended_with_session`, `send_accepted`, `send_delivered`, `send_dropped` and
+`send_lost`.
 It emits `banner` with all five required fields:
 `{conversation_id, level:"info", text:"", truncated:false,
 stops_turn:false}`. It requires a nonzero successful durable ID, nonzero entry
-timestamp, matching conversation and nonzero `occurred_at`. Openings and turn
+timestamp and matching conversation. Queued acceptance requires nonzero
+`accepted_at`; every other supported fact requires nonzero `occurred_at`.
+`validQueuedSendFact` additionally requires nonzero `accepted_entry_id` for
+queued outcomes. Delivery needs nonzero `delivery_entry_id` and exactly
+`reason: delivered`; drops accept only `removed` or `give_up`; loss accepts only
+`daemon_restart`. Legacy callers' optional sender/message fields remain optional.
+Only the five-field banner crosses the boundary: no send text, attachments,
+sender fields, references or raw facts. Openings and turn
 interruptions need `turn_id`; tool interruptions also need `tool_call_id`.
 Dividers need `cause` and a predecessor session, except `daemon_restart` dividers.
 `validAgentHistoryFact` requires matching conversation and nonzero `occurred_at`;
@@ -76,6 +85,18 @@ classifier, without supplied call/task IDs, parent, status, prose or storage pat
 `closeStartupAgentWork` appends before the restart divider without publishing
 live traffic or backfilling replay; its valid endings become receipts when paged.
 
+Queued writers also bypass `emit`: `queuedSendHistory.accepted` and `terminal`
+append before notifying the operator emitter of acceptance/removal/give-up
+receipts. `operatorMessageHistory` carries the delivered receipt with its
+committed user message, so serialized publication drains acceptance first, then
+publishes user before outcome. A page-only projection would leave live/replay
+checkpoint holes. Shared bytes, durable ID/timestamp and existing recipient,
+access and isolation gates apply on every lane. Receipt notification uses the
+[separate bounded mailbox](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
+to keep queue callbacks independent of peer delivery. `closeStartupSends` stays
+history-only: valid `send_lost` entries appear as paged receipts without startup
+live traffic or replay backfill.
+
 Raw visibility and legacy unread targets differ (#3029): the
 [legacy watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
 counts validated receipts regardless of `Shown`. Raw facts, metadata and store
@@ -110,7 +131,7 @@ recipient gates keep their original meaning.
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
 | Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; validated nonvisual receipts count toward legacy latest. |
 | Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Raw payloads stay off legacy transports; validated receipts count toward legacy latest for either visibility value and confer no foreground presentation. |
-| [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. All four stay excluded from legacy pages, live traffic, replay and receipts. |
+| [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. Raw payloads stay off legacy transports; validated receipts count toward legacy latest regardless of visibility and confer no sight. Running facts share page/live/replay identities; startup loss is page-only. |
 | [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the future fold, with original asking-session provenance when known. Excluded from legacy pages, live traffic, reconnect replay and nonvisual receipts; open prompts remain live-only. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
@@ -246,6 +267,21 @@ rule would be defeated by relaying them.
 **Test-shape traps worth knowing before touching these producers
 again:**
 
+- **Keep storage broken through delivery and drop, not only acceptance (#3167).**
+  `TestQueuedSendHistoryFailures` repairs storage before user delivery, so it
+  cannot prove failed user/outcome appends preserve eligible delivery without
+  minting receipts. `TestQueuedLegacyReceipts_StorageFailure` persists acceptance,
+  then blocks storage through delivery and removal; the existing user still
+  reaches live/replay without durable identity, no outcome receipt appears and
+  stored allocation stays unchanged.
+- **Prove queued accounting against persisted read confirmation (#3167).**
+  `TestQueuedLegacyReceipts_CompletedTurn` removes accepted/delivered IDs to
+  reproduce the displayed-reply hole, then compares repaired page/live/replay
+  checkpoints with correlated list/read persistence on warm/reopened logs.
+  Receipt arrival alone remains a negative control. `TestQueuedLegacyReceipts_Pages`
+  covers all four facts and both drop reasons with repeated bounded raw pages,
+  mixed malformed/unknown holes and receipt-only pages. A correct raw visibility
+  assertion would miss either a filtered ID hole or a legacy read clamp mismatch.
 - **Restart local numbering and report from idle to prove durable attribution.**
   `TestAgentHistory_Isolation` reuses call/task IDs across conversations, sources
   and child incarnations, then replaces the emitter and reopens the real store.

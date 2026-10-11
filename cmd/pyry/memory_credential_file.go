@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -22,6 +23,7 @@ type memoryCredentialSelection struct {
 }
 type memoryCredentialStore struct {
 	home   string
+	goos   string
 	rename func(int, string, int, string) error
 }
 
@@ -143,8 +145,11 @@ func memorySelected(ctx context.Context, dir *os.File) (memoryCredentialSelectio
 		return sel, "", errMemorySelection
 	}
 	canonical, _ := json.Marshal(sel)
-	if !bytes.Equal(b, canonical) || sel.Backend != "file" || !validMemoryID(sel.Generation) || len(sel.Reference) != 46 || sel.Reference[:14] != "memory:openai:" || !validMemoryID(sel.Reference[14:]) {
+	if !bytes.Equal(b, canonical) || (sel.Backend != "file" && sel.Backend != "keychain" && sel.Backend != "secret-service") || !validMemoryID(sel.Generation) || len(sel.Reference) != 46 || sel.Reference[:14] != "memory:openai:" || !validMemoryID(sel.Reference[14:]) {
 		return sel, "", errMemorySelection
+	}
+	if sel.Backend != "file" {
+		return sel, "", nil
 	}
 	b, err = memoryRead(ctx, dir, sel.Generation+".token")
 	if err != nil {
@@ -156,7 +161,7 @@ func memorySelected(ctx context.Context, dir *os.File) (memoryCredentialSelectio
 	}
 	return sel, token, nil
 }
-func (s memoryCredentialStore) selected(ctx context.Context) (memoryCredentialSelection, string, error) {
+func (s memoryCredentialStore) selected(ctx context.Context, reference string) (memoryCredentialSelection, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, memoryCredentialDeadline)
 	defer cancel()
 	dir, err := s.directory(ctx, false)
@@ -168,13 +173,22 @@ func (s memoryCredentialStore) selected(ctx context.Context) (memoryCredentialSe
 	}
 	defer dir.Close() // releases the directory lock
 	sel, token, err := memorySelected(ctx, dir)
+	if err == nil && reference != "" && sel.Reference != reference {
+		return sel, "", errMemorySelection
+	}
+	if err == nil {
+		token, err = s.readSelected(ctx, sel, token)
+	}
 	if ctx.Err() != nil {
 		return sel, "", ctx.Err()
 	}
 	return sel, token, err
 }
 func (s memoryCredentialStore) resolve(ctx context.Context, ref string) (string, error) {
-	sel, token, err := s.selected(ctx)
+	if len(ref) != 46 || ref[:14] != "memory:openai:" || !validMemoryID(ref[14:]) {
+		return "", errMemorySelection
+	}
+	sel, token, err := s.selected(ctx, ref)
 	if err != nil {
 		return "", err
 	}
@@ -184,7 +198,7 @@ func (s memoryCredentialStore) resolve(ctx context.Context, ref string) (string,
 	return token, nil
 }
 func (s memoryCredentialStore) status(ctx context.Context) (bool, error) {
-	sel, _, err := s.selected(ctx)
+	sel, _, err := s.selected(ctx, "")
 	return sel.Reference != "", err
 }
 func memoryWrite(ctx context.Context, dir *os.File, name string, b []byte) (result error) {
@@ -221,11 +235,20 @@ func (s memoryCredentialStore) set(ctx context.Context, in *os.File) (string, er
 		return "", err
 	}
 	defer dir.Close() // releases the directory lock
-	sel, _, err := memorySelected(ctx, dir)
+	sel, prior, err := memorySelected(ctx, dir)
+	if err == nil {
+		_, err = s.readSelected(ctx, sel, prior)
+	}
 	if err != nil {
 		return "", err
 	}
 	old := sel.Generation
+	if sel.Reference == "" {
+		sel.Backend, err = s.preferred(ctx)
+		if err != nil {
+			return "", err
+		}
+	}
 	if sel.Reference == "" {
 		id, err := memoryID()
 		if err != nil {
@@ -237,16 +260,28 @@ func (s memoryCredentialStore) set(ctx context.Context, in *os.File) (string, er
 	if err != nil {
 		return "", err
 	}
-	sel.Backend = "file"
 	secret := sel.Generation + ".token"
 	temp := sel.Generation + ".selection"
 	committed := false
-	if err = memoryWrite(ctx, dir, secret, []byte(token)); err != nil {
+	if sel.Backend == "file" {
+		err = memoryWrite(ctx, dir, secret, []byte(token))
+	} else {
+		err = memoryOSWrite(ctx, sel.Backend, sel.Generation, strings.NewReader(token))
+		if err == nil {
+			var got string
+			got, err = memoryOSRead(ctx, sel.Backend, sel.Generation)
+			if err == nil && got != token {
+				err = errMemorySelection
+			}
+		}
+	}
+	if err != nil {
+		memoryRemoveGeneration(ctx, dir, sel.Backend, sel.Generation)
 		return "", err
 	}
 	defer func() {
 		if !committed {
-			_ = unix.Unlinkat(int(dir.Fd()), secret, 0)
+			memoryRemoveGeneration(ctx, dir, sel.Backend, sel.Generation)
 		}
 	}()
 	b, _ := json.Marshal(sel)
@@ -267,7 +302,7 @@ func (s memoryCredentialStore) set(ctx context.Context, in *os.File) (string, er
 	committed = true
 	// Cleanup is best effort after the atomic selection commit; it cannot undo success.
 	if old != "" {
-		_ = unix.Unlinkat(int(dir.Fd()), old+".token", 0)
+		memoryRemoveGeneration(ctx, dir, sel.Backend, old)
 	}
 	return sel.Reference, nil
 }

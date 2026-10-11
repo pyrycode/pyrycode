@@ -777,14 +777,12 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		scfg.MCPStatusConfigPath = mcpServersPath
 		scfg.AccountTokenProvider = approval.account
 		tag := newStreamSessionTag(cfg.SessionID)
-		// #2135 chains the announced-reset follower between the retention holds and
-		// the fan-in send, rather than inside newSessionParser: it retains nothing,
-		// and it needs the two per-runner objects on this line — the live tag and the
-		// pool callback — which that function has no business knowing about. The
-		// placement it DOES need is being on the parser's side of the channel, which
-		// the chain's own doc states is what the retentions get from, and only from,
-		// sitting here.
-		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, sink.sinkForSessionTag(tag, "claude"), cfg.Logger)
+		// The reset follower runs after inventory retention and before fan-in,
+		// using this runner's tag and the pool's adoption callback.
+		downstream := sink.sinkForSessionTag(tag, "claude")
+		inventory := &daemonInventoryIngress{sink: sink, tag: tag}
+		downstream = inventory.downstream(downstream)
+		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, downstream, cfg.Logger)
 		contextUsage := newTurnEndContextUsageRequester(follow.Sink, cfg.Logger)
 		// #2450 chains the vocabulary persister at the head of the same run of
 		// non-retaining decorators, for the reason the two above it sit here: it needs
@@ -813,6 +811,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 			parserSink = vocab.sinkFor(parserSink)
 		}
 		parser, held := newSessionParser(parserSink, cfg.Logger)
+		held.models.live, held.commands.live = inventory, inventory
 		scfg.Stdout = parser
 		exitSink := sink.exitForSessionTag(tag)
 		// The hold outlives respawns; invalidate joins before either exit path
@@ -1171,3 +1170,10 @@ func stripSessionIDFlags(args []string) []string {
 var _ sessions.Runner = streamRunner{}
 var _ confirmedPermissionModeReader = streamRunner{}
 var _ memorySearchLauncher = streamRunner{}
+
+func (a streamRunner) ModelListLive() (turnevent.ModelList, daemonLiveSource, bool) {
+	return a.models.ModelListLive()
+}
+func (a streamRunner) SlashCommandListLive() (turnevent.SlashCommandList, daemonLiveSource, bool) {
+	return a.commands.SlashCommandListLive()
+}

@@ -410,7 +410,7 @@ still be partial. Joined reader completion and observed EOF are independent of
 Wait receipt: forced close/read failure means partial, not a complete child
 error report. Unobserved Wait leaves exit/completion unknown. The return-time
 stderr snapshot follows bounded cleanup; stdout progress freezes before
-cancellation. See [fallback observation boundaries](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+cancellation. See [fallback observation boundaries](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831).
 Ring exclusion cannot protect a direct primary-log tee into a test report.
 Live harnesses keep primary output in memory and omit the final tail suffix
 from report snapshots, even incomplete failure/cleanup records; see

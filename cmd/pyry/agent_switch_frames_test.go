@@ -253,6 +253,9 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 				}
 			}
 		}
+		// Adapter completion includes fanout and FlushPushes, so the legacy
+		// barrier cannot overtake an outcome still being published.
+		gate.waitCompleted(t)
 		// A barrier push to the legacy peer drains any queued outcome before counting.
 		if err := mgr.Push(ctx, "old", protocol.Envelope{ID: 900, Type: protocol.TypeWorkspaceUpdated, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}); err != nil {
 			t.Fatal(err)
@@ -275,8 +278,30 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 					t.Fatalf("legacy post-commit frame: %+v", e)
 				}
 			}
-		} else if len(seen["old"]) < 3 || seen["old"][len(seen["old"])-1].Type != protocol.TypeConversationUpdated {
-			t.Fatalf("Claude delivery not restored: %+v", seen["old"])
+		} else {
+			events := seen["old"]
+			want := []string{protocol.TypeResetting, protocol.TypeBanner, protocol.TypeSessionTransition, protocol.TypeConversationUpdated}
+			if len(events) < len(want) {
+				t.Fatalf("Claude delivery not restored: %+v", events)
+			}
+			prefix := len(events) - len(want)
+			for _, e := range events[:prefix] {
+				var status protocol.ResettingPayload
+				json.Unmarshal(e.Payload, &status)
+				if e.Type != protocol.TypeResetting || !status.Active {
+					t.Fatalf("legacy pre-commit frame: %+v", e)
+				}
+			}
+			for i, e := range events[prefix:] {
+				if e.Type != want[i] {
+					t.Fatalf("legacy event %d: %+v", i, e)
+				}
+			}
+			var status protocol.ResettingPayload
+			json.Unmarshal(events[prefix].Payload, &status)
+			if status.Active {
+				t.Fatalf("legacy resetting still active: %+v", status)
+			}
 		}
 		settings, err := pool.SettingsFor(sessions.SessionID(row.CurrentSessionID))
 		if err != nil {
@@ -298,9 +323,6 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 			t.Fatal("unpersisted outcome")
 		}
 		oldID = row.CurrentSessionID
-		// Outcome frames can precede release of the reset exclusion. Join the
-		// adapter before issuing another switch or changing its configuration.
-		gate.waitCompleted(t)
 	}
 	// Refusal is correlated and silent apart from its static error.
 	w.request("requester", protocol.SwitchAgentPayload{ConversationID: switchConvID, Agent: "codex", Model: "ZZPRIVATEFAILUREMARKERZZ"})

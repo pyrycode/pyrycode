@@ -34,6 +34,7 @@ import (
 //
 // SECURITY: the text is claude-authored and untrusted. It is never logged.
 type replySuggestions struct {
+	live  *daemonLiveBindings
 	mu    sync.Mutex
 	convs map[string]*replySuggestionConv
 	dirty map[string]struct{}
@@ -56,6 +57,7 @@ type replySuggestions struct {
 
 // replySuggestionConv is one conversation's suggestion state.
 type replySuggestionConv struct {
+	live      daemonLiveSource
 	revision  uint64
 	published bool    // a set or clear has been sent, so the state is real
 	text      *string // nil is the clear
@@ -176,9 +178,15 @@ func (s *replySuggestions) noteDelivered(convID string, msg msgqueue.QueuedMessa
 
 // turnStarted keeps the identity and invalidations already recorded at the
 // write gate. A spontaneous turn has no producing queued message to credit.
-func (s *replySuggestions) turnStarted(convID string) {
+func (s *replySuggestions) turnStarted(convID string, sources ...daemonLiveSource) {
 	if s == nil {
 		return
+	}
+	var src daemonLiveSource
+	if len(sources) > 0 {
+		src = sources[0]
+	} else {
+		src = s.live.capture(convID, "", false)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -186,6 +194,7 @@ func (s *replySuggestions) turnStarted(convID string) {
 	if c == nil {
 		return
 	}
+	c.live = src
 	if c.awaitingStart {
 		c.awaitingStart = false
 	} else {
@@ -224,13 +233,20 @@ func (s *replySuggestions) noteAssistantText(convID string, ev turnevent.TextChu
 
 // turnEnded decides whether convID's just-ended turn may publish a suggestion,
 // using the identity recorded before the write. Nil-safe.
-func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd) {
+func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd, sources ...daemonLiveSource) {
 	if s == nil {
 		return
 	}
 	sessionID := ""
-	if fn := s.resolver(); fn != nil {
-		sessionID, _ = fn(convID)
+	var src daemonLiveSource
+	if len(sources) > 0 && sources[0].SessionGeneration > 0 {
+		src = sources[0]
+		sessionID = src.provenance.SessionID
+	} else {
+		if fn := s.resolver(); fn != nil {
+			sessionID, _ = fn(convID)
+		}
+		src = s.live.capture(convID, sessionID, false)
 	}
 	success := ev.Reason == turnevent.TurnEndReasonEndTurn && ev.Outcome == "success" && !ev.IsError
 	s.mu.Lock()
@@ -239,6 +255,7 @@ func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd) {
 			s.mu.Unlock()
 			return
 		}
+		c.live = src
 		c.ended = true
 		c.turnOK = success && c.assistant && c.writeID != 0 && !c.invalidated
 		c.turnSID = sessionID
@@ -272,13 +289,20 @@ func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd) {
 // suggest publishes text for convID when its just-ended turn qualifies, holds it
 // when only the delivery confirmation is missing, and does nothing otherwise.
 // One suggestion per turn. Nil-safe.
-func (s *replySuggestions) suggest(convID, text string) {
+func (s *replySuggestions) suggest(convID, text string, sources ...daemonLiveSource) {
 	if s == nil {
 		return
 	}
 	sessionID := ""
-	if fn := s.resolver(); fn != nil {
-		sessionID, _ = fn(convID)
+	var src daemonLiveSource
+	if len(sources) > 0 && sources[0].SessionGeneration > 0 {
+		src = sources[0]
+		sessionID = src.provenance.SessionID
+	} else {
+		if fn := s.resolver(); fn != nil {
+			sessionID, _ = fn(convID)
+		}
+		src = s.live.capture(convID, sessionID, false)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -286,6 +310,7 @@ func (s *replySuggestions) suggest(convID, text string) {
 	if c == nil || !c.ended || !c.turnOK || c.invalidated || c.pending != nil {
 		return
 	}
+	c.live = src
 	if !c.userOK {
 		// Only this turn's own confirmation may release the pending text.
 		c.pending, c.pendingSID = &text, sessionID
@@ -369,6 +394,7 @@ func (s *replySuggestions) clearLocked(convID string, c *replySuggestionConv) {
 func (s *replySuggestions) publishLocked(convID string, c *replySuggestionConv) {
 	c.revision++
 	c.published = true
+	s.live.offer(c.live, protocol.TypeReplySuggestion, payloadLocked(convID, c), "")
 	s.dirty[convID] = struct{}{}
 	select {
 	case s.wake <- struct{}{}:
@@ -638,7 +664,7 @@ func (s *replySuggestions) startFallbackLocked(convID string, c *replySuggestion
 	ctx, cancel := context.WithCancel(s.parent)
 	s.cancelLocked(c)
 	c.cancel = cancel
-	generation, user, assistant, sid := c.generation, c.userText, c.assistantText, c.turnSID
+	generation, user, assistant, sid, source := c.generation, c.userText, c.assistantText, c.turnSID, c.live
 	s.workers.Add(1)
 	go func() {
 		defer s.workers.Done()
@@ -658,6 +684,7 @@ func (s *replySuggestions) startFallbackLocked(convID string, c *replySuggestion
 		if s.stopped || s.convs[convID] != c || c.generation != generation || !c.turnOK || c.invalidated || ctx.Err() != nil {
 			return
 		}
+		c.live = source
 		s.setLocked(convID, c, text, sid)
 	}()
 }

@@ -109,10 +109,11 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 		}
 		return "", ErrAgentSwitchWorkspaceUnavailable
 	}
-	s.resetting.wrappingUp(convID)
+	resetting := s.resetting.bound(convID, string(oldID))
+	resetting.wrappingUp(convID)
 	// LIFO closes the reset sequence before begin's exclusion is released.
 	defer func() {
-		s.resetting.done(convID)
+		resetting.done(convID)
 		// The signal must follow the falling edge even when persistence could
 		// not roll back or old-session cleanup failed after commitment. The relay
 		// publisher waits through sealing before begin's exclusion is released.
@@ -130,7 +131,7 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 		}
 	}
 	wrote := s.storeHandover(convID, summary)
-	s.resetting.restarting(convID, wrote)
+	resetting.restarting(convID, wrote)
 
 	newID, err := s.pool.MintWith(convID, spawnDir, target, start)
 	if err != nil {

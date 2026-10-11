@@ -31,7 +31,10 @@ const sessionErrorQueueSize = 16
 // the wire code the producer chose; each producer sets its own constant, and
 // neither takes it from its caller. Same struct-channel shape as
 // sessionTransitionEmitterV2.in.
-type giveUpNotice struct{ convID, code, reason string }
+type giveUpNotice struct {
+	convID, code, reason string
+	live                 daemonLiveSource
+}
 
 // childCrashingMessage is the fixed prose a session.child_crashing frame carries.
 // It is a constant so that nothing from the child — its stderr, its argv, its exit
@@ -104,10 +107,16 @@ func newSessionErrorEmitterV2(in <-chan giveUpNotice, logger *slog.Logger) *sess
 // (the reason is a one-shot edge, not re-derivable from queue state) — but the
 // buffer makes overflow unreachable short of a simultaneous mass-wedge, and
 // blocking would stall the drain's exit->respawn.
-func sessionErrorNotify(ch chan<- giveUpNotice, logger *slog.Logger) msgqueue.GiveUpFunc {
+func sessionErrorNotify(ch chan<- giveUpNotice, logger *slog.Logger, attachments ...*daemonLiveBindings) msgqueue.GiveUpFunc {
+	var live *daemonLiveBindings
+	if len(attachments) > 0 {
+		live = attachments[0]
+	}
 	return func(convID, reason string) {
+		src := live.capture(convID, "", false)
+		live.offer(src, protocol.TypeSessionError, protocol.SessionErrorPayload{ConversationID: convID, Code: protocol.CodeSessionBlocked, Message: reason}, "")
 		select {
-		case ch <- giveUpNotice{convID: convID, code: protocol.CodeSessionBlocked, reason: reason}:
+		case ch <- giveUpNotice{convID: convID, code: protocol.CodeSessionBlocked, reason: reason, live: src}:
 		default:
 			logger.Warn("relay: session-error give-up queue full; dropping notification",
 				"event", "session_error.queue_full",
@@ -127,7 +136,11 @@ func sessionErrorNotify(ch chan<- giveUpNotice, logger *slog.Logger) msgqueue.Gi
 // A session no conversation owns has no client to tell, so it is dropped with a
 // Warn too: a crash loop nobody can hear about is what an operator needs to see at
 // the default level.
-func childCrashingNotify(ch chan<- giveUpNotice, resolve func(sessionID string) (string, bool), logger *slog.Logger) func(sessionID string) {
+func childCrashingNotify(ch chan<- giveUpNotice, resolve func(sessionID string) (string, bool), logger *slog.Logger, attachments ...*daemonLiveBindings) func(sessionID string) {
+	var live *daemonLiveBindings
+	if len(attachments) > 0 {
+		live = attachments[0]
+	}
 	return func(sessionID string) {
 		convID, ok := resolve(sessionID)
 		if !ok {
@@ -136,8 +149,10 @@ func childCrashingNotify(ch chan<- giveUpNotice, resolve func(sessionID string) 
 				"session_id", sessionID)
 			return
 		}
+		src := live.capture(convID, sessionID, false)
+		live.offer(src, protocol.TypeSessionError, protocol.SessionErrorPayload{ConversationID: convID, Code: protocol.CodeSessionChildCrashing, Message: childCrashingMessage}, "")
 		select {
-		case ch <- giveUpNotice{convID: convID, code: protocol.CodeSessionChildCrashing, reason: childCrashingMessage}:
+		case ch <- giveUpNotice{convID: convID, code: protocol.CodeSessionChildCrashing, reason: childCrashingMessage, live: src}:
 		default:
 			logger.Warn("relay: session-error queue full; dropping child-crashing notification",
 				"event", "session_error.queue_full",

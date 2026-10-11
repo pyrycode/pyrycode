@@ -67,22 +67,73 @@ for the real-signal regression pattern.
 
 ## Memory credential persistence
 
+### Replacement and selection trust
+
 Updating a token in place before saving selection would change what an existing
 reference resolves to even if the metadata save then failed. `memoryCredentialStore.set`
-writes an immutable token generation and staged selection, syncs and closes
-both, then commits with one atomic selection rename. The reference stays stable;
+writes a separate immutable secret generation and staged selection. File data is
+synced and closed; OS writes are read back and checked before publication. One
+atomic selection rename commits the change. The reference stays stable;
 only the selected generation changes. Readers hold the same directory lock as
 writers through resolution, so post-commit cleanup cannot remove a generation
 while a reader still needs it. `TestMemoryCredentialFailedSave` injects a rename
 failure and checks both unchanged selection bytes and resolution of the old
 token; checking only the returned error would miss an in-place token overwrite.
 
+A backend can persist the candidate and still report failure. A fake that fails
+before writing cannot prove preservation across that partial success.
+`TestMemoryOSReplacement` writes the new candidate before emitting hostile
+stdout/stderr and failing; its rename fault verifies backend completion before
+rejecting the selection commit. Both faults require unchanged metadata and old
+token resolution after recovery. Checking only the returned error or the stable
+reference would miss an overwritten secret. Cleanup targets only unselected
+generations, so cleanup failure cannot change the committed token.
+
 Non-secret metadata still controls access to a secret. `memorySelected` requires
-canonical file-backend selection and valid identifier formats, while
-`memoryCredentialStore.resolve` requires equality with the committed reference.
+canonical selection for `file`, `keychain` or `secret-service` and valid
+identifier formats. `memoryCredentialStore.resolve` requires equality with the
+committed reference.
 Pinned no-follow directory traversal and opened-descriptor checks protect both
 selection and token files. This applies the [selection trust rule](claude-account-source.md#the-selection-file-needed-the-same-trust-check-as-the-secret-it-points-to)
 without allowing memory references to redirect to paths or Claude login entries.
+OS item names come only from validated generations under `pyry.memory.openai.`;
+an unissued reference must fail before accessing an OS item.
+
+### OS availability and credential bytes
+
+Piped stdin and a process deadline do not suppress OS interaction: a prompt
+answered before the deadline can make an interactive store appear unattended.
+`memoryOSScript` disables Keychain interaction with
+`SecKeychainSetUserInteractionAllowed(false)` before every operation. Secret
+Service requires an existing unlocked default collection and unlocked selected
+items, rejects returned prompt objects, and never calls Unlock,
+CreateCollection or Prompt. `TestMemoryOSNativeAPI` exercises controlled native
+locked and prompt-required failures; checking only subprocess vectors would
+miss API-level interaction.
+
+Executable presence cannot establish usable storage either.
+`memoryCredentialStore.preferred` probes a disposable random item through
+write/read/delete before submitting the user's token. Ordinary probe failure,
+including absent Python 3 or Linux GLib/GIO libraries, selects files; cancellation
+or timeout aborts. Reprobing a committed selection would silently change its
+storage boundary when availability changes. `TestMemoryOSPreference` and
+`TestMemoryOSProcess` require persisted OS choices and existing file selections
+to survive availability changes. A selected store's failure must be returned
+without fallback or cached-token reuse, and `TestMemoryOSInitialWriteFailure`
+ensures failure after a successful probe cannot commit a file fallback.
+
+Keychain CLI text output can render binary passwords as printable hex, making
+local validation accept different bytes from the stored secret. Keychain reads
+therefore use `SecKeychainFindGenericPassword`'s exact length/data buffer;
+Secret Service reads return the secret byte array. `memoryOSRead` validates
+unchanged bytes and rejects even stored trailing newlines. Rejecting every
+hex-looking value would instead reject valid tokens. `TestMemoryOSNativeAPI`
+checks raw reads, while `TestMemoryOSStoredBytes` rejects binary/control values
+and preserves printable hex and metacharacter tokens. Native byte APIs also
+avoid the old command tool's framing cap: `TestMemoryOSFraming` covers the full
+4096-byte stdin limit, including an optional LF/CRLF, without token truncation.
+
+### Cancellation and persistence tests
 
 The [Claude file reader's before/after context checks](claude-account-source.md#the-ten-second-bound-covers-reads-that-return-not-reads-that-hang)
 alone cannot bound a stdin read waiting for EOF. `readMemoryInput` polls the
@@ -92,9 +143,25 @@ so a cancelled operation leaves no worker that can publish later.
 `TestMemoryCredentialCancellation` blocks stdin or the lock, then verifies the
 old token still resolves after release. Resolution in a fresh process in
 `TestMemoryCredentialProcess` prevents an in-memory cache from masking broken
-persistence. See the [command contract](../../guide.md#memory-credentials),
+persistence.
+
+A replacement reads the old credential before starting its candidate write.
+An early wall timer can expire during that read, leaving a cancellation test
+green without exercising the blocked write. `TestMemoryOSCancellation` waits
+for the controlled tool's target-operation marker before signalling cancellation
+or deadline failure, then releases the backend and checks old resolution or
+absence of initial selection. Race-instrumented tool children disable the race
+runtime's artificial exit delay so that delay cannot consume the test deadline.
+`memoryOSCommand` bounds every helper to ten seconds, kills its process group
+on cancellation, and never lets its Wait goroutine publish selection. Tool
+diagnostics are discarded, and only bounded successful read bytes cross the
+adapter boundary; hostile failure output is covered by the replacement and
+fresh-process tests.
+
+See the [command contract](../../guide.md#memory-credentials),
 [service-user storage requirements](../../deployment.md#memory-credentials) and
-[design](../../specs/architecture/3112-memory-credentials.md).
+the [file lifecycle design](../../specs/architecture/3112-memory-credentials.md)
+and [native OS design revision](../../specs/architecture/3113-memory-os-credentials.md#revisions).
 
 ## Memory configuration and effective roots
 

@@ -380,7 +380,7 @@ Envelope-level fields beyond the v1 set:
 |---|---|---|---|
 | `event_id` | int | no (omitempty) | In-memory event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present on ring-backed interactive structured-stream frames and operator messages (binary → phone), including their reconnect replay; absent on session transitions and frames without ring recording. See [Interactive events](#interactive-events-v2-capability-gated). Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
 | `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present after a successful history append on direct live interactive-turn, session-transition and operator-message envelopes (#2861); reconnect replay of history-backed ring events carries that original append's id (#2909). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients **must fall back to history/list** for a durable read-mark target. |
-| `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082).** Omitted means no provenance was supplied; explicit `null` positively means no producing session; a nonempty string names the producing session. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. Daemon provenance/retention and production installation/activation remain pending #3076/#3077. |
+| `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082/#3162).** Omitted means no provenance was supplied; explicit `null` positively means no producing session; a nonempty string names the producing session. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. Daemon provider installation remains #3163; production negotiation remains #3164. |
 | `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears the family's session-scoped readings before fresh readings for the supplied session. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
 
 The relay strips supplied session metadata from non-thread connections and
@@ -400,6 +400,8 @@ substitutes the conversation's newer session binding. Fresh replies retain
 handle `session_state_cleared: true` before decoding the ordinary payload schema,
 because a clear's `{}` intentionally has none of that schema's required fields.
 Supplied thread live state carries neither `event_id` nor `history_entry_id`.
+Repeated equal-revision requests remain answerable; strictly older revisions
+and overtaken session generations are suppressed even when correlated.
 Ordering, access gates and connect reconciliation follow the
 [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract).
 
@@ -1043,8 +1045,12 @@ wire types: `turn_state`, `stall`, `api_retry`, `compacting` and
 eligible legacy type counts regardless of absent/false/true stored `shown`,
 including normal, failed or stopped `turn_end` and nonvisual metadata. Validated
 runtime facts projected as info-banner receipts also count at their original
-durable IDs, including receipt-only logs and runtime tails. Unsupported entries,
-including invalid runtime facts, retain the conservative visibility fallback:
+durable IDs, including receipt-only logs and runtime tails. This includes
+validated `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`
+receipts (#3167), even hidden removal/give-up outcomes. Their
+[validation](#a-history-entry) is shared by paging and the legacy list/read
+target. Unsupported entries, including malformed queued/runtime facts and
+unknown types, retain the conservative visibility fallback:
 absent/true counts, false excludes. Neither exclusion nor fallback counting
 certifies a harmless receipt. Missing/empty logs and logs with no qualifying
 entry yield `0`; an all-hidden raw log can still have a nonzero legacy target.
@@ -1061,8 +1067,9 @@ on the next list even if excluded statuses follow it; new counted entries make
 **Accounting is not presentation.** A list watermark, fetched history or a live/
 replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
 Submit a checkpoint only from explicit foreground presentation evidence. Known
-nonvisual receipts can account for intervening durable IDs, but unknown,
-malformed or unidentified receipts and unaccounted numeric holes remain barriers.
+nonvisual receipts, including queued-send receipts, can account for intervening
+durable IDs, but unknown, malformed or unidentified receipts and unaccounted
+numeric holes remain barriers.
 The daemon's clamp bounds the requested mark; it does not establish that the
 operator saw the content. Raw history and its metadata-aware watermark remain
 unchanged for future thread consumers.
@@ -1752,11 +1759,30 @@ contract covers permission prompts and question batches (`modal_shown` /
 items; their transient progress remains live state.
 
 **Implementation boundary:** the relay delivery/reconciliation contract is
-implemented using supplied providers and fakes. Actual daemon provenance and
-retained current readings remain pending #3076; provider installation and
-production activation remain pending #3077. Production still does not negotiate
+implemented using supplied providers and fakes (#3082/#3162). The relay's five
+on-demand handler paths consume optional source-bearing providers; daemon
+provider installation remains #3163 and production negotiation remains #3164.
+Production `ThreadReady` remains unset, so production still does not negotiate
 `thread`. The behavior below applies when those source providers and readiness
 are supplied, and does not claim that existing daemon emitters have migrated.
+
+**Supplied on-demand replies.** On a thread connection, an installed optional
+provider is selected once for `request_context_usage`, `mcp_status_request`,
+`request_model_list`, `request_session_settings` or `set_session_settings`.
+It returns a `LiveState` whose conversation, session tag, generation, reading
+identity and revision survive enrichment, queueing and sealing unchanged.
+The relay adds `in_reply_to` equal to the requesting envelope's `id` and delivers
+through `PushLiveState`, including when only the source-bearing provider is
+installed. It never derives provenance from the request, payload or current
+conversation binding. Settings reads retain the enrichment described in
+[Session settings](#session-settings-v2).
+
+A selected provider's unavailable result keeps the handler's existing refusal
+or zero-settings response; a failed settings update keeps its existing error
+mapping and emits no success reading. Neither outcome retries a legacy provider
+or repeats the query or mutation. A non-thread connection, or a handler without
+its optional provider, retains its legacy reply path and bytes. Existing typed
+providers and `SettingsUpdater` remain compatible.
 
 Each supplied push or on-demand reply keeps its producing session metadata:
 omitted `session_id` means no provenance was supplied, explicit `null` positively
@@ -1808,8 +1834,8 @@ each fit **65519 bytes** after JSON escaping and metadata; ordinary live state
 does not use thread-item continuation encoding.
 
 These frames carry no replay or history identity, contribute no thread items or
-catch-up data, and never advance `last_shown_version`. Connections without
-`thread` retain their existing stream, snapshots and replay/resync, receive no
+catch-up data, and never advance `last_shown_version` or read watermarks.
+Connections without `thread` retain their existing stream, snapshots and replay/resync, receive no
 envelope session metadata and receive no explicit clear frames. This work does
 not replace legacy replay/resync with catch-up; thread catch-up/pages and that
 replacement remain #2963.
@@ -3448,7 +3474,17 @@ The **producer** is **#657**. Until a server-side workspace-change source exists
 Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
 including envelope session tags and `{}` family clears before fresh state.
 
-Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty-three turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though it rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
+For a negotiated thread connection with `ModelListReadingFor` installed,
+`request_model_list` consumes that provider once, passing the negotiated
+`multi_agent` decision so the supplied inventory keeps the existing projection.
+The fresh `model_list` preserves supplied source metadata and payload fields,
+is correlated to the request, and carries no ring/history identity. Generated
+clears are uncorrelated; equal-revision requests are answered, while older
+revisions or generations are suppressed. An unavailable result keeps
+`model_list.unavailable` without retrying `ModelListFor`. Without the optional
+provider, or without `thread`, the legacy path and bytes below remain unchanged.
+
+Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty-three turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though its legacy live publication rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3635,6 +3671,17 @@ envelope id. A resolver result is forwarded unchanged as the existing
 [`mcp_status`](#mcp_status) payload, including its daemon-authored
 `conversation_id`, server order and `dropped_servers` value.
 
+On a negotiated thread connection, an installed `MCPStatusReadingFor` is
+consumed once instead of the payload-only resolver, even when that legacy
+resolver is absent. Its supplied reply follows the
+[live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract):
+source metadata and the complete payload are preserved, generated clears are
+uncorrelated and precede the correlated fresh reply, equal revisions remain
+answerable, and older revisions or generations are suppressed. An unavailable
+reading keeps `mcp_status.unavailable` and never retries the legacy resolver.
+Non-thread connections or an absent optional provider retain the legacy path
+and bytes. The existing validation, four-ask bound and cancellation still apply.
+
 The daemon resolves the conversation's current session from its registry and
 queries that session's live child afresh. It uses the registry record's canonical
 conversation id in the answer. Eligibility comes from the exact child's spawn:
@@ -3664,8 +3711,9 @@ Three rejects are possible, each sent as one `error` envelope correlated by
 
 No reject sends an empty or stale `mcp_status`. A conn that did not negotiate
 `interactive` receives nothing, and the daemon consults neither membership nor
-the resolver. A relay with no `MCPStatusFor` resolver configured is equally inert
-and consumes the type before decoding its payload, so it does not fall through to
+the resolver. A relay with neither an applicable supplied provider nor
+`MCPStatusFor` configured is equally inert and consumes the type before decoding
+its payload, so it does not fall through to
 an unknown-type response. Ticket #2382 wires the daemon's hosted-conversation
 resolver.
 
@@ -3931,6 +3979,18 @@ operator is actually looking at the screen — exactly what an inbound request
 means. No second outbound shape is minted: the answer is [`context_usage`](#context_usage),
 correlated by `in_reply_to`.
 
+On a negotiated thread connection, an installed `ContextUsageReadingFor` is
+consumed once, including when the legacy `ContextUsageFor` is absent. The
+supplied conversation, session tag, generation, reading identity, revision and
+complete payload survive asynchronous delivery. Under the
+[live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
+generated clears are uncorrelated and precede the correlated fresh reply;
+equal-revision requests remain answerable, while an overtaken revision or
+generation is suppressed. An unavailable result keeps
+`context_usage.unavailable` without consulting the legacy provider. Without
+`thread` or the optional provider, the existing legacy path and bytes remain.
+Validation, the four-ask bound and teardown cancellation are unchanged.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | The conversation whose reading is wanted. A lookup key checked against the daemon's registry, not a value trusted as sent. Always present (no `omitempty`); the empty string names nothing and is refused. |
@@ -4086,7 +4146,7 @@ No field is `omitempty`: all four keys are always present. **Only an explicit `n
 
 **Fallback generation.** One fresh turn uses the `haiku` alias through the daemon's configured Claude binary and existing account selection, with no more-expensive model fallback or new API-key setup. A configured account provider is re-read for this launch; refusal never falls back to ambient credentials. Input contains only fixed instructions, the producing message's client-safe delivered text and the final main-agent assistant message, bounded to the first **8192 UTF-8 bytes per side** at complete code points. It uses encoded stdin with no resumed session, session prompts, tools, MCP, hooks, approval dialogs, or workspace/CLAUDE.md/auto-memory/history/attachment-file reads. The attempt has a **ten-second total bound**, including credential lookup, startup and termination, and is never retried. Missing binary/model/authentication, failure, timeout or invalid output publishes nothing and leaves the suggestion absent.
 
-Persistent stream spawns still request `--prompt-suggestions`, unless the child's effective environment sets `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` (last entry wins). Claude also honours its own `promptSuggestionEnabled: false` setting. These controls disable native generation; the fallback can still supply a reply. Reusing native output makes no additional Pyrycode inference call, although Claude spends tokens generating it. See [the owner lifecycle and isolation rules](knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+Persistent stream spawns still request `--prompt-suggestions`, unless the child's effective environment sets `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` (last entry wins). Claude also honours its own `promptSuggestionEnabled: false` setting. These controls disable native generation; the fallback can still supply a reply. Reusing native output makes no additional Pyrycode inference call, although Claude spends tokens generating it. See [the owner lifecycle and isolation rules](knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831).
 
 A client replaces its held suggestion state keyed by **`conversation_id` and `session_id` together**, ignores a frame whose `revision` is not higher than the one held for that pair, and discards cached suggestions on a fresh handshake (`hello`/`hello_ack`). State is daemon-memory-only; a restarted daemon's revision counter does not resume above its previous value.
 
@@ -5455,6 +5515,35 @@ error. Refusal diagnostics use static reasons only.
 
 A paired client sends `set_session_settings` to change one session's **per-session settings** — its model, reasoning effort, permission mode, and YOLO (bypass-permissions) — and the daemon confirms with `session_settings_updated` (#597 Phase 3, #844, permission mode #1687). This section defines only the wire vocabulary; the handler that intercepts the request — gating on the negotiated `interactive` capability, validating, and persisting the change via `sessions.Pool.UpdateSettings` (#840) — is sibling #845.
 
+On a negotiated thread connection, installed `SessionSettingsReadingFor` and
+`UpdateSettingsReading` providers supply the read and successful-write replies,
+respectively (#3162). Each selected provider is consumed once and can be
+installed without its legacy counterpart. Supplied source metadata and payload
+fields are preserved through `PushLiveState`; only request correlation is added.
+Both reply types share the `session_settings` clear family: an automatically
+generated `{}` clear is uncorrelated and precedes the fresh correlated reply.
+Equal-revision requests remain answerable; strictly older revisions and
+overtaken generations are suppressed under the
+[live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract).
+
+A supplied settings read provides the base payload. Relay enrichment preserves
+unrelated fields and the existing presence/error rules: available applied effort
+is a string or explicit null, unavailable effort adds no field; capabilities
+are added only for negotiated `multi_agent` with an available provider;
+`memory_search` uses the supplied report, or `unknown` with `providers: []` on
+provider error. Effective effort uses the supplied conversation; capabilities
+use the base payload's session/model; memory search uses the supplied
+conversation and base session. Envelope provenance stays independent of those
+payload keys. Explicit supplied clears need no enrichment queries.
+
+An unavailable supplied read retains the all-zero no-session reply. A failed
+supplied mutation retains every existing error mapping and emits no success
+reading or generated clear. Neither falls back to a legacy provider or repeats
+the operation. Without `thread` or the relevant optional provider, the legacy
+reply path, bytes, enrichment and `SettingsUpdater` contract remain unchanged.
+Daemon provider installation remains #3163, production negotiation #3164, and
+thread catch-up/pages and replay replacement #2963.
+
 #### `set_session_settings`
 
 Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler (like [`modal_answer`](#modal-v2) / [`new_session`](#new-session-v2)).
@@ -6016,9 +6105,12 @@ timeline reducer it already runs for the live stream.
 | `payload` | object | Eligible stored payload bytes unchanged, or the nonvisual receipt shape below. |
 | `ts` | string (RFC 3339) | The original durable entry timestamp, also retained by receipts. |
 
-**Known runtime facts use nonvisual receipts (#3026).** Only
+**Known runtime and queued-send facts use nonvisual receipts (#3026, #3167).**
 `main_turn_opened`, `main_tool_interrupted`, `main_turn_interrupted` and
-`session_divider` project into legacy history as `type: "banner"` with this
+`session_divider`, validated
+[agent/task facts](knowledge/features/history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
+and `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`
+project into legacy history as `type: "banner"` with this
 payload (all five keys are required and nonnull):
 
 ```json
@@ -6032,21 +6124,41 @@ payload (all five keys are required and nonnull):
 ```
 
 The receipt retains the raw fact's original `id` and `ts`; it is not a new
-durable append or a second ID space. Runtime payloads and metadata stay off
-legacy transports. Projection validates matching conversation ownership,
-occurrence time and required identities: a turn ID for opening/turn interruption,
-also a tool-call ID for tool interruption, and a cause plus predecessor session
+durable append or a second ID space. Raw fact payloads and metadata stay off
+legacy transports. Opening/interruption/divider projection validates matching
+conversation ownership, occurrence time and required identities: a turn ID for
+opening/turn interruption, also a tool-call ID for tool interruption, and a cause plus predecessor session
 for a divider. A `daemon_restart` divider needs no predecessor/successor session
 IDs. Missing durable identity or timestamp and malformed facts produce no
 receipt; arbitrary unknown types remain excluded without being certified harmless.
+
+**Queued-send validation preserves the same boundary.** Every queued receipt
+requires matching `conversation_id`, a nonzero successful durable entry ID and
+a nonzero entry timestamp, plus these raw fact fields:
+
+| Raw fact | Additional required validation |
+| --- | --- |
+| `send_accepted` | Nonzero `accepted_at`. |
+| `send_delivered` | Nonzero `occurred_at`, `accepted_entry_id` and `delivery_entry_id`; exactly `reason: "delivered"`. |
+| `send_dropped` | Nonzero `occurred_at` and `accepted_entry_id`; exactly `reason: "removed"` or `"give_up"`. |
+| `send_lost` | Nonzero `occurred_at` and `accepted_entry_id`; exactly `reason: "daemon_restart"`. |
+
+Legacy callers' sender/message fields remain optional. Unknown/malformed facts,
+missing required fields and unsupported outcome reasons produce no receipt.
+Receipts carry only the five banner fields above: no send text, attachments,
+sender fields, raw references or facts. Raw facts, provenance/visibility metadata,
+raw store watermarks and durable ID allocation remain unchanged, including
+hidden removal/give-up outcomes. Raw visibility does not authorize transport
+or certify accounting.
 
 Unchanged mobile decoding/reduction understands this info banner as nonvisual
 accounting. It draws no content and changes no turn, permission, model or status
 state. Accounting grants no presentation of unseen content. Unknown, malformed
 or unidentified receipts and unaccounted holes remain read-evidence barriers;
 an all-receipt page cannot establish sight. The projection consumes exactly one
-bounded raw page and preserves its opaque `cursor` and `at_start`, including
-all-runtime pages; it never scans ahead to fill a page after excluding facts.
+bounded raw page and preserves its raw-page limit, opaque `cursor` and
+`at_start`, including receipt-only and mixed valid/invalid pages; it never scans
+ahead to fill a page after excluding facts.
 
 **A direct live envelope's `history_entry_id` is this entry's `id` (#2861).**
 After a successful append, interactive-turn emission, session-transition
@@ -6054,9 +6166,14 @@ broadcast and operator-message history commit/publication attach that same
 per-conversation id to every interactive recipient's direct envelope. Reconnect
 replay of history-backed interactive-turn, runtime-receipt and operator-message
 ring events carries the original append's id too (#2909), without appending another entry.
-Running runtime facts, including dividers, publish the same receipt bytes and
-original durable ID/timestamp to live recipients and the replay ring. Startup
-reconciliation receipts are available through history, without populating the
+Running runtime and queued-send facts, including dividers, publish the same
+receipt bytes and original durable ID/timestamp to live recipients and the
+replay ring. Queued acceptance is recorded and its receipt enqueued before
+placement can proceed; the delivered user message precedes its linked delivery
+receipt in serialized publication. Ordinary and send-now delivery preserve that
+chronology through delayed echo/idle confirmation, and later confirmation adds
+no message or receipt. Startup reconciliation receipts, including `send_lost`,
+are available through history, without populating the
 ring or sending live frames. Existing recipient and agent/isolation gates apply.
 Channel posts still omit it; ordinary `session_transition` frames are not
 ring-replayed. Use it as
@@ -6066,9 +6183,9 @@ has read through that entry. It is independent of the envelope's connection
 absent or failed history storage, and non-history-backed frames (live or replayed)
 omit `history_entry_id` entirely, never as `null` or `0`. Eligible legacy delivery
 and existing ring recording proceed even when history cannot be appended;
-failed or absent storage cannot mint a runtime receipt. Obtain a durable target
-only with presentation evidence, using a served entry's `id`; a list watermark
-alone is not a read checkpoint.
+failed or absent storage cannot mint a runtime or queued-send receipt. Obtain a
+durable target only with presentation evidence, using a served entry's `id`;
+a list watermark alone is not a read checkpoint.
 
 **The entry's `id` is not an `event_id`.** [`event_id`](#reconnect-replay--resync-consumer-647)
 is the in-memory ring's id: per-process, reset by a daemon restart, and meaningful
@@ -6081,9 +6198,10 @@ reports `latest_entry_id` using the shared
 [legacy list/read watermark](#marking-a-conversation-read): eligible wire types
 count regardless of stored `shown`, except `turn_state`, `stall`, `api_retry`,
 `compacting` and `session_transition`, which never count. Validated runtime
-info-banner receipts count at their original IDs, including receipt-only pages
-and tails. Unsupported entries keep conservative absent/true visibility counting
-and false exclusion without certifying receipt accounting. **History pages still
+info-banner receipts, including all four queued-send facts, count at their
+original IDs, including hidden drops, receipt-only pages and tails. Unsupported
+entries keep conservative absent/true visibility counting and false exclusion
+without certifying receipt accounting. **History pages still
 contain eligible hidden/status entries and validated runtime receipts, and all
 entries use the original durable ID sequence.** Neither `shown` nor session
 metadata is serialized on this legacy route; raw visibility cannot distinguish
@@ -6158,9 +6276,11 @@ an event emitted with no connected recipient; replay creates no new history entr
 The pair (`conversation_id`, `history_entry_id`) also identifies the same entry
 across devices and daemon restarts.
 
-This join also applies to the four known runtime facts' info-banner receipts:
-history, live publication and reconnect replay carry the same projected bytes,
-original durable ID and timestamp. Their `banner` wire type contributes to the
+This join also applies to known runtime and queued-send info-banner receipts,
+including `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`:
+receipts published while running carry the same projected bytes, original
+durable ID and timestamp in history, live publication and reconnect replay.
+Startup loss is page-only. Their `banner` wire type contributes to the
 same legacy latest target on every lane, regardless of the raw fact's `shown`.
 Repeated or overlapping delivery accounts for that ID once, duplicates no
 content and cannot lower latest/read marks or grant additional sight. Do not
@@ -6173,6 +6293,15 @@ daemon-confirmed persisted mark. These are separate facts.
 Fetched pages and replay alone establish no presentation. The
 [completed-turn controls](#marking-a-conversation-read) compare client-derived
 latest, presented checkpoint and confirmation across all three lanes.
+
+Each history request projects one bounded raw page with its original IDs,
+timestamps, opaque `cursor`, raw-page limit and `at_start`. Receipt-only,
+mixed valid/invalid, repeated and overlapping pages retain those bounds;
+projection never scans ahead to replace filtered facts. Use `at_start` to
+terminate paging, since an empty projected page need not be the beginning.
+Keep one page per physical pull; page arrival does not itself request another
+catch-up page or grant sight. Startup `send_lost` receipts have no live/replay
+backfill; history supplies their durable identities.
 
 **Without `history_entry_id`, fall back to (`type`, `ts`).** An entry in a page
 and its twin on the live or replay lane carry the same `type` and the same `ts`,

@@ -544,7 +544,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// folder-not-trusted session_error on a trust deny; that sender was removed
 	// deliberately (#1545), because trust is settled by trustMark before every
 	// spawn and no trust modal can reach the resolver since #1348.
-	blocked := sessionErrorNotify(giveUps, logger)
+	liveBindings := &daemonLiveBindings{sink: streamSink, reg: convReg}
+	streamSink.live = newDaemonLiveState(func(sid string) (string, bool) { return conversationForSession(convReg, sid) })
+	blocked := sessionErrorNotify(giveUps, logger, liveBindings)
 	// The second sender into giveUps (#2724): a stream runner whose claude keeps
 	// exiting at startup reports its crash episode as a non-terminal
 	// session.child_crashing. Installed on the sink after the pool exists because the
@@ -552,7 +554,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// and the sink loads it atomically at fire time.
 	streamSink.setCrashLoopNotify(childCrashingNotify(giveUps, func(sid string) (string, bool) {
 		return conversationForSession(convReg, sid)
-	}, logger))
+	}, logger, liveBindings))
 	// approvalParked is the third value in this block built BEFORE msgqueue.New for
 	// the same chicken-and-egg reason as queueChanges and giveUps: it carries #1919's
 	// ApprovalParked report to the Pending gate below, and the bridge that answers
@@ -606,7 +608,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// for queueChanges' reason. The ring that push appends to is born in the relay
 	// leg, which hands it to the emitter's Run at start.
 	operatorMessages := make(chan operatorMessage, operatorMessageQueueSize)
+	ome := newOperatorMessageEmitterV2(operatorMessages, logger)
 	sends := newQueuedSendHistory(conversationHistory, logger, channelPostSession(convReg, pool.HarnessFor))
+	sends.publish = ome.notifyReceipt
 	// Queued Claude history entries and pushes wait for their echoes, which the stream drain hands over through the sink. Built only on the
 	// stream path, beside the tracker whose idle is its fallback; nil elsewhere,
 	// which commits at the write as before.
@@ -626,6 +630,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	var replySuggDelivered msgqueue.DeliveredFunc
 	if streamSink != nil {
 		replySugg = newReplySuggestions(logger)
+		replySugg.live = liveBindings
 		replySugg.parent = ctx
 		defer replySugg.stopFallbacks()
 		replySugg.fallback = (replyFallback{binary: *claudeBin, account: account.provider(), logger: logger}).run
@@ -701,11 +706,6 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// startRelayV2, where the broadcaster exists.
 	qse := newQueueStateEmitterV2(queueChanges, queue.Snapshot, logger)
 
-	// The live push of the operator's own delivered message (#2699): fed by the
-	// history producer on OnDelivered, started inside startRelayV2 where the
-	// broadcaster and the replay ring exist — same shape as qse.
-	ome := newOperatorMessageEmitterV2(operatorMessages, logger)
-
 	// The session_error producer (#1008): on each msgqueue give-up it fans a typed
 	// session_error envelope (terminal CodeSessionBlocked) to interactive phones,
 	// so a wedged session surfaces instead of leaving a queued turn that silently
@@ -723,6 +723,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// reset tail, which already runs off the dispatch goroutine, so it emits
 	// synchronously and cannot drop or reorder an edge.
 	resetting := newResettingEmitterV2(ctx, logger)
+	resetting.live = liveBindings
 	reset := newConversationReset(ctx, convReg, pool, turnBusy, queue, *wrapUpDeadlineFlag, logger)
 
 	// The debug-bundle producer (#813): a paired `request_debug_bundle` frame
@@ -843,13 +844,13 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		sessionErr:   see,
 		resetting:    resetting,
 		debugBundler: debugBundler,
-		settings:     settingsUpdaterAdapter{pool, modelVocabulary},
+		settings:     liveSettingsUpdater{settingsUpdaterAdapter: settingsUpdaterAdapter{pool, modelVocabulary}, live: liveBindings},
 		// #2699: pushes each delivered operator message; Run starts in startRelayV2.
 		operatorMessages: ome,
 		// #2646: the capability list is read off an adapter over the same pool and
 		// store as settings above, so it reports exactly what that one checks.
-		capabilities: settingsUpdaterAdapter{pool, modelVocabulary}.Capabilities,
-		runSettings:  runSettingsFor(convReg, pool, modelVocabulary),
+		capabilities: liveSettingsUpdater{settingsUpdaterAdapter: settingsUpdaterAdapter{pool, modelVocabulary}, live: liveBindings}.Capabilities,
+		runSettings:  runSettingsFor(convReg, pool, modelVocabulary, liveBindings),
 		// The registry half and the live-session half of one conversation's
 		// system-prompt picture (#2152), resolved together over the same registry and
 		// pool. The closure returns cmd/pyry's own primitive-typed state.
@@ -864,10 +865,10 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		sessionHarness:       sessionHarness(pool),
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
-		modelListFor: modelListFor(convReg, pool, modelVocabulary),
+		modelListFor: modelListFor(convReg, pool, modelVocabulary, liveBindings),
 		// The pushed-frame half of the merged list (#2652), over the same store.
 		pushedModelOptions: pushedModelOptions(modelVocabulary),
-		mcpStatusFor:       mcpStatusFor(convReg, pool),
+		mcpStatusFor:       mcpStatusFor(convReg, pool, liveBindings),
 		effectiveEffortFor: effectiveEffortFor(convReg, pool),
 		memorySearchFor:    memorySearchFor(convReg, pool, resolveConfigPath()),
 		// The resolution half of the on-demand context-usage read (#2431), built
@@ -878,7 +879,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		mcpActuatorFor:                boundMCPChildActuator(convReg, pool),
 		backgroundTaskStopper:         boundBackgroundTaskStopper(convReg, pool),
 		retainedModelLists:            retainedModelLists(convReg, pool, modelVocabulary),
-		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool),
+		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool, liveBindings),
 		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),
 		approvals:                     approvals,
 		streamSink:                    streamSink,

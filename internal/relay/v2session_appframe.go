@@ -36,8 +36,10 @@ type appFrameJob struct {
 	// multiAgent is the conn's negotiated multi_agent decision, copied from the
 	// Run-owned V2Session.multiAgent when the job is built on Run, so a worker
 	// handler reads it without touching session state (#2646). Only the
-	// session-settings read consults it.
+	// settings read consults it.
 	multiAgent bool
+	// thread is copied on Run so supplied providers never read negotiated state off Run.
+	thread bool
 }
 
 // appFrameKind names the off-Run handlers, one member per dispatchAppFrame case
@@ -102,10 +104,11 @@ const (
 // mcp_status_request (#2702) are checked here but their seam wait and reply
 // run on a goroutine of their own, so that reply can emit after replies to
 // frames that arrived later. Clients correlate it on in_reply_to. connCtx is
-// what ends those goroutines: it is cancelled when this worker returns, which
-// is exactly on s.done or ctx. Each verb has its own semaphore bounding how
-// many one conn can hold: asks (maxContextUsageAsksPerConn) and mcpAsks
-// (maxMCPStatusAsksPerConn).
+// what ends those goroutines and settings enrichment: a separate watcher cancels
+// it on s.done even while a handler holds the worker. Run cancellation propagates
+// through ctx, and worker return also cancels connCtx and joins the watcher.
+// Each verb has its own semaphore bounding how many one conn can hold: asks
+// (maxContextUsageAsksPerConn) and mcpAsks (maxMCPStatusAsksPerConn).
 //
 // The worker NEVER touches s.send / s.recv / keys / session state: it only
 // runs Route → handler → c.Send (a marshal + channel push, no AEAD) and
@@ -113,7 +116,19 @@ const (
 // single-owner-cipher invariant (AC-3).
 func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 	connCtx, cancelConn := context.WithCancel(ctx)
-	defer cancelConn()
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-s.done:
+			cancelConn()
+		case <-connCtx.Done():
+		}
+	}()
+	defer func() {
+		cancelConn()
+		<-watchDone
+	}()
 	asks := make(chan struct{}, maxContextUsageAsksPerConn)
 	mcpAsks := make(chan struct{}, maxMCPStatusAsksPerConn)
 	for {
@@ -175,14 +190,14 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// trip. Saved settings resolution and reply composition share this
 				// worker placement, and the unsealed reply returns through
 				// forwardToRun so the worker never touches s.send.
-				m.handleRequestSessionSettings(ctx, s, job.plaintext, job.multiAgent)
+				m.handleRequestSessionSettings(connCtx, s, job.plaintext, job.multiAgent, job.thread)
 			case appFrameMCPStatusRequest:
 				// The resolver may wait on a child round trip. That wait does NOT
 				// stall this conn's later frames (#2702): the handler checks
 				// membership here and hands the wait to a goroutine of its own. Its
 				// reply and every reject return through forwardToRun, so nothing
 				// seals under s.send off Run.
-				m.handleMCPStatusRequest(connCtx, s, mcpAsks, job.plaintext)
+				m.handleMCPStatusRequest(connCtx, s, mcpAsks, job.plaintext, job.thread)
 			case appFrameMCPReconnect:
 				// The actuator waits on a child round trip, so this stalls only the
 				// addressed conn's later frames. Its reply and every reject return
@@ -201,7 +216,7 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// hands the wait to a goroutine of its own, so its reply may emit
 				// after later frames' replies. Its reply and every reject return
 				// through forwardToRun, so nothing seals under s.send off Run.
-				m.handleRequestContextUsage(connCtx, s, asks, job.plaintext)
+				m.handleRequestContextUsage(connCtx, s, asks, job.plaintext, job.thread)
 			case appFrameRoute:
 				// The v1 application dispatch chain, unchanged: build the outbound
 				// channel, call dispatch.Route, forward its replies to Run.

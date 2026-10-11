@@ -409,7 +409,23 @@ arguments. Input is capped at **4096 bytes including any trailing newline**;
 oversize input is rejected rather than truncated. One trailing LF or CRLF is
 removed, then the token must be nonempty printable non-space ASCII. Thus a token
 with a trailing LF can contain at most 4095 bytes, or 4094 with CRLF. Validation
-is local, requires no particular key prefix, and makes no OpenAI request.
+is local, requires no particular key prefix, and makes no OpenAI request. The
+same limit applies to file, Keychain and Secret Service storage; there is no
+smaller platform framing cap. Printable quotes and metacharacters are preserved.
+
+For a service user with no committed selection, set prefers macOS Keychain or
+Linux Secret Service only after an unattended write/read/delete probe using a
+disposable random memory entry succeeds. If the probe finds the OS store
+unusable, set chooses the protected file fallback before submitting your token
+to a backend. Probe cancellation or timeout aborts set. Once a backend is chosen
+for the write, a failed write never triggers fallback.
+
+OS storage requires Python 3; Linux also needs the GLib/GIO shared libraries,
+access to the service user's session bus and an existing unlocked default
+Secret Service collection. Missing runtime support selects files only during
+initial setup. Operations never initiate an unlock or collection-creation
+prompt. OS-store writes stream the token through stdin, keeping secrets out of
+child command-line arguments and public diagnostics.
 
 A successful set prints only JSON containing a non-secret reference, shaped like
 `{"reference":"memory:openai:<opaque identifier>"}`. Retain that reference: it
@@ -424,23 +440,30 @@ afresh. Configured means the stored token passes local validation; it does not
 prove OpenAI accepts it. Unsafe storage, malformed selection, or a selected token
 that is missing, inaccessible or invalid causes a sanitized error and nonzero
 exit, rather than an unconfigured result or reuse of a cached token.
+Locked or denied access to a selected OS store also fails without prompting or
+switching backends.
 
 Set, status and internal resolution have a ten-second operation deadline,
 including waiting for set's stdin or the storage lock. They honor cancellation
 and any shorter caller deadline; the CLI also honors SIGINT and SIGTERM. Rejected
-input, unsafe storage, cancellation, timeout or a failed save leaves the prior
-committed credential and reference intact. Once the failure clears, the same
+input, unsafe storage, cancellation, timeout, a failed backend write or a failed
+selection commit leaves the prior committed credential and reference intact.
+Replacement writes a separate candidate before committing selection; it does
+not overwrite the selected secret first. Once the failure clears, the same
 reference resolves to the old token; a successful replacement selects the new
 token. A cancelled or timed-out save cannot publish later.
 
-Secrets and protected selection metadata live in
-`~/.pyry/memory/credentials/`, outside vaults and ordinary settings. Storage
-directories are service-user-owned with mode 0700, and regular files have mode
-0600 from creation. Existing unsafe storage is refused without being repaired or
-overwritten. Memory credentials are separate from the daemon's Claude account
-and the operator's interactive login. See [deployment requirements](deployment.md#memory-credentials).
-This lifecycle currently uses protected files; OS-store access and preference
-are deferred to [#3113](https://github.com/pyrycode/pyrycode/issues/3113).
+Protected non-secret selection metadata lives in
+`~/.pyry/memory/credentials/`, outside vaults and ordinary settings; file-backed
+tokens live there too. The committed backend choice persists across processes
+and availability changes. Existing file selections remain file-backed even
+when an OS store becomes usable. Storage directories are service-user-owned
+with mode 0700, and regular files have mode 0600 from creation. Existing unsafe
+storage is refused without being repaired or overwritten. OS entries use a
+dedicated memory namespace. Memory credentials are separate from the daemon's
+Claude account and the operator's interactive login; only lifecycle-issued
+memory references can resolve them. See
+[deployment requirements](deployment.md#memory-credentials).
 
 ## Memory configuration
 
@@ -525,29 +548,62 @@ After saving valid memory settings, restart the daemon to activate automatic
 Markdown export at `~/.pyry/memory/recent-transcripts`. The daemon resolves the
 settings against its startup workspace and discovers registered chats, including
 chats created later. With readable history and writable transcript storage,
-eligible committed text appears within 60 seconds of persistence. Export runs
+delivered user text appears within 60 seconds of persistence; completed main
+assistant replies appear within 60 seconds of persistence of their qualifying
+recorded `turn_end`. Export runs
 without a connected client, an indexer or a scheduled knowledge-capture run.
 Unconfigured memory creates no transcript storage. Invalid settings or export
 failures leave ordinary chat operational and produce content-free diagnostics.
 
-Transcripts contain delivered conversational user text from Claude and Codex
-chats, preserving the complete recorded text and whitespace in delivery order.
-They include conversation ID and title, recorded session and agent identity,
-stable message IDs, source timestamps and speaker. Queued, dropped and lost
-acceptances, assistant output, injected or reset wrap-up instructions, background
-memory-capture executions and non-user events are excluded. Unresolved historical
-session attribution is explicitly unknown. Completed assistant text is pending
-[#3151](https://github.com/pyrycode/pyrycode/issues/3151).
+Transcripts contain delivered conversational user text and completed Claude/Codex
+main assistant replies. They preserve every main text run before, between and
+after tool calls in durable creation/delivery order, coalescing streaming deltas
+once and retaining complete text and whitespace. Rows include conversation ID,
+recorded agent/session attribution, stable message identity, source timestamp and
+speaker; the file also includes the conversation title. An assistant row's
+identity and timestamp come from its first text entry and do not change with
+later deltas or completion. Attribution uses persisted provenance and divider
+evidence. Unresolved attribution stays explicitly unknown and separate; the
+current session binding never fills it in.
+
+All text runs of an unfinished reply are withheld. Tool launches, another user
+message, runtime interruption or process restart alone cannot establish
+completion. Completion must match the conversation, recorded agent/session
+source, turn and opening generation or legacy boundary scope; tagged and legacy
+evidence stay separate even if their displayed attribution matches. The first
+valid terminal in history-entry order owns that lifetime. A main `turn_end`,
+including an error or cancellation ending, qualifies it for export. If
+`main_turn_interrupted` wins first, a later `turn_end` cannot release that
+lifetime's text. A fresh opening is a separate lifetime even with reused IDs.
+Malformed evidence and unrelated or child-agent endings release nothing.
+
+Replies also require a delivered conversational user exchange in their own
+recorded turn interval and source scope. An earlier completed exchange cannot
+qualify a later assistant-only wrap-up. Excluded content includes reasoning,
+tool inputs/results, child-agent traffic, injected or reset wrap-up instructions
+and their assistant-only replies, system/status events and background
+memory-capture executions. Queued, dropped and lost acceptances and messages
+explicitly recorded as having no receiving child remain excluded.
 
 Files are grouped by logical session. A recorded reset/clear, agent switch or
 other replacement with a distinct successor routing session closes the
 predecessor and starts the successor. Idle or capacity eviction, disconnect,
 restart or respawn retaining the routing session does not close it. A restart
 without a recorded successor also leaves it open; a recorded distinct successor
-is a replacement. Each file reports open/closed state, a closing history entry
-only when closed, and the last delivered-message entry represented. Late text
-attributed to the predecessor updates that file without changing its closing
-entry or entering the successor.
+is a replacement. Each file reports open/closed state and three separate
+boundaries:
+
+- `Last delivered entry`: the greatest represented user-delivery history entry;
+  assistant replies do not advance it.
+- `Last text entry`: the greatest history entry contributing exported user or
+  eligible assistant text, including a late delta extending an exported run.
+  Completion, tool and status facts alone do not advance it.
+- `Closing entry`: the immutable logical-session closure entry, present only
+  when closed.
+
+Late eligible predecessor text updates only that file and its relevant text or
+user-delivery boundary. It never moves the closing entry or changes the
+successor's contents or closure, including when a routing ID is reused.
 
 Open transcripts retain the complete session without an age limit or a cutoff
 after intermediate knowledge capture. Closed files are retained too. Persisted

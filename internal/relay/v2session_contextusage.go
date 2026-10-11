@@ -150,7 +150,7 @@ var (
 //
 // ctx is the conn-scoped context appFrameWorker derives, and asks is that worker's
 // semaphore of waiting-ask slots; see step 5.
-func (m *V2SessionManager) handleRequestContextUsage(ctx context.Context, s *V2Session, asks chan struct{}, plaintext []byte) {
+func (m *V2SessionManager) handleRequestContextUsage(ctx context.Context, s *V2Session, asks chan struct{}, plaintext []byte, thread bool) {
 	var env protocol.Envelope
 	if err := json.Unmarshal(plaintext, &env); err != nil {
 		// Step 2. Unreachable; content-free record, no reply.
@@ -187,19 +187,31 @@ func (m *V2SessionManager) handleRequestContextUsage(ctx context.Context, s *V2S
 	}
 	go func() {
 		defer func() { <-asks }()
-		m.resolveContextUsageRequest(ctx, s, env.ID, p.ConversationID)
+		m.resolveContextUsageRequest(ctx, s, env.ID, p.ConversationID, thread)
 	}()
 }
 
 // resolveContextUsageRequest is steps 5 and 6 on the ask's own goroutine. ctx is the
-// conn's, ended by the worker's return, so both conn teardown and manager shutdown
-// end the seam's wait. Its emissions leave through forwardToRun like every other on
-// this path; nothing here touches s.send.
+// conn's, canceled independently of worker progress on teardown or manager shutdown.
+// Replies return to Run for sealing; nothing here touches s.send.
 //
 // A seam that returns after ctx ended is answered with NOTHING, whatever it returned:
 // the conn is gone, and a refusal logged for it would misreport a teardown as an
 // unavailable reading.
-func (m *V2SessionManager) resolveContextUsageRequest(ctx context.Context, s *V2Session, inReplyTo uint64, conversationID string) {
+func (m *V2SessionManager) resolveContextUsageRequest(ctx context.Context, s *V2Session, inReplyTo uint64, conversationID string, thread bool) {
+	if thread && m.cfg.ContextUsageReadingFor != nil {
+		reading, ok := m.cfg.ContextUsageReadingFor(ctx, conversationID)
+		if ctx.Err() != nil {
+			return
+		}
+		if !ok {
+			m.rejectContextUsageRequest(ctx, s, inReplyTo, rejectContextUsageUnavailable, "no current reading is available for this conversation", conversationID)
+			return
+		}
+		m.pushLiveReply(ctx, s, inReplyTo, reading)
+		return
+	}
+
 	payload, ok := m.cfg.ContextUsageFor(ctx, conversationID)
 	if ctx.Err() != nil {
 		m.cfg.Logger.Debug("relay: v2 context_usage request abandoned; session tearing down",

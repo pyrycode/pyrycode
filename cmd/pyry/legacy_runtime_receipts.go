@@ -14,7 +14,8 @@ import (
 
 func legacyRuntimeFact(typ string) bool {
 	switch typ {
-	case historyTurnOpened, historyToolInterrupted, historyTurnInterrupted, historySessionDivider:
+	case historyTurnOpened, historyToolInterrupted, historyTurnInterrupted, historySessionDivider,
+		historySendAccepted, historySendDelivered, historySendDropped, historySendLost:
 		return true
 	default:
 		return agentHistoryType(typ)
@@ -27,6 +28,13 @@ func legacyRuntimeFact(typ string) bool {
 func legacyRuntimeReceipt(convID, typ string, raw json.RawMessage, id *uint64, ts time.Time) (json.RawMessage, bool) {
 	if !legacyRuntimeFact(typ) || id == nil || *id == 0 || ts.IsZero() {
 		return nil, false
+	}
+	if queuedSendHistoryType(typ) {
+		if !validQueuedSendFact(convID, typ, raw) {
+			return nil, false
+		}
+		payload, err := json.Marshal(protocol.BannerPayload{ConversationID: convID, Level: "info"})
+		return payload, err == nil
 	}
 	if agentHistoryType(typ) {
 		if !validAgentHistoryFact(convID, typ, raw) {

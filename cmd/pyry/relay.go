@@ -499,7 +499,9 @@ func startRelay(
 			emitter.hist = w.hist
 			installRuntimeHistory(w.streamSink, emitter, w.busy)
 			resolve := func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }
-			w.streamSink.live = newDaemonLiveState(resolve)
+			if w.streamSink.live == nil {
+				w.streamSink.live = newDaemonLiveState(resolve)
+			}
 			drain := startStreamTurnDrainV2(ctx, w.streamSink, emitter, resolve, w.busy, logger)
 			transitions := startSessionTransitionStreamV2WithHarness(ctx, w.transitions, bcast, resolve, w.sessionHarness, w.busy, w.hist, logger)
 			return func() { drain(); transitions() }, nil, nil, nil, nil, nil, nil
@@ -774,6 +776,7 @@ func runConfigFor(
 		if usage != nil && b.live {
 			cfg.UsedTokens, cfg.WindowTokens = usage(b.sessionID)
 		}
+		runSettingsReading(b, cfg, protocol.Envelope{})
 		return cfg, true
 	}
 }
@@ -982,6 +985,7 @@ func startRelayV2(
 	if w.contextUsageResolve != nil {
 		resolver := newContextUsageResolver(ctx, w.contextUsageResolve, w.busy, nil)
 		resolver.rec = contextUsageRec
+		resolver.live = &daemonLiveBindings{sink: w.streamSink, reg: w.convReg}
 		contextUsage = resolver.Get
 	}
 
@@ -1598,6 +1602,7 @@ func startRelayV2(
 		// the tree does, and there a question surfaces as the permission modal it did
 		// before this slice. Set before mgr.Run's goroutine starts below, like
 		// streamApprovals — no data race on the field.
+		bridge.live = &daemonLiveBindings{sink: w.streamSink, reg: w.convReg}
 		bridge.hist = w.hist
 		bridge.sessionHarness = w.sessionHarness
 		bridge.questions = questionReg
@@ -1759,7 +1764,9 @@ func startRelayV2(
 		if w.operatorMessages != nil {
 			w.streamSink.setOperatorPublisher(func(m operatorMessage) { w.operatorMessages.broadcast(ctx, mgr, emitter.ring, m) })
 		}
-		w.streamSink.live = newDaemonLiveState(conversationFor)
+		if w.streamSink.live == nil {
+			w.streamSink.live = newDaemonLiveState(conversationFor)
+		}
 		installRuntimeHistory(w.streamSink, emitter, w.busy)
 		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, conversationFor, w.busy, logger)
 	}

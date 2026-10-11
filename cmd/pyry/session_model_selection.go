@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -30,9 +31,12 @@ func offeredModel(harness string, list turnevent.ModelList, model string) string
 // identity for the bound session, live or dormant. It preserves the resolver's
 // session isolation, confirmed posture and live marker. Vocabulary reads use the
 // same bound/bootstrap/saved priority as publication and settings validation.
-func runSettingsFor(reg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary) func(string) (boundRunSettings, bool) {
+func runSettingsFor(reg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary, attachments ...*daemonLiveBindings) func(string) (boundRunSettings, bool) {
 	return func(convID string) (boundRunSettings, bool) {
-		bound, ok := resolveBoundRunSettings(reg, runSettingsPool{Pool: pool}, convID)
+		bound, ok, op := liveResolve(liveAttachment(attachments), convID, protocol.TypeSessionSettings, func() (boundRunSettings, bool) {
+			return resolveBoundRunSettings(reg, runSettingsPool{Pool: pool}, convID)
+		})
+		bound.liveOp = op
 		if !ok || bound.model == "" {
 			return bound, ok
 		}

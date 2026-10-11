@@ -363,6 +363,7 @@ type streamApprovalBridge struct {
 	activeConv     func() string          // cursor; the stamp when sessionConv misses (#1065, #2675)
 	ctx            context.Context        // daemon ctx captured at construction, for broadcasts
 	logger         *slog.Logger
+	live           *daemonLiveBindings
 	hist           *history.Store
 	sessionHarness func(string) (string, bool)
 	promptOwners   map[string]promptHistoryOwner
@@ -647,6 +648,7 @@ func (b *streamApprovalBridge) RefuseQuestionDiagnostic(batchID string) (bool, s
 		b.recordPromptAnswer(batchID, owner, "refusal", verdict, nil)
 	}
 
+	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID)
 	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
 		QuestionBatchID: batchID,
 		Outcome:         outcomeQuestionRefused,
@@ -771,6 +773,7 @@ func (b *streamApprovalBridge) AnswerQuestionDiagnostic(batchID string, answers 
 		b.recordPromptAnswer(batchID, owner, "answer", verdict, answers)
 	}
 
+	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID)
 	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
 		QuestionBatchID: batchID,
 		Outcome:         outcomeQuestionAnswered,
@@ -919,8 +922,8 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 		toolUseID:               req.ToolUseID,
 		requiresUserInteraction: req.RequiresUserInteraction,
 	}
+	b.live.offer(owner.live, protocol.TypeModalShown, payload, modalID, !req.RequiresUserInteraction)
 	b.mu.Unlock()
-
 	b.broadcast(protocol.TypeModalShown, payload, "stream_approval.push_err")
 	// After the fan-out, and only on this live path: the reconnect replay
 	// (reconcileModals) never passes through here, so it cannot wake anyone.
@@ -980,8 +983,8 @@ func (b *streamApprovalBridge) surfaceQuestion(batch protocol.QuestionShownPaylo
 	owner.questions = stamped.Questions
 	b.promptOwners[batchID] = owner
 	b.byQuestion[batchID] = toolUseID
+	b.live.offer(owner.live, protocol.TypeQuestionShown, stamped, batchID, true)
 	b.mu.Unlock()
-
 	b.broadcast(protocol.TypeQuestionShown, stamped, "stream_question.push_err")
 
 	return func() { b.retireQuestion(batchID) }
@@ -1014,9 +1017,11 @@ func (b *streamApprovalBridge) surfaceQuestion(batch protocol.QuestionShownPaylo
 // Runs on the control-server handler goroutine after Await.
 func (b *streamApprovalBridge) retireQuestion(batchID string) {
 	b.mu.Lock()
+	owner := b.promptOwners[batchID]
 	delete(b.byQuestion, batchID)
 	delete(b.promptOwners, batchID)
 	b.mu.Unlock()
+	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID)
 
 	if _, ok := b.questions.Resolve(batchID); !ok {
 		return // the answer path already consumed + broadcast this batch's dismissal
@@ -1092,6 +1097,7 @@ func (b *streamApprovalBridge) resolveStreamDecision(modalID string, allow, alwa
 	if !ok {
 		return false
 	}
+	defer b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID)
 	verdict := permbridge.Deny(denyReason)
 	if allow {
 		req, live := b.perm.Lookup(correlation.toolUseID)
@@ -1301,9 +1307,11 @@ func (b *streamApprovalBridge) retire(modalID string) {
 	out, ok := b.modal.Resolve(modalID)
 
 	b.mu.Lock()
+	owner := b.promptOwners[modalID]
 	delete(b.byModal, modalID)
 	delete(b.promptOwners, modalID)
 	b.mu.Unlock()
+	b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID)
 
 	if !ok {
 		return // a modal_answer already consumed + broadcast this modal's dismissal
