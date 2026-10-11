@@ -34,6 +34,15 @@ type memoryReplyChildKey struct {
 }
 type memoryReplyCallOwner struct {
 	child, created, shell bool
+	observed              uint64
+}
+type memoryReplyTaskOwner struct {
+	call     string
+	observed uint64
+}
+type memoryReplyObservation struct {
+	key        memoryReplyChildKey
+	call, task string
 }
 type memoryReplyEvidence struct {
 	conversation string
@@ -45,10 +54,12 @@ type memoryReplyEvidence struct {
 	children     map[memoryReplyChildKey]map[string]bool
 	owners       map[memoryReplyChildKey]map[string]*memoryReplyCallOwner
 	lifetimes    map[memoryReplyKey]string
+	tasks        map[memoryReplyChildKey]map[string]*memoryReplyTaskOwner
+	observations map[uint64][]*memoryReplyObservation
 }
 
 func newMemoryReplyEvidence(id string) *memoryReplyEvidence {
-	return &memoryReplyEvidence{conversation: id, turns: make(map[memoryReplyKey]*memoryReplyLifetime), openings: make(map[uint64]*memoryReplyLifetime), pending: make(map[memoryReplyKey]uint64), text: make(map[uint64]*memoryReplyLifetime), children: make(map[memoryReplyChildKey]map[string]bool), owners: make(map[memoryReplyChildKey]map[string]*memoryReplyCallOwner), lifetimes: make(map[memoryReplyKey]string)}
+	return &memoryReplyEvidence{conversation: id, turns: make(map[memoryReplyKey]*memoryReplyLifetime), openings: make(map[uint64]*memoryReplyLifetime), pending: make(map[memoryReplyKey]uint64), text: make(map[uint64]*memoryReplyLifetime), children: make(map[memoryReplyChildKey]map[string]bool), owners: make(map[memoryReplyChildKey]map[string]*memoryReplyCallOwner), lifetimes: make(map[memoryReplyKey]string), tasks: make(map[memoryReplyChildKey]map[string]*memoryReplyTaskOwner), observations: make(map[uint64][]*memoryReplyObservation)}
 }
 
 type memoryReplyIdentity struct {
@@ -244,6 +255,7 @@ func (r *memoryReplyEvidence) callOwner(key memoryReplyChildKey, call string) *m
 func (r *memoryReplyEvidence) promoteOwners(key memoryReplyChildKey) {
 	old := key
 	old.lifetime, old.scope = "", r.scope
+	moved := make(map[string]bool)
 	for call, owner := range r.owners[old] {
 		if (owner.created && !owner.shell) || r.owners[key][call] != nil {
 			continue
@@ -253,6 +265,24 @@ func (r *memoryReplyEvidence) promoteOwners(key memoryReplyChildKey) {
 		}
 		r.owners[key][call] = owner
 		delete(r.owners[old], call)
+		moved[call] = true
+	}
+	tasks := make(map[string]bool)
+	for id, task := range r.tasks[old] {
+		if (task.call != "" && !moved[task.call]) || r.tasks[key][id] != nil {
+			continue
+		}
+		r.taskOwner(key, id)
+		r.tasks[key][id] = task
+		delete(r.tasks[old], id)
+		tasks[id] = true
+	}
+	for _, observations := range r.observations {
+		for _, obs := range observations {
+			if obs.key == old && (moved[obs.call] || tasks[obs.task]) {
+				obs.key = key
+			}
+		}
 	}
 }
 
@@ -286,10 +316,12 @@ func (r *memoryReplyEvidence) mappedOwner(e history.Entry, id memoryReplyIdentit
 			owner := r.callOwner(key, id.Call)
 			owner.child = owner.child || parent
 			owner.created = true
+			r.observe(e.ID, key, id.Call, "")
 		case "Bash", "local_bash":
 			owner := r.callOwner(key, id.Call)
 			if !owner.created {
 				owner.child, owner.created, owner.shell = parent, true, true
+				r.observe(e.ID, key, id.Call, "")
 			}
 		}
 	case "tool_result", "tool_denied":
@@ -298,32 +330,126 @@ func (r *memoryReplyEvidence) mappedOwner(e history.Entry, id memoryReplyIdentit
 	}
 }
 
-// Durable call ownership precedes mapped reports and is independent of turn IDs.
-// Recovery references cannot replace the active source's producer lifetime.
+func (r *memoryReplyEvidence) taskOwner(key memoryReplyChildKey, id string) *memoryReplyTaskOwner {
+	if r.owners[key] == nil {
+		r.owners[key] = make(map[string]*memoryReplyCallOwner)
+	}
+	if r.tasks[key] == nil {
+		r.tasks[key] = make(map[string]*memoryReplyTaskOwner)
+	}
+	if r.tasks[key][id] == nil {
+		r.tasks[key][id] = &memoryReplyTaskOwner{}
+	}
+	return r.tasks[key][id]
+}
+
+func (r *memoryReplyEvidence) observe(id uint64, key memoryReplyChildKey, call, task string) {
+	var observed *uint64
+	if call != "" {
+		observed = &r.callOwner(key, call).observed
+	} else {
+		observed = &r.taskOwner(key, task).observed
+	}
+	if *observed == 0 {
+		*observed = id
+		r.observations[id] = append(r.observations[id], &memoryReplyObservation{key: key, call: call, task: task})
+	}
+}
+
+func (p memoryReplyAgentFact) lost(field string) bool {
+	return slices.Contains(p.Truncated, field) || slices.Contains(p.Dropped, field)
+}
+
+// Every supplied recovery reference must resolve to the same original group.
+// There is no fallback to the ending's append-time lifetime or boundary scope.
+func (r *memoryReplyEvidence) recoveryKey(e history.Entry, p memoryReplyAgentFact, key memoryReplyChildKey) (memoryReplyChildKey, bool, bool) {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(e.Payload, &fields)
+	var original *memoryReplyChildKey
+	for _, ref := range []struct {
+		field, identity, identityField string
+		value                          *uint64
+		task                           bool
+	}{{"call_observed_entry_id", p.Call, "tool_call_id", p.CallRef, false}, {"task_observed_entry_id", p.Task, "task_id", p.TaskRef, true}} {
+		supplied := false
+		for field := range fields {
+			supplied = supplied || strings.EqualFold(field, ref.field)
+		}
+		if !supplied {
+			continue
+		}
+		if e.Type != historyAgentSessionEnded || ref.identity == "" || p.lost(ref.identityField) || p.lost(ref.field) || ref.value == nil || *ref.value == 0 || *ref.value >= e.ID || *ref.value > history.MaxEntryID {
+			return key, true, false
+		}
+		var match *memoryReplyChildKey
+		for _, obs := range r.observations[*ref.value] {
+			identity := obs.call
+			if ref.task {
+				identity = obs.task
+			}
+			if identity == ref.identity && obs.key.source == key.source && obs.key.tagged == key.tagged && (key.lifetime == "" || key.lifetime == obs.key.lifetime) {
+				match = &obs.key
+				break
+			}
+		}
+		if match == nil || (original != nil && *original != *match) {
+			return key, true, false
+		}
+		original = match
+	}
+	if original != nil {
+		return *original, true, true
+	}
+	return key, false, true
+}
+
+// Task links and recovery references are validated before any ownership mutation.
+// Referenced endings enrich their original group without replacing active lifetime.
 func (r *memoryReplyEvidence) agentFact(e history.Entry) {
-	if !agentHistoryType(e.Type) || (e.Session != nil && e.Session.Kind != "claude") {
+	durable := agentHistoryType(e.Type)
+	mappedLaunch := e.Type == protocol.TypeToolUse
+	mappedTask := slices.Contains([]string{protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskProgress, protocol.TypeBackgroundTaskRoster}, e.Type)
+	if (!durable && !mappedTask && !mappedLaunch) || (e.Session != nil && e.Session.Kind != "claude") {
 		return
 	}
 	var p memoryReplyAgentFact
-	if !memoryReplyDecode(e.Payload, &p) || p.Conversation != r.conversation || p.At.IsZero() || !conversations.ValidID(p.Lifetime) {
+	if !memoryReplyDecode(e.Payload, &p) {
 		return
 	}
-	lost := func(field string) bool {
-		return slices.Contains(p.Truncated, field) || slices.Contains(p.Dropped, field)
-	}
-	if lost("conversation_id") || lost("lifetime_id") {
-		return
-	}
-	var fields map[string]json.RawMessage
-	_ = json.Unmarshal(e.Payload, &fields)
-	for field := range fields {
-		if strings.EqualFold(field, "call_observed_entry_id") || strings.EqualFold(field, "task_observed_entry_id") {
+	source := memoryReplySource(e)
+	key := r.childKey(e, "")
+	if durable {
+		if p.Conversation != r.conversation || p.At.IsZero() || p.lost("conversation_id") || p.lost("lifetime_id") || (p.Lifetime != "" && !conversations.ValidID(p.Lifetime)) || (p.Lifetime == "" && e.Type != historyAgentSessionEnded) {
 			return
 		}
+		key.lifetime = p.Lifetime
+		key.scope = r.scope
+		if key.lifetime != "" {
+			key.scope = 0
+		}
 	}
-	call, task := p.Call != "" && !lost("tool_call_id"), p.Task != "" && !lost("task_id")
-	valid := false
+	key, referenced, valid := r.recoveryKey(e, p, key)
+	if !valid {
+		return
+	}
+	if mappedLaunch {
+		p.Call = p.Use
+	}
+	call, task := p.Call != "" && !p.lost("tool_call_id"), p.Task != "" && !p.lost("task_id")
+	var roster struct {
+		Tasks []struct {
+			Task      string   `json:"task_id"`
+			Call      string   `json:"tool_call_id"`
+			Truncated []string `json:"truncated_fields"`
+			Dropped   []string `json:"dropped_fields"`
+		} `json:"tasks"`
+	}
+	valid = false
 	switch e.Type {
+	case protocol.TypeToolUse:
+		var dto protocol.ToolUsePayload
+		valid = memoryReplyDecode(e.Payload, &dto, "tool_use_id", "name") && p.Use != "" && (p.Name == "Agent" || p.Name == "Task") && !p.lost("tool_use_id") && !p.lost("turn_id") && !p.lost("parent_tool_use_id") && !p.lost("parent_tool_call_id")
+		call = valid
 	case historyAgentObserved:
 		valid = call && (p.Tool == "Agent" || p.Tool == "Task")
 	case historyAgentResult:
@@ -337,22 +463,70 @@ func (r *memoryReplyEvidence) agentFact(e history.Entry) {
 	case historyTaskGone:
 		valid = task && call && p.Status == "gone"
 	case historyAgentSessionEnded:
-		valid = (call || task) && p.Cause != ""
+		valid = (call || task) && p.Cause != "" && (referenced || key.lifetime != "")
+	case protocol.TypeBackgroundTaskStarted:
+		var dto protocol.BackgroundTaskStartedPayload
+		valid = task && memoryReplyDecode(e.Payload, &dto, "task_id")
+	case protocol.TypeBackgroundTaskUpdated:
+		var dto protocol.BackgroundTaskUpdatedPayload
+		valid = task && memoryReplyDecode(e.Payload, &dto, "task_id")
+		call = false
+	case protocol.TypeBackgroundTaskProgress:
+		var dto protocol.BackgroundTaskProgressPayload
+		valid = task && memoryReplyDecode(e.Payload, &dto, "task_id")
+		call = false
+	case protocol.TypeBackgroundTaskRoster:
+		var dto protocol.BackgroundTaskRosterPayload
+		valid = memoryReplyDecode(e.Payload, &dto, "tasks") && memoryReplyDecode(e.Payload, &roster)
+		call, task = false, false
 	}
 	if !valid {
 		return
 	}
-	source := memoryReplySource(e)
-	key := r.childKey(e, "")
-	key.lifetime, key.scope = p.Lifetime, 0
-	if r.lifetimes[source] == "" {
+	promote := durable && !referenced && r.lifetimes[source] == ""
+	validationKey := key
+	if promote && r.owners[key] == nil {
+		validationKey.lifetime, validationKey.scope = "", r.scope
+	}
+	if e.Type == historyAgentSessionEnded && call && task {
+		if linked := r.tasks[validationKey][p.Task]; linked != nil && linked.call != "" && linked.call != p.Call {
+			return
+		}
+	}
+	if promote {
 		r.promoteOwners(key)
 	}
-	r.lifetimes[source] = p.Lifetime
-	if call {
+	if durable && !referenced {
+		r.lifetimes[source] = key.lifetime
+	}
+	if call && (durable || mappedLaunch) {
 		owner := r.callOwner(key, p.Call)
-		if (p.Parent != "" || p.ParentCall != "") && !lost("parent_tool_use_id") && !lost("parent_tool_call_id") {
+		if (p.Parent != "" || p.ParentCall != "") && !p.lost("parent_tool_use_id") && !p.lost("parent_tool_call_id") {
 			owner.child = true
+		}
+	}
+	if e.Type == historyAgentObserved || mappedLaunch {
+		if mappedLaunch {
+			r.callOwner(key, p.Call).created = true
+		}
+		r.observe(e.ID, key, p.Call, "")
+	} else if task {
+		t := r.taskOwner(key, p.Task)
+		if e.Type == historyTaskObserved || mappedTask {
+			r.observe(e.ID, key, "", p.Task)
+		}
+		if call && slices.Contains([]string{historyTaskLinked, historyTaskGone, protocol.TypeBackgroundTaskStarted}, e.Type) {
+			t.call = p.Call
+		}
+	}
+	for _, row := range roster.Tasks {
+		id := memoryReplyAgentFact{Truncated: row.Truncated, Dropped: row.Dropped}
+		if row.Task == "" || id.lost("task_id") {
+			continue
+		}
+		r.observe(e.ID, key, "", row.Task)
+		if row.Call != "" && !id.lost("tool_call_id") {
+			r.taskOwner(key, row.Task).call = row.Call
 		}
 	}
 }
