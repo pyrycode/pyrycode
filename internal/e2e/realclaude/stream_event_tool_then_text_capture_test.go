@@ -31,6 +31,9 @@ type tttLoss struct {
 }
 
 type tttRecord struct {
+	Source            string                `json:"capture_source,omitempty"`
+	MobileEvidence    *tttMobileEvidence    `json:"mobile_evidence,omitempty"`
+	EstablishedGuard  string                `json:"established_rejecting_guard,omitempty"`
 	Ticket            string                `json:"ticket"`
 	CapturedAt        string                `json:"captured_at"`
 	ClaudeVersion     string                `json:"claude_version"`
@@ -213,7 +216,7 @@ func tttCapture(t *testing.T) {
 	red := newDropcapRedactor(home, dir, workdir, "", secapSessionID, time.Now().UnixNano())
 	scanner := newDropcapScanner(home, dir, workdir)
 	rec := tttRecord{
-		Ticket: "2939", CapturedAt: time.Now().UTC().Format(time.RFC3339),
+		Ticket: "2939", Source: "isolated", CapturedAt: time.Now().UTC().Format(time.RFC3339),
 		ClaudeVersion: probeClaudeVersion(claudeBin), Prompt: tttPrompt,
 		MobileRevision: "not driven; historical failure at 5de4f4459",
 		Assumptions:    "Historical mobile model/effort/permission are unknown. Isolated attempt uses no model or effort override, fresh HOME without user configuration, and --allowedTools Bash for the test-owned echo. Effective model/permission and effort key presence are retained in system/init; absent effort is unknown. This does not establish historical configuration equivalence.",

@@ -810,9 +810,12 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		if vocab != nil {
 			parserSink = vocab.sinkFor(parserSink)
 		}
+		parserSink, bindCapture, err := newToolThenTextCapture(&scfg, parserSink)
+		if err != nil {
+			return nil, fmt.Errorf("cmd/pyry: stream capture: %w", err)
+		}
 		parser, held := newSessionParser(parserSink, cfg.Logger)
 		held.models.live, held.commands.live = inventory, inventory
-		scfg.Stdout = parser
 		exitSink := sink.exitForSessionTag(tag)
 		// The hold outlives respawns; invalidate joins before either exit path
 		// reports the child gone. Retention never infers task completion.
@@ -845,7 +848,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// is #1840's argument for minting the parser and its holds in one call, applied
 		// to a seam whose two ends sit in different packages.
 		scfg.PostureGate = parser.PostureGate()
-		var err error
+		bindCapture(parser)
 		r, err = streamsup.New(scfg)
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
