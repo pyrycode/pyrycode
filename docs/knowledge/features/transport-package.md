@@ -34,6 +34,7 @@ func New(cfg Config) *Client
 
 func (*Client) Connect(ctx context.Context) error // blocking; ctx.Err() | ErrClosed | wrapped ErrFatalClose
 func (*Client) Send(frame []byte) error           // ErrNotConnected | ErrClosed | ErrDisconnected | nil
+func (*Client) SendContext(ctx context.Context, frame []byte) error // ordered socket completion; cancellation/deadline bounded
 func (*Client) Receive(ctx context.Context) ([]byte, error) // ErrClosed | ErrDisconnected | ctx.Err() | frame
 func (*Client) Connected() <-chan struct{}        // emits on every fresh conn (#248 addition)
 func (*Client) IsConnected() bool                  // synchronous level poll, agrees with Send's live-conn predicate (#874 addition)
@@ -87,6 +88,21 @@ Attempt counter increments per failed dial; resets to 1 after a serve loop that 
 ## Lifecycle and goroutines
 
 Per Client lifetime: one caller-owned goroutine running `Connect`. Per live conn: three pump goroutines (`recvPump`, `sendPump`, `pingLoop`) under a child ctx. All three drain before `serve` returns to the outer dial loop — no goroutine outlives its `serve` call.
+
+`Client.Send` and `Client.SendContext` share the same unbuffered `sendPump`
+admission path. `Send` returns when accepted; `SendContext` waits for the pump's
+socket-write acknowledgement. Its caller context and `WriteTimeout` bound both
+admission and I/O; after admission it joins completion, leaving no queued or
+active write when it returns. Each request retains the socket identity captured
+for admission, so it cannot migrate to a reconnect. Pump shutdown cancels active
+I/O even when the caller's context remains live.
+
+A separate direct socket writer can overtake a frame already accepted by
+`Send`, even if both writes serialize on the WebSocket writer lock. For Noise,
+that can deliver nonce 1 before nonce 0, or application output before the initial
+`noise_resp`. Socket completion and writer serialization cannot replace shared
+admission ordering. `Connection.SendContext` adapts this contract; the relay
+still owns sender IDs and [sealing order](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ```
 caller's goroutine: client.Connect(ctx)
@@ -161,6 +177,18 @@ A non-101 HTTP response to the WS upgrade (e.g. a `404` because the relay URL ha
 - **`Config.ReadTimeout` is not present** (was in the original AC body but dropped by architect's security review). The heartbeat is the inactivity contract; a separate ReadTimeout would shadow it.
 
 ## Test surface
+
+To expose an enqueue-to-write ordering bypass, pause after pump acceptance and
+before writer acquisition. Holding the writer lock blocks both paths and can
+hide the defect. `TestHostedDiscoveryRealTransportOrdering` in relay drives
+authenticated real-socket legacy-to-hosted and handshake-to-hosted transitions,
+then decrypts output and checks IDs/correlation. Its retirement counterpart
+requires pending context sends to exit before releasing the pump and uses a
+later transport marker to prove no abandoned reply remains. Transport's
+`TestClientSendContextDelivery` tests accepted I/O cancellation;
+`TestClientSendContextPumpShutdown` keeps the caller live to distinguish pump
+shutdown from caller cancellation. These are controlled scheduling proofs,
+not timing-only assertions.
 
 `internal/transport/wssclient_test.go` (~520 LOC, stdlib + `coder/websocket`):
 

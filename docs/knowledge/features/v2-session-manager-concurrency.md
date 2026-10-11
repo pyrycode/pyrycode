@@ -222,6 +222,46 @@ before-decode inert gate. Capability advertisement is separate (#2797).
 
 `V2Session.State()` is a plain field read. Safe today because no cross-goroutine reads exist. Both the push surface (#571, rewritten #610) and the #588 enumeration surface deliberately keep it that way: the #610 `Push` reads only `m.queues` under `pushMu` (never `s.state`), while `forwardEnvelope` reads `s.state` **on the `Run` goroutine** during the drain, and `handleActiveConns` reads `s.state` (and `s.interactive`, #626) **on the `Run` goroutine** (funneled through `m.snapshot`) — neither via a cross-goroutine `State()` call. So the broadcast/enumeration layer that this comment once anticipated (the [#589](../codebase/589.md) assistant-turn fan-out, built on #571's `Push` + #588's `ActiveConns`) introduces **no** new reader of `s.state` off the owner goroutine, and `State()` still needs no `atomic.Int32`/mutex. Should a future slice read `s.state` directly from a producer goroutine *outside* the funnel, that accessor will need the atomic/mutex then — not pre-emptively refactored.
 
+## Hosted discovery and ordered delivery
+
+`routeHosted` admits one pending list page per connection, including registry
+read, queued reply and delivery. `Registry.List` can block under persistence;
+cancel retires the page and continuation but keeps the original reader's slot
+until it returns. Releasing that slot on cancel would allow repeated list/cancel
+cycles to accumulate abandoned readers. `handleHostedDone` checks the original
+session and pending pointers before using detached results, including after a
+same-ID reconnect. A delivered page is finished work; its cursor holds no worker.
+`TestHostedDiscoveryBlockedRead` requires retirement and `app.busy` responses
+before releasing the read, then verifies capacity recovers without a late page.
+
+The hosted output lane holds at most 16 envelopes including active delivery.
+`hostedEnvelope` admits plaintext; `hostedDeliver` assigns a fresh connection-local
+sender ID and seals only the selected head on `Run`. Mixing pre-sealed legacy
+pushes/replies with queued hosted plaintext would spend Noise nonces in a different
+order from delivery despite race-free cipher ownership. `forwardAppReply`,
+`forwardEnvelopeSource` and `emitRekeyRequest` therefore share this lane once
+installed. IDs start above `hello_ack` and earlier legacy output. Rekey response
+delivery is a barrier: old-key output drains, `noise_resp` installs the send
+cipher, then new-key output follows. A second rekey during that barrier closes
+the connection. `TestHostedDiscoveryOrderedDelivery` and
+`TestHostedDiscoveryRekeyOrdering` decrypt resumed output and check IDs; merely
+running the race detector would miss ordering defects.
+
+`hostedSender` selects `HostedAppsSend` or `OutboundContext`, never context-free
+`Outbound`. The callback must honor cancellation/deadlines through actual I/O
+and suppress publication after retirement. A goroutine around a synchronous
+callback cannot establish that guarantee. Missing safe adapters retire locally
+before sealing or worker creation, including unsupported controls while
+discovery is disabled. Delivery has a five-second deadline; terminal-close
+contexts inherit Run cancellation, including `Frames` closure. Queue overflow,
+failed sealed delivery and cancellation of an active sealed page close the
+affected connection because continuing would leave a Noise nonce gap. Queued
+unsealed pages can be removed and acknowledged without consuming a nonce.
+Other connections remain runnable during blocked reads or delivery. The
+[transport pump](transport-package.md#lifecycle-and-goroutines) must preserve
+admission order across legacy, initial-handshake and cancellable output too.
+See the [wire behavior](../../protocol-mobile.md#paging-cancellation-and-validation).
+
 ## Connection-scoped reading cancellation
 
 Cancellation must be independent of FIFO worker progress. Settings enrichment
