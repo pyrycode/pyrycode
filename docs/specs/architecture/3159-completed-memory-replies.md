@@ -1,0 +1,82 @@
+# Completed main replies in memory transcripts
+
+## Files read
+- `cmd/pyry/memory_transcript_fold.go` → `feed`, `files`: delivery identity, grouping and immutable closure.
+- `cmd/pyry/memory_transcripts.go` → `startMemoryTranscripts`: serialized polling, retry and joined shutdown.
+- `cmd/pyry/memory_transcript_files.go` → `publishMemoryTranscript`: confined private atomic publication.
+- `cmd/pyry/memory_transcripts_test.go` → replay, worker and storage tests: reuse helpers and security/lifecycle proofs.
+- `internal/thread/main.go` → `mainDecode`, `mainWork`, `closeText`: raw source/generation joins; text closure is not completion.
+- `internal/thread/agent.go` → `agentWork`, `agentLaunchIsChild`: validated durable lifetimes and retained call parents before mapped launch.
+- `internal/thread/child.go` → `childGroup`, `childWork`: lifetime/legacy ownership and parentless report exclusions.
+- `cmd/pyry/agent_history.go` → `agentHistoryType`, agent/task fact constants: reuse the existing durable fact vocabulary.
+- `internal/thread/fold.go` → `Feed`, `Items`, `decode`: malformed/foreign rejection and raw text preservation.
+- `internal/thread/boundaries.go` → `boundary`: legacy scope advances once per paired boundary, except restart.
+- `cmd/pyry/conversation_handover.go` → `switchRecentExchanges`: assistant-only intervals must not inherit a previous exchange.
+- `docs/knowledge/features/thread-package-main-thread-folding.md` → main-work and scoped closure: display fallback never joins tagged and legacy work.
+- `docs/knowledge/features/history-package-shape.md` → Memory transcript view: late text must not move closure.
+- `docs/knowledge/features/thread-package.md`, `cli-verb-dispatch.md`, `development-verification.md`, `CODING-STYLE.md`: replay, memory activation and focused proof conventions.
+
+## Context
+Export completed conversational Claude/Codex replies through the existing recent-transcript worker, independent of clients, search and capture. Thread status and revision cannot prove completion or the greatest contributing text ID. Retain raw evidence beside the fold without changing history or thread APIs. No decision record is needed.
+
+## Design
+Add private source/turn lifetime evidence in `cmd/pyry/memory_transcript_replies.go`. Recorded metadata distinguishes agent/session sources from legacy boundary scopes. Explicit openings create generations; valid main work establishes implicit legacy openings. Recovery references select only a matching original opening. A lifetime's first valid terminal wins: `turn_end` permits export, interruption withholds permanently. Error/cancellation `turn_end` still permits export.
+
+Validate evidence as recorded objects, including identity-loss markers, required fields, scalar nulls and conversation/parent ownership. Keep raw timestamps and nonempty delta IDs independently from revisions. `Fold.Items` remains the authority for main text runs and delivered users; render `Content.text` with existing safe fences. Match each run's creating ID to its lifetime, and qualify that lifetime only through a delivered conversational user in the same raw source interval. Consume the pending exchange on a new lifetime so a later assistant-only turn cannot reuse it.
+
+Use that delivered user's existing group to anchor replies to the correct logical session generation, including late predecessor runs after routing-ID reuse. Assistant identity is conversation plus creating ID; timestamp is its first delta's raw timestamp. Rows stay in durable creation/delivery order. Keep user rendering and transcript hashes unchanged. Add `Last text entry` as the greatest contributing delivered-user or assistant delta ID, separately from user-only `Last delivered entry` and immutable `Closing entry`.
+
+No changes to polling, activation, storage, retention or publication. Other feature branches do not overlap the planned files. Estimate: approximately 730 written lines (350 production, 300 tests, 80 plan); zero exported types/interfaces, zero migrated consumers, four criteria, at most ten rejection categories. Rechecked against this plan: within all limits.
+
+## Concurrency model
+Each existing worker exclusively owns reader, fold and evidence. No new goroutines or locks. Existing cancellation joins discovery and workers; failure rebuilds evidence and fold together before retrying publication.
+
+## State transitions and identity reuse
+| Event | Race-enabled proof |
+| --- | --- |
+| Tool/user run closure without ending; later recorded completion | `TestMemoryTranscriptReplies`, `TestMemoryTranscriptReplyWorker` |
+| Repeated/conflicting terminals; error/cancellation; interruption first | `TestMemoryTranscriptReplyTerminals` |
+| Fresh opening with reused turn/source IDs; reference to an old opening | `TestMemoryTranscriptReplyScopes` |
+| Tagged/legacy/source/conversation/child isolation and unknown provenance | `TestMemoryTranscriptReplyScopes` |
+| Assistant-only wrap-up after exchange, excluded facts | `TestMemoryTranscriptReplyExclusions` |
+| Reset/switch, late predecessor run/delta, routing reuse | `TestMemoryTranscriptReplyBoundaries` |
+| Split replay/reconstruction of evidence and stable first-text rows | `TestMemoryTranscriptReplies` |
+| Parentless child result/denial before any mapped launch; interruption then conflicting ending | `TestMemoryTranscriptReplyObservedChildReport` |
+| Reused child call/turn across producer lifetimes; scoped and malformed ownership | `TestMemoryTranscriptReplyChildCallReuse`, `TestMemoryTranscriptReplyChildOwnershipScopes` |
+Existing worker/storage tests cover restart, retry and joined shutdown; broader interleaved worker recovery remains #3161.
+
+## Error handling
+Malformed, unrelated and unresolved evidence supplies no completion or exchange permission. Existing history/fold failure prevents publication and reconstructs from history; publication failure preserves complete files and retries. Logs remain fixed content-free reasons.
+
+## Testing strategy
+Write focused table-driven tests first and observe failures before implementation. Assert exact run text/whitespace, stable IDs/timestamps and distinct text/delivery/closure boundaries. A controlled-tick production worker smoke test proves withholding then publication within the configured 60-second scheduling bound. Run `go test -race ./cmd/pyry/...`, `go vet ./...`, and build `./cmd/pyry` with its artifact outside the worktree. Full-module verification belongs to the verifier; no live run is required.
+
+## Open questions
+None; implementation details remain private to the exporter.
+
+## Documentation handoff
+Pending for documentation stage:
+- `docs/guide.md`, “Memory configuration” → “Recent conversation transcripts”: include completed Claude/Codex main replies and text around tools, 60 seconds after recorded completion, unfinished withholding, first-terminal/error/cancellation semantics and exclusions (reasoning, tools, child agents, injected/reset-wrap-up instructions and assistant-only replies, system/status, background capture, queued/dropped/lost/no-child). Remove assistant deferral; preserve automatic activation/location, lifecycle boundaries, complete open-session and closed-file retention, history as truth and managed-index/agent-search prerequisites. Explain separate user-delivery, eligible-text and closure boundaries.
+- `docs/knowledge/features/history-package-shape.md`, “Memory transcript view”: scoped completion, stable first-text identity/timestamp and late assistant reconstruction; preserve recorded attribution and atomic publication.
+
+## Security review
+**Verdict:** PASS
+**Findings:**
+- Trust boundaries: evidence validation and `Fold.Feed` reject malformed/foreign facts; raw sources, not display fallback, authorize joins. Validated durable agent/task facts establish only their recorded source's producer lifetime. Retained child ownership uses that lifetime or legacy boundary scope, with tagged and untagged sources separate; observations can exclude parentless reports before any mapped launch. Accepted main launches remain authoritative. Parent-only and assistant-only lifetimes cannot inherit user permission.
+- Tokens/secrets: no credentials are accessed. Conversation text is intentionally retained privately; no payload reaches diagnostics.
+- File operations: existing hashed names and `publishMemoryTranscript` retain held-directory/no-follow operations, 0700 directories, 0600 files and synced atomic replacement; text and opaque IDs never become paths.
+- Subprocesses: no new subprocess or shell execution.
+- Cryptography: existing SHA-256 structured transcript identity only; no keys/nonces/comparisons added.
+- Network/I/O: no network boundary added; history reads retain bounded ForwardReader chunks.
+- Errors/logs/telemetry: failures retain fixed reasons without content, host paths or opaque IDs.
+- Concurrency: serialized evidence has no lock ordering; existing joined cancellation and retryable snapshots preserve complete publication.
+- Threat model: local history/subprocess content is inert fenced text, never instructions to the exporter. Index/search integration is owned by #3099/#3103; broader recovery proof is #3161.
+**Reviewer:** builder (self-review per security-review checklist)
+**Date:** 2026-10-11
+
+## Revisions
+- 2026-10-10: focused review added explicit child-call evidence to keep parentless child reports from establishing an implicit main opening, and tied pending-user cleanup to the first terminal only. `TestMemoryTranscriptReplyImplicitOpening`, `TestMemoryTranscriptReplyObservedChild` and `TestMemoryTranscriptReplyReuse` cover these contracts, including parent attribution retained only in a preceding observation. Final lifecycle coverage includes those tests alongside the table above; no API, worker or publication design changed.
+- 2026-10-10, verifier finding 1: every valid explicit `main_turn_opened` creates a fresh exporter lifetime, even when earlier terminal-only evidence had no opening. A terminal cannot cross that new opening generation. `TestMemoryTranscriptReplyTerminalBeforeOpening` covers Claude, Codex and legacy evidence, prior ending/interruption, chunked replay, withholding and a later qualifying ending with stable first-text identity/time.
+- 2026-10-10, verifier finding 2: logical replacement invalidates all unmatched pending user exchanges, using the same replacement contract as `memoryTranscriptReader.files`. Established lifetime-to-user associations remain available for late predecessor text. `TestMemoryTranscriptReplyReplacementPermission` covers reset then switch back to the same source, both divider/transition forms and chunked replay, excluded assistant-only successors and late predecessor deltas with immutable closure/successor files. `TestMemoryTranscriptReplyPendingAcrossUnloading` preserves tagged pending exchanges across idle sleep, capacity eviction, restart and same-session recovery. The security review remains PASS: only recorded opening generations and user-associated lifetimes authorize export; no publication, diagnostic or concurrency contract changes.
+- 2026-10-11, verifier finding 1 on `c7fdbb54`: `memoryReplyEvidence.agentFact` retains validated recorded child ownership before mapped launch evidence. Parentless child results/denials cannot establish a main opening or consume an exchange. `TestMemoryTranscriptReplyObservedChildReport` proves interrupted withholding, successful completion, stable first-text identity/time and text/delivery boundaries with tagged/legacy sources and whole/single-entry feeds.
+- 2026-10-11, verifier finding 2 on `c7fdbb54`: child exclusions now join by recorded source and active producer lifetime, falling back to legacy boundary scope only without a lifetime. Accepted main tool creations cannot be suppressed by retained exclusions. `TestMemoryTranscriptReplyChildCallReuse` covers a child call/turn reused as a main launch in a fresh lifetime with interruption referencing that launch; `TestMemoryTranscriptReplyChildOwnershipScopes` checks malformed/foreign observations and lifetime changes from agent/task facts. Security re-review remains PASS after checking all nine categories: ownership validation rejects scalar nulls, identity-loss markers and unexpected observation references; recovery references do not change the active lifetime. No credentials, paths, publication, diagnostics, I/O, cryptography or concurrency contracts change. Rework sizing: about 290 written lines, no exported types/interfaces or migrated consumers; the existing documentation handoff and #3161 recovery gate remain pending.

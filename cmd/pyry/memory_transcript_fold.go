@@ -14,9 +14,10 @@ import (
 )
 
 type memoryTranscriptReader struct {
-	reader *history.ForwardReader
-	fold   *thread.Fold
-	stamps map[uint64]time.Time
+	reader  *history.ForwardReader
+	fold    *thread.Fold
+	stamps  map[uint64]time.Time
+	replies *memoryReplyEvidence
 }
 
 func newMemoryTranscriptReader(h *history.Store, id conversations.ConversationID) *memoryTranscriptReader {
@@ -24,29 +25,32 @@ func newMemoryTranscriptReader(h *history.Store, id conversations.ConversationID
 	if h != nil {
 		r, _ = h.Forward(id, 0)
 	} // callers establish registry-owned valid IDs
-	return &memoryTranscriptReader{r, thread.New(string(id)), make(map[uint64]time.Time)}
+	return &memoryTranscriptReader{reader: r, fold: thread.New(string(id)), stamps: make(map[uint64]time.Time), replies: newMemoryReplyEvidence(string(id))}
 }
 func (w *memoryTranscriptReader) feed(entries []history.Entry) error {
 	if err := w.fold.Feed(entries); err != nil {
 		return err
 	}
 	for _, e := range entries {
-		if e.Type == "message" {
+		if e.Type == "message" || e.Type == "assistant_delta" {
 			w.stamps[e.ID] = e.TS
 		}
 	}
+	w.replies.feed(entries, w.fold.Items())
 	return nil
 }
 
 type memoryTranscriptGroup struct {
-	session             string
-	unknown             bool
-	start, closed, last uint64
-	messages            []thread.Item
+	session                   string
+	unknown                   bool
+	start, closed, last, text uint64
+	messages                  []thread.Item
 }
 
 func (w *memoryTranscriptReader) files(c conversations.Conversation) map[string]string {
 	items := w.fold.Items()
+	replyUsers, replyText := w.replies.rows(items)
+	userGroups := make(map[uint64]*memoryTranscriptGroup)
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Order < items[j].Order })
 	groups := []*memoryTranscriptGroup{}
 	current := make(map[string]*memoryTranscriptGroup)
@@ -94,7 +98,17 @@ func (w *memoryTranscriptReader) files(c conversations.Conversation) map[string]
 		}
 		g := group(session, start, unknown)
 		g.messages = append(g.messages, item)
-		g.last = item.Order
+		g.last = max(g.last, item.Order)
+		g.text = max(g.text, item.Order)
+		userGroups[item.Order] = g
+	}
+	for _, item := range items {
+		if user := replyUsers[item.ID]; user != 0 {
+			if g := userGroups[user]; g != nil && replyText[item.ID] != 0 {
+				g.messages = append(g.messages, item)
+				g.text = max(g.text, replyText[item.ID])
+			}
+		}
 	}
 	files := make(map[string]string)
 	quote := func(s string) string { raw, _ := json.Marshal(s); return string(raw) }
@@ -114,7 +128,8 @@ func (w *memoryTranscriptReader) files(c conversations.Conversation) map[string]
 		} else {
 			fmt.Fprintf(&b, "State: closed\nClosing entry: %d\n", g.closed)
 		}
-		fmt.Fprintf(&b, "Last delivered entry: %d\n", g.last)
+		fmt.Fprintf(&b, "Last delivered entry: %d\nLast text entry: %d\n", g.last, g.text)
+		sort.SliceStable(g.messages, func(i, j int) bool { return g.messages[i].Order < g.messages[j].Order })
 		for _, item := range g.messages {
 			var p struct {
 				Text string `json:"text"`
@@ -126,7 +141,18 @@ func (w *memoryTranscriptReader) files(c conversations.Conversation) map[string]
 			if agent == "" {
 				agent = "unknown"
 			}
-			fmt.Fprintf(&b, "\n## User\nMessage: %s/%d\nTimestamp: %s\nSpeaker: user\nAgent: %s\n\n", c.ID, item.Order, w.stamps[item.Order].UTC().Format(time.RFC3339Nano), agent)
+			speaker, title := "user", "User"
+			if item.Kind == "assistant_message" {
+				speaker, title = "assistant", "Assistant"
+			}
+			fmt.Fprintf(&b, "\n## %s\nMessage: %s/%d\nTimestamp: %s\nSpeaker: %s\nAgent: %s\n\n", title, c.ID, item.Order, w.stamps[item.Order].UTC().Format(time.RFC3339Nano), speaker, agent)
+			if speaker == "assistant" {
+				session := "unknown"
+				if item.Session != "" {
+					session = quote(item.Session)
+				}
+				fmt.Fprintf(&b, "Session: %s\n\n", session)
+			}
 			fence := "```"
 			for strings.Contains(p.Text, fence) {
 				fence += "`"
