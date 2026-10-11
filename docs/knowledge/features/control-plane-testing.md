@@ -38,6 +38,23 @@ and custom peers are drained too. Malformed-result tests check both provider and
 wire boundaries, including error-plus-success replies; exact request/decision
 encodings and `TestProtocol_SessionsRoundTripBackCompat` pin the wire contract.
 
+## Socket paths and cleanup
+
+Use the shared `shortTempDir(t)` in `internal/control/server_test.go` for Unix
+socket directories. `t.TempDir()` combines macOS's long default `TMPDIR` with
+the test name, which can exceed the Unix socket path limit and fail at `Listen`
+before any lifecycle assertions run. `shortTempDir` creates a unique directory
+directly under `/tmp`, independent of `TMPDIR`, and registers its removal with
+`t.Cleanup`; see the [short socket-path design](../../specs/architecture/860-e2e-short-socket-path.md).
+
+`TestServerSealRetainsOwnership` uses this helper for `control.sock`. Its deferred
+server close and `Serve` join run before the helper's directory cleanup, including
+on assertion failure. Keep that ordering so cleanup cannot unlink the socket
+while the server still owns it. The test holds an admitted writer across `Seal`,
+requires replacement `Listen` to return `ErrInstanceRunning`, rejects a late
+writer, then releases the admitted writer and checks that `Seal` joins it and
+can be called again.
+
 ## Startup readiness and ownership
 
 `TestControlStartupReadinessCreation` uses a real Unix socket, persistent pool
