@@ -404,16 +404,22 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 			continue
 		}
 		key := r.key(e, id.Turn)
-		childKey := r.childKey(e, id.Turn)
-		observedKey := childKey
-		observedKey.turn = ""
-		callOwner := r.owners[observedKey][id.Call]
-		child := id.Parent != "" || id.ParentCall != "" || r.children[childKey][id.Call] || (callOwner != nil && callOwner.child)
-		// Consult prior ownership before recording this fact, as childWork does.
-		// Missing or reused public rows supply no ownership evidence.
-		r.mappedOwner(e, id)
+		child := id.Parent != "" || id.ParentCall != ""
+		switch e.Type {
+		case "assistant_delta", "tool_use", "tool_result", "tool_denied", "turn_end":
+			childKey := r.childKey(e, id.Turn)
+			observedKey := childKey
+			observedKey.turn = ""
+			callOwner := r.owners[observedKey][id.Call]
+			child = child || r.children[childKey][id.Call] || (callOwner != nil && callOwner.child)
+			// Consult prior ownership before recording mapped work, as childWork does.
+			// Main runtime facts retain turn authority regardless of incidental call IDs.
+			r.mappedOwner(e, id)
+			if child {
+				r.rememberChild(childKey, id.Call)
+			}
+		}
 		if child {
-			r.rememberChild(childKey, id.Call)
 			continue
 		}
 		source := key
