@@ -272,3 +272,42 @@ ordinary vet, tagged realclaude vet and the production daemon build pass. No And
 authenticated host rerun, host cause or production admission repair is claimed. The
 original evidence remains immutable, and the concrete dispatcher acquisition/recovery
 and documentation handoffs above are still pending.
+
+### 2026-10-11: live-gate reconnect failure triage
+
+The dispatcher gate at `64d267f2` executed 2121 leaves, with 13 failures.
+Its attempted main comparison executed zero tests and cannot attribute this
+failure. Both prefix arms first fail in the reconnect/model-change method;
+subsequent dependent-prefix reads fail immediately. The immediate arm calls
+`Fatal` through `readinessStartHarness` on its parent test, interrupting result
+accounting. The same failures recur in the retained failed-method run. This
+is evidence of a capture/harness failure, not an established admission cause.
+
+Files read: `readinessStartHarness`, `readinessRunArm`, `readinessReplay.receive`,
+`fakephone.Dial`/`ReceiveBytes`, `fakerelay.handlePhone`/`binaryRecvPump` and
+`driveHandshakeInteractive`. Fakephone receive timeouts retire connections;
+the relay forwards synchronously, so connection failures must retain their
+safe category before considering pacing or backpressure changes.
+
+Design: pass the active subtest to reconnect/restart callbacks while keeping
+process and connection cleanup owned by the arm. Record fixed error categories
+and WebSocket close codes, excluding raw errors, tokens and private paths.
+First establish the concrete reconnect failure using the named authenticated
+live family. Select any further harness correction only from that evidence.
+Do not select a production readiness repair from these diagnostic failures.
+
+Testing: a helper subprocess forces reconnect failure and proves only the
+active case fails while the arm records its outcome. Table-driven checks
+cover safe connection-error categories. Tagged race/readiness checks, tagged
+vet, ordinary vet/build and the smallest relevant authenticated failing family
+cover the change. No Android acquisition or historical replay substitute is
+claimed; the existing eight-file dispatcher handoff stays pending.
+
+Concurrency/state: callbacks execute on the existing case goroutine; cleanup
+remains arm-owned. Reconnect, restart and failed reconnect retain separate
+case attribution. No additional goroutine or admission state is introduced.
+Security review: PASS; only fixed public error families/numeric close codes
+are recorded. Authentication, permission confirmation and token binding remain
+unchanged. Sizing: about 180 written source/test/plan lines, zero new exports,
+fewer than ten callback consumers and no new production reject branch.
+Documentation handoff remains pending at the existing exact path and section.
