@@ -548,29 +548,62 @@ After saving valid memory settings, restart the daemon to activate automatic
 Markdown export at `~/.pyry/memory/recent-transcripts`. The daemon resolves the
 settings against its startup workspace and discovers registered chats, including
 chats created later. With readable history and writable transcript storage,
-eligible committed text appears within 60 seconds of persistence. Export runs
+delivered user text appears within 60 seconds of persistence; completed main
+assistant replies appear within 60 seconds of persistence of their qualifying
+recorded `turn_end`. Export runs
 without a connected client, an indexer or a scheduled knowledge-capture run.
 Unconfigured memory creates no transcript storage. Invalid settings or export
 failures leave ordinary chat operational and produce content-free diagnostics.
 
-Transcripts contain delivered conversational user text from Claude and Codex
-chats, preserving the complete recorded text and whitespace in delivery order.
-They include conversation ID and title, recorded session and agent identity,
-stable message IDs, source timestamps and speaker. Queued, dropped and lost
-acceptances, assistant output, injected or reset wrap-up instructions, background
-memory-capture executions and non-user events are excluded. Unresolved historical
-session attribution is explicitly unknown. Completed assistant text is pending
-[#3151](https://github.com/pyrycode/pyrycode/issues/3151).
+Transcripts contain delivered conversational user text and completed Claude/Codex
+main assistant replies. They preserve every main text run before, between and
+after tool calls in durable creation/delivery order, coalescing streaming deltas
+once and retaining complete text and whitespace. Rows include conversation ID,
+recorded agent/session attribution, stable message identity, source timestamp and
+speaker; the file also includes the conversation title. An assistant row's
+identity and timestamp come from its first text entry and do not change with
+later deltas or completion. Attribution uses persisted provenance and divider
+evidence. Unresolved attribution stays explicitly unknown and separate; the
+current session binding never fills it in.
+
+All text runs of an unfinished reply are withheld. Tool launches, another user
+message, runtime interruption or process restart alone cannot establish
+completion. Completion must match the conversation, recorded agent/session
+source, turn and opening generation or legacy boundary scope; tagged and legacy
+evidence stay separate even if their displayed attribution matches. The first
+valid terminal in history-entry order owns that lifetime. A main `turn_end`,
+including an error or cancellation ending, qualifies it for export. If
+`main_turn_interrupted` wins first, a later `turn_end` cannot release that
+lifetime's text. A fresh opening is a separate lifetime even with reused IDs.
+Malformed evidence and unrelated or child-agent endings release nothing.
+
+Replies also require a delivered conversational user exchange in their own
+recorded turn interval and source scope. An earlier completed exchange cannot
+qualify a later assistant-only wrap-up. Excluded content includes reasoning,
+tool inputs/results, child-agent traffic, injected or reset wrap-up instructions
+and their assistant-only replies, system/status events and background
+memory-capture executions. Queued, dropped and lost acceptances and messages
+explicitly recorded as having no receiving child remain excluded.
 
 Files are grouped by logical session. A recorded reset/clear, agent switch or
 other replacement with a distinct successor routing session closes the
 predecessor and starts the successor. Idle or capacity eviction, disconnect,
 restart or respawn retaining the routing session does not close it. A restart
 without a recorded successor also leaves it open; a recorded distinct successor
-is a replacement. Each file reports open/closed state, a closing history entry
-only when closed, and the last delivered-message entry represented. Late text
-attributed to the predecessor updates that file without changing its closing
-entry or entering the successor.
+is a replacement. Each file reports open/closed state and three separate
+boundaries:
+
+- `Last delivered entry`: the greatest represented user-delivery history entry;
+  assistant replies do not advance it.
+- `Last text entry`: the greatest history entry contributing exported user or
+  eligible assistant text, including a late delta extending an exported run.
+  Completion, tool and status facts alone do not advance it.
+- `Closing entry`: the immutable logical-session closure entry, present only
+  when closed.
+
+Late eligible predecessor text updates only that file and its relevant text or
+user-delivery boundary. It never moves the closing entry or changes the
+successor's contents or closure, including when a routing ID is reused.
 
 Open transcripts retain the complete session without an age limit or a cutoff
 after intermediate knowledge capture. Closed files are retained too. Persisted
