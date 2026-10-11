@@ -93,13 +93,13 @@ type readinessReplay struct {
 	h           *perConvHarness
 	r           *readinessCapture
 	subjects    map[string]int
-	reconnect   func()
+	reconnect   func(*testing.T)
 	seq         uint64
 	conv        string
 	ordinal     int
 	nextOrdinal int
 	peer        *perConvHarness
-	restart     func()
+	restart     func(*testing.T)
 	epoch       int
 	hold        *httptest.Server
 	release     func()
@@ -160,7 +160,8 @@ func (p *readinessReplay) receive(until time.Time) protocol.Envelope {
 	raw, err := p.h.phone.ReceiveBytes(time.Until(until))
 	if err != nil {
 		p.r.Setup["prefix_phone_read_failed"] = true
-		p.t.Fatal("bounded replay phone read failed")
+		p.r.Setup["prefix_phone_read_failure"] = readinessConnectionFailure(err)
+		p.t.Fatalf("bounded replay phone read failed: %s", readinessConnectionFailure(err))
 	}
 	var frame protocol.InnerFrameV2
 	if json.Unmarshal(raw, &frame) != nil {
@@ -340,7 +341,7 @@ func (p *readinessReplay) operation(op string) {
 	case "opening":
 		p.opening()
 	case "reconnect":
-		p.reconnect()
+		p.reconnect(p.t)
 		p.opening()
 	case "ping":
 		p.turn("Reply with exactly ping. Do not use tools.")

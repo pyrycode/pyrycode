@@ -311,3 +311,49 @@ are recorded. Authentication, permission confirmation and token binding remain
 unchanged. Sizing: about 180 written source/test/plan lines, zero new exports,
 fewer than ten callback consumers and no new production reject branch.
 Documentation handoff remains pending at the existing exact path and section.
+
+### Live-gate attribution: inherited reconnect overflow (#3214)
+
+The named authenticated prefix diagnosis executed 76 leaves: 52 passed,
+24 failed, zero skipped. Both first reconnect failures retain WebSocket 4413.
+The additional failures are cascading reconnect closes, not evidence of the
+historical permission-readiness delay. The isolated main comparison at
+`18ddc5f89f567353a3b1554cda23ba369d00c04e` now executes the same wired test
+as the branch: one executed, zero passed, one failed, zero skipped on each,
+with `legacy reconnect closed with 4413 before all 64 retained snapshots`.
+The earlier 17-snapshot experiment passed and proved no cause; the 64-snapshot
+case retains the reconnect's multi-family batch size and a handshake barrier.
+
+`handleNoiseInit` enables the ordered hosted lane for ordinary interactive
+clients whenever the host wires hosted discovery/send. `forwardEnvelopeSource`
+and `drainOnce` transfer their bounded legacy snapshots into `hostedEnqueue`
+without destination-capacity admission; its 16-slot limit closes the connection.
+These production blocks are identical on main and the branch. A fix belongs
+to the independently filed #3214, in Backlog with priority:low, now an explicit
+GitHub blocker of #3071. No production relay repair is made in this ticket.
+
+`internal/relay/readiness_reconnect_capacity_test.go` retains the wired counterexample
+as `TestReadinessLegacyReconnectSnapshotCapacity`, skipped explicitly on #3214.
+The transport pump pause is bounded by existing context/cancellation cleanup;
+the handshake-completion barrier precedes `FlushPushes`, so an empty queue cannot
+supply a false pass. Encrypted snapshot delivery is required in wire order.
+The skip is pending coverage, never repair proof or a passed test. The original
+live test remains enabled with its assertions and deadlines unchanged.
+
+The callback and safe-error diagnostic corrections remain this ticket's work.
+New diagnostic recovery copies are outside the checkout under
+`/tmp/pyry-3071-live-records/20261011T221339Z-immediate-prefix/` and
+`/tmp/pyry-3071-live-records/20261011T221339Z-dependent-prefix/`; they are failed,
+dirty-source Go observations, not the admitted emulator run or usable before/after
+readiness repair evidence. Filtered-out fresh arms are not execution proof and
+are excluded from publication. All previously committed historical records remain
+unchanged. Sizing adds about 60 test lines and this revision; generated diagnostic
+rows are not added to the branch. No new export or production state is introduced.
+
+Security review remains PASS: fixed error categories/close codes exclude error
+text and private joins; the regression uses generated identities and bounded
+owned loopback transport. No permission, token or authentication behavior changes.
+After #3214 merges, rerun the named authenticated family and dispatch the pending
+`3071-emulator-20261011` acquisition. Keep `needs-live-artifacts` and
+`needs-real-claude`. The exact eight-file recovery and Documentation handoff above
+remain pending; no Android execution or original readiness cause is claimed.

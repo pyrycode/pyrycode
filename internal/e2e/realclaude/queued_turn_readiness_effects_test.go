@@ -24,7 +24,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-func readinessStartHarness(t *testing.T, r *readinessCapture, configure func(string) string) (*perConvHarness, *perConvHarness, func(), func()) {
+func readinessStartHarness(t *testing.T, r *readinessCapture, configure func(string) string) (*perConvHarness, *perConvHarness, func(*testing.T), func(*testing.T)) {
 	t.Helper()
 	home := liveHome(t)
 	work := filepath.Join(home, "work")
@@ -63,7 +63,7 @@ func readinessStartHarness(t *testing.T, r *readinessCapture, configure func(str
 		t.Cleanup(func() { h.daemon.stop(t) })
 		waitBinaryHello(t, fr, string(phonePair.Server))
 	}
-	connect := func(client *perConvHarness, token, name string) {
+	connect := func(caseT *testing.T, client *perConvHarness, token, name string) {
 		if client.phone != nil {
 			_ = client.phone.Close()
 		}
@@ -71,24 +71,25 @@ func readinessStartHarness(t *testing.T, r *readinessCapture, configure func(str
 		defer cancel()
 		client.phone, err = fakephone.Dial(ctx, fr.URL(), string(phonePair.Server), token, name)
 		if err != nil {
-			t.Fatal("independent device dial failed")
+			r.Setup["device_dial_failure"] = readinessConnectionFailure(err)
+			caseT.Fatalf("independent device dial failed: %s", readinessConnectionFailure(err))
 		}
-		client.initSend, client.initRecv = driveHandshakeInteractive(t, client.phone, public, token)
+		client.initSend, client.initRecv = driveHandshakeInteractive(caseT, client.phone, public, token)
 		phone := client.phone
 		t.Cleanup(func() { _ = phone.Close() })
 	}
 	spawn()
-	connect(h, phonePair.Token, "phone-a")
-	connect(peer, peerPair.Token, "readiness-peer")
-	reconnect := func() { connect(h, phonePair.Token, "phone-a") }
-	restart := func() {
+	connect(t, h, phonePair.Token, "phone-a")
+	connect(t, peer, peerPair.Token, "readiness-peer")
+	reconnect := func(caseT *testing.T) { connect(caseT, h, phonePair.Token, "phone-a") }
+	restart := func(caseT *testing.T) {
 		_ = h.phone.Close()
 		_ = peer.phone.Close()
 		h.daemon.stop(t)
 		r.Witnesses = append(r.Witnesses, readinessWitness{At: time.Now().UTC(), Boundary: "isolated_daemon_stopped", OK: true})
 		spawn()
-		connect(peer, peerPair.Token, "readiness-peer")
-		reconnect()
+		connect(caseT, peer, peerPair.Token, "readiness-peer")
+		reconnect(caseT)
 		r.Witnesses = append(r.Witnesses, readinessWitness{At: time.Now().UTC(), Boundary: "isolated_daemon_restarted", OK: true})
 	}
 	r.Setup["independent_peer"] = true
@@ -134,7 +135,7 @@ func (p *readinessReplay) upload(peer, cut bool, data []byte) string {
 		for _, chunk := range chunks[:2] {
 			p.send(protocol.TypeAttachmentChunk, chunk)
 		}
-		p.reconnect()
+		p.reconnect(p.t)
 		p.effect("upload_cut_after_chunk_1_before_final", true)
 		messages := 0
 		for _, entry := range readinessHistory(p.h.home, p.conv) {
@@ -218,7 +219,7 @@ func (p *readinessReplay) attachmentEffect(op string) {
 		p.attachmentTurn(true, []string{id}, "Reply with exactly ping. Do not use tools.")
 		_ = p.h.phone.Close()
 		p.effect("phone_cut_before_retrieval_request", true)
-		p.reconnect()
+		p.reconnect(p.t)
 		p.opening()
 		p.retrieve(false, id, data)
 	case "share-files", "collision-file":
@@ -256,7 +257,7 @@ func (p *readinessReplay) attachmentEffect(op string) {
 		}
 		p.wait(protocol.TypeTurnEnd, true)
 		p.effect("pyry_files_send_file_offered", true)
-		p.reconnect()
+		p.reconnect(p.t)
 		p.opening()
 		p.retrieve(false, offer.ID, data)
 	}
@@ -285,7 +286,7 @@ func (p *readinessReplay) offlineEffect() {
 	p.waitReply(p.seq, "conversation_updated")
 	p.turn("Reply with exactly ping. Do not use tools.")
 	p.wait(protocol.TypeTurnEnd, true)
-	p.reconnect()
+	p.reconnect(p.t)
 	p.opening()
 	_ = p.h.phone.Close()
 	p.effect("phone_offline_peer_retained", true)
@@ -326,7 +327,7 @@ func (p *readinessReplay) offlineEffect() {
 	})
 	p.posts(name, 2)
 	p.observePosts("before_restart")
-	p.restart()
+	p.restart(p.t)
 	p.epoch++
 	p.effect("restart_epoch_advanced", true)
 	p.opening()

@@ -231,7 +231,7 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 			row.Finished, row.Completed = time.Now().UTC(), passed
 			row.EpochAfter = p.epoch
 			if !passed {
-				p.reconnect()
+				p.reconnect(p.t)
 			}
 			t.Logf("prefix %d %s completed, main operations=%d", n, row.Method, len(row.Operations))
 		}
