@@ -653,7 +653,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 	}
 	cmd := exec.CommandContext(ctx, claudeBin, args...)
 	cmd.Dir = workDir
-	cmd.Stdout = r.cfg.Stdout
+	cmd.Stdout = readinessStdout(r.cfg.Stdout, r.parser, r.liveSessionID())
 	cmd.Env = childEnv
 	var childPATH *string
 	for _, entry := range cmd.Environ() {
@@ -707,6 +707,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 		return false, "", fmt.Errorf("streamsup: start: %w", err)
 	}
 	stderr.started(true)
+	ObserveReadiness("child_started", r.liveSessionID(), true, cmd.Process.Pid)
 
 	// The posture gate is ARMED BEFORE setStdin, and that ordering is load-bearing:
 	// setStdin publishes the live stdin handle and disarms the rotation gate in ONE
@@ -795,6 +796,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 		postureID = r.nextControlID()
 	}
 	r.postureGate.arm(postureID)
+	readinessArm(r.postureGate, r.liveSessionID())
 
 	r.setStdin(stdin, freshSeq, mcpEligible)
 	r.mu.Lock()
@@ -824,6 +826,9 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 	if postureID != "" {
 		if err := WritePermissionMode(r.Stdin(), postureID, spawnMode); err != nil {
 			r.log.Debug("streamsup: permission mode not delivered", "err", err)
+			ObserveReadiness("permission_write", r.liveSessionID(), false)
+		} else {
+			ObserveReadiness("permission_write", r.liveSessionID(), true)
 		}
 	}
 	// One ask per spawn, which is one ask per child — see
