@@ -8,11 +8,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -275,5 +278,103 @@ func TestDaemonLiveRelayCodexOnlyProjection(t *testing.T) {
 	}
 	if _, ok := modelListFor(b.reg, pool, saved, b)("conv", false); ok {
 		t.Fatal("basic legacy provider lost its refusal")
+	}
+}
+
+func TestDaemonLiveRelayBorrowedBootstrapVocabulary(t *testing.T) {
+	for _, multi := range []bool{false, true} {
+		t.Run(map[bool]string{false: "basic", true: "multi"}[multi], func(t *testing.T) {
+			b, pool, runner := testInventoryIngress(t, true)
+			sid := string(pool.BootstrapID())
+			b.reg.Create(conversations.Conversation{ID: "other", CurrentSessionID: "other-session"})
+			parser := streamsup.NewParser(runner.models.Sink, discardLogger())
+			if _, err := parser.Write(testInventoryLine(protocol.TypeModelList, "bootstrap")); err != nil {
+				t.Fatal(err)
+			}
+			target := b.capture("other", "other-session", false)
+			// Foreign and target generation counters can coincide. That coincidence
+			// cannot confer retention authority on borrowed producer evidence.
+			b.sink.queueBoundary(sessions.SessionTransition{ConversationID: "conv", PreviousID: sessions.SessionID(sid), NewID: sessions.SessionID(sid), NextAgent: "claude"}, func() {}, nil)
+			if _, err := parser.Write(testInventoryLine(protocol.TypeModelList, "bootstrap")); err != nil {
+				t.Fatal(err)
+			}
+			list, evidence, have := runner.ModelListLive()
+			if !have || evidence.ConversationID != "conv" || evidence.SessionGeneration == 0 || evidence.SessionGeneration != target.SessionGeneration {
+				t.Fatal("parser did not supply bootstrap evidence")
+			}
+			saved := twoAgentVocabularyDouble{codex: sentinelCodexModels()}
+			provider := daemonModelListReadingFor(b.reg, pool, saved, b)
+			w, mgr := testDaemonRelayWire(t, b, relayWiring{modelListReading: provider}, nil, func(cfg *relay.V2SessionConfig) {
+				cfg.MergedModelOptions = pushedModelOptions(saved)
+			})
+			w.open("phone", multi, protocol.CapabilityThread)
+			testDaemonWireReading(t, w, protocol.TypeModelList, 0)
+			var predecessor daemonLiveReading
+			for phase := 0; phase < 2; phase++ {
+				if phase == 1 {
+					b.sink.queueBoundary(sessions.SessionTransition{ConversationID: "other", PreviousID: "other-session", NewID: "other-session", NextAgent: "claude"}, func() {}, nil)
+				}
+				before, retainedBefore := testLiveReadings(t, b.sink.live, "other")[liveReadingKey{protocol.TypeModelList, ""}]
+				source := b.capture("other", "other-session", false)
+				reading, ok := provider("other", multi)
+				if !ok || reading.ConversationID != "other" || reading.SessionGeneration != source.SessionGeneration || reading.Revision == 0 || string(reading.Envelope.SessionID) != `"`+sid+`"` {
+					t.Fatalf("invalid borrowed reply ordering/source: %+v", reading)
+				}
+				if phase == 0 {
+					predecessor = reading
+				}
+				requestID := uint64(90 + phase)
+				testDaemonWireRequest(t, w, requestID, protocol.TypeRequestModelList, protocol.RequestModelListPayload{ConversationID: "other"})
+				reply := testDaemonWireReading(t, w, protocol.TypeModelList, requestID)
+				want, _ := mapModelList(list, "other")
+				if multi {
+					want.Models = pushedModelOptions(saved)(want.Models)
+				}
+				raw, _ := json.Marshal(want)
+				if !bytes.Equal(reply.Payload, raw) || string(reply.SessionID) != `"`+sid+`"` {
+					t.Fatalf("borrowed vocabulary/source changed: %+v", reply)
+				}
+				encoded, _ := json.Marshal(reply)
+				if len(encoded) > protocol.MaxThreadEnvelopeBytes {
+					t.Fatal("borrowed reply exceeded envelope limit")
+				}
+				legacy, ok := modelListFor(b.reg, pool, saved, b)("other", multi)
+				legacyRaw, _ := json.Marshal(legacy)
+				if !ok || !bytes.Equal(legacyRaw, raw) {
+					t.Fatal("legacy fallback bytes changed")
+				}
+				after, retainedAfter := testLiveReadings(t, b.sink.live, "other")[liveReadingKey{protocol.TypeModelList, ""}]
+				if retainedBefore != retainedAfter || (retainedAfter && (!after.Envelope.SessionStateCleared || after.Revision != before.Revision)) {
+					t.Fatal("borrowed evidence replaced target retention")
+				}
+			}
+			// Source caches remain paired with their original generation across borrowing.
+			_, afterEvidence, _ := runner.ModelListLive()
+			if afterEvidence != evidence {
+				t.Fatal("borrowing changed bootstrap evidence")
+			}
+			// A delayed response captured before the reused-ID clear cannot overtake it.
+			lateID := uint64(100)
+			predecessor.Envelope.InReplyTo = &lateID
+			if err := mgr.PushLiveState(t.Context(), "phone", daemonRelayReading(predecessor)); err != nil {
+				t.Fatal(err)
+			}
+			if err := mgr.FlushPushes(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			marker := protocol.Envelope{ID: 101, Type: protocol.TypeError, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}
+			if err := mgr.Push(t.Context(), "phone", marker); err != nil {
+				t.Fatal(err)
+			}
+			for {
+				_, e := w.read()
+				if e.InReplyTo != nil && *e.InReplyTo == lateID {
+					t.Fatal("borrowed predecessor overtook successor")
+				}
+				if e.ID == marker.ID {
+					break
+				}
+			}
+		})
 	}
 }

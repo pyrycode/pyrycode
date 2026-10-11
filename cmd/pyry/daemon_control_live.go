@@ -37,6 +37,7 @@ type daemonLiveOperation struct {
 	key        liveReadingKey
 	revision   uint64
 	generation uint64 // generation in which ordering was reserved
+	replyOnly  bool   // borrowed inventory has no retention authority for the target
 }
 
 func (o *daemonLiveState) begin(src daemonLiveSource, typ, id string) daemonLiveOperation {
@@ -65,6 +66,9 @@ func (op daemonLiveOperation) complete(e protocol.Envelope) (daemonLiveReading, 
 		return daemonLiveReading{}, false
 	}
 	r := daemonLiveReading{Envelope: detachLiveEnvelope(e), ConversationID: op.source.ConversationID, SessionGeneration: op.source.SessionGeneration, ReadingID: op.key.id, Revision: op.revision}
+	if op.replyOnly {
+		return r, false
+	}
 	o := op.owner
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -246,7 +250,14 @@ func liveInventoryResult[T any](b *daemonLiveBindings, conv, typ string, e proto
 	if !ok {
 		return v.payload, false, daemonLiveReading{}
 	}
-	op.source = v.source
+	if v.source.SessionGeneration != 0 && v.source.ConversationID != op.source.ConversationID {
+		// Borrowed vocabulary uses captured request ordering, preserving its producer
+		// tag without installing foreign cached evidence as target live state.
+		op.source.provenance = v.source.provenance
+		op.replyOnly = true
+	} else {
+		op.source = v.source
+	}
 	raw, err := json.Marshal(v.payload)
 	if err != nil {
 		return v.payload, false, daemonLiveReading{}
