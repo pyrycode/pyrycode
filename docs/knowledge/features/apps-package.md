@@ -46,6 +46,38 @@ and `esbuild-wasm` instead. TypeScript 6's side-effect import checking needs the
 explicit `declare module '*.css'` in `assets.d.ts` for the frontend stylesheet
 import; removing it breaks frontend typechecking.
 
+`scaffold` copies an explicit `files` inventory rather than the whole source
+tree. New shared service modules, migration SQL and tests must enter that
+inventory; testing the maintained source tree alone can pass while generated
+apps lack dependencies or service coverage. Verify a fresh generated app through
+install, frontend/service typecheck, tests and build. `npm test` compiles its
+service dependencies itself, so a prior build cannot mask missing test setup.
+
+## Template SQL and readiness
+
+`schema` must validate the immutable preference table definition as well as
+columns, saved values and integrity. Matching column names/types alone lets a
+table stripped of CHECK constraints or STRICT mode report ready. Startup and
+health also require the complete checksum ledger; they cannot repair/migrate
+storage as a readiness side effect. The [template reference](../../hosted-apps.md#migrations)
+owns migration commands and persistent-data placement; [ADR 043](../decisions/043-hosted-app-runtime-and-isolation.md)
+owns the trusted-service isolation boundary.
+
+SQLite identifiers are case-insensitive, and unqualified object lookup searches
+the temporary schema before `main`. A case-sensitive ledger guard therefore
+lets a temporary uppercase/mixed-case ledger capture runner writes: migration
+can exit successfully with committed schema but no durable checksum, then fail
+on rerun. `migrationSQL` reserves ledger identifiers case-insensitively and
+rejects non-main operations; runner ledger, schema and preference API SQL target
+`main` explicitly. Keep both protections so validation cannot accept temporary
+shadows as durable state.
+
+Migration authorization lasts only while the SQL file executes. Temporary or
+persistent triggers could defer ledger mutation until runner SQL executes after
+authorization is removed. Deny both trigger forms, alongside transaction control,
+connection changes and external effects, so all pending schema/ledger work stays
+within the runner's single transaction.
+
 ## Manifest updates and retention
 
 The stored manifest can describe a candidate title/release while the committed
@@ -139,6 +171,17 @@ original reader returns. Starting a replacement reader on every cancel would
 accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ## Testing
+
+The template's `case-variant ledger shadows reject and roll back all pending migrations`
+and `migration authorization reserves case-variant durable ledger names` checks
+inspect `main.pyry_schema_migrations` and preserve its applied checksums after
+rejection. Assert rollback of earlier pending files as well as the offending
+file, then retry corrected SQL and rerun to prove idempotence. A nonzero exit
+alone cannot establish atomicity; the original green service tests missed a
+successful schema commit without its durable ledger entry. The
+`runner ledger and schema checks use durable main tables despite temporary shadows`
+test checks validation against missing durable state even with matching temporary
+objects. See [SQL validation](#template-sql-and-readiness).
 
 The scaffold's `fresh generated app passes the toolchain` test preserves a
 sentinel in existing `node_modules` while invoking `npm ci` with an explicitly

@@ -7,9 +7,9 @@ lifecycle mutations and restart normalization are implemented in the standalone
 list cancellation; production capability activation still requires complete
 supervision/resource integration and cancellable transport wiring. Lifecycle
 notification producers remain #3158; resource-scoped cancellation remains #3123.
-A buildable React/TypeScript scaffold is maintained under
-`templates/hosted-app/`; SQL service behavior, preference UI, daemon integration,
-publication and native viewers remain later work. This reference
+A React/TypeScript scaffold with SQLite preferences, migrations and service
+health is maintained under `templates/hosted-app/`; preference UI, daemon
+integration, publication and native viewers remain later work. This reference
 preserves the contract's fields, limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 used by daemon, desktop and mobile consumers. Runtime and isolation choices are
@@ -228,9 +228,9 @@ APPS_ROOT/
 The template owns `npm run typecheck` (TypeScript checks both frontend and service
 without emitting), `npm test` (noninteractive, deterministic tests), and
 `npm run build` (frontend bundle and compiled service/migration JS). The current
-scaffold tests runtime bounds and literal React title rendering; temporary-SQL
-tests and migration SQL follow in #3141. The build leaves `sql/migrations` at
-the source/release root rather than copying it into `dist`. See
+scaffold tests runtime bounds, literal React title rendering and the generated
+SQLite service with isolated temporary databases. The build leaves
+`sql/migrations` at the source/release root rather than copying it into `dist`. See
 [Template and saved preferences](#template-and-saved-preferences) for the
 implemented layout and commands. No runtime TS loader, Node type stripping or
 dev server is part of publication. Install/build scripts execute as trusted app
@@ -301,9 +301,10 @@ Generated source includes:
   tsconfig.web.json, tsconfig.service.json
   scripts/build.mjs
   src/web/{main.tsx,App.tsx,style.css,assets.d.ts,title.json}
-  src/service/{main.ts,migrate.ts,runtime.mjs}
-  sql/migrations/                     initially empty
-  test/app.test.mjs
+  src/service/{main.ts,migrate.ts,health.ts,runtime.mjs}
+  src/service/{environment.ts,database.ts,migrations.ts}
+  sql/migrations/0001_preferences.sql  singleton preference schema
+  test/{app,service}.test.mjs
 ```
 
 React/React DOM, their type definitions, Node type definitions, TypeScript and
@@ -319,31 +320,134 @@ npm run build
 ```
 
 `npm ci` uses the committed lockfile. `typecheck` covers both frontend and service;
-`test` runs offline without prompts. npm `devEngines`, `engines` and
+`test` compiles the service before running offline tests without prompts, so it
+needs no prior build. npm `devEngines`, `engines` and
 `.npmrc`'s `engine-strict=true` reject a mismatched actual Node executable before
 installation. Runtime checks also guard scaffold generation, typecheck, tests,
-build and the compiled start/migration entries; they never select another runtime.
+build and the compiled start/migration/health entries; they never select another
+runtime.
 
 Build output is compiled ESM at `dist/service/main.js`,
-`dist/service/migrate.js` and `dist/service/runtime.mjs`, plus public-only
-`dist/web/index.html` and `dist/web/assets/main.js`/`main.css`.
+`dist/service/migrate.js`, `dist/service/health.js` and their shared modules, plus
+public-only `dist/web/index.html` and `dist/web/assets/main.js`/`main.css`.
 The external script and stylesheet use `/assets/…` URLs relative to the app root,
 compatible with the [viewer CSP](#electron-and-android-isolation).
 Source secrets, environment files, SQL data, service code, lockfiles and
 `node_modules` stay outside `dist/web`. `sql/migrations` remains release-relative
 beside `dist`; publication needs no runtime TypeScript loader or development server.
 
-This slice supplies buildable source. `npm start` and `npm run migrate` execute
-the compiled entries, which deliberately exit nonzero with `unfinished-service`
-diagnostics. They bind no port, create no database and claim neither health nor
-schema readiness. SQL service/migrations and saved-preference persistence follow
-in [#3141](https://github.com/pyrycode/pyrycode/issues/3141); the responsive
-preference UI and browser persistence proof follow in
-[#3142](https://github.com/pyrycode/pyrycode/issues/3142). The eventual
-[orchestrator walkthrough](#orchestrator-walkthrough) describes app-scoped saved
-preferences shared by authorized viewers.
+### Preference API
 
-Generation alone does not register, publish or return a ready app link.
+`GET /api/preferences` returns HTTP 200 JSON. With no saved record, it returns:
+
+```json
+{ "version": 1, "selected_tab": "overview", "period": "24h" }
+```
+
+`POST /api/preferences` accepts one JSON object with required numeric `version: 1`.
+`selected_tab` accepts `overview` or `preferences`; `period` accepts `1h`, `24h`
+or `7d`. Each committed save replaces the whole record. Omitted tab/period values
+use `overview`/`24h`, even if a previous save chose different values. Unknown
+fields are ignored. HTTP 204 acknowledges only a committed transaction.
+
+Malformed JSON or invalid UTF-8, non-object input (including arrays/null),
+missing/invalid version, or a supplied tab/period with an invalid type or enum
+(including null) returns HTTP 400. The request body limit is **16384 bytes**,
+inclusive; larger bodies return HTTP 413, including streamed bodies without
+Content-Length. Rejected writes leave the saved record unchanged. SQL failures
+return HTTP 503 without acknowledging a save.
+
+All viewers share one app-scoped SQL record, rather than per-client preferences.
+Opening a fresh client after process restart or replacement of the compiled
+release reads the same saved values when the app uses the same persistent
+database. SQL data stays outside replaceable source/staging/build trees and
+`dist/web`. The responsive preference UI and browser proof remain
+[#3142](https://github.com/pyrycode/pyrycode/issues/3142); see the
+[orchestrator walkthrough](#orchestrator-walkthrough) for that intended workflow.
+
+### Migrations
+
+`npm run migrate` runs `node dist/service/migrate.js` once. Both migration and
+service entries use file-backed `DatabaseSync` at `PYRY_APP_DB_PATH`, foreign
+keys, defensive mode and disabled extension loading; values use parameter binding.
+Migration creates private data storage (0700 directory, 0600 database).
+
+The runner reads regular SQL files from release-relative `sql/migrations` beside
+`dist`, independently of the current working directory. Every filename must
+match `^[0-9]{4}_[a-z0-9_]+\.sql$`; numeric prefixes must be unique and pending
+files run in numeric order. `main.pyry_schema_migrations` records
+`version INTEGER PRIMARY KEY` and `sha256 TEXT NOT NULL`, hashing the raw SQL
+file bytes. Applied files are immutable: a missing file or changed checksum fails
+before any pending migration runs. Reruns with unchanged applied files are
+idempotent.
+
+All pending schema changes and ledger entries share one transaction. The runner
+validates the preference schema, record and database integrity before commit;
+any failure rolls back all pending work and exits nonzero with a diagnostic.
+Exit 0 means schema validation and commit completed. Migration SQL cannot control
+transactions/savepoints, attach/detach databases, change connection settings,
+write external files, create triggers or temporary-schema objects, or access the
+reserved migration ledger (including case variants). The publisher owns
+serialization against service writers and the 60-second migration deadline.
+
+### Startup and health
+
+Migration, startup and the health command validate the actual Node runtime and
+the same mandatory environment before proceeding:
+
+| Variable | Required value / validation |
+|---|---|
+| `PYRY_APP_ID` | Canonical lowercase UUIDv4 matching release-root `app.json`'s `app_id`. |
+| `PYRY_SERVER_ID` | Canonical lowercase UUIDv4 matching `app.json`'s `server_id`. |
+| `PYRY_APP_RELEASE` | Matching `app.json`'s `release_version`; `MAJOR.MINOR.PATCH`, components 0–2147483647, no leading zeros except `0`, suffixes or `v`, at most 32 bytes. |
+| `PYRY_APP_DATA_DIR` | Absolute persistent directory outside the release/source/staging/build trees. |
+| `PYRY_APP_DB_PATH` | Exactly `PYRY_APP_DATA_DIR/app.sqlite`, absolute, with no database symlink/redirection. |
+| `PYRY_APP_BIND_HOST` | Exactly `127.0.0.1`. |
+| `PYRY_APP_PORT` | Decimal integer in 1–65535; the hosted supervisor supplies the reserved port. |
+| `NODE_ENV` | Exactly `production`. |
+
+Data validation resolves existing ancestors even when the data directory is not
+yet created, so symlink escapes into source/staging/build storage are rejected.
+For the standalone scaffold example above, choose an available local port and
+set these values in the generated destination:
+
+```sh
+export PYRY_APP_ID=22222222-2222-4222-8222-222222222222
+export PYRY_SERVER_ID=11111111-1111-4111-8111-111111111111
+export PYRY_APP_RELEASE=1.0.0
+export PYRY_APP_DATA_DIR=/tmp/my-hosted-app-data
+export PYRY_APP_DB_PATH=/tmp/my-hosted-app-data/app.sqlite
+export PYRY_APP_BIND_HOST=127.0.0.1
+export PYRY_APP_PORT=43141
+export NODE_ENV=production
+npm run migrate
+npm start
+```
+
+`npm start` executes `node dist/service/main.js`. Migration must precede startup;
+startup requires an existing migrated database and never migrates implicitly.
+Missing/invalid environment, runtime mismatch, unsafe paths, unavailable or
+unmigrated schema and bind collisions fail with a diagnostic and nonzero exit,
+without choosing a fallback endpoint or creating data inside builds. A release
+copy needs `package.json` with `type: module`, `app.json`, compiled `dist/service`
+and `sql/migrations` at the same release root.
+
+`GET /_pyry/health` revalidates SQL/schema and the migration ledger. Healthy
+storage returns HTTP 200 with at most 4096 bytes of JSON
+`{ "ready": true, "app_id": "…", "release_version": "…" }`; SQL/schema failure
+returns HTTP 503 and never reports ready. The service configures a 5-second
+read-header timeout, 30-second request read/write and idle timeouts. SIGTERM
+closes HTTP connections and SQL within 5 seconds, including an outstanding client.
+
+From another shell in the same destination with the same environment,
+`npm run health` executes `node dist/service/health.js`. It probes the supplied
+loopback endpoint once with an absolute 1-second deadline and 4096-byte response
+cap, follows no redirects, and exits 0 only for HTTP 200, `ready: true` and
+matching app/release identity. The supervisor owns repeated probes and restart
+policy; this command supplies only the one-shot service check.
+
+Scaffold generation and service health alone do not register, publish or return
+a ready app link.
 [#3125](https://github.com/pyrycode/pyrycode/issues/3125) owns identity minting,
 daemon-selected destinations and registration/publication tools;
 [#3126](https://github.com/pyrycode/pyrycode/issues/3126) owns the channel workflow
