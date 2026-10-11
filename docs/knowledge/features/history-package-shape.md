@@ -245,8 +245,13 @@ is absent; later reconciliation yields the same single exported message,
 identity and timestamp. Queued, dropped and lost acceptances export no text.
 
 Assistant identity is conversation ID plus the run's creating entry ID; its
-timestamp is that first text entry's raw `Entry.TS`. Later deltas, tools and
-completion cannot move either. Render only `Content.text`: all main text runs
+timestamp is that first text entry's raw `Entry.TS`. Deltas extending that run,
+tools and completion cannot move either. Text after a closed run creates a new
+row with its own first-text identity/time; subsequent deltas can extend that new
+row even after the lifetime's terminal. Assuming all late text extends the
+pre-terminal row would impose a false identity contract. See
+[main-work text splitting](thread-package-main-thread-folding.md#main-work-source-entries).
+Render only `Content.text`: all main text runs
 before/between/after tools retain exact whitespace and coalesce deltas once, in
 durable creation/delivery order. `Item.Rev` can advance for closure without any
 new text, so it cannot serve as a text watermark.
@@ -389,5 +394,18 @@ runtime rejection prevent a guard from silently disabling legitimate transfer.
 Replay absence assertions must isolate the exchange under test: an earlier valid
 delivered exchange can already own the same transcript before a chosen cut.
 The controlled-tick `TestMemoryTranscriptReplyWorker` checks withholding followed
-by production publication within 60 seconds. Broader interleaved worker recovery
-coverage belongs to [#3161](https://github.com/pyrycode/pyrycode/issues/3161).
+by production publication within 60 seconds. `TestMemoryTranscriptPersistedReplay`
+extends that gate through persisted callbacks across `history.MaxPageEntries`,
+interleaved chats and separate-Store commits during replay/publication.
+`TestMemoryTranscriptPublicationRecovery` checks later-tick retry on the same
+worker, preservation of prior complete files and joined replacement/reconstruction.
+
+A tick send proves only discovery consumed it, and `beforeRename` fires before
+replacement completes. Hold all participating workers at that hook before
+inspecting staged files, then release and await exact disk contents; notification
+counts alone can falsely certify publication. `testTranscriptGate.publish` uses
+this ordering. Specify complete rows, whitespace, first-text identities/times and
+delivery/text/closure boundaries independently, as `testTranscriptExpected` does,
+before comparing chunked and uninterrupted reconstruction: two exporter snapshots
+can agree on the same omission. Snapshot source paths and bytes after fixture
+commits finish so recovery assertions also detect source-history changes.
