@@ -2,7 +2,7 @@
   "schema": 2,
   "run_id": "3071-emulator-20261011",
   "status": "pending dispatcher admission; diagnostic, no host repair established",
-  "daemon_revision": "5a3428a0da9074201fa8ee47f6aab62a83c895b1",
+  "daemon_revision": "902bf0f5d80d03fd0143ed21558c740bd78050d2",
   "daemon_source_variable": "PYRYCODE_SRC",
   "build_tags": "e2e_realclaude",
   "build_environment": {
@@ -112,7 +112,7 @@
   "ownership": "Wrapper-generated e2e-auto primary and second-host instances belong to this run; peer is an independent device; bypass and answer instances remain separately owned. Header observer records private instance/process/connection joins; export uses ordinals. Never count pre-restart children as retained afterward.",
   "private_input": {
     "RunID": "3071-emulator-20261011",
-    "SourceRevision": "5a3428a0da9074201fa8ee47f6aab62a83c895b1",
+    "SourceRevision": "902bf0f5d80d03fd0143ed21558c740bd78050d2",
     "Binary": "<mobile checkout>/build/e2e-bin/pyry",
     "Observations": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/observations.jsonl",
     "XML": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/emulator-results.xml",
@@ -161,7 +161,10 @@
     "readinessRunnerIntervals",
     "readinessNewJoins",
     "readinessValidateEmulator",
-    "TestReadinessEmulatorSemanticValidation"
+    "TestReadinessEmulatorSemanticValidation",
+    "TestReadinessEmulatorPendingTarget",
+    "TestReadinessEmulatorTurnIsolation",
+    "TestReadinessEmulatorChildResources"
   ],
   "offline_checks": [
     "go test -race -tags e2e_realclaude -run ^TestReadiness ./internal/e2e/realclaude ./internal/streamsup ./internal/dispatch",
@@ -205,7 +208,7 @@
     "path": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/acquisition-provenance.json",
     "record": {
       "RunID": "3071-emulator-20261011",
-      "Source": "5a3428a0da9074201fa8ee47f6aab62a83c895b1",
+      "Source": "902bf0f5d80d03fd0143ed21558c740bd78050d2",
       "MobileSource": "90d0407f06f70e325701603602d67fd2bcb96308",
       "MobileMerge": "4a5e624f6f630e75069c2ce729c63fcc2eb748e2",
       "MobileTree": "8564ff1d87ee16944c1b99cd577449bd96b1534b",
@@ -256,5 +259,7 @@
   "return_checks": [
     "PYRY_E2E_READINESS_REQUIRE_EMULATOR=1 go test -race -tags e2e_realclaude -run ^TestReadiness ./internal/e2e/realclaude ./internal/streamsup ./internal/dispatch",
     "go vet -tags e2e_realclaude ./internal/e2e/realclaude/..."
-  ]
+  ],
+  "child_lifetime_contract": "Private child_started observations retain child_start kernel identity. Sampler and live census require a matching current process lifetime and no witnessed completion/replacement; historical PID membership never attributes resources. Kernel identities remain private.",
+  "target_join_contract": "Keep EnqueueRestartEpoch/EnqueueSessionOrdinal/EnqueueChildOrdinal independently from delivery identity. Accepted-only failures/incomplete captures retain the known session and later witnessed child; absent delivery/opening/reply comparisons stay unknown. Join opening/deltas/completion by producing session, owner epoch and nonempty target turn ID. Independently later turns cannot satisfy or invalidate the target. A current-child claim requires the full matching chain and no successful replacement or completion before delivery; each persistence boundary matches its own epoch/session/child."
 }
