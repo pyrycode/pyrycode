@@ -61,6 +61,12 @@ func run(ctx context.Context, dir, program string, args ...string) ([]byte, erro
 	return output.Bytes(), nil
 }
 func supportedHost(ctx context.Context, p lock) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.MinimumMacOS != "" {
+		return supportedMacOS(ctx, p.MinimumMacOS)
+	}
 	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
 		return ErrUnsupported

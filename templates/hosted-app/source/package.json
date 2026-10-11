@@ -8,10 +8,11 @@
   "scripts": {
     "preinstall": "node src/service/runtime.mjs",
     "typecheck": "node src/service/runtime.mjs && tsc -p tsconfig.web.json && tsc -p tsconfig.service.json --noEmit",
-    "test": "node src/service/runtime.mjs && node --test test/*.test.mjs",
+    "test": "node src/service/runtime.mjs && tsc -p tsconfig.service.json && node --test test/*.test.mjs",
     "build": "node scripts/build.mjs",
     "start": "node dist/service/main.js",
-    "migrate": "node dist/service/migrate.js"
+    "migrate": "node dist/service/migrate.js",
+    "health": "node dist/service/health.js"
   },
   "dependencies": { "react": "19.3.0", "react-dom": "19.3.0" },
   "devDependencies": {
