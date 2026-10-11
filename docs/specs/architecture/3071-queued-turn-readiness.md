@@ -214,3 +214,44 @@ or before/after live proof is claimed. Diagnosis, one localized repair and ordin
 host proof follow the dispatcher acquisition; the full mobile gate remains with #2010 and
 the subsequent full host gate with the dispatcher. The Documentation handoff above remains
 pending, including client/host boundaries and effective setup provenance.
+
+### 2026-10-11: verifier rework on `2ec4d53c`
+
+Files read: `readinessEmulatorJoins.targets`, `readinessValidateEmulator`,
+`readinessSampleEmulator`, `readinessResources`, `ObserveReadiness`,
+`queuedSendHistory.accepted`/`delivered`, `history.Entry`/`SessionProvenance`,
+and `runtimeHistoryFact`: the four findings concern diagnostic joins and lifecycle
+proof, not admission behavior. No other fetched feature branch overlaps these files.
+
+Design revisions for findings 1–4:
+
+- Preserve the acceptance's independently witnessed session, enqueue epoch and
+  current child before delivery exists. Absent delivery/opening/reply comparisons
+  remain unknown. Keep enqueue identity separate when delivery follows a rebind.
+- Join the target's opening, deltas and completion by producing session, daemon
+  epoch and nonempty persisted turn ID. Stop attribution at another user message;
+  independent turns neither satisfy nor invalidate the target comparison.
+- Validate the complete session child lifecycle at delivery, including a successor
+  Start and predecessor completion. Persistence boundaries must match their own
+  epoch/session/child identities, not merely conversation and timestamp.
+- Record each spawned child's kernel start identity in private tagged observations.
+  Census and sampler require that identity and an uncompleted owned lifecycle before
+  attributing current CPU/RSS. Counter identity comes from the same stat read as ticks.
+
+Lifecycle race coverage: `TestReadinessEmulatorPendingTarget` (accepted-only failure
+and incomplete); `TestReadinessEmulatorTurnIsolation` (foreign/missing provenance,
+turn identity and later turns); `TestReadinessEmulatorSemanticValidation` (replacement,
+completion and persistence identity contradictions); `TestReadinessEmulatorChildResources`
+(wired sampler/census, PID reuse, missing identity and completed child).
+
+Concurrency remains unchanged: the existing bounded sampler and tagged append lock
+own observations; no observer changes a gate or admission outcome. Security review:
+PASS. Kernel identities remain private and are excluded from portable resource output;
+existing allowlists/deny scans, file modes and bounded cleanup remain authoritative.
+No credential, subprocess command or remote contract is added.
+
+Sizing: approximately 650 additional source/test/plan lines, zero new exported types,
+zero admission consumer migrations or rejection states. The existing one-consumer
+sizing floor remains applicable. Refresh support hashes and the clean host revision
+in a metadata-only contract commit. The eight-file live-artifact recovery and exact
+Documentation handoff above remain pending with their existing owners.
