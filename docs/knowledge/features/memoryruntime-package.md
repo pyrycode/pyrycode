@@ -1,18 +1,22 @@
 # `internal/memoryruntime` — isolated managed memory installation
 
 `Install(ctx, Options)` returns permanent managed launch locations and verified
-versions for Linux/OpenAI mode. Installation is independent of credentials,
-provider initialization, production databases, watchers and workspace search
-readiness. See [deployment](../../deployment.md#managed-memory-runtime) for
-the supported target, complete dependency pins, private paths and smoke command;
+versions for OpenAI mode on Linux and macOS. Installation is independent of
+credentials, provider initialization, production databases, watchers and
+workspace search readiness. See
+[deployment](../../deployment.md#managed-memory-runtime) for the supported
+targets, complete dependency pins, private paths and smoke commands;
 [memorysearch](memorysearch-package.md) owns read-only agent access detection.
 
 ## Artifact integrity and extraction
 
-The embedded `linux-amd64.lock.json` binds the standalone Python archive,
-bundled bootstrap pip and complete wheel closure. `download` hashes network
-bytes and rehashes cached artifacts before reuse; a checksum fetched beside an
-artifact would not authenticate it. The Pyrycode updater's signing keys have
+The embedded [Linux lock](../../../internal/memoryruntime/linux-amd64.lock.json)
+and [macOS lock](../../../internal/memoryruntime/macos-arm64.lock.json) bind each
+target's standalone Python archive, bundled bootstrap pip and complete wheel
+closure. Both pin CPython 3.12.11 (standalone release 20250918), pip 24.3.1 and
+the same 32 distribution versions, with target-specific artifacts. `download`
+hashes network bytes and rehashes cached artifacts before reuse; a checksum
+fetched beside an artifact would not authenticate it. The Pyrycode updater's signing keys have
 no authority over upstream Python or memsearch artifacts. See
 [the lock and publication decision](../decisions/044-memory-runtime-lock-and-generations.md).
 
@@ -52,6 +56,18 @@ publication record or an existing executable alone cannot establish readiness.
 
 ## Version and compatibility verification
 
+`selectPins` accepts only OpenAI mode on Linux/amd64 and Darwin/arm64.
+`supportedHost` retains Ubuntu 24.04/glibc >=2.39 validation; on macOS,
+`supportedMacOS` runs the fixed `/usr/bin/sw_vers -productVersion` command with
+bounded output and a credential-free environment. `macOSAtLeast` compares
+numeric version components against the lock's minimum, 26.6.2. This minimum
+follows the oldest executed smoke host; wheel tags alone do not prove support.
+Older/malformed versions, Intel Macs and other unsupported
+targets/modes fail recoverably with `ErrUnsupported`. `TestTargetPins`,
+`TestMacOSMinimumVersion`, `TestMacOSHostGate` and `TestMacOSInstallCancelled`
+cover lock selection, host rejection and cancellation/deadline causes before
+destination changes.
+
 `probe` imports memsearch, pymilvus, Milvus Lite and OpenAI, checks every pinned
 distribution plus Python/pip, runs the memsearch CLI version and finishes with
 `pip --isolated check`. Query each distribution by name with
@@ -70,9 +86,10 @@ no publication and a successful retry reusing verified downloads.
 ## Managed subprocesses and testing
 
 `run` uses a minimal environment with a private home, isolated Python, offline
-model flags and no inherited credentials. Linux process groups handle active
-cancellation; parent-death termination also stops a managed child if the
-installer process dies. Installer lock recovery alone cannot prove child
+model flags and no inherited credentials. Linux and macOS process groups
+handle active cancellation; Linux additionally stops a managed child if the
+installer process dies through parent-death termination. macOS has no such
+parent-death contract. Installer lock recovery alone cannot prove child
 termination: `TestParentDeathStopsCommand` checks that boundary separately from
 `TestInterruptedRetry`.
 
@@ -83,10 +100,26 @@ writer in isolation would miss unbounded child-output collection.
 output, sanitized environment and cancellation. `run` bounds stdout and stderr
 independently and never includes arbitrary subprocess output in failure text.
 
-Hermetic tests use controlled downloads and commands. The separate build-tagged
-`TestSmoke` calls the real installer and opens/closes only a temporary Milvus Lite
-database; it does not prove provider, indexing or agent readiness. Its
-[executed evidence](../../../internal/memoryruntime/smoke-linux-amd64.json) must
+Hermetic tests use controlled downloads and commands. Canonicalize macOS
+temporary homes with `filepath.EvalSymlinks` before passing them to `Install`:
+`/var` aliases `/private/var`, so an ordinary temporary path can otherwise trip
+`openPrivateHome`'s symlink-destination guard. `TestSmoke` resolves its temporary
+home to preserve the strict destination boundary.
+
+The shared exclusion, cancellation/retry, generation-preservation and
+publication/security tests run on macOS as well as Linux; only
+`TestParentDeathStopsCommand` requires Linux's parent-death contract.
+
+The separate build-tagged `TestSmoke` calls the real installer and opens/closes
+only a temporary Milvus Lite database; it does not prove provider, indexing or
+agent readiness. Its
+[macOS evidence](../../../internal/memoryruntime/smoke-macos-arm64.json) records
+arm64/macOS 26.6.2, build 25G83; the
+[Linux evidence](../../../internal/memoryruntime/smoke-linux-amd64.json) records
+Ubuntu 24.04.5 amd64/glibc 2.39. Both record all exact component versions and
+seven executed/passed checks, including repeated verified reuse.
+`TestMacOSSmokeEvidence` checks the committed macOS target, complete version
+closure and named successful results against the shipped lock. Evidence must
 be committed and match the advertised target and exact pins. Extend this entry
 point for new platforms or modes rather than treating unexecuted support as
 proved. See [verification practices](development-verification.md) for capture
