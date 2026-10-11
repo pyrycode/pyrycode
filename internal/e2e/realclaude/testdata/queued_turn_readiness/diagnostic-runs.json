@@ -475,17 +475,6 @@
     "The service becomes ready once both dependency roles enter, then stays ready for subsequent children. This is one tested lifecycle, not a recovered original dependency.",
     "Synthetic held Bash and background prompts preserve selected host edges; exact original tool choice, timing and outcomes remain unknown.",
     "Source Android lifecycle is translated to host requests; UI assertions and full mobile result remain pending in #2010.",
-    "ack_forwarder_line is before destination Write; ack_stdout_line is inside Parser.Write; kernel arrival is unobserved.",
-    "Successful isolated daemon stop/restart and new descendant sets were observed; separate kernel-exit witnesses for every outgoing child were not retained."
-  ],
-  "offline_validation": {
-    "passed": true,
-    "commands": [
-      "go test -race ./cmd/pyry/... ./internal/streamsup/... ./internal/e2e/realclaude/...",
-      "go test -tags e2e_realclaude -race -run ^Test(Readiness|QueuedReadiness|SourceCitation) ./internal/e2e/realclaude ./internal/streamsup",
-      "go vet ./...",
-      "go build ./cmd/pyry"
-    ],
-    "boundaries": "Scoped builder checks only; no full-module hermetic or full live host/mobile gate claimed."
-  }
+    "ack_forwarder_line is before destination Write; ack_stdout_line is inside Parser.Write; kernel arrival is unobserved."
+  ]
 }
