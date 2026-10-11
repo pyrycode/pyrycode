@@ -30,6 +30,7 @@ type Owner struct {
 	closed      bool
 	grace       time.Duration
 	failures    error
+	kill        func(int, syscall.Signal) error
 }
 type generation struct {
 	cancel      context.CancelFunc
@@ -52,9 +53,9 @@ func NewOwner(registry *Registry, nodeExecutable string) (*Owner, error) {
 	}
 	node, err = filepath.Abs(node)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("apps: resolve node executable: %w", err)
 	}
-	return &Owner{registry: registry, node: node, generations: map[string]*generation{}, ports: map[int]bool{}, previous: map[string]int{}, grace: stopGrace}, nil
+	return &Owner{registry: registry, node: node, generations: map[string]*generation{}, ports: map[int]bool{}, previous: map[string]int{}, grace: stopGrace, kill: syscall.Kill}, nil
 }
 
 // Start resumes available intent and waits for preparation/spawn or failure.
@@ -162,10 +163,14 @@ func (o *Owner) launch(ctx context.Context, id string, g *generation) {
 			err = ErrStale
 		}
 		if err == nil {
-			err = listener.Close()
+			if err = listener.Close(); err != nil {
+				err = fmt.Errorf("apps: release service listener: %w", err)
+			}
 		}
 		if err == nil {
-			err = g.cmd.Start()
+			if err = g.cmd.Start(); err != nil {
+				err = fmt.Errorf("apps: spawn service: %w", err)
+			}
 		}
 		o.mu.Unlock()
 		o.registry.mu.Unlock()
@@ -288,7 +293,7 @@ func (o *Owner) reserve(id string) (net.Listener, int, error) {
 	for attempt := 0; attempt < 128; attempt++ {
 		listener, err := net.Listen("tcp4", "127.0.0.1:0")
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("apps: reserve service port: %w", err)
 		}
 		port := listener.Addr().(*net.TCPAddr).Port
 		if o.ports[port] || o.previous[id] == port {
@@ -305,21 +310,25 @@ func (o *Owner) reserve(id string) (net.Listener, int, error) {
 // cleanup watches the group rather than only its leader: a leader may already
 // have exited while descendants still hold service resources.
 func (o *Owner) cleanup(pid int) error {
-	var result error
-	signal := func(sig syscall.Signal) {
-		err := syscall.Kill(-pid, sig)
+	var result, probeErr error
+	signal := func(sig syscall.Signal, operation string) {
+		err := o.kill(-pid, sig)
 		if err != nil && !errors.Is(err, syscall.ESRCH) {
-			result = errors.Join(result, err)
+			result = errors.Join(result, fmt.Errorf("apps: %s process group: %w", operation, err))
 		}
 	}
-	signal(syscall.SIGTERM)
+	signal(syscall.SIGTERM, "terminate")
 	deadline := time.Now().Add(o.grace)
 	for time.Now().Before(deadline) {
-		if errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
-			return result
+		err := o.kill(-pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return errors.Join(result, probeErr)
+		}
+		if err != nil && probeErr == nil {
+			probeErr = fmt.Errorf("apps: inspect process group: %w", err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	signal(syscall.SIGKILL)
-	return result
+	signal(syscall.SIGKILL, "kill")
+	return errors.Join(result, probeErr)
 }
