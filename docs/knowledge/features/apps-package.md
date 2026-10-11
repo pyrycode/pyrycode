@@ -27,6 +27,25 @@ rejected bytes untouched. The canonical UUIDv4 check reuses
 [`identity.ParseServerID`](identity-package.md#parseserverid--validation).
 Identity is `(server_id, app_id)`; separate hosts require separate roots.
 
+## Template toolchain
+
+The [standalone source scaffold](../../hosted-apps.md#template-and-saved-preferences)
+shares the manifest contract with `ValidateManifest`; generation and a successful
+build establish neither registration nor service readiness.
+
+An npm `preinstall` hook runs too late to reject an unsupported runtime before
+dependency installation. Keep the template's npm `devEngines` runtime error
+policy, `engines` range and `.npmrc` `engine-strict=true` together with
+`assertRuntime` checks in command/compiled entries. The check concerns the actual
+executable and must not silently choose another Node version.
+
+Portable compiler/bundler choices keep the scaffold's dependency closure small
+across Linux and macOS. TypeScript 7's native platform packages expanded the
+lockfile substantially; the template pins the JavaScript TypeScript 6 compiler
+and `esbuild-wasm` instead. TypeScript 6's side-effect import checking needs the
+explicit `declare module '*.css'` in `assets.d.ts` for the frontend stylesheet
+import; removing it breaks frontend typechecking.
+
 ## Manifest updates and retention
 
 The stored manifest can describe a candidate title/release while the committed
@@ -110,6 +129,16 @@ work; the registry adds no delivery goroutines or queues. Discovery wire mapping
 and relay/daemon installation remain #3138/#3139.
 
 ## Testing
+
+The scaffold's `fresh generated app passes the toolchain` test preserves a
+sentinel in existing `node_modules` while invoking `npm ci` with an explicitly
+selected unsupported Node executable. A nonzero exit alone could pass with a
+late `preinstall` rejection after dependencies were replaced; unchanged sentinel
+bytes prove rejection precedes that mutation. This arm requires
+`HOSTED_APP_UNSUPPORTED_NODE` and `HOSTED_APP_NPM_CLI`; the default run does not
+exercise an actual alternate executable. Generated `npm test` checks version
+strings separately. Frontend and service type-error injections likewise prove
+both trees are checked, rather than trusting an exit-zero typecheck on valid files.
 
 `TestStorageExactKeys` distinguishes required omissions from optional omissions
 and rejects aliases at each storage level. `TestStorageAliasShadowing` supplies
