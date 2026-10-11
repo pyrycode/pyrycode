@@ -21,6 +21,21 @@ _ = h2
 // Inspect the registry file at <home>/.pyry/test/sessions.json directly.
 ```
 
+### Host-app storage ownership and readback
+
+Seed host-app registrations/lifecycle through `internal/apps` only while the
+daemon is stopped, then relinquish that registry before `StartInWithEnv`.
+`apps.Open` durably normalizes observed state: using it for post-start readback
+could make a broken daemon pass by performing the missing startup work in the
+test. `TestHostedAppsRestartIsolation` instead reads and decodes raw
+`registry.json` before any test-side reopen, compares full metadata/intent/releases
+and changed revisions, and checks saved data bytes separately. A second unchanged
+restart must preserve bytes/revisions. Keeping another home with a distinct
+persisted host ID and the same app ID running during that restart detects
+cross-host state aliasing. Never resume writes through the seeding registry;
+its stale snapshot could overwrite normalization and move revisions backwards.
+See [registry ownership](apps-package.md#concurrency-and-persistence).
+
 ### Why `os.MkdirTemp` instead of `t.TempDir()` for the HOME
 
 Unix sockets cap `sun_path` at 104 bytes on macOS (108 on Linux).

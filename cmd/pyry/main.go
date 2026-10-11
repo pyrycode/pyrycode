@@ -309,6 +309,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}),
 		logRing,
 	))
+	appRegistry := openDaemonApps(*name, logger)
 	workspaceBase := resolveStartupWorkspaceBase(os.Getwd, logger)
 	// Rows recorded before #2568 carry the client's spelling of their folder —
 	// relative or "~"-prefixed — beside rows holding its realpath, so one folder
@@ -750,6 +751,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 
 	relayCleanup, approvalSurface, announceAttachment, announceConversation, announcePost, pairingProvider, err := startRelay(ctx, logger, relayWiring{
 		instanceName:     *name,
+		appRegistry:      appRegistry,
 		relayURL:         relayURL,
 		version:          Version,
 		allowInsecure:    allowInsecure,
