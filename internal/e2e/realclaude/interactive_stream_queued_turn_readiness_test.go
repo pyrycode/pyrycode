@@ -366,6 +366,16 @@ func readinessReadObservations(path string, subjects map[string]int) []readiness
 
 func readinessResources(ctx context.Context, daemonPID int, path string) map[string]any {
 	r := map[string]any{"at": time.Now().UTC(), "known": false}
+	if b, err := os.ReadFile("/proc/meminfo"); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) == 3 && (f[0] == "MemTotal:" || f[0] == "MemAvailable:" || f[0] == "SwapTotal:" || f[0] == "SwapFree:") {
+				if n, err := strconv.ParseUint(f[1], 10, 64); err == nil {
+					r["host_"+strings.TrimSuffix(f[0], ":")+"_kib"] = n
+				}
+			}
+		}
+	}
 	call, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(call, "ps", "-e", "-o", "pid=,ppid=,pcpu=,rss=").Output()
