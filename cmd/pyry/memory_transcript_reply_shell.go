@@ -20,6 +20,13 @@ func (r *memoryReplyEvidence) ordinaryWork(e history.Entry, id memoryReplyIdenti
 	if id.Call == "" {
 		return
 	}
+	// Only accepted child-work event kinds can transfer ordinary call ownership.
+	// Parented runtime facts are rejected and must leave both call lanes intact.
+	switch e.Type {
+	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+	default:
+		return
+	}
 	group := r.childKey(e, "")
 	var calls map[string]*memoryReplyOrdinaryCall
 	if child {

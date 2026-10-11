@@ -68,6 +68,32 @@ func TestVerifierShellRecoveryValidation(t *testing.T) {
 	}
 }
 
+func TestVerifierRejectedRuntimeTransfer(t *testing.T) {
+	for _, source := range []string{"claude", "legacy", "codex"} {
+		// Child text must still transfer the existing ordinary call. A guard
+		// that rejects every non-tool event would fabricate the same observation.
+		for _, kind := range []string{"main_turn_opened", "main_turn_interrupted", "assistant_delta"} {
+			for _, parent := range []string{"parent_tool_call_id", "parent_tool_use_id"} {
+				for _, shell := range []string{"Bash", "local_bash"} {
+					for _, interrupted := range []bool{false, true} {
+						t.Run(fmt.Sprintf("%s/%s/%s/%s/interrupted=%t", source, kind, parent, shell, interrupted), func(t *testing.T) {
+							entries := testReplyEntries(
+								`tool_use {"turn_id":"old","tool_use_id":"child","name":"Read"}`,
+								fmt.Sprintf(`%s {"turn_id":"old","tool_use_id":"child",%q:"outer","cause":"restart","occurred_at":"2026-01-01T00:00:00Z","text":"child text"}`, kind, parent),
+								fmt.Sprintf(`tool_use {"turn_id":"old","tool_use_id":"child","name":%q}`, shell),
+								replyUser,
+								`agent_ended_with_session {"conversation_id":"chat","tool_call_id":"child","call_observed_entry_id":3,"parent_tool_call_id":"outer","cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`,
+								replyChildResult)
+							testReplyLauncherSource(entries, source)
+							testReplyLauncherReplay(t, entries, 6, 4, interrupted)
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestMemoryTranscriptReplyShellObservation(t *testing.T) {
 	launch := `tool_use {"turn_id":"old","tool_use_id":"child","name":"Bash"}`
 	ending := `agent_ended_with_session {"conversation_id":"chat","tool_call_id":"child","call_observed_entry_id":1,"parent_tool_call_id":"outer","cause":"restart","occurred_at":"2026-01-01T00:00:00Z"}`
