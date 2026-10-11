@@ -103,18 +103,21 @@ type InnerFrameV2Decoded struct {
 var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent, protocol.CapabilityStopBackgroundTask}
 
 // negotiateCapabilities intersects advertisements with supported capabilities,
-// in supported-set order, then grants thread only when readiness is supplied.
+// in supported-set order, then grants thread and hosted apps only with readiness.
 // Duplicates collapse and unsupported names grant nothing. A nil result omits
 // the ack field and preserves the fail-closed capability flags.
-func negotiateCapabilities(advertised []string, threadReady ...bool) []string {
+func negotiateCapabilities(advertised []string, readiness ...bool) []string {
 	var out []string
 	for _, name := range supportedV2Capabilities {
 		if slices.Contains(advertised, name) {
 			out = append(out, name)
 		}
 	}
-	if len(threadReady) > 0 && threadReady[0] && slices.Contains(advertised, protocol.CapabilityThread) {
+	if len(readiness) > 0 && readiness[0] && slices.Contains(advertised, protocol.CapabilityThread) {
 		out = append(out, protocol.CapabilityThread)
+	}
+	if len(readiness) > 1 && readiness[1] && slices.Contains(advertised, protocol.CapabilityHostedAppsV1) {
+		out = append(out, protocol.CapabilityHostedAppsV1)
 	}
 	return out
 }
@@ -137,7 +140,7 @@ func WorkspaceRoot() string {
 // docs/specs/architecture/445-internal-relay-v2-inner-frame-handshake-token-gating.md.
 // A noise_init arriving in V2StateOpen is a phone-initiated re-key
 // (docs/protocol-mobile.md § Re-key); it is routed to handleRekeyInit,
-// which runs IK responder again and atomically swaps s.send / s.recv.
+// which runs IK responder again and orders send-key changes through noise_resp.
 // noise_init in V2StateHandshakeComplete remains a state-machine
 // violation (CipherStates are held but uncommitted; a fresh handshake
 // at that point is indistinguishable from a wire-protocol violation).
@@ -230,7 +233,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// as s.interactive below. Computed before the ack literal so the same
 	// negotiated slice is the single source of truth for both the echo and the
 	// flag — ack and flag can never disagree.
-	negotiated := negotiateCapabilities(helloPayload.Capabilities, m.cfg.ThreadReady != nil && m.cfg.ThreadReady())
+	negotiated := negotiateCapabilities(helloPayload.Capabilities, m.cfg.ThreadReady != nil && m.cfg.ThreadReady(), m.cfg.HostedAppsDiscovery != nil && m.cfg.HostedAppsSend != nil && m.cfg.HostedAppsReady != nil && m.cfg.HostedAppsReady())
 
 	// Reload the on-disk registry so a device paired after daemon startup
 	// authenticates without a restart (#782). Fail closed on a read error:
@@ -490,6 +493,11 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// reasons and, like s.interactive, left untouched by a re-key.
 	s.multiAgent = slices.Contains(negotiated, protocol.CapabilityMultiAgent)
 	s.thread = slices.Contains(negotiated, protocol.CapabilityThread)
+	s.hostedApps = slices.Contains(negotiated, protocol.CapabilityHostedAppsV1)
+	s.nextID = 2
+	if m.cfg.HostedAppsSend != nil || m.cfg.HostedAppsDiscovery != nil || slices.Contains(helloPayload.Capabilities, protocol.CapabilityHostedAppsV1) {
+		s.hosted = &hostedState{}
+	}
 	// Retain what the client reported about ITSELF, for the session's appended
 	// system prompt (#2148). Recorded here, on the accept path and before the
 	// session becomes enumerable, for s.interactive's reason: an unauthenticated

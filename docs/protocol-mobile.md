@@ -6407,7 +6407,8 @@ The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, wi
 
 ## Hosted apps (v2)
 
-**Defined ahead of hosting implementation.** The
+**Discovery and list cancellation are implemented; production activation remains
+pending.** The
 [hosted-app reference](hosted-apps.md) and
 [approved v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 fix manifest fields, runtime/layout, resource/Fetch semantics, limits and safe
@@ -6415,17 +6416,24 @@ publication. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 for daemon, Electron and Android consumers.
 
-The six discovery/lifecycle/cancellation frames below have Go declarations in
-`internal/protocol` (#3137), ahead of their producers. Discovery producers and
-handlers (#3138), resource/cancellation producers and handlers (#3123), and
-capability activation remain **pending implementation**. Declaration alone is
-not shipped hosting support: the six frames do not join `inboundAppTypeSet`, and
-`CapabilityHostedAppsV1` does not add support to `supportedV2Capabilities`.
+The encrypted v2 boundary recognizes the six declared discovery/lifecycle/
+cancellation types: `list_apps`, `apps`, `app_updated`, `app_removed`, `app_cancel`
+and `app_cancelled`. Only `list_apps` and `app_cancel` are client directions.
+Paged discovery and list-scoped cancellation have handlers (#3157); lifecycle
+notification producers remain pending #3158, and resource requests, credit and
+resource-scoped cancellation remain #3123. These types do not join the v1
+`inboundAppTypeSet`.
 
 The additive capability constant `CapabilityHostedAppsV1` is exactly
-`hosted_apps_v1`. Once activated, clients will advertise it through
-`HelloClientPayload.capabilities` and the daemon will acknowledge it through
-`HelloAckPayload.capabilities` after `negotiateCapabilities`. Following
+`hosted_apps_v1`. Clients offer it through `HelloClientPayload.capabilities`;
+`negotiateCapabilities` includes it in `HelloAckPayload.capabilities` only when
+the discovery provider and cancellable hosted delivery adapter are installed
+and daemon-supplied readiness attests registration, supervision and resource
+routing together. Missing or false readiness withholds it. Production installs
+the general cancellable transport adapter but supplies neither discovery nor
+readiness, so the capability remains disabled. Complete production activation
+requires supervision/resource integration and cancellable transport wiring;
+fake sessions may explicitly attest complete readiness. Following
 [ADR 037](knowledge/decisions/037-capability-strings-not-version-numbers.md), it
 advertises support and grants no authorization. Advertise it only once v1
 registration, supervision and routing are wired and available. Without negotiated
@@ -6437,24 +6445,24 @@ version `1`, app `release_version` and transport `v2` are distinct.
 
 | Envelope type | Direction | Purpose/correlation |
 |---|---|---|
-| `list_apps` | Client → daemon | `ListAppsPayload`: optional opaque `cursor`; first request `{}`. Declared ahead of producer/handler (#3138). |
-| `apps` | Daemon → client | `AppsPayload`: reply to list ID; `revision`, records and required nullable `next_cursor`. Declared ahead of producer (#3138). |
-| `app_updated` | Daemon → client | `HostedAppRecord`: unsolicited whole record, omitting `in_reply_to`. Declared ahead of producer (#3138). |
-| `app_removed` | Daemon → client | `AppRemovedPayload`: unsolicited `{app_id, revision}`, omitting `in_reply_to`; saved data is retained. Declared ahead of producer (#3138). |
+| `list_apps` | Client → daemon | `ListAppsPayload`: `{}` starts a walk; optional connection-owned `cursor` continues it. One pending page per connection (#3157). |
+| `apps` | Daemon → client | `AppsPayload`: reply to list ID; atomic host `revision`, at most 16 whole records sorted by `app_id`, required nullable `next_cursor` (#3157). |
+| `app_updated` | Daemon → client | `HostedAppRecord`: unsolicited whole record, omitting `in_reply_to`. Producer pending #3158. |
+| `app_removed` | Daemon → client | `AppRemovedPayload`: unsolicited `{app_id, revision}`, omitting `in_reply_to`; saved data is retained. Producer pending #3158. |
 | `app_asset_request` | Client → daemon | Selected app/release asset GET, with native-stamped navigation. |
 | `app_api_request` | Client → daemon | Selected app/release API method, permitted headers and base64 body. |
 | `app_response` | Daemon → client | Once per asset/API request; status, headers, byte/chunk counts and digest. |
 | `app_response_chunk` | Daemon → client | Ordered base64 body chunks replying to the same asset/API ID. |
 | `app_response_credit` | Client → daemon | Grants one next chunk via original `request_id` and `next_index`; no reply. |
-| `app_cancel` | Client → daemon | `AppCancelPayload`: original target `request_id`; `app_id` required for asset/API, omitted for list. Declared ahead of producer/handler (#3123). |
-| `app_cancelled` | Daemon → client | `AppCancelPayload`: reply to cancel ID, echoing target/scope; no mutation-rollback guarantee. Declared ahead of producer (#3123). |
-| `error` | Daemon → client | Existing `ErrorPayload`; terminal bridge failure replying to the failing ID. |
+| `app_cancel` | Client → daemon | `AppCancelPayload`: original target `request_id`; omit `app_id` to cancel this connection's pending list page (#3157). Valid resource scope with `app_id` returns `protocol.unsupported` until #3123. |
+| `app_cancelled` | Daemon → client | List-cancel reply to the cancel ID, echoing target `request_id` and omitting `app_id`; duplicate/unknown/finished targets are idempotent (#3157). Resource acknowledgements remain #3123. |
+| `error` | Daemon → client | Static bridge error replying to the failing ID: required `code`, `message`, `retryable`; optional `retry_after_s` for busy. |
 
-### Declared discovery and lifecycle payloads
+### Discovery and lifecycle payloads
 
-These Go-backed shapes use the existing `Envelope`; they declare the contract
-ahead of the pending producers above. Payload fields are required unless stated
-optional. Optional fields are omitted when unset, never emitted as null.
+These Go-backed shapes use the existing `Envelope`. Lifecycle notification
+producers remain pending as described above. Payload fields are required unless
+stated optional. Optional fields are omitted when unset, never emitted as null.
 
 - `ListAppsPayload` has only optional `cursor` (`string`, `omitempty`). The first
   page request is `{}`; later requests supply a nonempty opaque cursor. Sending
@@ -6484,15 +6492,84 @@ optional. Optional fields are omitted when unset, never emitted as null.
   target `request_id`. For example, cancelling request 6 with envelope ID 7
   yields `app_cancelled` with `in_reply_to: 7` and `request_id: 6`.
 
-Standalone bridge errors reuse `ErrorPayload`, replying to the failing request
-through `in_reply_to`; they are distinct from the record's two-field `last_error`.
+Standalone bridge errors use only required `code`, static `message` and
+`retryable`, plus `retry_after_s: 1` for `app.busy`, replying to the failing
+request through `in_reply_to`. Other optional `ErrorPayload` fields are omitted;
+the error is distinct from the record's two-field `last_error`.
 Envelope IDs, correlations, cancellation `request_id` and page revisions permit
 0–9007199254740991; record/tombstone revisions permit 1–9007199254740991. Go's
 `uint64` preserves the integers but does not enforce these bounds. Required-key
 presence, safe-integer bounds, cursor validity, direction and forbidden metadata
-are handler obligations pending #3138/#3123. Ordinary DTO decoding validates
-none of those rules. Shared handshake examples reuse the existing handshake
-DTOs and prove vocabulary, not live negotiation or hosting availability.
+are enforced for discovery/list cancellation at the encrypted boundary.
+Resource enforcement remains #3123. Ordinary DTO decoding validates none of
+those rules.
+
+### Paging, cancellation and validation
+
+Discovery requires an authenticated, nonrevoked paired peer and is independent
+of `interactive`, `thread`, conversations and active channels. Membership is
+rechecked on request admission, completion and delivery; unauthenticated or
+revoked peers receive no app data. A valid request without negotiated support
+receives a correlated, nonretryable `protocol.unsupported`.
+
+Each page contains at most 16 whole committed records, sorted by `app_id` and
+including every desired/observed state. Records and `apps.revision` come from
+one atomic registry snapshot; candidate manifest title/release metadata never
+replaces committed fields. Empty discovery emits `items: []`; `next_cursor`,
+`active_release`, `pending_release` and `last_error` remain present even when null.
+
+A nonempty opaque cursor is at most 256 ASCII bytes. Its connection-owned state
+binds the authenticated host, captured revision and last app ID, and expires
+30 seconds after issuance. Only that connection's current continuation is valid;
+it cannot select a host or survive reconnect. Malformed, tampered, foreign-host
+or old-connection cursors receive nonretryable `app.invalid_request`. Expiry or
+revision drift receives retryable `apps.changed`, retires the continuation and
+requires a fresh `{}` request. Continuations re-read the atomic snapshot and
+check revision, so pages never mix revisions. A fresh `{}` after page completion
+replaces the previous walk.
+
+At most one list page is pending per connection, from registry read through
+queued reply and delivery. A delivered page is finished work; its cursor retains
+no worker. Further list work while capacity is occupied receives retryable
+`app.busy` with `retry_after_s: 1`. The ordered discovery/control delivery lane
+holds at most 16 envelopes, including active delivery and cancel acknowledgements.
+
+List-scoped `app_cancel` omits `app_id` and names the pending original
+`request_id` on that connection. It retires the read result or queued page and
+invalidates that walk's continuation. `app_cancelled` correlates to the cancel
+envelope ID and echoes the target ID; duplicate, unknown and finished targets
+are idempotent and do not retire other work. A blocked registry read still
+occupies its slot until it exits, so repeated cancellation cannot accumulate
+replacement readers. A valid resource-scoped cancel with `app_id` receives
+correlated `protocol.unsupported` and cannot retire discovery until #3123.
+
+Cancellation, disconnect, revocation and shutdown suppress late results and
+retire queued work independently of blocked reads or delivery. Another
+connection can continue. If cancellation targets a page whose sealed delivery
+has begun, the connection closes instead of sending a later acknowledgement
+across a Noise nonce gap. Queue overflow, delivery failure after sealing and
+delivery timeout also close the affected connection; controls are never silently
+dropped. Delivery uses a cancellable adapter with a five-second deadline.
+
+Requests require exact-case `id`, `type`, `ts` and object `payload`, with all
+known required payload keys present and `id`/`request_id` as JSON integers in
+the safe range.
+Timestamps use padded RFC3339 UTC syntax ending in `Z`, optionally with a
+nonempty decimal fraction. Optional known fields must be omitted when unset,
+not null. Reject duplicate keys at any depth, trailing JSON, invalid UTF-8 and
+empty/null/oversized/non-ASCII cursors. Client-sent `apps`, `app_updated`,
+`app_removed` and `app_cancelled` are invalid. Presence of `conversation_id`,
+`session_id`, `event_id`, `history_entry_id`, `session_state_cleared`,
+`payload_encrypted` or request `in_reply_to` is invalid even when false/null.
+Unknown additive fields grant no authority; case aliases cannot supply or
+override canonical fields. Invalid input with an unambiguous usable request ID
+receives static nonretryable `app.invalid_request`; unusable or ambiguous IDs
+follow the protocol-rejection/close path.
+
+Every discovery reply, error and cancel acknowledgement has a fresh sender
+connection-local safe-integer `id`, without reusing `hello_ack`'s ID, and
+`in_reply_to` naming the request it answers. App data enters neither history nor
+event rings; output omits conversation/session/replay metadata.
 
 ### Host scope and pending resource contract
 

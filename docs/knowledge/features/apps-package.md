@@ -108,7 +108,13 @@ value, not pointer identity. Each changed mutation advances the durable host
 sequence once and stamps its record or tombstone. A failed write never swaps
 committed memory or notifies consumers.
 `Registry.List` returns records and host revision from one detached snapshot,
-including independent last-error values. Use one registry owner per root;
+including independent last-error values. Discovery must preserve this atomic
+pair: reading the revision separately could label records from another commit.
+The relay maps committed `Record` fields, never candidate manifest title/release
+metadata, and rechecks the snapshot revision on each continuation. Equal app IDs
+on different host roots remain separate registrations; connection-owned cursors
+cannot select a host. See [discovery paging](../../protocol-mobile.md#paging-cancellation-and-validation).
+Use one registry owner per root;
 independent owners and cross-process writes to the same root are unsupported.
 Reopening can commit newer revisions, so transfer ownership to the reopened
 registry and stop using its predecessor. Mutating the predecessor's stale
@@ -126,7 +132,11 @@ Callbacks must return promptly and never re-enter any registry method, including
 the returned idempotent unsubscribe: doing so would deadlock on the held mutex.
 Slow callbacks also block mutations and readers. Consumers own later transport
 work; the registry adds no delivery goroutines or queues. Discovery wire mapping
-and relay/daemon installation remain #3138/#3139.
+is implemented in the relay; lifecycle notification producers remain #3158 and
+daemon installation remains #3139. Because `List` can wait on this mutex, relay
+cancellation retires its result without releasing read capacity until the
+original reader returns. Starting a replacement reader on every cancel would
+accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ## Testing
 
