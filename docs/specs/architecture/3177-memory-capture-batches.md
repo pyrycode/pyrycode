@@ -58,3 +58,8 @@ Pending documentation stage: add `docs/knowledge/features/memorycapture-package.
 - Threat model: filesystem redirection and unsafe state are in scope; executing capture, recovering unreported note edits (#3174) and receipts (#3178) are explicitly deferred.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-11
+
+## Revisions
+- 2026-10-11: `TestFilesystemAttacks/regular-swap` demonstrated inode reuse after closing the validated record. Keep that descriptor alive throughout the transaction and duplicate the temporary descriptor through close/rename. Revalidate the published inode and complete bytes after directory sync, with `TestPostRenameSubstitution` covering post-rename record, lock and directory swaps. The contract remains no executable batch on any failure, including ambiguous committed writes.
+- 2026-10-11: Reject invalid UTF-8 rather than let JSON silently replace captured text or identity bytes. Sync every private directory's parent during New, including existing entries from another creator or an earlier failed mkdir sync. Bound record reads at 64 MiB. Partial-write and structured-corruption tests extend the fault proof. Final written work exceeds the initial 850–950-line sketch (approximately 1,300 lines); the recorded grandchild exception still applies. Five exported types and zero consumers remain unchanged.
+- 2026-10-11: `TestOwnershipValidation` covers foreign-owned records, private directories and home directories without requiring chown privileges; the real foreign-owner filesystem fixture remains conditional on root. Final written work is approximately 1,440 lines including the plan. All persisted payload and evidence contracts are unchanged.
