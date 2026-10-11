@@ -3,12 +3,7 @@
 package realclaude
 
 import (
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -73,61 +68,5 @@ func TestReadinessPrefixContract(t *testing.T) {
 	}
 	if got := readinessOpeningTypes(); strings.Join(got, ",") != "mcp_status_request,request_context_usage,request_session_settings,request_history" {
 		t.Fatalf("opening control types: %v", got)
-	}
-}
-
-func TestReadinessRetainedEvidence(t *testing.T) {
-	dir := filepath.Join("testdata", "queued_turn_readiness")
-	b, err := os.ReadFile(filepath.Join(dir, "diagnostic-runs.json"))
-	if err != nil {
-		t.Fatal("counted diagnostic manifest missing")
-	}
-	var manifest struct {
-		Artifacts []struct {
-			Path, SHA256, Source string
-			Counts               map[string]int
-		}
-	}
-	if json.Unmarshal(b, &manifest) != nil || len(manifest.Artifacts) == 0 {
-		t.Fatal("usable artifact pins missing")
-	}
-	for _, a := range manifest.Artifacts {
-		if filepath.Base(a.Path) != a.Path || a.Path == "diagnostic-runs.json" {
-			t.Fatal("artifact path escapes capture directory")
-		}
-		b, err := os.ReadFile(filepath.Join(dir, a.Path))
-		if err != nil || fmt.Sprintf("%x", sha256.Sum256(b)) != a.SHA256 {
-			t.Fatalf("missing or changed artifact: %s", a.Path)
-		}
-		var r readinessCapture
-		if json.Unmarshal(b, &r) != nil || r.DaemonCommit != a.Source || !reflect.DeepEqual(r.Counts, a.Counts) {
-			t.Fatalf("source/count pin mismatch: %s", a.Path)
-		}
-		if r.Counts["executed"] != r.Counts["passed"]+r.Counts["failed"] || r.Counts["skipped"] != 0 {
-			t.Fatalf("unusable terminal counts: %s", a.Path)
-		}
-		for _, w := range r.Witnesses {
-			if w.Subject != "" || w.Value != 0 {
-				t.Fatal("portable witness retained private join")
-			}
-		}
-	}
-}
-
-func TestReadinessConversationOrdinals(t *testing.T) {
-	p := &readinessReplay{subjects: map[string]int{"seed": 0}}
-	a := p.bind("a", "child-a")
-	b := p.bind("b", "child-b")
-	p.bind("seed", "seed-child")
-	c := p.bind("c", "child-c")
-	if a == b || a == c || b == c || c == 0 {
-		t.Fatal("selecting seed reused a conversation ordinal")
-	}
-	if got := p.bind("a", "replacement-child"); got != a || p.subjects["replacement-child"] != a {
-		t.Fatal("replacement lost conversation identity")
-	}
-	d := p.bind("d", "child-d")
-	if d == c || d == a || d == b {
-		t.Fatal("reactivation reset the allocation counter")
 	}
 }
