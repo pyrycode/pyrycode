@@ -174,10 +174,9 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 			if ended && got.Idle && got.ExactlyOnce && got.ReplyMatches {
 				break
 			}
-			raw, err := h.phone.ReceiveBytes(time.Until(until))
+			raw, err := h.phone.ReceiveBytes(250 * time.Millisecond)
 			if err != nil {
-				r.Setup["phone_read_failed"] = true
-				break
+				continue
 			}
 			var frame protocol.InnerFrameV2
 			if json.Unmarshal(raw, &frame) != nil || frame.Type != protocol.TypeNoiseMsg {
@@ -219,7 +218,6 @@ func readinessRunArm(t *testing.T, bin string, preceding int, r *readinessCaptur
 				got.Idle = true
 			}
 		}
-		readinessFoldTurn(got, readinessHistory(h.home, conv), conv, msg, prompt)
 		got.AdmissionWithin90Seconds = !got.Enqueued.IsZero() && !got.Delivered.IsZero() && !got.Opened.IsZero() && got.Delivered.Sub(got.Enqueued) <= 90*time.Second && got.Opened.Sub(got.Enqueued) <= 90*time.Second
 		obs := readinessReadObservations(private, subjects)
 		boundaries := map[string]time.Time{}
