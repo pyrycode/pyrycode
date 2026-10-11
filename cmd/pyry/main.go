@@ -608,7 +608,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// for queueChanges' reason. The ring that push appends to is born in the relay
 	// leg, which hands it to the emitter's Run at start.
 	operatorMessages := make(chan operatorMessage, operatorMessageQueueSize)
+	ome := newOperatorMessageEmitterV2(operatorMessages, logger)
 	sends := newQueuedSendHistory(conversationHistory, logger, channelPostSession(convReg, pool.HarnessFor))
+	sends.publish = ome.notifyReceipt
 	// Queued Claude history entries and pushes wait for their echoes, which the stream drain hands over through the sink. Built only on the
 	// stream path, beside the tracker whose idle is its fallback; nil elsewhere,
 	// which commits at the write as before.
@@ -703,11 +705,6 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// Built here (so queue.Snapshot is bound) but its Run goroutine starts inside
 	// startRelayV2, where the broadcaster exists.
 	qse := newQueueStateEmitterV2(queueChanges, queue.Snapshot, logger)
-
-	// The live push of the operator's own delivered message (#2699): fed by the
-	// history producer on OnDelivered, started inside startRelayV2 where the
-	// broadcaster and the replay ring exist — same shape as qse.
-	ome := newOperatorMessageEmitterV2(operatorMessages, logger)
 
 	// The session_error producer (#1008): on each msgqueue give-up it fans a typed
 	// session_error envelope (terminal CodeSessionBlocked) to interactive phones,

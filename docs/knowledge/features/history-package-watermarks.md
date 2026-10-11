@@ -63,9 +63,16 @@ with `Shown == true`. Every other `legacyHistoryType` counts regardless of
 absent/false/true visibility, including normal, failed/stopped `turn_end` and
 nonvisual metadata. Facts validated by `legacyRuntimeReceipt` count as projected
 info banners at their original durable IDs, including receipt-only logs and
-runtime tails. Unsupported entries, including invalid runtime facts, keep
-conservative absent/true visibility counting and false exclusion. Transport
-exclusion or fallback counting never certifies a harmless receipt.
+runtime tails. This includes `send_accepted`, `send_delivered`, `send_dropped`
+and `send_lost` (#3167); valid hidden removal/give-up receipts count even when
+the raw displayable watermark is zero. The
+[queued-send classifier](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)
+requires matching conversation, nonzero durable ID/timestamp, acceptance time or
+outcome time/references and exact supported reasons. Raw payloads, visibility,
+provenance, store watermarks and ID allocation retain their existing semantics.
+Unsupported entries, including malformed queued/runtime facts and unknown
+types, keep conservative absent/true visibility counting and false exclusion.
+Transport exclusion or fallback counting never certifies a harmless receipt.
 
 The adapter validates through `Store.LatestEntryID`, then walks newest-first raw
 pages of 128 entries until it finds qualifying content or `AtStart`. It keeps bounded
@@ -75,7 +82,7 @@ Entirely hidden logs can still contain counted completions, metadata or runtime
 receipts; only a zero raw durable cursor can short-circuit this scan. This
 watermark walk is separate from `newHistoryPager`, which projects exactly one
 bounded raw page and retains its opaque cursor and `AtStart`, including pages
-containing only [runtime receipts](history-package.md#reader-2116).
+containing only [runtime or queued-send receipts](history-package.md#reader-2116).
 
 `read_up_to` stays in the original durable ID space. The registry persists
 `max(held, min(up_to, latest))`; a held mark above the current legacy watermark
@@ -108,6 +115,13 @@ eligible entries, excluded statuses, validated receipts and unsupported fallback
 `TestLegacyRuntimeReceipts_Watermark` checks warm/reopened stores, raw watermark
 preservation and append after lookup; `TestLegacyRuntimeReceipts_ReadMarks`
 checks list/clamp agreement, persistence, repeats and held marks above the clamp.
+`TestQueuedLegacyReceipts_CompletedTurn` removes queued acceptance/delivery
+receipts to reproduce the checkpoint hole after a displayed reply, then checks
+the repaired checkpoint against correlated persisted read confirmation through
+the real queue, operator and interactive emitters, pager and list/read handlers.
+Warm/reopened logs and page/live/replay overlap preserve accounting without
+granting sight; a checkpoint-versus-raw-watermark check alone misses an
+incorrect legacy clamp.
 
 Within the raw store, after `load`, the first filtered lookup walks `listSegments`
 newest-first and each `readSegment`'s entries backwards until a qualifying entry

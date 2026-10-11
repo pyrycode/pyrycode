@@ -17,20 +17,20 @@ import (
 // a push (queueStateQueueSize's reasoning).
 const operatorMessageQueueSize = 16
 
-// operatorMessage is one confirmed operator turn, handed from
-// newOperatorMessageHistory to the live push (#2699). payload and ts are the
-// very values the durable log entry was written with, so the log and the wire
-// cannot differ.
+// operatorMessage carries a committed user message or an inert queued receipt.
+// The payload, timestamp and durable identity are shared by history and live
+// publication. A user message can carry its linked outcome for ordered fan-out.
 type operatorMessage struct {
 	convID         string
+	typ            string
 	payload        json.RawMessage
 	ts             time.Time
 	historyEntryID *uint64
+	receipt        *operatorMessage
 }
 
-// operatorMessageEmitterV2 pushes the operator's own delivered message, as a
-// `message` envelope with role "user", to every open INTERACTIVE conn, the
-// sender's included (#2699). It mirrors queueStateEmitterV2: a buffered channel
+// operatorMessageEmitterV2 pushes delivered user messages and queued receipts
+// to every open interactive connection, including the sender. A buffered channel
 // decouples unplaced queue confirmations from Run. Placed Claude messages
 // call broadcast synchronously from the stream drain; mu serializes both paths.
 //
@@ -51,13 +51,32 @@ type operatorMessageEmitterV2 struct {
 	// mu protects the producer counter and fan-out shared by Run and stream placement.
 	mu     sync.Mutex
 	nextID uint64
+	// Queue producers never acquire mu, which can be held during peer delivery.
+	pendingMu sync.Mutex
+	pending   []operatorMessage
+	wake      chan struct{}
 }
 
 // newOperatorMessageEmitterV2 builds the emitter over the channel the
 // OnDelivered seam sends into. Like queueChanges, the channel exists before
 // msgqueue.New; Run is started by the relay leg.
 func newOperatorMessageEmitterV2(in <-chan operatorMessage, logger *slog.Logger) *operatorMessageEmitterV2 {
-	return &operatorMessageEmitterV2{in: in, logger: logger}
+	return &operatorMessageEmitterV2{in: in, logger: logger, wake: make(chan struct{}, 1)}
+}
+
+func (e *operatorMessageEmitterV2) notifyReceipt(m operatorMessage) {
+	e.pendingMu.Lock()
+	if len(e.pending) == operatorMessageQueueSize {
+		e.pendingMu.Unlock()
+		e.logger.Warn("relay: queued receipt mailbox full", "event", "send_history.queue_full")
+		return
+	}
+	e.pending = append(e.pending, m)
+	e.pendingMu.Unlock()
+	select {
+	case e.wake <- struct{}{}:
+	default:
+	}
 }
 
 // operatorMessageNotify builds the push hand-off newOperatorMessageHistory calls
@@ -84,6 +103,8 @@ func (e *operatorMessageEmitterV2) Run(ctx context.Context, bcast interactiveBro
 		select {
 		case <-ctx.Done():
 			return
+		case <-e.wake:
+			e.broadcast(ctx, bcast, ring, operatorMessage{})
 		case m, ok := <-e.in:
 			if !ok {
 				return
@@ -93,16 +114,36 @@ func (e *operatorMessageEmitterV2) Run(ctx context.Context, bcast interactiveBro
 	}
 }
 
-// broadcast appends the message to the replay ring once, before the fan-out, so
-// it is retained with no conn open, then pushes one envelope per interactive
-// conn sharing that one event id, payload and stamp — the shape of
-// interactiveTurnEmitterV2.emit.
+// broadcast drains accepted/drop receipts before a user and its linked outcome.
+// Each event enters replay once before interactive fan-out, sharing the original
+// durable identity, payload and timestamp even with no connections open.
 func (e *operatorMessageEmitterV2) broadcast(ctx context.Context, bcast interactiveBroadcaster, ring *eventring.Ring, m operatorMessage) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.pendingMu.Lock()
+	pending := e.pending
+	e.pending = nil
+	e.pendingMu.Unlock()
+	for _, receipt := range pending {
+		e.publish(ctx, bcast, ring, receipt)
+	}
+	if m.convID != "" {
+		e.publish(ctx, bcast, ring, m)
+		if m.receipt != nil {
+			e.publish(ctx, bcast, ring, *m.receipt)
+		}
+	}
+}
+
+// publish runs under mu; the user and its outcome form one ordered batch.
+func (e *operatorMessageEmitterV2) publish(ctx context.Context, bcast interactiveBroadcaster, ring *eventring.Ring, m operatorMessage) {
+	typ := m.typ
+	if typ == "" {
+		typ = protocol.TypeMessage
+	}
 	var eventID *uint64
 	if ring != nil {
-		id := ring.AppendWithHistoryID(m.convID, protocol.TypeMessage, m.payload, m.ts, m.historyEntryID)
+		id := ring.AppendWithHistoryID(m.convID, typ, m.payload, m.ts, m.historyEntryID)
 		eventID = &id
 	}
 	for _, c := range bcast.ActiveConns(ctx) {
@@ -112,7 +153,7 @@ func (e *operatorMessageEmitterV2) broadcast(ctx context.Context, bcast interact
 		e.nextID++
 		env := protocol.Envelope{
 			ID:             e.nextID,
-			Type:           protocol.TypeMessage,
+			Type:           typ,
 			TS:             m.ts,
 			Payload:        m.payload,
 			EventID:        eventID,
