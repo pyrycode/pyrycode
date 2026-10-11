@@ -27,16 +27,19 @@ import (
 // forensic audit record. It is the composition-root binding that lets
 // internal/relay stay free of internal/{modalbridge,permbridge,audit} imports.
 //
-// Both methods run on the v2 manager's single Run dispatch goroutine (the relay
-// calls them from dispatchAppFrame). The registry's own mutex is the only
-// synchronisation; the stream-approval bridge and audit sink are themselves safe
-// to call from any goroutine.
+// Both methods run on the v2 manager's single Run dispatch goroutine. Permission
+// resolution captures bridge ownership before the registry one-shot, so a winner
+// retains its source through concurrent retirement. Registry calls, actuation
+// and audit happen after releasing the bridge lock.
 //
 // SECURITY: no modal body/prompt/title and no payload bytes are ever logged; the
 // audit entry carries only non-secret identity (device hash/label) + the opaque
 // modal_id + outcome/source.
 type modalResolverV2 struct {
-	reg    *modalbridge.Registry
+	reg interface {
+		Lookup(string) (modalbridge.Outstanding, bool)
+		Resolve(string) (modalbridge.Outstanding, bool)
+	}
 	logger *slog.Logger
 
 	// streamApprovals resolves a stream-json permission approval (a
@@ -83,46 +86,35 @@ func newModalResolverV2(reg *modalbridge.Registry, logger *slog.Logger) *modalRe
 	return &modalResolverV2{reg: reg, logger: logger}
 }
 
-// ResolveCancel consumes the named modal and denies its parked stream approval.
-// The registry Resolve is the single idempotency gate (AC #4): an unknown or
-// already-consumed id returns (zero, false) before any actuation or audit, so a
-// replayed/stale cancel never double-acts. A consumed modal that no stream
-// approval handles actuates nothing and is Warn-logged, but the phone must still
-// learn the dismissal (broadcast) and the forensic record must still exist
-// (audit).
-//
-// The deny arm exists because a stream-json permission is a permbridge-parked
-// completer, not an on-screen modal (#2416): without it a cancelled stream
-// permission left claude blocked until permbridge's own timer fired,
-// mcpApprovalTimeout at ten minutes.
-//
-// TWO GATES THE ANSWER ARM APPLIES ARE DELIBERATELY ABSENT HERE, and both look
-// like omissions. RemoteAnswerable exists because an interaction-required
-// permission cannot be ALLOWED by a one-tap remote answer; a cancel is only ever a
-// deny, the fail-closed direction, so gating it would preserve exactly the
-// parked-for-ten-minutes state this arm removes. And no per-device privilege is
-// checked, as it never has been on this path: a cancel was a deny to claude on
-// the deleted terminal path too (its escape key), so the stream path was brought
-// level with it rather than granted anything new. reasonRemoteDeny is a
-// compile-time constant, so nothing a client or the host authored reaches claude.
+// ResolveCancel consumes an outstanding modal and denies its parked approval.
+// The registry one-shot gates actuation, audit and dismissal; bridge ownership
+// is captured before consumption so concurrent retirement cannot erase it.
+// A consumed modal without a parked approval still produces its dismissal.
+// Cancellation is fail-closed and does not require allow-answer eligibility;
+// authenticated-device eligibility controls only recording the prompt fact.
 func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (relay.ModalDismissal, bool) {
-	out, ok := r.reg.Resolve(modalID)
+	bridge, supplied := r.streamApprovals.(*streamApprovalBridge)
+	var captured streamModalResolution
+	var out modalbridge.Outstanding
+	var ok bool
+	if supplied {
+		out, captured, ok = bridge.consumeModal(modalID, r.reg.Resolve)
+	} else {
+		out, ok = r.reg.Resolve(modalID)
+	}
 	if !ok {
 		return relay.ModalDismissal{}, false
 	}
 
-	// STREAM (#2416): a permbridge-parked approval keyed by modalID resolves its
-	// completer to deny. handled=true only when modalID is a stream approval. The
-	// registry's only producer is the bridge's Surface, so a miss has never been
-	// observed; it is logged, not defended (#1546). The modal is already consumed,
-	// so the audit and dismissal below still happen — aborting would orphan it.
+	// The registry winner owes a dismissal even if the parked approval vanished.
+	// Only a captured stream correlation can actuate the permission completer.
 	handled := false
-	if bridge, ok := r.streamApprovals.(*streamApprovalBridge); ok {
+	if supplied {
 		decision := ""
 		if dev.MayAnswerPrompt() {
 			decision = "cancel"
 		}
-		handled = bridge.resolveStreamDecision(modalID, false, false, reasonRemoteDeny, decision)
+		handled = bridge.resolveCapturedStreamDecision(modalID, captured, false, false, reasonRemoteDeny, decision, protocol.ModalDismissedPayload{ModalID: modalID, Outcome: string(audit.OutcomeCancelled), Source: string(audit.SourceRemote)})
 	} else if r.streamApprovals != nil {
 		handled = r.streamApprovals.ResolveStream(modalID, false, false, reasonRemoteDeny)
 	}
@@ -217,11 +209,16 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 		return relay.ModalDismissal{}, false
 	}
 
-	// Step 5/6: consume FIRST (commit idempotency), then actuate. The
-	// defensive Resolve-miss (modal vanished between Lookup and Resolve) is
-	// unreachable in practice — resolutions are serialized on the manager's Run
-	// goroutine and the producer only adds — but is handled as a row-1 no-op.
-	if _, ok := r.reg.Resolve(modalID); !ok {
+	// Capture source ownership before consumption. Retirement may remove the
+	// correlations afterwards; only the registry winner uses its capture.
+	bridge, supplied := r.streamApprovals.(*streamApprovalBridge)
+	var captured streamModalResolution
+	if supplied {
+		_, captured, ok = bridge.consumeModal(modalID, r.reg.Resolve)
+	} else {
+		_, ok = r.reg.Resolve(modalID)
+	}
+	if !ok {
 		return relay.ModalDismissal{}, false
 	}
 
@@ -238,7 +235,16 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 	// modalID is a stream approval; a miss actuates nothing and is Warn-logged
 	// (#1546). The modal is already consumed, so the audit and dismissal still
 	// happen — aborting would orphan it.
-	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, allow, alwaysAllow, reasonRemoteDeny)
+	handled := false
+	if supplied {
+		decision := "deny"
+		if allow {
+			decision = "allow"
+		}
+		handled = bridge.resolveCapturedStreamDecision(modalID, captured, allow, alwaysAllow, reasonRemoteDeny, decision, protocol.ModalDismissedPayload{ModalID: modalID, Outcome: optionID, Source: string(audit.SourceRemote)})
+	} else if r.streamApprovals != nil {
+		handled = r.streamApprovals.ResolveStream(modalID, allow, alwaysAllow, reasonRemoteDeny)
+	}
 	if !handled {
 		r.logUnrouted("relay: modal answer reached no stream approval", "modal_answer.unrouted", modalID)
 	}
@@ -648,12 +654,9 @@ func (b *streamApprovalBridge) RefuseQuestionDiagnostic(batchID string) (bool, s
 		b.recordPromptAnswer(batchID, owner, "refusal", verdict, nil)
 	}
 
-	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID)
-	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
-		QuestionBatchID: batchID,
-		Outcome:         outcomeQuestionRefused,
-		Source:          sourceQuestionRemote,
-	}, "stream_question.refused_push_err")
+	dismissal := protocol.QuestionDismissedPayload{QuestionBatchID: batchID, Outcome: outcomeQuestionRefused, Source: sourceQuestionRemote}
+	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID, dismissal)
+	go b.broadcast(protocol.TypeQuestionDismissed, dismissal, "stream_question.refused_push_err")
 
 	return true, "resolved"
 }
@@ -773,12 +776,9 @@ func (b *streamApprovalBridge) AnswerQuestionDiagnostic(batchID string, answers 
 		b.recordPromptAnswer(batchID, owner, "answer", verdict, answers)
 	}
 
-	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID)
-	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
-		QuestionBatchID: batchID,
-		Outcome:         outcomeQuestionAnswered,
-		Source:          sourceQuestionRemote,
-	}, "stream_question.answered_push_err")
+	dismissal := protocol.QuestionDismissedPayload{QuestionBatchID: batchID, Outcome: outcomeQuestionAnswered, Source: sourceQuestionRemote}
+	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID, dismissal)
+	go b.broadcast(protocol.TypeQuestionDismissed, dismissal, "stream_question.answered_push_err")
 
 	return true, "resolved"
 }
@@ -1021,17 +1021,13 @@ func (b *streamApprovalBridge) retireQuestion(batchID string) {
 	delete(b.byQuestion, batchID)
 	delete(b.promptOwners, batchID)
 	b.mu.Unlock()
-	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID)
-
 	if _, ok := b.questions.Resolve(batchID); !ok {
 		return // the answer path already consumed + broadcast this batch's dismissal
 	}
 
-	b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
-		QuestionBatchID: batchID,
-		Outcome:         outcomeQuestionUnanswered,
-		Source:          sourceQuestionNoAnswer,
-	}, "stream_question.dismissed_push_err")
+	dismissal := protocol.QuestionDismissedPayload{QuestionBatchID: batchID, Outcome: outcomeQuestionUnanswered, Source: sourceQuestionNoAnswer}
+	b.live.dismiss(owner.live, protocol.TypeQuestionDismissed, batchID, dismissal)
+	b.broadcast(protocol.TypeQuestionDismissed, dismissal, "stream_question.dismissed_push_err")
 }
 
 // parkedToolUseIDs snapshots every tool_use_id currently parked on a person,
@@ -1086,18 +1082,52 @@ func (b *streamApprovalBridge) ResolveStream(modalID string, allow, alwaysAllow 
 	if allow {
 		decision = "allow"
 	}
-	return b.resolveStreamDecision(modalID, allow, alwaysAllow, denyReason, decision)
+	outcome := string(turnevent.PermissionOptionKindRejectOnce)
+	if allow {
+		outcome = string(turnevent.PermissionOptionKindAllowOnce)
+		if alwaysAllow {
+			outcome = string(turnevent.PermissionOptionKindAllowAlways)
+		}
+	}
+	return b.resolveStreamDecision(modalID, allow, alwaysAllow, denyReason, decision, protocol.ModalDismissedPayload{ModalID: modalID, Outcome: outcome, Source: string(audit.SourceRemote)})
 }
 
-func (b *streamApprovalBridge) resolveStreamDecision(modalID string, allow, alwaysAllow bool, denyReason, decision string) bool {
+type streamModalResolution struct {
+	correlation streamApprovalCorrelation
+	owner       promptHistoryOwner
+	handled     bool
+}
+
+// consumeModal captures ownership before the one-shot registry consume. A
+// registry winner keeps that capture even if retirement removes the maps. No
+// bridge lock spans the registry call, actuation, history or publication.
+func (b *streamApprovalBridge) consumeModal(modalID string, resolve func(string) (modalbridge.Outstanding, bool)) (modalbridge.Outstanding, streamModalResolution, bool) {
+	b.mu.Lock()
+	correlation, handled := b.byModal[modalID]
+	captured := streamModalResolution{correlation, b.promptOwners[modalID], handled}
+	b.mu.Unlock()
+	out, ok := resolve(modalID)
+	return out, captured, ok
+}
+
+func (b *streamApprovalBridge) resolveStreamDecision(modalID string, allow, alwaysAllow bool, denyReason, decision string, wire ...protocol.ModalDismissedPayload) bool {
 	b.mu.Lock()
 	correlation, ok := b.byModal[modalID]
-	owner := b.promptOwners[modalID]
+	captured := streamModalResolution{correlation, b.promptOwners[modalID], ok}
 	b.mu.Unlock()
-	if !ok {
+	return b.resolveCapturedStreamDecision(modalID, captured, allow, alwaysAllow, denyReason, decision, wire...)
+}
+
+// resolveCapturedStreamDecision uses the registry winner's detached ownership,
+// even if timeout has removed the parked approval or retirement erased its maps.
+func (b *streamApprovalBridge) resolveCapturedStreamDecision(modalID string, captured streamModalResolution, allow, alwaysAllow bool, denyReason, decision string, wire ...protocol.ModalDismissedPayload) bool {
+	correlation, owner := captured.correlation, captured.owner
+	if len(wire) > 0 {
+		defer b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID, wire[0])
+	}
+	if !captured.handled {
 		return false
 	}
-	defer b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID)
 	verdict := permbridge.Deny(denyReason)
 	if allow {
 		req, live := b.perm.Lookup(correlation.toolUseID)
@@ -1287,34 +1317,21 @@ func (b *streamApprovalBridge) ApprovalAnswerable(approvalID string, req permbri
 	return false
 }
 
-// retire is the guaranteed cleanup + dismissal backstop the control server defers
-// for a surfaced stream approval. It runs on EVERY Await return (answer, timeout,
-// disconnect, shutdown) in two steps with separate arbiters:
-//
-//  1. modal.Resolve(modalID): a miss ⇒ a modal_answer already consumed + dismissed
-//     the modal → no second dismissal. A hit ⇒ the timeout/disconnect/shutdown
-//     path (permbridge already denied claude via its own timer or watchApproveConn)
-//     → write one content-free fail-closed audit record and broadcast one
-//     modal_dismissed so no stale modal lingers (AC-3). The modalbridge one-shot is
-//     the SINGLE arbiter of the dismissal broadcast: exactly one of {ResolveAnswer,
-//     retire} broadcasts.
-//  2. Unconditionally delete the modalID correlation under mu. Resolve comes first
-//     so an interaction-required modal cannot lose its negative eligibility while
-//     it is still available to a concurrent remote answer.
-//
-// Runs on the control-server handler goroutine after Await.
+// retire captures ownership before consuming an unresolved modal, then removes
+// its correlations. Only the registry winner dismisses: timeout/disconnect/
+// shutdown publish a fail-closed timeout; a remote winner retains its detached
+// owner. Registry calls, audit and delivery never run under the bridge lock.
 func (b *streamApprovalBridge) retire(modalID string) {
-	out, ok := b.modal.Resolve(modalID)
-
 	b.mu.Lock()
 	owner := b.promptOwners[modalID]
+	b.mu.Unlock()
+	out, ok := b.modal.Resolve(modalID)
+	b.mu.Lock()
 	delete(b.byModal, modalID)
 	delete(b.promptOwners, modalID)
 	b.mu.Unlock()
-	b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID)
-
 	if !ok {
-		return // a modal_answer already consumed + broadcast this modal's dismissal
+		return // the registry winner owns its captured dismissal
 	}
 
 	// Timeout / disconnect / shutdown: no answering device, fail-closed deny — the
@@ -1326,11 +1343,9 @@ func (b *streamApprovalBridge) retire(modalID string) {
 		Outcome:    audit.OutcomeDeniedTimeout,
 		Source:     audit.SourceTimeout,
 	})
-	b.broadcast(protocol.TypeModalDismissed, protocol.ModalDismissedPayload{
-		ModalID: modalID,
-		Outcome: string(audit.OutcomeDeniedTimeout),
-		Source:  string(audit.SourceTimeout),
-	}, "stream_approval.dismissed_push_err")
+	dismissal := protocol.ModalDismissedPayload{ModalID: modalID, Outcome: string(audit.OutcomeDeniedTimeout), Source: string(audit.SourceTimeout)}
+	b.live.dismiss(owner.live, protocol.TypeModalDismissed, modalID, dismissal)
+	b.broadcast(protocol.TypeModalDismissed, dismissal, "stream_approval.dismissed_push_err")
 }
 
 // broadcast marshals payload and fans one control envelope of envType to every

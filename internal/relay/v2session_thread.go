@@ -27,6 +27,9 @@ func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) b
 		return env.SessionStateCleared
 	}
 	if liveStateFamily(env.Type) {
+		if m.cfg.ThreadLiveState != nil && env.InReplyTo == nil {
+			return true
+		}
 		if !s.interactive || !validLiveTag(env.SessionID) || env.EventID != nil {
 			return true
 		}

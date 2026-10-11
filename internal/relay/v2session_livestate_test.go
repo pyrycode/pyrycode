@@ -507,3 +507,38 @@ func TestLiveStateRun(t *testing.T) {
 		t.Fatal("snapshot overflow closed connection")
 	}
 }
+
+func TestLiveStateCapturedEligibility(t *testing.T) {
+	m, s, rec, _ := liveFixture(t, threadCaps, nil)
+	r := liveReading(protocol.TypeModalShown, gateClaudeConv, "prompt", `"source"`, 1, 1)
+	eligible := false
+	r.Answerable = &eligible
+	before := len(rec.snapshot())
+	if err := m.PushLiveState(t.Context(), s.connID, r); err != nil {
+		t.Fatal(err)
+	}
+	eligible = true
+	m.drainOnce(t.Context())
+	if len(rec.snapshot()) != before || len(s.liveWatermarks) != 0 {
+		t.Fatal("queued prompt eligibility was reconstructed or advanced ordering")
+	}
+}
+
+func TestRetireLiveState(t *testing.T) {
+	m, s, _, _ := liveFixture(t, threadCaps, nil)
+	if err := m.RetireLiveState(t.Context(), s.connID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-m.pushOverflow:
+		m.handlePushOverflow(t.Context(), id)
+	default:
+		t.Fatal("missing retirement")
+	}
+	if _, ok := m.queues[s.connID]; ok {
+		t.Fatal("retirement retained publication queue")
+	}
+	if err := m.RetireLiveState(t.Context(), s.connID); !errors.Is(err, ErrConnNotFound) {
+		t.Fatalf("repeated retirement=%v", err)
+	}
+}

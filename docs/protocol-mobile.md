@@ -458,7 +458,7 @@ Encoding: line-delimited JSON over WS text frames. One outer envelope per frame.
 
 ### Binary → relay
 
-Unchanged from v1. The binary opens `wss://<relay>/v1/server` with these request headers:
+**Current behaviour (unchanged from v1).** The binary opens `wss://<relay>/v1/server` with these request headers:
 
 | Header | Required | Notes |
 |---|---|---|
@@ -472,7 +472,241 @@ First-claim-wins. Conflict → `4409` close. 30-second grace period on disconnec
 
 The route path label carries no protocol meaning. The relay registers the binary from the `x-pyrycode-server` header regardless of path. The path stays `/v1/server` even though the application protocol is v2, because the relay is protocol-agnostic: the version lives in the `v` field of every inner frame, not in the route. The relay routes only `/v1/server` and `/v1/client`; there is no `/v2/*` route.
 
-The binary does not authenticate to the relay via Noise — the relay isn't a Noise peer. The relay-issued admin token (deferred from v1) is still a separate future hardening and is not part of v2.
+#### Daemon admission (declared)
+
+**Declared ahead of implementation and production activation.** Current daemon
+admission stays unchanged until [Core #3197](https://github.com/pyrycode/pyrycode/issues/3197)
+and [Relay #167](https://github.com/pyrycode/pyrycode-relay/issues/167) ship and the
+operator explicitly enables **enforce**. This is the authoritative shared
+admission reference, published from the [build-time contract](specs/architecture/3196-daemon-relay-admission.md).
+No enforcement or live rollout verification is claimed by #3196.
+
+The binary does not authenticate to Relay through Noise; Relay is not a Noise
+peer. The following identity-bound admission credential is separate from phone
+authentication and the encrypted phone↔binary handshake.
+
+##### Wire and exact identity binding
+
+On the initial connection and **every reconnect** to `/v1/server`, a configured
+daemon sends exactly one `x-pyrycode-admission-token` header. Missing configuration
+omits it. Retries must retain the selected startup credential; they must never
+silently omit it after a failed attempt. Existing `x-pyrycode-server`,
+`x-pyrycode-version` and `user-agent` headers and identity validation remain.
+
+The token field value is exactly 64 lowercase hexadecimal characters encoding
+32 independently cryptographically random bytes. Operators generate production
+tokens with a cryptographic random source; repeated example patterns below are
+not valid production provisioning. Validate length and alphabet before decoding;
+no whitespace, trimming, uppercase conversion or comma-separated list is allowed.
+Duplicate token or identity header values are inadmissible to the admission
+check, even when identical. A coalesced comma list cannot become one credential
+or one identity; never select the first or last value to authenticate it.
+
+Each token is bound to exactly one exact `x-pyrycode-server` value. No identity
+normalization, aliasing or cross-identity fallback is permitted. Token equality
+is constant-time. A valid token for identity A cannot admit identity B. This
+credential is independent of phone pairing tokens and Noise keys, and must never
+enter a URL, QR payload, routing envelope or application frame.
+
+##### Modes and decision table
+
+Relay modes apply to a startup snapshot:
+
+- **off (default):** preserve existing admission without credential checks.
+- **observe:** evaluate admission and record bounded aggregate outcomes; allow
+  requests that otherwise satisfy existing validation. A credential provides no
+  enforcement guarantee in this mode.
+- **enforce:** admit only an exact matching identity/token pair. An absent
+  identity in the mapping or an empty accepted-token array admits nobody.
+
+In the table, **proceed** means continue through existing identity/version/header
+validation and first-claim-wins conflict handling; it does not promise a successful
+connection. Off ignores admission credentials. Observe evaluates duplicate token
+or identity values as inadmissible but does not add an enforcement rejection;
+existing validation can still reject such a request in off or observe.
+
+| Request / credential condition | off | observe | enforce |
+|---|---|---|---|
+| Single valid token matching its exact identity | Proceed; unchecked | Proceed; count valid | Admit to existing path |
+| Missing token header | Proceed; unchecked | Proceed; count missing | Reject 401 |
+| Empty, wrong-length, non-hex, uppercase, whitespace or comma-list token | Proceed; unchecked | Proceed; count malformed | Reject 401 |
+| Well-formed unknown token | Proceed; unchecked | Proceed; count unknown | Reject 401 |
+| Removed/revoked token, after Relay restart | Proceed; unchecked | Proceed; count unknown | Reject 401 |
+| Token accepted only for a different identity | Proceed; unchecked | Proceed; count mismatch | Reject 401 |
+| Identity absent from mapping or mapped to an empty array | Proceed; unchecked | Proceed; count unknown | Reject 401 |
+| Duplicate token values, equal or different | Proceed; unchecked | Proceed; count malformed | Reject 401 |
+| Duplicate identity values, equal or different, or coalesced identity list | Existing validation | Existing validation; count malformed | Reject 401 |
+| Missing or malformed identity, even with a known token | Existing validation | Existing validation; count malformed | Reject 401 |
+
+Removed credentials need no persistent tombstone: in the new snapshot they are
+unknown. Outcomes are a finite vocabulary, such as valid, missing, malformed,
+unknown and mismatch, with no token or claimed identity labels. Observe counts
+are aggregate; operators correlate private provisioning and controlled reconnects
+to confirm intended identities without publishing per-identity metrics.
+
+##### Uniform rejection and ordering
+
+In enforce, admission is checked **before** WebSocket acceptance, registration,
+claim-conflict handling, grace reservation or push eligibility. Every rejected
+admission attempt returns the same response:
+
+```http
+HTTP/1.1 401 Unauthorized
+Cache-Control: no-store
+
+daemon admission rejected
+```
+
+The body bytes are exactly `daemon admission rejected\n`, ending in one LF byte.
+No identity, supplied value or rejection detail is echoed. A rejection leaves no
+upgraded connection, registry claim, grace reservation or push access, including
+when the claimed identity is already occupied. There is no new WebSocket close
+code or application error frame. Only a claimant admitted by enforce can reach
+the existing first-claim-wins/4409 path. Other existing validation remains in
+force for requests that pass admission.
+
+##### Startup configuration
+
+The daemon's existing private `~/.pyry/config.json` gains optional
+`relay_admission_tokens`, an object mapping exact server-id to one token. Each
+instance selects the entry for its own loaded server-id. An absent object or
+absent selected entry omits the header. A present map requires owner-only storage:
+the file is `0600`, its parent is `0700`, and ownership is the daemon user's.
+Malformed supplied configuration or insecure storage fails startup with static,
+value-free validation errors. Never include an offending value or parser excerpt.
+No flag or environment override is introduced for this secret.
+
+Relay retains its startup environment registry:
+
+| Variable | Contract |
+|---|---|
+| `PYRYCODE_RELAY_DAEMON_ADMISSION_MODE` | `off`, `observe` or `enforce`; unset defaults to `off`. Other supplied values fail startup. |
+| `PYRYCODE_RELAY_DAEMON_ADMISSION_CREDENTIALS` | JSON object mapping exact server-ids to arrays of accepted tokens. Unset means empty in off/observe; enforce requires an explicit mapping. `{}` is valid and denies all in enforce. |
+
+Supplied malformed configuration fails Relay startup in **every mode**, including
+off; disabling request checks does not disable configuration validation. Tokens
+must have the wire shape. A token assigned to multiple identities is invalid
+configuration. Errors are static and value-free. Accepted arrays permit old/new
+overlap for the same identity. Configuration is loaded at startup and changes
+apply only on restart: there is no credential service or hot reload.
+
+##### Synthetic configuration and decisions
+
+**SYNTHETIC EXAMPLES ONLY — never deploy these predictable credentials.** The
+two server-ids are illustrative exact identities; token values are visibly
+repeated patterns, each 64 lowercase hex characters. All real tokens must be
+independently cryptographically random and distinct.
+
+Daemon config example (A selects its new token; B selects its own token):
+
+```json
+{
+  "relay_admission_tokens": {
+    "11111111-1111-4111-8111-111111111111": "2222222222222222222222222222222222222222222222222222222222222222",
+    "33333333-3333-4333-8333-333333333333": "3333333333333333333333333333333333333333333333333333333333333333"
+  }
+}
+```
+
+Relay credentials JSON example (A accepts old and new during overlap):
+
+```json
+{
+  "11111111-1111-4111-8111-111111111111": [
+    "1111111111111111111111111111111111111111111111111111111111111111",
+    "2222222222222222222222222222222222222222222222222222222222222222"
+  ],
+  "33333333-3333-4333-8333-333333333333": [
+    "3333333333333333333333333333333333333333333333333333333333333333"
+  ]
+}
+```
+
+With this snapshot, A/old, A/new and B/own pass enforce admission. B/A-new fails
+with the uniform 401. After removing A/old and restarting Relay, A/old fails
+while A/new and B/own still pass. In observe all these requests proceed through
+existing validation and only their bounded outcomes differ; in off none of these
+credentials are checked. Neither mode protects A or B from anonymous claims.
+
+##### Rotation and revocation
+
+Configuration is an immutable startup snapshot. Editing credentials without a
+restart leaves the old snapshot and existing connections authoritative. Returning
+to observe/off and restarting Relay is an explicit operator rollback that restores
+unauthenticated admission and removes enforcement guarantees.
+
+Rotation order is: privately add a fresh token beside the old token for the same
+identity, restart Relay, update the daemon's selected token and restart that
+daemon, then remove the old Relay token and restart Relay again. Revocation is
+removal of a token or identity mapping followed by Relay restart. It is not
+immediate on editing a file/environment; restart closes all existing connections
+and removes their claims and grace state before the new snapshot admits requests.
+
+##### Admission failure and reconnect
+
+The first HTTP 401 received for `/v1/server` is terminal for automatic retries of
+that daemon relay leg, whether during initial connection or reconnect. Report a
+static admission-failure diagnostic without raw response/header/credential data.
+Keep the daemon available locally; do not exit such that service-manager restarts
+produce another authentication loop. The operator corrects private configuration
+and restarts the daemon to retry. Authentication rejection has no conflict counter
+and must not reuse the 4409 counter.
+
+Network and HTTP 5xx failures retain existing backoff: 1/2/4/8/16/30-second cap,
+with ±20% jitter and attempt reset after a successful connection lasting at least
+60 seconds. Preserve 4409's eight-consecutive-close threshold on both dial and
+established-connection close paths. Any cycle ending without a 4409 resets the
+consecutive-conflict counter; successful upgrade alone does not reset it. This
+counter reset is separate from the uptime-based backoff reset.
+
+Daemon admission is an HTTP upgrade decision, independent of phone authentication
+on `/v1/client` and the phone's Noise/paired-device authorization. Phone close
+4401 and sealed `auth.invalid_token` keep their existing meanings and handling.
+
+##### Threat boundary and secret hygiene
+
+Only enforce prevents anonymous identity reservation and anonymous
+daemon-originated push requests. A stolen admission token permits claiming its
+bound identity and abusing push. It supplies neither the daemon's Noise private
+key nor phone authorization; it cannot impersonate the Noise responder to an
+already-paired phone or decrypt application content by itself.
+
+Relay sees routing/traffic metadata, admission credentials and the existing opaque
+phone-token header. The phone must still send `x-pyrycode-token` today: Relay
+requires it and receives it in memory without parsing, comparing, logging or
+forwarding it. Phone token validation occurs in encrypted Noise early-data.
+Admission does not remove this visibility caveat. Noise protects application
+content; relay-directed push requests already sit outside that encrypted content.
+
+Relay compromise can deny service and capture admission tokens; admission adds
+no protection against a malicious Relay and does not give it Noise decryption
+keys. Preserve phone authentication, pairing, endpoints and Noise encryption.
+Prompt injection, endpoint compromise, static-key compromise, metadata privacy
+and general rate-limiting remain their existing threat boundaries.
+
+Real credentials, credential maps and raw request headers must be absent from
+status, logs, errors, repository files and public metric labels. Only explicitly
+synthetic examples belong in this reference. Telemetry uses bounded aggregate
+outcomes rather than tokens or claimed identities. Protect private daemon files
+and Relay environment provisioning; TLS protects the admission header on the
+network, while Relay and any trusted TLS-terminating proxy can see it.
+
+##### Operator rollout checklist (pending both implementations)
+
+1. Ship Core #3197 and Relay #167 with Relay **off**; confirm both implementations
+   are present before proceeding. This contract is not activation evidence.
+2. Privately provision independently random, distinct tokens bound to each exact
+   identity; configure owner-only daemon storage and Relay's startup registry.
+3. Configure Relay **observe** and restart configured daemons and Relay so both
+   load their startup snapshots.
+4. Confirm every intended identity authenticates through controlled reconnects
+   and bounded aggregate outcomes; investigate all failures before enforcement.
+5. Explicitly select **enforce** and restart Relay; verify authorized reconnects
+   and anonymous rejection without upgrade, claims, grace reservation or push.
+   Recovery from a daemon's 401 requires correction and operator daemon restart.
+
+Returning to observe/off is an explicit operator rollback restoring
+unauthenticated admission. No checklist step was performed in this ticket.
 
 ### Phone → relay → binary
 
@@ -550,10 +784,16 @@ See pyrycode-relay#132, #133 (relay-side send) and #2564 (daemon-side trigger).
 1. **Load or create the static keypair** through `keys.LoadOrCreate` while
    starting the v2 relay leg. Existing corrupt or insecurely permissioned files
    fail startup; absence is the first-run generation case.
-2. **Connect** WSS to `/v1/server` with headers above.
+2. **Connect** WSS to `/v1/server` with headers above. The [declared admission
+   contract](#daemon-admission-declared) requires the selected startup credential
+   on the initial connection and every reconnect once Core #3197 ships.
 3. **Hold open** for inbound phone connections. The binary itself does not initiate a Noise handshake — it is always the Noise responder.
 4. **For each phone WS forwarded by the relay**, expect a `noise_init` as the first frame within 10 seconds; otherwise close with `4421`. This is the missing-first-frame timeout; a `noise_msg` arriving instead of `noise_init` on a conn the daemon holds no session for is a different case and closes with the retryable `4410` (see [Error codes](#error-codes)), not this timeout path.
-5. **On disconnect from relay**, reconnect with exponential backoff (unchanged from v1).
+5. **On disconnect from relay**, reconnect with exponential backoff, subject to
+   the eight-consecutive-4409 rule below. Under the declared admission contract,
+   the first HTTP 401, initially or after a successful connection, stops retries
+   for this relay leg while local daemon service stays available. Correcting
+   configuration and restarting the daemon is the operator recovery path.
 
 ### Phone
 
@@ -576,7 +816,13 @@ Unchanged from v1: WS-native ping/pong every 30s idle; 60s worst-case dead-conne
 
 ### Reconnect
 
-Unchanged from v1: exponential backoff with ±20% jitter, capped at 30s, reset to attempt 1 after any successful connection lasting ≥ 60 seconds. A close code listed as fatal (`4409`) does not terminate the loop on first observation: it is retried on the same ladder and becomes terminal only after 8 consecutive fatal closes (see § Authentication → Binary → relay; #1072). This subsection covers reconnect **timing** only; the **application-layer** reconcile-on-connect contract — what control and transcript state the daemon re-asserts once the handshake completes — lives in [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics).
+Unchanged from v1: exponential backoff with ±20% jitter, capped at 30s, reset to attempt 1 after any successful connection lasting ≥ 60 seconds. A close code listed as fatal (`4409`) does not terminate the loop on first observation: it is retried on the same ladder and becomes terminal only after 8 consecutive fatal closes (see § Authentication → Binary → relay; #1072). Any cycle ending without 4409 resets the consecutive-conflict counter; a
+successful upgrade alone does not. Both dial-time and established-connection
+4409 observations count. This is separate from the uptime-based backoff reset.
+The [declared admission contract](#admission-failure-and-reconnect) makes HTTP 401
+immediately terminal for this relay leg, without using the conflict counter or
+exiting the locally available daemon; network/5xx backoff remains unchanged.
+This subsection covers reconnect **timing** only; the **application-layer** reconcile-on-connect contract — what control and transcript state the daemon re-asserts once the handshake completes — lives in [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics).
 
 ## Application message types
 
@@ -6739,9 +6985,19 @@ Phone messages become user-role input to `claude`. v2 changes nothing here; encr
 
 Server-ids are still the only routing key on the relay. **However, v2 strengthens this in one important way:** even if an attacker successfully claims a server-id at the relay (winning the race against a real binary), they cannot impersonate the binary to a paired phone because they do not hold the binary's static private key. The Noise_IK handshake fails (the phone closes with `4426`). The phone surfaces "pair record may be stale; re-pair" but no plaintext is leaked.
 
-In v1, a successful server-id race let the attacker harvest plaintext. In v2, it just denies service to that one server-id until the legitimate binary reconnects.
+In v1, a successful server-id race let the attacker harvest plaintext. In v2,
+claiming the server-id does not expose application plaintext, but can deny service
+to that identity and allow abuse of daemon-originated push requests.
 
-**Deferred:** Relay-issued admin token (independent of v2; orthogonal hardening).
+**Declared admission boundary:** [Identity-bound daemon admission](#daemon-admission-declared)
+prevents anonymous identity reservation and anonymous daemon-originated push
+requests only in enforce. Current admission stays unchanged until Core #3197 and
+Relay #167 ship and the operator enables enforce; off/observe provide no such
+protection. A stolen admission token permits claiming its exact bound identity
+and abusing push, but supplies neither the daemon's Noise private key nor phone
+authorization. Revocation takes effect on Relay restart, which closes existing
+connections and discards their claims/grace state; revoked holders then have no
+push access in enforce.
 
 #### 3. Relay operator MITM — `severity: high → low`, `mitigation: cryptographic`
 
@@ -6749,14 +7005,24 @@ In v1, a successful server-id race let the attacker harvest plaintext. In v2, it
 
 In v1, a malicious relay operator (or a compromise of our VPS, the relay binary's supply chain, or our deploy keys) saw every byte of every conversation in plaintext. The mitigation was operational ("the relay MUST NOT log message bodies") — a policy commitment, not a guarantee.
 
-In v2, the relay sees only:
+In v2, the relay sees the following wire data:
 
-- WS Upgrade headers (server-id, version, user-agent, device-name on the phone leg).
+- WS Upgrade headers (server-id, version, user-agent, device-name and the opaque phone-token header on the phone leg; the declared daemon admission header when configured).
 - The outer routing envelope (`conn_id`, `frame` as opaque base64-shaped JSON).
 - The outer `frame.type` field (`noise_init` / `noise_resp` / `noise_msg`), enough to know whether to forward a frame but not what it contains.
 - The opaque ciphertext payload.
 
 The relay cannot decrypt any content. Even if the relay's entire process memory is dumped, no plaintext message text, no `cwd` paths, and no conversation names are recoverable. The device-token is a partial exception: the relay still requires the opaque `x-pyrycode-token` header (see [Phone → relay → binary](#phone--relay--binary)), so that header value is transiently in relay memory at upgrade time. The relay never parses, logs, or persists it, but a memory dump taken during a phone upgrade would still contain it. Dropping the header entirely is a not-yet-implemented follow-up.
+
+The declared admission credential and Relay's configured credential map are also
+visible to Relay, and the header is visible to any trusted TLS-terminating proxy.
+Relay compromise can capture admission tokens and deny service; admission does
+not protect against a malicious Relay or give it Noise decryption keys. Push
+requests directed to Relay already sit outside Noise-encrypted application
+content. Credentials, maps and raw request headers must stay out of status, logs,
+errors, repository files and public metric labels. Admission telemetry uses only
+bounded aggregate outcomes, with no token or claimed-identity labels. Phone
+authentication, pairing, endpoints and Noise encryption remain unchanged.
 
 **Residual risk:** Low. A malicious relay can still:
 
