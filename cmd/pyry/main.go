@@ -867,7 +867,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		sessionHarness:       sessionHarness(pool),
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
-		modelListFor: modelListFor(convReg, pool, modelVocabulary, liveBindings),
+		modelListFor:     modelListFor(convReg, pool, modelVocabulary, liveBindings),
+		modelListReading: daemonModelListReadingFor(convReg, pool, modelVocabulary, liveBindings),
+		mcpStatusReading: daemonMCPStatusReadingFor(convReg, pool, liveBindings),
 		// The pushed-frame half of the merged list (#2652), over the same store.
 		pushedModelOptions: pushedModelOptions(modelVocabulary),
 		mcpStatusFor:       mcpStatusFor(convReg, pool, liveBindings),

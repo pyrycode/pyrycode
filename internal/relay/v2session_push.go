@@ -292,10 +292,11 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 // log level); they MUST NOT echo env, plaintext, ciphertext, or key
 // bytes, matching the package's no-AEAD-bytes-in-logs discipline.
 func (m *V2SessionManager) forwardEnvelope(ctx context.Context, connID string, env protocol.Envelope) error {
-	return m.forwardEnvelopeSource(ctx, connID, env, false)
+	return m.forwardEnvelopeSource(ctx, connID, env, nil)
 }
 
-func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID string, env protocol.Envelope, supplied bool) error {
+func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID string, env protocol.Envelope, reading *LiveState) error {
+	supplied := reading != nil
 	s, ok := m.sessions[connID]
 	if !ok {
 		// A torn-down session was already deleted from the map by
@@ -340,7 +341,7 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	if stale && !supplied {
 		return nil
 	}
-	env = m.mergedForConn(s, env)
+	env = m.mergedForConn(s, env, supplied && reading.ModelListUnprojected)
 	env = m.agentTaggedForConn(s, env)
 	env = m.threadProjected(s, env)
 	envJSON, err := json.Marshal(env)
@@ -376,27 +377,13 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	return nil
 }
 
-// mergedForConn returns env as s is to be sent it: for a conn that negotiated
-// protocol.CapabilityMultiAgent, a pushed model_list whose Claude entries are
-// replaced by MergedModelOptions' merged, tagged list (#2652); every other frame,
-// and every frame to any other conn, unchanged. conversation_id and
-// dropped_models are the pushed frame's.
-//
-// A pushed model_list is told apart by its EventID: the turn lane stamps one on
-// every live push and drainReplayOnce on every replay. #2651's two paths leave it
-// nil — the request_model_list reply and reconcileModelLists' connect-time
-// snapshot — and both already carry the merged list, so merging them here would
-// re-tag Codex's entries as Claude's and append them twice. InReplyTo alone does
-// not separate them: the reconcile snapshot has none either.
-//
-// The pushed envelope is shared by every conn and the replay ring, so this builds
-// the capable conn's copy per call and never writes through env.Payload: env is a
-// by-value copy and only its Payload field is reassigned to fresh bytes. A payload
-// that does not decode, or a merged one that does not marshal, is delivered
-// unchanged. Nothing is logged: the payload is claude-authored (#833).
-// Run-goroutine only, like its caller: s.multiAgent is Run-owned.
-func (m *V2SessionManager) mergedForConn(s *V2Session, env protocol.Envelope) protocol.Envelope {
-	if !s.multiAgent || m.cfg.MergedModelOptions == nil || env.Type != protocol.TypeModelList || env.EventID == nil {
+// mergedForConn projects canonical model rows for a multi_agent recipient.
+// Legacy events are canonical when EventID is present; supplied readings mark
+// their projection explicitly. Legacy replies already carry their projection.
+// Clears stay empty. Shared payload bytes are never mutated, and conversation
+// and dropped-model fields are preserved. Runs only on the Run goroutine.
+func (m *V2SessionManager) mergedForConn(s *V2Session, env protocol.Envelope, unprojected bool) protocol.Envelope {
+	if !s.multiAgent || m.cfg.MergedModelOptions == nil || env.Type != protocol.TypeModelList || env.SessionStateCleared || (env.EventID == nil && !unprojected) {
 		return env
 	}
 	var p protocol.ModelListPayload

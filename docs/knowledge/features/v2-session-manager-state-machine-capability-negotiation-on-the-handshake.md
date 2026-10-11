@@ -108,8 +108,9 @@ installed. Nil/false disables `thread`; advertisement alone is insufficient.
 `handleNoiseInit` records `s.thread` only on authenticated admission, and rekey
 preserves it. `ActiveConn.Thread` exposes the decision for open connections.
 Production leaves readiness unwired until #3164. The relay's supplied-state
-reconciliation (#3082) and on-demand handlers (#3162) are implemented; daemon
-provider installation remains #3163. Catch-up/pages and replay replacement
+reconciliation (#3082), on-demand handlers (#3162) and daemon producer/provider
+installation (#3163) are implemented. Folded-item publication and production
+`thread` negotiation still await #3164; catch-up/pages and replay replacement
 remain #2963.
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
@@ -154,6 +155,17 @@ grow the codec's supplied `SessionID`. See the
 
 ### Supplied live-state ordering
 
+`startRelayV2` installs the [daemon retained-reading delivery path](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery):
+`daemonRelaySnapshot` supplies a finite `ThreadLiveState` cursor spanning owner
+conversations, `startDaemonLivePublisher` supplies bounded `PushLiveState`
+publication, and `installDaemonLiveRelay` wires all five source-bearing reply/
+settings providers. Accepted producers hand off publication before legacy
+enumeration or fan-in can refuse/delay delivery. Captured source/order fields survive adaptation;
+original payload session fields and prompt answer IDs stay intact. This wiring
+leaves production `ThreadReady` unset pending
+[#3164](https://github.com/pyrycode/pyrycode/issues/3164); catch-up/pages remain
+[#2963](https://github.com/pyrycode/pyrycode/issues/2963).
+
 Carry provenance with the originating reading through `PushLiveState` and
 `ThreadLiveState`, rather than resolving a conversation's current binding when
 sealing delayed output. `liveWithheld` uses `LiveState.ConversationID` even when
@@ -161,6 +173,38 @@ the wire payload is `{}` or names only a prompt/session ID. Correlation is not
 authorization: a supplied reply and its clear require interactive access, a
 known source conversation and the existing Codex gate. Withheld readings do not
 advance delivery state. See the [wire contract](../../protocol-mobile.md#session-scoped-live-state-v2-supplied-delivery-contract).
+
+Prompt shows use detached captured `Answerable`; the daemon snapshot excludes
+missing/false eligibility, and relay delivery withholds false eligibility without
+re-reading mutable prompt state. Existing authorized resolvers remain the answer
+authority. Source-bearing dismissals preserve original prompt IDs and permission
+outcome/source and retire only that identity; they do not appear in snapshots. With
+`ThreadLiveState` installed, unsolicited legacy live frames are withheld from
+thread recipients. Otherwise an unsourced legacy dismissal could arrive before
+its source-bound counterpart and bypass conversation checks. Legacy recipients
+keep their existing frames and bytes.
+
+`LiveStateCurrent` checks owner generation and accepted retained revision before
+unsolicited Run delivery, including captured cursors and queued pushes. Removing
+owner state alone cannot invalidate a detached cursor; without this check it can
+restore stale indicators after removal/recreation. An unfinished query reservation
+does not invalidate prior accepted state. Dismissals use terminal ordering and
+clears use current generation. Correlated replies instead preserve captured
+evidence under relay ordering. `TestDaemonLiveRelayRetiredSnapshot` and
+`TestDaemonLiveRelayReservedQuerySnapshot` cover those distinctions;
+`TestLiveStateCapturedEligibility` pins detached eligibility.
+
+Canonical daemon model inventories carry `ModelListUnprojected`, so
+`mergedForConn` projects separately for each recipient on snapshots, pushes and
+correlated replies, even without a legacy `EventID`. Retaining the requester's
+projection would expose multi-agent rows to basic clients. Empty Claude
+inventories from Codex-only fallback are withheld from basic recipients before
+generating clears, preserving refusal; model clears stay `{}` and projected
+envelopes are size-checked before encryption. Other supplied providers keep their
+existing projection contract. `TestDaemonLiveRelayModelProjection` and
+`TestDaemonLiveRelayCodexOnlyProjection` cover both requester capabilities and
+fanout. See [cached evidence and borrowed bootstrap vocabulary](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#control-and-on-demand-readings)
+for reply-only target ordering that cannot publish foreign cache state.
 
 Select an optional source-bearing provider once, only for a negotiated thread
 connection. Source-only context/MCP installation must pass admission without a

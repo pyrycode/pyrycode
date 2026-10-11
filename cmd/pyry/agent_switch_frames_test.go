@@ -61,7 +61,7 @@ func (w *switchWire) data(e protocol.RoutingEnvelope) []byte {
 	}
 	return data
 }
-func (w *switchWire) open(id string, capable bool) {
+func (w *switchWire) open(id string, capable bool, extra ...string) {
 	w.t.Helper()
 	key, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -75,6 +75,7 @@ func (w *switchWire) open(id string, capable bool) {
 	if capable {
 		caps = append(caps, protocol.CapabilityMultiAgent)
 	}
+	caps = append(caps, extra...)
 	payload, _ := json.Marshal(protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: id + "-token", Capabilities: caps})
 	raw, _ := json.Marshal(protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: payload})
 	data, err := init.WriteInit(raw)
