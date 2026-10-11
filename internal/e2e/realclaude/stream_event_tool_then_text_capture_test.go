@@ -3,7 +3,6 @@
 package realclaude
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +21,7 @@ import (
 )
 
 const tttPrompt = "Run this exact shell command with your tools: echo pyry1311. Then reply with one short sentence saying what it printed."
-const tttFixturePrefix = "testdata/tool_then_text_stream_event_v"
+const tttFixturePrefix = "testdata/tool_then_text_wire_stream_event_v"
 
 type tttLoss struct {
 	Lines    int `json:"lines_dropped_over_cap"`
@@ -41,11 +41,12 @@ type tttRecord struct {
 	SpawnShape        []string              `json:"spawn_shape"`
 	Prompt            string                `json:"prompt"`
 	Outcome           string                `json:"outcome"`
+	ReplayMatches     bool                  `json:"retained_replay_matches_original"`
 	RejectedRows      []int                 `json:"rejected_rows"`
 	ToolStarts        int                   `json:"completed_tool_starts"`
 	ToolCompletions   int                   `json:"tool_completions"`
 	TextChunks        int                   `json:"text_chunks"`
-	Rows              []json.RawMessage     `json:"ordered_stdout"`
+	Rows              []string              `json:"ordered_stdout"`
 	IdentityRedaction string                `json:"identity_redaction"`
 	Loss              tttLoss               `json:"capture_loss"`
 	Redaction         []dropcapSubstitution `json:"redaction"`
@@ -54,71 +55,113 @@ type tttRecord struct {
 }
 
 func (r tttRecord) complete() bool {
-	if r.Loss != (tttLoss{}) || len(r.Rows) == 0 {
+	if !r.ReplayMatches || r.Loss != (tttLoss{}) || len(r.Rows) == 0 {
 		return false
 	}
 	for _, row := range r.Rows {
-		if !json.Valid(row) {
+		if !json.Valid([]byte(row)) {
 			return false
 		}
 	}
-	return secapTypeField(r.Rows[len(r.Rows)-1]) == "result"
+	return secapTypeField([]byte(r.Rows[len(r.Rows)-1])) == "result"
 }
 
-// tttRedactRows registers dynamic paths and identities before applying one shared
-// substitution table. Raw rows retain their JSON types, key presence and order.
-func tttRedactRows(rows []json.RawMessage, red *dropcapRedactor, scanner *dropcapScanner) []json.RawMessage {
+// tttRedactRows edits only string-token spans. Duplicate keys, numeric spellings,
+// whitespace and invalid trailing bytes remain intact for rejection replay.
+func tttRedactRows(rows []string, red *dropcapRedactor, scanner *dropcapScanner) []string {
 	identities := map[string]string{secapSessionID: "$SESSION_ID"}
-	var visit func(any, string)
-	visit = func(value any, parentKey string) {
-		switch value := value.(type) {
-		case map[string]any:
-			for key, child := range value {
-				if s, ok := child.(string); ok && s != "" {
-					if strings.HasPrefix(s, "/") && strings.Trim(s, "/") != "" {
-						class, replacement := "dynamic_path", "$DYNAMIC_PATH"
-						if key == "messaging_socket_path" {
-							class, replacement = dropcapClassMessagingSocket, "$MESSAGING_SOCKET"
-						}
-						red.addPathClass(class, replacement, s)
-						scanner.addDynamicPath(class, s)
-					}
-					if (key == "id" && (parentKey == "message" || value["type"] == "tool_use" || value["type"] == "control_response")) || key == "uuid" || key == "session_id" || key == "message_id" ||
-						key == "parent_tool_use_id" || key == "tool_use_id" || key == "request_id" {
-						if _, exists := identities[s]; !exists {
-							identities[s] = fmt.Sprintf("$IDENTITY_%d", len(identities)+1)
-						}
-						value[key] = identities[s]
+	type span struct {
+		start, end int
+		value      string
+		identity   bool
+	}
+	spans := make([][]span, len(rows))
+	for i, row := range rows {
+		decoder := json.NewDecoder(strings.NewReader(row))
+		decoder.UseNumber()
+		read := func(identity bool, key string) (json.Token, error) {
+			before := int(decoder.InputOffset())
+			token, err := decoder.Token()
+			if value, ok := token.(string); err == nil && ok {
+				end := int(decoder.InputOffset())
+				start := before + strings.IndexByte(row[before:end], '"')
+				spans[i] = append(spans[i], span{start, end, value, identity})
+				if identity && value != "" {
+					if _, exists := identities[value]; !exists {
+						identities[value] = fmt.Sprintf("$IDENTITY_%d", len(identities)+1)
 					}
 				}
-				visit(child, key)
+				if strings.HasPrefix(value, "/") && strings.Trim(value, "/") != "" {
+					class, replacement := "dynamic_path", "$DYNAMIC_PATH"
+					if key == "messaging_socket_path" {
+						class, replacement = dropcapClassMessagingSocket, "$MESSAGING_SOCKET"
+					}
+					red.addPathClass(class, replacement, value)
+					scanner.addDynamicPath(class, value)
+				}
 			}
-		case []any:
-			for _, child := range value {
-				visit(child, parentKey)
-			}
+			return token, err
 		}
+		var walk func(string, bool) error
+		walk = func(parent string, identity bool) error {
+			token, err := read(identity, parent)
+			if err != nil {
+				return err
+			}
+			switch token {
+			case json.Delim('{'):
+				for decoder.More() {
+					token, err := read(parent == "wire_tool_inputs", "")
+					if err != nil {
+						return err
+					}
+					key := token.(string) // object keys returned by Token are strings
+					identity := key == "id" || key == "uuid" || key == "session_id" || key == "message_id" ||
+						key == "parent_tool_use_id" || key == "tool_use_id" || key == "request_id"
+					if err := walk(key, identity); err != nil {
+						return err
+					}
+				}
+				_, err = decoder.Token()
+			case json.Delim('['):
+				for decoder.More() {
+					if err := walk(parent, identity); err != nil {
+						return err
+					}
+				}
+				_, err = decoder.Token()
+			}
+			return err
+		}
+		_ = walk("", false) // malformed input stays malformed; deny-scan gates recovery
 	}
-	out := make([]json.RawMessage, len(rows))
+	out := make([]string, len(rows))
 	for i, row := range rows {
-		var value any
-		decoder := json.NewDecoder(bytes.NewReader(row))
-		decoder.UseNumber()
-		out[i] = append([]byte(nil), row...)
-		if decoder.Decode(&value) == nil {
-			visit(value, "")
-			if encoded, err := json.Marshal(value); err == nil {
-				out[i] = encoded
+		var retained strings.Builder
+		offset := 0
+		for _, span := range spans[i] {
+			value := span.value
+			if span.identity && value != "" {
+				value = identities[value]
+			} else {
+				value = red.str(value)
 			}
+			retained.WriteString(row[offset:span.start])
+			if value == span.value {
+				retained.WriteString(row[span.start:span.end])
+			} else {
+				encoded, _ := json.Marshal(value) // a string always marshals
+				retained.Write(encoded)
+			}
+			offset = span.end
 		}
-	}
-	for i, row := range out {
-		out[i] = red.redact(row)
+		retained.WriteString(row[offset:])
+		out[i] = retained.String()
 	}
 	return out
 }
 
-func tttReplay(t *testing.T, rows []json.RawMessage) ([]turnevent.Event, []int) {
+func tttReplay(t *testing.T, rows []string) ([]turnevent.Event, []int) {
 	t.Helper()
 	var events []turnevent.Event
 	rejected := []int{}
@@ -131,11 +174,21 @@ func tttReplay(t *testing.T, rows []json.RawMessage) ([]turnevent.Event, []int) 
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	for i, row := range rows {
 		index = i
-		if _, err := parser.Write(append(append([]byte(nil), row...), '\n')); err != nil {
+		if _, err := parser.Write(append([]byte(row), '\n')); err != nil {
 			t.Fatal("replay write failed")
 		}
 	}
 	return events, rejected
+}
+
+func tttRejections(events []turnevent.Event) []string {
+	out := []string{}
+	for _, ev := range events {
+		if ev, ok := ev.(turnevent.Unrecognized); ok {
+			out = append(out, fmt.Sprintf("%s/%s/%t", ev.Site, ev.Kind, ev.Truncated))
+		}
+	}
+	return out
 }
 
 func tttCapture(t *testing.T) {
@@ -164,8 +217,8 @@ func tttCapture(t *testing.T) {
 		ClaudeVersion: probeClaudeVersion(claudeBin), Prompt: tttPrompt,
 		MobileRevision: "not driven; historical failure at 5de4f4459",
 		Assumptions:    "Historical mobile model/effort/permission are unknown. Isolated attempt uses no model or effort override, fresh HOME without user configuration, and --allowedTools Bash for the test-owned echo. Effective model/permission and effort key presence are retained in system/init; absent effort is unknown. This does not establish historical configuration equivalence.",
-		Outcome:        "incomplete", RejectedRows: []int{}, Rows: []json.RawMessage{},
-		IdentityRedaction: "Identity-valued JSON fields use one consistent $IDENTITY_N mapping; other string fields, including string-valued indices, retain their values.",
+		Outcome:        "incomplete", RejectedRows: []int{}, Rows: []string{},
+		IdentityRedaction: "Identity-valued JSON fields and wire_tool_inputs keys use one consistent $IDENTITY_N mapping. String-token edits preserve duplicate keys, order, index shapes and trailing bytes.",
 	}
 	if revision, err := exec.Command("git", "rev-parse", "HEAD").Output(); err == nil {
 		rec.DaemonRevision = strings.TrimSpace(string(revision))
@@ -179,7 +232,16 @@ func tttCapture(t *testing.T) {
 	}
 	recorder := newDropcapRecorder()
 	argvHandler, argv := newDropcapArgvHandler()
-	parser := streamsup.NewParser(func(turnevent.Event) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	liveRejections := []string{}
+	ended := false
+	parser := streamsup.NewParser(func(ev turnevent.Event) {
+		if !ended {
+			liveRejections = append(liveRejections, tttRejections([]turnevent.Event{ev})...)
+		}
+		if _, ok := ev.(turnevent.TurnEnd); ok {
+			ended = true
+		}
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	runner, err := streamsup.New(streamsup.Config{
 		ClaudeBin: claudeBin, WorkDir: workdir, SessionID: secapSessionID,
 		Args: []string{"--allowedTools", "Bash"}, Stdout: io.MultiWriter(parser, recorder),
@@ -205,15 +267,22 @@ func tttCapture(t *testing.T) {
 		lines, caps := recorder.snapshot()
 		rec.Loss = tttLoss{caps.LinesOverCap, caps.BytesOverCap, caps.PartialsDropped, caps.UnterminatedPartial}
 		for _, line := range lines {
-			rec.Rows = append(rec.Rows, json.RawMessage(line.Raw))
+			rec.Rows = append(rec.Rows, string(line.Raw))
 			if line.Type == "result" {
 				break
 			}
 		}
+		events, rejected := tttReplay(t, rec.Rows)
+		rec.RejectedRows = rejected // census of original ordered wire rows
 		rec.Rows = tttRedactRows(rec.Rows, red, &scanner)
 		rec.SpawnShape = red.strs(argv())
-		events, rejected := tttReplay(t, rec.Rows)
-		rec.RejectedRows = rejected
+		retainedEvents, retainedRejected := tttReplay(t, rec.Rows)
+		rec.ReplayMatches = reflect.DeepEqual(rejected, retainedRejected) &&
+			reflect.DeepEqual(tttRejections(events), tttRejections(retainedEvents)) &&
+			reflect.DeepEqual(liveRejections, tttRejections(events))
+		if !rec.ReplayMatches {
+			t.Error("original live/replay and retained rejection censuses differ; refusing promotion")
+		}
 		for _, ev := range events {
 			switch ev := ev.(type) {
 			case turnevent.ToolStart:

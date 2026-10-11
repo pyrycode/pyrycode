@@ -16,7 +16,14 @@ import (
 // behavior. Its passing result does not diagnose the separate mobile rejection.
 func TestParser_ToolThenTextIsolatedCapture(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("../e2e/realclaude/testdata/tool_then_text_stream_event_v2.1.280.json")
+	for _, name := range []string{"tool_then_text_stream_event_v2.1.280.json", "tool_then_text_wire_stream_event_v2.1.280.json"} {
+		t.Run(name, func(t *testing.T) { testToolThenTextIsolatedCapture(t, name) })
+	}
+}
+
+func testToolThenTextIsolatedCapture(t *testing.T, name string) {
+	t.Helper()
+	data, err := os.ReadFile("../e2e/realclaude/testdata/" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +33,7 @@ func TestParser_ToolThenTextIsolatedCapture(t *testing.T) {
 		Revision    string                     `json:"daemon_revision"`
 		Rows        []json.RawMessage          `json:"ordered_stdout"`
 		Rejected    []int                      `json:"rejected_rows"`
+		ReplayMatch *bool                      `json:"retained_replay_matches_original"`
 		Loss        map[string]json.RawMessage `json:"capture_loss"`
 		ScanApplied map[string]bool            `json:"credential_scan_applied"`
 	}
@@ -43,6 +51,10 @@ func TestParser_ToolThenTextIsolatedCapture(t *testing.T) {
 	if !rec.ScanApplied["messaging_socket_path"] {
 		t.Fatal("capture did not apply messaging-socket deny-scan")
 	}
+	wireCapture := strings.Contains(name, "_wire_")
+	if wireCapture && (rec.ReplayMatch == nil || !*rec.ReplayMatch) {
+		t.Fatal("wire capture must pin agreement with the original rejection census")
+	}
 	var got []turnevent.Event
 	var logs bytes.Buffer
 	p := NewParser(func(ev turnevent.Event) { got = append(got, ev) }, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -51,11 +63,20 @@ func TestParser_ToolThenTextIsolatedCapture(t *testing.T) {
 	var settled, streamed strings.Builder
 	var wantToolIDs, startIDs, updateIDs []string
 	for i, row := range rec.Rows {
+		if len(row) > 0 && row[0] == '"' {
+			var wire string
+			if err := json.Unmarshal(row, &wire); err != nil {
+				t.Fatal(err)
+			}
+			row = json.RawMessage(wire)
+			rec.Rows[i] = row
+		}
 		var line struct {
-			Type    string         `json:"type"`
-			Parent  string         `json:"parent_tool_use_id"`
-			Message *streamMessage `json:"message"`
-			Event   struct {
+			Type       string                     `json:"type"`
+			Parent     string                     `json:"parent_tool_use_id"`
+			Message    *streamMessage             `json:"message"`
+			WireInputs map[string]json.RawMessage `json:"wire_tool_inputs"`
+			Event      struct {
 				Type    string `json:"type"`
 				Message struct {
 					ID string `json:"id"`
@@ -83,6 +104,11 @@ func TestParser_ToolThenTextIsolatedCapture(t *testing.T) {
 					settled.WriteString(block.Text)
 				case "tool_use":
 					wantToolIDs = append(wantToolIDs, block.ID)
+					if wireCapture {
+						if _, ok := line.WireInputs[block.ID]; !ok {
+							t.Fatal("completed tool ID must match its retained wire input key")
+						}
+					}
 				}
 			}
 		}
