@@ -35,6 +35,17 @@ import (
 // MUST NOT be logged, wrapped into an error or emitted on any wire surface, the
 // same contract internal/keys and internal/noise state for those bytes.
 type V2SessionConfig struct {
+	// HostedAppsDiscovery supplies committed registrations for this authenticated host.
+	// Nil disables hosted capability admission.
+	HostedAppsDiscovery HostedAppsDiscovery
+	// HostedAppsReady attests complete registration, supervision and resource routing.
+	// It must be nonblocking. Nil/false keeps production capability disabled.
+	HostedAppsReady func() bool
+	// HostedAppsSend provides ordered cancellable delivery for hosted connections.
+	// It must honor cancellation/deadlines and never publish cancelled work. Nil
+	// withholds the capability: context-free Outbound cannot promise retirement.
+	HostedAppsSend func(context.Context, protocol.RoutingEnvelope) error
+
 	// ThreadLiveState returns a detached current-state cursor, including inactive
 	// retry/compaction and only outstanding prompts/questions with answer IDs.
 	// Factory and cursor run on Run and must be nonblocking, hold no resources

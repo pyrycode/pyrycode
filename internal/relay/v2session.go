@@ -299,7 +299,9 @@ type V2Session struct {
 	// *dispatch.Conn by routeAppFrame, so a handler reads it as c.MultiAgent().
 	multiAgent bool
 	// thread is the authenticated admission decision, retained through rekey.
-	thread bool
+	thread     bool
+	hostedApps bool
+	hosted     *hostedState
 	// Supplied live-state progress is Run-owned and ends with this connection.
 	liveSnapshot   func() (LiveState, bool)
 	livePending    *LiveState
@@ -494,8 +496,9 @@ func (s *V2Session) State() V2SessionState { return s.state }
 // cannot be observed half-applied by any other code path, so the spec's
 // atomic-switchover requirement is structural.
 type V2SessionManager struct {
-	cfg      V2SessionConfig
-	sessions map[string]*V2Session
+	hostedDone chan hostedResult
+	cfg        V2SessionConfig
+	sessions   map[string]*V2Session
 
 	// minClientVersions is cfg.MinClientVersions parsed once by
 	// NewV2SessionManager, keyed by app name, holding only the apps with a
@@ -687,6 +690,7 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 	}
 	return &V2SessionManager{
 		cfg:          cfg,
+		hostedDone:   make(chan hostedResult),
 		sessions:     make(map[string]*V2Session),
 		wake:         make(chan wakeSignal, wakeBufferSize),
 		manualRekey:  make(chan manualRekeyReq),
@@ -717,6 +721,15 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 func (m *V2SessionManager) Run(ctx context.Context) error {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
+	defer func() {
+		for _, s := range m.sessions {
+			if s.hosted != nil {
+				m.retireHosted(s)
+			}
+		}
+	}()
+	hostedSweep := time.NewTicker(100 * time.Millisecond)
+	defer hostedSweep.Stop()
 	for {
 		select {
 		case <-runCtx.Done():
@@ -726,6 +739,14 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 				return nil
 			}
 			m.handleFrame(runCtx, env)
+		case res := <-m.hostedDone:
+			m.handleHostedDone(runCtx, res)
+		case <-hostedSweep.C:
+			for _, s := range m.sessions {
+				if s.hosted != nil && (!m.hostedAuthorized(s) || (s.hosted.deliveryCtx != nil && s.hosted.deliveryCtx.Err() != nil)) {
+					m.closeWith(runCtx, s, StatusUnauthorized, nil)
+				}
+			}
 		case w := <-m.wake:
 			m.handleWake(runCtx, w)
 		case connID := <-m.pushOverflow:
@@ -964,9 +985,15 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 	// per-frame AEAD cost. A JSON decode failure here deliberately falls
 	// through so dispatch.Route's malformed-envelope branch emits the
 	// sealed protocol.malformed reply established by #446 unchanged.
+	if m.routeHosted(ctx, s, plaintext) {
+		return
+	}
 	var probeEnv protocol.Envelope
 	if err := json.Unmarshal(plaintext, &probeEnv); err == nil {
 		switch probeEnv.Type {
+		case protocol.TypeListApps, protocol.TypeAppCancel:
+			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
+			return
 		case protocol.TypeRekeyRequest:
 			m.handleRekeyRequest(ctx, s, probeEnv)
 			return
@@ -1215,6 +1242,18 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 	if ctx.Err() != nil {
 		return
 	}
+	if s.hosted != nil {
+		go func() {
+			deliveryCtx, cancel := context.WithTimeout(context.Background(), hostedDeliveryTimeout)
+			defer cancel()
+			if m.cfg.HostedAppsSend != nil {
+				_ = m.cfg.HostedAppsSend(deliveryCtx, env)
+			} else {
+				_ = m.cfg.Outbound(env)
+			}
+		}()
+		return
+	}
 	m.send(env)
 }
 
@@ -1226,6 +1265,7 @@ func (m *V2SessionManager) teardown(s *V2Session) bool {
 	if s.state == V2StateClosed {
 		return false
 	}
+	m.retireHosted(s)
 	s.state = V2StateClosed
 	// Stop per-session timers to free runtime timer-heap entries and
 	// ensure no pending callback goroutine blocks indefinitely on
@@ -1302,6 +1342,10 @@ func (m *V2SessionManager) teardown(s *V2Session) bool {
 // reconnect handles recovery and the frame is lost (consistent with the
 // v1 protocol contract that frames sent while disconnected are dropped).
 func (m *V2SessionManager) send(env protocol.RoutingEnvelope) {
+	if s := m.sessions[env.ConnID]; s != nil && s.hosted != nil && s.state == V2StateOpen {
+		m.hostedEnqueue(context.Background(), s, &hostedOutput{wire: &env})
+		return
+	}
 	if err := m.cfg.Outbound(env); err != nil {
 		// transport.ErrDisconnected / ErrNotConnected are expected during
 		// reconnect; log at debug to keep the warn channel clean.
