@@ -62,29 +62,36 @@ func openDirectory(home string, create bool) (int, error) {
 	parts := strings.Split(strings.TrimPrefix(filepath.Join(home, ".pyry/memory/capture"), "/"), "/")
 	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return -1, err
+		return -1, fmt.Errorf("directory root open: %w", err)
 	}
 	for i, part := range parts {
+		operation := "directory openat"
 		next, e := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if errors.Is(e, unix.ENOENT) && create && i >= len(parts)-3 {
+			operation = "directory mkdirat"
 			e = unix.Mkdirat(fd, part, 0700)
 			if e == nil {
+				operation = "directory parent sync"
 				e = unix.Fsync(fd)
 			}
 			if e == nil || errors.Is(e, unix.EEXIST) {
+				operation = "directory created openat"
 				next, e = unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			}
 		}
 		if e == nil {
 			var st unix.Stat_t
+			operation = "directory fstat"
 			e = unix.Fstat(next, &st)
 			private := i >= len(parts)-3
 			if e == nil && !safeDirectory(st, private, i == len(parts)-4) {
+				operation = "directory validation"
 				e = ErrUnsafe
 			}
 			// Also sync pre-existing entries: another creator may not yet have
 			// synced its parent, or may have failed just after mkdir.
 			if e == nil && create && private {
+				operation = "directory parent sync"
 				e = unix.Fsync(fd)
 			}
 		}
@@ -93,7 +100,7 @@ func openDirectory(home string, create bool) (int, error) {
 			if next >= 0 {
 				_ = unix.Close(next)
 			}
-			return -1, errors.Join(ErrUnsafe, e)
+			return -1, fmt.Errorf("%s: %w", operation, errors.Join(ErrUnsafe, e))
 		}
 		fd = next
 	}
@@ -103,11 +110,14 @@ func openDirectory(home string, create bool) (int, error) {
 func privateFile(dir int, name string, flags int) (*os.File, error) {
 	fd, err := unix.Openat(dir, name, flags|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0600)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("file openat: %w", err)
 	}
 	f := os.NewFile(uintptr(fd), name)
 	var st unix.Stat_t
 	err = unix.Fstat(fd, &st)
+	if err != nil {
+		err = fmt.Errorf("file fstat: %w", err)
+	}
 	if err == nil && !safeRecord(st) {
 		err = ErrUnsafe
 	}
@@ -129,7 +139,7 @@ func sameFile(dir int, name string, want os.FileInfo) error {
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return err
+		return fmt.Errorf("file identity stat: %w", err)
 	}
 	if want == nil || !os.SameFile(info, want) {
 		return ErrUnsafe
@@ -140,26 +150,40 @@ func sameFile(dir int, name string, want os.FileInfo) error {
 func (s *Store) checkDirectory() error {
 	fd, err := openDirectory(s.home, false)
 	if err != nil {
-		return err
+		return fmt.Errorf("directory check: %w", err)
 	}
 	defer unix.Close(fd)
 	var held, current unix.Stat_t
-	if unix.Fstat(s.dir, &held) != nil || unix.Fstat(fd, &current) != nil || held.Dev != current.Dev || held.Ino != current.Ino {
+	if err = unix.Fstat(s.dir, &held); err != nil {
+		return fmt.Errorf("directory held fstat: %w", errors.Join(ErrUnsafe, err))
+	}
+	if err = unix.Fstat(fd, &current); err != nil {
+		return fmt.Errorf("directory current fstat: %w", errors.Join(ErrUnsafe, err))
+	}
+	if held.Dev != current.Dev || held.Ino != current.Ino {
 		return ErrUnsafe
 	}
 	return nil
 }
 
 func (s *Store) lock(ctx context.Context) (*os.File, error) {
-	f, err := privateFile(s.dir, ".lock", unix.O_CREAT|unix.O_RDWR)
+	err := s.fault("lock-open")
+	var f *os.File
+	if err == nil {
+		f, err = privateFile(s.dir, ".lock", unix.O_CREAT|unix.O_RDWR)
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lock open: %w", err)
 	}
 	for {
 		if err = ctx.Err(); err != nil {
+			err = fmt.Errorf("lock wait: %w", err)
 			break
 		}
-		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		err = s.fault("lock-flock")
+		if err == nil {
+			err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		}
 		if err == nil {
 			info, e := f.Stat()
 			if e == nil {
@@ -168,10 +192,11 @@ func (s *Store) lock(ctx context.Context) (*os.File, error) {
 			if e == nil {
 				return f, nil
 			}
-			err = e
+			err = fmt.Errorf("lock validation: %w", e)
 			break
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) {
+			err = fmt.Errorf("lock flock: %w", err)
 			break
 		}
 		timer := time.NewTimer(10 * time.Millisecond)
@@ -191,7 +216,7 @@ func readRecord(dir int, name string, id Identity) (_ *record, _ []byte, _ *os.F
 		return nil, nil, nil, nil
 	}
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("record open: %w", err)
 	}
 	defer func() {
 		if retErr != nil {
@@ -200,7 +225,7 @@ func readRecord(dir int, name string, id Identity) (_ *record, _ []byte, _ *os.F
 	}()
 	raw, err := io.ReadAll(io.LimitReader(f, maxRecord+1))
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("record read: %w", err)
 	}
 	if len(raw) > maxRecord || !utf8.Valid(raw) {
 		return nil, nil, nil, ErrCorrupt
@@ -219,7 +244,7 @@ func readRecord(dir int, name string, id Identity) (_ *record, _ []byte, _ *os.F
 	// A previous rename may have succeeded while its parent sync failed. Recovery
 	// must make the complete surviving record durable before authorizing execution.
 	if err = f.Sync(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("record recovery sync: %w", err)
 	}
 	return &r, raw, f, nil
 }
@@ -249,13 +274,13 @@ func (s *Store) transaction(ctx context.Context, id Identity, change func(*recor
 		return err
 	}
 	defer func() {
-		if e := lock.Close(); retErr == nil {
-			retErr = e
+		if e := lock.Close(); retErr == nil && e != nil {
+			retErr = fmt.Errorf("lock close: %w", e)
 		}
 	}()
 	lockInfo, err := lock.Stat()
 	if err != nil {
-		return err
+		return fmt.Errorf("lock stat: %w", err)
 	}
 	name := recordName(id)
 	r, raw, held, err := readRecord(s.dir, name, id)
@@ -267,13 +292,13 @@ func (s *Store) transaction(ctx context.Context, id Identity, change func(*recor
 		// Keep the validated inode alive until the transaction finishes. A
 		// removed and recreated path must not reuse its inode number.
 		defer func() {
-			if e := held.Close(); retErr == nil {
-				retErr = e
+			if e := held.Close(); retErr == nil && e != nil {
+				retErr = fmt.Errorf("record close: %w", e)
 			}
 		}()
 		info, err = held.Stat()
 		if err != nil {
-			return err
+			return fmt.Errorf("record stat: %w", err)
 		}
 	}
 	next, err := change(r)
@@ -288,7 +313,7 @@ func (s *Store) transaction(ctx context.Context, id Identity, change func(*recor
 			return e
 		}
 		if e := sameFile(s.dir, ".lock", lockInfo); e != nil {
-			return e
+			return fmt.Errorf("lock identity: %w", e)
 		}
 		return nil
 	}
@@ -297,7 +322,7 @@ func (s *Store) transaction(ctx context.Context, id Identity, change func(*recor
 			return e
 		}
 		if e := sameFile(s.dir, name, info); e != nil {
-			return e
+			return fmt.Errorf("record identity: %w", e)
 		}
 		if info != nil {
 			_, now, current, e := readRecord(s.dir, name, id)
@@ -308,7 +333,7 @@ func (s *Store) transaction(ctx context.Context, id Identity, change func(*recor
 				return ErrUnsafe
 			}
 			if e = current.Close(); e != nil {
-				return e
+				return fmt.Errorf("record recheck close: %w", e)
 			}
 			if !bytes.Equal(raw, now) {
 				return ErrUnsafe
@@ -333,7 +358,7 @@ func (s *Store) transaction(ctx context.Context, id Identity, change func(*recor
 			return err
 		}
 		if err = unix.Fsync(s.dir); err != nil {
-			return err
+			return fmt.Errorf("directory recovery sync: %w", err)
 		}
 	}
 	return fence()
@@ -348,9 +373,13 @@ func (s *Store) fault(stage string) error {
 
 func (s *Store) publish(data []byte, name string, id Identity, safe, fence func() error) (retErr error) {
 	temp := ".tmp-" + rand.Text()
-	f, err := privateFile(s.dir, temp, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY)
+	err := s.fault("temp-create")
+	var f *os.File
+	if err == nil {
+		f, err = privateFile(s.dir, temp, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY)
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("temporary create: %w", err)
 	}
 	defer unix.Unlinkat(s.dir, temp, 0) // Best effort: rename may have consumed it.
 	// The original descriptor must close before rename to surface close errors,
@@ -358,16 +387,18 @@ func (s *Store) publish(data []byte, name string, id Identity, safe, fence func(
 	duplicate, err := unix.FcntlInt(f.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		_ = f.Close()
-		return err
+		return fmt.Errorf("temporary duplicate: %w", err)
 	}
 	guard := os.NewFile(uintptr(duplicate), temp)
 	defer func() {
-		if e := guard.Close(); retErr == nil {
-			retErr = e
+		if e := guard.Close(); retErr == nil && e != nil {
+			retErr = fmt.Errorf("temporary guard close: %w", e)
 		}
 	}()
+	operation := "temporary stat"
 	info, err := f.Stat()
 	if err == nil {
+		operation = "temporary write"
 		err = s.fault("write")
 	}
 	if err == nil {
@@ -378,6 +409,7 @@ func (s *Store) publish(data []byte, name string, id Identity, safe, fence func(
 		}
 	}
 	if err == nil {
+		operation = "temporary sync"
 		err = s.fault("file-sync")
 	}
 	if err == nil {
@@ -385,37 +417,38 @@ func (s *Store) publish(data []byte, name string, id Identity, safe, fence func(
 	}
 	closeErr := f.Close()
 	if err == nil {
+		operation = "temporary close"
 		err = closeErr
 	}
 	if err == nil {
 		err = s.fault("close")
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", operation, err)
 	}
 	if err = s.fault("rename"); err != nil {
-		return err
+		return fmt.Errorf("record rename: %w", err)
 	}
 	if err = safe(); err != nil {
 		return err
 	}
 	if err = sameFile(s.dir, temp, info); err != nil {
-		return err
+		return fmt.Errorf("temporary identity: %w", err)
 	}
 	if err = unix.Renameat(s.dir, temp, s.dir, name); err != nil {
-		return err
+		return fmt.Errorf("record rename: %w", err)
 	}
 	if err = s.fault("dir-sync"); err != nil {
-		return err
+		return fmt.Errorf("directory sync: %w", err)
 	}
 	if err = unix.Fsync(s.dir); err != nil {
-		return err
+		return fmt.Errorf("directory sync: %w", err)
 	}
 	if err = fence(); err != nil {
 		return err
 	}
 	if err = sameFile(s.dir, name, info); err != nil {
-		return err
+		return fmt.Errorf("published record identity: %w", err)
 	}
 	_, current, held, err := readRecord(s.dir, name, id)
 	if err != nil {
@@ -425,7 +458,7 @@ func (s *Store) publish(data []byte, name string, id Identity, safe, fence func(
 		return ErrUnsafe
 	}
 	if err = held.Close(); err != nil {
-		return err
+		return fmt.Errorf("published record close: %w", err)
 	}
 	if !bytes.Equal(data, current) {
 		return ErrUnsafe

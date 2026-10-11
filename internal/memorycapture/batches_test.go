@@ -151,11 +151,31 @@ func TestEvidence(t *testing.T) {
 }
 func TestConcurrentStores(t *testing.T) {
 	home := t.TempDir()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	testPlatform(t, ctx)
 	const n = 12
+	ready := make(chan struct{}, n)
+	start := make(chan struct{})
 	handles := make([]*Store, n)
 	for i := range handles {
 		handles[i] = testStore(t, home)
+		var once sync.Once
+		handles[i].hook = func(stage string) error {
+			if stage == "lock-open" {
+				once.Do(func() {
+					ready <- struct{}{}
+					select {
+					case <-start:
+					case <-ctx.Done():
+					}
+				})
+			}
+			return ctx.Err()
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".pyry/memory/capture/.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first publication requires absent lock: %v", err)
 	}
 	batches := make(chan *Batch, n)
 	errs := make(chan error, n)
@@ -168,16 +188,29 @@ func TestConcurrentStores(t *testing.T) {
 			p.Model = fmt.Sprint(i)
 			b, e := s.Publish(ctx, testID, p)
 			batches <- b
-			errs <- e
+			errs <- testOperationError("publish", fmt.Sprint(i), e)
 		}(i, s)
 	}
+waiting:
+	for range n {
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			t.Error("lock-open barrier:", ctx.Err())
+			break waiting
+		}
+	}
+	close(start)
 	wg.Wait()
 	close(batches)
 	close(errs)
 	for e := range errs {
 		if e != nil {
-			t.Fatal(e)
+			t.Error(e)
 		}
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 	b := testPending(t, handles[0], testID)
 	for got := range batches {
@@ -189,15 +222,20 @@ func TestConcurrentStores(t *testing.T) {
 		wg.Add(1)
 		go func(i int, s *Store) {
 			defer wg.Done()
-			if e := s.Report(ctx, testID, b.ID, []string{fmt.Sprintf("%02d.md", i)}); e != nil {
-				t.Error(e)
+			if e := s.Report(ctx, testID, b.ID, []string{fmt.Sprintf("%02d.md", i), "shared.md", fmt.Sprintf("%02d.md", i)}); e != nil {
+				t.Error(testOperationError("report", fmt.Sprint(i), e))
 			}
 		}(i, s)
 	}
 	wg.Wait()
-	got := testPending(t, handles[0], testID)
-	if len(got.ChangedPaths) != n {
-		t.Fatal(got)
+	got := testPending(t, testStore(t, home), testID)
+	want := make([]string, 0, n+1)
+	for i := range n {
+		want = append(want, fmt.Sprintf("%02d.md", i))
+	}
+	want = append(want, "shared.md")
+	if !reflect.DeepEqual(got.ChangedPaths, want) || got.ID != b.ID || !reflect.DeepEqual(got.Payload, b.Payload) {
+		t.Fatalf("reopened evidence/payload diverged: %#v", got)
 	}
 }
 func TestHelperProcess(t *testing.T) {
@@ -218,10 +256,10 @@ func TestHelperProcess(t *testing.T) {
 	p.Model = os.Getenv("MEMORY_CAPTURE_TEST_NOTE")
 	b, err := s.Publish(context.Background(), testID, p)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(testOperationError("publish", p.Model, err))
 	}
 	if err = s.Report(context.Background(), testID, b.ID, []string{p.Model}); err != nil {
-		t.Fatal(err)
+		t.Fatal(testOperationError("report", p.Model, err))
 	}
 }
 func TestCrossProcess(t *testing.T) {
@@ -229,29 +267,30 @@ func TestCrossProcess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmds := make([]*exec.Cmd, 4)
+	outputs := make([]*testProcessOutput, len(cmds))
 	for i := range cmds {
-		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHelperProcess$")
-		cmd.Env = append(os.Environ(), "MEMORY_CAPTURE_TEST_HOME="+home, fmt.Sprintf("MEMORY_CAPTURE_TEST_NOTE=%d.md", i))
+		cmd, output := testProcessCommand(ctx, home, fmt.Sprintf("%d.md", i))
 		cmds[i] = cmd
+		outputs[i] = output
 		if err := cmd.Start(); err != nil {
-			t.Error(err)
+			t.Errorf("worker=%d helper start: %v\n%s", i, err, output.String())
 			cmds[i] = nil
 			break
 		}
 	}
-	for _, cmd := range cmds {
+	for i, cmd := range cmds {
 		if cmd == nil {
 			continue
 		}
 		if err := cmd.Wait(); err != nil {
-			t.Error(err)
+			t.Errorf("worker=%d helper wait: %v\n%s", i, err, outputs[i].String())
 		}
 	}
 	if t.Failed() {
 		t.FailNow()
 	}
 	b := testPending(t, testStore(t, home), testID)
-	if b == nil || len(b.ChangedPaths) != 4 {
+	if b == nil || !reflect.DeepEqual(b.ChangedPaths, []string{"0.md", "1.md", "2.md", "3.md"}) {
 		t.Fatalf("cross-process lost union: %#v", b)
 	}
 }
