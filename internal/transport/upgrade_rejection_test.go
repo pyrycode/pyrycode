@@ -247,7 +247,7 @@ func TestUpgradeRetryRecovery(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				n := int(requests.Add(1))
 				if n > len(tc.statuses) {
-					http.Error(w, reflectedSecret, 503)
+					http.Error(w, reflectedSecret, http.StatusServiceUnavailable)
 					return
 				}
 				if tc.statuses[n-1] != 101 || (tc.name == "invalid-101" && n == 1) {
