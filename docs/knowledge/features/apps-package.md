@@ -169,8 +169,13 @@ handoff and no peer I/O, worker creation or registry re-entry. Handoff and deliv
 share a 16-envelope capacity bound per connection; separate bounds would retain
 more than the promised total when a peer stalls. Overflow retires that generation
 so fresh discovery recovers committed state, instead of silently dropping a
-revision on a current connection. Daemon subscription installation/unsubscribe
-ownership remains #3139.
+revision on a current connection. Daemon subscription ownership belongs to
+`newDaemonAppsManager` and relay cleanup: install only after successful
+manager construction, before `Run`, and detach before manager drain. Channel
+stop, clear and eviction cannot detach this daemon-lifetime subscription.
+Installing discovery and `HostedAppsSend` must preserve `HostedAppsReady` as the
+complete registration/supervision/resource attestation; treating a registry or
+cancellable sender as readiness would advertise services that do not exist.
 
 Because `List` can wait on this mutex, relay cancellation retires its result
 without releasing read capacity until the
@@ -214,8 +219,11 @@ already have normalized observed state. An available active record stored as
 stopped legitimately becomes starting and writes on reopen; that is not schema
 repair. `testStorageDocument` uses stopped intent/state so optional-field checks
 do not accidentally test normalization. Rejected storage still remains unchanged.
-Restart tests must transfer ownership after reopening, rather than mutating the
-previous registry and overwriting newer revisions.
+Restart tests must transfer exclusive ownership between stopped-daemon seeding
+and startup, rather than mutating the previous registry and overwriting newer
+revisions. Inspect daemon-written JSON before any test-side `Open`: that call
+normalizes state itself and could conceal missing daemon initialization. See the
+[harness restart proof](e2e-harness-restart-pattern-startin-stop.md#host-app-storage-ownership-and-readback).
 
 `TestRestartNormalization` covers mixed states and reverses disk order to verify
 stable revision assignment; `TestNormalizationFailure` checks multiple changes

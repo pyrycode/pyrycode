@@ -81,9 +81,14 @@ Resolution reuses the list's fail-open rule rather than a stricter one: an unkno
 Offered `hosted_apps_v1` is admitted only with `HostedAppsDiscovery`,
 `HostedAppsSend` and a true `HostedAppsReady` attesting registration, supervision
 and resource routing together. A registry or transport adapter alone proves
-neither complete hosting nor readiness. Production installs `OutboundContext`
-for cancellable controls but no discovery/readiness providers, so it still
-withholds the capability. Apps require neither `interactive` nor `thread` nor
+neither complete hosting nor readiness. `newDaemonAppsManager` installs initialized
+storage as discovery and `OutboundContext` as `HostedAppsSend`, preserving the
+caller's complete readiness attestation. Production supplies no such attestation
+while supervision (#3122) and resource routing (#3123) are absent, so it withholds
+the capability; `TestHostedAppsProductionUnsupported` checks both `hello_ack`
+omission and `protocol.unsupported` for `list_apps` through the real daemon.
+Ready in-process fakes exercise wiring without an environment bypass.
+Apps require neither `interactive` nor `thread` nor
 an active channel; every request/completion/delivery also checks current paired
 membership. See the [wire gates](../../protocol-mobile.md#hosted-apps-v2).
 
