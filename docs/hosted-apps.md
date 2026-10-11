@@ -2,11 +2,13 @@
 
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 defines the hosting design. Strict manifest validation, durable registration,
-lifecycle mutations and restart normalization are implemented in the
+lifecycle mutations, restart normalization and callable committed-release
+process ownership are implemented in the
 `internal/apps` package. The relay implements authenticated paged discovery,
 committed lifecycle notifications and list cancellation. The daemon owns storage,
-discovery subscriptions and cancellable delivery; production capability
-activation still awaits service supervision (#3122) and resource routing (#3123).
+discovery subscriptions and cancellable delivery. Process-owner daemon wiring
+(#3204), health/readiness (#3206), automatic recovery (#3207) and resource routing
+(#3123) remain separate work before production capability activation.
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
 `templates/hosted-app/`; daemon service integration, publication and native
@@ -151,7 +153,8 @@ revisions remain registry-assigned. Foreign, unknown or tombstoned identities
 cannot be updated. `Lifecycle` is a complete replacement, with empty release strings and
 nil `LastError` meaning unset. Title/release bounds and record validation apply,
 including an active release for `running`. Callers supply confirmed observations
-and static safe errors; the package starts no processes and checks no health.
+and static safe errors. The registry starts no processes and checks no health;
+the package's separate `Owner` supplies explicit process ownership.
 
 Missing `APPS_ROOT/registry.json` opens empty at host revision 0. Each changed
 registration, manifest update, lifecycle mutation or removal advances the durable
@@ -204,7 +207,7 @@ for storage, concurrency and regression-test constraints.
 
 ### Registration and observed state
 
-A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists caller-supplied observations; health checks and process/retry reconciliation remain separate work (#3122). New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
+A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists observations; callable `Owner.Start`, `Owner.Stop` and `Owner.Shutdown` implement local process ownership. Health/readiness (#3206), automatic reconciliation/recovery (#3207) and daemon wiring (#3204) remain separate work. New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
 
 The implemented discovery mapping has these exact fields. Unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality and the package's unset storage values do not change record nullability.
 
@@ -223,9 +226,33 @@ The implemented discovery mapping has these exact fields. Unknown wire fields ar
 
 The registry validates `running`'s active release; confirmed health is the caller's obligation. A successful cutover supplies the new title/active release, `state: running`, unset pending release and unset error together in one `UpdateLifecycle`. `LastError` accepts only the [contract error codes](#errors) and a static message of 1–160 UTF-8 bytes with no controls or leading/trailing whitespace. Callers must choose safe metadata: validation cannot establish that text is safe by its provenance. Raw parser, process or I/O diagnostics never become `last_error`; package errors are returned separately from transport codes.
 
+`Registry.CommitObservation(serverID, appID, expectedRevision, Observation)`
+checks the app record's revision under the registry lock, then commits state/error
+and optional explicit desired intent while preserving identity, manifest, title
+and active/pending releases. Empty `Desired` preserves intent; empty `State`
+preserves state/error, while a supplied state replaces `LastError` (nil clears it).
+It returns a detached current record and a change flag on success, including
+no-ops. A zero or obsolete expected revision returns `ErrStale` without writing,
+advancing revisions or notifying. Another app's commit does not invalidate this
+app's observation. Existing unconditional `UpdateLifecycle` retains its complete
+replacement behavior; both paths persist before exposing records or notifications.
+
+Explicit start durably resumes `available` intent, clears the previous error and
+sets `starting` when an active release exists; an unpublished registration stays
+`stopped` and launches nothing. Failed intent/starting persistence launches
+nothing. Spawn leaves state `starting`, never `running`. A final locked revision
+and cancellation check prevents obsolete preparation from spawning, and late
+generation exits cannot overwrite newer title, release or intent commits.
+Validation/spawn failure records `app.unavailable` / `Service could not start`;
+unexpected exit records `app.unavailable` / `Service exited unexpectedly`, only
+while its revision is current. Child output is discarded; persisted errors contain
+no output, paths or endpoints. Local preparation and cleanup errors carry operation
+context and preserve `errors.Is`; persistence failures are returned, with
+asynchronous observation/cleanup failures retained for `Shutdown` to surface.
+
 The host change sequence advances for registration, manifest/title/desired/state/release/error changes and removal, including restart state normalization; persist before announcing. It never resets on reconnect/restart or wraps; exhaustion refuses changes rather than reusing revisions. Semantic no-ops advance nothing. Committed package updates are ordered detached whole records, and removals are identity/revision tombstones as described above. The wire contract's `app_removed` carries a tombstone revision and removes only the registration; deletion does not silently erase data, and explicit data deletion is outside v1. No event-ring or conversation-history replay is used for apps.
 
-`Open` durably normalizes observed state before any launch/probe or reader exposure: available apps with active releases become starting; unpublished or intentionally stopped apps become stopped. Only changed states receive new revisions; unchanged reopen adds none. Health checks and process reconciliation (#3122) must then establish fresh readiness. The remaining reconciliation contract uses exponential retry delays of 1, 2, 4, 8, 16, then 30 seconds, resets after 60 seconds healthy, and stops immediately when desired becomes stopped. Every launched process has a new private generation even when app ID/release/port are reused.
+`Open` durably normalizes observed state before any launch/probe or reader exposure: available apps with active releases become starting; unpublished or intentionally stopped apps become stopped. Only changed states receive new revisions; unchanged reopen adds none. Opening the registry or constructing an owner performs no startup scan or launch. Health/readiness (#3206) and automatic reconciliation (#3207) must then establish fresh readiness. The pending reconciliation contract uses exponential retry delays of 1, 2, 4, 8, 16, then 30 seconds, resets after 60 seconds healthy, and stops immediately when desired becomes stopped. Every new launch has a fresh private generation; repeated start of the current owned generation creates no duplicate.
 
 ## Runtime and layout
 
@@ -281,7 +308,7 @@ APPS_ROOT/
   <app_id>/backups/<publish_id>/       consistent pre-update data snapshot
 ```
 
-`build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The registry maps app/release identities to validated roots and digests; network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; activation/data restoration have a recoverable journal. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
+`build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The publication contract (#3125) associates app/release identities with validated roots and digests; callable start resolves the committed release from build manifests without a persisted build index. Network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; recoverable activation/data-restoration journals belong to #3125. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
 The template owns `npm run typecheck` (TypeScript checks both frontend and service
 without emitting), `npm test` (noninteractive, deterministic tests), and
@@ -296,23 +323,62 @@ code; publishing from a channel uses the existing assistant/operator authorizati
 boundary. These commands are argv arrays executed in the selected source/staging
 tree, not shell text assembled from wire fields.
 
-The daemon starts `node dist/service/main.js` with cwd equal to the immutable build directory. It supplies only a documented minimal environment plus explicitly configured app-service integrations; client tokens, Noise keys and daemon-control credentials are never supplied. The mandatory values are:
+`NewOwner(registry, nodeExecutable)` selects one executable and resolves its
+absolute path without runtime fallback. `Owner.Start` executes only the committed
+`Record.ActiveRelease`, even when `Record.Manifest` describes another candidate.
+It resolves exactly one matching validated
+`APPS_ROOT/<app_id>/builds/<build_id>/app.json`. Build directory names must be 64
+lowercase hexadecimal characters; scanned manifests must have the local host/app
+identity. Missing or ambiguous matches, invalid manifests, nonregular manifests
+or service entries, and symlink components/path escapes are rejected before
+service execution. Directory/file access uses no-follow descriptors. Inventory
+verification and keeping the published build immutable throughout execution
+remain the publisher's responsibility (#3125); start adds no persisted build index.
+
+Before spawn, the owner checks the actual selected executable with `--version`
+against `>=24.15.0 <25.0.0`, then runs `node dist/service/main.js` with cwd at the
+selected immutable build. Ordinary start runs no source/staging code, dev server,
+dependency install or migration. It creates or enforces
+`APPS_ROOT/<app_id>/data` at 0700 and `data/app.sqlite` at 0600, preserving existing
+database bytes. A missing database is created without truncation; symlink components,
+path escapes and a nonregular database are rejected. Creating the file does not
+initialize or migrate its SQL schema.
+
+The service environment is exactly these eight variables. There are no additional
+allowed or inherited variables, including `PATH`, `NODE_OPTIONS`, integration
+configuration, client tokens, Noise keys, control credentials or other secrets.
+The Node version check also inherits no environment.
 
 | Environment variable | Meaning |
 |---|---|
-| `PYRY_APP_ID`, `PYRY_SERVER_ID` | Registered identity. |
-| `PYRY_APP_RELEASE` | Candidate/active release version. |
+| `PYRY_APP_ID` | Registered local app identity. |
+| `PYRY_SERVER_ID` | Persisted local host identity. |
+| `PYRY_APP_RELEASE` | Committed `ActiveRelease` version. |
 | `PYRY_APP_DATA_DIR` | Absolute persistent data directory. |
 | `PYRY_APP_DB_PATH` | Absolute `data/app.sqlite` path. |
 | `PYRY_APP_BIND_HOST` | Exactly `127.0.0.1`. |
-| `PYRY_APP_PORT` | Daemon-reserved ephemeral loopback TCP port, never from a manifest/request. |
+| `PYRY_APP_PORT` | Owner-reserved ephemeral loopback TCP port, never from a manifest/request. |
 | `NODE_ENV` | Exactly `production`. |
 
-The reservation must prevent port reuse by another app during launch; bind collision fails startup and gets a fresh endpoint on retry. The service binds only that host/port and exposes `/api/…` plus `/_pyry/health`. Neither endpoint nor environment paths are returned to a client. The daemon resolves API targets from its private live-process record; it disables HTTP redirects, proxies and connection reuse across process generations. Loopback privacy is a routing boundary, not authentication against other processes under the same OS account.
+The owner reserves an ephemeral loopback listener and keeps ports unique across
+its live/in-flight generations. It closes the listening socket immediately before
+spawn so the service can bind, retaining private ownership of the port until
+generation retirement. Failed launch releases the reservation; the next explicit
+attempt excludes that app's previous reserved port. Listener handoff cannot prevent
+another OS process taking the port; health-based collision detection (#3206) and
+automatic retry scheduling (#3207) remain pending. Endpoints and generation
+records stay private and never enter discovery.
 
-Migrations run first using `node dist/service/migrate.js` with the same identity/data environment, exit 0 only on completed schema validation. Ordered SQL files match `^[0-9]{4}_[a-z0-9_]+\.sql$`, have unique increasing prefixes, and are immutable once applied. The SQL `pyry_schema_migrations` table records `version INTEGER PRIMARY KEY` and `sha256 TEXT NOT NULL`; an applied checksum mismatch fails validation. Missing new migrations are applied in one explicit SQLite transaction; failures roll back the transaction. Nontransactional SQL and external side effects are forbidden in migrations. The migration process has a 60-second deadline.
+The service binds only that host/port and exposes `/api/…` plus `/_pyry/health`.
+The resource-routing contract (#3123) requires the daemon to resolve API targets
+from its private live-process record and disable HTTP redirects, proxies and
+connection reuse across generations. Neither endpoint nor environment paths are
+returned to a client. Loopback privacy is a routing boundary, not authentication
+against other processes under the same OS account.
 
-A service is ready only when `GET /_pyry/health` returns HTTP 200 and JSON `{ "ready": true, "app_id": "…", "release_version": "…" }` matching the launched identity, and the process remains alive. Probe every 250 ms, each with a 1-second timeout, for at most 15 seconds after service spawn. Health is checked every 5 seconds while running; three consecutive failures transition to failed and stop that process. SIGTERM allows 5 seconds to close HTTP/SQL and children; then the daemon kills the owned process group and waits. Startup/stop are independent of session supervision. Read-header timeout 5 seconds, request read/write timeout 30 seconds, idle timeout 30 seconds and private health reply cap 4096 bytes are required service conventions.
+The publication contract (#3125) runs migrations before candidate startup using `node dist/service/migrate.js` with the same identity/data environment, exiting 0 only on completed schema validation. Ordinary `Owner.Start` never invokes this command. Ordered SQL files match `^[0-9]{4}_[a-z0-9_]+\.sql$`, have unique increasing prefixes, and are immutable once applied. The SQL `pyry_schema_migrations` table records `version INTEGER PRIMARY KEY` and `sha256 TEXT NOT NULL`; an applied checksum mismatch fails validation. Missing new migrations are applied in one explicit SQLite transaction; failures roll back the transaction. Nontransactional SQL and external side effects are forbidden in migrations. The migration process has a 60-second deadline.
+
+The pending supervisor health contract (#3206) requires `GET /_pyry/health` to return HTTP 200 and JSON `{ "ready": true, "app_id": "…", "release_version": "…" }` matching the launched identity, with the process still alive. It calls for probes every 250 ms, each with a 1-second timeout, for at most 15 seconds after spawn, then every 5 seconds while running; three consecutive failures transition to failed and stop the process. Callable ownership currently establishes only `starting` and performs no probes. Its implemented five-second owned-group cleanup is described under [Startup and health](#startup-and-health). Read-header timeout 5 seconds, request read/write timeout 30 seconds, idle timeout 30 seconds and private health reply cap 4096 bytes remain required service conventions.
 
 ### Responsive React shell
 
@@ -563,6 +629,41 @@ reserved migration ledger (including case variants). The publisher owns
 serialization against service writers and the 60-second migration deadline.
 
 ### Startup and health
+
+The callable process owner is independent of channel sessions and supplies local
+`Start`, `Stop` and `Shutdown` for daemon/publisher consumers. Concurrent starts
+for one app coalesce; repeated start of its current owned generation creates no
+duplicate child. For an already spawned generation, an explicit start seeing a
+different committed active release or stopped intent retires the old generation
+before preparing a replacement.
+Each new launch has private cancellation, process-group and port ownership.
+Cancelling the initiating start context retires that generation; a coalesced caller
+can cancel its own wait independently. Start returns after spawn or failure and
+does not claim readiness, even if the service has already bound its socket.
+
+`Owner.Stop` cancels in-flight work and serializes ownership capture/cancellation
+with the durable stopped-intent write and launch admission. After releasing both
+locks, it retires the owned group: send SIGTERM only to that group, allow up to
+5 seconds, SIGKILL surviving members, and wait for the direct child. Cleanup
+tracks the group even if the leader exits before descendants; it never signals a
+sibling app's group. Only after cleanup does stop conditionally commit observed
+`stopped`. Repeated stop is harmless. Concurrent stops accept a stale final
+observation only when the latest record already has stopped intent and state;
+newer available intent still returns `ErrStale`. Failed intent persistence still
+cancels and cleans up ownership, returns failure and leaves committed intent
+unchanged. A failed final observation returns failure without claiming it committed.
+
+`Owner.Shutdown` prevents further launches (`ErrClosed`), cancels all owned
+generations, joins workers and conditionally observes stopped without changing
+desired intent. It also surfaces retained asynchronous persistence/cleanup errors.
+The owner adds no startup scan, registry subscriptions, readiness probes,
+automatic retries or publisher cutover policy. Daemon wiring is #3204,
+health/readiness #3206, automatic recovery #3207, publication/migrations/activation
+and rollback #3125, and encrypted resource capability activation #3123.
+
+The maintained standalone template supplies its own migration/startup validation
+and health endpoint. The commands below exercise that template directly; they do
+not invoke the callable owner or establish daemon readiness.
 
 Migration, startup and the health command validate the actual Node runtime and
 the same mandatory environment before proceeding:

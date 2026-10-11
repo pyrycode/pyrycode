@@ -1,12 +1,15 @@
 # `internal/apps` — durable host-app registrations
 
-This package owns strict manifest validation and durable registrations independent
-of conversations. The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
+This package owns strict manifest validation, durable registrations and callable
+committed-release process ownership independent of conversations. The
+[hosted-app reference](../../hosted-apps.md#manifest-and-identity)
 owns the field tables and registration behavior; the
 [v1 contract](../../specs/architecture/3120-hosted-app-contract.md) owns the broader
 hosting design. Registration and stored `running` prove neither publication nor
 readiness. The registry commits lifecycle observations and normalizes restart
-state; health/process reconciliation remains #3122 and publication checks #3125.
+state. Process spawn proves only starting; daemon wiring (#3204), health/readiness
+(#3206), automatic recovery (#3207), publication (#3125) and encrypted resource
+activation (#3123) remain separate responsibilities.
 
 ## Validation and stored identity
 
@@ -110,9 +113,81 @@ accepts the [contract vocabulary](../../hosted-apps.md#errors); messages are
 1–160 UTF-8 bytes with no controls or leading/trailing whitespace. Keep parser,
 process and I/O diagnostics out of metadata; package errors are returned separately.
 Validation cannot establish safe provenance of text. Health confirmation belongs
-to callers; no processes or probes run here. A cutover supplies new title/active
-release, running state and unset pending/error in one mutation, avoiding an
-observable mix of old and new release fields.
+to callers; the registry runs no processes or probes. A cutover supplies new
+title/active release, running state and unset pending/error in one mutation,
+avoiding an observable mix of old and new release fields.
+
+`Registry.CommitObservation` checks the expected app record revision under the
+registry lock before applying `Observation`. Preserve identity, manifest, title
+and active/pending releases; empty `Desired` preserves intent and empty `State`
+preserves state/error. A supplied state replaces `LastError`, including clearing
+it with nil. Success returns a detached committed record and change flag, even
+for a no-op; input and returned error values cannot mutate storage. Zero or stale
+revisions return `ErrStale` without writes, revisions or notifications. Compare
+the app revision, not the host sequence: an unrelated app commit must not invalidate
+the observation. Detached `List` followed by unconditional `UpdateLifecycle`
+can overwrite newer fields, so asynchronous process observations use this
+conditional path. Unconditional callers retain their complete replacement and
+persistence-before-notification behavior.
+
+Use one `Owner` per registry. `NewOwner` resolves one selected Node executable
+to an absolute path without fallback. `Owner.Start` durably resumes available
+intent, clears old errors and sets starting for a published record; an unpublished
+record remains stopped and launches nothing. It runs only `Record.ActiveRelease`,
+not the candidate `Record.Manifest`: `prepareRelease` finds exactly one matching
+validated local manifest under `builds/<build_id>/app.json`, with lowercase
+64-hex directory names. Missing/ambiguous matches, invalid or foreign identities,
+nonregular manifests/entries and symlink components/path escapes reject execution.
+The actual executable version must satisfy `>=24.15.0 <25.0.0`; service argv is
+`node dist/service/main.js`, with cwd at that immutable build. Ordinary start runs
+no source/staging code, install, migration or dev server. Inventory verification
+and continued build immutability belong to publication; start does not hash the
+inventory or create a persisted build index.
+
+Runtime preparation retains existing `data/app.sqlite` bytes while enforcing
+data directory 0700 and database 0600. No-follow directory/file descriptors reject
+symlink escapes and nonregular databases; creating a missing database file does
+not migrate its schema. The environment contains exactly `PYRY_APP_ID`,
+`PYRY_SERVER_ID`, `PYRY_APP_RELEASE` (committed active release), `PYRY_APP_DATA_DIR`,
+`PYRY_APP_DB_PATH`, `PYRY_APP_BIND_HOST=127.0.0.1`, `PYRY_APP_PORT` and
+`NODE_ENV=production`, with no additional or inherited variables. The Node version
+check also inherits nothing. See [runtime and layout](../../hosted-apps.md#runtime-and-layout)
+for the complete allowlist and paths.
+
+`Owner.Start` coalesces concurrent calls and reuses the current owned generation
+without another child. For an already spawned generation, an explicit start after
+committed release/intent changes retires the old generation before replacement. Each new launch has fresh private
+cancellation, process-group and port ownership. The loopback listener reserves an
+ephemeral port unique across the owner's live/in-flight generations; it closes
+before spawn for service binding, while private port ownership lasts until
+retirement. Failed launch releases it and the next explicit attempt excludes
+the app's immediately previous reservation. This cannot exclude unrelated OS
+processes during handoff; collision detection and automatic retries remain
+downstream. Ports and generations never enter registry/discovery.
+
+Start returns after spawn/failure, never health confirmation or running. Failed
+intent/starting writes launch nothing; a final revision/cancellation check and
+spawn share the registry lock, preventing a newer commit from slipping between
+them. Late exits cannot overwrite newer records or retire replacements. Current
+validation/spawn failures persist `app.unavailable` / `Service could not start`;
+unexpected exits persist `app.unavailable` / `Service exited unexpectedly`.
+Child output is discarded. Local diagnostics carry operation context and preserve
+`errors.Is`, but no output, paths or endpoints enter metadata. Cleanup still runs
+when lifecycle persistence fails; `Stop` returns synchronous failures and
+`Shutdown` also surfaces retained asynchronous observation/cleanup failures.
+
+`Owner.Stop` cancels in-flight starts, durably sets stopped intent, retires only
+its owned group, then conditionally commits observed stopped. SIGTERM allows up
+to five seconds before SIGKILL of surviving group members and direct-child wait,
+including when descendants outlive the leader. Repeated stop is harmless; a failed
+intent write still cancels/cleans up and returns failure without claiming changed
+intent. A final observation persistence failure leaves durable intent intact
+without claiming observed stopped. `Owner.Shutdown` closes launch admission, cancels all generations
+and joins workers, conditionally observing stopped without changing desired intent.
+Cancelling the initiating start context retires its generation; a coalesced caller
+can cancel its own wait independently. No startup scan, subscriptions, probes,
+automatic retries or publisher cutover policy run in the owner. See
+[startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
 
 `Open` validates storage before `normalizeSnapshot`. Every available record with
 an active release becomes starting; every unpublished or intentionally stopped
@@ -124,6 +199,18 @@ An unchanged reopen neither writes nor advances revisions, even at the ceiling.
 Opening exposes this committed normalized baseline, not earlier-process events.
 
 ## Concurrency and persistence
+
+Capture/cancel ownership and commit stopped intent under registry-then-owner
+locks, also used by start admission and final spawn. Capturing ownership before
+the intent write leaves an admission gap: an absent or retired generation can be
+replaced while stop commits stopped/stopped and misses its child. Release both
+locks before joining workers. Registry callbacks must not call owner methods
+either, since owner operations can hold its mutex across registry notifications.
+
+Concurrent stops can share the stopped-intent revision while only the first final
+observation advances it. `Owner.Stop` accepts that stale observation only after
+checking the latest record already has stopped intent and state; treating every
+`ErrStale` as success would hide a newer available intent.
 
 `Registry.change` holds one mutex across validation, detached candidate creation,
 persistence, the committed snapshot swap and synchronous notifications. Even the
@@ -198,6 +285,29 @@ generated manifest. A fixed `1.0.1` rejection value becomes valid when the
 generates 1.0.1 with the same identities/data. Run the deterministic suite for
 both generated releases to verify the rejection case remains invalid for each
 build.
+
+Controlled-child tests must wait for child-owned signals written after signal
+handlers and descendants are initialized. Spawn success alone cannot prove those
+exist. `TestOwnerGroupCleanup` checks descendants independently of leader wait;
+on Linux, killed orphan zombies retained by container init are distinguished from
+live processes. The owner joins its direct child and cleanup targets only its
+group; `TestOwnerDuplicateAndIsolation` verifies a sibling remains alive.
+
+Inspect ownership immediately after the original concurrent start/stop operations.
+A second cleanup stop can conceal the child missed by a successful first stop.
+`TestOwnerStartStopRaces` asserts retirement without that extra operation;
+`TestOwnerStopAdmission` checks the child is gone before stopped observation, and
+`TestOwnerStopCommitAdmission` covers absent/retired ownership during intent commit.
+`TestOwnerPostSpawnPersistenceFailure` checks both returned write errors and actual
+child retirement, rather than inferring cleanup from failed persistence.
+
+`TestOwnerSupportedNode` requires an actual supported executable, selected with
+`HOSTED_APP_NODE` when the default Node is unavailable or unsupported. A skipped
+arm supplies no launch evidence; controlled executable doubles cover failures and
+concurrency but cannot replace this check of committed-versus-candidate selection,
+real cwd/argv, exact environment, listener handoff and retained database bytes/modes.
+Tests shorten the private cleanup grace while `TestOwnerStartStopRaces` asserts
+the production default remains five seconds.
 
 The template's `case-variant ledger shadows reject and roll back all pending migrations`
 and `migration authorization reserves case-variant durable ledger names` checks
