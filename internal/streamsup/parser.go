@@ -638,7 +638,6 @@ func (p *Parser) Write(b []byte) (int, error) {
 		if i < 0 {
 			break
 		}
-		readinessAck(p, rest[:i], "ack_stdout_line")
 		p.consumeLine(rest[:i])
 		rest = rest[i+1:]
 	}
