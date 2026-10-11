@@ -36,6 +36,26 @@ at every call site since it lands in claude's argv.
 
 ## Lessons that outlive this ticket
 
+- **Durable-answer assertions must select history segments before opening
+  files.** `readPromptAnswerHistory` follows `history.parseSegmentName` and
+  `history.listSegments`: regular files named `segment-` plus a 20-character
+  uint64 decimal field plus `.jsonl`. The
+  [thread cache, recovery marker and run certificates](thread-package.md#cache-and-epochs)
+  share that directory; `thread.Store.writeCacheFile` publishes them through
+  `.thread-*` temporary files that can disappear between enumeration and
+  opening. Globbing every entry can therefore fail after a successful remote
+  answer. Exclude non-segment entries before reading: ignoring missing-file
+  errors would also hide a vanished selected segment, whose read failure must
+  still fail the assertion. Selection preserves exactly one matching durable
+  `prompt_answered` fact, conversation/correlation ownership, asking-session
+  provenance, decision, remote source, resolution timestamp, shown visibility
+  and the 16 KiB context bound. Missing facts and partial trailing writes retain
+  the five-second deadline and 20 ms retry; duplicates fail. The credential-free
+  `TestPromptAnswerHistoryReaderPublication` forces rename/removal after a
+  directory snapshot without timing sleeps, while
+  `TestPromptAnswerHistoryReaderSegmentReadFailure` forces selected-segment
+  disappearance at the same boundary. See the
+  [reader repair plan](../../specs/architecture/3115-prompt-answer-history-segments.md).
 - **`questionbridge.Parse` rejects a question whose `multiSelect` key is
   absent, and the rejection is invisible as a rejection.** A batch missing
   that key falls through to a permission modal that a question-only test
