@@ -32,6 +32,9 @@ type memoryReplyChildKey struct {
 	scope    uint64
 	turn     string
 }
+type memoryReplyCallOwner struct {
+	child, created, shell bool
+}
 type memoryReplyEvidence struct {
 	conversation string
 	scope        uint64
@@ -40,11 +43,12 @@ type memoryReplyEvidence struct {
 	pending      map[memoryReplyKey]uint64
 	text         map[uint64]*memoryReplyLifetime
 	children     map[memoryReplyChildKey]map[string]bool
+	owners       map[memoryReplyChildKey]map[string]*memoryReplyCallOwner
 	lifetimes    map[memoryReplyKey]string
 }
 
 func newMemoryReplyEvidence(id string) *memoryReplyEvidence {
-	return &memoryReplyEvidence{conversation: id, turns: make(map[memoryReplyKey]*memoryReplyLifetime), openings: make(map[uint64]*memoryReplyLifetime), pending: make(map[memoryReplyKey]uint64), text: make(map[uint64]*memoryReplyLifetime), children: make(map[memoryReplyChildKey]map[string]bool), lifetimes: make(map[memoryReplyKey]string)}
+	return &memoryReplyEvidence{conversation: id, turns: make(map[memoryReplyKey]*memoryReplyLifetime), openings: make(map[uint64]*memoryReplyLifetime), pending: make(map[memoryReplyKey]uint64), text: make(map[uint64]*memoryReplyLifetime), children: make(map[memoryReplyChildKey]map[string]bool), owners: make(map[memoryReplyChildKey]map[string]*memoryReplyCallOwner), lifetimes: make(map[memoryReplyKey]string)}
 }
 
 type memoryReplyIdentity struct {
@@ -57,6 +61,27 @@ type memoryReplyIdentity struct {
 	Opening      *uint64  `json:"turn_opened_entry_id"`
 	Truncated    []string `json:"truncated_fields"`
 	Dropped      []string `json:"dropped_fields"`
+}
+
+type memoryReplyAgentFact struct {
+	Conversation string    `json:"conversation_id"`
+	Lifetime     string    `json:"lifetime_id"`
+	Call         string    `json:"tool_call_id"`
+	Use          string    `json:"tool_use_id"`
+	Task         string    `json:"task_id"`
+	Name         string    `json:"name"`
+	Tool         string    `json:"tool"`
+	Turn         string    `json:"turn_id"`
+	Parent       string    `json:"parent_tool_use_id"`
+	ParentCall   string    `json:"parent_tool_call_id"`
+	Status       string    `json:"status"`
+	Cause        string    `json:"cause"`
+	IsError      bool      `json:"is_error"`
+	CallRef      *uint64   `json:"call_observed_entry_id"`
+	TaskRef      *uint64   `json:"task_observed_entry_id"`
+	At           time.Time `json:"occurred_at"`
+	Truncated    []string  `json:"truncated_fields"`
+	Dropped      []string  `json:"dropped_fields"`
 }
 
 // Decode the same recorded DTO fields as the fold, including scalar null rejection.
@@ -121,10 +146,18 @@ func memoryReplyFields(raw json.RawMessage, typ reflect.Type) bool {
 	}
 	return true
 }
-func (r *memoryReplyEvidence) key(e history.Entry, turn string) memoryReplyKey {
-	key := memoryReplyKey{scope: r.scope, turn: turn}
+func memoryReplySource(e history.Entry) memoryReplyKey {
+	var key memoryReplyKey
 	if e.Session != nil {
-		key.source, key.tagged, key.scope = *e.Session, true, 0
+		key.source, key.tagged = *e.Session, true
+	}
+	return key
+}
+func (r *memoryReplyEvidence) key(e history.Entry, turn string) memoryReplyKey {
+	key := memoryReplySource(e)
+	key.turn = turn
+	if !key.tagged {
+		key.scope = r.scope
 	}
 	return key
 }
@@ -175,8 +208,7 @@ func memoryReplyFact(e history.Entry) (memoryReplyIdentity, bool) {
 }
 
 func (r *memoryReplyEvidence) childKey(e history.Entry, turn string) memoryReplyChildKey {
-	source := r.key(e, "")
-	source.scope = 0
+	source := memoryReplySource(e)
 	key := memoryReplyChildKey{source: source.source, tagged: source.tagged, lifetime: r.lifetimes[source], scope: r.scope, turn: turn}
 	if key.lifetime != "" {
 		key.scope = 0
@@ -194,32 +226,85 @@ func (r *memoryReplyEvidence) rememberChild(key memoryReplyChildKey, call string
 	r.children[key][call] = true
 }
 
+func (r *memoryReplyEvidence) callOwner(key memoryReplyChildKey, call string) *memoryReplyCallOwner {
+	if r.owners[key] == nil {
+		r.owners[key] = make(map[string]*memoryReplyCallOwner)
+	}
+	owner := r.owners[key][call]
+	if owner == nil {
+		owner = &memoryReplyCallOwner{}
+		r.owners[key][call] = owner
+	}
+	return owner
+}
+
+// Match promoteShellEvidence: pending calls and ordinary shells may move from
+// the uninterrupted pre-lifetime scope. Created Agent/Task calls and collisions
+// retain their original owner; turn-local ordinary child evidence never moves.
+func (r *memoryReplyEvidence) promoteOwners(key memoryReplyChildKey) {
+	old := key
+	old.lifetime, old.scope = "", r.scope
+	for call, owner := range r.owners[old] {
+		if (owner.created && !owner.shell) || r.owners[key][call] != nil {
+			continue
+		}
+		if r.owners[key] == nil {
+			r.owners[key] = make(map[string]*memoryReplyCallOwner)
+		}
+		r.owners[key][call] = owner
+		delete(r.owners[old], call)
+	}
+}
+
+// Launcher and shell owners are call-scoped, while ordinary child calls also
+// retain their turn-local evidence. Merely observing a report occupies a call
+// identity so promotion cannot overwrite an existing lifetime's owner.
+func (r *memoryReplyEvidence) mappedOwner(e history.Entry, id memoryReplyIdentity) {
+	if e.Session != nil && e.Session.Kind != "claude" {
+		return
+	}
+	var fact memoryReplyAgentFact
+	if !memoryReplyDecode(e.Payload, &fact) {
+		return
+	}
+	// Mapped reports cannot carry original-observation recovery references.
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(e.Payload, &fields)
+	for field := range fields {
+		if strings.EqualFold(field, "call_observed_entry_id") || strings.EqualFold(field, "task_observed_entry_id") {
+			return
+		}
+	}
+	key := r.childKey(e, "")
+	parent := id.Parent != "" || id.ParentCall != ""
+	switch e.Type {
+	case "tool_use":
+		var p protocol.ToolUsePayload
+		_ = json.Unmarshal(e.Payload, &p)
+		switch p.Name {
+		case "Agent", "Task":
+			owner := r.callOwner(key, id.Call)
+			owner.child = owner.child || parent
+			owner.created = true
+		case "Bash", "local_bash":
+			owner := r.callOwner(key, id.Call)
+			if !owner.created {
+				owner.child, owner.created, owner.shell = parent, true, true
+			}
+		}
+	case "tool_result", "tool_denied":
+		owner := r.callOwner(key, id.Call)
+		owner.child = owner.child || parent
+	}
+}
+
 // Durable call ownership precedes mapped reports and is independent of turn IDs.
 // Recovery references cannot replace the active source's producer lifetime.
 func (r *memoryReplyEvidence) agentFact(e history.Entry) {
 	if !agentHistoryType(e.Type) || (e.Session != nil && e.Session.Kind != "claude") {
 		return
 	}
-	var p struct {
-		Conversation string    `json:"conversation_id"`
-		Lifetime     string    `json:"lifetime_id"`
-		Call         string    `json:"tool_call_id"`
-		Use          string    `json:"tool_use_id"`
-		Task         string    `json:"task_id"`
-		Name         string    `json:"name"`
-		Tool         string    `json:"tool"`
-		Turn         string    `json:"turn_id"`
-		Parent       string    `json:"parent_tool_use_id"`
-		ParentCall   string    `json:"parent_tool_call_id"`
-		Status       string    `json:"status"`
-		Cause        string    `json:"cause"`
-		IsError      bool      `json:"is_error"`
-		CallRef      *uint64   `json:"call_observed_entry_id"`
-		TaskRef      *uint64   `json:"task_observed_entry_id"`
-		At           time.Time `json:"occurred_at"`
-		Truncated    []string  `json:"truncated_fields"`
-		Dropped      []string  `json:"dropped_fields"`
-	}
+	var p memoryReplyAgentFact
 	if !memoryReplyDecode(e.Payload, &p) || p.Conversation != r.conversation || p.At.IsZero() || !conversations.ValidID(p.Lifetime) {
 		return
 	}
@@ -257,11 +342,18 @@ func (r *memoryReplyEvidence) agentFact(e history.Entry) {
 	if !valid {
 		return
 	}
-	source := r.key(e, "")
-	source.scope = 0
+	source := memoryReplySource(e)
+	key := r.childKey(e, "")
+	key.lifetime, key.scope = p.Lifetime, 0
+	if r.lifetimes[source] == "" {
+		r.promoteOwners(key)
+	}
 	r.lifetimes[source] = p.Lifetime
-	if call && (p.Parent != "" || p.ParentCall != "") && !lost("parent_tool_use_id") && !lost("parent_tool_call_id") {
-		r.rememberChild(r.childKey(e, ""), p.Call)
+	if call {
+		owner := r.callOwner(key, p.Call)
+		if (p.Parent != "" || p.ParentCall != "") && !lost("parent_tool_use_id") && !lost("parent_tool_call_id") {
+			owner.child = true
+		}
 	}
 }
 
@@ -298,6 +390,7 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 			_ = json.Unmarshal(e.Payload, &p)
 			if e.Type != "session_divider" || p.Cause != "daemon_restart" {
 				r.scope++
+				clear(r.lifetimes)
 			}
 			if p.Cause != "idle_sleep" && p.Cause != "capacity_eviction" && p.Reason != "idle_evict" && p.Previous != "" && p.Next != "" && p.Previous != p.Next {
 				// Only lifetimes already joined to a user retain exchange permission
@@ -319,13 +412,15 @@ func (r *memoryReplyEvidence) feed(entries []history.Entry, items []thread.Item)
 		}
 		key := r.key(e, id.Turn)
 		childKey := r.childKey(e, id.Turn)
+		r.mappedOwner(e, id)
 		if id.Parent != "" || id.ParentCall != "" || (e.Type == "tool_use" && !mainTools[e.ID]) {
 			r.rememberChild(childKey, id.Call)
 			continue
 		}
 		observedKey := childKey
 		observedKey.turn = ""
-		if e.Type != "tool_use" && (r.children[childKey][id.Call] || r.children[observedKey][id.Call]) {
+		callOwner := r.owners[observedKey][id.Call]
+		if e.Type != "tool_use" && (r.children[childKey][id.Call] || (callOwner != nil && callOwner.child)) {
 			continue
 		}
 		source := key
