@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/pyrycode/pyrycode/internal/apps"
 	"github.com/pyrycode/pyrycode/internal/attachments"
 	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/conversations"
@@ -148,6 +149,8 @@ func resolveWorkspaceFolder(parent, name string) (string, error) {
 // travel in the struct so they too are bound by name at the call site.
 type relayWiring struct {
 	shadow *threadShadow
+	// appRegistry persists independently of channel/session lifetimes.
+	appRegistry *apps.Registry
 	// instanceName is the daemon instance name; it derives the per-instance
 	// server-id, device-registry, conversations-registry, and static-key paths.
 	instanceName string
@@ -1500,7 +1503,7 @@ func startRelayV2(
 		SettingsUpdater: w.settings,
 	}
 	installDaemonLiveRelay(&sessionConfig, w, liveContextUsage)
-	mgr, err := relay.NewV2SessionManager(sessionConfig)
+	mgr, detachApps, err := newDaemonAppsManager(sessionConfig, w.appRegistry)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
 	}
@@ -1859,6 +1862,7 @@ func startRelayV2(
 	streamReplySuggestionsCleanup := startReplySuggestionsV2(ctx, suggestions, mgr)
 
 	return func() {
+		detachApps()
 		// Stop the producers — the structured turn stream's drain, the
 		// session-transition producer, the queue_state producer, and the session_error
 		// producer — before waiting on the manager so no fan-out races a winding-down

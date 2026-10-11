@@ -153,9 +153,10 @@ test('fresh generated app passes the toolchain', (t) => {
   cpSync(join(dest, 'dist'), join(release, 'dist'), { recursive: true });
   cpSync(join(dest, 'sql/migrations'), join(release, 'sql/migrations'), { recursive: true });
   writeFileSync(join(release, 'package.json'), JSON.stringify({ type: 'module' }));
+  cpSync(join(dest, 'app.json'), join(release, 'app.json'));
   for (const entry of ['main', 'migrate']) {
     const result = run(process.execPath, [`dist/service/${entry}.js`], release, 1);
-    assert.match(result.stderr, /unfinished-service/);
+    assert.match(result.stderr, /missing PYRY_APP_ID/);
     assert.equal(result.stdout, '');
   }
   if (process.env.HOSTED_APP_UNSUPPORTED_NODE) {

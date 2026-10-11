@@ -46,6 +46,38 @@ and `esbuild-wasm` instead. TypeScript 6's side-effect import checking needs the
 explicit `declare module '*.css'` in `assets.d.ts` for the frontend stylesheet
 import; removing it breaks frontend typechecking.
 
+`scaffold` copies an explicit `files` inventory rather than the whole source
+tree. New shared service modules, migration SQL and tests must enter that
+inventory; testing the maintained source tree alone can pass while generated
+apps lack dependencies or service coverage. Verify a fresh generated app through
+install, frontend/service typecheck, tests and build. `npm test` compiles its
+service dependencies itself, so a prior build cannot mask missing test setup.
+
+## Template SQL and readiness
+
+`schema` must validate the immutable preference table definition as well as
+columns, saved values and integrity. Matching column names/types alone lets a
+table stripped of CHECK constraints or STRICT mode report ready. Startup and
+health also require the complete checksum ledger; they cannot repair/migrate
+storage as a readiness side effect. The [template reference](../../hosted-apps.md#migrations)
+owns migration commands and persistent-data placement; [ADR 043](../decisions/043-hosted-app-runtime-and-isolation.md)
+owns the trusted-service isolation boundary.
+
+SQLite identifiers are case-insensitive, and unqualified object lookup searches
+the temporary schema before `main`. A case-sensitive ledger guard therefore
+lets a temporary uppercase/mixed-case ledger capture runner writes: migration
+can exit successfully with committed schema but no durable checksum, then fail
+on rerun. `migrationSQL` reserves ledger identifiers case-insensitively and
+rejects non-main operations; runner ledger, schema and preference API SQL target
+`main` explicitly. Keep both protections so validation cannot accept temporary
+shadows as durable state.
+
+Migration authorization lasts only while the SQL file executes. Temporary or
+persistent triggers could defer ledger mutation until runner SQL executes after
+authorization is removed. Deny both trigger forms, alongside transaction control,
+connection changes and external effects, so all pending schema/ledger work stays
+within the runner's single transaction.
+
 ## Manifest updates and retention
 
 The stored manifest can describe a candidate title/release while the committed
@@ -131,14 +163,37 @@ neither events nor consumers and replay no baseline or previous-process changes.
 Callbacks must return promptly and never re-enter any registry method, including
 the returned idempotent unsubscribe: doing so would deadlock on the held mutex.
 Slow callbacks also block mutations and readers. Consumers own later transport
-work; the registry adds no delivery goroutines or queues. Discovery wire mapping
-is implemented in the relay; lifecycle notification producers remain #3158 and
-daemon installation remains #3139. Because `List` can wait on this mutex, relay
-cancellation retires its result without releasing read capacity until the
+work; the registry adds no delivery goroutines or queues.
+`V2SessionManager.HostedAppsChanged` provides the relay consumer, with bounded
+handoff and no peer I/O, worker creation or registry re-entry. Handoff and delivery
+share a 16-envelope capacity bound per connection; separate bounds would retain
+more than the promised total when a peer stalls. Overflow retires that generation
+so fresh discovery recovers committed state, instead of silently dropping a
+revision on a current connection. Daemon subscription ownership belongs to
+`newDaemonAppsManager` and relay cleanup: install only after successful
+manager construction, before `Run`, and detach before manager drain. Channel
+stop, clear and eviction cannot detach this daemon-lifetime subscription.
+Installing discovery and `HostedAppsSend` must preserve `HostedAppsReady` as the
+complete registration/supervision/resource attestation; treating a registry or
+cancellable sender as readiness would advertise services that do not exist.
+
+Because `List` can wait on this mutex, relay cancellation retires its result
+without releasing read capacity until the
 original reader returns. Starting a replacement reader on every cancel would
 accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ## Testing
+
+The template's `case-variant ledger shadows reject and roll back all pending migrations`
+and `migration authorization reserves case-variant durable ledger names` checks
+inspect `main.pyry_schema_migrations` and preserve its applied checksums after
+rejection. Assert rollback of earlier pending files as well as the offending
+file, then retry corrected SQL and rerun to prove idempotence. A nonzero exit
+alone cannot establish atomicity; the original green service tests missed a
+successful schema commit without its durable ledger entry. The
+`runner ledger and schema checks use durable main tables despite temporary shadows`
+test checks validation against missing durable state even with matching temporary
+objects. See [SQL validation](#template-sql-and-readiness).
 
 The scaffold's `fresh generated app passes the toolchain` test preserves a
 sentinel in existing `node_modules` while invoking `npm ci` with an explicitly
@@ -164,8 +219,11 @@ already have normalized observed state. An available active record stored as
 stopped legitimately becomes starting and writes on reopen; that is not schema
 repair. `testStorageDocument` uses stopped intent/state so optional-field checks
 do not accidentally test normalization. Rejected storage still remains unchanged.
-Restart tests must transfer ownership after reopening, rather than mutating the
-previous registry and overwriting newer revisions.
+Restart tests must transfer exclusive ownership between stopped-daemon seeding
+and startup, rather than mutating the previous registry and overwriting newer
+revisions. Inspect daemon-written JSON before any test-side `Open`: that call
+normalizes state itself and could conceal missing daemon initialization. See the
+[harness restart proof](e2e-harness-restart-pattern-startin-stop.md#host-app-storage-ownership-and-readback).
 
 `TestRestartNormalization` covers mixed states and reverses disk order to verify
 stable revision assignment; `TestNormalizationFailure` checks multiple changes

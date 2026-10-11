@@ -234,7 +234,22 @@ same-ID reconnect. A delivered page is finished work; its cursor holds no worker
 `TestHostedDiscoveryBlockedRead` requires retirement and `app.busy` responses
 before releasing the read, then verifies capacity recovers without a late page.
 
-The hosted output lane holds at most 16 envelopes including active delivery.
+`HostedAppsChanged` runs under the registry's commit mutex. It holds only the
+leaf `hostedMu` for bounded inbox admission and signals a coalesced wake; it never
+accesses mutable session/cipher state, performs peer I/O, creates workers or
+calls the registry/unsubscribe. Waiting for transport here would block both
+mutations and registry readers. `Run` drains distinct generation inboxes and
+rechecks paired authorization before sealing. Handshake installs the inbox
+before any list request; list cancellation retires list work without removing
+lifecycle eligibility. See [registry callback ownership](apps-package.md#concurrency-and-persistence).
+
+The hosted output lane and callback handoff share at most 16 envelopes per
+connection, including active delivery. Separate inbox/queue limits would exceed
+that total; `hostedEnqueue` and `HostedAppsChanged` reserve from the same counter.
+Overflow cancels the generation and signals `Run` to close it, allowing fresh
+discovery to recover without silently skipping a committed revision. Completed
+and cancelled queue entries are cleared as well as releasing their reservations:
+slice backing arrays would otherwise retain envelopes beyond the logical queue.
 `hostedEnvelope` admits plaintext; `hostedDeliver` assigns a fresh connection-local
 sender ID and seals only the selected head on `Run`. Mixing pre-sealed legacy
 pushes/replies with queued hosted plaintext would spend Noise nonces in a different
@@ -246,6 +261,16 @@ cipher, then new-key output follows. A second rekey during that barrier closes
 the connection. `TestHostedDiscoveryOrderedDelivery` and
 `TestHostedDiscoveryRekeyOrdering` decrypt resumed output and check IDs; merely
 running the race detector would miss ordering defects.
+
+Checking the original session on completion does not fence a delayed terminal
+close addressed by connection ID. `hostedCloseContext` gives it a cancellable
+lifetime; `handleFrame` calls `cancelHostedClose` when creating a replacement,
+before the new handshake emits bytes. Completion removes only its own close
+context, so it cannot cancel a successor's close. Distinct inboxes likewise keep
+old events and overflow signals out of a reused connection. `TestHostedLifecycleReconnect`
+holds both predecessor delivery and terminal close through the replacement
+handshake, then releases them and decrypts new discovery/notification output.
+An admission or completion-only assertion would miss a late predecessor close.
 
 `hostedSender` selects `HostedAppsSend` or `OutboundContext`, never context-free
 `Outbound`. The callback must honor cancellation/deadlines through actual I/O
