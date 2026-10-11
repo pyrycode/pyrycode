@@ -121,7 +121,9 @@ func TestMemoryTranscriptSessions(t *testing.T) {
 	}
 }
 func TestMemoryTranscriptStorage(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "memory", "recent-transcripts")
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	testMemoryMust(t, err)
+	dir := filepath.Join(root, "memory", "recent-transcripts")
 	name := strings.Repeat("a", 64) + ".md"
 	testMemoryMust(t, publishMemoryTranscript(context.Background(), dir, name, "complete", nil))
 	data, err := os.ReadFile(filepath.Join(dir, name))

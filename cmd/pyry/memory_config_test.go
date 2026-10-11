@@ -21,7 +21,8 @@ func testManagedMemory() config.MemorySettings {
 }
 func testManagedHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	testMemoryMust(t, err)
 	testMemoryMust(t, os.Chmod(home, 0700))
 	t.Setenv("HOME", home)
 	return home
