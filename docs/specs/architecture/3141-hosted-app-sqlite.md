@@ -73,3 +73,9 @@ Pending for documentation stage: `docs/hosted-apps.md` § Template and saved pre
 - [Threat model] Native hostile-content isolation and publisher backup/recovery remain assigned to native-viewer tickets and #3125; daemon supervision is #3122.
 
 **Reviewer:** builder (self-review); **Date:** 2026-10-11
+
+## Revisions
+
+- 2026-10-11: Fresh-generation typechecking exposed that the scaffold copies an explicit file inventory rather than the source tree. Extend its existing inventory with the shared service modules, health entry, preference SQL and service tests; preserve all scaffold behavior. This ensures generated applications actually contain and run the new tests and compiled-entry dependencies. The implemented footprint is below the original estimate.
+
+- 2026-10-11: Final security review tightened schema validation to compare the preference table definition with its immutable SQL migration as well as column/record/integrity checks. Column-only validation could report ready after a same-column table lost its CHECK constraints or STRICT mode. Temporary triggers are forbidden alongside persistent triggers so SQL cannot defer ledger writes until the runner removes authorization.
