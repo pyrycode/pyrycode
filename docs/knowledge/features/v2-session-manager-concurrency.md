@@ -255,7 +255,7 @@ calls the registry/unsubscribe. Waiting for transport here would block both
 mutations and registry readers. `Run` drains distinct generation inboxes and
 rechecks paired authorization before sealing. Handshake installs the inbox
 before any list request; list cancellation retires list work without removing
-lifecycle eligibility. See [registry callback ownership](apps-package.md#concurrency-and-persistence).
+lifecycle eligibility. See [registry callback ownership](apps-package-concurrency-and-persistence.md#concurrency-and-persistence).
 
 The hosted output lane and callback handoff share at most 16 envelopes per
 connection, including active delivery, queued output, pending lifecycle callbacks

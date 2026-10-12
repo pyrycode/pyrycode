@@ -49,7 +49,7 @@ Resolved: Chromium executable is supplied explicitly via `HOSTED_APP_BROWSER`; a
 Satisfied in [Template and saved preferences](../../hosted-apps.md#template-and-saved-preferences): committed smoke command, Node/npm/Chromium installation prerequisites, built-UI workflow, generated browser script/pinned driver, retained evidence and approved responsive reference. Earlier scaffold commands/layout and service API/defaults/limits/migration/startup documentation are preserved. The guide explains data survival across replacement builds, generation versus registration/publication/readiness (#3125/#3126), and fixture proof versus pending native/live-channel acceptance (#3133 and client tickets).
 
 The React renderer-sharing and release-mismatch fixture lessons are recorded in
-[apps package testing](../../knowledge/features/apps-package.md#testing).
+[apps package testing](../../knowledge/features/apps-package-testing.md#testing).
 
 ## Security review
 **Verdict:** PASS
