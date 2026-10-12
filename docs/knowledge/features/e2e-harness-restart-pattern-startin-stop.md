@@ -29,12 +29,27 @@ daemon is stopped, then relinquish that registry before `StartInWithEnv`.
 could make a broken daemon pass by performing the missing startup work in the
 test. `TestHostedAppsRestartIsolation` instead reads and decodes raw
 `registry.json` before any test-side reopen, compares full metadata/intent/releases
-and changed revisions, and checks saved data bytes separately. A second unchanged
-restart must preserve bytes/revisions. Keeping another home with a distinct
+and monotonic revisions, and checks saved data bytes separately. Running apps
+receive fresh processes and health observations on restart, so their registry
+bytes/revisions legitimately change while identity, intent, release selection and
+SQL data remain intact. Keeping another home with a distinct
 persisted host ID and the same app ID running during that restart detects
 cross-host state aliasing. Never resume writes through the seeding registry;
 its stale snapshot could overwrite normalization and move revisions backwards.
 See [registry ownership](apps-package.md#concurrency-and-persistence).
+
+A dialable control socket can precede app registry normalization. A seeded
+`running` record alone can therefore satisfy a readiness wait before the daemon
+has launched anything. `hostedRunning` waits for service process evidence before
+reading the committed running baseline; storage snapshots alone cannot prove
+channel-independent process ownership.
+
+`Harness.Stop` can escalate to SIGKILL. Descendant disappearance after it returns
+does not by itself prove joined owner shutdown. `TestHostedAppsRecoverySQL` also
+requires a clean daemon exit and reads committed stopped observations with
+available intent retained. Its `GORACE=atexit_sleep_ms=0` removes the race
+runtime's exit delay so the harness grace measures actual cleanup. See
+[daemon-owned lifetimes and SQL evidence](apps-package.md#lifecycle-and-restart-state).
 
 ### Why `os.MkdirTemp` instead of `t.TempDir()` for the HOME
 

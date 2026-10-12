@@ -6,13 +6,13 @@ lifecycle mutations, restart normalization and callable committed-release
 process ownership, health supervision, automatic reconciliation/recovery and
 guarded private targets are implemented in the `internal/apps` package. The relay
 implements authenticated paged discovery, committed lifecycle notifications and
-list cancellation. The daemon owns storage,
-discovery subscriptions and cancellable delivery. Process-owner daemon wiring
-(#3204) and resource routing
-(#3123) remain separate work before production capability activation.
+list cancellation. The daemon owns storage, service reconciliation/recovery,
+discovery subscriptions and cancellable delivery independently of channels.
+Encrypted resource routing (#3123) remains required before production capability
+activation.
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
-`templates/hosted-app/`; daemon service integration, publication and native
+`templates/hosted-app/`; publication and native
 viewers remain later work. This reference preserves the contract's fields,
 limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
@@ -130,7 +130,7 @@ reconnect always starts a fresh list walk, and predecessor work cannot reach a
 replacement even when connection/request IDs are reused. Wired discovery and
 cancellable delivery do not activate `hosted_apps_v1`: `HostedAppsReady` must
 attest registration, supervision and resource routing together. Production
-withholds the capability pending #3122/#3123; an offering paired phone sees its
+withholds the capability pending #3123; an offering paired phone sees its
 omission from `hello_ack`, and `list_apps` returns `protocol.unsupported`.
 No test environment variable bypasses this readiness gate.
 
@@ -208,7 +208,19 @@ for storage, concurrency and regression-test constraints.
 
 ### Registration and observed state
 
-A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists observations; callable `NewOwner`, `Owner.Start`, `Owner.Stop` and `Owner.Shutdown` implement automatic local reconciliation/recovery with asynchronous health confirmation and guarded private targets. Daemon wiring remains #3204. New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
+A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists observations; the daemon's single `apps.Owner` implements automatic local reconciliation/recovery with asynchronous health confirmation and guarded private targets. New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
+
+The owner uses discovery's successfully opened registry; its committed
+observations feed the existing discovery subscription. Client closure, relay
+disconnect/reconnect, channel stop, `/clear`
+and idle eviction leave services running. Explicit local `Owner.Stop` durably
+sets stopped intent and joins that app's workers and owned process group,
+including descendants, without stopping sibling apps or the session pool.
+Daemon shutdown and any startup failure after owner construction detach
+subscriptions and join owned workers/children; shutdown observations preserve
+desired intent. Restart reuses host/app identity, committed release selection and
+file-backed SQL data, with monotonic revisions and fresh health confirmation for
+available releases. Stopped and unpublished apps remain unlaunched.
 
 The implemented discovery mapping has these exact fields. Unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality and the package's unset storage values do not change record nullability.
 
@@ -295,6 +307,14 @@ See [Startup and health](#startup-and-health) for retry and cancellation timing.
 
 Use Node.js 24 LTS, version 24.15.0 or newer in the 24.x line, on Linux/macOS. Check the actual executable before install/build/migration/start; an unavailable or mismatched runtime is a validation/start error, never an automatic fallback to another major or SQLite package. The exact Node patch, npm version, lockfile digest and build digest are recorded with the release for reproducibility. The runtime selection follows [Node's release policy](https://nodejs.org/en/about/previous-releases). `node:sqlite` has **stability 1.2, release candidate**, from 24.15.0; this is an explicit dependency, not a stable-API promise. See the [Node 24 SQLite API](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html). Use `DatabaseSync` with parameter binding, foreign keys, defensive mode and extension loading disabled. SQL runs on the app-service side, never through a native-client SQL API.
 
+`runSupervisor` claims the instance with `ctrl.Listen` before opening/normalizing
+app storage or constructing its owner. It retains that claim through joined
+owner shutdown and final durable observations on normal exit and subsequent
+startup failure. Opening a registry can write normalized state and constructing
+an owner immediately admits reconciliation: doing either before the claim, or
+releasing it before cleanup, could launch a competing service generation and
+overwrite the incumbent's observations.
+
 The daemon resolves an absolute `APPS_ROOT` at
 `~/.pyry/<sanitized-instance>/apps` using `resolveInstanceDirPath` and
 `sanitizeName`; app content cannot select it. The existing resolver's fallback
@@ -309,6 +329,13 @@ continues. Startup logs only a fixed local reason, without paths, storage
 contents or secrets; rejected registry/data bytes remain intact and no partially
 initialized registry reaches relay wiring.
 
+One daemon-owned `apps.Owner` uses that same registry, persisted host identity
+and root, including with relay disabled. Reconciliation is asynchronous: control
+and conversation readiness wait for neither service spawn nor health. Missing or
+unsupported Node, owner construction failure and app-specific start/health
+failures leave normal daemon/channel operation available and do not cancel the
+session pool. Daemon startup performs no dependency installation or migration.
+
 Opening storage durably normalizes observed state before exposing discovery:
 `available` apps with an active release become `starting`; unpublished or
 intentionally stopped apps become `stopped`. Identity, manifest/display metadata,
@@ -316,8 +343,24 @@ desired intent, releases and saved data survive. Only changed states advance
 monotonic host/record revisions; an unchanged restart adds none. Stored `running`
 does not establish a live process or an openable readiness link. See
 [durable registration](#durable-registration) for atomic normalization and
-revision limits. Storage/discovery wiring leaves hosting capability disabled
-until #3122/#3123 provide the complete readiness attestation.
+revision limits. Storage, discovery and supervision leave production
+`HostedAppsReady` unsatisfied and `hosted_apps_v1` withheld until #3123 supplies
+resource routing as part of the complete readiness attestation. Publication,
+migration serialization, activation and rollback remain publisher-owned
+(#3125/#3133).
+
+The [final verifier review for #3204](https://github.com/pyrycode/pyrycode/pull/3237#issuecomment-6117617232)
+records `TestHostedAppsRecoverySQL` on actual **Node v24.15.0**: **1 executed,
+1 passed, 0 failed, 0 skipped**, against a race-built daemon and the maintained
+template's freshly compiled service. Preparation migrated/seeded file-backed
+`node:sqlite` while the daemon was stopped. Saving
+`{"version":1,"selected_tab":"preferences","period":"7d"}` returned HTTP 204;
+service readback and direct SQL queries retained it after app crash/recovery and
+daemon restart with unchanged host/app identity and release selection. Sibling
+health, an unrelated fake-Claude turn during recovery and clean shutdown with
+descendant cleanup also passed. This seeded proof establishes persistence and
+lifetime isolation; live Claude was neither used nor required. It supplies no
+encrypted resource-routing or publisher migration/rollback acceptance.
 
 Stable structure below this root:
 
@@ -764,9 +807,9 @@ observes stopped without changing desired intent and surfaces retained asynchron
 persistence/cleanup errors. Reopening after shutdown requires exclusive root
 ownership, fresh processes and fresh matching health; existing data bytes survive,
 and stopped/unpublished registrations stay unlaunched.
-Callable reconciliation/recovery is complete. Daemon wiring and the full
-Node/SQLite/unrelated-channel integration proof remain #3204;
-publication/migrations/activation and rollback remain #3125, and encrypted
+Daemon-owned reconciliation/recovery and the
+[Node/SQLite/unrelated-channel proof](#runtime-and-layout) are complete.
+Publication/migrations/activation and rollback remain #3125/#3133, and encrypted
 resource capability activation remains #3123.
 
 The maintained standalone template supplies its own migration/startup validation
@@ -839,7 +882,7 @@ and readiness-confirmed links described in
 
 ### Capability and envelope vocabulary
 
-`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3122/#3123. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
+`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery, a daemon-owned service supervisor and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3123. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
 
 Without the negotiated capability, clients show that host's Apps feature as unsupported and send no app requests; hosts emit no app list/state/resource pushes to that peer. An old host may return existing `protocol.unknown_type`; a supporting host receiving an app request without negotiation returns `error` with `protocol.unsupported`. Other host connections/conversations continue normally. A new contract version uses a new capability and vocabulary for incompatible semantics, never reinterprets these enums.
 

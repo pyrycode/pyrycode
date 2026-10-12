@@ -51,8 +51,13 @@ split from #51.
   eviction disabled.
 - Polls the Unix socket until `net.Dial` succeeds (5s deadline), short-circuiting
   if pyry exits early.
+- Each test daemon starts in its own process group. After it exits, the harness
+  stops any remaining children in that group and waits for the group to disappear.
+  This also covers forced daemon termination and failure before readiness.
 - On test cleanup: SIGTERM, escalate to SIGKILL after 3s, then `os.Remove` the
-  socket. The temp `$HOME` is auto-cleaned by `t.TempDir`.
+  socket. The temp `$HOME` is auto-cleaned by `t.TempDir`. The harness's `Done`
+  channel closes after process-group cleanup. An inherited output pipe cannot
+  keep daemon collection waiting indefinitely.
 
 ## Invocation
 

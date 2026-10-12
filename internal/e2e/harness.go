@@ -54,6 +54,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -763,6 +764,9 @@ func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *safe
 	args = append(args, "--")
 	args = append(args, o.claudeArgs...)
 	cmd := exec.Command(bin, args...)
+	// A fixture owns its daemon's group, including children left after a crash.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = killGrace
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Env = append(childEnv(home), o.extraEnv...)
@@ -774,10 +778,32 @@ func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *safe
 	doneCh := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
+		reapSpawnedGroup(t, cmd.Process.Pid)
 		close(doneCh)
 	}()
 
 	return socket, cmd, stdout, stderr, doneCh
+}
+
+func reapSpawnedGroup(t *testing.T, pid int) {
+	t.Helper()
+	// The daemon has exited. Only its isolated fixture group may remain.
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		t.Errorf("e2e: stop fixture group %d: %v", pid, err)
+		return
+	}
+	deadline := time.Now().Add(killGrace)
+	for {
+		err := syscall.Kill(-pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if err != nil || time.Now().After(deadline) {
+			t.Errorf("e2e: fixture group %d remains after cleanup: %v", pid, err)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // killSpawned tears down a spawn'd child via the same SIGTERM→grace→SIGKILL
@@ -985,7 +1011,7 @@ func RunBareInWithEnv(t *testing.T, home string, extraEnv []string, args ...stri
 	return RunResult{ExitCode: exitCode, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 }
 
-// Done returns a channel that closes when the daemon process exits.
+// Done returns a channel that closes after the daemon and its fixture group exit.
 // Tests use this to assert clean shutdown after an external trigger
 // (e.g. a relay 4409 close). The exit code is then available via
 // h.ExitCode() once the channel has closed.
