@@ -41,6 +41,10 @@ func testCatchUpError(t *testing.T, p *testHostedPeer, id uint64) {
 	if strings.Contains(string(env.Payload), catchUpConversation) || strings.Contains(string(env.Payload), "secret") {
 		t.Fatal("error exposes request/provider content")
 	}
+	var payload protocol.ErrorPayload
+	if json.Unmarshal(env.Payload, &payload) != nil || payload.Code != "thread.query_failed" || payload.Message != "thread query could not complete" || !payload.Retryable {
+		t.Fatalf("query refusal: %+v", payload)
+	}
 }
 
 func TestThreadCatchUpResults(t *testing.T) {
@@ -216,9 +220,13 @@ func testCatchUpLive(t *testing.T, p *testHostedPeer, version uint64) {
 }
 
 func TestThreadCatchUpLiveRace(t *testing.T) {
+	testThreadQueryLiveRace(t, false)
+}
+
+func testThreadQueryLiveRace(t *testing.T, page bool) {
 	entered, exited := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
-	p := testCatchUpPeer(t, func(ctx context.Context, _ protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
+	p := testThreadQueryPeer(t, page, func(ctx context.Context, _ protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
 		if calls.Add(1) == 1 {
 			close(entered)
 			<-ctx.Done()
@@ -227,7 +235,7 @@ func TestThreadCatchUpLiveRace(t *testing.T) {
 		}
 		return thread.QueryResult{State: thread.StateUsable, Epoch: "epoch", Version: 20, FromVersion: 20}, nil
 	}, nil)
-	testCatchUpRequest(p, 40, 20)
+	testThreadQueryRequest(p, page, 40, 20)
 	testHostedAwait(t, entered)
 	// Another connection and manager control remain usable during provider capture.
 	legacy := p.sibling("legacy")
@@ -256,7 +264,7 @@ func TestThreadCatchUpLiveRace(t *testing.T) {
 	if !failed || !live {
 		t.Fatal("missing explicit failure/live")
 	}
-	testCatchUpRequest(p, 41, 20)
+	testThreadQueryRequest(p, page, 41, 20)
 	e, _ = p.next()
 	var result protocol.ThreadItemsPayload
 	json.Unmarshal(e.Payload, &result)
@@ -266,10 +274,14 @@ func TestThreadCatchUpLiveRace(t *testing.T) {
 }
 
 func TestThreadCatchUpJoinedLive(t *testing.T) {
-	p := testCatchUpPeer(t, func(context.Context, protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
+	testThreadQueryJoinedLive(t, false)
+}
+
+func testThreadQueryJoinedLive(t *testing.T, page bool) {
+	p := testThreadQueryPeer(t, page, func(context.Context, protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
 		return thread.QueryResult{State: thread.StateUsable, Epoch: "epoch", Version: 90, FromVersion: 20}, nil
 	}, nil)
-	testCatchUpRequest(p, 40, 20)
+	testThreadQueryRequest(p, page, 40, 20)
 	e, _ := p.next()
 	var result protocol.ThreadItemsPayload
 	json.Unmarshal(e.Payload, &result)
@@ -304,6 +316,10 @@ func TestThreadCatchUpJoinedLive(t *testing.T) {
 }
 
 func TestThreadCatchUpInterrupted(t *testing.T) {
+	testThreadQueryInterrupted(t, false)
+}
+
+func testThreadQueryInterrupted(t *testing.T, page bool) {
 	for _, mode := range []string{"live", "failed", "cancelled", "reuse", "down", "withheld"} {
 		t.Run(mode, func(t *testing.T) {
 			entered, exited, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -311,7 +327,7 @@ func TestThreadCatchUpInterrupted(t *testing.T) {
 			var eligible, up atomic.Bool
 			eligible.Store(true)
 			up.Store(true)
-			p := testCatchUpPeer(t, func(context.Context, protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
+			p := testThreadQueryPeer(t, page, func(context.Context, protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
 				return thread.QueryResult{State: thread.StateUsable, Epoch: "epoch", Version: 90, FromVersion: 20, Items: []thread.Item{{ID: 1, Kind: "message", Rev: 2, Summary: strings.Repeat("large", 15000), Content: json.RawMessage(`{}`)}}}, nil
 			}, func(c *V2SessionConfig) {
 				c.KnownConversation = func(id string) bool { return eligible.Load() && id == catchUpConversation }
@@ -327,12 +343,12 @@ func TestThreadCatchUpInterrupted(t *testing.T) {
 						target = 1
 					}
 					if frame.Type == protocol.TypeNoiseMsg && sends.Add(1) == target {
-						close(entered)
+						defer close(exited)
 						if mode == "withheld" || mode == "down" {
+							close(entered)
 							select {
 							case <-release:
 							case <-ctx.Done():
-								close(exited)
 								return ctx.Err()
 							}
 						} else {
@@ -341,19 +357,17 @@ func TestThreadCatchUpInterrupted(t *testing.T) {
 							if err := out(ctx, e); err != nil {
 								return err
 							}
+							close(entered)
 							select {
 							case <-release:
 							case <-ctx.Done():
-								close(exited)
 								return ctx.Err()
 							}
-							close(exited)
 							if mode == "failed" {
 								return errors.New("secret transport failure")
 							}
 							return ctx.Err()
 						}
-						close(exited)
 					}
 					return out(ctx, e)
 				}
@@ -365,7 +379,7 @@ func TestThreadCatchUpInterrupted(t *testing.T) {
 					close(release)
 				}
 			})
-			testCatchUpRequest(p, 40, 20)
+			testThreadQueryRequest(p, page, 40, 20)
 			testHostedAwait(t, entered)
 			switch mode {
 			case "withheld":
@@ -418,9 +432,14 @@ func TestThreadCatchUpInterrupted(t *testing.T) {
 				}
 			}
 			if mode == "reuse" || mode == "down" {
+				if mode == "down" {
+					// Session removal precedes asynchronous terminal delivery. Await that
+					// delivery before taking the new handshake's recorder boundary.
+					testHostedClose(t, p)
+				}
 				up.Store(true)
 				p.open(append(threadCaps, protocol.CapabilityHostedAppsV1))
-				testCatchUpRequest(p, 42, 20)
+				testThreadQueryRequest(p, page, 42, 20)
 				for {
 					e, _ := p.next()
 					var r protocol.ThreadItemsPayload
@@ -437,8 +456,12 @@ func TestThreadCatchUpInterrupted(t *testing.T) {
 }
 
 func TestThreadCatchUpRequestedScope(t *testing.T) {
+	testThreadQueryRequestedScope(t, false)
+}
+
+func testThreadQueryRequestedScope(t *testing.T, page bool) {
 	var calls atomic.Int32
-	p := testCatchUpPeer(t, func(_ context.Context, r protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
+	p := testThreadQueryPeer(t, page, func(_ context.Context, r protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
 		calls.Add(1)
 		if r.ConversationID != catchUpConversation {
 			t.Error("active cursor substituted")
@@ -504,7 +527,7 @@ func TestThreadCatchUpRequestedScope(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("listing queried")
 	}
-	testCatchUpRequest(p, 40, 20)
+	testThreadQueryRequest(p, page, 40, 20)
 	testCatchUpError(t, p, 40)
 	if calls.Load() != 1 {
 		t.Fatal("explicit request not served")
@@ -512,14 +535,18 @@ func TestThreadCatchUpRequestedScope(t *testing.T) {
 }
 
 func TestThreadCatchUpProviderShutdown(t *testing.T) {
+	testThreadQueryProviderShutdown(t, false)
+}
+
+func testThreadQueryProviderShutdown(t *testing.T, page bool) {
 	entered, exited := make(chan struct{}), make(chan struct{})
-	p := testCatchUpPeer(t, func(ctx context.Context, _ protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
+	p := testThreadQueryPeer(t, page, func(ctx context.Context, _ protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
 		close(entered)
 		<-ctx.Done()
 		close(exited)
 		return thread.QueryResult{}, ctx.Err()
 	}, nil)
-	testCatchUpRequest(p, 40, 20)
+	testThreadQueryRequest(p, page, 40, 20)
 	testHostedAwait(t, entered)
 	p.stop()
 	testHostedAwait(t, exited)

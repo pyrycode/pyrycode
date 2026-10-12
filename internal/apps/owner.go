@@ -396,7 +396,9 @@ func (o *Owner) cleanup(pid int) error {
 	for time.Now().Before(deadline) {
 		err := o.kill(-pid, 0)
 		if errors.Is(err, syscall.ESRCH) {
-			return errors.Join(result, probeErr)
+			// A transient inspection failure does not survive confirmed cleanup.
+			// macOS can report EPERM while exited group members await collection.
+			return result
 		}
 		if err != nil && probeErr == nil {
 			probeErr = fmt.Errorf("apps: inspect process group: %w", err)

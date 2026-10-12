@@ -228,6 +228,14 @@ file or symlink and fail during setup before exercising the predicate.
 `TestWorkspaceFileReader_SecretNames` uses distinct `-lower-case` and
 `-upper-case` directories while preserving the actual leaf spellings under test.
 
+No-follow filesystem tests need a canonical fixture root before deriving paths
+and exact-root references. `t.TempDir()` can inherit a symlinked `TMPDIR`; then an
+ancestor rejection prevents valid-state checks from reaching the operation and
+can make containment refusals pass for the wrong reason. Resolve only the
+fixture root, retain deliberate unsafe leaves, and exercise successful states
+alongside refusal cases under a controlled alias. See
+[the apps snapshot fixture](apps-package-concurrency-and-testing.md#testing).
+
 A test whose premise is "past a named cap" must build its fixture by computing from
 that constant, not by restating a literal believed to be past it. A hardcoded number
 keeps passing for the wrong reason after the cap changes, or silently stops testing

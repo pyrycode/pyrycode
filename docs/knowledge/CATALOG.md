@@ -75,7 +75,10 @@ paragraph breaks instead, and the document stops being retrievable.
 
 | File | Topic |
 |------|-------|
-| [apps-package.md](features/apps-package.md) | `internal/apps` — exact manifest/storage schemas, raw create-title validation, compiled template exclusion boundary, conditional lifecycle commits, owned committed-release processes and group cleanup, generation-bound stable responses with reservation/disposal ownership, private runtime environments/ports, durable restart normalization, ordered detached changes, permanent tombstones, snapshot locking, controlled-child/storage fixtures and hosted-app toolchain/SQL validation boundaries. |
+| [apps-package.md](features/apps-package.md) | `internal/apps` entry point: validation and stored identity, template toolchain/SQL, persistent-data snapshots and links to lifecycle, resource-serving, concurrency and testing. |
+| [apps-package-lifecycle.md](features/apps-package-lifecycle.md) | `internal/apps` lifecycle commits, committed-release processes, health/reconciliation, private runtime environments and restart normalization. |
+| [apps-package-resource-serving.md](features/apps-package-resource-serving.md) | `internal/apps` private targets and generation-bound stable response preparation, staging, reservation and disposal. |
+| [apps-package-concurrency-and-testing.md](features/apps-package-concurrency-and-testing.md) | `internal/apps` lock ordering, persistence, ordered subscriptions and discriminating storage, process, template and snapshot fixtures. |
 | [streamsup-package-testing.md](features/streamsup-package-testing.md) | `internal/streamsup` test-harness patterns, discriminating concurrency tests, and content-free log assertions split from the package overview. |
 | [streamsup-package-draining-turnevents-into-the-interactive-emitter.md](features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md) | Map of interactive stream fan-in, daemon-retained readings and reply suggestion lifecycle. |
 | [streamsup-package-draining-turnevents-into-the-interactive-emitter-fan-in.md](features/streamsup-package-draining-turnevents-into-the-interactive-emitter-fan-in.md) | Stream fan-in, source attribution, per-source emitter state and publication ordering. |
