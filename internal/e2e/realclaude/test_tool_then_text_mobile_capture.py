@@ -47,9 +47,61 @@ class PortableCaptureTest(unittest.TestCase):
                     self.assertEqual((recovery / "driver.json").stat().st_mode & 0o777, 0o600)
                 return subprocess.CompletedProcess(command, 1)
 
-            argv = [capture.__file__, "--mobile", str(mobile), "--mobile-agents", str(mobile_agents), "--daemon-agents", str(daemon_agents)]
+            argv = [capture.__file__, "--focused", "--mobile", str(mobile), "--mobile-agents", str(mobile_agents), "--daemon-agents", str(daemon_agents)]
             with patch.dict(os.environ, {}, clear=True), patch("sys.argv", argv), \
                  patch.object(capture, "revision", side_effect=lambda path: ("b" if path == mobile else "a") * 40), \
+                 patch.object(capture.tempfile, "mkdtemp", return_value=str(recovery)), \
+                 patch.object(capture.subprocess, "run", side_effect=run):
+                self.assertEqual(capture.main(), 1)
+            self.assertEqual(len(calls), 2)
+
+    def test_historical_selection_and_observed_order(self):
+        methods = ["interactiveTurn_case"+str(i) for i in range(63)] + [capture.METHOD.split("#")[1]]
+        source = 'elif [ -n "${LIVE}" ]; then\n  # LIVE curates\n'
+        source += '  TEST_TARGET="' + ','.join('${TEST_CLASS}#'+m for m in methods) + '"\nelse\n'
+        with patch.object(capture.subprocess, "check_output", return_value=source):
+            selected, provenance = capture.historical_selection(Path("/mobile"))
+        self.assertEqual(len(selected), 64)
+        self.assertEqual(selected[-1], capture.METHOD)
+        self.assertEqual(provenance["historical_mobile_revision"], capture.HISTORICAL_MOBILE)
+        lines = ["10-12 20:00:01.123  1 2 I TestRunner: started: interactiveTurn_case1(de.pyryco.mobile.e2e.InteractiveStreamE2ETest)",
+                 "10-12 20:00:02.456  1 2 I TestRunner: finished: interactiveTurn_case1(de.pyryco.mobile.e2e.InteractiveStreamE2ETest)",
+                 "10-12 20:00:03.456  1 2 I TestRunner: started: "+capture.METHOD.split("#")[1]+"(de.pyryco.mobile.e2e.InteractiveStreamE2ETest)"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("a-logcat-one.txt", "b-logcat-two.txt"):
+                (root / name).write_text("\n".join(lines))
+            observed = capture.execution_records(root, root / "private")
+        self.assertEqual([r["event"] for r in observed], ["started", "finished", "started"])
+        self.assertEqual(observed[-1]["method"], capture.METHOD)
+
+    def test_shared_launch_is_one_bounded_harness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mobile, agents = root / "mobile", root / "agents"
+            for path in (mobile / "scripts/android-test-gate.py", agents / "scripts/android-test-gate.py",
+                         agents / "dispatcher/scripts/live-claude-gate.py"):
+                path.parent.mkdir(parents=True, exist_ok=True); path.touch()
+            recovery = root / "recovery"; recovery.mkdir(mode=0o700)
+            selected = [capture.METHOD]+["de.pyryco.mobile.e2e.InteractiveStreamE2ETest#interactiveTurn_case"+str(i) for i in range(63)]
+            calls = []
+            def run(command, **kwargs):
+                calls.append(command)
+                if len(calls) == 1:
+                    self.assertEqual(command[-1], ",".join(selected))
+                    report = mobile / "build/dispatcher-tests/live-test/dispatcher.xml"
+                    report.parent.mkdir(parents=True); report.write_text("<testsuite/>")
+                else:
+                    self.assertEqual(command[-1], "^TestRealClaude_ToolThenTextSharedHarnessCapture$")
+                    driver = json.loads((recovery / "driver.json").read_text())
+                    self.assertEqual(driver["selected_methods"], selected)
+                    self.assertEqual(driver["mode"], "shared-harness")
+                return subprocess.CompletedProcess(command, 1)
+            argv = [capture.__file__, "--mobile", str(mobile), "--mobile-agents", str(agents), "--daemon-agents", str(agents)]
+            with patch.dict(os.environ, {}, clear=True), patch("sys.argv", argv), \
+                 patch.object(capture, "revision", return_value="a"*40), \
+                 patch.object(capture, "historical_selection", return_value=(selected, {})), \
+                 patch.object(capture, "source_differences", return_value={}), \
                  patch.object(capture.tempfile, "mkdtemp", return_value=str(recovery)), \
                  patch.object(capture.subprocess, "run", side_effect=run):
                 self.assertEqual(capture.main(), 1)

@@ -25,6 +25,8 @@ import (
 )
 
 type toolThenTextDaemonManifest struct {
+	StartedAt      string   `json:"started_at"`
+	FinishedAt     string   `json:"finished_at"`
 	Source         string   `json:"source"`
 	DaemonRevision string   `json:"daemon_revision"`
 	DaemonDirty    bool     `json:"daemon_dirty"`
@@ -115,6 +117,7 @@ func (r *toolThenTextDaemonRecorder) begin(args []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.manifest = r.seed
+	r.manifest.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	r.manifest.SpawnShape = append([]string(nil), args...)
 	r.manifest.Rejections = []string{}
 	r.written = 0
@@ -159,6 +162,7 @@ func (r *toolThenTextDaemonRecorder) finish() error {
 		r.manifest.IOFailed = true
 	}
 	r.file = nil
+	r.manifest.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	r.manifest.CapturedBytes = r.written
 	if raw, err := os.ReadFile(r.base + ".stdout"); err != nil {
 		r.manifest.IOFailed = true

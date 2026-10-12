@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -62,6 +63,11 @@ func TestToolThenTextDaemonCapture(t *testing.T) {
 		}
 		if m.BytesDropped != 0 || m.Tail != 0 || m.IOFailed || len(m.Rejections) != 1 || m.SpawnShape[1] != "observed" {
 			t.Fatalf("invalid manifest: %+v", m)
+		}
+		start, startErr := time.Parse(time.RFC3339Nano, m.StartedAt)
+		finish, finishErr := time.Parse(time.RFC3339Nano, m.FinishedAt)
+		if startErr != nil || finishErr != nil || finish.Before(start) {
+			t.Fatal("child execution window missing")
 		}
 		raw, err := os.ReadFile(strings.TrimSuffix(path, ".manifest.json") + ".stdout")
 		if err != nil || string(raw) != wire {
