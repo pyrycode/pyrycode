@@ -58,6 +58,10 @@ func (o *Owner) supervise(ctx context.Context, id string, g *generation, spawned
 		if !running {
 			phase = startup
 		}
+		ticks := timer.C
+		if running && o.healthTicks != nil {
+			ticks = o.healthTicks
+		}
 		select {
 		case <-ctx.Done():
 			return ""
@@ -65,7 +69,7 @@ func (o *Owner) supervise(ctx context.Context, id string, g *generation, spawned
 			return "Service exited unexpectedly"
 		case <-phase.Done():
 			return "Service health check failed"
-		case <-timer.C:
+		case <-ticks:
 		}
 		probedAt := time.Now()
 		request, finish := context.WithTimeout(phase, o.requestTimeout)
@@ -119,6 +123,9 @@ func (o *Owner) supervise(ctx context.Context, id string, g *generation, spawned
 		}
 		interval := o.startInterval
 		if running {
+			if o.healthTicks != nil {
+				continue
+			}
 			interval = o.runtimeInterval
 		}
 		timer.Reset(max(0, interval-time.Since(probedAt)))
