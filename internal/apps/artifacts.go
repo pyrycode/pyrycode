@@ -30,6 +30,7 @@ type artifactEntry struct {
 type artifactScan struct {
 	entries    []artifactEntry
 	nodes      map[string]artifactEntry
+	resolved   map[string][]string
 	manifest   []byte
 	migrations []string
 	stored     []byte
@@ -87,7 +88,7 @@ func scanArtifacts(ctx context.Context, dir, dst *os.File, serverID, appID strin
 	}
 	for _, entry := range s.entries {
 		if entry.kind == "symlink" {
-			if err := s.resolve(entry.path); err != nil {
+			if err := s.resolve(ctx, entry.path); err != nil {
 				return RetainedBuild{}, err
 			}
 		}
@@ -113,7 +114,11 @@ func scanArtifacts(ctx context.Context, dir, dst *os.File, serverID, appID strin
 	if strict && string(s.stored) != string(inventory) {
 		return RetainedBuild{}, ErrInvalidStorage
 	}
-	return RetainedBuild{Manifest: manifest, BuildID: digestBytes(inventory), Inventory: inventory, Migrations: s.migrations}, nil
+	result := RetainedBuild{Manifest: manifest, BuildID: digestBytes(inventory), Inventory: inventory, Migrations: s.migrations}
+	if err := ctx.Err(); err != nil {
+		return RetainedBuild{}, err
+	}
+	return result, nil
 }
 func retainedPath(p string) bool {
 	switch p {
@@ -365,13 +370,20 @@ func (s *artifactScan) walk(ctx context.Context, dir, dst *os.File, prefix strin
 }
 
 // resolve interprets every component before processing '..', including components
-// reached through other links. No filesystem access follows an artifact link.
-func (s *artifactScan) resolve(name string) error {
-	_, err := s.resolveParts([]string{"node_modules"}, strings.Split(strings.TrimPrefix(name, "node_modules/"), "/"), map[string]bool{})
+// reached through other links. Completed link resolutions are reused within this
+// scan; cached paths are immutable. No filesystem access follows an artifact link.
+func (s *artifactScan) resolve(ctx context.Context, name string) error {
+	if s.resolved == nil {
+		s.resolved = map[string][]string{}
+	}
+	_, err := s.resolveParts(ctx, []string{"node_modules"}, strings.Split(strings.TrimPrefix(name, "node_modules/"), "/"), map[string]bool{})
 	return err
 }
-func (s *artifactScan) resolveParts(current, pending []string, active map[string]bool) ([]string, error) {
+func (s *artifactScan) resolveParts(ctx context.Context, current, pending []string, active map[string]bool) ([]string, error) {
 	for len(pending) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		part := pending[0]
 		pending = pending[1:]
 		if part == "" || part == "." {
@@ -391,14 +403,19 @@ func (s *artifactScan) resolveParts(current, pending []string, active map[string
 			return nil, ErrInvalidStorage
 		}
 		if node.kind == "symlink" {
-			if active[p] {
-				return nil, ErrInvalidStorage
-			}
-			active[p] = true
-			resolved, err := s.resolveParts(current, strings.Split(node.target, "/"), active)
-			delete(active, p)
-			if err != nil {
-				return nil, err
+			resolved, cached := s.resolved[p]
+			if !cached {
+				if active[p] {
+					return nil, ErrInvalidStorage
+				}
+				active[p] = true
+				var err error
+				resolved, err = s.resolveParts(ctx, current, strings.Split(node.target, "/"), active)
+				delete(active, p)
+				if err != nil {
+					return nil, err
+				}
+				s.resolved[p] = resolved
 			}
 			current = resolved
 		} else {
@@ -407,6 +424,9 @@ func (s *artifactScan) resolveParts(current, pending []string, active map[string
 		if len(pending) > 0 && s.nodes[strings.Join(current, "/")].kind != "directory" {
 			return nil, ErrInvalidStorage
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return current, nil
 }
