@@ -1466,7 +1466,8 @@ including normal, failed or stopped `turn_end` and nonvisual metadata. Validated
 runtime facts projected as info-banner receipts also count at their original
 durable IDs, including receipt-only logs and runtime tails. This includes
 validated `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`
-receipts (#3167), even hidden removal/give-up outcomes. Their
+receipts (#3167), even hidden removal/give-up outcomes, and validated remote
+`prompt_answered` receipts (#3222), regardless of stored visibility. Their
 [validation](#a-history-entry) is shared by paging and the legacy list/read
 target. Unsupported entries, including malformed queued/runtime facts and
 unknown types, retain the conservative visibility fallback:
@@ -1486,9 +1487,9 @@ on the next list even if excluded statuses follow it; new counted entries make
 **Accounting is not presentation.** A list watermark, fetched history or a live/
 replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
 Submit a checkpoint only from explicit foreground presentation evidence. Known
-nonvisual receipts, including queued-send receipts, can account for intervening
-durable IDs, but unknown, malformed or unidentified receipts and unaccounted
-numeric holes remain barriers.
+nonvisual receipts, including queued-send and remote prompt-answer receipts,
+can account for intervening durable IDs, but unknown, malformed or unidentified
+receipts and unaccounted numeric holes remain barriers.
 The daemon's clamp bounds the requested mark; it does not establish that the
 operator saw the content. Raw history and its metadata-aware watermark remain
 unchanged for future thread consumers.
@@ -6550,12 +6551,12 @@ timeline reducer it already runs for the live stream.
 | `payload` | object | Eligible stored payload bytes unchanged, or the nonvisual receipt shape below. |
 | `ts` | string (RFC 3339) | The original durable entry timestamp, also retained by receipts. |
 
-**Known runtime and queued-send facts use nonvisual receipts (#3026, #3167).**
+**Known runtime, queued-send and remote prompt-answer facts use nonvisual receipts (#3026, #3167, #3222).**
 `main_turn_opened`, `main_tool_interrupted`, `main_turn_interrupted` and
 `session_divider`, validated
 [agent/task facts](knowledge/features/history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
-and `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`
-project into legacy history as `type: "banner"` with this
+`send_accepted`, `send_delivered`, `send_dropped`, `send_lost` and validated remote
+`prompt_answered` facts project into legacy history as `type: "banner"` with this
 payload (all five keys are required and nonnull):
 
 ```json
@@ -6596,6 +6597,27 @@ raw store watermarks and durable ID allocation remain unchanged, including
 hidden removal/give-up outcomes. Raw visibility does not authorize transport
 or certify accounting.
 
+**Remote prompt-answer validation binds to the original resolution (#3222).**
+A receipt requires matching `conversation_id`, the original nonempty
+`correlation_id`, exactly `source: "remote"`, a nonzero durable ID and entry
+timestamp, and nonzero `resolved_at` equal to that timestamp. Required producer
+fields must be present and nonnull: `conversation_id`, `correlation_id`,
+`resolved_at`, `source`, `decision`, `behavior`, boolean `session_grant`, object
+`context` and boolean `truncated`. Only `allow` or `answer` with `behavior: "allow"`
+and `deny`, `cancel` or `refusal` with `behavior: "deny"` qualify; denied decisions
+cannot claim a session grant.
+
+The encoded context is capped at 16 KiB and checked against the
+[producer's typed tool/question/value shapes](knowledge/features/history-package-producers.md#resolved-remote-prompt-answers-2973),
+rejecting unknown context fields and malformed shapes. An empty object is valid.
+Original asking-session identity and provenance remain optional; today's active
+session never supplies missing ownership. Stored `shown` alone cannot authorize
+accounting. Malformed, foreign, unknown-source/decision, missing-field and
+unidentified facts remain holes. The receipt contains only the five banner
+fields above, never decisions, prompt/question/tool context, raw answers,
+correlation/session identities or provenance. Raw `prompt_answered` payloads
+remain excluded from legacy history, live delivery and replay.
+
 Unchanged mobile decoding/reduction understands this info banner as nonvisual
 accounting. It draws no content and changes no turn, permission, model or status
 state. Accounting grants no presentation of unseen content. Unknown, malformed
@@ -6611,11 +6633,15 @@ broadcast and operator-message history commit/publication attach that same
 per-conversation id to every interactive recipient's direct envelope. Reconnect
 replay of history-backed interactive-turn, runtime-receipt and operator-message
 ring events carries the original append's id too (#2909), without appending another entry.
-Running runtime and queued-send facts, including dividers, publish the same
-receipt bytes and original durable ID/timestamp to live recipients and the
-replay ring. Queued acceptance is recorded and its receipt enqueued before
-placement can proceed; the delivered user message precedes its linked delivery
-receipt in serialized publication. Ordinary and send-now delivery preserve that
+Running runtime, queued-send and validated remote prompt-answer facts, including
+dividers, publish the same receipt bytes and original durable ID/timestamp to
+live recipients and the replay ring. A winning remote prompt resolution appends once and serializes
+publication outside bridge/registry locks, recording for replay even when no
+clients are connected. Duplicate/losing resolutions add no fact or receipt.
+The captured original conversation and existing interactive, conversation
+membership and agent-access gates apply. Queued acceptance is recorded and its
+receipt enqueued before placement can proceed; the delivered user message
+precedes its linked delivery receipt in serialized publication. Ordinary and send-now delivery preserve that
 chronology through delayed echo/idle confirmation, and later confirmation adds
 no message or receipt. Startup reconciliation receipts, including `send_lost`,
 are available through history, without populating the
@@ -6628,9 +6654,9 @@ has read through that entry. It is independent of the envelope's connection
 absent or failed history storage, and non-history-backed frames (live or replayed)
 omit `history_entry_id` entirely, never as `null` or `0`. Eligible legacy delivery
 and existing ring recording proceed even when history cannot be appended;
-failed or absent storage cannot mint a runtime or queued-send receipt. Obtain a
-durable target only with presentation evidence, using a served entry's `id`;
-a list watermark alone is not a read checkpoint.
+failed or absent storage cannot mint a runtime, queued-send or prompt-answer
+receipt. Obtain a durable target only with presentation evidence, using a served
+entry's `id`; a list watermark alone is not a read checkpoint.
 
 **The entry's `id` is not an `event_id`.** [`event_id`](#reconnect-replay--resync-consumer-647)
 is the in-memory ring's id: per-process, reset by a daemon restart, and meaningful
@@ -6643,9 +6669,10 @@ reports `latest_entry_id` using the shared
 [legacy list/read watermark](#marking-a-conversation-read): eligible wire types
 count regardless of stored `shown`, except `turn_state`, `stall`, `api_retry`,
 `compacting` and `session_transition`, which never count. Validated runtime
-info-banner receipts, including all four queued-send facts, count at their
-original IDs, including hidden drops, receipt-only pages and tails. Unsupported
-entries keep conservative absent/true visibility counting and false exclusion
+info-banner receipts, including all four queued-send facts and validated remote
+prompt answers, count at their original IDs, including hidden drops, receipt-only
+pages and tails. Unsupported entries keep conservative absent/true visibility
+counting and false exclusion
 without certifying receipt accounting. **History pages still
 contain eligible hidden/status entries and validated runtime receipts, and all
 entries use the original durable ID sequence.** Neither `shown` nor session
@@ -6721,8 +6748,9 @@ an event emitted with no connected recipient; replay creates no new history entr
 The pair (`conversation_id`, `history_entry_id`) also identifies the same entry
 across devices and daemon restarts.
 
-This join also applies to known runtime and queued-send info-banner receipts,
-including `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`:
+This join also applies to known runtime, queued-send and validated remote
+prompt-answer info-banner receipts, including `send_accepted`, `send_delivered`,
+`send_dropped`, `send_lost` and `prompt_answered`:
 receipts published while running carry the same projected bytes, original
 durable ID and timestamp in history, live publication and reconnect replay.
 Startup loss is page-only. Their `banner` wire type contributes to the
@@ -6735,9 +6763,21 @@ has been presented. Received durable identity enables joining and deduplication;
 a validated receipt accounts for its ID; explicit foreground presentation
 establishes sight; a correlated `conversation_updated.read_up_to` establishes the
 daemon-confirmed persisted mark. These are separate facts.
+Prompt-answer receipts on every lane come from the
+[original-resolution validation](#a-history-entry); raw answers and missing
+provenance never acquire authority from
+current routing or stored visibility. A winning successful append supplies the
+same receipt identity for disconnected replay; nil/failed storage and
+duplicate/losing resolutions supply none. Receipt accounting never advances a
+read mark or grants presentation of the answer or reply.
 Fetched pages and replay alone establish no presentation. The
 [completed-turn controls](#marking-a-conversation-read) compare client-derived
 latest, presented checkpoint and confirmation across all three lanes.
+Mobile [#2098](https://github.com/pyrycode/pyrycode-mobile/issues/2098) retains
+its pending live notification gate: real Claude completion while backgrounded,
+real FCM, exactly one alert, independently fetched private reply preview,
+public redaction and owning-thread tap. Deterministic daemon accounting does
+not replace that gate.
 
 Each history request projects one bounded raw page with its original IDs,
 timestamps, opaque `cursor`, raw-page limit and `at_start`. Receipt-only,
