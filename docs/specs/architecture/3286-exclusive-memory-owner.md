@@ -61,3 +61,10 @@ Pending documentation stage: `docs/deployment.md`, “Managed memory runtime”:
 - Threat model: source/index/query/daemon/agent integration deferred to #3099/#3103/#3287.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-12
+
+## Revisions
+- 2026-10-12: Keep the read half of the private channel open when stopping; EOF on its write half initiates cleanup while the controller can still return verified release. Treat worker socket reset as exit and proceed through bounded group cleanup, rather than bypassing the release check.
+- 2026-10-12: Selected local model downloads use a private flat snapshot at `models/selected`, then pinned LocalEmbedding loads that snapshot with remote code disabled. This avoids symlink-based Hugging Face snapshot destinations while retaining memsearch's provider implementation.
+- 2026-10-12: Native companion scheduling is blocked by #3290: the managed recipe only invokes the installer package. Record validation rejects absent/invalid records; the two committed-native-record assertions are explicitly skipped pending this external capture dependency. Keep `needs-live-artifacts`; after #3290, run both native companions, commit the exact records and remove the temporary missing-record skip. Installer package/API remains independent.
+- 2026-10-12: Cap combined worker stdout/stderr at 64 KiB without retaining any bytes. Overflow closes the private write half and prevents successful initialization. `TestMemoryOwnerFailures` emits oversized planted-secret output through the real child pipe. `TestMemoryOwnerSurvivingBackend` proves an escaped live backend retains exclusion and cleanup returns a bounded recoverable error without signalling from PID bookkeeping.
+- 2026-10-12: `TestMemoryOwnerFreshCredential` uses the existing saved file-backend reference through production `resolveMemoryCredential`, then replaces its token to prove a reopen freshly resolves rather than reusing the prior credential. Socketpair setup uses the Go fork lock and portable close-on-exec operations for both supported targets.
