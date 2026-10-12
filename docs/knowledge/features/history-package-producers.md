@@ -358,18 +358,44 @@ remain optional; validation never consults today's active session or stored
 facts remain holes. Raw decisions, prompt/question/tool context, answers,
 correlation/session identities and provenance never cross in the receipt.
 
-**Serialize successful append and publication together.** `recordPromptAnswer`
+**Serialize successful append and replay admission together.** `recordPromptAnswer`
 uses `promptAnswerPublisher`'s dedicated mutex across its single durable append
-and `publishLegacyHistory` fan-out, outside bridge and registry locks. Reusing
-the operator emitter's bounded `notifyReceipt` mailbox could drop a successful
-answer receipt when full, leaving a live/replay checkpoint hole despite a valid
-page. Synchronous publication preserves append order under concurrent answers
-and records into the shared replay ring before peer delivery, even without
-connected clients. `startRelayV2` installs the publisher and its shared ring
+and `enqueue`, outside bridge and registry locks. `enqueue` records the validated
+receipt into the shared replay ring before admitting live delivery, even without
+connected clients. One ordered worker, `promptAnswerPublisher.deliver`, takes
+receipts under that mutex and releases it before `ActiveConns` or `Push`.
+Concurrent answers therefore retain append/replay order without waiting for
+connection discovery or peer delivery.
+
+The mailbox holds at most 256 pending live receipts. Overflow logs a fixed,
+content-free warning and drops only live delivery; the successful history append
+and replay admission remain intact. Context cancellation releases blocked
+delivery and clears pending live work without removing history or replay.
+Neither held delivery nor cancellation blocks recording later answers.
+`startRelayV2` installs the publisher and its shared ring
 before manager answer workers start: attaching the ring at the later interactive
 emitter setup would race early answers. Existing interactive, conversation
 membership and agent-access gates apply to the captured original conversation.
 Nil/failed appends and duplicate/losing resolutions produce no receipt.
+
+**Connection discovery must not run on the answer-recording path (#3279).**
+The relay manager dispatch loop can itself resolve a prompt; synchronous
+`publishLegacyHistory` fan-out from `recordPromptAnswer` then waits for
+`ActiveConns` to query that same loop. The child can receive its verdict while
+dismissals and subsequent relay traffic deadlock. Merely releasing bridge and
+registry locks does not break that cycle. Delivery must leave both the recording
+lock and the manager dispatch call stack.
+
+`TestPromptAnswerRelayRemainsResponsive` exercises all five decisions through
+the encrypted manager path and checks continued relay progress.
+`TestPromptAnswerBlockedDeliveryDoesNotBlockNextAnswer` holds connection discovery
+while two answers complete, then checks ordered original history/event identities
+or cancellation with both history/replay entries retained. These race regressions
+prove the repaired boundary; they do not establish real-Claude acceptance.
+A merged repair or offline pass leaves named live acceptance pending until a
+counted full gate records each required leaf, including subtests, against the
+actual daemon source and Claude version. See
+[the separate #3256 live evidence](../../specs/architecture/3256-shared-live-repair-evidence.md#revisions).
 
 History, live publication and reconnect replay use identical receipt bytes and
 the original durable ID/timestamp, without another append. Valid receipts count
