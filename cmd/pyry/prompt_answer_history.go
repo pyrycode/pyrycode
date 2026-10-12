@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -15,12 +17,69 @@ import (
 const historyPromptAnswered = "prompt_answered"
 const maxPromptAnswerProjection = 16 * 1024
 
-// promptAnswerPublisher owns append/publication ordering independently of the
-// bridge and registry locks. Its ring is installed before answer workers start.
+// promptAnswerPublisher serializes durable appends and replay admission. A single
+// worker fans accepted receipts out in that order, outside mu: ActiveConns asks
+// the relay dispatch loop, which may itself be recording the next answer.
 type promptAnswerPublisher struct {
-	mu     sync.Mutex
-	ring   *eventring.Ring
-	nextID uint64
+	mu      sync.Mutex
+	ring    *eventring.Ring
+	nextID  uint64 // owned by the delivery worker
+	pending []protocol.Envelope
+	running bool
+	done    chan struct{}
+}
+
+// enqueue runs under mu after the durable append. Replay retains every receipt,
+// including those whose live delivery is dropped when the mailbox is full.
+func (p *promptAnswerPublisher) enqueue(ctx context.Context, bcast interactiveBroadcaster, logger *slog.Logger, convID string, payload json.RawMessage, ts time.Time, historyID *uint64) {
+	env := protocol.Envelope{Type: protocol.TypeBanner, TS: ts, Payload: payload, HistoryEntryID: historyID}
+	if p.ring != nil {
+		id := p.ring.AppendWithHistoryID(convID, env.Type, payload, ts, historyID)
+		env.EventID = &id
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if len(p.pending) >= 256 {
+		logger.Warn("relay: prompt receipt mailbox full", "event", "prompt_answer.queue_full")
+		return
+	}
+	p.pending = append(p.pending, env)
+	if !p.running {
+		p.running = true
+		p.done = make(chan struct{})
+		go p.deliver(ctx, bcast, logger)
+	}
+}
+
+func (p *promptAnswerPublisher) deliver(ctx context.Context, bcast interactiveBroadcaster, logger *slog.Logger) {
+	for {
+		p.mu.Lock()
+		if len(p.pending) == 0 || ctx.Err() != nil {
+			p.pending = nil
+			p.running = false
+			close(p.done)
+			p.mu.Unlock()
+			return
+		}
+		env := p.pending[0]
+		p.pending[0] = protocol.Envelope{}
+		p.pending = p.pending[1:]
+		p.mu.Unlock()
+		for _, c := range bcast.ActiveConns(ctx) {
+			if !c.Interactive {
+				continue
+			}
+			p.nextID++
+			env.ID = p.nextID
+			if err := bcast.Push(ctx, c.ConnID, env); err != nil {
+				if ctx.Err() != nil {
+					break
+				}
+				logger.Debug("relay: prompt receipt push dropped", "event", "prompt_answer.push_err", "conn_id", c.ConnID, "err", err)
+			}
+		}
+	}
 }
 
 // promptHistoryOwner is immutable after surfacing. It contains no permission
@@ -125,7 +184,7 @@ func (b *streamApprovalBridge) recordPromptAnswer(id string, owner promptHistory
 	receipt, ok := legacyRuntimeReceipt(owner.conversationID, historyPromptAnswered, payload, historyID, ts)
 	if ok && b.historyPublisher != nil {
 		p := b.historyPublisher
-		publishLegacyHistory(b.ctx, b.bcast, p.ring, b.logger, &p.nextID, owner.conversationID, protocol.TypeBanner, receipt, ts, historyID)
+		p.enqueue(b.ctx, b.bcast, b.logger, owner.conversationID, receipt, ts, historyID)
 	}
 }
 
