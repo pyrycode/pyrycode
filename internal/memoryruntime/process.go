@@ -123,6 +123,9 @@ func probe(ctx context.Context, dir string, p lock) (map[string]string, error) {
 	script := `import importlib.metadata as m, json, platform, sys
 import memsearch.cli, pymilvus, milvus_lite, openai
 print(json.dumps(dict([(name,m.version(name)) for name in json.loads(sys.argv[1])]+[('python',platform.python_version())])))`
+	if p.Local {
+		script = "import einops, sentence_transformers, memsearch.embeddings.local, torch\nassert torch.ones(2, device='cpu').sum().item() == 2\n" + script
+	}
 	names := []string{"pip"}
 	for _, a := range p.Wheels {
 		names = append(names, a.Name)

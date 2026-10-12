@@ -31,15 +31,17 @@ type LastError struct {
 // Record is a committed registration. Empty release strings mean unset.
 // Manifest updates preserve all committed display and lifecycle fields.
 type Record struct {
-	AppID          string     `json:"app_id"`
-	Manifest       Manifest   `json:"manifest"`
-	Title          string     `json:"title"`
-	Desired        string     `json:"desired"`
-	State          string     `json:"state"`
-	ActiveRelease  string     `json:"active_release,omitempty"`
-	PendingRelease string     `json:"pending_release,omitempty"`
-	LastError      *LastError `json:"last_error,omitempty"`
-	Revision       uint64     `json:"revision"`
+	AppID          string          `json:"app_id"`
+	Manifest       Manifest        `json:"manifest"`
+	Title          string          `json:"title"`
+	Desired        string          `json:"desired"`
+	State          string          `json:"state"`
+	ActiveRelease  string          `json:"active_release,omitempty"`
+	PendingRelease string          `json:"pending_release,omitempty"`
+	LastError      *LastError      `json:"last_error,omitempty"`
+	Revision       uint64          `json:"revision"`
+	ReleaseHistory []Release       `json:"release_history,omitempty"`
+	PublishJournal *PublishJournal `json:"publish_journal,omitempty"`
 }
 
 // Registry serializes durable mutations and readers. Open one owner per root;
@@ -139,7 +141,12 @@ func (r *Registry) changeLocked(action, appID string, data []byte, update *lifec
 	}
 	next := cloneSnapshot(r.snapshot)
 	if update != nil {
-		if update.observation == nil {
+		if update.metadata != nil {
+			if e := update.metadata(&next.Records[index]); e != nil {
+				return false, e
+			}
+			next.Records[index] = cloneRecord(next.Records[index])
+		} else if update.observation == nil {
 			applyLifecycle(&next.Records[index], update.fields)
 		} else {
 			record := &next.Records[index]
@@ -157,7 +164,10 @@ func (r *Registry) changeLocked(action, appID string, data []byte, update *lifec
 			}
 			*record = cloneRecord(*record)
 		}
-		if e := validateSnapshot(next); e != nil {
+		if e := validateSnapshot(r.root, next); e != nil {
+			if update.metadata != nil {
+				return false, ErrInvalidStorage
+			}
 			return false, ErrInvalidLifecycle
 		}
 		if reflect.DeepEqual(next.Records[index], r.snapshot.Records[index]) {
