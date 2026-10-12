@@ -10,6 +10,8 @@ import (
 // hostedInbox is guarded by hostedMu. Reservations include callback handoff,
 // Run's queue and active delivery. Each session owns a distinct inbox.
 type hostedInbox struct {
+	query                         *threadQuery
+	threadJoins                   map[string]threadJoin
 	pending                       []*hostedOutput
 	used                          int
 	subscribed, retired, overflow bool

@@ -1,6 +1,7 @@
 # `internal/apps` — durable host-app registrations
 
-This package owns strict manifest validation, durable registrations and callable
+This package owns strict manifest validation, bundled registered source creation
+and identity-based inspection, durable registrations and callable
 health-confirmed committed-release process ownership and generation-bound stable
 response preparation independent of conversations.
 The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
@@ -36,6 +37,14 @@ only when storage is missing, validates the stored host otherwise, and leaves
 rejected bytes untouched. The canonical UUIDv4 check reuses
 [`identity.ParseServerID`](identity-package.md#parseserverid--validation).
 Identity is `(server_id, app_id)`; separate hosts require separate roots.
+
+Validate a create title before JSON encoding: Go replaces malformed UTF-8 in
+strings, so validating only the encoded manifest would silently accept a changed
+title. `Registry.Create` checks raw `validText` first, validates the stamped
+manifest before writes and revalidates the generated manifest before committing.
+`Registry.Inspect` resolves committed identity and derived editable locations
+without reading source; edited bytes cannot mint another identity or establish
+activation. See [creation and inspection](../../hosted-apps.md#registered-creation-and-inspection).
 
 `registry.json` records optionally store `release_history` (`Record.ReleaseHistory`)
 and `publish_journal` (`Record.PublishJournal`). Absence means empty history and
@@ -84,12 +93,20 @@ and `esbuild-wasm` instead. TypeScript 6's side-effect import checking needs the
 explicit `declare module '*.css'` in `assets.d.ts` for the frontend stylesheet
 import; removing it breaks frontend typechecking.
 
-`scaffold` copies an explicit `files` inventory rather than the whole source
-tree. New shared service modules, migration SQL, browser scripts and tests must
-enter that inventory; testing the maintained source tree alone can pass while generated
-apps lack dependencies or service coverage. Verify a fresh generated app through
-install, frontend/service typecheck, tests and build. `npm test` compiles its
+`scaffold` and `Registry.Create` share `templates/hosted-app/inventory.json` and
+the original assets, including required dotfiles, without a second maintained
+copy. New shared service modules, migration SQL, browser scripts and tests must
+enter that inventory; testing the maintained source tree alone can pass while
+generated apps lack dependencies or service coverage. Verify a fresh generated
+app through install, frontend/service typecheck, tests and build. `npm test` compiles its
 service dependencies itself, so a prior build cannot mask missing test setup.
+
+Inventory edits must also update the exact embed paths in `hostedtemplate.Assets`.
+Go directory embedding ignores `.gitignore`; filtering generated output happens
+after compilation and cannot protect the distributed executable from private
+working-tree bytes. Embed exact maintained files, never directories or globs,
+so environment files, SQLite data/sidecars, dependencies, build output and
+unlisted adjacent source stay outside the binary even when present at build time.
 
 ## Template SQL and readiness
 
@@ -548,6 +565,19 @@ original reader returns. Starting a replacement reader on every cancel would
 accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ## Testing
+
+Inspect the compiled bundle itself, not only generated output.
+`TestBundleInventory` requires exactly the shared inventory plus the manifest
+and inventory JSON; `TestBundleExcludesWorkingFiles` recompiles the production
+embed declaration in a temporary package seeded with synthetic private files.
+An output-only assertion stays green with recursive embedding because generation
+filters the inventory after those extra bytes have entered the binary.
+
+`TestCreateAndInspect` compares generated inventory/content with maintained
+assets and preserves edited bytes across reopen and repeated inspection.
+`TestCreateOutsideCheckout` runs the compiled test binary from another directory
+with empty `PATH`, proving bundled creation needs neither checkout reads nor
+commands. Bundle exclusion and generated-content checks prove separate boundaries.
 
 `TestResponseIOAtChunkBoundary` returns bytes together with raw
 `io.ErrUnexpectedEOF` or a private source error at known-size and incremental

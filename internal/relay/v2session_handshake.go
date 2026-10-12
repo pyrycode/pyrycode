@@ -546,9 +546,6 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 			m.signalLiveDrain()
 		}
 		// Thread state comes from current source readings, never legacy snapshots.
-		if helloPayload.LastEventID != nil {
-			m.replayMissed(ctx, s, *helloPayload.LastEventID)
-		}
 		return
 	}
 

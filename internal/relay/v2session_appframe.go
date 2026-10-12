@@ -22,6 +22,7 @@ import (
 // a worker-side copy would let a future edit delete the case while the frame kept
 // routing, flipping the guard without changing behaviour.
 type appFrameJob struct {
+	query *threadQuery
 	// plaintext is the decrypted application frame, freshly allocated by
 	// noise.CipherState.Decrypt and therefore aliasing nothing.
 	plaintext []byte
@@ -88,6 +89,7 @@ const (
 	// the retrieval arm's shape, over a file read live rather than a stored copy.
 	appFrameWorkspaceFileRead
 	appFrameSendQueuedNow
+	appFrameThreadCatchUp
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -148,6 +150,8 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 			default:
 			}
 			switch job.kind {
+			case appFrameThreadCatchUp:
+				m.runThreadCatchUp(connCtx, s, job.query)
 			case appFrameSendQueuedNow:
 				m.handleSendQueuedNow(s, job.plaintext)
 			case appFrameAttachmentChunk:

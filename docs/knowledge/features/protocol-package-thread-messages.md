@@ -26,8 +26,9 @@ Consumers own numeric bounds, stable identity/kind and patch applicability.
 `TestThreadItemAddedRoundTrip`, `TestThreadItemOptionalFacts`,
 `TestThreadChangesRoundTrip` and `TestThreadTextAppendRoundTrip` re-encode decoded
 DTOs with distinct item/order/revision/version values and inspect emitted JSON.
-Live negotiation/publication is installed; catch-up/page handlers and production
-query wiring remain #3234–#3236. Bounded live encoding is available through
+Live negotiation/publication and relay catch-up handling are installed;
+history-page handling remains #3235 and production query providers remain
+\#3236. Bounded live encoding is available through
 `EncodeThreadUpdate`. The DTO declarations perform no validation, fold I/O or
 patch application.
 
@@ -50,13 +51,22 @@ return a content-free error and no partial sequence. See the
 ## Query replies and coverage
 
 [`thread_catch_up`, `thread_page`, `thread_items` and `thread_reset`](../../protocol-mobile.md#thread-query-messages)
-are declared v2 vocabulary outside `inboundAppTypeSet`. Relay handlers and
-production query wiring remain pending in #3234–#3236. Request limits normalize
+are declared v2 vocabulary outside `inboundAppTypeSet`. `TypeThreadCatchUp` is
+intercepted by the authenticated relay switch; history pages remain #3235 and
+production query provider installation remains #3236. Request limits normalize
 through `NormalizeThreadQueryLimit`: omitted/zero defaults to 50 ordered rows,
 positive clamps to 256, negative rejects even for nonzero catch-up. Nonzero
 catch-up is never truncated; ties, active rows and parents can exceed window
 limits. The [backend](thread-package-background-store.md#bounded-queries) ignores
 limits on nonzero catch-up, so handlers must still normalize before selecting it.
+
+**Dispatch registration and provider readiness are separate.** An implemented
+switch arm must move its type from `excludedTypes` to `inboundTypes` as
+`switch-intercepted`, even when production providers remain pending. Leaving
+`TypeThreadCatchUp` excluded makes the command package's independent AST guard
+fail while relay-only tests pass. `TestEveryInboundV2TypeHasHandler` checks
+coverage, reverse registration and disjoint classification. See
+[relay admission and delivery gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
 
 Only the separate successful `thread_items` marker with `items: []` and
 `final: true` certifies query coverage. Every item batch has `final: false`, the
