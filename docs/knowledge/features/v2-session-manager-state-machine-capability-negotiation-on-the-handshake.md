@@ -117,14 +117,19 @@ remain #2963. Readiness attests installed providers, not that every conversation
 has completed replay. See [daemon publication and lifecycle](thread-package.md#shadow-lifecycle-and-evidence).
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
-replies, but `threadWithheld` independently gates all three thread update kinds
-and their continuations at `forwardEnvelope` and `forwardAppReply`, before
-Noise encryption. A frame must name its conversation, and the connection must
-be open, thread-capable, interactive, name a currently registered conversation
-and pass the existing Codex restriction. Membership is rechecked at delivery,
-so a queued item cannot reach a removed conversation.
-A missing conversation ID fails closed for items. Neither `thread` alone nor
-`in_reply_to` grants interactive or multi-agent access. Unsolicited content
+replies, but `threadWithheld` independently gates live additions/changes/text
+appends and their continuations, plus correlated `thread_items` batches, assembly
+parts/completion, the separate final marker and `thread_reset`. Upstream checks
+at `forwardEnvelope` and `forwardAppReply` cannot authorize a later queued send:
+`hostedDeliver` rechecks the selected unsealed thread-content head immediately
+before Noise sealing. The connection must still be open/authenticated, currently
+paired, thread-capable and interactive; its payload must name a currently
+registered conversation and pass the existing Codex/`multi_agent` gate. Removal
+or eligibility loss while queued withholds content without spending a sender ID
+or Noise nonce. Withheld heads release lane capacity and do not strand permitted
+output. Missing conversation identity fails closed. Neither `thread` alone nor
+`in_reply_to` grants interactive or multi-agent access. Unaffected legacy caller
+and provider signatures and reply behavior remain unchanged. Unsolicited content
 replaced by the thread is suppressed on live, replay and connect-reconcile
 paths. Supplied live state has independent source-conversation gates, including
 for correlated replies and empty clears; see [supplied live-state ordering](#supplied-live-state-ordering).
@@ -132,6 +137,24 @@ Suppression returns normally: an error would abandon replay and strand buffered
 live traffic even if a one-frame denial test passed. See the
 [wire filtering contract](../../protocol-mobile.md#daemon-thread-updates-v2-supplied-delivery-contract)
 and [replay drain](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
+
+Keep the late `threadWithheld` check restricted to `threadContent`. Reapplying
+its unsolicited-legacy suppression to supplied `LiveState` would discard
+authorized fresh readings and metadata-only clears after source ordering had
+advanced their watermarks. Supplied state retains `forwardLiveState`'s source
+gate and `forwardEnvelopeSource`'s supplied bypass. Authenticated coverage must
+install both the ordered lane and `ThreadLiveState`:
+`TestThreadDeliverySuppliedLiveState` exercises clear/fresh pushes and replies,
+and `TestThreadDeliveryLateEligibility` covers queued thread-content denial.
+
+`DeliverThread` certifies each envelope only after the ordered transport callback
+returns success. Enqueue, Run handoff and batch assembly completion are weaker
+boundaries; future query callers must deliver serially and stop on any error
+before their separate success marker. See [ordered delivery and eligibility](../../protocol-mobile.md#ordered-delivery-and-eligibility)
+for withholding, failure, retirement and cancellation outcomes, and
+[lane ownership](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery)
+for capacity and detached input. Query handlers/providers remain pending #3253
+and #3235; production query wiring remains #3236.
 
 **Project fields without round-tripping a partial DTO.** `conversation_updated`
 has supplied fields that `ConversationUpdatedPayload` does not represent,
