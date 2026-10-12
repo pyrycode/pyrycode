@@ -62,7 +62,7 @@ func TestDaemonAppProcess(t *testing.T) {
 
 func daemonOwnerFixture(t *testing.T) (*apps.Registry, string, string) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv("HOME", testRealTempDir(t))
 	r := openDaemonApps("test", discardLogger())
 	if r == nil {
 		t.Fatal("registry unavailable")
@@ -198,7 +198,7 @@ func TestHostedAppsStartupFailureCleanup(t *testing.T) {
 	_, node, root := daemonOwnerFixture(t)
 	t.Setenv("PATH", filepath.Dir(node)+":"+os.Getenv("PATH"))
 	expected := errors.New("delivery failure")
-	err := runSupervisor([]string{"-pyry-name=test", "-pyry-workdir=" + os.Getenv("HOME"), "-pyry-socket=" + filepath.Join(t.TempDir(), "control.sock"), "-pyry-relay=", "-pyry-claude=/bin/sleep"}, func(_ string, _ channelDeliveryHistory, _ func(conversations.ConversationID, string), _ *slog.Logger) (*channelDelivery, error) {
+	err := runSupervisor([]string{"-pyry-name=test", "-pyry-workdir=" + os.Getenv("HOME"), "-pyry-socket=" + filepath.Join(shortTempDir(t), "control.sock"), "-pyry-relay=", "-pyry-claude=/bin/sleep"}, func(_ string, _ channelDeliveryHistory, _ func(conversations.ConversationID, string), _ *slog.Logger) (*channelDelivery, error) {
 		daemonProcesses(t, root, daemonAppID)
 		return nil, expected
 	})

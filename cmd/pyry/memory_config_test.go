@@ -19,9 +19,24 @@ import (
 func testManagedMemory() config.MemorySettings {
 	return config.MemorySettings{Vault: config.MemoryVault{Mode: "default"}, Embedding: config.MemoryEmbedding{Provider: "local", Model: "embed"}, Capture: config.MemoryCapture{Agent: "codex", Model: "capture"}}
 }
+
+// testRealTempDir resolves t.TempDir() to its real path. On macOS the
+// default temp directory sits under a symlink (/var -> /private/var), and
+// production code that refuses a symlinked path component (see privateDir
+// in internal/apps and memoryTranscriptDir here) or canonicalizes paths for
+// storage (canonicalpath.Resolve) would otherwise treat an unresolved
+// TempDir as hostile input or as a different path than the one asserted on.
+func testRealTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 func testManagedHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
+	home := testRealTempDir(t)
 	testMemoryMust(t, os.Chmod(home, 0700))
 	t.Setenv("HOME", home)
 	return home
