@@ -33,6 +33,7 @@ type hostedPage struct {
 	cursor  *hostedWalk
 }
 type hostedOutput struct {
+	query        *threadQuery
 	unsolicited  bool
 	typ          string
 	payload      any
@@ -226,6 +227,9 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		}
 		if rejection == nil && o.env != nil && ((threadContent(o.env.Type) && m.threadWithheld(s, *o.env)) || (o.callerCtx != nil && (!s.thread || !s.interactive))) {
 			rejection = ErrThreadWithheld
+		}
+		if rejection == nil {
+			rejection = m.threadQueryGate(s, o)
 		}
 		if rejection == nil {
 			break
