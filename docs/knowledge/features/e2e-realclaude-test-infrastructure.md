@@ -246,6 +246,34 @@ and delays the first result beyond the old cutoff. Both fail with the old
 deadline and pass with the correction; a receipt-only assertion would miss the
 first case. See [the isolated-attempt contract](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831).
 
+**Init-only progress can hide active thinking.** The
+[#3200 diagnosis](../../specs/architecture/3200-fallback-thinking.md#diagnosis-records)
+reproduced deadline exhaustion on unchanged code: an exact-forwarding observer
+saw complete `system/thinking_tokens` frames grow from an estimated 50 tokens
+at 1873 ms to 3750 at 29735 ms, before the 29801-ms own-deadline group kill.
+No assistant text, result, successful completion or publication appeared.
+`replyFallbackStream.envelope` recognizes only init/retry/result, so its last
+recognized event stayed init while inference continued. Saturated receipt with
+init-only progress establishes neither a forwarding stall nor an oversized
+result. The original #2939 failure/rerun retained no thinking observations:
+it locates the same result/completion/publication boundary but cannot uniquely
+attribute that historical call's delay. Its failure remains recorded in
+[the refinement evidence](https://github.com/pyrycode/pyrycode/issues/3200#issuecomment-6115167411).
+
+A short final-reply instruction does not bound preceding extended thinking.
+Empty setting sources left default thinking enabled, and a positive ambient
+`MAX_THINKING_TOKENS` overrides a settings-only disable. `replyFallbackEnv`
+removes every inherited budget entry and supplies exactly one
+`MAX_THINKING_TOKENS=0` for the isolated helper. The persistent child is
+unaffected. `TestReplyFallbackThinkingIsolation` uses the existing subprocess
+fixture to withhold results while thinking is enabled, requiring one selected
+account read, one invocation, a valid reply and successful completion before
+the parent deadline. `TestReplyFallbackThinkingEnv` checks duplicate removal
+and preservation of unrelated/authentication variables. The focused leaves
+failed before correction (**4/1/3/0**) and passed afterward (**4/4/0/0**);
+see [the causal regression evidence](../../specs/architecture/3200-fallback-thinking.md#offline-validation).
+Neither the attempt deadline nor the phone wait was extended.
+
 The fresh print-mode helper uses `--output-format stream-json --verbose`.
 Wrapper and daemon parse independently while the wrapper forwards exact stdout,
 inherits stdin/stderr and stays in the daemon group. Each retains at most 4096
@@ -384,6 +412,7 @@ Counts: executed/passed/failed/skipped.
 | [PR #2896 batch](https://github.com/pyrycode/pyrycode/pull/2896) | 6/3/3/0 |
 | [#3024 declared batch](../../specs/architecture/3024-fallback-stream-observation.md#six-run-results), `28974c1c` | 6/2/4/0 |
 | [#2923 corrected declared batch](../../specs/architecture/2923-fallback-timing.md#six-run-results), `1918d756` | 6/6/0/0 |
+| [#3200 no-thinking declared batch](../../specs/architecture/3200-fallback-thinking.md#six-run-results), `df44e507` | 6/6/0/0 |
 
 **Historical deadline-stage failures remain recorded.** #2873 run 4
 remains FAIL: fallback/own deadline, neither parent flag, wrapper Wait/SIGKILL;
@@ -422,6 +451,20 @@ each outcome and safe scalar source/timing evidence; launcher preflight proves
 authentication independently of reported source. Counted live non-reproduction
 supports the deterministic correction; observation alone does not establish it
 or determine how long historically killed calls would otherwise have taken.
+
+The [#3200 six-run evidence](../../specs/architecture/3200-fallback-thinking.md#six-run-results)
+retains exactly six sequential authenticated targeted launches on unchanged
+corrected commit `df44e507`, with no retries, replacements, skips or diagnostic
+observer: **6/6/0/0**, every launcher exit zero. Each native-disabled seeded
+exchange produced a bounded nonblank single-line UTF-8 fallback, successful
+Wait and set/explicit-null clear revisions 1/2 after accepted input. Attempt
+times were 2103–8091 ms; authentication preflights were independent of init or
+reported source. These passes establish corrected live non-reproduction;
+the thinking-progress failure and red/green subprocess regression establish
+the cause and correction. They replace no historical failure. The separate
+[dispatcher full gate](https://github.com/pyrycode/pyrycode/issues/3200#issuecomment-6115728967)
+counted **1987/1987/0/27** on `b31ea7a2` merged with main `352e8b50`;
+`TestInteractiveStream_FallbackReplySuggestionSetThenClear` passed in 9.8 seconds.
 
 The [#2881 full gate](https://github.com/pyrycode/pyrycode/issues/2881#issuecomment-6017651019)
 at `81c7ac78f9` counted 1635/1635/0/27. Passing cannot recover witnesses or resolve
