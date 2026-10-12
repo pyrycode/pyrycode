@@ -156,3 +156,37 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+
+2026-10-12 — Validation at `071cb419cde985de419edb9eb7a170d3a8d66f6c`, using
+Go 1.26.2 on Linux/amd64. Product sources are unchanged from starting main;
+producer and both repair-test files are also unchanged from #3279. No evidenced
+prompt-answer residual required production changes or another regression.
+
+| Race regression | Executed leaves | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| `TestPromptAnswerRelayRemainsResponsive` (allow, deny, cancel, answer, refusal) | 5 | 5 | 0 | 0 |
+| `TestPromptAnswerBlockedDeliveryDoesNotBlockNextAnswer` (both cancellation arms) | 2 | 2 | 0 | 0 |
+
+`go vet ./...`, `go build -o /tmp/builder-3256/pyry ./cmd/pyry`, and offline
+`go vet -tags e2e_realclaude ./internal/e2e/realclaude/...` passed.
+
+The first uncached `cmd/pyry` race suite executed 15286 leaves: 15285 passed,
+one failed and three skipped. `TestHostedAppsStartupFailureCleanup` failed with
+`app lifecycle deadline` during hosted-process disappearance checks. This is the
+existing main flake tracked by [#3251](https://github.com/pyrycode/pyrycode/issues/3251),
+whose retained repeated-main probe reports the same failure. Its fixture runs
+without relay configuration and checks app teardown, outside prompt-answer
+publication. Its focused race rerun executed one test and passed with zero skips.
+Do not fix or suppress that independent failure in this ticket.
+
+The three package skips are existing opt-in `TestRunAgentRun_RealClaude` and
+`TestCodexApprovalLive`, plus `TestMemoryPathsCaseInsensitive` on this
+case-sensitive filesystem. Neither prompt repair regression skipped. Full live
+acceptance for the fourteen named cases remains pending for the dispatcher;
+no Claude version or live results are claimed by these offline checks.
+
+One full uncached package rerun passed: 15286 leaves executed, 15286 passed,
+zero failed and the same three skipped. This completes the builder's scoped
+race check without claiming that #3251's intermittent failure is repaired.
