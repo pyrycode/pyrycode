@@ -64,3 +64,6 @@ None. The delivery contract certifies local transport acceptance, with no client
 **Date:** 2026-10-12
 
 Sizing: approximately 700 written lines (230 production, 390 tests, 80 plan), zero new exported types, zero required consumer migrations, four acceptance criteria, eight reject/lifecycle branches. All five limits remain within the builder ceiling.
+
+## Revisions
+- 2026-10-12: Existing outbound-only fixtures have no ordered callback. Initialize the thread lane on handshake only with `OutboundContext` (or the existing hosted configuration), preserving those legacy fixtures and paths. `DeliverThread` reports `ErrConnNotFound` when no ordered lane exists. Terminal codec error envelopes can also use the delivery contract, with thread/interactive checks and stamped size enforcement. Manager shutdown reports connection retirement; caller cancellation retains its context error. Added `TestThreadDeliveryActiveCancellation`, `TestThreadDeliveryCapabilityGates`, and `TestThreadDeliveryStampFailure` for the final contract.
