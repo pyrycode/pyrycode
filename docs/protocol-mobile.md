@@ -939,8 +939,8 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`thread_item_added`** | binary → phone | no | **Production emitted (#3164).** Full daemon-built item with `conversation_id`, `epoch`, `version`; oversized updates use bounded assembly parts (#3073). Delivered only to eligible authenticated interactive connections that negotiated `thread`. See [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 | **`thread_item_changed`** | binary → phone | no | **Production emitted (#3164).** In-place field replacements with `item_id`, `base_rev`, `rev`, `changes` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_item_changed`](#thread_item_changed). |
 | **`thread_text_append`** | binary → phone | no | **Production emitted (#3164).** Message text suffix with `item_id`, `base_rev`, `rev`, `text` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_text_append`](#thread_text_append). |
-| **`thread_catch_up`** | phone → binary | no | **Declared (#3233).** Request current full items after an unsigned history `version`, or a newest window at zero; carries `conversation_id`, `epoch` and optional signed `limit`. Handlers/wiring pending #3234–#3236. See [Thread query messages](#thread-query-messages). |
-| **`thread_page`** | phone → binary | no | **Declared (#3233).** Request an older ordered window below exclusive unsigned `before_order`; carries `conversation_id` and optional signed `limit`. Handlers/wiring pending #3234–#3236. See [Thread query messages](#thread-query-messages). |
+| **`thread_catch_up`** | phone → binary | no | **Declared (#3233).** Request current full items after an unsigned history `version`, or a newest window at zero; carries `conversation_id`, `epoch` and optional signed `limit`. Handler/provider installation pending #3253; production wiring pending #3236. See [Thread query messages](#thread-query-messages). |
+| **`thread_page`** | phone → binary | no | **Declared (#3233).** Request an older ordered window below exclusive unsigned `before_order`; carries `conversation_id` and optional signed `limit`. Handler/provider installation pending #3235; production wiring pending #3236. See [Thread query messages](#thread-query-messages). |
 | **`thread_items`** | binary → phone | no | **Declared (#3233).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
 | **`thread_reset`** | binary → phone | no | **Declared (#3233).** Correlated terminal reset carrying current `conversation_id`, `epoch`, `version`, with no items or coverage. See [Thread query messages](#thread-query-messages). |
 
@@ -1298,7 +1298,10 @@ rejected assembly changes neither message text nor completed `rev`/`version`.
 
 ### Thread query messages
 
-Thread query messages are declared; relay handlers and production query wiring remain pending in #3234–#3236.
+Thread query messages and their codec are declared. Ordered delivery outcomes
+and queued eligibility rechecks are implemented (#3252); catch-up admission,
+providers, query/live joining and replay bypass remain pending #3253, history
+pages #3235, and production query wiring #3236.
 
 These v2 types stay outside `inboundAppTypeSet`; declaration does not install
 validation, authorization or dispatch. The contract follows
@@ -1394,7 +1397,7 @@ Missing, reordered or mismatched parts invalidate assembly. An interrupted
 assembly followed by a request marker MUST NOT certify completion or advance
 the checkpoint. Keep completed checkpoints unchanged until all batches assemble
 and the separate successful marker arrives. Production client assembly/resource
-limits and transport ordering remain downstream.
+limits remain downstream.
 
 Every emitted application envelope, including marker/reset/error, fits
 `MaxThreadEnvelopeBytes` (**65519 bytes**) after JSON escaping and
@@ -1406,6 +1409,46 @@ malformed coverage or insufficient metadata budget returns a content-free
 `ErrInvalidThreadUpdate` or `ErrThreadUpdateMetadataTooLarge` with **nil output**,
 including failure after earlier encodable batches. `EncodeThreadUpdate` retains
 its live-update API and wire contract.
+
+#### Ordered delivery and eligibility
+
+`V2SessionManager.DeliverThread(ctx, connID, envelope)` is an off-Run,
+per-envelope delivery contract for thread content and terminal codec errors.
+Its outcomes distinguish local ordered transport acceptance from non-delivery:
+
+| Result | Meaning |
+|---|---|
+| `nil` | The ordered transport callback returned success within its delivery context. This is local acceptance, with no client acknowledgement protocol. |
+| `ErrThreadWithheld` | Current recipient eligibility forbids the envelope. |
+| `ErrThreadDeliveryFailed` | Encoding, stamped size, sealing or transport failed, including transport-down rejection. |
+| `ErrConnNotFound` | The connection retired, the manager shut down, or no ordered lane exists. |
+| Caller context error | Caller cancellation/deadline releases the wait, including while waiting for capacity or transport. |
+
+Classify sentinel errors with `errors.Is`; a delivery failure may wrap its cause.
+
+The caller MUST deliver a codec sequence serially and stop on any non-success
+before its separate success marker. Enqueue, `forwardToRun` handoff, source-queue
+flush and `continuation.final: true` assembly completion alone cannot certify
+a query. Query handlers own this stopping rule; installing this delivery
+contract does not install those handlers or providers.
+
+Immediately before sealing queued thread content, Run rechecks open/authenticated
+state, current paired authorization, negotiated `thread`, interactive access,
+current conversation membership and the existing Codex/`multi_agent` gate.
+This covers live additions/changes/text appends and their continuations, as well
+as correlated `thread_items` batches, every assembly part including completion,
+the separate `final: true` marker and `thread_reset`. Missing payload conversation
+identity fails closed; request correlation grants no access. Removal or
+eligibility loss while content waits unsealed withholds it without spending a
+sender ID or Noise nonce, releases its slot and lets permitted output proceed.
+
+Delivery waits for capacity in the shared **16-slot** ordered lane without
+blocking Run; a legal reply can exceed that count and resume in order. Run owns
+sender IDs and Noise sealing, and checks each stamped plaintext against
+`MaxThreadEnvelopeBytes` (**65519 bytes**). Failure and retirement release waits;
+recovery cannot turn failed output into success. Cancellation of an active sealed
+send retires the connection because its nonce may already have reached the peer.
+Existing legacy caller/provider signatures and reply behavior are preserved.
 
 ### `conversations`
 

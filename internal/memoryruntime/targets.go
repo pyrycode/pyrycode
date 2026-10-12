@@ -14,7 +14,7 @@ var macOSLockData []byte
 
 func selectPins(goos, arch, mode string) (lock, error) {
 	var p lock
-	if mode != "openai" {
+	if mode != "openai" && mode != "local" {
 		return p, ErrUnsupported
 	}
 	var data []byte
@@ -26,8 +26,20 @@ func selectPins(goos, arch, mode string) (lock, error) {
 	default:
 		return p, ErrUnsupported
 	}
-	err := json.Unmarshal(data, &p)
-	return p, err
+	if err := json.Unmarshal(data, &p); err != nil {
+		return p, err
+	}
+	if mode == "local" {
+		var extra struct {
+			Wheels []artifact `json:"local_wheels"`
+		}
+		if err := json.Unmarshal(data, &extra); err != nil {
+			return p, err
+		}
+		p.Wheels = append(p.Wheels, extra.Wheels...)
+		p.Local = true
+	}
+	return p, nil
 }
 
 func supportedMacOS(ctx context.Context, minimum string) error {
