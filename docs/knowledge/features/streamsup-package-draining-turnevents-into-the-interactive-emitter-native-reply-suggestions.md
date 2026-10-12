@@ -21,7 +21,7 @@ inference and carries them through completion. Reading the current binding at
 publication would misattribute a predecessor result after rotation; the captured
 daemon generation rejects it even when the session ID is reused. See
 [control and on-demand readings](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#control-and-on-demand-readings)
-for shared ordering and the pending #3077 relay integration.
+for shared ordering and installed source-bound production relay delivery.
 
 **Final-exchange selection and bounded retention (#2832).** `noteAssistantText`
 assembles chunks of the final main-agent message by `MessageID`; a new message
