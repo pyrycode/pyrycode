@@ -61,7 +61,7 @@ matching `context.Cause(sigCtx)` as clean stops. Checking only `sigCtx.Err()`
 would lose an earlier fatal cause when a signal arrives during shutdown:
 the first cancellation cause wins, including over cleanup's `cancelCause(nil)`.
 
-See [relay supervisor wiring](relay-package.md#consumers-and-roadmap) for fatal
+See [relay supervisor wiring](relay-package-consumers.md#consumers-and-roadmap) for fatal
 error propagation and [verification guidance](development-verification.md#prove-that-tests-distinguish-the-change)
 for the real-signal regression pattern.
 

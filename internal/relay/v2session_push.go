@@ -168,7 +168,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	// A fresh reading parked behind its clear completes before another clear
 	// can replace the single pending slot. Each call still sends only one frame.
 	for _, s := range m.sessions {
-		if s.livePending != nil && m.hostedPushAvailable(s) {
+		if s.livePending != nil && !m.pushRetired(s.connID) && m.hostedPushAvailable(s) {
 			m.drainLiveOnce(ctx, true)
 			return
 		}
@@ -192,7 +192,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	m.pushMu.Lock()
 	candidates := make([]string, 0, len(m.queues))
 	for id, q := range m.queues {
-		if len(q.items) > 0 {
+		if !q.overflowed && len(q.items) > 0 {
 			candidates = append(candidates, id)
 		}
 	}

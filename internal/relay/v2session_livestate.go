@@ -238,7 +238,7 @@ func (m *V2SessionManager) signalLiveDrain() {
 	m.pushMu.Lock()
 	queued := false
 	for id, q := range m.queues {
-		if s := m.sessions[id]; len(q.items) > 0 && s != nil && len(s.replayQueue) == 0 && s.livePending == nil && (!held[id] || q.items[0].barrier != nil) {
+		if s := m.sessions[id]; !q.overflowed && len(q.items) > 0 && s != nil && len(s.replayQueue) == 0 && s.livePending == nil && (!held[id] || q.items[0].barrier != nil) {
 			queued = true
 			break
 		}
@@ -252,7 +252,7 @@ func (m *V2SessionManager) signalLiveDrain() {
 		return
 	}
 	for _, s := range m.sessions {
-		if !held[s.connID] && (s.livePending != nil || s.liveSnapshot != nil) {
+		if !held[s.connID] && (s.livePending != nil || s.liveSnapshot != nil) && !m.pushRetired(s.connID) {
 			select {
 			case m.drainCh <- struct{}{}:
 			default:
@@ -269,6 +269,9 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 		return
 	}
 	for _, s := range m.sessions {
+		if m.pushRetired(s.connID) {
+			continue
+		}
 		if (s.livePending == nil && (s.liveSnapshot == nil || pendingOnly)) || !m.reserveHostedPush(s) {
 			continue
 		}
@@ -298,7 +301,7 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 }
 
 // RetireLiveState forces reconnect reconciliation after a producer handoff gap.
-// It uses the same Run-owned teardown as push-queue overflow, without I/O here.
+// The queue latch quarantines pending output until Run handles gap teardown.
 func (m *V2SessionManager) RetireLiveState(ctx context.Context, connID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -318,4 +321,12 @@ func (m *V2SessionManager) RetireLiveState(ctx context.Context, connID string) e
 		return ctx.Err()
 	}
 	return nil
+}
+
+// pushRetired checks the queue latch without accessing Run-owned session state.
+func (m *V2SessionManager) pushRetired(connID string) bool {
+	m.pushMu.Lock()
+	defer m.pushMu.Unlock()
+	q := m.queues[connID]
+	return q != nil && q.overflowed
 }

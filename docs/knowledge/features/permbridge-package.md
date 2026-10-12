@@ -63,7 +63,7 @@ Spec: [`specs/architecture/1103-permbridge-registry.md`](../../specs/architectur
 
 ## Why `internal/permbridge` is self-contained
 
-Unlike [`internal/modalbridge`](modalbridge-package.md), which must document a relay-import hazard (`internal/relay` imports it, so it must not import `internal/relay` back), `internal/permbridge` imports **nothing** from `internal/` at all — only stdlib (`encoding/json`, `errors`, `sync`, `time`). No import cycle is possible with any future consumer. The package doc states this invariant directly rather than documenting a hazard to avoid.
+Unlike [`internal/modalbridge`](modalbridge-package.md), which must document a relay-import hazard (`internal/relay` imports it, so it must not import `internal/relay` back), `internal/permbridge` imports **nothing** from `internal/` at all — only stdlib, including the diagnostic recorder's SHA-256 and atomics. No import cycle is possible with any future consumer. The package doc states this invariant directly rather than documenting a hazard to avoid.
 
 It is also **log-free** — a pure data structure with no logger field, so it cannot leak a request's tool input, an id, or a deny message into logs. Content-free decision logging is the consumer's job, matching how `acp_permission.go` logs only discriminants.
 
@@ -184,14 +184,14 @@ type AnswerableFunc func(id string, req Request) bool
 - **`SetAnswerable`** (#1931) installs the liveness report, or clears it with `nil` — a setter rather than a `New` option, because the daemon composition root builds the registry long before the thing that can answer the question exists. It does not validate its argument: `nil` is a meaningful value ("nobody can answer"), not an error. Written under `Registry.mu`; the expiry path reads it under the same lock, so last write wins and calling it concurrently with live entries is safe. The report receives the immutable `Request` from the exact pending generation whose timer fired; consumers must use that request rather than recover eligibility from an ID-keyed side map that may still contain an older generation.
 - **`Pending.Await`** blocks until resolved and returns the verdict. With no `AnswerableFunc` installed (the default, and the state this ships in) it is guaranteed to return within the `Register` timeout, exactly as before. With one installed, it returns within one window of the first reading that says nobody can answer — an approval whose answerer stays reachable and simply never decides stays parked indefinitely, by design (see § Conditional bound).
 
-Exported surface: 7 data types (`Request`, `Verdict`, `PermissionRule`, `PermissionUpdate`, `AlwaysAllow`, `Registry`, `Pending`), one func type (`AnswerableFunc`), funcs `New`/`Allow`/`AllowAlways`/`Deny`/`ParseAlwaysAllow`/`SessionGrant`, sentinel `ErrDuplicateID`.
+Ordinary-build exported surface: 7 data types (`Request`, `Verdict`, `PermissionRule`, `PermissionUpdate`, `AlwaysAllow`, `Registry`, `Pending`), one func type (`AnswerableFunc`), funcs `New`/`Allow`/`AllowAlways`/`Deny`/`ParseAlwaysAllow`/`SessionGrant`, sentinel `ErrDuplicateID`. Diagnostic additions are described under [Isolated permission observation](#isolated-permission-observation).
 
 ## Conditional bound: `expire` and `AnswerableFunc` (#1931)
 
-The registry no longer treats the timer as an unconditional deadline. `Register`'s `time.AfterFunc` now fires `expire(id, timeout)` instead of resolving straight to deny:
+The registry no longer treats the timer as an unconditional deadline. `Register`'s `time.AfterFunc` fires `expire(id, p, timeout)`, capturing the originating `*pending` before the callback can start:
 
 1. Under `mu`: snapshot the live `*pending` for `id` and `r.answerable`. Release `mu`.
-2. Entry absent → return (already resolved by a winning `Resolve`; the report is never consulted for a dead entry — the common negative must not pay a cross-goroutine round-trip to reach an answer it cannot change).
+2. Entry absent or different from the captured `*pending` → return. An old callback starting after id reuse must not consult the replacement's report; checking identity only after the report would already have let stale work act on the wrong request.
 3. No report installed, or a non-positive window → resolve only if that same pending identity is still current.
 4. Call `ask(id, p.req)` with **no lock held** — in production this is a blocking round-trip onto the relay manager's `Run` goroutine, so `mu` (a leaf lock) is never held across it.
 5. `false` → deny only if that same pending identity is still current.
@@ -206,11 +206,12 @@ Each positive reading buys exactly one more window and is re-asked at the next e
 Both `Resolve` and the timer callback funnel through one unexported method:
 
 ```
-resolve(id, v):
+resolve(id, expected, v):
     mu.Lock()
     p, ok := pending[id]
-    if !ok { mu.Unlock(); return false }   // lost the race / unknown / already resolved
+    if !ok || (expected != nil && p != expected) { mu.Unlock(); return false }
     delete(pending, id)                    // ← the one-shot arbiter: delete-under-lock
+    p.observation.terminal(v, expected != nil) // inert normally; one TryLock in diagnostic builds
     mu.Unlock()
     p.timer.Stop()                         // idempotent; harmless from the timer's own call
     p.ch <- v                              // buffered(1) + provably single writer ⇒ never blocks
@@ -223,7 +224,7 @@ This mirrors `cmd/pyry/acp_permission.go`'s existing default-deny idiom (every n
 
 ## Concurrency model
 
-Four goroutine roles touch the registry: (1) the caller/verb goroutine — `Register` then `Await`, one per parked request; (2) the resolver goroutine (`streamApprovalBridge.ResolveStream`/`retire`, #1080, calling `Resolve` from the relay `Run` goroutine and the control-server handler goroutine respectively); (3) the per-entry timer goroutine (`time.AfterFunc`, `Stop()`ped when `Resolve` wins so it never fires in the resolved-in-time case); (4) a concurrent `Lookup` reader. All shared state is `Registry.pending`, guarded by the **leaf** `Registry.mu` — held only around O(1) map ops, never nested with another lock, never held across the channel send. Each `pending.ch` is buffered(1), written exactly once by the one-shot winner, read at most once by `Await`.
+Four goroutine roles touch the registry: (1) the caller/verb goroutine — `Register` then `Await`, one per parked request; (2) the resolver goroutine (`streamApprovalBridge.ResolveStream`/`retire`, #1080, calling `Resolve` from the relay `Run` goroutine and the control-server handler goroutine respectively); (3) the per-entry timer goroutine (`time.AfterFunc`, `Stop()`ped when `Resolve` wins so it never fires in the resolved-in-time case); (4) a concurrent `Lookup` reader. `Registry.pending` is guarded by `Registry.mu`, never held across the channel send or liveness report. Ordinary builds have no nested observer lock; diagnostic hooks make one nonblocking recorder `TryLock` while holding `Registry.mu`. Recorder snapshot/lifecycle operations never acquire the registry lock. Each `pending.ch` is buffered(1), written exactly once by the one-shot winner, read at most once by `Await`.
 
 Consumer-side lifecycle tracking needs the same per-registration identity. The
 stdio adapter's `stdioPermissionHandler` may accept a new request after the
@@ -265,11 +266,156 @@ Allow is reachable by **exactly one path**: an explicit `Resolve(id, Allow(...))
 
 The deterministic proof is a 300-iteration allow-vs-timeout race test asserting internal consistency under `-race` on every round (belt-and-suspenders: the guarantee is structural — a map delete under a mutex — and the test is deterministic code, not another stochastic check).
 
-The timer callback still captures the external id, but it snapshots the matching
-`*pending` and supplies that identity to every resolve or re-arm. Re-registering
-an id after its predecessor resolves is therefore safe even if the predecessor's
-timer or liveness report is still unwinding: stale work becomes a no-op against
+The timer closure captures both the external id and the originating `*pending`.
+`expire` checks that exact instance at its first lookup and again before resolving
+or re-arming. Re-registering an id after its predecessor resolves is safe even
+if the predecessor's callback starts only after the replacement is installed,
+or its liveness report is still unwinding: stale work becomes a no-op against
 the replacement generation.
+
+## Isolated permission observation
+
+The `permission_observe` build tag enables a bounded, content-free recorder for
+isolated registry captures. Build with `go build -tags permission_observe
+./cmd/pyry`, or run hermetic package tests with `go test -race -json -tags
+permission_observe ./internal/permbridge/...`. Building with the tag makes the
+API available; activation requires explicit attachment before isolated activity:
+
+```go
+o := permbridge.NewObservationRecorder()
+registry.Observe(o)
+// Exercise the registry, then close coverage and take detached evidence.
+o.End()
+snapshot := o.Snapshot()
+```
+
+`ObservationRecorder`, `ObservationIdentity`, `ObservationRecord` and
+`ObservationSnapshot` exist only in diagnostic builds. Existing constructors and
+consumer signatures stay unchanged. Ordinary builds use inert private hooks,
+with no recorder, retained identities or observer locks. `Observe(nil)` disables
+observation of future registrations; already observed pending lifetimes retain
+their original recorder, including when another recorder is attached. Bridge and
+relay hooks belong to [#3225](https://github.com/pyrycode/pyrycode/issues/3225);
+daemon startup activation, file output and acquisition belong to
+[#3226](https://github.com/pyrycode/pyrycode/issues/3226).
+
+### Lifetime and submission identity
+
+Each recorder starts coverage with a distinct process-local `Run` and observer
+`Epoch` 1. Captures from different processes have separate run scopes. An
+accepted registration with retained observation and available identity numbers
+mints a nonzero `Generation` on the actual `pending` and public `Pending` handle.
+Reused request ids can share a request alias but never a
+generation. Empty/duplicate rejections carry generation zero and cannot
+impersonate the live lifetime. `Pending.ObservationIdentity()` returns the
+originating identity; terminal correlation never looks it up through a later
+id-keyed entry.
+
+`Identity(conversation, session, request, modal, connection string)` aliases
+identifiers with independent kinds: `c:`, `s:`, `r:`, `m:` and `l:` respectively.
+Aliases are stable within the recorder run, including across reset. Supply
+canonical conversation and session independently; missing values are explicitly
+`unknown`, and session is never inferred from conversation. Connection input must
+identify a connection lifetime, rather than a reusable client id. Permission
+generation is the separate numerical `Generation` field. Oversized or exhausted
+alias allocation also returns `unknown`, with explicit loss.
+
+`Submit(stage, reason string, identity ObservationIdentity) bool` admits sibling
+observations using finite stage and reason vocabularies:
+
+| Field | Accepted values |
+|---|---|
+| Stage | `coverage`, `register`, `terminal`, `bridge`, `relay`, `modal`, `answer`, `connection` |
+| Reason | `start`, `end`, `reset`, `accepted`, `empty`, `duplicate`, `allow`, `deny`, `timeout`, `unknown`, `seen`, `sent`, `rejected`, `absent`, `connected`, `disconnected` |
+
+Copy live identities from `Identity` or `Pending.ObservationIdentity`, preserving
+`Run`, originating `Epoch` and `Generation`. Checking alias kinds and recorder run
+alone would still let a caller forge epoch/generation metadata. `Submit` checks
+a private inline issuance stamp, the recorder run and numerical ceiling; changed,
+foreign, reconstructed or deserialized nonzero metadata is discarded with
+`invalid_identity`. The stamp is three uint64 values (24 bytes), excluded from
+JSON, with no retained lifetime table. Copied originating identities remain valid
+across reset. The zero value means wholly unknown numerical identity. Supplied
+aliases must be issued by this recorder for the corresponding kind; invalid
+aliases become `unknown` and mark `incomplete_coverage`. Serialization produces
+evidence, not identities that can be restored for submission.
+
+### Bounds, loss and coverage
+
+| Resource | Limit |
+|---|---:|
+| Retained records at once, including coverage records | 1024 (`ObservationMaxRecords`) |
+| Retained alias entries per run | 512 (`ObservationMaxIdentities`) |
+| Input bytes per identifier | 1024 (`ObservationMaxIdentityInput`) |
+| Retained alias payload per entry | 41 bytes: 33-byte kind/digest key plus 8-byte alias number |
+| Total retained alias payload | 20992 bytes (`ObservationMaxIdentityBytes`), excluding Go container overhead |
+| Each of eight stage counters, run/observer epoch and alias/generation allocator | 9007199254740991 (`ObservationMaxCounter`) |
+
+Private equality keys use stdlib SHA-256; neither keys nor raw identifiers enter
+snapshots. Byte accounting includes alias-number values: counting hash keys alone
+understates retained payload. Aliases and generations share a monotonically
+allocated numerical sequence. Counters saturate, allocation stops at its ceiling,
+and numbers never wrap, roll back or collide. Exhausted generations are zero;
+failed run allocation yields run zero, ended coverage and `run_exhausted`.
+
+The sticky loss vocabulary is `record_capacity`, `identity_capacity`,
+`identity_oversize`, `identity_exhausted`, `counter_exhausted`, `contention`,
+`reset_truncation`, `incomplete_coverage`, `closed_submission`,
+`invalid_vocabulary`, `invalid_identity` and `run_exhausted`. Stage counters count
+admitted append attempts before record-capacity discard; missing stage keys mean
+zero. Contention is a loss flag, not an exact dropped-event count. `Submit` false
+means discarded evidence, never failed approval; true alone does not establish
+loss-free coverage.
+
+`NewObservationRecorder`, `Reset` and `End` emit coverage `start`, `reset` and
+`end`. `Reset` clears records and advances the observer epoch while preserving
+aliases, counters, loss and pending-origin identities. A later terminal's record
+`Epoch` can therefore differ from its identity's originating `Epoch`. Reset does
+not reopen ended coverage. Attaching with pending requests, replacing/detaching
+an observer, or ending with observed pending lifetimes marks incomplete coverage
+(or contention if the marking cannot acquire the recorder). `Complete` requires
+`Ended` and no loss. Open, lossy, reset-truncated or incomplete intervals cannot
+prove that no request occurred; `unknown` identity cannot establish absence for a
+specific session or conversation.
+
+A full recorder stops retaining records rather than overwriting registrations.
+Registration retention gates lifetime exposure and observed-pending accounting:
+a dropped registration returns a wholly unknown handle identity and suppresses
+its terminal observation, even if reset later creates space. A retained accepted
+registration precedes its terminal unless reset explicitly truncates that
+evidence. Rejections never produce a lifetime. Only the winning `resolve`
+observes a terminal: `allow`/`deny` come from verdict behavior, `timeout` from the
+expiry path, and unsupported behavior is `unknown`. A deny message that happens
+to equal the timeout message remains a deny.
+
+### Snapshot and approval isolation
+
+Schema `permission_observe/v1` has snapshot fields `Schema`, `Clock`, `Run`,
+`Epoch`, `Ended`, `Complete`, `IdentityCount`, `IdentityBytes`, `Records`,
+`Counters` and `Loss`. Each record has `Nanoseconds`, recording `Epoch`, `Stage`,
+`Reason` and `Identity`. Identity contains `Run`, originating `Epoch`,
+`Generation`, `Conversation`, `Session`, `Request`, `Modal` and `Connection`.
+`Clock` is `monotonic_elapsed_nanoseconds`: elapsed nanoseconds since recorder
+creation, with no wall-clock timestamp. `Snapshot` copies the records and maps;
+mutating a snapshot cannot alter retained state. Serialization is caller-owned
+and happens after snapshot creation.
+
+Records contain no prompt/command text, tool name/input, instructions, pairing
+material, credentials, Claude text, verdict messages, raw exceptions or verbatim
+untrusted identifiers. Approval hooks, `Identity` and `Submit` make one recorder
+`TryLock` attempt. A stalled recorder marks atomic contention loss and lets
+approval proceed. There are no observer goroutines, callbacks, consumer waits,
+serialization or I/O on registration, resolution or `Pending.Await`.
+Snapshot/reset/end may block each other, but never acquire the registry lock.
+Observation preserves verdict bytes, delete-under-lock arbitration and the
+conditional answerability/deadline policy; diagnostic loss adds no approval
+rejection branch.
+
+Snapshots prove registry events only, not modal emission or receipt. Synthetic
+`Submit("bridge", "seen", ...)` evidence exercises the submission contract;
+it does not establish a wired bridge hook or a Mobile cause. See the
+[observation design](../../specs/architecture/3224-permission-observation.md) and
+[sibling contract and checked snapshot in PR #3230](https://github.com/pyrycode/pyrycode/pull/3230).
 
 ## Trust boundary — who may call `Resolve`, and who may report liveness
 
@@ -296,6 +442,23 @@ marshals a `SessionGrant`-derived `Verdict` and a plain `Allow` and asserts the
 bytes are identical — the only way to prove `ForSession`'s `json:"-"` tag
 actually keeps Claude's wire shape untouched, since a marshal diff is the one
 check a field-by-field assertion can't produce by accident.
+
+Diagnostic tests exercise the real registry under `permission_observe`:
+`TestObservationRegistry` covers allow/deny/expiry winners, immediate expiry,
+rejections and answerability; `TestObservationReuseReset` covers stale expiry,
+reused ids and originating identity across reset; `TestObservationBounds` covers
+record/identity limits, stalled observation and saturation;
+`TestObservationNumericalIdentity` rejects forged numerical metadata; and
+`TestObservationContract` checks typed aliases, unknown session, coverage,
+hostile-content serialization and detached snapshots. No live Claude run is
+required for this contract.
+
+Capacity tests must resolve both before and after reset. A full-buffer test alone
+can stay green while exposing an unrecorded generation: its terminal is also
+dropped, hiding the false correlation. Reset creates space and reveals that bug
+unless registration retention gates lifetime exposure. Identity tests must also
+change or reconstruct numerical metadata; checking only alias kinds cannot
+prove recorder issuance.
 
 ## Related
 

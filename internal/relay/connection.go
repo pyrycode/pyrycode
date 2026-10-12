@@ -62,7 +62,11 @@ var (
 	// this server-id.
 	ErrServerIDConflict = errors.New("relay: server-id conflict (close 4409)")
 
-	// ErrInvalidConfig is returned by Connect on missing required fields.
+	// ErrAdmissionFailed is returned by Wait on the first HTTP 401 upgrade
+	// rejection. Automatic attempts stop until the caller creates a new connection.
+	ErrAdmissionFailed = errors.New("relay: daemon admission failed (HTTP 401)")
+
+	// ErrInvalidConfig is returned by Connect on invalid or missing fields.
 	ErrInvalidConfig = errors.New("relay: invalid config")
 )
 
@@ -75,6 +79,11 @@ type Config struct {
 	RelayURL      string
 	BinaryVersion string
 	Logger        *slog.Logger
+
+	// AdmissionToken is the selected startup credential: exactly 64 lowercase
+	// hexadecimal characters, or empty to omit the admission header. It is sent
+	// unchanged on every upgrade attempt and must never be logged.
+	AdmissionToken string
 
 	// AllowInsecureScheme, when true, lets RelayURL use plain ws:// in
 	// addition to wss://. Test-only seam so e2e suites can point pyry at
@@ -96,9 +105,8 @@ type Config struct {
 // Connection runs the binary↔relay leg of the wire protocol. Lifecycle is
 // tied to the context passed to Connect; cancellation closes the WS
 // cleanly. Wait blocks until the lifecycle terminates; the returned error
-// is the terminal classification (ErrServerIDConflict for fatal 4409,
-// ctx.Err for graceful shutdown, or a wrapped transport error for
-// unexpected halts).
+// is ErrAdmissionFailed for HTTP 401, ErrServerIDConflict for persistent
+// 4409, ctx.Err for graceful shutdown, or a wrapped transport error.
 type Connection struct {
 	cfg    Config
 	client *transport.Client
@@ -136,6 +144,9 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 	if cfg.BinaryVersion == "" {
 		return nil, fmt.Errorf("%w: BinaryVersion is required", ErrInvalidConfig)
 	}
+	if cfg.AdmissionToken != "" && !validAdmissionToken(cfg.AdmissionToken) {
+		return nil, fmt.Errorf("%w: AdmissionToken must be 64 lowercase hexadecimal characters", ErrInvalidConfig)
+	}
 	dialURL, err := resolveDialURL(cfg.RelayURL, cfg.AllowInsecureScheme)
 	if err != nil {
 		return nil, err
@@ -145,6 +156,9 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 	headers.Set("x-pyrycode-server", string(cfg.ServerID))
 	headers.Set("x-pyrycode-version", cfg.BinaryVersion)
 	headers.Set("user-agent", "pyry/"+cfg.BinaryVersion)
+	if cfg.AdmissionToken != "" {
+		headers.Set("x-pyrycode-admission-token", cfg.AdmissionToken)
+	}
 
 	// Default to the production threshold; a positive override (test-only,
 	// set from PYRY_RELAY_4409_THRESHOLD) shortens the persistent-conflict
@@ -154,12 +168,13 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 		fatalThreshold = cfg.ServerIDConflictThreshold
 	}
 	tcfg := transport.Config{
-		URL:                 dialURL,
-		Headers:             headers,
-		WriteTimeout:        10 * time.Second,
-		Logger:              cfg.Logger,
-		FatalCloseCodes:     []websocket.StatusCode{statusServerIDConflict},
-		FatalCloseThreshold: fatalThreshold,
+		URL:                     dialURL,
+		Headers:                 headers,
+		WriteTimeout:            10 * time.Second,
+		Logger:                  cfg.Logger,
+		TerminalUpgradeStatuses: []int{http.StatusUnauthorized},
+		FatalCloseCodes:         []websocket.StatusCode{statusServerIDConflict},
+		FatalCloseThreshold:     fatalThreshold,
 	}
 	c := &Connection{
 		cfg:         cfg,
@@ -171,6 +186,19 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 	}
 	go c.run(ctx)
 	return c, nil
+}
+
+func validAdmissionToken(token string) bool {
+	if len(token) != 64 {
+		return false
+	}
+	for i := range token {
+		b := token[i]
+		if !(b >= '0' && b <= '9' || b >= 'a' && b <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveDialURL is the single home for relay-URL handling: it validates the
@@ -326,8 +354,8 @@ func (c *Connection) SendPushWake(platform, token string) error {
 }
 
 // Wait blocks until the lifecycle terminates and returns the terminal
-// classification: ErrServerIDConflict (fatal), ctx.Err (graceful
-// shutdown), or a wrapped transport error.
+// classification: ErrAdmissionFailed (HTTP 401), ErrServerIDConflict
+// (persistent 4409), ctx.Err (graceful shutdown), or a wrapped transport error.
 func (c *Connection) Wait() error {
 	<-c.done
 	return c.result
@@ -415,6 +443,10 @@ func (c *Connection) forwardFrames(ctx context.Context) {
 }
 
 func (c *Connection) classifyTransportErr(err error) error {
+	var rejection *transport.UpgradeRejectionError
+	if errors.As(err, &rejection) && rejection.StatusCode == http.StatusUnauthorized {
+		return ErrAdmissionFailed
+	}
 	if errors.Is(err, transport.ErrFatalClose) {
 		if status := websocket.CloseStatus(err); status == statusServerIDConflict {
 			return ErrServerIDConflict
