@@ -59,8 +59,8 @@ type ObservationSnapshot struct {
 // Stages include registry, bridge, relay and queue_modal_shown/queue_modal_dismissed.
 // Reasons: start, end, reset, accepted, empty, duplicate, allow, deny, timeout,
 // unknown, seen, sent, rejected, absent, connected, disconnected; queue reasons are
-// admitted, cancelled, byte_ceiling, hold_transport, hold_replay, quarantined,
-// dequeued and discarded.
+// admitted, cancelled, byte_ceiling, hold_transport, hold_replay, hold_capacity,
+// requeued, quarantined, dequeued and discarded.
 // Loss keys: record_capacity, identity_capacity, identity_oversize,
 // identity_exhausted, counter_exhausted, contention, reset_truncation,
 // incomplete_coverage, closed_submission, invalid_vocabulary, invalid_identity,
@@ -119,7 +119,7 @@ func observationVocabulary(stage, reason string) bool {
 		return false
 	}
 	switch reason {
-	case "start", "end", "reset", "accepted", "empty", "duplicate", "allow", "deny", "timeout", "unknown", "seen", "sent", "rejected", "absent", "connected", "disconnected", "admitted", "cancelled", "byte_ceiling", "hold_transport", "hold_replay", "quarantined", "dequeued", "discarded":
+	case "start", "end", "reset", "accepted", "empty", "duplicate", "allow", "deny", "timeout", "unknown", "seen", "sent", "rejected", "absent", "connected", "disconnected", "admitted", "cancelled", "byte_ceiling", "hold_transport", "hold_replay", "hold_capacity", "requeued", "quarantined", "dequeued", "discarded":
 		return true
 	}
 	return false

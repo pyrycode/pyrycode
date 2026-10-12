@@ -18,3 +18,4 @@ func (permissionObservation) record(string)                                     
 func (*pushQueue) observePermissions(string)                                                  {}
 func (*V2SessionManager) observePermissionCancellation(string, protocol.Envelope, *LiveState) {}
 func (*V2SessionManager) observePermissionTransportHold()                                     {}
+func (*V2SessionManager) observePermissionHold(string, string)                                {}

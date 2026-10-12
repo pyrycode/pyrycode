@@ -939,6 +939,10 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`thread_item_added`** | binary → phone | no | **Production emitted (#3164).** Full daemon-built item with `conversation_id`, `epoch`, `version`; oversized updates use bounded assembly parts (#3073). Delivered only to eligible authenticated interactive connections that negotiated `thread`. See [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 | **`thread_item_changed`** | binary → phone | no | **Production emitted (#3164).** In-place field replacements with `item_id`, `base_rev`, `rev`, `changes` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_item_changed`](#thread_item_changed). |
 | **`thread_text_append`** | binary → phone | no | **Production emitted (#3164).** Message text suffix with `item_id`, `base_rev`, `rev`, `text` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_text_append`](#thread_text_append). |
+| **`thread_catch_up`** | phone → binary | no | **Declared (#3233).** Request current full items after an unsigned history `version`, or a newest window at zero; carries `conversation_id`, `epoch` and optional signed `limit`. Handlers/wiring pending #3234–#3236. See [Thread query messages](#thread-query-messages). |
+| **`thread_page`** | phone → binary | no | **Declared (#3233).** Request an older ordered window below exclusive unsigned `before_order`; carries `conversation_id` and optional signed `limit`. Handlers/wiring pending #3234–#3236. See [Thread query messages](#thread-query-messages). |
+| **`thread_items`** | binary → phone | no | **Declared (#3233).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
+| **`thread_reset`** | binary → phone | no | **Declared (#3233).** Correlated terminal reset carrying current `conversation_id`, `epoch`, `version`, with no items or coverage. See [Thread query messages](#thread-query-messages). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -953,8 +957,9 @@ current-reading snapshots/pushes/replies are installed (#3163); relay-owned
 supplied-state reconciliation and source-conversation routing are implemented
 (#3082/#3195).
 [ADR 042](knowledge/decisions/042-daemon-built-thread.md) defines the migration.
-Catch-up/pages and replacement of replay/resync remain #2963; later pages can
-reuse the full-item added-payload assembly representation below.
+The [thread query vocabulary and bounded replies](#thread-query-messages) are
+declared; catch-up/page handlers and production wiring remain #3234–#3236.
+Replacement of replay/resync remains part of #2963.
 
 Publication starts from a complete usable `Store.Observe` baseline, sending full
 additions to eligible connected peers, then follows proven `Store.Changes`
@@ -964,8 +969,8 @@ session dividers and channel posts. A dropped send retains its item with
 unavailable views publish no partial items or fabricated watermark; usable
 last-shown zero is authoritative. A connection admitted after a conversation's
 baseline is not automatically given its earlier items. This is live publication,
-with no connect-time thread history initializer; that initializer and client
-catch-up/page handlers remain #2963.
+with no connect-time thread history initializer; that initializer remains #2963,
+while catch-up/page handlers and query wiring remain #3234–#3236.
 
 **Continuity loss retires the connection.** `BaselineRequired`, changed epoch,
 withdrawn usable state or an encoding failure discards the publication cursor
@@ -1159,8 +1164,9 @@ part leaves the update incomplete; receiver buffering limits/timeouts belong
 to the client implementation. The publisher enqueues all parts of one logical
 update consecutively before the next update; reassembly preserves the entire
 payload, including unknown content and explicit clears. Every final envelope
-fits 65519 bytes after JSON escaping and relay stamps. Client catch-up recovery
-remains pending #2963; no catch-up verb is introduced by this encoding contract.
+fits 65519 bytes after JSON escaping and relay stamps. The separate
+[query contract](#thread-query-messages) reuses this assembly representation;
+client catch-up recovery and query handlers remain downstream.
 Revision-advancing updates reject duplicates through their old `base_rev`, but
 the same-revision append in a combined change below needs ordered, once-only
 application too: `base_rev` equality alone cannot detect its duplicate.
@@ -1289,6 +1295,117 @@ rejected assembly changes neither message text nor completed `rev`/`version`.
   "item_id": 101, "base_rev": 303, "rev": 707, "text": " next text"
 }
 ```
+
+### Thread query messages
+
+Thread query messages are declared; relay handlers and production query wiring remain pending in #3234–#3236.
+
+These v2 types stay outside `inboundAppTypeSet`; declaration does not install
+validation, authorization or dispatch. The contract follows
+[ADR 042](knowledge/decisions/042-daemon-built-thread.md#update-messages) and the
+[backend bounded-query semantics](knowledge/features/thread-package-background-store.md#bounded-queries).
+
+#### Requests
+
+| Type | Payload fields | Meaning |
+|---|---|---|
+| `thread_catch_up` | Required string `conversation_id`, string `epoch`, unsigned 64-bit integer `version`; optional signed integer `limit`. | `version: 0` selects the newest ordered window, including active items and parents. A nonzero version requests current full states of changed/active items and parent closure after that exclusive consumed-history checkpoint. |
+| `thread_page` | Required string `conversation_id`, unsigned 64-bit integer `before_order`; optional signed integer `limit`. | Select the newest ordered window strictly below `before_order`, including required parents. |
+
+An omitted or zero `limit` defaults to **50 ordered rows**. Positive limits clamp
+to **256**; negative limits MUST be rejected, including on nonzero catch-up.
+Nonzero catch-up is never truncated by the window limit. Lower-order ties,
+active items and parent extras can exceed the ordered-row count; an item-count
+or byte-count cutoff must not silently discard required rows.
+
+#### Reply batches and successful completion
+
+Every reply envelope MUST preserve `in_reply_to` equal to the request envelope's
+`id`, including all assembly parts, the success marker, reset and error.
+Every logical `thread_items` batch has these required fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Queried conversation. |
+| `epoch` | string | Captured conversation epoch. |
+| `version` | unsigned 64-bit integer | The same captured consumed-history version throughout the reply, not the greatest returned item's revision or order. |
+| `items` | array of full [thread items](#full-thread-item) | Complete supplied fields and inert content, including unknown kinds/statuses/content. Always an array, never `null`. |
+| `final` | boolean | Explicit `false` on item batches; `true` only on the separate empty success marker. |
+
+Ordinary batches omit every coverage field. Success ends with **exactly one
+separate `thread_items` marker** containing `items: []` and `final: true`, even
+when the query returns no items. Only that marker certifies completion and
+allows the completed checkpoint to advance. It carries exactly one coverage
+shape; the two shapes MUST NOT be mixed:
+
+| Query | Marker-only fields | Certified coverage |
+|---|---|---|
+| Nonzero catch-up | Required unsigned 64-bit `from_version`; omit all page fields. | `(from_version, version]` in the captured epoch. `from_version` is the request's exclusive checkpoint, greater than zero and no greater than `version`. |
+| Newest window (`version: 0`) or page | Required unsigned 64-bit integers `lower_order`, `upper_order`, `continuation` (numeric); required boolean `older_exists`. Emit all four, even when zero/false. Omit `from_version`. | Backend `[lower_order, upper_order)`, with `continuation == lower_order`. `older_exists` is authoritative for the captured publication. |
+
+Use numeric `continuation` as the next page's exclusive `before_order` when
+`older_exists` is true. Active/parent extras outside the ordered selection do
+not expand its certified range. Neither a short/empty batch nor the oldest
+returned parent establishes whether older rows exist. With no eligible ordered
+rows, `lower_order` and `continuation` are zero and `older_exists` is false;
+`upper_order` still preserves the backend bound.
+
+For example, these payloads are separate successful terminal markers:
+
+```json
+{"conversation_id":"conv-a","epoch":"epoch-b","version":808,"items":[],"final":true,"from_version":707}
+```
+
+```json
+{"conversation_id":"conv-a","epoch":"epoch-b","version":808,"items":[],"final":true,"lower_order":101,"upper_order":809,"continuation":101,"older_exists":true}
+```
+
+#### Terminal reset and failure
+
+A correlated `thread_reset` has exactly the required string `conversation_id`,
+string `epoch` and unsigned 64-bit `version`, naming current state. It carries
+no `items`, `final` or coverage fields and is terminal; acquire a fresh newest
+window. The existing correlated `error` is terminal failure: required `code`,
+`message`, `retryable`, with existing optional `retry_after_s`, `conversation_id`
+and `min_client_version`. No new query error DTO or error code is introduced.
+Neither outcome certifies partial items or advances a completed checkpoint.
+
+#### Oversized replies and assembly
+
+`EncodeThreadReply(Envelope, any) ([][]byte, error)` accepts a detached complete
+`ThreadItemsPayload` with `Final: true`, all items and one valid coverage shape,
+or a `ThreadResetPayload`/existing `ErrorPayload`. It batches every supplied item
+without applying a window limit and appends the separate success marker.
+
+An oversized single-item batch uses the existing
+[assembly fields and validation](#bounded-thread-encoding-and-assembly) under
+**`thread_items`**. Every part carries `conversation_id`, `epoch`, `version`,
+`item_id`, `rev`, an object `continuation` and string `data`; `base_rev` is omitted.
+Concatenated decoded `data` bytes equal the serialized **entire single-item
+`ThreadItemsPayload`**, including `items` and explicit `final: false`, byte for
+byte. No item field is truncated and no fragment is a text-only patch.
+
+Inspect the JSON type of `continuation` before DTO decoding: a **number** is
+page coverage on a request success marker; an **object** describes assembly.
+`continuation.final: true` completes only validated batch assembly, never the
+request. Require consecutive indices/offsets, matching length/digest, routing,
+session metadata, request correlation, epoch/version and item identity/revision.
+Missing, reordered or mismatched parts invalidate assembly. An interrupted
+assembly followed by a request marker MUST NOT certify completion or advance
+the checkpoint. Keep completed checkpoints unchanged until all batches assemble
+and the separate successful marker arrives. Production client assembly/resource
+limits and transport ordering remain downstream.
+
+Every emitted application envelope, including marker/reset/error, fits
+`MaxThreadEnvelopeBytes` (**65519 bytes**) after JSON escaping and
+[reserved relay stamps](#thread-update-byte-budgets). Supply variable envelope
+`conversation_id`/`session_id` metadata before encoding and preserve it and
+`in_reply_to` afterwards; the external routing wrapper is outside the cap.
+Terminal envelopes never fragment. Invalid JSON/UTF-8, missing correlation,
+malformed coverage or insufficient metadata budget returns a content-free
+`ErrInvalidThreadUpdate` or `ErrThreadUpdateMetadataTooLarge` with **nil output**,
+including failure after earlier encodable batches. `EncodeThreadUpdate` retains
+its live-update API and wire contract.
 
 ### `conversations`
 

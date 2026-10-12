@@ -156,6 +156,51 @@ func TestPermissionQueueHolds(t *testing.T) {
 	}
 }
 
+func TestPermissionQueueCapacity(t *testing.T) {
+	for _, requeue := range []bool{false, true} {
+		t.Run(map[bool]string{false: "supplied_hold", true: "inline_requeue"}[requeue], func(t *testing.T) {
+			m, s, q := testHostedCapacityManager(t)
+			q.popHead()
+			s.interactive = true
+			s.hosted.active = &hostedOutput{} // Keep admitted plaintext observable without sending.
+			o := permbridge.NewObservationRecorder()
+			m.ObservePermissions(o)
+			env := permissionEnvelope(protocol.TypeModalDismissed)
+			want := []string{"admitted"}
+			if requeue {
+				if !m.hostedEnvelope(t.Context(), s, env) {
+					t.Fatal("full lane did not hand back plaintext")
+				}
+				want = append(want, "requeued")
+			} else {
+				r := LiveState{Envelope: env, ConversationID: "source-conversation", SessionGeneration: 1, ReadingID: "opaque-modal", Revision: 1}
+				if err := m.PushLiveState(t.Context(), s.connID, r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m.drainOnce(t.Context())
+			want = append(want, "hold_capacity")
+			rs := assertPermissionReasons(t, o, want...)
+			origin := rs[0].Identity
+			if len(q.items) != 1 || q.items[0].ready != requeue || s.nextID != 2 || s.state != V2StateOpen || len(s.hosted.queue) != 0 {
+				t.Fatal("capacity hold changed admission or sealing")
+			}
+			if (origin.Envelope == "unknown") != requeue || rs[len(rs)-1].Identity != origin {
+				t.Fatal("capacity hold lost provenance")
+			}
+			o.Reset()
+			m.releaseHosted(s, hostedQueueLimit)
+			m.drainOnce(t.Context())
+			rs = assertPermissionReasons(t, o, "dequeued")
+			if rs[0].Identity != origin || len(q.items) != 0 || len(s.hosted.queue) != 1 || !reflect.DeepEqual(s.hosted.queue[0].env.Payload, env.Payload) {
+				t.Fatal("resumed admission changed identity or plaintext")
+			}
+			m.teardown(s)
+			assertPermissionReasons(t, o, "dequeued")
+		})
+	}
+}
+
 func TestPermissionQueueIdentity(t *testing.T) {
 	o := permbridge.NewObservationRecorder()
 	var identities []permbridge.ObservationIdentity

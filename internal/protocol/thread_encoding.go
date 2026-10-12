@@ -25,7 +25,8 @@ var (
 // UpdateID is SHA-256(type + NUL + serialized logical payload), in lowercase hex.
 // Index and Offset start at zero. TotalBytes counts decoded Data bytes.
 // Consumers require consecutive indices/offsets and identical assembly metadata;
-// Final commits only after length, digest, routing and base_rev validation.
+// Final commits only after length, digest, routing, request correlation and
+// applicable base_rev validation. It never certifies query coverage.
 // A failed assembly requires catch-up without advancing completed rev/version.
 type ThreadContinuation struct {
 	UpdateID   string `json:"update_id"`
@@ -39,8 +40,8 @@ type ThreadContinuation struct {
 // Check Continuation before decoding an ordinary DTO. Concatenate Data, decode
 // that JSON as the original DTO, then apply atomically. No fragment is a patch or
 // message suffix by itself. Kind, placement, unknown values and explicit clears
-// are preserved inside the assembled payload. Full-item replies may reuse the
-// added-payload representation. BaseRev is present only for changes and appends.
+// are preserved inside the assembled payload. Query fragments serialize the whole
+// single-item batch. BaseRev is present only for changes and appends.
 type ThreadUpdatePart struct {
 	ConversationID string              `json:"conversation_id"`
 	Epoch          string              `json:"epoch"`
@@ -59,9 +60,9 @@ type ThreadUpdatePart struct {
 // carry assembly metadata. Any error returns nil, never a usable partial prefix.
 //
 // ID, TS, InReplyTo, EventID, HistoryEntryID and both booleans may be stamped later:
-// maximum serialized widths are reserved even when absent. SessionID must be
-// supplied before encoding and must not grow afterwards. Payload/Type must not
-// change. The external relay routing wrapper is outside the plaintext cap.
+// maximum serialized widths are reserved even when absent. SessionID and
+// ConversationID must be supplied before encoding and must not grow afterwards.
+// Payload/Type must not change. The relay routing wrapper is outside the cap.
 // Inputs must not be mutated concurrently. Content stays inert and errors contain
 // no input values. Consumers own semantic validation and assembly resource limits.
 func EncodeThreadUpdate(env Envelope, update any) ([][]byte, error) {
@@ -79,7 +80,11 @@ func EncodeThreadUpdate(env Envelope, update any) ([][]byte, error) {
 	default:
 		return nil, ErrInvalidThreadUpdate
 	}
-	if !threadValidUTF8(reflect.ValueOf(update)) || !utf8.Valid(env.SessionID) {
+	return threadEncodePayload(env, update, &part)
+}
+
+func threadEncodePayload(env Envelope, update any, part *ThreadUpdatePart) ([][]byte, error) {
+	if !threadValidUTF8(reflect.ValueOf(update)) || !utf8.Valid(env.SessionID) || !utf8.Valid(env.ConversationID) {
 		return nil, ErrInvalidThreadUpdate
 	}
 	logical, err := json.Marshal(update)
@@ -98,6 +103,9 @@ func EncodeThreadUpdate(env Envelope, update any) ([][]byte, error) {
 	}
 	if len(measured) <= MaxThreadEnvelopeBytes {
 		return [][]byte{ordinary}, nil
+	}
+	if part == nil {
+		return nil, ErrThreadUpdateMetadataTooLarge
 	}
 	sum := sha256.Sum256([]byte(env.Type + "\x00" + string(logical)))
 	part.Continuation = &ThreadContinuation{UpdateID: hex.EncodeToString(sum[:]), Index: math.MaxUint64, Offset: math.MaxUint64, TotalBytes: math.MaxUint64}
@@ -191,8 +199,17 @@ func threadValidUTF8(v reflect.Value) bool {
 				return false
 			}
 		}
+	case reflect.Pointer, reflect.Interface:
+		return v.IsNil() || threadValidUTF8(v.Elem())
 	case reflect.Slice:
-		return utf8.Valid(v.Bytes()) // all DTO slices are inert json.RawMessage
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return utf8.Valid(v.Bytes())
+		}
+		for i := 0; i < v.Len(); i++ {
+			if !threadValidUTF8(v.Index(i)) {
+				return false
+			}
+		}
 	}
 	return true
 }

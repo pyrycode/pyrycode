@@ -127,6 +127,24 @@ func (m *V2SessionManager) observePermissionCancellation(connID string, e protoc
 	m.permissionAttempt(m.queues[connID], e, r).record("cancelled")
 }
 
+// observePermissionHold preserves the drain's unlocked hold paths. Contention
+// loses coverage explicitly instead of adding a queue-lock wait to a held lane.
+func (m *V2SessionManager) observePermissionHold(connID, reason string) {
+	if !m.pushMu.TryLock() {
+		if o := m.permissionObserver.recorder.Load(); o != nil {
+			o.MarkIncomplete()
+		}
+		return
+	}
+	defer m.pushMu.Unlock()
+	if q := m.queues[connID]; q != nil {
+		if q.overflowed {
+			reason = "quarantined"
+		}
+		q.observePermissions(reason)
+	}
+}
+
 func (m *V2SessionManager) observePermissionTransportHold() {
 	if !m.pushMu.TryLock() {
 		if o := m.permissionObserver.recorder.Load(); o != nil {

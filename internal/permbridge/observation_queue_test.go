@@ -17,7 +17,7 @@ func TestObservationQueueContract(t *testing.T) {
 	id := o.Identity("conversation", "session", "", "modal", "", "source-envelope")
 	id.Connection = a.Connection
 	for _, stage := range []string{"queue_modal_shown", "queue_modal_dismissed"} {
-		for _, reason := range []string{"admitted", "cancelled", "absent", "byte_ceiling", "hold_transport", "hold_replay", "quarantined", "dequeued", "discarded"} {
+		for _, reason := range []string{"admitted", "cancelled", "absent", "byte_ceiling", "hold_transport", "hold_replay", "hold_capacity", "requeued", "quarantined", "dequeued", "discarded"} {
 			if !o.Submit(stage, reason, id) {
 				t.Fatal(stage, reason)
 			}

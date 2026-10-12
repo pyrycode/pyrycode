@@ -5,7 +5,7 @@ import "context"
 // FlushPushes waits for each currently open connection's preceding pushes to
 // pass Run's capability/agent gates and seal-and-forward path, or for that
 // connection to close. It is called off Run with the daemon lifetime context.
-// Later pushes cannot extend the wait. Transport-down and replay holds retain
+// Later pushes cannot extend the wait. Transport-down, replay and hosted-capacity holds retain
 // the markers in FIFO order until recovery; daemon cancellation always releases
 // the caller. Markers contain no payload and never reach the wire or logs.
 func (m *V2SessionManager) FlushPushes(ctx context.Context) error {

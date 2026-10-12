@@ -29,6 +29,7 @@ type queuedEnv struct {
 	permissionObservation permissionObservation
 	env                   protocol.Envelope
 	live                  *LiveState
+	ready                 bool // already projected ordinary output awaiting hosted admission
 	droppable             bool // env.Type == protocol.TypeAssistantDelta
 	// barrier is an internal FIFO completion marker, never a wire envelope.
 	barrier chan struct{}
@@ -115,7 +116,11 @@ type pushQueue struct {
 //     What bounds BOTH is pushQueueByteCeiling: past it the envelope is
 //     rejected and overflowed latches, which tears the session down.
 func (q *pushQueue) enqueue(env protocol.Envelope) bool {
-	qe := queuedEnv{env: env, droppable: env.Type == protocol.TypeAssistantDelta}
+	return q.enqueueSource(env, nil, false)
+}
+
+func (q *pushQueue) enqueueSource(env protocol.Envelope, live *LiveState, ready bool) bool {
+	qe := queuedEnv{env: env, live: live, ready: ready, droppable: env.Type == protocol.TypeAssistantDelta}
 	if len(q.items) < pushQueueCap {
 		q.items = append(q.items, qe)
 		q.bytes += len(env.Payload)

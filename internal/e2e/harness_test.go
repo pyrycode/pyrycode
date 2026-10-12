@@ -15,6 +15,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/control"
 )
 
 // TestHarness_Smoke verifies the spawn + ready + clean-shutdown path.
@@ -129,4 +132,53 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return p.Signal(syscall.Signal(0)) == nil
+}
+
+func TestHarness_ReapsOwnedChildren(t *testing.T) {
+	for _, killed := range []bool{false, true} {
+		name := "normal-stop"
+		if killed {
+			name = "daemon-killed"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := Start(t)
+			st := waitForRunnerStatus(t, h, 10*time.Second, "fake child running",
+				func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID > 1 })
+			child, err := os.FindProcess(st.ChildPID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = child.Kill(); _ = child.Release() })
+
+			// A second fixture must survive cleanup of the first one.
+			sibling := Start(t)
+			siblingState := waitForRunnerStatus(t, sibling, 10*time.Second, "sibling child running",
+				func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID > 1 })
+
+			if killed {
+				if err := h.cmd.Process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-h.Done():
+				case <-time.After(5 * time.Second):
+					t.Fatal("killed daemon did not finish cleanup")
+				}
+			} else {
+				h.Stop(t)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for processAlive(st.ChildPID) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if processAlive(st.ChildPID) {
+				t.Errorf("fake child pid=%d survived its daemon", st.ChildPID)
+			}
+			h.Stop(t)
+			h.Stop(t)
+			if !processAlive(sibling.PID) || !processAlive(siblingState.ChildPID) {
+				t.Fatal("cleanup stopped an unrelated fixture")
+			}
+		})
+	}
 }
