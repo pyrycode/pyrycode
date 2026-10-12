@@ -312,8 +312,8 @@ type Pool struct {
 	capMu sync.Mutex
 
 	// runGroup and runCtx are set when Pool.Run begins and cleared before
-	// Run returns. supervise(sess) reads them under p.mu (RLock) and calls
-	// runGroup.Go off-lock so future Pool.Create can hand a freshly-built
+	// Run returns. supervise(sess) reads them and calls runGroup.Go under
+	// p.mu (RLock) so future Pool.Create can hand a freshly-built
 	// Session into the same errgroup that supervises the bootstrap. nil
 	// when Run is not active. Read together so a caller never sees a
 	// half-initialised handle.
@@ -987,17 +987,19 @@ func (p *Pool) Run(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 
 	p.mu.Lock()
-	p.runGroup, p.runCtx = g, gctx
-	p.mu.Unlock()
-	defer func() {
+	// Keep the group nonempty while sessions may still be admitted. Closing
+	// admission and adding a session use the same lock, so no Go call can race
+	// the final group member returning and Wait observing an empty group.
+	g.Go(func() error {
+		<-gctx.Done()
 		p.mu.Lock()
 		p.runGroup, p.runCtx = nil, nil
 		p.mu.Unlock()
-	}()
-
-	if err := p.supervise(bootstrap); err != nil {
-		return fmt.Errorf("sessions: supervise bootstrap: %w", err)
-	}
+		return gctx.Err()
+	})
+	g.Go(func() error { return bootstrap.Run(gctx) })
+	p.runGroup, p.runCtx = g, gctx
+	p.mu.Unlock()
 	// Signal readiness: runGroup/runCtx are wired and the bootstrap is
 	// supervised, so Pool.Create's supervise can no longer hit
 	// ErrPoolNotRunning. Embedded hosts (pyry acp) gate their first
@@ -1015,20 +1017,20 @@ func (p *Pool) Run(ctx context.Context) error {
 }
 
 // supervise schedules sess.Run on Pool.Run's live errgroup. Returns
-// ErrPoolNotRunning when the handle is not set. Callers must invoke
+// ErrPoolNotRunning when the handle is not set or shutdown has started. Callers must invoke
 // supervise only while Pool.Run is active; the sentinel turns the
 // race-prone "supervise after shutdown" case into a clean error rather
 // than a silent leak.
 //
-// Lock discipline: takes p.mu (RLock) briefly to snapshot runGroup and
-// runCtx, then releases the lock before calling g.Go. Does not touch
+// Lock discipline: holds p.mu (RLock) through g.Go so shutdown cannot close
+// admission between the check and registration. Does not touch
 // Session.lcMu. Preserves Pool.mu → Session.lcMu and
 // Pool.capMu → Pool.mu → Session.lcMu lock orders.
 func (p *Pool) supervise(sess *Session) error {
 	p.mu.RLock()
+	defer p.mu.RUnlock()
 	g, gctx := p.runGroup, p.runCtx
-	p.mu.RUnlock()
-	if g == nil {
+	if g == nil || gctx.Err() != nil {
 		return ErrPoolNotRunning
 	}
 	g.Go(func() error { return sess.Run(gctx) })

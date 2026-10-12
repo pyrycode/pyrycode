@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
@@ -104,20 +105,33 @@ func TestTurnBusy_SendNowCarry_SecondTurnHoldsUntilItsOwnEnd(t *testing.T) {
 // the grace closes the mark.
 func TestTurnBusy_SendNowCarry_FoldedWriteClosesAfterGrace(t *testing.T) {
 	t.Parallel()
-	tr := sendNowTracker(20 * time.Millisecond)
-	tr.observe("sess-a", snOpener)
-	if ok, _ := tr.openForSendNow(testConvID); !ok {
-		t.Fatal("openForSendNow on a running turn = false")
-	}
-	tr.observe("sess-a", snEnd)
-	if !tr.Busy(testConvID) {
-		t.Fatal("turn end released the conversation before the grace")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := tr.WaitIdle(ctx, testConvID); err != nil {
-		t.Fatalf("grace never closed the folded turn: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		tr := sendNowTracker(sendNowGrace)
+		tr.observe("sess-a", snOpener)
+		if ok, _ := tr.openForSendNow(testConvID); !ok {
+			t.Fatal("openForSendNow on a running turn = false")
+		}
+		tr.observe("sess-a", snEnd)
+		synctest.Wait()
+		if !tr.Busy(testConvID) {
+			t.Fatal("turn end released the conversation before the grace")
+		}
+		// Advance the fake clock to both sides of the production deadline.
+		// Scheduler delays cannot consume the grace before its assertion.
+		time.Sleep(sendNowGrace - time.Nanosecond)
+		synctest.Wait()
+		if !tr.Busy(testConvID) {
+			t.Fatal("folded turn closed before the grace expired")
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if tr.Busy(testConvID) {
+			t.Fatal("grace never closed the folded turn")
+		}
+		if err := tr.WaitIdle(t.Context(), testConvID); err != nil {
+			t.Fatalf("closed grace did not release the idle waiter: %v", err)
+		}
+	})
 }
 
 // An idle conversation refuses the carry; a teardown close drops it.

@@ -16,6 +16,7 @@ type threadQuery struct {
 	id           uint64
 	conversation string
 	request      protocol.ThreadCatchUpPayload
+	page         *protocol.ThreadPagePayload
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
@@ -29,8 +30,8 @@ func threadQueryError(id uint64) protocol.Envelope {
 	return protocol.Envelope{Type: protocol.TypeError, TS: time.Now().UTC(), InReplyTo: &id, Payload: payload}
 }
 
-// admitThreadCatchUp runs after Noise authentication and before any provider work.
-func (m *V2SessionManager) admitThreadCatchUp(ctx context.Context, s *V2Session, raw []byte) {
+// admitThreadQuery runs after Noise authentication and before any provider work.
+func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, raw []byte) {
 	var fields map[string]json.RawMessage
 	var env protocol.Envelope
 	var id *uint64
@@ -50,12 +51,22 @@ func (m *V2SessionManager) admitThreadCatchUp(ctx context.Context, s *V2Session,
 	}
 	var p struct {
 		Conversation *string `json:"conversation_id"`
-		Epoch        *string `json:"epoch"`
-		Version      *uint64 `json:"version"`
 		Limit        *int    `json:"limit"`
 	}
 	var payload map[string]json.RawMessage
-	if json.Unmarshal(env.Payload, &p) != nil || json.Unmarshal(env.Payload, &payload) != nil || p.Conversation == nil || p.Epoch == nil || p.Version == nil {
+	page := env.Type == protocol.TypeThreadPage
+	if json.Unmarshal(env.Payload, &p) != nil || json.Unmarshal(env.Payload, &payload) != nil || p.Conversation == nil {
+		fail()
+		return
+	}
+	var beforeOrder, version *uint64
+	var epoch *string
+	if page {
+		if json.Unmarshal(payload["before_order"], &beforeOrder) != nil || beforeOrder == nil {
+			fail()
+			return
+		}
+	} else if json.Unmarshal(payload["epoch"], &epoch) != nil || epoch == nil || json.Unmarshal(payload["version"], &version) != nil || version == nil {
 		fail()
 		return
 	}
@@ -67,7 +78,8 @@ func (m *V2SessionManager) admitThreadCatchUp(ctx context.Context, s *V2Session,
 		return
 	}
 	limit, err := protocol.NormalizeThreadQueryLimit(limit)
-	if err != nil || !conversations.ValidID(*p.Conversation) || !s.thread || m.liveWithheld(s, *p.Conversation) || !m.hostedAuthorized(s) || m.cfg.ThreadCatchUp == nil || m.hostedSender() == nil {
+	providerMissing := page && m.cfg.ThreadPage == nil || !page && m.cfg.ThreadCatchUp == nil
+	if err != nil || !conversations.ValidID(*p.Conversation) || !s.thread || m.liveWithheld(s, *p.Conversation) || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
 		fail()
 		return
 	}
@@ -83,21 +95,32 @@ func (m *V2SessionManager) admitThreadCatchUp(ctx context.Context, s *V2Session,
 		return
 	}
 	queryCtx, cancel := context.WithCancel(in.ctx)
-	q := &threadQuery{id: *id, conversation: *p.Conversation, request: protocol.ThreadCatchUpPayload{ConversationID: *p.Conversation, Epoch: *p.Epoch, Version: *p.Version, Limit: limit}, ctx: queryCtx, cancel: cancel}
+	q := &threadQuery{id: *id, conversation: *p.Conversation, ctx: queryCtx, cancel: cancel}
+	if page {
+		q.page = &protocol.ThreadPagePayload{ConversationID: *p.Conversation, BeforeOrder: *beforeOrder, Limit: limit}
+	} else {
+		q.request = protocol.ThreadCatchUpPayload{ConversationID: *p.Conversation, Epoch: *epoch, Version: *version, Limit: limit}
+	}
 	in.query = q
 	m.hostedMu.Unlock()
-	m.enqueueAppFrame(ctx, s, appFrameJob{kind: appFrameThreadCatchUp, query: q})
+	m.enqueueAppFrame(ctx, s, appFrameJob{kind: appFrameThreadQuery, query: q})
 }
 
-func (m *V2SessionManager) runThreadCatchUp(ctx context.Context, s *V2Session, q *threadQuery) {
+func (m *V2SessionManager) runThreadQuery(ctx context.Context, s *V2Session, q *threadQuery) {
 	defer q.cancel()
 	fail := func() { _ = m.deliverThread(ctx, s.connID, threadQueryError(q.id), q) } // best effort terminal refusal; retirement cannot receive it.
 	if q.ctx.Err() != nil {
 		fail()
 		return
 	}
-	result, err := m.cfg.ThreadCatchUp(q.ctx, q.request)
-	if err != nil || result.Err != nil || result.State != thread.StateUsable || q.ctx.Err() != nil {
+	var result thread.QueryResult
+	var err error
+	if q.page != nil {
+		result, err = m.cfg.ThreadPage(q.ctx, *q.page)
+	} else {
+		result, err = m.cfg.ThreadCatchUp(q.ctx, q.request)
+	}
+	if err != nil || result.Err != nil || result.State != thread.StateUsable || q.ctx.Err() != nil || q.page != nil && result.ResetRequired {
 		fail()
 		return
 	}
@@ -107,7 +130,7 @@ func (m *V2SessionManager) runThreadCatchUp(ctx context.Context, s *V2Session, q
 		reply = protocol.ThreadResetPayload{ConversationID: q.conversation, Epoch: result.Epoch, Version: result.Version}
 	} else {
 		p := protocol.ThreadItemsPayload{ConversationID: q.conversation, Epoch: result.Epoch, Version: result.Version, Final: true}
-		if q.request.Version > 0 {
+		if q.page == nil && q.request.Version > 0 {
 			p.FromVersion = &result.FromVersion
 		} else {
 			p.LowerOrder = &result.LowerOrder
@@ -116,12 +139,20 @@ func (m *V2SessionManager) runThreadCatchUp(ctx context.Context, s *V2Session, q
 			p.OlderExists = &result.OlderExists
 		}
 		for _, i := range result.Items {
+			if q.ctx.Err() != nil {
+				fail()
+				return
+			}
 			p.Items = append(p.Items, protocol.ThreadItem{ID: i.ID, Kind: i.Kind, Order: i.Order, Rev: i.Rev, EndedOrder: i.EndedOrder, Session: i.Session, Agent: i.Agent, NoChild: i.NoChild, Turn: i.Turn, Parent: i.Parent, Status: i.Status, Active: i.Active, Shown: i.Shown, Summary: i.Summary, Subtype: i.Subtype, Content: i.Content})
 		}
 		reply = p
 	}
+	if q.ctx.Err() != nil {
+		fail()
+		return
+	}
 	frames, err := protocol.EncodeThreadReply(env, reply)
-	if err != nil {
+	if err != nil || q.ctx.Err() != nil {
 		fail()
 		return
 	}

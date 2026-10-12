@@ -125,8 +125,11 @@ func TestDaemonThreadPublication(t *testing.T) {
 		live := startDaemonLivePublisher(ctx, b.sink.live, m.ActiveConns, m.PushLiveState, func(ctx context.Context, id string) { _ = m.RetireLiveState(ctx, id) }, discardLogger())
 		return func() { stop(); live() }
 	})
+	t.Log("phase: handshake phone")
 	w.open("phone", false, protocol.CapabilityThread)
+	t.Log("phase: handshake legacy")
 	w.open("legacy", false)
+	t.Log("phase: handshake again")
 	w.open("again", true, protocol.CapabilityThread)
 	var cfg relay.V2SessionConfig
 	installDaemonLiveRelay(&cfg, relayWiring{streamSink: b.sink}, nil)
@@ -230,6 +233,7 @@ func TestDaemonThreadPublication(t *testing.T) {
 	}
 	await := func(conv string, version uint64, peers ...string) {
 		t.Helper()
+		t.Logf("phase: fold/publication conversation=%s version=%d peers=%v", conv, version, peers)
 		testShadowWait(t, func() bool { return store.Snapshot(conversations.ConversationID(conv)).Version == version })
 		expected := map[uint64]protocol.ThreadItem{}
 		for _, i := range store.Observe(conversations.ConversationID(conv)).Items {
@@ -323,6 +327,7 @@ func TestDaemonThreadPublication(t *testing.T) {
 	if !continued {
 		t.Fatal("oversized fixture did not exercise continuation")
 	}
+	t.Log("phase: live reading")
 	b.sink.sinkForSessionTag(newStreamSessionTag("a"), "claude")(turnevent.ModelAnnounced{Model: "current"})
 	seen := map[string]bool{}
 	for len(seen) < 2 {
