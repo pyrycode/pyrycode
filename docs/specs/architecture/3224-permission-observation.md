@@ -52,3 +52,6 @@ Pending documentation stage: add **Isolated permission observation** in `docs/kn
 - Concurrency: one nonblocking recorder lock attempt on approval boundaries; snapshots cannot hold the registry lock. MUST FIX addressed in design: terminal identity belongs to pending, never a later ID lookup.
 - Threat model: bounded adversarial identities and full/stalled recorders cannot delay approval or alter authorization. Mobile receipt/authentication is OUT OF SCOPE (#3225/#3226).
 **Reviewer:** builder self-review. **Date:** 2026-10-12.
+
+## Revisions
+- 2026-10-12: count both 33-byte private equality keys and 8-byte alias numbers in retained identity payload: 41 bytes each, 20992 bytes total, excluding fixed Go map overhead. The alias strings are generated for records/accessors; none is retained in the alias table. This tightens the byte accounting without changing the identity contract.
