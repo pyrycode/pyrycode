@@ -35,10 +35,16 @@ protect the row: `agentTaggedForConn` and `withheldFromConn` read its binding
 when `Run` seals, so a later switch could otherwise change the first outcome's
 agent or recipients. `FlushPushes` inserts payload-free FIFO markers in the
 current connections' push queues and waits off `Run` for preceding pushes to
-pass gates and sealing, or for each connection to close. Transport-down and
-replay holds retain markers until recovery; later pushes cannot extend the wait,
-and daemon cancellation releases it. Markers never reach the wire or logs.
-See [switch publication and exclusion](conversation-session-binding.md#switching-to-the-other-agent-2672), the
+pass gates and forwarding, or for each connection to close. Transport-down,
+replay and ordered-lane capacity holds retain markers until recovery, including
+a supplied reading's pending fresh half after its clear. Later pushes cannot
+extend the wait; caller cancellation, including daemon shutdown, releases it.
+This is a source-queue fence: hosted forwarding admits unsealed plaintext to
+the ordered lane, so flush completion does not establish transport receipt or
+peer consumption. Markers need no delivery slot and never reach the wire or
+logs, but cannot overtake preceding held output. See
+[ordered delivery](#hosted-discovery-and-ordered-delivery),
+[switch publication and exclusion](conversation-session-binding.md#switching-to-the-other-agent-2672), the
 [presence contract](protocol-package-types-session-settings-payloads.md#agent-switch-presence-and-round-trip-testing)
 and [completion-test barriers](development-verification.md#prove-that-tests-distinguish-the-change).
 
@@ -244,12 +250,40 @@ before any list request; list cancellation retires list work without removing
 lifecycle eligibility. See [registry callback ownership](apps-package.md#concurrency-and-persistence).
 
 The hosted output lane and callback handoff share at most 16 envelopes per
-connection, including active delivery. Separate inbox/queue limits would exceed
-that total; `hostedEnqueue` and `HostedAppsChanged` reserve from the same counter.
-Overflow cancels the generation and signals `Run` to close it, allowing fresh
-discovery to recover without silently skipping a committed revision. Completed
-and cancelled queue entries are cleared as well as releasing their reservations:
+connection, including active delivery, queued output, pending lifecycle callbacks
+and temporary ordinary-push reservations. Separate inbox/queue limits would
+exceed that total; `reserveHostedPush`, `hostedEnqueue` and `HostedAppsChanged`
+use the same counter under `hostedMu`. Lifecycle callback overflow still cancels
+only the affected generation and signals `Run` to close it at 4413, allowing
+fresh discovery to recover without silently skipping a committed revision.
+Hosted controls and rekey retain terminal admission on overflow. Completed and
+cancelled queue entries are cleared as well as releasing their reservations:
 slice backing arrays would otherwise retain envelopes beyond the logical queue.
+
+Ordinary bounded pushes wait unsealed upstream when this lane is full. A legal
+reconnect batch can exceed the destination's 16 slots even for an
+`interactive`-only client whose handshake installs hosted delivery; popping the
+batch without destination admission would turn delayed transport completion
+into an overflow close. `drainOnce` reserves one slot before popping, transfers
+it once into `hostedEnqueue`, and releases unused capacity if forwarding filters
+or rejects the head. Callback admission competes atomically with that reservation
+and may still retire the generation on genuine overflow. `pushMu` and `hostedMu`
+are taken separately. Candidate selection alone cannot protect quarantine across
+that off-lock admission: the final pop must reread the queue's retirement latch
+under `pushMu`, or `RetireLiveState` or byte-ceiling retirement could leave a
+quarantined head eligible for delivery. `TestHostedPushAdmissionRetirement`
+forces both races and checks that declined output returns its reservation.
+
+`releaseHosted` signals the drain when capacity returns, including delivery
+completion through `handleHostedDone` and cancelled queued pages. Capacity-held
+connections do not re-signal themselves; another connection and manager control
+work can progress, and held output resumes without another producer push.
+Inline ordinary replies use the same reservation or enter the bounded upstream
+FIFO as already-projected plaintext. The queue's `ready` tag prevents projection
+and revision checks from being applied twice. Supplying a fresh reading behind
+a deferred clear preserves their upstream order; see
+[supplied current-state delivery](#supplied-current-state-delivery).
+
 `hostedEnvelope` admits plaintext; `hostedDeliver` assigns a fresh connection-local
 sender ID and seals only the selected head on `Run`. Mixing pre-sealed legacy
 pushes/replies with queued hosted plaintext would spend Noise nonces in a different
@@ -261,6 +295,23 @@ cipher, then new-key output follows. A second rekey during that barrier closes
 the connection. `TestHostedDiscoveryOrderedDelivery` and
 `TestHostedDiscoveryRekeyOrdering` decrypt resumed output and check IDs; merely
 running the race detector would miss ordering defects.
+
+`TestReadinessLegacyReconnectSnapshotCapacity` holds the real transport's
+acknowledgment through handshake completion, proves `FlushPushes` is still
+waiting, releases delivery, then decrypts 64 distinct retained model lists once
+in FIFO order with increasing sender IDs. Transport entry alone is too early
+to fence handshake reconciliation: wait for the separate Run barrier before
+starting flush, or an empty source queue could make a broken drain appear sound.
+Awaiting successful flush before releasing acknowledgment would deadlock the
+correct capacity hold. Fixture observation channels must accommodate the full
+batch or be consumed concurrently; a 32-entry tap can block a 64-frame proof
+independently of production capacity. A subsequent transport receipt and wire
+marker check for trailing duplicate or terminal output beyond the source fence.
+`TestHostedPushCapacityPendingFence` additionally prevents a marker passing an
+admitted clear while its fresh reading still waits outside the lane; ordinary
+FIFO ordering alone would miss that violation. `TestHostedPushCapacityDelivery`
+and `TestHostedPushCapacityTeardown` cover resume, disconnect and caller
+cancellation. See [completion-test barriers](development-verification.md#prove-that-tests-distinguish-the-change).
 
 Checking the original session on completion does not fence a delayed terminal
 close addressed by connection ID. `hostedCloseContext` gives it a cancellable
@@ -318,9 +369,10 @@ or sealing from its producer would violate `Run`'s single-writer ownership.
 `ThreadLiveState` instead returns a detached, nonblocking cursor with no resource
 needing closure. `drainLiveOnce` consumes at most one reading per pass; the
 generated family clear and its fresh reading take separate passes. `Run` owns
-the cursor, pending fresh state and delivered watermarks. Transport-down holds
-before consuming a cursor or popping queued input; reconnect re-signals the
-pump, and cancellation/teardown end delivery. `TestLiveStatePacing` and
+the cursor, pending fresh state and delivered watermarks. Transport-down and
+ordered-lane capacity holds apply before consuming a cursor or popping queued
+input; reconnect or capacity release re-signals the pump, and
+cancellation/teardown end delivery. `TestLiveStatePacing` and
 `TestLiveStateRun` exercise a snapshot larger than push capacity without overflow.
 
 Queued live updates drain before the next snapshot reading, so connect state
@@ -329,6 +381,11 @@ can be overtaken. Snapshot and live delivery must use the same
 to keep that snapshot from restoring stale state. `PushLiveState` copies payload,
 session tag and correlation values beside the unsealed queue entry; looking up
 the current binding later could retag old output as fresh. A fresh reading is
-parked only after its clear forwards successfully. Retaining it earlier turns a
-failed clear into an endlessly re-signaled pending read, blocking unrelated
-queued and snapshot state; see [complete-envelope validation](protocol-package-types-envelope.md#live-state-session-metadata).
+parked in `livePending` only after its clear forwards successfully into the
+delivery lane. If inline delivery instead defers the clear upstream, its fresh
+reading follows in the same bounded FIFO. A capacity-held `livePending` gates
+that connection's queued heads, including flush markers, until admission;
+otherwise a fence could report completion between clear and fresh. Retaining
+fresh state after a failed clear would create an endlessly re-signaled pending
+read, blocking unrelated queued and snapshot state; see
+[complete-envelope validation](protocol-package-types-envelope.md#live-state-session-metadata).
