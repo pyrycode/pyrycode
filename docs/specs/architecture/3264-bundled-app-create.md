@@ -105,3 +105,29 @@ network, token lifecycle and viewer isolation do not apply: creation executes
 no template commands and exposes no runtime resource. Hostile same-account root
 renames and pre-existing registry persistence hardening are out of scope; daemon
 state ownership is the same trusted boundary as the existing registry/runtime.
+
+## Revisions
+
+### 2026-10-12 — Verifier finding 1: compiled template boundary
+
+**Design:** Replace the Design section's whole-source-tree embedding with exact
+maintained asset paths in `Assets`. Go embedding does not honor `.gitignore`;
+filtering generation through `inventory.json` happens after compilation and cannot
+prevent private working-tree bytes entering binaries. Keep the original assets
+and shared inventory without a second asset copy. `TestBundleInventory` checks
+that the compiled filesystem contains exactly the inventory plus the manifest
+and inventory JSON, including required dotfiles. Inventory changes must also
+update the explicit embed paths.
+
+**Security review:** PASS with the packaging MUST FIX addressed. The added trust
+boundary is working checkout to distributed executable: compile only exact
+maintained files, never directories or globs. Credentials in `.env`/`.env.*`,
+SQLite data and sidecars, dependencies, build output and unlisted adjacent source
+must remain outside the bundle even when present at build time. This introduces
+no runtime input, process, network, crypto or concurrency changes.
+
+**Testing:** `TestBundleExcludesWorkingFiles` recompiles the unchanged production
+declaration in a temporary package seeded with synthetic private files and runs
+`TestBundleInventory` against that compiled filesystem. It fails with the original
+recursive declaration. Existing creation tests continue to verify maintained
+asset contents, literal titles, no commands and creation outside the checkout.
