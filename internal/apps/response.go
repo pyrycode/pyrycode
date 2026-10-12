@@ -67,7 +67,11 @@ type PreparedResponse struct {
 // serverID comes from the authenticated boundary; this method authenticates no connection.
 // Do not mutate source/headers during Prepare. Later changes cannot affect output.
 // Consumers own status restrictions, header projection and HTTP no-body semantics.
-func (o *Owner) Prepare(ctx context.Context, serverID, appID, release string, in ResponseInput) (_ *PreparedResponse, err error) {
+func (o *Owner) Prepare(ctx context.Context, serverID, appID, release string, in ResponseInput) (*PreparedResponse, error) {
+	return o.prepare(ctx, serverID, appID, release, in, nil)
+}
+
+func (o *Owner) prepare(ctx context.Context, serverID, appID, release string, in ResponseInput, expected *Target) (_ *PreparedResponse, err error) {
 	work, cancel := context.WithCancel(ctx)
 	p := &PreparedResponse{ctx: work, caller: ctx, cancel: cancel, source: in.Body, release: in.Release, watched: make(chan struct{}), unsubscribe: func() {}}
 	started := false
@@ -84,21 +88,7 @@ func (o *Owner) Prepare(ctx context.Context, serverID, appID, release string, in
 			cancel()
 		}
 	})
-	o.registry.mu.Lock()
-	o.mu.Lock()
-	r := o.currentLocked(appID)
-	switch {
-	case serverID != o.registry.snapshot.ServerID || r.AppID == "" || r.Manifest.ServerID() != serverID:
-		err = ErrNotFound
-	case r.ActiveRelease != release:
-		err = ErrReleaseChanged
-	case !o.usableLocked(o.generations[appID]):
-		err = ErrUnavailable
-	default:
-		p.target = &Target{owner: o, generation: o.generations[appID]}
-	}
-	o.mu.Unlock()
-	o.registry.mu.Unlock()
+	p.target, _, err = o.responseTarget(serverID, appID, release, expected)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +119,26 @@ func (o *Owner) Prepare(ctx context.Context, serverID, appID, release string, in
 		return nil, err
 	}
 	return p, nil
+}
+
+// responseTarget binds committed identity and readiness under registry then owner locks.
+// An expected target prevents lookup work from moving to a replacement generation.
+func (o *Owner) responseTarget(serverID, appID, release string, expected *Target) (*Target, Record, error) {
+	o.registry.mu.Lock()
+	defer o.registry.mu.Unlock()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	r := o.currentLocked(appID)
+	g := o.generations[appID]
+	switch {
+	case serverID != o.registry.snapshot.ServerID || r.AppID == "" || r.Manifest.ServerID() != serverID:
+		return nil, Record{}, ErrNotFound
+	case r.ActiveRelease != release:
+		return nil, Record{}, ErrReleaseChanged
+	case !o.usableLocked(g) || (expected != nil && (expected.owner != o || expected.generation != g)):
+		return nil, Record{}, ErrUnavailable
+	}
+	return &Target{owner: o, generation: g}, r, nil
 }
 
 func validResponseMetadata(status int, headers map[string]string) bool {
