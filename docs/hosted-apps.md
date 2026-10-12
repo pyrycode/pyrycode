@@ -4,7 +4,8 @@ The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contrac
 defines the hosting design. Strict manifest validation, durable registration,
 lifecycle mutations, restart normalization and callable committed-release
 process ownership, health supervision, automatic reconciliation/recovery and
-guarded private targets are implemented in the `internal/apps` package. The relay
+guarded private targets and generation-bound stable response preparation are
+implemented in the `internal/apps` package. The relay
 implements authenticated paged discovery, committed lifecycle notifications and
 list cancellation. The daemon owns storage, service reconciliation/recovery,
 discovery subscriptions and cancellable delivery independently of channels.
@@ -943,6 +944,68 @@ Allowed request headers are `accept`, `content-type`, `if-none-match`; response 
 | `app_response_chunk.data` | string | Nonempty standard padded base64; decodes to 1–32768 bytes. |
 
 There is no separate success-completion frame. Completion requires exactly the declared chunk count, byte length and digest; a zero-body response completes at metadata after verifying the empty digest. HEAD and HTTP 204/205/304 have zero body. HTTP errors such as 404/409/500 use `app_response` and ordinary body chunks, not bridge `error`. API redirects are exposed through the Fetch shim as HTTP responses with no redirect following or Location header. Fetch returns a Response with status/headers/body once complete, including non-2xx, using a null body for HEAD/204/205/304. Native resource loaders accept only 200–299/400–599; an API GET made by a resource loader that yields 3xx fails that load without following it. Static assets do not use conditional requests/304; native caches complete immutable bodies itself. This common loader subset follows [Android WebResourceResponse's status restrictions](https://developer.android.com/reference/android/webkit/WebResourceResponse). Native reason phrases come from a local status table, with `App response` for unknown codes; backend reason text is not forwarded. Incomplete bodies are never delivered as successful resources/Fetch results.
+
+#### Callable stable response preparation
+
+`internal/apps` implements `Owner.Prepare(ctx, serverID, appID, release,
+ResponseInput)` for generation-bound stable bodies. The authenticated boundary
+supplies the host identity; preparation resolves committed local registration,
+active release and a live, health-confirmed owned generation before staging.
+Unknown, removed and foreign-host registrations return the same `ErrNotFound`;
+an accessible app with a different active release returns `ErrReleaseChanged`,
+and a matching release without readiness returns `ErrUnavailable`. Removal,
+release replacement, stop, exit or retirement invalidates preparation and retained
+results, including same-release restart. Healthy metadata-only commits preserve
+them. Every metadata/body access checks cancellation and generation validity;
+earlier copied metadata must not be used after retirement.
+
+`ResponseInput` supplies an identity-encoded `io.ReadCloser`, size hint (-1 for
+unknown), caller-selected decoded limit, status, headers and reservation/release
+callbacks. Preparation accepts 200–599 and the lowercase response-header allowlist
+and byte bounds above, including `{}`. It copies headers and stages complete
+immutable memory chunks, exposing detached `ResponseMetadata` with exact size
+and lowercase 64-hex SHA-256, including empty and HTTP-error bodies. Do not mutate
+source/headers during preparation; subsequent changes cannot affect the result.
+A known oversized body is rejected before staging allocation/read; unknown or
+growing input is checked through EOF with no truncation or partial success.
+
+The caller supplies capacity accounting: `Reserve(n)` acquires all requested
+positive bytes atomically or refuses, and `Release(n)` returns acquired capacity.
+Callbacks must return promptly and never reenter the result. Reservations precede
+staging allocation/read, including incremental growth and the EOF/overflow probe.
+An exact-limit body can require one temporary probe byte beyond its final size;
+refusal stops before another read. Unused capacity is released at EOF, while the
+stable body's exact size remains reserved through delivery completion/disposal.
+This implementation creates no disk spool. Invalid input metadata, decoded limit,
+capacity refusal and source I/O failures are distinct static package errors
+(`ErrResponseMetadata`, `ErrResponseLimit`, `ErrResponseCapacity`, `ErrResponseIO`);
+ordinary HTTP errors remain successful preparation. Native paths, endpoints and
+request/source diagnostics are not exposed in these failures.
+
+A nonnil source transfers to preparation immediately on invocation, including
+failures, and is closed exactly once before successful return. It must support
+concurrent `Close` that promptly unblocks pending `Read`, including generation
+retirement; caller-context cancellation alone is insufficient. The caller owns
+delivery of `PreparedResponse.Metadata` and checked `Read` bytes, calls
+`Complete(nil)` after successful delivery, reports delivery failure with
+`Complete(deliveryErr)`, or uses `Close` to abandon it. Reported delivery errors
+are sanitized as `ErrResponseIO` when the result is still usable. EOF alone holds
+capacity. Preparation failure, caller cancellation, generation retirement and
+disposal release reservations exactly once, including retained unconsumed results;
+`Close` is idempotent and may race consumption/cancellation. The transport must
+enforce its own cancellation boundary for copied metadata and bytes.
+
+Confined callable assets and navigation/SPA fallback remain pending in
+[#3258](https://github.com/pyrycode/pyrycode/issues/3258). Asset status restrictions
+and MIME/path handling belong to that consumer; API forwarding, backend header
+projection and HEAD/204/205/304 no-body handling remain
+[#3246](https://github.com/pyrycode/pyrycode/issues/3246). Admission, connection
+ceilings, credit, deadlines, wire serialization and transport error mapping remain
+[#3247](https://github.com/pyrycode/pyrycode/issues/3247). Paired resource routing
+and capability activation remain pending under
+[#3123](https://github.com/pyrycode/pyrycode/issues/3123). See the
+[apps resource-serving overview](knowledge/features/apps-package.md#resource-serving)
+for ownership, concurrency and regression details.
 
 ### Bounded transfers and retirement
 
