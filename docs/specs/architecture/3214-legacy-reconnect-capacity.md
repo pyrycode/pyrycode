@@ -70,10 +70,10 @@ Pending for documentation stage: update `docs/knowledge/features/v2-session-mana
 - Trust boundaries: `forwardEnvelopeSource` retains open-session, capability and projection checks; reservation grants capacity, never authorization.
 - Tokens/secrets: no credential generation/storage changes. `hostedAuthorized` still checks paired-device revocation before delivery.
 - Files/subprocesses: no production filesystem or subprocess operations are added; authenticated validation uses the restricted launcher.
-- Cryptography: MUST FIX addressed in design: held ordinary pushes remain unsealed, and only `hostedDeliver` on Run allocates hosted IDs/nonces. No nonce-consuming probe or send bypass.
+- Cryptography: no outstanding findings. held ordinary pushes remain unsealed, and only `hostedDeliver` on Run allocates hosted IDs/nonces. No nonce-consuming probe or send bypass.
 - Network/I/O: existing upstream byte/count bounds, shared 16-slot destination bound and delivery timeout stay intact. A stalled client holds only its own bounded queue.
 - Errors/logs: capacity holds expose no payload, token or ciphertext; existing content-free diagnostics remain.
-- Concurrency: MUST FIX addressed in design: reserve atomically against `HostedAppsChanged`, transfer once or release once, and never nest queue/inbox locks. Callback overflow may still retire a reserved generation.
+- Concurrency: no outstanding findings. reserve atomically against `HostedAppsChanged`, transfer once or release once, and never nest queue/inbox locks. Callback overflow may still retire a reserved generation.
 - Threat model: protocol threats 2/3 preserve per-generation Noise isolation; threat 7 retains bounded destination admission. Prompt injection and client compromise policy are unchanged by this internal handoff.
 
 **Reviewer:** builder (self-review per security-review checklist)
@@ -82,3 +82,5 @@ Pending for documentation stage: update `docs/knowledge/features/v2-session-mana
 ## Revisions
 
 - 2026-10-12: the focused `TestHostedPushCapacityPendingFence` exposed a marker overtaking a supplied reading's fresh half while capacity was held. Keep that connection's queued heads gated until `livePending` is admitted, and exclude those markers from wake eligibility. Reservation release also wakes the drain through `releaseHosted`, covering delivery completion and cancelled queued pages without adding a separate completion path. Production touches five relay files; total written work remains below 800 lines.
+
+- 2026-10-12: clarified the security verdict wording: the nonce and atomic-reservation concerns were resolved in the original design before its commit; they are not outstanding MUST FIX findings. The contract and PASS verdict are unchanged.
