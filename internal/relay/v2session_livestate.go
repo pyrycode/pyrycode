@@ -210,7 +210,13 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 	}
 	if needsClear {
 		fresh := r
-		s.livePending = &fresh
+		if s.hosted != nil && s.hosted.pushDeferred {
+			if err := m.PushLiveState(ctx, s.connID, fresh); err != nil {
+				return err
+			}
+		} else {
+			s.livePending = &fresh
+		}
 	}
 	if s.liveWatermarks == nil {
 		s.liveWatermarks = make(map[string]*liveWatermark)

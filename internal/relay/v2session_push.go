@@ -51,6 +51,10 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 }
 
 func (m *V2SessionManager) push(ctx context.Context, connID string, env protocol.Envelope, live *LiveState) error {
+	return m.pushSource(ctx, connID, env, live, false)
+}
+
+func (m *V2SessionManager) pushSource(ctx context.Context, connID string, env protocol.Envelope, live *LiveState, ready bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -61,10 +65,7 @@ func (m *V2SessionManager) push(ctx context.Context, connID string, env protocol
 		return ErrConnNotFound
 	}
 	before := q.overflowed
-	dropped := q.enqueue(env)
-	if live != nil && !q.overflowed {
-		q.items[len(q.items)-1].live = live
-	}
+	dropped := q.enqueueSource(env, live, ready)
 	droppedCount := q.dropped
 	// Capture both the LEVEL (still latched ⇒ keep signalling) and the EDGE
 	// (just tripped ⇒ log once) under the same hold, so neither can be read
@@ -214,6 +215,8 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 		m.pushMu.Unlock()
 		if head.barrier != nil {
 			close(head.barrier)
+		} else if head.ready {
+			m.hostedEnvelope(ctx, s, env)
 		} else if head.live != nil {
 			if err := m.forwardLiveState(ctx, s, *head.live); err != nil {
 				m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", connID)
@@ -259,6 +262,9 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	}
 	if s.state != V2StateOpen {
 		return ErrSessionNotOpen
+	}
+	if s.hosted != nil {
+		s.hosted.pushDeferred = false
 	}
 	// A frame about a Codex conversation, for a conn without multi_agent (#2644).
 	// Nil, not an error: drainReplayOnce abandons a conn's replay tail on an error
@@ -308,7 +314,7 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 		return errInvalidLiveState
 	}
 	if s.hosted != nil {
-		m.hostedEnvelope(ctx, s, env)
+		s.hosted.pushDeferred = m.hostedEnvelope(ctx, s, env)
 		if suggestionRev > 0 && !supplied {
 			recordReplySuggestion(s, suggestionConv, suggestionRev)
 		}

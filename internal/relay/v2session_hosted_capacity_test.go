@@ -260,3 +260,34 @@ func TestHostedPushCapacityDelivery(t *testing.T) {
 		})
 	}
 }
+
+func TestHostedPushCapacityInlineEnvelope(t *testing.T) {
+	m, s, q := testHostedCapacityManager(t)
+	env := protocol.Envelope{Type: protocol.TypeMessage, Payload: []byte(`{"reply":true}`)}
+	m.hostedEnvelope(t.Context(), s, env)
+	if s.state != V2StateOpen || len(q.items) != 2 || q.bytes != len(env.Payload)+2 || s.hosted.inbox.used != hostedQueueLimit {
+		t.Fatal("ordinary inline output retired the full destination instead of waiting upstream")
+	}
+}
+
+func TestHostedPushCapacityInlineLiveState(t *testing.T) {
+	m, s, q := testHostedCapacityManager(t)
+	q.popHead()
+	s.thread, s.interactive = true, true
+	m.cfg.KnownConversation = func(string) bool { return true }
+	r := liveReading(protocol.TypeTurnState, "conversation", "", `"session"`, 1, 1)
+	if err := m.forwardLiveState(t.Context(), s, r); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.items) != 2 || !q.items[0].ready || !q.items[0].env.SessionStateCleared || q.items[1].live == nil || s.livePending != nil {
+		t.Fatal("deferred fresh reading did not follow its clear upstream")
+	}
+	s.hosted.active = &hostedOutput{}
+	m.releaseHosted(s, hostedQueueLimit)
+	m.drainOnce(t.Context())
+	m.drainOnce(t.Context())
+	out := s.hosted.queue
+	if len(out) != 2 || !out[0].env.SessionStateCleared || out[1].env.SessionStateCleared || string(out[1].env.Payload) != string(r.Envelope.Payload) || s.hosted.inbox.used != 2 || s.nextID != 2 {
+		t.Fatalf("clear/fresh admission: %+v", out)
+	}
+}
