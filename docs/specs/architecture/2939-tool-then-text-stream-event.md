@@ -215,3 +215,39 @@ Recovered the two earlier managed native bundles exactly through `fleet-task.py 
 All three use mobile `83a277afe045ddc734d513f47aad6aa6e2aeeb63`, Claude 2.1.280, observed `claude-haiku-4-5-20251001`/default permission, absent effort, one completed tool start/completion and zero original/retained rejections. Native task failure reports mean cause admission failed; they do not negate the passing counted XML. Portable bundle paths are `mobile/mobile-redacted.json`, `mobile/mobile.xml`, `mobile/driver.json`, and `mobile/daemon-*.stdout` with matching manifests. The two earlier records remain in their native task bundles and private recovery copies; the 48-row fixture and its XML companion remain byte-for-byte unchanged in Git.
 
 Concrete remaining reproduction gap: original `live-nu5iihoe`'s offending ordered child input, producing session/conversation and effective settings are unavailable. The [original diagnosis](https://github.com/pyrycode/pyrycode-mobile/issues/1888#issuecomment-6043311668) supplies only sentinel metadata and full-run counts (64/62/2/0); it cannot identify a stream-event subtype or guard. The shared-harness and whole-thread sentinel context is absent from three independent standalone passes. A relevant next diagnostic must either recover that original sequence or record the full-run context, including all child streams and effective settings, while leaving the sentinel unchanged. The existing opt-in recorder can capture all those child streams; the current fixed managed recipe selects only the named method and cannot establish equivalence to that context. Do not request a fourth identical standalone capture or weaken `tttMobileProofComplete`. Keep both live markers. Cause-backed repair and its failing-before/passing-after race witness remain builder-owned and incomplete; documentation and the subsequent full live gate remain pending separately.
+
+
+### 2026-10-12 — shared diagnostic candidate and native return contract
+
+The evidence-selection repair is committed at
+`c2c92b2a349fa71904baafb31d9b4269ff541857` and pushed to PR #3199.
+Historical selector SHA-256:
+`bcff5910a9abbd0d7d8b6a0da143d206cc9f3dcd456bcdecb56b25bb5dfa30a0`;
+its recovered selection contains exactly 64 unique methods including the target.
+New diagnostic tests failed before the reader existed; this is evidence-selection
+coverage, not a failing-before/passing-after witness of a parser repair.
+
+Offline leaf counts executed/passed/failed/skipped: capture/admission race
+33/33/0/0; tagged recorder race 2/2/0/0; default daemon race 15287/15287/0/3
+(existing skips); focused parser preservation race 20/20/0/0. Portable driver
+4/4/0/0. Default vet, tagged realclaude vet and scratch daemon build passed.
+This rework adds 583 lines including the committed plan, within its incremental
+estimate; no new exports or production parser changes.
+
+Managed task
+`c02a547f02bb3c7548c17198150b7acc5e290ef937d1ef495d8a1651f454d58e`
+requests the pushed candidate through `android-tool-then-text` / `android-emulator`.
+It is queued at this checkpoint, with no new native executed counts. Retrieve its
+exact result with `fleet-task.py await` into a fresh private directory. Inspect
+`mobile/shared-harness-redacted.json`, `mobile/mobile.xml`, `mobile/driver.json`
+and every `mobile/daemon-*.manifest.json`/stdout pair. Raw logcats remain private
+as `execution-*.log`; parsed TestRunner records travel in the driver/evidence.
+Promote the deny-scanned full inventory to
+`internal/e2e/realclaude/testdata/tool_then_text_shared_harness_v<observed-version>.json`
+together with its coupled replay reader. Preserve existing mobile/isolated and
+#2270 fixtures. Identify the exact rejecting guard from a complete ordered
+child sequence before any parser repair. Then add cause-specific failing-before/
+passing-after race coverage and actually execute the unchanged focused method
+using the driver's `--focused` option. A non-rejecting or incomplete diagnostic
+cannot complete cause admission. Keep both live labels. Documentation and the
+subsequent dispatcher-owned full live gate remain pending separately.
