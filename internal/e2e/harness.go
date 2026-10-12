@@ -798,7 +798,9 @@ func reapSpawnedGroup(t *testing.T, pid int) {
 		if errors.Is(err, syscall.ESRCH) {
 			return
 		}
-		if err != nil || time.Now().After(deadline) {
+		// macOS can report EPERM while exited members await collection. Only
+		// ESRCH proves disappearance; keep checking within the existing grace.
+		if time.Now().After(deadline) {
 			t.Errorf("e2e: fixture group %d remains after cleanup: %v", pid, err)
 			return
 		}
@@ -1077,7 +1079,13 @@ func shortHome(t *testing.T) string {
 		t.Fatalf("mkdir temp: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	// The app runtime intentionally rejects symlinked ancestors. macOS temp
+	// roots may use /var or /tmp aliases, so give the daemon the real path.
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve temporary home: %v", err)
+	}
+	return resolved
 }
 
 func readPersistedServerID(t *testing.T, home string) string {
