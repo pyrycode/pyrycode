@@ -258,9 +258,15 @@ func TestReplyFallbackProcessCancellation(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { _, err := f.run(ctx, "user", "assistant"); done <- err }()
 			deadline := time.Now().Add(5 * time.Second)
+			var pid int
 			for {
-				if _, err := os.Stat(ready); err == nil {
-					break
+				// File creation precedes its contents. Cancelling on Stat alone can
+				// kill the child before its PID is written, then probe process group 0.
+				if data, err := os.ReadFile(ready); err == nil {
+					if value, err := strconv.Atoi(string(data)); err == nil && value > 0 {
+						pid = value
+						break
+					}
 				}
 				if time.Now().After(deadline) {
 					t.Fatal("child not ready")
@@ -278,8 +284,6 @@ func TestReplyFallbackProcessCancellation(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("cancel hung")
 			}
-			data, _ := os.ReadFile(ready)
-			pid, _ := strconv.Atoi(string(data))
 			deadline = time.Now().Add(time.Second)
 			for syscall.Kill(pid, 0) == nil {
 				if time.Now().After(deadline) {

@@ -89,7 +89,7 @@ const (
 	// the retrieval arm's shape, over a file read live rather than a stored copy.
 	appFrameWorkspaceFileRead
 	appFrameSendQueuedNow
-	appFrameThreadCatchUp
+	appFrameThreadQuery
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -150,8 +150,8 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 			default:
 			}
 			switch job.kind {
-			case appFrameThreadCatchUp:
-				m.runThreadCatchUp(connCtx, s, job.query)
+			case appFrameThreadQuery:
+				m.runThreadQuery(connCtx, s, job.query)
 			case appFrameSendQueuedNow:
 				m.handleSendQueuedNow(s, job.plaintext)
 			case appFrameAttachmentChunk:

@@ -112,10 +112,10 @@ Production `startRelayV2` installs the real fold publisher and authoritative
 `ThreadLiveState` and `LiveStateCurrent` providers. Readiness stays false without
 that live-state installation or a running publisher, and becomes false before
 publisher teardown. Production negotiation and live publication are active.
-Relay catch-up handling and thread-only replay/resync bypass are implemented;
-production query provider installation remains #3236 and history pages remain
-\#3235. Readiness attests live providers, not query availability or that every
-conversation has completed replay. See
+Relay catch-up/page handling (#3253/#3235) and thread-only replay/resync bypass
+are implemented; production query provider installation remains #3236. Readiness
+attests live providers, not query availability or that every conversation has
+completed replay. See
 [daemon publication and lifecycle](thread-package.md#shadow-lifecycle-and-evidence).
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
@@ -155,35 +155,62 @@ and `TestThreadDeliveryLateEligibility` covers queued thread-content denial.
 
 `DeliverThread` certifies each envelope only after the ordered transport callback
 returns success. Enqueue, Run handoff and batch assembly completion are weaker
-boundaries; `runThreadCatchUp` delivers serially and stops on any error before
-its separate success marker. See [ordered delivery and eligibility](../../protocol-mobile.md#ordered-delivery-and-eligibility)
+boundaries; [`runThreadQuery`](../../../internal/relay/v2session_catchup.go)
+delivers serially and stops on any error before its separate success marker.
+See [ordered delivery and eligibility](../../protocol-mobile.md#ordered-delivery-and-eligibility)
 for withholding, failure, retirement and cancellation outcomes, and
 [lane ownership](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery)
 for capacity and detached input.
 
-`admitThreadCatchUp` validates field presence/types, canonical conversation ID,
-current pairing, `thread`/interactive capability, `KnownConversation` and the
-Codex/`multi_agent` gate before invoking `ThreadCatchUp`. Normalize limits even
-for nonzero catch-up: the backend ignoring its window limit does not authorize
-a negative wire limit. Only an explicit request selects its named conversation;
+[`admitThreadQuery`](../../../internal/relay/v2session_catchup.go) validates field
+presence/types, canonical conversation ID, current pairing, `thread`/interactive
+capability, `KnownConversation` and the Codex/`multi_agent` gate before invoking
+`ThreadCatchUp` or `ThreadPage`. Normalize limits even for nonzero catch-up: the
+backend ignoring its window limit does not authorize a negative wire limit. Only an explicit request selects its named conversation;
 handshake and listing do not query, and the active cursor cannot substitute.
 The worker maps detached full items and authoritative coverage without deriving
 either coverage or reset from item revisions. Missing/nonusable/erroring
 providers and codec failures return a content-free `thread.query_failed` error;
-reset and failure cannot certify partial items. Production provider installation
-and history pages remain #3236 and #3235. See the
+reset and failure cannot certify partial items. A page result with reset state
+fails instead of emitting catch-up-only `thread_reset`. Production provider
+installation and the 36000-entry integration proof remain #3236. See the
 [wire query contract](../../protocol-mobile.md#thread-query-messages).
+
+`ThreadPage` receives required unsigned `before_order`, including zero, and the
+normalized limit. `runThreadQuery` forwards every supplied full item and all four
+backend page fields through `EncodeThreadReply`; only the separate empty final
+marker certifies `[LowerOrder, UpperOrder)`. Lower-bound ties and hidden/dropped
+public rows remain intact, as do complete deduplicated out-of-range parents.
+Parents do not expand coverage, and a short page cannot establish `OlderExists`.
+Use `Continuation == LowerOrder` as the next exclusive upper bound; an empty page
+keeps the requested upper bound with lower/continuation zero and older-exists
+false. Selection and parent closure belong to
+[`Store.HistoryPage`](thread-package-background-store.md#bounded-queries),
+not another relay query engine. `TestThreadPageResults` and
+`TestThreadPageContinuation` pin forwarding and successive ranges, while
+`TestThreadPageLargeReply` checks assembly beyond 16 escaped, stamped envelopes
+without dropping supplied content or request correlation.
+
+**Dispatch probing must reach the owning validator.** Decoding a full `Envelope`
+just to identify a query type rejects wrong-type IDs before `admitThreadQuery`
+can apply its connection-close policy. `dispatchAppFrame` probes the type
+independently for both query kinds; other malformed types keep their existing
+fallback. `TestThreadPageAdmission` sends malformed IDs through the authenticated
+wire, because direct admission tests would miss this bypass.
 
 **A refusal must preserve the legacy delivery path.** An Outbound-only peer has
 no cancellable ordered sender. Initializing a lane merely to deny an unnegotiated
-query would close it before its owed correlated error. `admitThreadCatchUp`
+query would close it before its owed correlated error. `admitThreadQuery`
 uses Run-owned `forwardEnvelope` when no lane exists; accepted sequences require
-the cancellable ordered sender. `TestThreadCatchUpLegacyRefusal` pins that split.
+the cancellable ordered sender. `TestThreadCatchUpLegacyRefusal` and
+`TestThreadPageLegacyRefusal` pin that split; the
+[legacy raw-history path](../../protocol-mobile.md#conversation-history-v2)
+retains its cursor, disk reads and delivery behavior.
 
 **Completion must fence live admission.** One generation-specific query token
-owns each connection's unfinished catch-up. `cancelThreadQuery` cancels it when
-a live item update for that conversation is admitted; `threadQueryGate` catches
-already queued updates immediately before sealing. No extra live buffer is
+owns each connection's unfinished catch-up or page; both use the same slot.
+`cancelThreadQuery` cancels it when a live item update for that conversation is
+admitted; `threadQueryGate` catches already queued updates immediately before sealing. No extra live buffer is
 introduced. At the separate success marker, cancellation checking and capture
 watermark installation share `hostedMu`; checking them separately could let a
 live patch cross the completion cut and be overwritten by older full items.
@@ -193,10 +220,11 @@ one consumed version; the capture watermark is not advanced for each patch.
 The map caps joined conversations at 256 per connection and rejects further
 new joins. Existing queue bounds and generation fencing remain authoritative;
 lost/withheld/cancelled parts never earn a success marker, and retirement cannot
-carry a join into a reused connection ID. `TestThreadCatchUpLiveRace`,
-`TestThreadCatchUpInterrupted` and `TestThreadCatchUpJoinedLive` exercise these
-cuts; `TestThreadCatchUpRequestedScope` pairs gap-producing thread and legacy
-handshakes with named requests.
+carry a join into a reused connection ID. The catch-up and page variants of
+`TestThreadCatchUpLiveRace`, `TestThreadCatchUpInterrupted` and
+`TestThreadCatchUpJoinedLive` exercise these cuts; `TestThreadPageSharedAdmission`
+pins cross-query slot contention and the join cap. Both requested-scope tests
+pair gap-producing thread and legacy handshakes with named requests.
 
 **Project fields without round-tripping a partial DTO.** `conversation_updated`
 has supplied fields that `ConversationUpdatedPayload` does not represent,
@@ -253,8 +281,8 @@ now participates in production `ThreadReady` alongside the installed fold
 publisher and watermark provider. Negotiated thread connections receive current
 readings at connect/reconnect and source-bound live updates; these snapshots
 initialize transient state only. Thread item backfill requires explicit catch-up;
-relay handling and replay bypass are implemented, while production query
-provider installation remains #3236 and history pages remain #3235.
+relay catch-up/page handling and replay bypass are implemented, while production
+query provider installation remains #3236.
 
 Carry provenance with the originating reading through `PushLiveState` and
 `ThreadLiveState`, rather than resolving a conversation's current binding when
