@@ -249,7 +249,7 @@ func TestPermissionQueueIdentity(t *testing.T) {
 		}
 	}
 	a, b, c := identities[0], identities[1], identities[2]
-	if a.Connection == b.Connection || b.Connection == c.Connection || a.Connection == "unknown" {
+	if a.Connection == b.Connection || b.Connection == c.Connection || a.Connection == c.Connection || a.Connection == "unknown" {
 		t.Fatal("connection lifetime reused")
 	}
 	if a.Envelope == "unknown" || a.Envelope != b.Envelope || a.Envelope == c.Envelope {
