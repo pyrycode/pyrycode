@@ -55,3 +55,6 @@ PASS after adversarial review:
 - Concurrency: registry→owner locking, immutable generation binding, existing watcher exits on disposal; no new workers.
 - Tokens/subprocesses/cryptography: no credentials or command execution in asset path; SHA-256 reuses standard preparation integrity hashing, not authentication.
 - Threat model: host-file exposure and cross-release delivery are addressed here. Native isolation and connection admission/serialization remain out of scope under #3123/#3247.
+
+## Revisions
+2026-10-12 — Verifier finding 1: the pre-existing interruption fixture race tracked by #3296 was repaired in merged #3298 (`8ab5829b`), included here through `7c639d4e`. `testThreadQueryInterrupted` now announces readiness after accepted prefix delivery and defers completion on every return. No asset design or implementation change is required. The catch-up/page interruption tests passed with race detection (2 parent tests and 12 subtests, no skips); the apps race suite, module vet and pyry build also passed. The dispatcher must rerun complete `make check` followed by `make build` before approval; these focused proofs do not replace that gate. Documentation handoff remains pending as recorded above.
