@@ -74,6 +74,8 @@ Pending documentation stage:
 
 **Verdict:** PASS
 
+**Findings:**
+
 - [Trust boundaries] Raw config field validation precedes typed decoding; every supplied token is validated. `startRelay` selects only the loaded exact identity; 401 classification trusts the library sentinel alone.
 - [Tokens] Plaintext private storage requires effective ownership and exact modes even for `{}`. Restart reloads rotation; no token generation, equality authentication or secret override is added.
 - [File operations] Descriptor-relative reads and handle metadata bind ownership/mode checks to bytes and parent. Followed targets must be private; same-user filesystem replacement remains inside the trusted operator boundary. Atomic memory writes and caller serialization remain. No caller-controlled path joins are added.
@@ -86,3 +88,7 @@ Pending documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+
+2026-10-12: `TestRelayAdmissionStorage` exposed that opening a parent for descriptor-relative reads adds a read-permission requirement that legacy configs never had. On parent-open permission errors, `readConfig` retains legacy `os.ReadFile` behavior but supplies no trusted metadata, so any present admission map still fails the static storage check. Valid admission configs always retain pinned handle validation. Ownership injection is covered separately by `TestRelayAdmissionOwnership`. The storage reader lives in new `internal/config/admission.go` to keep this security boundary together; no dependency or exported type was added. Final written scope remains below 800 lines.

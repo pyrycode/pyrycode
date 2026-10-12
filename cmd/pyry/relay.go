@@ -157,6 +157,8 @@ type relayWiring struct {
 	// relayURL is the resolved binary↔relay WebSocket URL. Empty disables the
 	// relay leg entirely (startRelay returns a no-op cleanup).
 	relayURL string
+	// admissionTokens is loaded once; only the instance's exact server-id is selected.
+	admissionTokens map[string]string
 	// version is the binary version advertised to the relay on connect.
 	version string
 	// allowInsecure permits a ws:// (non-TLS) relay scheme
@@ -542,6 +544,7 @@ func startRelay(
 	logger.Info("relay: connecting", "url", w.relayURL, "server_id", string(serverID))
 
 	conn, err := relay.Connect(ctx, relay.Config{
+		AdmissionToken:            w.admissionTokens[string(serverID)],
 		ServerID:                  serverID,
 		RelayURL:                  w.relayURL,
 		BinaryVersion:             w.version,
@@ -569,15 +572,15 @@ func startRelay(
 		drain()
 	}
 
-	// The conn.Wait() classifier — a PERSISTENT 4409 server-id conflict
-	// (post-#1072: the transport has already retried the bounded backoff
-	// window, so this is a genuine duplicate) unwinds the daemon; ctx-cancel
-	// is the clean-shutdown path; any other terminal error is logged at warn.
+	// Persistent identity conflicts unwind the daemon. Admission rejection ends
+	// only the relay leg, retaining local service until an operator restart.
 	waitDone := make(chan struct{})
 	go func() {
 		defer close(waitDone)
 		err := conn.Wait()
 		switch {
+		case errors.Is(err, relay.ErrAdmissionFailed):
+			logger.Error("relay: admission failed; correct relay admission configuration and restart the daemon")
 		case errors.Is(err, relay.ErrServerIDConflict):
 			logger.Error("relay: server-id conflict; shutting down daemon",
 				"server_id", string(serverID), "err", err)
