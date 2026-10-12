@@ -3,6 +3,7 @@
 ## Files read
 - `internal/permbridge/permbridge.go`: `Register`, `expire`, `resolve`, `Pending.Await`; delete-under-lock is the verdict arbiter.
 - `internal/permbridge/permbridge_test.go`: `TestRegistry_StaleExpiryCannotResolveReusedIDGeneration`, `TestRegistry_ExtendedAllowVsTimeoutRace`, `TestRegistry_NonPositiveWindowIsNeverExtended` establish identity and answerability policy.
+- `internal/permbridge/observation.go` and `observation_test.go`: `Submit`, `register`, `TestObservationNumericalIdentity` and `TestObservationBounds` cover issued metadata and dropped registration evidence.
 - `docs/knowledge/features/permbridge-package.md`: conditional window, exact pending identity and log-free stdlib dependency direction must survive.
 - `CODING-STYLE.md` and `docs/knowledge/features/development-verification.md`: behavioral assertions and counted evidence.
 
@@ -51,7 +52,10 @@ Pending documentation stage: add **Isolated permission observation** in `docs/kn
 - Errors/logs/telemetry: no logger or free-text record field. Invalid verdict behaviors use a fixed unknown reason.
 - Concurrency: one nonblocking recorder lock attempt on approval boundaries; snapshots cannot hold the registry lock. MUST FIX addressed in design: terminal identity belongs to pending, never a later ID lookup.
 - Threat model: bounded adversarial identities and full/stalled recorders cannot delay approval or alter authorization. Mobile receipt/authentication is OUT OF SCOPE (#3225/#3226).
+- Rework trust-boundary review: MUST FIX findings 1 and 2 addressed by private issuance metadata in `ObservationIdentity` and checking registration retention before exposing a lifetime. `Submit` rejects changed, foreign, reconstructed or over-limit run/epoch/generation metadata with `invalid_identity` loss; wholly unknown zero metadata remains supported. Copying live values preserves issuance across reset. The stamp is three inline uint64 values (24 bytes), no unbounded lifetime table, content, serialization field or additional locking. Alias validation remains kind-specific; credentials, crypto and I/O boundaries are unchanged.
 **Reviewer:** builder self-review. **Date:** 2026-10-12.
 
 ## Revisions
 - 2026-10-12: count both 33-byte private equality keys and 8-byte alias numbers in retained identity payload: 41 bytes each, 20992 bytes total, excluding fixed Go map overhead. The alias strings are generated for records/accessors; none is retained in the alias table. This tightens the byte accounting without changing the identity contract.
+- 2026-10-12, verifier finding 1: bounds alone cannot establish issuance. `Submit` validates numerical metadata against a private inline issuance stamp plus recorder run and the numerical ceiling. Changed or reconstructed nonzero metadata is discarded with `invalid_identity` loss; live identities from `Identity`/`Pending.ObservationIdentity` remain valid across reset, while the zero value is explicitly unknown. Serialization is for evidence only, not reactivation of identities. `TestObservationNumericalIdentity` covers each field, overflow, missing metadata, alias-number impersonation and reconstruction; `TestObservationReuseReset` covers valid originating submission after reset.
+- 2026-10-12, verifier finding 2: `register` must retain the registration before exposing a generation or incrementing observed pending. A dropped registration returns a wholly unknown handle identity and suppresses its terminal observation even if reset later frees capacity. Allocation is never rolled back or reused. `TestObservationBounds/records` covers capacity loss before and across reset, including zero terminal count and no observed pending leak. No approval policy or inert-build code changes.

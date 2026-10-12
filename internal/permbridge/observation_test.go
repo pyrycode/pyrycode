@@ -142,6 +142,9 @@ func TestObservationReuseReset(t *testing.T) {
 			if reset {
 				o.Reset()
 			}
+			if !o.Submit("bridge", "seen", first.ObservationIdentity()) {
+				t.Fatal("originating identity rejected")
+			}
 			r.Resolve("reuse", Allow(nil))
 			awaitWithin(t, first, time.Second)
 			second, _ := r.Register("reuse", Request{SessionID: "session"}, time.Hour)
@@ -173,21 +176,31 @@ func TestObservationReuseReset(t *testing.T) {
 }
 
 func TestObservationBounds(t *testing.T) {
-	t.Run("records", func(t *testing.T) {
-		o := NewObservationRecorder()
-		for i := 0; i < ObservationMaxRecords+2; i++ {
-			o.Submit("bridge", "seen", ObservationIdentity{})
-		}
-		r := New()
-		r.Observe(o)
-		p, _ := r.Register("full", Request{}, 0)
-		awaitWithin(t, p, time.Second)
-		o.End()
-		s := o.Snapshot()
-		if len(s.Records) != ObservationMaxRecords || !s.Loss["record_capacity"] || s.Complete {
-			t.Fatal(s)
-		}
-	})
+	for _, reset := range []bool{false, true} {
+		t.Run("records/reset="+fmt.Sprint(reset), func(t *testing.T) {
+			o := NewObservationRecorder()
+			for i := 0; i < ObservationMaxRecords+2; i++ {
+				o.Submit("bridge", "seen", ObservationIdentity{})
+			}
+			r := New()
+			r.Observe(o)
+			p, _ := r.Register("full", Request{}, time.Hour)
+			defer r.Resolve("full", Deny("cleanup"))
+			if p.ObservationIdentity().Generation != 0 {
+				t.Fatal("lost registration exposed generation")
+			}
+			if reset {
+				o.Reset()
+			}
+			r.Resolve("full", Allow(nil))
+			awaitWithin(t, p, time.Second)
+			o.End()
+			s := o.Snapshot()
+			if !reset && len(s.Records) != ObservationMaxRecords || !s.Loss["record_capacity"] || s.Complete || s.Counters["terminal"] != 0 || o.pending != 0 {
+				t.Fatal(s)
+			}
+		})
+	}
 	t.Run("identities", func(t *testing.T) {
 		o := NewObservationRecorder()
 		for i := 0; i < ObservationMaxIdentities; i++ {
@@ -259,6 +272,51 @@ func TestObservationBounds(t *testing.T) {
 			t.Fatal("generation collision")
 		}
 	})
+}
+
+func TestObservationNumericalIdentity(t *testing.T) {
+	for _, field := range []string{"run_overflow", "epoch_overflow", "generation_overflow", "both_overflow", "future_epoch", "unissued_generation", "alias_generation", "missing_run", "missing_epoch", "missing_generation", "reconstructed"} {
+		t.Run(field, func(t *testing.T) {
+			r, o := New(), NewObservationRecorder()
+			r.Observe(o)
+			p, _ := r.Register("request", Request{}, time.Hour)
+			r.Resolve("request", Allow(nil))
+			awaitWithin(t, p, time.Second)
+			id := p.ObservationIdentity()
+			switch field {
+			case "run_overflow":
+				id.Run = ObservationMaxCounter + 1
+			case "epoch_overflow":
+				id.Epoch = ObservationMaxCounter + 1
+			case "generation_overflow":
+				id.Generation = ObservationMaxCounter + 1
+			case "both_overflow":
+				id.Epoch, id.Generation = ObservationMaxCounter+1, ObservationMaxCounter+1
+			case "future_epoch":
+				id.Epoch++
+			case "unissued_generation":
+				id.Generation++
+			case "alias_generation":
+				id.Generation = 1
+			case "missing_run":
+				id.Run = 0
+			case "missing_epoch":
+				id.Epoch = 0
+			case "missing_generation":
+				id.Generation = 0
+			case "reconstructed":
+				id = ObservationIdentity{Run: id.Run, Epoch: id.Epoch, Generation: id.Generation, Request: id.Request}
+			}
+			if o.Submit("bridge", "seen", id) {
+				t.Fatal("unissued metadata admitted")
+			}
+			o.End()
+			s := o.Snapshot()
+			if s.Complete || !s.Loss["invalid_identity"] || s.Counters["bridge"] != 0 {
+				t.Fatal(s)
+			}
+		})
+	}
 }
 
 func TestObservationContract(t *testing.T) {

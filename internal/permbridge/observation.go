@@ -22,9 +22,12 @@ const (
 // ObservationIdentity contains only opaque, kind-prefixed run-scoped aliases.
 // Generation zero means unknown; Epoch is the originating observer epoch.
 // Connection input must identify a connection lifetime, not a reusable client ID.
+// Copy live identities for Submit; numerical fields cannot be edited or restored
+// from serialization. The zero value represents wholly unknown numerical identity.
 type ObservationIdentity struct {
 	Run, Epoch, Generation                            uint64
 	Conversation, Session, Request, Modal, Connection string
+	issued                                            [3]uint64
 }
 
 // ObservationRecord carries no caller content. Nanoseconds use the monotonic
@@ -57,7 +60,8 @@ type ObservationSnapshot struct {
 // unknown, seen, sent, rejected, absent, connected, disconnected.
 // Loss keys: record_capacity, identity_capacity, identity_oversize,
 // identity_exhausted, counter_exhausted, contention, reset_truncation,
-// incomplete_coverage, closed_submission, invalid_vocabulary, run_exhausted.
+// incomplete_coverage, closed_submission, invalid_vocabulary, invalid_identity,
+// run_exhausted.
 type ObservationRecorder struct {
 	mu               sync.Mutex
 	contention       atomic.Bool
@@ -129,6 +133,12 @@ func (o *ObservationRecorder) Submit(stage, reason string, id ObservationIdentit
 		o.loss["invalid_vocabulary"] = true
 		return false
 	}
+	metadata := [3]uint64{id.Run, id.Epoch, id.Generation}
+	if metadata != id.issued || id.Run != 0 && id.Run != o.run ||
+		id.Run > ObservationMaxCounter || id.Epoch > ObservationMaxCounter || id.Generation > ObservationMaxCounter {
+		o.loss["invalid_identity"] = true
+		return false
+	}
 	// Resolve supplied aliases through the private issued vocabulary, preventing
 	// callers from using an identity field as an arbitrary content channel.
 	for i, a := range []*string{&id.Conversation, &id.Session, &id.Request, &id.Modal, &id.Connection} {
@@ -147,10 +157,6 @@ func (o *ObservationRecorder) Submit(stage, reason string, id ObservationIdentit
 			*a = "unknown"
 			o.loss["incomplete_coverage"] = true
 		}
-	}
-	if id.Run != 0 && id.Run != o.run {
-		o.loss["incomplete_coverage"] = true
-		return false
 	}
 	return o.append(stage, reason, id)
 }
@@ -215,7 +221,7 @@ func (o *ObservationRecorder) alias(kind byte, value string) string {
 }
 
 func (o *ObservationRecorder) identity(conversation, session, request, modal, connection string) ObservationIdentity {
-	return ObservationIdentity{Run: o.run, Epoch: o.epoch, Conversation: o.alias('c', conversation), Session: o.alias('s', session), Request: o.alias('r', request), Modal: o.alias('m', modal), Connection: o.alias('l', connection)}
+	return ObservationIdentity{Run: o.run, Epoch: o.epoch, issued: [3]uint64{o.run, o.epoch, 0}, Conversation: o.alias('c', conversation), Session: o.alias('s', session), Request: o.alias('r', request), Modal: o.alias('m', modal), Connection: o.alias('l', connection)}
 }
 
 // Identity aliases bounded identifiers without retaining their verbatim bytes.
@@ -309,16 +315,15 @@ func (s *observationState) register(id string, req Request, reason string) obser
 	}
 	defer o.mu.Unlock()
 	identity := o.identity("", req.SessionID, id, "", "")
-	life := observationLifetime{}
 	if reason == "accepted" && !o.ended {
 		identity.Generation = o.number()
-		if identity.Generation != 0 {
-			life = observationLifetime{o, identity}
-			o.pending++
-		}
+		identity.issued[2] = identity.Generation
 	}
-	o.append("register", reason, identity)
-	return life
+	if !o.append("register", reason, identity) || identity.Generation == 0 {
+		return observationLifetime{}
+	}
+	o.pending++
+	return observationLifetime{o, identity}
 }
 func (l observationLifetime) terminal(v Verdict, expired bool) {
 	o := l.recorder
