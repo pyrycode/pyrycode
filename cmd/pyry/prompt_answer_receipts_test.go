@@ -247,8 +247,8 @@ func TestPromptAnswerReceiptsPages(t *testing.T) {
 	}
 }
 
-// The probe reacquires bridge and registry locks during delivery. Publication
-// cannot retain either lock while invoking a peer.
+// The probe snapshots the registry under the bridge lock during delivery, then
+// reacquires the registry lock. Publication cannot retain either lock at a peer.
 type promptReceiptBroadcaster struct {
 	conns      []relay.ActiveConn
 	bridge     *streamApprovalBridge
@@ -261,8 +261,9 @@ type promptReceiptBroadcaster struct {
 func (p *promptReceiptBroadcaster) ActiveConns(context.Context) []relay.ActiveConn { return p.conns }
 func (p *promptReceiptBroadcaster) Push(_ context.Context, id string, env protocol.Envelope) error {
 	p.bridge.mu.Lock()
+	registry := p.bridge.perm
 	p.bridge.mu.Unlock()
-	p.bridge.perm.Lookup("probe")
+	registry.Lookup("probe")
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.envs = append(p.envs, env)

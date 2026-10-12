@@ -66,3 +66,6 @@ Pending for documentation stage:
 - [Threat model] Existing Noise authentication, per-device access and agent gates prevent widened access; receipts give no prompt actuation, presentation or read-mark authority. Mobile #2098 owns the pending notification privacy gate.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-12
+
+## Revisions
+2026-10-12: Verifier finding 1 identified an empty critical section in `promptReceiptBroadcaster.Push`. The probe now snapshots the registry under the bridge mutex, releases it, then reacquires the registry lock through `Lookup`. This preserves the delivery-lock proof and passes staticcheck SA2001. The production publication contract is unchanged; rerun focused race regressions and staticcheck.
