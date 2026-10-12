@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +189,84 @@ func TestHostedPushReservationTransfer(t *testing.T) {
 	m.releaseHostedPush(s)
 	if in.used != hostedQueueLimit || in.overflow || s.hosted.pushReserved || len(s.hosted.queue) != 2 || s.hosted.queue[0].typ != protocol.TypeAppRemoved || s.hosted.queue[1].env != &env || s.nextID != 2 {
 		t.Fatalf("reservation transfer: used=%d overflow=%v queue=%+v id=%d", in.used, in.overflow, s.hosted.queue, s.nextID)
+	}
+}
+
+func TestHostedPushAdmissionRetirement(t *testing.T) {
+	for _, cause := range []string{"live_state_gap", "byte_ceiling"} {
+		t.Run(cause, func(t *testing.T) {
+			m, s, q := testHostedCapacityManager(t)
+			m.pushOverflow = make(chan string, 1)
+			s.hosted.inbox.used = hostedQueueLimit - 1
+			s.hosted.active = &hostedOutput{} // Hold delivery so admission is observable without sealing.
+			if cause == "byte_ceiling" {
+				for len(q.items) < pushQueueCap {
+					q.enqueue(protocol.Envelope{Type: protocol.TypeModelList, Payload: []byte(`{}`)})
+				}
+			}
+			items, retained := len(q.items), q.bytes
+			finished := make(chan struct{})
+			ctx := t.Context()
+			// Holding hostedMu parks admission after selection while producers
+			// can still take pushMu before the final queue read.
+			m.hostedMu.Lock()
+			go func() {
+				m.drainOnce(ctx)
+				close(finished)
+			}()
+			t.Cleanup(func() { testHostedAwait(t, finished) })
+			func() {
+				defer m.hostedMu.Unlock()
+				testHostedAwaitAdmission(t)
+				var err error
+				if cause == "live_state_gap" {
+					err = m.RetireLiveState(ctx, s.connID)
+				} else {
+					err = m.Push(ctx, s.connID, protocol.Envelope{Type: protocol.TypeModelList, Payload: make([]byte, pushQueueByteCeiling)})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if id := <-m.pushOverflow; id != s.connID {
+					t.Fatalf("retired connection = %q", id)
+				}
+			}()
+			testHostedAwait(t, finished)
+			if !q.overflowed || len(q.items) != items || q.bytes != retained {
+				t.Fatalf("quarantined head escaped: items=%d/%d bytes=%d/%d overflowed=%v", len(q.items), items, q.bytes, retained, q.overflowed)
+			}
+			if s.hosted.pushReserved || s.hosted.inbox.used != hostedQueueLimit-1 || len(s.hosted.queue) != 0 || s.nextID != 2 {
+				t.Fatalf("retired admission retained capacity or output: reserved=%v used=%d queued=%d id=%d", s.hosted.pushReserved, s.hosted.inbox.used, len(s.hosted.queue), s.nextID)
+			}
+		})
+	}
+}
+
+// testHostedAwaitAdmission observes reservation waiting on hostedMu: candidate
+// selection has completed and the final pop cannot start.
+func testHostedAwaitAdmission(t *testing.T) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	stack := make([]byte, 64<<10)
+	for {
+		n := runtime.Stack(stack, true)
+		if n == len(stack) {
+			stack = make([]byte, 2*len(stack))
+			continue
+		}
+		for _, goroutine := range strings.Split(string(stack[:n]), "\n\n") {
+			if strings.Contains(goroutine, "(*V2SessionManager).reserveHostedPush(") && strings.Contains(goroutine, "sync.(*Mutex).Lock(") {
+				return
+			}
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("drain did not reach the held hosted reservation")
+		case <-tick.C:
+		}
 	}
 }
 

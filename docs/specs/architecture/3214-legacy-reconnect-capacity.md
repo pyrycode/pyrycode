@@ -8,6 +8,7 @@
 - `internal/relay/v2session_livestate.go` → `forwardLiveState`, `drainLiveOnce`, `signalLiveDrain`: clear/fresh sequencing and detached readings.
 - `internal/relay/v2session_publication.go` → `FlushPushes`: source-queue fence and cancellation.
 - `internal/relay/v2session_hosted_transport_test.go` → `testHostedRealTransport`: actual transport acknowledgment barrier.
+- `internal/relay/v2session_hosted_capacity_test.go` → `testHostedCapacityManager`, `TestHostedPushAdmissionRetirement`: focused admission ownership and producer retirement quarantine.
 - PR #3201 source `18a8f70eaadbd2da3b98bd3687120c362fc95d8b` → `TestReadinessLegacyReconnectSnapshotCapacity`: retained counterexample and validation harness.
 - `docs/knowledge/features/v2-session-manager-concurrency.md` § Hosted discovery and ordered delivery: reserve callback handoff, queued output and active delivery together; never mix pre-sealed output with ordered plaintext.
 - `docs/knowledge/features/development-verification.md`: count executed tests and prove completion barriers.
@@ -38,6 +39,7 @@ Run owns all session pointers, temporary reservation ownership, sender IDs and N
 | Capacity-held supplied fresh reading cannot be overtaken by a FIFO fence | `TestHostedPushCapacityPendingFence` |
 | Caller cancellation, disconnect and manager shutdown release held flush | `TestHostedPushCapacityTeardown`, `TestHostedPushCapacityDelivery` |
 | Callback competes with ordinary reservation; unused admission returns its slot | `TestHostedPushReservation`, `TestHostedPushReservationTransfer` |
+| Producer retirement or byte overflow between candidate selection and hosted admission quarantines the head and returns its reservation | `TestHostedPushAdmissionRetirement` |
 | True callback overflow retires only old generation; same-ID reconnect stays isolated | existing `TestHostedLifecycleOverflow`, `TestHostedLifecycleReconnect` |
 | Rekey repeats delivery barrier, queued output remains ordered | existing `TestHostedDiscoveryRekeyOrdering` |
 
@@ -73,7 +75,7 @@ Pending for documentation stage: update `docs/knowledge/features/v2-session-mana
 - Cryptography: no outstanding findings. held ordinary pushes remain unsealed, and only `hostedDeliver` on Run allocates hosted IDs/nonces. No nonce-consuming probe or send bypass.
 - Network/I/O: existing upstream byte/count bounds, shared 16-slot destination bound and delivery timeout stay intact. A stalled client holds only its own bounded queue.
 - Errors/logs: capacity holds expose no payload, token or ciphertext; existing content-free diagnostics remain.
-- Concurrency: no outstanding findings. reserve atomically against `HostedAppsChanged`, transfer once or release once, and never nest queue/inbox locks. Callback overflow may still retire a reserved generation.
+- Concurrency: no outstanding findings. Reserve atomically against `HostedAppsChanged`, transfer once or release once, and never nest queue/inbox locks. `drainOnce` rechecks the current ordinary queue's retirement latch under the same final `pushMu` hold as the pop; producer retirement or byte overflow during hosted admission leaves the head quarantined and releases unused hosted capacity off `pushMu`. Callback overflow may still retire a reserved generation.
 - Threat model: protocol threats 2/3 preserve per-generation Noise isolation; threat 7 retains bounded destination admission. Prompt injection and client compromise policy are unchanged by this internal handoff.
 
 **Reviewer:** builder (self-review per security-review checklist)
@@ -86,3 +88,5 @@ Pending for documentation stage: update `docs/knowledge/features/v2-session-mana
 - 2026-10-12: clarified the security verdict wording: the nonce and atomic-reservation concerns were resolved in the original design before its commit; they are not outstanding MUST FIX findings. The contract and PASS verdict are unchanged.
 
 - 2026-10-12: authenticated prefixes still closed with 4413 when an ordinary inline reply competed with a capacity-held reconnect batch. `TestHostedPushCapacityInlineEnvelope` reproduced the same full-lane retirement. `hostedEnvelope` now reserves inline ordinary admission too, or parks already-projected plaintext in the same byte-bounded FIFO. A ready tag prevents projection/revision checks from being applied twice; a deferred supplied clear queues its fresh reading behind it. Rekey and hosted controls retain their terminal admission policy. `pushQueue.enqueueSource` owns metadata at insertion, preserving delta shedding and byte accounting. Production additionally touches `internal/relay/v2session_modal.go` → `queuedEnv`, `enqueueSource`; no exported API or consumer migration is added.
+
+- 2026-10-12: verifier finding 1 on `560b947f` exposed a producer retirement race introduced by the admission split. `drainOnce` now rereads the current queue and checks its retirement latch atomically with the final pop, returning unused hosted reservations after unlocking when declining a quarantined head. `TestHostedPushAdmissionRetirement` blocks hosted admission after selection and forces both `RetireLiveState` and byte-ceiling retirement; both arms failed before the guard. No new type, consumer migration, limit or production goroutine; total written work remains below 800 lines.

@@ -210,6 +210,13 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 			continue
 		}
 		m.pushMu.Lock()
+		q = m.queues[connID]
+		// Retirement may latch while hosted admission runs off pushMu.
+		if q.overflowed {
+			m.pushMu.Unlock()
+			m.releaseHostedPush(s)
+			continue
+		}
 		head := q.items[0]
 		env := q.popHead()
 		m.pushMu.Unlock()
