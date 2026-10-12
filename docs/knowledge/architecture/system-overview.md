@@ -102,11 +102,16 @@ go list -deps ./internal/control | grep -qx github.com/pyrycode/pyrycode/interna
 ! go list -deps ./internal/sessions/... | grep -qx github.com/pyrycode/pyrycode/internal/streamsup
 ```
 
-Hosted-app registration is a standalone leaf: `internal/apps` imports
+Hosted-app ownership is independent of conversations: `internal/apps` imports
 `internal/identity` for canonical UUID validation and stores registrations outside
-conversation/session state. Daemon consumers, lifecycle reconciliation and
-publication remain later work; this package establishes no readiness. See the
-[apps package overview](../features/apps-package.md) for its persistence and
+conversation/session state. `runSupervisor` constructs one `apps.Owner` from the
+same registry used by relay discovery, even with relay disabled. It claims the
+control socket before registry normalization/reconciliation and retains that
+claim through joined owner shutdown and final durable observations. Channels,
+clients and relay reconnects cannot cancel app workers; daemon restart preserves
+intent/data while requiring fresh processes and health. Publication and encrypted
+resource routing remain separate work, and production hosting capability stays
+withheld. See the [apps package overview](../features/apps-package.md) for its persistence and
 concurrency boundaries.
 
 ## Data Flow

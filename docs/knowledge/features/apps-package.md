@@ -9,8 +9,9 @@ hosting design. Registration and stored `running` prove neither publication nor
 readiness. The registry commits lifecycle observations and normalizes restart
 state. Process spawn proves only starting; the owner confirms health before
 exposing private targets; owner construction reconciles registrations and recovers
-failed generations automatically. Daemon wiring (#3204), publication (#3125) and
-encrypted resource activation (#3123) remain separate responsibilities.
+failed generations automatically. The daemon owns one owner for its discovery
+registry, independently of channels; publication (#3125) and encrypted resource
+activation (#3123) remain separate responsibilities.
 
 ## Validation and stored identity
 
@@ -100,6 +101,28 @@ Tombstones survive reopen and are excluded from the 256 live-registration limit;
 discarding them to bound storage would permit removed identities to be reused.
 
 ## Lifecycle and restart state
+
+`runSupervisor` constructs one `apps.Owner` through `newDaemonAppsOwner` from
+discovery's registry, persisted host identity and
+`~/.pyry/<sanitized-instance>/apps` root, including with relay disabled. Its
+reconciliation waits for neither spawn nor health before control/conversation
+readiness. No channel, client or relay context owns it: client closure, relay
+reconnect, channel stop, `/clear` and idle eviction leave app services running.
+Committed owner observations feed the existing discovery subscription. Unusable
+storage, missing/unsupported Node and app-specific start/health failures leave
+normal daemon/channel operation available without cancelling the session pool;
+composition logs only static reason codes.
+
+Claim the instance with `ctrl.Listen` before `openDaemonApps` or owner
+construction, and retain it until `Owner.Shutdown` has joined workers/descendants
+and finished durable observations on every exit. `Open` can persist normalized
+state and `NewOwner` immediately admits launches: an unsuccessful second daemon
+could otherwise launch a competing generation and overwrite an incumbent's
+observations. The detached control context and defer ordering in `runSupervisor`
+hold this boundary through normal shutdown and post-owner startup failures.
+`TestDaemonAppsRejectedDuplicateStartup` and
+`TestDaemonAppsShutdownRetainsOwnership` cover both rejected claims and a child
+cleanup barrier before final observations/claim release.
 
 `Registry.UpdateLifecycle(serverID, appID, Lifecycle)` replaces committed title,
 desired/state, active/pending releases and optional `LastError` atomically. Empty
@@ -274,10 +297,14 @@ detaches its subscription outside owner locks, cancels reconciliation, retries a
 all generations, and joins every worker and owned process, conditionally observing
 stopped without changing desired intent.
 Cancelling the initiating start context retires its generation; a coalesced caller
-can cancel its own wait independently. Callable reconciliation/recovery is complete;
-daemon wiring and full Node/SQLite/unrelated-channel integration (#3204),
-publication/migration/activation/rollback (#3125) and encrypted resource capability
-activation (#3123) remain downstream; exclusive cutover is publisher-owned. See
+can cancel its own wait independently. The daemon invokes joined shutdown on
+normal exit and every startup failure after owner construction. Local stop
+preserves sibling services and the session pool; daemon shutdown preserves
+available intent for restart. Publication/migration/activation/rollback
+(#3125/#3133) and encrypted resource capability activation (#3123) remain
+downstream; exclusive cutover is publisher-owned. Production `HostedAppsReady`
+remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes
+the attestation. Daemon startup installs no dependencies and runs no migrations. See
 [startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
 
 `Open` validates storage before `normalizeSnapshot`. Every available record with
@@ -293,6 +320,21 @@ to a reopened registry and construct a new owner: available committed releases g
 fresh processes/generations and must pass fresh matching health and conditional
 running persistence. Stopped/unpublished records stay unlaunched and existing data
 bytes survive; stored running never establishes readiness.
+
+The [final #3204 verifier review](https://github.com/pyrycode/pyrycode/pull/3237#issuecomment-6117617232)
+records `TestHostedAppsRecoverySQL` on actual **Node v24.15.0** with **1 executed,
+1 passed, 0 failed, 0 skipped**, using a race-built daemon and the freshly compiled
+maintained template service. Migration/SQL seeding happened while stopped.
+HTTP save returned 204 for
+`{"version":1,"selected_tab":"preferences","period":"7d"}`; service readback
+and direct `node:sqlite` queries retained it after app crash/recovery and daemon
+restart, with unchanged host/app identity, committed release selection and
+monotonic revisions. The proof also observed failed → retry delay → starting →
+fresh health-confirmed running, a healthy sibling, an unrelated fake-Claude turn,
+unlaunched stopped/unpublished apps and clean shutdown descendant cleanup.
+Backoff is a delay, never another registry state. No live Claude was used or
+required; seeded persistence supplies no resource-routing or publisher
+migration/rollback acceptance. See the [runtime reference](../../hosted-apps.md#runtime-and-layout).
 
 ## Concurrency and persistence
 

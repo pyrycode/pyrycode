@@ -39,6 +39,20 @@ func openDaemonApps(name string, logger *slog.Logger) *apps.Registry {
 	return reg
 }
 
+// newDaemonAppsOwner reconciles committed releases independently of channels.
+// Storage or runtime unavailability never prevents normal daemon startup.
+func newDaemonAppsOwner(reg *apps.Registry, node string, logger *slog.Logger) *apps.Owner {
+	if reg == nil {
+		return nil
+	}
+	owner, err := apps.NewOwner(reg, node)
+	if err != nil {
+		logger.Warn("apps: unavailable", "reason", "owner_construction_failed")
+		return nil
+	}
+	return owner
+}
+
 // newDaemonAppsManager attaches only fully initialized storage to a valid
 // manager. HostedAppsReady remains the caller's complete hosting attestation;
 // registration and cancellable delivery alone establish no service readiness.
