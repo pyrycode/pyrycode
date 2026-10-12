@@ -17,17 +17,18 @@ import (
 func TestParser_ToolThenTextIsolatedCapture(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"tool_then_text_stream_event_v2.1.280.json", "tool_then_text_wire_stream_event_v2.1.280.json"} {
-		t.Run(name, func(t *testing.T) { testToolThenTextIsolatedCapture(t, name) })
+		t.Run(name, func(t *testing.T) { testToolThenTextCapture(t, name, "", "2.1.280 (Claude Code)") })
 	}
 }
 
-func testToolThenTextIsolatedCapture(t *testing.T, name string) {
+func testToolThenTextCapture(t *testing.T, name, source, version string) {
 	t.Helper()
 	data, err := os.ReadFile("../e2e/realclaude/testdata/" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var rec struct {
+		Source      string                     `json:"capture_source"`
 		Ticket      string                     `json:"ticket"`
 		Version     string                     `json:"claude_version"`
 		Revision    string                     `json:"daemon_revision"`
@@ -40,8 +41,8 @@ func testToolThenTextIsolatedCapture(t *testing.T, name string) {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Ticket != "2939" || rec.Version != "2.1.280 (Claude Code)" || len(rec.Revision) != 40 || len(rec.Rejected) != 0 || len(rec.Rows) == 0 {
-		t.Fatal("missing or unpinned isolated capture provenance")
+	if rec.Source != source || rec.Ticket != "2939" || rec.Version != version || len(rec.Revision) != 40 || len(rec.Rejected) != 0 || len(rec.Rows) == 0 {
+		t.Fatal("missing or unpinned capture provenance")
 	}
 	for _, key := range []string{"lines_dropped_over_cap", "bytes_dropped_over_cap", "partials_dropped", "unterminated_tail_bytes"} {
 		if n, ok := rec.Loss[key]; !ok || string(bytes.TrimSpace(n)) != "0" {
@@ -51,7 +52,7 @@ func testToolThenTextIsolatedCapture(t *testing.T, name string) {
 	if !rec.ScanApplied["messaging_socket_path"] {
 		t.Fatal("capture did not apply messaging-socket deny-scan")
 	}
-	wireCapture := strings.Contains(name, "_wire_")
+	wireCapture := strings.Contains(name, "_wire_") || source == "mobile-daemon"
 	if wireCapture && (rec.ReplayMatch == nil || !*rec.ReplayMatch) {
 		t.Fatal("wire capture must pin agreement with the original rejection census")
 	}
@@ -137,7 +138,7 @@ func testToolThenTextIsolatedCapture(t *testing.T, name string) {
 				t.Fatal("stream thinking carried content")
 			}
 		case turnevent.Unrecognized:
-			t.Fatal("isolated captured turn emitted Unrecognized")
+			t.Fatal("captured turn emitted Unrecognized")
 		}
 	}
 	if len(wantText) == 0 || !reflect.DeepEqual(actualText, wantText) || streamed.String() != settled.String() {
