@@ -34,9 +34,10 @@ Run owns all session pointers, temporary reservation ownership, sender IDs and N
 | Event | Race test |
 | --- | --- |
 | Held handshake fills lane, ordinary FIFO waits, completion resumes without producer push | `TestReadinessLegacyReconnectSnapshotCapacity` |
-| Held ordinary fence; another connection and control request progress | `TestHostedPushCapacityHold` |
-| Caller cancellation, disconnect and manager shutdown release held flush | `TestHostedPushCapacityTeardown` |
-| Callback competes with ordinary reservation; unused admission returns its slot | `TestHostedPushReservation` |
+| Held ordinary fence; another connection and control request progress | `TestHostedPushCapacityHold`, `TestHostedPushCapacityDelivery` |
+| Capacity-held supplied fresh reading cannot be overtaken by a FIFO fence | `TestHostedPushCapacityPendingFence` |
+| Caller cancellation, disconnect and manager shutdown release held flush | `TestHostedPushCapacityTeardown`, `TestHostedPushCapacityDelivery` |
+| Callback competes with ordinary reservation; unused admission returns its slot | `TestHostedPushReservation`, `TestHostedPushReservationTransfer` |
 | True callback overflow retires only old generation; same-ID reconnect stays isolated | existing `TestHostedLifecycleOverflow`, `TestHostedLifecycleReconnect` |
 | Rekey repeats delivery barrier, queued output remains ordered | existing `TestHostedDiscoveryRekeyOrdering` |
 
@@ -77,3 +78,7 @@ Pending for documentation stage: update `docs/knowledge/features/v2-session-mana
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+
+- 2026-10-12: the focused `TestHostedPushCapacityPendingFence` exposed a marker overtaking a supplied reading's fresh half while capacity was held. Keep that connection's queued heads gated until `livePending` is admitted, and exclude those markers from wake eligibility. Reservation release also wakes the drain through `releaseHosted`, covering delivery completion and cancelled queued pages without adding a separate completion path. Production touches five relay files; total written work remains below 800 lines.

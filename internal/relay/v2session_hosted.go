@@ -44,15 +44,16 @@ type hostedOutput struct {
 	deliveryDone <-chan error
 }
 type hostedState struct {
-	inbox       *hostedInbox
-	deliveryCtx context.Context
-	pending     *hostedPage
-	reading     bool
-	walk        *hostedWalk
-	queue       []*hostedOutput
-	active      *hostedOutput
-	cancel      context.CancelFunc
-	rekey       bool
+	inbox        *hostedInbox
+	deliveryCtx  context.Context
+	pending      *hostedPage
+	reading      bool
+	walk         *hostedWalk
+	queue        []*hostedOutput
+	active       *hostedOutput
+	cancel       context.CancelFunc
+	rekey        bool
+	pushReserved bool // Run owns the temporary ordinary-drain reservation.
 }
 type hostedResult struct {
 	s        *V2Session
@@ -187,9 +188,14 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 	m.takeHostedChanges(ctx, s)
 	m.hostedMu.Lock()
 	in := h.inbox
-	full := in.retired || in.overflow || in.used >= hostedQueueLimit
+	reserved := h.pushReserved && o.env != nil
+	full := in.retired || in.overflow || (!reserved && in.used >= hostedQueueLimit)
 	if !full {
-		in.used++
+		if reserved {
+			h.pushReserved = false
+		} else {
+			in.used++
+		}
 	}
 	m.hostedMu.Unlock()
 	if full {

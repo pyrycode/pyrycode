@@ -167,7 +167,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	// A fresh reading parked behind its clear completes before another clear
 	// can replace the single pending slot. Each call still sends only one frame.
 	for _, s := range m.sessions {
-		if s.livePending != nil {
+		if s.livePending != nil && m.hostedPushAvailable(s) {
 			m.drainLiveOnce(ctx, true)
 			return
 		}
@@ -186,92 +186,46 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	if m.transportDown() {
 		return
 	}
-	// A conn with an in-flight reconnect-replay tail must keep its live push
-	// queue buffered until the replay finishes, so replay ids (<= replayThrough)
-	// reach the wire before live ids (#777, AC #2). Snapshot the gated conn-ids
-	// from m.sessions BEFORE taking pushMu: m.sessions and replayQueue are
-	// Run-owned and drainOnce runs on Run, so this read needs no lock, and
-	// keeping it outside pushMu preserves pushMu's "guards only m.queues, taken
-	// alone" invariant. drainReplayOnce re-signals drainCh when a tail empties,
-	// so a gated conn's buffered live events are never stranded.
-	var replayPending map[string]struct{}
-	for id, s := range m.sessions {
-		if len(s.replayQueue) > 0 {
-			if replayPending == nil {
-				replayPending = make(map[string]struct{})
-			}
-			replayPending[id] = struct{}{}
-		}
-	}
-
+	// Snapshot candidates with pushMu alone. Producers may shed a delta before
+	// the second queue read; only Run removes heads and changes session identity.
 	m.pushMu.Lock()
-	var (
-		connID  string
-		env     protocol.Envelope
-		found   bool
-		barrier chan struct{}
-		live    *LiveState
-	)
-	// Go randomises map-range order, giving rough fairness across the
-	// realistically-tiny open-conn count.
+	candidates := make([]string, 0, len(m.queues))
 	for id, q := range m.queues {
-		if len(q.items) == 0 {
-			continue
-		}
-		if _, gated := replayPending[id]; gated {
-			continue // replay in flight for this conn; hold its live events (#777).
-		}
-		connID = id
-		barrier = q.items[0].barrier
-		live = q.items[0].live
-		env = q.popHead()
-		found = true
-		break
-	}
-	// After the pop, note whether any UNGATED queue still has work to re-signal.
-	// Gated queues are excluded: their re-signal comes from drainReplayOnce when
-	// the replay tail empties, not from the push pump.
-	more := false
-	if found {
-		for id, q := range m.queues {
-			if len(q.items) == 0 {
-				continue
-			}
-			if _, gated := replayPending[id]; gated {
-				continue
-			}
-			more = true
-			break
+		if len(q.items) > 0 {
+			candidates = append(candidates, id)
 		}
 	}
 	m.pushMu.Unlock()
-
-	if !found {
-		m.drainLiveOnce(ctx, false)
+	for _, connID := range candidates {
+		s := m.sessions[connID]
+		if s != nil && (len(s.replayQueue) > 0 || s.livePending != nil) {
+			continue
+		}
+		m.pushMu.Lock()
+		q := m.queues[connID]
+		marker := q.items[0].barrier != nil
+		m.pushMu.Unlock()
+		if !marker && !m.reserveHostedPush(s) {
+			continue
+		}
+		m.pushMu.Lock()
+		head := q.items[0]
+		env := q.popHead()
+		m.pushMu.Unlock()
+		if head.barrier != nil {
+			close(head.barrier)
+		} else if head.live != nil {
+			if err := m.forwardLiveState(ctx, s, *head.live); err != nil {
+				m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", connID)
+			}
+		} else if err := m.forwardEnvelope(ctx, connID, env); err != nil {
+			m.cfg.Logger.Debug("relay: v2 push drain drop", "event", "v2.push.drain_drop", "conn_id", connID, "err", err)
+		}
+		m.releaseHostedPush(s)
+		m.signalLiveDrain()
 		return
 	}
-	if barrier != nil {
-		close(barrier)
-	} else if live != nil {
-		if err := m.forwardLiveState(ctx, m.sessions[connID], *live); err != nil {
-			m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", connID)
-		}
-	} else if err := m.forwardEnvelope(ctx, connID, env); err != nil {
-		// Session vanished / not open / seal failure: drop with no app content
-		// in the log (the package's outbound-drop posture). The V2StateOpen
-		// security gate lives in forwardEnvelope.
-		m.cfg.Logger.Debug("relay: v2 push drain drop",
-			"event", "v2.push.drain_drop",
-			"conn_id", connID,
-			"err", err)
-	}
-	m.signalLiveDrain()
-	if more {
-		select {
-		case m.drainCh <- struct{}{}:
-		default:
-		}
-	}
+	m.drainLiveOnce(ctx, false)
 }
 
 // forwardEnvelope runs on Run's dispatch goroutine. It looks up the session,
