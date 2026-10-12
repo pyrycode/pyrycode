@@ -357,3 +357,55 @@ After #3214 merges, rerun the named authenticated family and dispatch the pendin
 `3071-emulator-20261011` acquisition. Keep `needs-live-artifacts` and
 `needs-real-claude`. The exact eight-file recovery and Documentation handoff above
 remain pending; no Android execution or original readiness cause is claimed.
+
+### 2026-10-12: verifier rework on `320923fb`
+
+Files read: `readinessExportRuntime`, `readinessExportEmulator`,
+`readinessValidateRuntime`, `readinessValidateEmulator`,
+`testReadinessEmulatorCapture` and `TestReadinessEmulatorCaptureContract`:
+the findings concern acquisition pins and publication of rejected diagnostics.
+`docs/knowledge/features/development-verification.md`, under `Captures and live
+evidence`, requires validation before publication. No fetched feature branch
+overlaps these files. The merged reconnect repair `bd85e998` is an ancestor of
+this worktree; the old admitted host pin is not.
+
+Design: serialize and deny-scan the complete candidate record set, then write
+it to a private temporary directory outside the checkout and run the existing
+coupled semantic reader there. Rejected configuration labels, provenance or
+record joins must leave neither a destination run nor a recovery run. Publish
+only validated bytes through a private destination-side staging directory,
+writing the manifest last and renaming the completed directory into place.
+Refuse an existing destination and remove owned staging directories on failure.
+The emulator destination and recovery exports use this same boundary.
+
+Repin `daemon_revision`, `private_input.SourceRevision` and
+`acquisition_provenance_input.record.Source` together to the clean implementation
+commit containing both this publication fix and the merged reconnect repair.
+Refresh support hashes in a subsequent metadata-only contract commit. Preserve
+`3071-emulator-20261011`, all selected methods and historical records. The eight
+recovery/destination paths and the Documentation handoff above remain pending;
+keep `needs-live-artifacts` and `needs-real-claude`. No acquisition or host cause
+proof is claimed by these offline corrections.
+
+Testing: `TestReadinessRejectBeforePortablePublication` first exports a valid
+control, then rejects private model/posture/configuration/provenance values and
+contradictory record sets without publishing either run. Destination preservation
+and complete valid publication have focused checks. The capture contract test
+checks the three source pins agree. Run focused tagged race checks, ordinary
+realclaude race checks, tagged realclaude vet, ordinary vet and daemon build.
+No new goroutines, admission state or exported interfaces are introduced.
+Estimated rework: under 300 written lines, two exporter consumers, three existing
+acceptance criteria and no new production rejection state. The investigation's
+existing one-consumer sizing floor still applies.
+
+Security review revision: the earlier allowlisting-before-publication assurance
+was incorrect; the verifier demonstrated a rejected private model in published
+`setup.json`. MUST FIX: validate all typed setup and complete candidate semantics
+inside mode-0700 private staging before either publication. Files are mode 0600;
+the manifest is written last, existing evidence is preserved, and errors name
+fixed categories rather than rejected values. No credentials, network calls,
+subprocesses, cryptography changes or permission/token behavior are added.
+Owned staging cleanup is synchronous and introduces no lock ordering. The existing
+deny scan remains an additional check. Verdict for the revised design: PASS;
+reviewer: builder, 2026-10-12. Documentation records the established mechanism only
+after the pending actual-client acquisition localizes it.
