@@ -210,7 +210,13 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 	}
 	if needsClear {
 		fresh := r
-		s.livePending = &fresh
+		if s.hosted != nil && s.hosted.pushDeferred {
+			if err := m.PushLiveState(ctx, s.connID, fresh); err != nil {
+				return err
+			}
+		} else {
+			s.livePending = &fresh
+		}
 	}
 	if s.liveWatermarks == nil {
 		s.liveWatermarks = make(map[string]*liveWatermark)
@@ -225,10 +231,14 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 }
 
 func (m *V2SessionManager) signalLiveDrain() {
+	held := make(map[string]bool)
+	for id, s := range m.sessions {
+		held[id] = !m.hostedPushAvailable(s)
+	}
 	m.pushMu.Lock()
 	queued := false
 	for id, q := range m.queues {
-		if s := m.sessions[id]; !q.overflowed && len(q.items) > 0 && s != nil && len(s.replayQueue) == 0 {
+		if s := m.sessions[id]; !q.overflowed && len(q.items) > 0 && s != nil && len(s.replayQueue) == 0 && s.livePending == nil && (!held[id] || q.items[0].barrier != nil) {
 			queued = true
 			break
 		}
@@ -242,7 +252,7 @@ func (m *V2SessionManager) signalLiveDrain() {
 		return
 	}
 	for _, s := range m.sessions {
-		if (s.livePending != nil || s.liveSnapshot != nil) && !m.pushRetired(s.connID) {
+		if !held[s.connID] && (s.livePending != nil || s.liveSnapshot != nil) && !m.pushRetired(s.connID) {
 			select {
 			case m.drainCh <- struct{}{}:
 			default:
@@ -262,6 +272,9 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 		if m.pushRetired(s.connID) {
 			continue
 		}
+		if (s.livePending == nil && (s.liveSnapshot == nil || pendingOnly)) || !m.reserveHostedPush(s) {
+			continue
+		}
 		var r LiveState
 		if s.livePending != nil {
 			r = *s.livePending
@@ -271,6 +284,7 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 			r, ok = s.liveSnapshot()
 			if !ok {
 				s.liveSnapshot = nil
+				m.releaseHostedPush(s)
 				m.signalLiveDrain()
 				return
 			}
@@ -280,6 +294,7 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 		if err := m.forwardLiveState(ctx, s, r); err != nil {
 			m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", s.connID)
 		}
+		m.releaseHostedPush(s)
 		m.signalLiveDrain()
 		return
 	}

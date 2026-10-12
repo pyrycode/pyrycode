@@ -100,6 +100,10 @@ func (m *V2SessionManager) releaseHosted(s *V2Session, count int) {
 	defer m.hostedMu.Unlock()
 	if in := s.hosted.inbox; !in.retired {
 		in.used -= count
+		select {
+		case m.drainCh <- struct{}{}:
+		default:
+		}
 	}
 }
 func (m *V2SessionManager) stopHosted() {
@@ -155,4 +159,40 @@ func hostedRecord(r apps.Record) protocol.HostedAppRecord {
 		}{r.LastError.Code, r.LastError.Message}
 	}
 	return item
+}
+
+// hostedPushAvailable is only a wake hint; reserveHostedPush performs admission.
+// Both run off pushMu so callback and producer locks are never nested.
+func (m *V2SessionManager) hostedPushAvailable(s *V2Session) bool {
+	if s == nil || s.hosted == nil {
+		return true
+	}
+	m.hostedMu.Lock()
+	defer m.hostedMu.Unlock()
+	in := s.hosted.inbox
+	return !in.retired && !in.overflow && in.used < hostedQueueLimit
+}
+
+// reserveHostedPush keeps a slot from being stolen by a callback between the
+// upstream pop and hosted admission. Only Run owns pushReserved.
+func (m *V2SessionManager) reserveHostedPush(s *V2Session) bool {
+	if s == nil || s.hosted == nil {
+		return true
+	}
+	m.hostedMu.Lock()
+	defer m.hostedMu.Unlock()
+	in := s.hosted.inbox
+	if in.retired || in.overflow || in.used >= hostedQueueLimit {
+		return false
+	}
+	in.used++
+	s.hosted.pushReserved = true
+	return true
+}
+
+func (m *V2SessionManager) releaseHostedPush(s *V2Session) {
+	if s != nil && s.hosted != nil && s.hosted.pushReserved {
+		s.hosted.pushReserved = false
+		m.releaseHosted(s, 1)
+	}
 }
