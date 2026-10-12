@@ -17,6 +17,9 @@ func TestCompatibilityProbeProcess(t *testing.T) {
 	args := os.Args[3:]
 	switch {
 	case len(args) == 5 && args[2] == "-c":
+		if _, err := os.Stat("expect-local"); err == nil && (!strings.Contains(args[3], "import einops, sentence_transformers, memsearch.embeddings.local, torch") || !strings.Contains(args[3], "device='cpu'")) {
+			os.Exit(4)
+		}
 		_, _ = os.Stdout.WriteString(`{"python":"3.12.11","pip":"24.3.1"}`)
 	case len(args) == 4 && filepath.Base(args[2]) == "memsearch" && args[3] == "--version":
 		_, _ = os.Stdout.WriteString("memsearch, version 0.4.21\n")
@@ -52,6 +55,11 @@ func TestCompatibilityProbeCancellation(t *testing.T) {
 			e.provision = func(ctx context.Context, dir string, p lock) error {
 				if err := base(ctx, dir, p); err != nil {
 					return err
+				}
+				if p.Local {
+					if err := os.WriteFile(filepath.Join(dir, "expect-local"), nil, 0600); err != nil {
+						return err
+					}
 				}
 				binary := "'" + strings.ReplaceAll(os.Args[0], "'", "'\"'\"'") + "'"
 				script := "#!/bin/sh\nexec " + binary + " -test.run=^TestCompatibilityProbeProcess$ -- \"$@\"\n"
