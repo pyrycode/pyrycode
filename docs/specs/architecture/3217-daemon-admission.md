@@ -4,6 +4,7 @@
 
 - `internal/config/config.go` → `Config`, `Load`: additive defaults and unsafe parser wrapping.
 - `internal/config/memory.go` → `UpdateMemory`, `memoryObject`: raw-value preservation and atomic replacement.
+- `internal/config/admission.go` → `decodeObject`, `validateAdmission`: shared occurrence checks and the validated credential map consumed by `Load`.
 - `cmd/pyry/main.go` → `runSupervisor`: startup config and daemon/control lifecycle.
 - `cmd/pyry/relay.go` → `relayWiring`, `startRelay`: loaded identity, relay inputs and shutdown classification.
 - `cmd/pyry/claude_account_startup_test.go` → `startAccountInstance`: existing hermetic daemon startup/stop pattern.
@@ -43,6 +44,7 @@ No new production goroutines or locks. Startup configuration is read synchronous
 | Event | Race-enabled proof |
 |---|---|
 | Config missing/absent/empty/invalid and repeated memory update | `TestRelayAdmissionConfig`, `TestRelayAdmissionStorage`, `TestRelayAdmissionUpdateMemory` |
+| Alternate admission-field spelling or repeated field/identity, including escaped names | `TestRelayAdmissionFieldBoundaries` checks both read paths, secret-safe errors and unchanged rejected-update bytes |
 | Two named instances select independently; selected entry absent | `TestDaemonAdmissionSelectionAndRotation`, `TestDaemonAdmissionRejection` |
 | File edit followed by reconnect retains startup selection | `TestDaemonAdmissionSelectionAndRotation` |
 | Overlap accepts old/new; revocation drops sockets then rejects old | `TestDaemonAdmissionSelectionAndRotation` |
@@ -66,7 +68,7 @@ None.
 ## Documentation handoff
 
 Pending documentation stage:
-- In `docs/knowledge/features/config-package.md`, add **Relay admission credentials** and reconcile **Load semantics**: optional exact-identity map, missing versus malformed/present-empty behavior, effective-user ownership/mode checks, secret-safe load/update errors, map-preserving memory updates, no secret flag/env override and restart-only application.
+- In `docs/knowledge/features/config-package.md`, add **Relay admission credentials** and reconcile **Load semantics**: optional exact-identity map, missing versus malformed/present-empty behavior, effective-user ownership/mode checks, secret-safe load/update errors, map-preserving memory updates, no secret flag/env override and restart-only application. Include canonical field spelling and rejection of duplicate admission fields/identity keys.
 - In `docs/knowledge/features/relay-package.md`, reconcile **Daemon admission security boundary (declared)** and **Reconnect semantics** to state that configured daemon delivery and local-service-preserving 401 handling are implemented; Relay #167 and operator activation remain separate.
 - In `docs/protocol-mobile.md`, under **Daemon admission (declared)**, update implementation ownership to name this completed daemon companion, retaining the off-mode production default, Relay #167 prerequisite and operator-only rollout checklist. Do not claim enforcement or live rollout verification.
 
@@ -76,13 +78,13 @@ Pending documentation stage:
 
 **Findings:**
 
-- [Trust boundaries] Raw config field validation precedes typed decoding; every supplied token is validated. `startRelay` selects only the loaded exact identity; 401 classification trusts the library sentinel alone.
+- [Trust boundaries] MUST FIX (verifier findings 1 and 2, addressed by the revision below): map decoding hid duplicate occurrences while struct decoding accepted case variants and merged repeated maps. `decodeObject` now rejects repeated admission fields and identity keys from original JSON occurrences, and `validateAdmission` rejects noncanonical case-folded field spellings. `Load` consumes only the map returned by validation. `startRelay` selects only the loaded exact identity; 401 classification trusts the library sentinel alone.
 - [Tokens] Plaintext private storage requires effective ownership and exact modes even for `{}`. Restart reloads rotation; no token generation, equality authentication or secret override is added.
 - [File operations] Descriptor-relative reads and handle metadata bind ownership/mode checks to bytes and parent. Followed targets must be private; same-user filesystem replacement remains inside the trusted operator boundary. Atomic memory writes and caller serialization remain. No caller-controlled path joins are added.
 - [Subprocesses] No production subprocess or environment-secret changes. Hermetic daemon tests use inert existing stubs.
 - [Cryptography] No primitives, comparisons or keys change. Production TLS and Noise remain; Relay token comparison/enforcement belongs to Relay #167.
 - [Network and I/O] Reuse transport limits, timeouts and validated admission header; no new listener or frame surface.
-- [Errors, logs, telemetry] SHOULD FIX, included in design: discard parser causes for all config decode errors, including unrelated/nested fields, rather than sanitizing outer text. Admission diagnostic is static without peer error attributes.
+- [Errors, logs, telemetry] Parser, duplicate-key and field-spelling failures return static text without input values or decoder causes in both `Load` and `UpdateMemory`; regression tests inspect error chains. Admission diagnostic is static without peer error attributes.
 - [Concurrency] No new shared mutable production state; existing cancellation joins all workers. Test socket/attempt records are synchronized and all daemons joined.
 - [Threat model] Relay compromise/stolen-token risks and explicit enforcement activation remain with Relay #167/operator rollout. This slice preserves phone authorization and encrypted transport, and does not claim enforcement.
 
@@ -92,3 +94,5 @@ Pending documentation stage:
 ## Revisions
 
 2026-10-12: `TestRelayAdmissionStorage` exposed that opening a parent for descriptor-relative reads adds a read-permission requirement that legacy configs never had. On parent-open permission errors, `readConfig` retains legacy `os.ReadFile` behavior but supplies no trusted metadata, so any present admission map still fails the static storage check. Valid admission configs always retain pinned handle validation. Ownership injection is covered separately by `TestRelayAdmissionOwnership`. The storage reader lives in new `internal/config/admission.go` to keep this security boundary together; no dependency or exported type was added. Final written scope remains below 800 lines.
+
+2026-10-12 (verifier findings 1 and 2): The decoder boundary requires occurrence checks as well as final-value checks. Both config read paths use `decodeObject` to reject duplicate admission fields before accepting the collapsed object; admission-map decoding rejects duplicate exact identities, including escaped equivalents. `validateAdmission` rejects alternate case-folded spellings rather than ignoring configured credentials, and returns the exact validated map for startup consumption. Unrelated field decoding and case-distinct identity keys retain their compatibility. `TestRelayAdmissionFieldBoundaries` first reproduced the findings, then passed all 15 rejection scenarios under the race detector, checking `Load`, `UpdateMemory`, error chains and rejected-update preservation. The security review now records both parser-boundary defects and their remedies. No overlapping feature branch touches these config files; the rework changes no daemon lifecycle or network policy.

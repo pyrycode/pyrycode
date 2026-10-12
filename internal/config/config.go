@@ -82,15 +82,17 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("config: read %s: %w", path, err)
 	}
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(data, &root); err != nil {
-		return Config{}, errors.New("config: parse: invalid JSON configuration")
+	root, err := decodeObject(data, "relay_admission_tokens")
+	if err != nil {
+		return Config{}, err
 	}
-	if err := validateAdmission(root, file, parent); err != nil {
+	tokens, err := validateAdmission(root, file, parent)
+	if err != nil {
 		return Config{}, err
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, errors.New("config: parse: invalid JSON configuration")
 	}
+	cfg.RelayAdmissionTokens = tokens
 	return cfg, nil
 }

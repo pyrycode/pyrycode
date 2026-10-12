@@ -71,14 +71,15 @@ func updateMemory(path string, settings MemorySettings, ops memoryWriteOps) (ret
 	}
 	root := make(map[string]json.RawMessage)
 	if err == nil {
-		if err := json.Unmarshal(data, &root); err != nil {
-			return errors.New("config: parse: invalid JSON configuration object")
+		root, err = decodeObject(data, "relay_admission_tokens")
+		if err != nil {
+			return err
 		}
 		// Unlike nested objects, a null document is not a config object.
 		if root == nil {
 			return fmt.Errorf("config: config must be an object")
 		}
-		if err := validateAdmission(root, file, parent); err != nil {
+		if _, err := validateAdmission(root, file, parent); err != nil {
 			return err
 		}
 	}

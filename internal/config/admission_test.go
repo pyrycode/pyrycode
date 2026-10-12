@@ -61,6 +61,7 @@ func TestRelayAdmissionConfig(t *testing.T) {
 	}{
 		{"empty object", `{}`, true},
 		{"exact identities", `{" Identity ":"` + admissionTestToken + `","other":"` + admissionTestToken + `"}`, true},
+		{"case distinct identities", `{"Selected":"` + admissionTestToken + `","selected":"` + strings.Repeat("b", 64) + `"}`, true},
 		{"null map", `null`, false}, {"array map", `[]`, false}, {"string map", `"private-parser-excerpt"`, false},
 		{"null entry", `{"private-identity":null}`, false}, {"numeric entry", `{"private-identity":123}`, false},
 		{"empty entry", `{"private-identity":""}`, false},
@@ -126,6 +127,60 @@ func TestRelayAdmissionConfig(t *testing.T) {
 	}
 }
 
+func TestRelayAdmissionFieldBoundaries(t *testing.T) {
+	t.Parallel()
+	valid := `{"selected":"` + admissionTestToken + `"}`
+	for _, tc := range []struct {
+		name, data string
+		public     bool
+	}{
+		{"uppercase storage bypass", `{"RELAY_ADMISSION_TOKENS":` + valid + `}`, true},
+		{"mixed case field", `{"Relay_Admission_Tokens":` + valid + `}`, false},
+		{"unicode folded field", `{"relay_admiſſion_tokens":` + valid + `}`, false},
+		{"uppercase invalid unselected", `{"RELAY_ADMISSION_TOKENS":{"selected":"` + admissionTestToken + `","private-identity":null}}`, false},
+		{"uppercase null override", `{"relay_admission_tokens":` + valid + `,"RELAY_ADMISSION_TOKENS":null}`, false},
+		{"uppercase null before canonical", `{"RELAY_ADMISSION_TOKENS":null,"relay_admission_tokens":` + valid + `}`, false},
+		{"duplicate field null first", `{"relay_admission_tokens":null,"relay_admission_tokens":` + valid + `}`, false},
+		{"duplicate field null last", `{"relay_admission_tokens":` + valid + `,"relay_admission_tokens":null}`, false},
+		{"duplicate field invalid unselected", `{"relay_admission_tokens":{"private-identity":"private-parser-excerpt"},"relay_admission_tokens":` + valid + `}`, false},
+		{"duplicate valid fields", `{"relay_admission_tokens":` + valid + `,"relay_admission_tokens":` + valid + `}`, false},
+		{"escaped duplicate field", `{"relay_admission_tokens":` + valid + `,"relay_admission_\u0074okens":` + valid + `}`, false},
+		{"duplicate identity null first", `{"relay_admission_tokens":{"selected":null,"selected":"` + admissionTestToken + `"}}`, false},
+		{"duplicate identity null last", `{"relay_admission_tokens":{"selected":"` + admissionTestToken + `","selected":null}}`, false},
+		{"duplicate valid identities", `{"relay_admission_tokens":{"selected":"` + admissionTestToken + `","selected":"` + admissionTestToken + `"}}`, false},
+		{"escaped duplicate identity", `{"relay_admission_tokens":{"selected":null,"\u0073elected":"` + admissionTestToken + `"}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := admissionConfigFile(t, tc.data)
+			if tc.public {
+				if err := os.Chmod(path, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := Load(path)
+			if err == nil {
+				t.Error("ambiguous admission configuration loaded")
+			}
+			assertConfigErrorSafe(t, err)
+			if !reflect.DeepEqual(cfg, Config{}) {
+				t.Error("failure returned partial config")
+			}
+			if err := UpdateMemory(path, MemorySettings{}); err == nil {
+				t.Error("ambiguous admission update accepted")
+			} else {
+				assertConfigErrorSafe(t, err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil || string(raw) != tc.data {
+				t.Error("rejected update changed config bytes")
+			}
+		})
+	}
+}
+
 func TestRelayAdmissionStorage(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -184,7 +239,7 @@ func TestRelayAdmissionStorage(t *testing.T) {
 
 func TestRelayAdmissionUpdateMemory(t *testing.T) {
 	t.Parallel()
-	data := `{"relay_admission_tokens":{" A ":"` + admissionTestToken + `","B":"` + strings.Repeat("b", 64) + `"},"unknown":123456789012345678901234567890}`
+	data := `{"relay_admission_tokens":{" A ":"` + admissionTestToken + `","B":"` + strings.Repeat("b", 64) + `","b":"` + strings.Repeat("c", 64) + `"},"unknown":123456789012345678901234567890}`
 	path := admissionConfigFile(t, data)
 	for i := 0; i < 2; i++ {
 		if err := UpdateMemory(path, MemorySettings{Capture: MemoryCapture{Agent: "claude"}}); err != nil {
@@ -248,7 +303,7 @@ func TestRelayAdmissionOwnership(t *testing.T) {
 	}{
 		{uid, uid, true}, {uid + 1, uid, false}, {uid, uid + 1, false},
 	} {
-		err := validateAdmission(root, admissionFileInfo{file, tc.fileUID}, admissionFileInfo{parent, tc.parentUID})
+		_, err := validateAdmission(root, admissionFileInfo{file, tc.fileUID}, admissionFileInfo{parent, tc.parentUID})
 		if (err == nil) != tc.valid {
 			t.Errorf("ownership validation: %v", err)
 		}

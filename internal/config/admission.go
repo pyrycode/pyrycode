@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -43,29 +45,78 @@ func readConfig(path string) ([]byte, os.FileInfo, os.FileInfo, error) {
 	return data, file, parent, err
 }
 
-func validateAdmission(root map[string]json.RawMessage, file, parent os.FileInfo) error {
+// decodeObject rejects duplicate keys for uniqueField, or all keys when it is
+// empty. Other fields keep their existing JSON decoding compatibility.
+func decodeObject(data []byte, uniqueField string) (map[string]json.RawMessage, error) {
+	var object map[string]json.RawMessage
+	invalid := errors.New("config: parse: invalid JSON configuration object")
+	if err := json.Unmarshal(data, &object); err != nil {
+		return nil, invalid
+	}
+	if object == nil {
+		return nil, nil
+	}
+	// Validate the complete document before walking its original key occurrences.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if _, err := dec.Token(); err != nil {
+		return nil, invalid
+	}
+	seen := make(map[string]bool)
+	for dec.More() {
+		name, err := dec.Token()
+		key, ok := name.(string)
+		if err != nil || !ok {
+			return nil, invalid
+		}
+		if (uniqueField == "" || key == uniqueField) && seen[key] {
+			return nil, errors.New("config: duplicate relay admission field or identity")
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, invalid
+		}
+	}
+	return object, nil
+}
+
+func validateAdmission(root map[string]json.RawMessage, file, parent os.FileInfo) (map[string]string, error) {
+	for key := range root {
+		if key != "relay_admission_tokens" && strings.EqualFold(key, "relay_admission_tokens") {
+			return nil, errors.New("config: relay admission field must use relay_admission_tokens spelling")
+		}
+	}
 	raw, present := root["relay_admission_tokens"]
 	if !present {
-		return nil
+		return nil, nil
 	}
-	var tokens map[string]string
-	if err := json.Unmarshal(raw, &tokens); err != nil || tokens == nil {
-		return errors.New("config: relay admission tokens must be an object of credentials")
+	entries, err := decodeObject(raw, "")
+	if err != nil {
+		return nil, err
 	}
-	for _, token := range tokens {
+	if entries == nil {
+		return nil, errors.New("config: relay admission tokens must be an object of credentials")
+	}
+	tokens := make(map[string]string, len(entries))
+	for identity, value := range entries {
+		var token string
+		if err := json.Unmarshal(value, &token); err != nil {
+			return nil, errors.New("config: relay admission tokens must be an object of credentials")
+		}
 		if len(token) != 64 {
-			return errors.New("config: relay admission tokens must be 64 lowercase hexadecimal characters")
+			return nil, errors.New("config: relay admission tokens must be 64 lowercase hexadecimal characters")
 		}
 		for _, c := range []byte(token) {
 			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
-				return errors.New("config: relay admission tokens must be 64 lowercase hexadecimal characters")
+				return nil, errors.New("config: relay admission tokens must be 64 lowercase hexadecimal characters")
 			}
 		}
+		tokens[identity] = token
 	}
 	if !privateAdmissionStorage(file, 0o600) || !privateAdmissionStorage(parent, os.ModeDir|0o700) {
-		return errors.New("config: relay admission requires an effective-user-owned 0600 file and 0700 parent directory")
+		return nil, errors.New("config: relay admission requires an effective-user-owned 0600 file and 0700 parent directory")
 	}
-	return nil
+	return tokens, nil
 }
 
 func privateAdmissionStorage(info os.FileInfo, mode os.FileMode) bool {
