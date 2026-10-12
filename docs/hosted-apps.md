@@ -3,11 +3,12 @@
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 defines the hosting design. Strict manifest validation, durable registration,
 lifecycle mutations, restart normalization and callable committed-release
-process ownership, health supervision and guarded private targets are implemented
-in the `internal/apps` package. The relay implements authenticated paged discovery,
-committed lifecycle notifications and list cancellation. The daemon owns storage,
+process ownership, health supervision, automatic reconciliation/recovery and
+guarded private targets are implemented in the `internal/apps` package. The relay
+implements authenticated paged discovery, committed lifecycle notifications and
+list cancellation. The daemon owns storage,
 discovery subscriptions and cancellable delivery. Process-owner daemon wiring
-(#3204), automatic recovery (#3207) and resource routing
+(#3204) and resource routing
 (#3123) remain separate work before production capability activation.
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
@@ -207,7 +208,7 @@ for storage, concurrency and regression-test constraints.
 
 ### Registration and observed state
 
-A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists observations; callable `Owner.Start`, `Owner.Stop` and `Owner.Shutdown` implement local process ownership with asynchronous health confirmation and guarded private targets. Automatic reconciliation/recovery (#3207) and daemon wiring (#3204) remain separate work. New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
+A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists observations; callable `NewOwner`, `Owner.Start`, `Owner.Stop` and `Owner.Shutdown` implement automatic local reconciliation/recovery with asynchronous health confirmation and guarded private targets. Daemon wiring remains #3204. New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
 
 The implemented discovery mapping has these exact fields. Unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality and the package's unset storage values do not change record nullability.
 
@@ -237,9 +238,10 @@ advancing revisions or notifying. Another app's commit does not invalidate this
 app's observation. Existing unconditional `UpdateLifecycle` retains its complete
 replacement behavior; both paths persist before exposing records or notifications.
 
-Explicit start durably resumes `available` intent, clears the previous error and
-sets `starting` when an active release exists; an unpublished registration stays
-`stopped` and launches nothing. Failed intent/starting persistence launches
+Explicit start durably resumes `available` intent when stopped or locally
+suppressed, clears the previous error and sets `starting` when an active release
+exists; an unpublished registration stays `stopped` and launches nothing.
+Failed intent/starting persistence launches
 nothing. Spawn alone establishes `starting`; `Start` returns on spawn/failure,
 without waiting for readiness. A final locked revision and cancellation check
 prevents obsolete preparation from spawning. The launch worker then confirms
@@ -249,20 +251,45 @@ before exposing a target. Title, active/pending releases and desired intent are
 preserved. App-revision and private generation checks reject obsolete results,
 including newer title, intent or active/pending-release commits during startup.
 Rejected/failed running persistence retires that generation and cleans up its
-group. Subsequent failure/exit/shutdown observations use the returned running
-revision; neither old probes nor exits can overwrite newer commits or retire
-replacement ownership.
+group. Failure/exit observations recheck current generation, available intent and
+active release, then conditionally update the latest matching record, preserving
+newer title, manifest and pending-release commits. Shutdown observations use the
+returned running revision; neither old probes nor exits can overwrite newer
+commits or retire replacement ownership.
 Validation/spawn failure records `app.unavailable` / `Service could not start`;
 startup/runtime health failure records `app.unavailable` / `Service health check failed`;
 unexpected exit records `app.unavailable` / `Service exited unexpectedly`, only
-while its revision is current. Child output is discarded; persisted errors contain
-no output, paths or endpoints. Local preparation and cleanup errors carry operation
-context and preserve `errors.Is`; persistence failures are returned, with
+while generation, available intent and active release still match. Child output
+is discarded; persisted errors contain no output, paths or endpoints. Local
+preparation and cleanup errors carry operation context and preserve `errors.Is`;
+persistence failures are returned, with
 asynchronous observation/cleanup failures retained for `Shutdown` to surface.
 
 The host change sequence advances for registration, manifest/title/desired/state/release/error changes and removal, including restart state normalization; persist before announcing. It never resets on reconnect/restart or wraps; exhaustion refuses changes rather than reusing revisions. Semantic no-ops advance nothing. Committed package updates are ordered detached whole records, and removals are identity/revision tombstones as described above. The wire contract's `app_removed` carries a tombstone revision and removes only the registration; deletion does not silently erase data, and explicit data deletion is outside v1. No event-ring or conversation-history replay is used for apps.
 
-`Open` durably normalizes observed state before any launch/probe or reader exposure: available apps with active releases become starting; unpublished or intentionally stopped apps become stopped. Only changed states receive new revisions; unchanged reopen adds none. Opening the registry or constructing an owner performs no startup scan or launch. An explicit `Owner.Start` establishes fresh health-confirmed ownership; automatic reconciliation remains #3207. The pending reconciliation contract uses exponential retry delays of 1, 2, 4, 8, 16, then 30 seconds, resets after 60 seconds healthy, and stops immediately when desired becomes stopped. Every new launch has a fresh private generation; repeated start of the current owned generation creates no duplicate.
+`Open` durably normalizes observed state before any launch/probe or reader exposure:
+available apps with active releases become starting; unpublished or intentionally
+stopped apps become stopped. Only changed states receive new revisions; unchanged
+reopen adds none. Opening the registry launches nothing. Successful `NewOwner`
+construction subscribes before its initial `Registry.List` and starts background
+reconciliation without waiting for services to spawn or become healthy. Callbacks
+only send a nonblocking coalesced wake and call neither registry nor owner methods,
+including unsubscribe. The reconciler lists current state and validates the host
+revision under the registry lock before applying it, discarding stale snapshots
+so concurrent stop/removal or publication cannot be missed or overwritten.
+
+Initially and after committed changes, available registrations with active
+releases launch automatically; stopped/unpublished registrations launch nothing.
+Every automatic attempt rechecks committed intent/release and conditionally
+observes starting without changing intent. Explicit starts and automatic work
+coalesce; lifecycle notifications do not cause duplicate launches or restart loops.
+Healthy metadata-only changes retain their generation, and duplicate starts or
+metadata/observation notifications cannot bypass scheduled backoff. Candidate
+manifest edits never activate a release or trigger migrations/cutover. After
+shutdown, reopen the same root with exclusive registry ownership and construct a
+new owner: available committed releases receive fresh processes and matching
+health, stopped/unpublished records remain unlaunched and existing data survives.
+See [Startup and health](#startup-and-health) for retry and cancellation timing.
 
 ## Runtime and layout
 
@@ -334,7 +361,8 @@ boundary. These commands are argv arrays executed in the selected source/staging
 tree, not shell text assembled from wire fields.
 
 `NewOwner(registry, nodeExecutable)` selects one executable and resolves its
-absolute path without runtime fallback. `Owner.Start` executes only the committed
+absolute path without runtime fallback and starts automatic reconciliation.
+Explicit starts and automatic attempts execute only the committed
 `Record.ActiveRelease`, even when `Record.Manifest` describes another candidate.
 It resolves exactly one matching validated
 `APPS_ROOT/<app_id>/builds/<build_id>/app.json`. Build directory names must be 64
@@ -373,11 +401,14 @@ The Node version check also inherits no environment.
 The owner reserves an ephemeral loopback listener and keeps ports unique across
 its live/in-flight generations. It closes the listening socket immediately before
 spawn so the service can bind, retaining private ownership of the port until
-generation retirement. Failed launch releases the reservation; the next explicit
+generation retirement. Failed launch releases the reservation; the next
 attempt excludes that app's previous reserved port. Listener handoff cannot prevent
 another OS process taking the port; bind failure, process exit or failed health
-confirmation retires ownership and cleans up the group. A later explicit launch
-uses a fresh endpoint; automatic retry scheduling (#3207) remains pending.
+confirmation retires ownership and cleans up the group. Automatic recovery waits
+until retirement, reservation release, group cleanup and child wait complete,
+then applies the [retry delay](#startup-and-health). Every attempt uses a fresh
+private generation and endpoint reservation while retaining the same app data;
+restart requires fresh matching health rather than stored running state.
 Endpoints and generation records stay private and never enter discovery.
 
 The service binds only that host/port and exposes `/api/…` plus `/_pyry/health`.
@@ -662,11 +693,12 @@ serialization against service writers and the 60-second migration deadline.
 ### Startup and health
 
 The callable process owner is independent of channel sessions and supplies local
-`Start`, `Stop` and `Shutdown` for daemon/publisher consumers. Concurrent starts
-for one app coalesce; repeated start of its current owned generation creates no
-duplicate child. For an already spawned generation, an explicit start seeing a
-different committed active release or stopped intent retires the old generation
-before preparing a replacement.
+`Start`, `Stop` and `Shutdown` for daemon/publisher consumers. Successful
+construction begins snapshot/subscription reconciliation asynchronously. Explicit
+starts, reconciliation and retries coalesce per app; compatible current ownership
+creates no duplicate child. Committed stopped intent, removal or active-release
+changes cancel incompatible ownership before any replacement. Healthy
+metadata-only updates retain the current generation.
 Each new launch has private cancellation, process-group and port ownership.
 Cancelling the initiating start context retires that generation; a coalesced caller
 can cancel its own wait independently. Start returns after spawn or failure and
@@ -688,31 +720,54 @@ failure count; one or two failures alone preserve established readiness. The
 third retires readiness, conditionally commits failed while still current and
 stops the owned group. Intervals are measured from probe start, accounting for
 request duration. Startup timeout/failure, unexpected exit and bind collision
-also retire targets/reservations and clean up the group; the next explicit launch
+also retire targets/reservations and clean up the group; every retry
 uses a fresh endpoint. The 15-second bound covers the readiness decision;
 cleanup retains its separate five-second grace.
 
-`Owner.Stop` cancels in-flight work and serializes ownership capture/cancellation
-with the durable stopped-intent write and launch admission. After releasing both
-locks, it retires the owned group: send SIGTERM only to that group, allow up to
+Failed launches, unexpected exits, bind collisions and sustained health failures
+retry after 1, 2, 4, 8, 16, then 30 seconds, continuing at 30 seconds. Each delay
+begins after completed retirement, reservation release, process-group cleanup and
+direct-child wait. Sixty seconds of uninterrupted health-confirmed running under
+the existing three-failure policy resets the next delay to one second, including
+an exit at that boundary before the next successful probe. Duplicate starts and
+metadata/observation notifications neither reset nor bypass backoff; an explicit
+start during a scheduled delay returns the last launch failure or `ErrUnavailable`.
+Automatic admission-write failures also back off, exposing no target and spawning
+nothing. Failed running persistence cleans up owned candidates and is retained
+through owner error paths. Each attempt rechecks available intent and the active
+release and uses secure committed-release execution and fresh matching health.
+Late probes, exits, timers and retired targets cannot affect replacement generations.
+Independent per-app workers keep startup, failure, stop and recovery of one app
+from interrupting another app or a conversation.
+
+Committed stopped intent or removal promptly retires readiness and wakes
+reconciliation to cancel startup/backoff without waiting for a retry/probe deadline.
+`Owner.Stop` suppresses retries, cancels in-flight work and serializes ownership
+capture/cancellation with the durable stopped-intent write and launch admission.
+After releasing both locks, it retires the owned group: send SIGTERM only to that group, allow up to
 5 seconds, SIGKILL surviving members, and wait for the direct child. Cleanup
 tracks the group even if the leader exits before descendants; it never signals a
 sibling app's group. Only after cleanup does stop conditionally commit observed
 `stopped`. Repeated stop is harmless. Concurrent stops accept a stale final
 observation only when the latest record already has stopped intent and state;
 newer available intent still returns `ErrStale`. Failed intent persistence still
-cancels and cleans up ownership, returns failure and leaves committed intent
-unchanged. A failed final observation returns failure without claiming it committed.
+cancels and cleans up ownership, locally suppresses retries until explicit start,
+returns failure and leaves committed intent unchanged. A failed final observation
+returns failure without claiming it committed. Removal retains source/build/data.
 Stop, shutdown and initiating-context cancellation retire readiness before further
 target use, including when lifecycle persistence fails.
 
-`Owner.Shutdown` prevents further launches (`ErrClosed`), cancels all owned
-generations, joins workers and conditionally observes stopped without changing
-desired intent. It also surfaces retained asynchronous persistence/cleanup errors.
-Callable health-confirmed supervision adds no startup scan, registry subscriptions,
-automatic retries or publisher cutover policy. Daemon wiring is #3204,
-automatic recovery #3207, publication/migrations/activation
-and rollback #3125, and encrypted resource capability activation #3123.
+`Owner.Shutdown` prevents further launches (`ErrClosed`), detaches its registry
+subscription outside owner locks, cancels reconciliation/retry/launch/health work
+and all owned generations, and joins workers and processes. It conditionally
+observes stopped without changing desired intent and surfaces retained asynchronous
+persistence/cleanup errors. Reopening after shutdown requires exclusive root
+ownership, fresh processes and fresh matching health; existing data bytes survive,
+and stopped/unpublished registrations stay unlaunched.
+Callable reconciliation/recovery is complete. Daemon wiring and the full
+Node/SQLite/unrelated-channel integration proof remain #3204;
+publication/migrations/activation and rollback remain #3125, and encrypted
+resource capability activation remains #3123.
 
 The maintained standalone template supplies its own migration/startup validation
 and health endpoint. The commands below exercise that template directly; they do
