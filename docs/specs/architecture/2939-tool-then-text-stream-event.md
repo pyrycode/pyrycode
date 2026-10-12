@@ -83,6 +83,59 @@ Pending documentation stage: in `docs/knowledge/features/streamsup-package-turn-
 
 ## Revisions
 
+### 2026-10-12 — orchestrator shared-harness evidence-selection repair
+
+The concrete rework is diagnostic selection, not parser classification. The
+portable driver's default reconstructs the 64 curated methods from mobile
+`5de4f4459`'s `scripts/e2e-emulator.sh` and submits them together to the existing
+admitted Android launcher. An explicit `--focused` retains the named-method
+proof recipe. Record the historical selector hash, actual mobile/agents/daemon
+revisions, relevant source differences, selected methods and observed Android
+TestRunner start/finish records. XML order is report order, not execution order;
+missing execution markers make context evidence incomplete.
+
+Add a separate tagged shared-harness evidence reader. Count mixed-method XML
+without relaxing `tttCountMobileXML`, `tttMobileAdmit` or cause completion. Inventory
+every child stdout/manifest pair, including children without the target prompt,
+all turns and any post-result rows. Keep bounded private recovery outside the
+worktree. Redact all children with one identity map, preserving wire shapes and
+preceding init/control/message/block state. Retain result row indices, original
+and retained rejection indices/sites, timestamps, spawn argv, observed init
+settings and explicit loss/tail/I/O counters for each child. Incomplete children
+remain diagnostic evidence and cannot become a cause fixture. Refuse missing
+pairs, revision mismatch, unsafe paths, overflow or deny-scan failures. No raw
+stdout or model text enters application logs.
+
+Files read additionally: the portable driver and its tests; the tagged daemon
+recorder; mobile historical/current selector and admitted launcher
+`run_on_device`/`run_device_command` (existing shutdown custody stays intact).
+No fetched feature branch overlaps these files. Estimated additional written
+work: 650–750 lines, zero exports, one driver consumer, no production parser
+call-site changes or new product reject branches. The shared reader is solely
+evidence for this repair; the existing one-consumer handback floor applies.
+
+Concurrency remains synchronous recording under the recorder mutex; add child
+start/end timestamps without new goroutines. Race proofs:
+`TestToolThenTextSharedHarnessXML` retains mixed methods and rejects that XML as
+focused proof; `TestToolThenTextSharedHarnessChildren` retains a rejecting
+non-prompt child and post-result rows, plus explicit incomplete-tail evidence;
+`TestToolThenTextDaemonCapture` covers respawn timestamp replacement. Portable
+driver tests verify one 64-method admission and order/provenance recovery.
+
+Security re-review: PASS. Existing 0700 recovery/0600 files and exclusive writes
+remain. Bound child count, per-child bytes and aggregate reader input; validate
+basenames and source pins. Reuse token-span redaction and credential/path scanner
+before any durable redacted write. Raw logcats remain private; only parsed
+allowlisted TestRunner identities/timestamps enter evidence. No credential lookup,
+configuration change, new crypto or production binary replacement is added.
+
+After focused offline checks, push the candidate and request the existing
+`android-tool-then-text` route. Establish the exact rejecting guard from returned
+input before any parser repair. Keep both live labels, normal review, the exact
+documentation handoff and subsequent dispatcher-owned full live gate. A
+non-rejecting shared capture remains inconclusive and requires refinement of the
+remaining reproduction gap, not relaxed cause admission.
+
 - 2026-10-11: The forced isolated capture ran on Claude 2.1.280 with observed `claude-sonnet-5`, permission `default`, explicit Bash admission and no model/effort override; init omitted effort. The first diagnostic run executed and failed in the fixture writer (1 executed / 0 passed / 1 failed / 0 skipped). A second run retained 30 ordered rows through result with zero loss, no tail and no rejection (1 executed / 1 passed / 0 failed / 0 skipped). This does not establish the mobile cause. Add `TestParser_ToolThenTextIsolatedCapture` to retain that observed valid behavior, and hand off the named mobile drive's rejecting ordered capture with `needs-live-artifacts`; production parser behavior stays unchanged until a rejecting guard is demonstrated. Historical mobile settings remain unknown.
 - 2026-10-11: Offline redaction negatives exposed two instrument traps: a root path's slug can corrupt negative JSON numbers, and global short-identity replacement can change string-valued indices. Ignore nondynamic root paths and substitute identities only in identity-valued JSON fields, decoding numbers with `UseNumber`. Final evidence must come from a fresh forced capture after these instrument corrections.
 - 2026-10-11: Final forced capture at committed probe `98b937b6f45cf5fe6dff4f8280d1b2e713789edd` again executed and passed (1/1/0/0), retaining 30 rows, three text chunks, one completed tool start and one successful tool completion. It reproduced no rejection. The fixture's dirty-tree flag reflects the earlier untracked generated fixture; the parser and runner source were committed. `TestParser_ToolThenTextIsolatedCapture` proves this fixture's ordered, exactly-once delivery; existing stream-event refusal/thinking/reset tests remain green under race detection. The missing rejecting mobile sequence and unchanged focused mobile pass are pending through the live-artifact handoff, not claimed as completed acceptance.
