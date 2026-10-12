@@ -74,7 +74,7 @@ type testHostedTransport struct {
 func testHostedRealTransport(t *testing.T, enabled bool) *testHostedTransport {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	p := &testHostedTransport{t: t, wires: make(chan protocol.RoutingEnvelope, 32), entered: make(chan struct{}, 32), delivered: make(chan error, 32)}
+	p := &testHostedTransport{t: t, wires: make(chan protocol.RoutingEnvelope, 128), entered: make(chan struct{}, 128), delivered: make(chan error, 128)}
 	connected := make(chan *websocket.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
