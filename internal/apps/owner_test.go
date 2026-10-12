@@ -216,11 +216,11 @@ func TestOwnerDuplicateAndIsolation(t *testing.T) {
 	other := testID(9)
 	testRegister(t, r, testInput(other))
 	v := ownerRecord(t, r, other)
+	ownerBuild(t, r, other, "a", "1.0.0", ownerService)
 	_, e = r.UpdateLifecycle(testHost, other, Lifecycle{Title: v.Title, Desired: "available", State: "stopped", ActiveRelease: "1.0.0"})
 	if e != nil {
 		t.Fatal(e)
 	}
-	ownerBuild(t, r, other, "a", "1.0.0", ownerService)
 	if e = o.Start(context.Background(), other); e != nil {
 		t.Fatal(e)
 	}
