@@ -1,7 +1,8 @@
 # `internal/apps` — durable host-app registrations
 
 This package owns strict manifest validation, durable registrations and callable
-health-confirmed committed-release process ownership independent of conversations.
+health-confirmed committed-release process ownership and generation-bound stable
+response preparation independent of conversations.
 The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
 owns the field tables and registration behavior; the
 [v1 contract](../../specs/architecture/3120-hosted-app-contract.md) owns the broader
@@ -397,7 +398,85 @@ Backoff is a delay, never another registry state. No live Claude was used or
 required; seeded persistence supplies no resource-routing or publisher
 migration/rollback acceptance. See the [runtime reference](../../hosted-apps.md#runtime-and-layout).
 
+## Resource-serving
+
+`Owner.Prepare(ctx, serverID, appID, release, ResponseInput)` resolves committed
+local registration and active release before staging a caller-supplied
+identity-encoded body. The authenticated boundary supplies `serverID`; this
+method does not authenticate connections. Unknown, removed and foreign-host apps
+return `ErrNotFound`; an accessible app with another active release returns
+`ErrReleaseChanged`; a matching release without a live, health-confirmed owned
+generation returns `ErrUnavailable`. Preparation and every `Metadata`/`Read`
+remain bound to that process generation. Removal, release replacement, stop,
+exit or retirement invalidates in-flight and retained results; even a restart
+of the same release cannot revive them. Healthy metadata-only commits preserve
+the generation.
+
+`ResponseInput` supplies `Body`, `Size` (-1 for unknown), nonnegative decoded
+`Limit`, `Status`, `Headers`, and required `Reserve`/`Release` callbacks. A nonnil
+body transfers to preparation immediately on invocation, including identity or
+metadata failure, and is closed exactly once before successful return. Do not
+mutate the source or headers during preparation. Afterwards, source/header edits
+cannot alter the staged bytes, metadata or digest. `ResponseMetadata` contains
+status, detached headers, exact size and lowercase 64-hex SHA-256 of the complete
+body, including empty, binary and HTTP-error bodies.
+
+Status must be 200–599; only lowercase `content-type`, `cache-control`, `etag`
+and `last-modified` are accepted. Header objects allow at most 8 entries and
+4096 serialized JSON UTF-8 bytes; values must be valid, control-free UTF-8 of at
+most 1024 bytes. Empty/nil input headers become `{}`. Invalid metadata, size,
+limit or missing callbacks returns `ErrResponseMetadata`. Ordinary HTTP errors
+are successful preparation; consumer-specific policy is described in the
+[HTTP reference](../../hosted-apps.md#assetapi-fields-and-http-semantics).
+
+Staging uses immutable memory chunks, with no private disk spool. A known size
+above the limit fails with `ErrResponseLimit` before body allocation/read; other
+known sizes are reserved before either. Unknown sizes and growth reserve
+incrementally before allocation/read and are checked through EOF, never truncated
+into success. `Reserve(n)` atomically acquires all positive `n` bytes or refuses;
+refusal returns `ErrResponseCapacity` before further unreserved I/O. Both callbacks
+must return promptly and never reenter the result. Proving EOF at the decoded
+limit requires a reserved probe byte: even an empty or exact-limit body may need
+one temporary byte beyond its final size. Refusing that reservation must stop
+before the probe read. EOF releases unused reservations, retaining exactly the
+stable body size until delivery completion/disposal, even after consumption.
+
+The caller owns delivery. `PreparedResponse.Metadata` returns a detached snapshot
+while usable; `Read` serializes checked consumption. Copied metadata expires on
+retirement, and the delivery boundary must suppress retired work. After successful
+delivery call `Complete(nil)`; report delivery failure with `Complete(deliveryErr)`;
+use `Close` to abandon delivery. EOF alone does not release capacity. Source
+read/close failures and delivery failures reported while usable yield static
+`ErrResponseIO`, exposing no source path, endpoint or request diagnostics. Caller
+cancellation preserves standard context errors. Preparation failure, cancellation,
+generation retirement and disposal close the source and release acquired reservations exactly once;
+cleanup also reaches retained, unconsumed results. `Close` is idempotent, and
+disposal may race metadata access, consumption and cancellation safely.
+
+Bodies must support concurrent `Close` that promptly unblocks a pending `Read`,
+including on generation retirement. Caller-context cancellation alone cannot
+satisfy this obligation. See [concurrency](#concurrency-and-persistence) for cleanup
+ordering and [testing](#testing) for the source-error regression.
+
+Confined callable assets, MIME/path handling and navigation/SPA fallback remain
+pending in [#3258](https://github.com/pyrycode/pyrycode/issues/3258). API forwarding,
+backend header projection and HEAD/204/205/304 no-body semantics belong to
+[#3246](https://github.com/pyrycode/pyrycode/issues/3246); delivery admission,
+connection ceilings, credit, deadlines, wire serialization and transport error
+mapping belong to [#3247](https://github.com/pyrycode/pyrycode/issues/3247).
+Paired resource routing and `hosted_apps_v1` capability activation remain pending
+under [#3123](https://github.com/pyrycode/pyrycode/issues/3123).
+
 ## Concurrency and persistence
+
+Stable preparation subscribes before committed identity resolution to close the
+registration race. Registry callbacks only cancel incompatible work; taking a
+result lock there would invert the result → registry → owner checks. Its watcher
+observes caller cancellation, generation cancellation and process exit, closes
+the source before waiting for the staging mutex, then drops chunks, releases
+capacity and unsubscribes. Waiting for that mutex before source closure deadlocks
+when a staging read needs `Close` to unblock. `Complete`/`Close` join the watcher;
+independent once guards serialize source closure and disposal.
 
 Capture/cancel ownership and commit stopped intent under registry-then-owner
 locks, also used by start admission and final spawn. Capturing ownership before
@@ -469,6 +548,24 @@ original reader returns. Starting a replacement reader on every cancel would
 accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ## Testing
+
+`TestResponseIOAtChunkBoundary` returns bytes together with raw
+`io.ErrUnexpectedEOF` or a private source error at known-size and incremental
+chunk boundaries. `io.ReadFull` discards even sanitized source errors when those
+bytes fill its buffer; error sanitization alone therefore allowed failed sources
+to produce successful responses while the original tests stayed green.
+`PreparedResponse.stage` records non-EOF source failure independently and rejects
+the chunk before retaining it. EOF-derived short reads remain valid; raw source
+`io.ErrUnexpectedEOF` remains I/O failure. Each regression checks no result, no
+further read, one source close and complete reservation release.
+
+`TestResponseBounds` checks reserved EOF probing and refusal before unreserved
+I/O. `TestResponseCancellation` and `TestResponseRetirement` use a source whose
+read blocks until concurrent close, proving caller cancellation and generation
+retirement unblock staging. The retirement test's stop arm restarts the same
+release and rejects old partially consumed results. `TestResponseDisposalRace`
+races reading, metadata, delivery-failure completion, close and cancellation,
+checking exactly-once closure and zero retained capacity.
 
 Prepare a fixture's committed build before making its release available.
 Construction-time reconciliation can execute immediately after the lifecycle
