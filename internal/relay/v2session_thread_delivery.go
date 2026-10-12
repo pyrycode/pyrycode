@@ -36,7 +36,8 @@ func (m *V2SessionManager) DeliverThread(ctx context.Context, connID string, env
 	if err != nil || len(raw) > protocol.MaxThreadEnvelopeBytes {
 		return ErrThreadDeliveryFailed
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
+	var detached protocol.Envelope
+	if err := json.Unmarshal(raw, &detached); err != nil {
 		return ErrThreadDeliveryFailed
 	}
 	m.hostedMu.Lock()
@@ -46,7 +47,7 @@ func (m *V2SessionManager) DeliverThread(ctx context.Context, connID string, env
 		return ErrConnNotFound
 	}
 	done := make(chan error, 1)
-	o := &hostedOutput{env: &env, callerCtx: ctx, outcome: done}
+	o := &hostedOutput{env: &detached, callerCtx: ctx, outcome: done}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err

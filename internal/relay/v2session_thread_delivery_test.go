@@ -271,6 +271,65 @@ func TestThreadDeliveryOrderedReply(t *testing.T) {
 	}
 }
 
+func TestThreadDeliveryInputIsolation(t *testing.T) {
+	for _, mode := range []string{"reuse", "admission_snapshot"} {
+		t.Run(mode, func(t *testing.T) {
+			p, _, _, release := testThreadHeld(t, nil)
+			q := &testHostedPeer{t: t, mgr: p.mgr, frames: p.frames, rec: p.rec, conn: "thread-recipient", pub: p.pub, events: p.events}
+			q.open(threadCaps)
+			const payload = `{ "conversation_id": "known", "items": [], "final": true }`
+			const conversation, session = ` "known" `, ` "session" `
+			reply, event, history := uint64(40), uint64(50), uint64(60)
+			env := protocol.Envelope{Type: protocol.TypeThreadItems, Payload: json.RawMessage(payload),
+				ConversationID: json.RawMessage(conversation), SessionID: json.RawMessage(session),
+				InReplyTo: &reply, EventID: &event, HistoryEntryID: &history}
+			raw, err := json.Marshal(env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want protocol.Envelope
+			if err := json.Unmarshal(raw, &want); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- p.mgr.DeliverThread(t.Context(), p.conn, env) }()
+			testThreadQueued(t, p, 2)
+			if string(env.Payload) != payload || string(env.ConversationID) != conversation || string(env.SessionID) != session || reply != 40 || event != 50 || history != 60 {
+				t.Fatal("admission modified caller-owned payload or metadata")
+			}
+			peers := []*testHostedPeer{p, q}
+			if mode == "admission_snapshot" {
+				// Admission fences the snapshot; later producer changes cannot alter it.
+				env.Payload[0], env.ConversationID[0], env.SessionID[0] = '!', '!', '!'
+				reply, event, history = 41, 51, 61
+				peers = peers[:1]
+			}
+			release()
+			testThreadResult(t, done, nil)
+			p.next()
+			for _, peer := range peers {
+				if peer == q {
+					if err := p.mgr.DeliverThread(t.Context(), peer.conn, env); err != nil {
+						t.Fatalf("reuse for another recipient: %v", err)
+					}
+				}
+				frames := p.rec.snapshot()
+				var got protocol.Envelope
+				if err := json.Unmarshal(threadPlain(t, frames[len(frames)-1], peer.recv), &got); err != nil {
+					t.Fatal(err)
+				}
+				if got.ID <= 1 {
+					t.Fatal("missing Run-owned sender ID")
+				}
+				got.ID = want.ID
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("admitted content changed: got %+v, want %+v", got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestThreadDeliveryFailure(t *testing.T) {
 	for _, cause := range []string{"transport", "down", "encoding", "oversize"} {
 		t.Run(cause, func(t *testing.T) {
