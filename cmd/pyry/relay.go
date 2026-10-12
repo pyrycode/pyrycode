@@ -1586,6 +1586,10 @@ func startRelayV2(
 	// mgr.Run starts below, so streamApprovals is set before any modal_answer can
 	// dispatch on the Run goroutine — no data race on the resolver field. nil
 	// approvals (foreground/v1) leaves streamApprovals nil ⇒ nothing is actuated.
+	promptPublisher := &promptAnswerPublisher{}
+	if w.streamSink != nil {
+		promptPublisher.ring = eventring.New(eventring.MaxEventsPerConversation)
+	}
 	if w.approvals != nil {
 		bridge := newStreamApprovalBridge(w.approvals, modalReg, mgr, w.active.CurrentConversation, ctx, logger)
 		// The question arm (#1973), assigned after construction rather than passed
@@ -1598,6 +1602,7 @@ func startRelayV2(
 		// streamApprovals — no data race on the field.
 		bridge.live = &daemonLiveBindings{sink: w.streamSink, reg: w.convReg}
 		bridge.hist = w.hist
+		bridge.historyPublisher = promptPublisher
 		bridge.sessionHarness = w.sessionHarness
 		bridge.questions = questionReg
 		bridge.waker = waker
@@ -1722,6 +1727,7 @@ func startRelayV2(
 		// and the session-scoped replay source it registers. SetReplaySource runs at
 		// most once, because this branch does.
 		emitter := newInteractiveTurnEmitterV2(w.active, mgr, logger)
+		emitter.ring = promptPublisher.ring
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
 		// Free a removed conversation's replay events when the registry drops it
 		// (#1502); installed here because this is where the ring is born.

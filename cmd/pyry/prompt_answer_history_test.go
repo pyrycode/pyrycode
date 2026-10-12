@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
@@ -159,15 +160,17 @@ func TestPromptAnswerHistoryPermission(t *testing.T) {
 						}
 						page := newHistoryPager(reader, logger)(testConvID, "", 1)
 						raw, err := reader.Page(conversations.ConversationID(testConvID), "", 1)
-						if err != nil || len(page.Entries) != 0 || page.Cursor != raw.Cursor || page.AtStart != raw.AtStart {
+						if err != nil || len(page.Entries) != 1 || page.Cursor != raw.Cursor || page.AtStart != raw.AtStart {
 							t.Fatalf("legacy page=%#v", page)
 						}
 					}
 					if legacyHistoryType(e.Type) {
 						t.Fatal("legacy type admitted")
 					}
-					if _, ok := legacyRuntimeReceipt(testConvID, e.Type, e.Payload, &e.ID, e.TS); ok {
-						t.Fatal("legacy receipt admitted")
+					if receipt, ok := legacyRuntimeReceipt(testConvID, e.Type, e.Payload, &e.ID, e.TS); !ok {
+						t.Fatal("legacy receipt missing")
+					} else {
+						testPromptReceipt(t, receipt)
 					}
 					select {
 					case env := <-bc.pushed:
@@ -324,6 +327,7 @@ func TestPromptAnswerHistoryStorage(t *testing.T) {
 				store = history.New(path)
 			}
 			b, m, _, bc := testPromptBridge(t, store, logger)
+			b.historyPublisher = &promptAnswerPublisher{ring: eventring.New(32)}
 			p, id, retire := testPromptSurface(t, b, bc, permbridge.Request{ToolUseID: "storage", ToolName: "Bash", Input: json.RawMessage(`{"secret":"secret-answer"}`)}, time.Hour)
 			if _, ok := m.ResolveAnswer(id, "allow_once", "secret-token", eligibleDevice(t)); !ok {
 				t.Fatal("storage blocked resolution")
@@ -337,6 +341,10 @@ func TestPromptAnswerHistoryStorage(t *testing.T) {
 			}
 			if strings.Contains(logs.String(), "secret-") {
 				t.Fatal("storage error/content leaked")
+			}
+			assertNoPush(t, bc.pushed)
+			if events, _ := b.historyPublisher.ring.After(testConvID, 0); len(events) != 0 {
+				t.Fatal("failed append entered replay")
 			}
 			if failed && strings.Count(logs.String(), "prompt_answer.history_append_err") != 1 {
 				t.Fatal("failure not logged once")
