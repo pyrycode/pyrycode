@@ -70,4 +70,3 @@ connection ceilings, credit, deadlines, wire serialization and transport error
 mapping belong to [#3247](https://github.com/pyrycode/pyrycode/issues/3247).
 Paired resource routing and `hosted_apps_v1` capability activation remain pending
 under [#3123](https://github.com/pyrycode/pyrycode/issues/3123).
-

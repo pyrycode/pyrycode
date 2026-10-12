@@ -266,4 +266,3 @@ unlaunched stopped/unpublished apps and clean shutdown descendant cleanup.
 Backoff is a delay, never another registry state. No live Claude was used or
 required; seeded persistence supplies no resource-routing or publisher
 migration/rollback acceptance. See the [runtime reference](../../hosted-apps.md#runtime-and-layout).
-
