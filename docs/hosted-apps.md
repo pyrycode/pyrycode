@@ -1,7 +1,8 @@
 # Hosted apps
 
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
-defines the hosting design. Strict manifest validation, durable registration,
+defines the hosting design. Strict manifest validation, bundled registered source
+creation and identity-based inspection, durable registration,
 lifecycle mutations, restart normalization and callable committed-release
 process ownership, health supervision, automatic reconciliation/recovery and
 guarded private targets and generation-bound stable response preparation are
@@ -509,6 +510,25 @@ The orchestrator's combined CPU/memory graphs have independent per-computer sele
 
 ## Template and saved preferences
 
+`Registry.Create(ctx, title)` generates registered editable source from assets
+bundled into the Go executable. It uses the registry's daemon-owned root and
+persisted server identity and mints the app ID; callers supply only the title.
+Creation works outside a repository checkout without Node, a Git hosting account
+or a selected port. It includes the maintained scaffold inventory, including
+`.npmrc` and `.gitignore`, and stamps `app.json` with the host/app identity,
+literal title and release `1.0.0`; `src/web/title.json` contains the same title.
+See [registered creation and inspection](#registered-creation-and-inspection)
+for returned locations and unpublished state.
+
+Both bundled creation and standalone generation consume
+[`inventory.json`](../templates/hosted-app/inventory.json) and the original
+maintained assets, with no second asset copy. Inventory changes must also update
+the exact embed paths in `hostedtemplate.Assets`. Go directory embedding ignores
+`.gitignore`; an output inventory cannot exclude private checkout bytes already
+compiled into a binary. Keep directory patterns and globs out of the bundle;
+environment files, SQLite data/sidecars, dependencies, build output and unlisted
+adjacent source must remain excluded even when present during compilation.
+
 The standalone entry is
 [`templates/hosted-app/scaffold.mjs`](../templates/hosted-app/scaffold.mjs), with
 maintained template files in `templates/hosted-app/source/`. Run it from the
@@ -533,6 +553,10 @@ Invalid manifest inputs fail before creating the directory. A write failure can
 leave an incomplete destination for inspection; retrying does not overwrite it.
 Titles are serialized into JSON and rendered as React text children, so valid
 quotes and HTML-like text remain literal data.
+Standalone generation creates source only; it does not mint identities, register
+an app or confirm readiness. The following inventory applies to both paths;
+bundled creation places it under `APPS_ROOT/<app_id>/source` with daemon-selected
+identities instead of the standalone caller's identities.
 
 Generated source includes:
 
@@ -1068,6 +1092,59 @@ Retryable is advisory, never authority to replay an uncertain mutation. App-spec
 
 ## Create, publish and update
 
+### Registered creation and inspection
+
+The implemented local package API is `Registry.Create(ctx, title) (Source, error)`.
+The daemon mints a cryptographically random canonical lowercase UUIDv4 app ID,
+uses the registry's persisted `server_id`, and selects
+`APPS_ROOT/<app_id>/source`. Callers cannot select identities or destinations.
+The raw title and stamped manifest are validated against `ValidateManifest`
+before writing; the generated manifest is read back and validated before
+registration commits through the same primitive as `Registry.Register`.
+`Register` alone persists a supplied validated manifest without generating source.
+
+Successful creation returns `Source.ServerID`, `AppID`, absolute `SourcePath` and
+`ManifestPath` (`source/app.json`), detached committed `Record` and host `Revision`.
+`Record.Revision` is the app's committed revision. The initial record has
+`desired=available`, `state=stopped`, no active or pending release and no last
+error. The manifest's `1.0.0` is source metadata, not an activated release.
+Creation runs no install, build, migration or service start and returns no open
+link or readiness claim.
+
+`Registry.Inspect(ctx, serverID, appID) (Source, error)` resolves that committed
+local identity, including after registry reopen, to the same editable locations
+and the current detached record/host revision. It neither mints another ID nor
+reads or restamps source; edits remain intact, and inspection does not validate
+source contents or prove readiness. Malformed, foreign, unknown and tombstoned
+identities fail with `ErrInvalidIdentity`, `ErrForeignHost`, `ErrNotFound` and
+`ErrRemoved`, respectively.
+
+Creation exclusively claims a new app directory and writes through no-follow
+directory descriptors and exclusive file creation. An existing destination,
+including a dangling symlink, is unavailable; existing source/build/data is never
+overwritten. Failures return no successful `Source`, registration, committed
+revision or notification. Incomplete source may remain unregistered for operator
+inspection; a later create mints a fresh ID and never reuses that retained tree.
+
+| Creation failure | Recovery |
+|---|---|
+| `ErrInvalidManifest` | Correct the title to the [manifest bounds](#manifest-validation), including valid UTF-8. |
+| `ErrMintIdentity` | Retry creation. |
+| `ErrIdentityUnavailable` | Retry creation with a newly daemon-minted identity; live/tombstoned IDs and existing destinations cannot be reused. |
+| `ErrCapacity` / `ErrExhausted` | The 256 live-registration limit / host revision limit has been reached; resolve capacity or revision exhaustion before creating. |
+| `ErrSourceWrite` | Check private app storage and retain the unregistered attempt. |
+| `ErrCreatePersistence` | Check private registry storage; generated source remains unregistered. |
+
+Cancellation returns the context error. Stage errors expose no title, source
+contents, raw path or process diagnostics.
+
+Local-control dispatch (#3265), daemon composition for creation/inspection
+(#3266), channel tools (#3126) and publication (#3125) remain downstream work.
+The walkthrough below describes the intended end-to-end workflow once those
+surfaces are connected.
+
+### Publication and recovery
+
 Publication is serialized per app, with at most one candidate and one writer to its SQL data. Build/typecheck/tests happen in private staging while the old service remains available. Before any migration, stop accepting that app's API work, cancel/retire pending reads/writes without replay, drain or stop the old service, and take a consistent recoverable snapshot of **all** app data including a SQLite backup that incorporates WAL state. Do not copy a live database file alone. Verify the snapshot before mutation. No fleet-side mutation may run as a startup/health side effect.
 
 Run candidate migrations and startup against persistent data. Commit activation only after health succeeds. Build/start failure retains the old immutable build. Migration/start failure after data mutation stops the candidate and restores the verified pre-update data/schema before restarting and health-checking the old service. Sync the verified backup and a journal of candidate/backup/previous release before the first data mutation. Activation commits the active-release pointer and journal decision atomically in the registry. Restart before that commit restores the snapshot and old release; restart after it starts the committed new release without reapplying completed migrations. Recovery completes before accepting API requests. A successful rollback announcement requires old-release health plus validated restored data; failed restoration stays failed with `app.io_failed` and no openable readiness claim. Keep the previous working build and recovery snapshot until activation/recovery is durable. These guarantees assume trusted service code follows the data-directory and side-effect conventions; they cannot roll back arbitrary OS or fleet-service effects.
@@ -1076,7 +1153,7 @@ Run candidate migrations and startup against persistent data. Commit activation 
 
 Store display preferences (selected tab, per-computer chart periods, project/computer filters, performance range) in `data/app.sqlite` via bounded `/api/preferences` reads/writes. Keep versioned preferences with defaults for missing/unknown fields. Saved preferences are app-scoped in v1 and shared by its authorized viewers; devices do not silently create competing fleet state. Opening from another client and updating the app must recover those preferences. SQL writes use prepared statements/transactions; fleet controls go through the fleet adapter with its authorization and outcome semantics. Test controls point only at isolated fixture services.
 
-1. **Create:** In a channel, request an orchestrator app. Assistant invokes create through local tools, mints/stamps this host's stable app ID, creates the editable template, and records originating channel plus app identity for follow-up targeting. The registration exists but is not yet openable; no success link is returned.
+1. **Create:** In a channel, request an orchestrator app. Assistant invokes create through local tools; the daemon mints/stamps this host's stable app ID and creates the editable template. The assistant records originating channel plus returned app identity for follow-up targeting. The registration is unpublished (`available`/`stopped`, no active release) and not yet openable; no success link is returned.
 2. **Validate:** Assistant edits source and runs runtime/manifest/lock checks, install, typecheck, tests and compile. Preference tests use temporary SQLite; frontend output is self-contained and public-only. Validation failure reports safe actionable channel feedback and leaves any existing active release serving.
 3. **Publish:** Publisher snapshots/serializes the update, runs migrations and service health, and durably commits the activated release. Tools return structured readiness confirmation with matching `server_id`, `app_id`, active release and current revision. A queued build or a PID alone is not confirmation.
 4. **Open:** Only after that confirmed readiness, assistant returns `pyrycode://hosts/11111111-1111-4111-8111-111111111111/apps/22222222-2222-4222-8222-222222222222` to the originating channel. Apps discovery also lists it under the connected host. Desktop/mobile validate running state, bind the view and load relative modules/API data over encrypted transport. Stop/removal after confirmation may make the link unavailable; the link remains the same identity.
@@ -1088,7 +1165,9 @@ The [implementation responsibilities](specs/architecture/3120-hosted-app-contrac
 assign registration/discovery to #3121, service supervision to #3122, encrypted
 resource routing to #3123, the template family to #3124 (buildable scaffold #3140,
 SQL service #3141 and responsive preference UI #3142), publishing/recovery to #3125
-and channel tools/readiness links to #3126. Desktop #1927 and mobile #2063 own
+(bundled registered creation/inspection #3264, local-control dispatch #3265 and
+creation/inspection daemon wiring #3266) and channel tools/readiness links to
+\#3126. Desktop #1927 and mobile #2063 own
 viewers; desktop #1928 and mobile #2064 own host-scoped Apps navigation.
 The issue's [family roadmap](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100789144)
 assigns the orchestrator/fleet integration to #3127–#3132.
