@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,9 +57,19 @@ func hostedSeed(t *testing.T, home, title string) hostedSnapshot {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 2; i <= 4; i++ {
+	for i := 2; i <= 5; i++ {
 		id := fmt.Sprintf("%d2222222-2222-4222-8222-222222222222", i)
 		manifest := []byte(fmt.Sprintf(`{"contract_version":1,"server_id":%q,"app_id":%q,"title":%q,"description":"Retained manifest metadata","release_version":"2.0.0","runtime":{"node":">=24.15.0 <25.0.0","sqlite":"node:sqlite"},"frontend":{"root":"dist/web","entry":"index.html"},"service":{"entry":"dist/service/main.js","migrate":"dist/service/migrate.js","health_path":"/_pyry/health","migrations":"sql/migrations"},"build":{"package":"package.json","lockfile":"package-lock.json","install":["npm","ci"],"typecheck":["npm","run","typecheck"],"test":["npm","test"],"compile":["npm","run","build"]}}`, host, id, title+" candidate"))
+		build := filepath.Join(hostedRoot(home), id, "builds", strings.Repeat("a", 64))
+		if err := os.MkdirAll(filepath.Join(build, "dist/service"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		committed := bytes.ReplaceAll(manifest, []byte(`"release_version":"2.0.0"`), []byte(`"release_version":"1.0.0"`))
+		for path, data := range map[string][]byte{"app.json": committed, "dist/service/main.js": []byte("fixture")} {
+			if err := os.WriteFile(filepath.Join(build, path), data, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if _, err := r.Register(manifest); err != nil {
 			t.Fatal(err)
 		}
@@ -108,29 +119,35 @@ func TestHostedAppsRestartIsolation(t *testing.T) {
 		t.Fatal("host identities alias")
 	}
 	hs := make([]*Harness, 2)
-	var normalized []byte
+	var previous hostedSnapshot
 	for i, home := range homes {
-		hs[i] = StartInWithEnv(t, home, nil, "-pyry-relay=")
-		got, raw := hostedRead(t, home)
+		hs[i] = StartInWithEnv(t, home, hostedNodeEnv(t), "-pyry-relay=")
+		got := hostedRunning(t, home)
 		want := before[i]
 		want.Records = slices.Clone(want.Records)
-		want.Revision = 8
-		want.Records[0].State, want.Records[0].Revision = "starting", 7
-		want.Records[1].State, want.Records[1].Revision = "stopped", 8
+		want.Revision = got.Revision
+		for j := range want.Records {
+			if got.Records[j].Revision < want.Records[j].Revision {
+				t.Fatal("revision regressed")
+			}
+			want.Records[j].Revision = got.Records[j].Revision
+		}
+		want.Records[0].State, want.Records[3].State = "running", "running"
+		want.Records[1].State = "stopped"
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("daemon restart snapshot:\ngot %#v\nwant %#v", got, want)
 		}
 		hostedAssertData(t, home, titles[i])
 		if i == 0 {
-			normalized = raw
+			previous = got
 		}
 	}
 	_, other := hostedRead(t, homes[1])
 	hs[0].Stop(t)
-	hs[0] = StartInWithEnv(t, homes[0], nil, "-pyry-relay=")
-	_, unchanged := hostedRead(t, homes[0])
-	if !bytes.Equal(unchanged, normalized) {
-		t.Fatal("unchanged restart added revisions or changed metadata")
+	hs[0] = StartInWithEnv(t, homes[0], hostedNodeEnv(t), "-pyry-relay=")
+	got := hostedRunning(t, homes[0])
+	if got.ServerID != previous.ServerID || got.Revision <= previous.Revision {
+		t.Fatal("restart identity/revision", got, previous)
 	}
 	_, otherAfter := hostedRead(t, homes[1])
 	if !bytes.Equal(other, otherAfter) {
@@ -153,7 +170,10 @@ func TestHostedAppsChannelIndependence(t *testing.T) {
 	hostedSeed(t, home, "Channel independent")
 	const initial = "11111111-1111-4111-8111-111111111111"
 
-	h := StartStreamInteractiveWithRelay(t, home, initial, payload.Relay)
+	nodeEnv := hostedNodeEnv(t)
+	h := StartStreamInteractiveWithRelay(t, home, initial, payload.Relay, nodeEnv...)
+	hostedRunning(t, home)
+	proof := hostedProof(t, home, hostedAppID)
 	_, baseline := hostedRead(t, home)
 	pub, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
@@ -176,14 +196,23 @@ func TestHostedAppsChannelIndependence(t *testing.T) {
 	}
 	_, after := hostedRead(t, home)
 	if !bytes.Equal(baseline, after) {
-		t.Fatal("channel clear/stop changed apps")
+		t.Fatalf("channel clear/stop changed apps:\nbefore %s\nafter %s", baseline, after)
 	}
 	hostedAssertData(t, home, "Channel independent")
 	_ = phone.Close()
+	if !fr.ForceCloseBinary(readPersistedServerID(t, home)) {
+		t.Fatal("relay disconnect failed")
+	}
+	waitBinaryHello(t, fr, readPersistedServerID(t, home))
+	hostedHealthy(t, proof)
 	h.Stop(t)
-	// Idle eviction has no app owner or discovery detach path.
+	hostedGone(t, proof)
+	// Idle eviction leaves the independent app owner running.
 	hostedDisableRelay(t, home)
-	h = StartInWithEnv(t, home, nil, "-pyry-relay=", "-pyry-idle-timeout=100ms")
+	h = StartInWithEnv(t, home, nodeEnv, "-pyry-relay=", "-pyry-idle-timeout=100ms")
+	hostedRunning(t, home)
+	_, baseline = hostedRead(t, home)
+	proof = hostedProof(t, home, hostedAppID)
 	entry, ok := readBootstrapIfPresent(filepath.Join(home, ".pyry", "test", "sessions.json"))
 	if !ok {
 		t.Fatal("bootstrap missing")
@@ -194,7 +223,9 @@ func TestHostedAppsChannelIndependence(t *testing.T) {
 		t.Fatal("idle eviction changed apps")
 	}
 	hostedAssertData(t, home, "Channel independent")
+	hostedHealthy(t, proof)
 	h.Stop(t)
+	hostedGone(t, proof)
 }
 
 func TestHostedAppsProductionUnsupported(t *testing.T) {
