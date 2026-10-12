@@ -62,3 +62,7 @@ Pending for documentation stage: update `docs/hosted-apps.md` § Runtime and lay
 - Threat model: trusted local app execution remains the contract; encrypted resource authorization belongs to #3123, publication immutability/journals to #3125.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-12
+
+## Revisions
+- 2026-10-12: completed retirement conditionally observes stopped against the latest record when stopped/unpublished intent still applies, preserving metadata. Existing stopped-intent tests now allow that post-cleanup observation revision. Duplicate starts during failure cleanup wait for retirement without marking it explicitly retired, so they cannot suppress the failure's backoff. A failed starting write retains the admitted record for release identity checks rather than accepting an empty result as a release change.
+- 2026-10-12: retirement also checks the confirmed-running duration for the retry reset, covering a crash at the 60-second boundary before the next successful probe (`TestOwnerRetryResetOnExit`). Existing active-release-change tests permit subsequent reconciliation observations while still requiring committed metadata preservation; test build preparation precedes available publication.

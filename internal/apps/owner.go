@@ -36,6 +36,13 @@ type Owner struct {
 	startInterval   time.Duration
 	runtimeInterval time.Duration
 	requestTimeout  time.Duration
+	wake            chan struct{}
+	reconcileCtx    context.Context
+	reconcileCancel context.CancelFunc
+	reconciled      chan struct{}
+	unsubscribe     func()
+	retries         map[string]*retryState
+	now             func() time.Time
 }
 type generation struct {
 	ctx            context.Context
@@ -49,9 +56,12 @@ type generation struct {
 	port           int
 	cmd            *exec.Cmd
 	cleanupErr     error
+	healthySince   time.Time
+	retired        bool
 }
 
-// NewOwner selects the specified Node executable once; no runtime fallback occurs.
+// NewOwner selects Node once and starts asynchronous committed-intent reconciliation.
+// Construction waits for neither service spawn nor fresh health confirmation.
 func NewOwner(registry *Registry, nodeExecutable string) (*Owner, error) {
 	if registry == nil {
 		return nil, ErrInvalidStorage
@@ -64,57 +74,89 @@ func NewOwner(registry *Registry, nodeExecutable string) (*Owner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("apps: resolve node executable: %w", err)
 	}
-	return &Owner{registry: registry, node: node, generations: map[string]*generation{}, ports: map[int]bool{}, previous: map[string]int{}, grace: stopGrace, kill: syscall.Kill, startup: startupDeadline, startInterval: startupInterval, runtimeInterval: healthInterval, requestTimeout: healthRequestTimeout, listen: func() (net.Listener, error) { return net.Listen("tcp4", "127.0.0.1:0") }}, nil
+	o := &Owner{registry: registry, node: node, generations: map[string]*generation{}, ports: map[int]bool{}, previous: map[string]int{}, grace: stopGrace, kill: syscall.Kill, startup: startupDeadline, startInterval: startupInterval, runtimeInterval: healthInterval, requestTimeout: healthRequestTimeout, listen: func() (net.Listener, error) { return net.Listen("tcp4", "127.0.0.1:0") }}
+	o.now = time.Now
+	o.retries = make(map[string]*retryState)
+	o.wake = make(chan struct{}, 1)
+	o.reconciled = make(chan struct{})
+	o.reconcileCtx, o.reconcileCancel = context.WithCancel(context.Background())
+	o.unsubscribe = registry.Subscribe(func(Change) {
+		select {
+		case o.wake <- struct{}{}:
+		default:
+		}
+	})
+	go o.reconcile()
+	o.signal()
+	return o, nil
 }
 
 // Start resumes available intent and waits for preparation/spawn or failure.
-// Concurrent attempts coalesce. Cancelling the initiating context retires its
+// Concurrent attempts coalesce; scheduled recovery returns the last failure or
+// ErrUnavailable without bypassing backoff. Cancelling the initiating context retires its
 // generation; a coalesced caller can cancel its own wait independently.
 func (o *Owner) Start(ctx context.Context, appID string) error {
 	if !validID(appID) {
 		return ErrInvalidIdentity
 	}
 	o.registry.mu.Lock()
-	var current Record
-	for _, r := range o.registry.snapshot.Records {
-		if r.AppID == appID {
-			current = r
-			break
-		}
-	}
 	o.mu.Lock()
-	o.registry.mu.Unlock()
 	if o.closed {
 		o.mu.Unlock()
+		o.registry.mu.Unlock()
 		return ErrClosed
 	}
+	current := o.currentLocked(appID)
+	var err error
+	if current.Desired != "available" || o.retryLocked(appID).suppressed {
+		current, err = o.registry.intentLocked(ctx, appID, "available")
+		if err == nil {
+			o.retries[appID] = &retryState{}
+		}
+	}
+	if err != nil {
+		o.mu.Unlock()
+		o.registry.mu.Unlock()
+		return err
+	}
+	if current.ActiveRelease == "" {
+		o.mu.Unlock()
+		o.registry.mu.Unlock()
+		return nil
+	}
 	g := o.generations[appID]
-	if g != nil {
+	if g != nil && (g.ctx.Err() != nil || current.ActiveRelease != g.record.ActiveRelease) {
 		select {
 		case <-g.done:
-			g = nil
 		default:
-		}
-		if g != nil {
+			if current.ActiveRelease != g.record.ActiveRelease || g.retired {
+				g.retired = true
+				g.cancel()
+			}
+			o.mu.Unlock()
+			o.registry.mu.Unlock()
 			select {
-			case <-g.ready:
-				if g.err == nil && (g.ctx.Err() != nil || current.ActiveRelease != g.record.ActiveRelease || current.Desired != "available") {
-					g.cancel()
-					o.mu.Unlock()
-					<-g.done
-					return o.Start(ctx, appID)
-				}
-			default:
+			case <-g.done:
+				return o.Start(ctx, appID)
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
-	if g == nil {
-		work, cancel := context.WithCancel(ctx)
-		g = &generation{ctx: work, exited: make(chan struct{}), cancel: cancel, ready: make(chan struct{}), done: make(chan struct{})}
-		o.generations[appID] = g
-		go o.launch(work, appID, g)
+	if g == nil || generationDone(g) {
+		if o.now().Before(o.retryLocked(appID).due) {
+			err = ErrUnavailable
+			if g != nil && g.err != nil {
+				err = g.err
+			}
+			o.mu.Unlock()
+			o.registry.mu.Unlock()
+			return err
+		}
+		g = o.admitLocked(ctx, current)
 	}
 	o.mu.Unlock()
+	o.registry.mu.Unlock()
 	select {
 	case <-g.ready:
 		return g.err
@@ -124,17 +166,31 @@ func (o *Owner) Start(ctx context.Context, appID string) error {
 }
 
 func (o *Owner) launch(ctx context.Context, id string, g *generation) {
-	defer close(g.done)
+	defer o.completed(id, g)
 	cancel := g.cancel
 	defer cancel()
-	r, err := o.registry.intent(ctx, id, "available")
+	r := g.record
+	o.registry.mu.Lock()
+	current := o.currentLocked(id)
+	var err error
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	} else if current.Revision != r.Revision || current.Desired != "available" || current.ActiveRelease != r.ActiveRelease {
+		err = ErrStale
+	} else {
+		var committed Record
+		committed, _, err = o.registry.commitObservationLocked(r.Manifest.ServerID(), id, r.Revision, Observation{State: "starting"})
+		if err == nil {
+			r = committed
+		}
+	}
+	o.registry.mu.Unlock()
+	o.mu.Lock()
 	g.record = r
+	o.mu.Unlock()
 	if err != nil {
 		g.err = err
-		close(g.ready)
-		return
-	}
-	if r.ActiveRelease == "" {
+		o.rememberObservation(err)
 		close(g.ready)
 		return
 	}
@@ -187,7 +243,7 @@ func (o *Owner) launch(ctx context.Context, id string, g *generation) {
 	}
 	if err != nil {
 		if ctx.Err() == nil && !errors.Is(err, ErrStale) {
-			_, _, writeErr := o.registry.CommitObservation(r.Manifest.ServerID(), id, r.Revision, Observation{State: "failed", LastError: &LastError{Code: "app.unavailable", Message: "Service could not start"}})
+			_, _, writeErr := o.observeFailure(id, g, "Service could not start")
 			err = errors.Join(err, writeErr)
 			if !errors.Is(writeErr, ErrStale) && !errors.Is(writeErr, ErrRemoved) {
 				o.remember(writeErr)
@@ -208,10 +264,9 @@ func (o *Owner) launch(ctx context.Context, id string, g *generation) {
 	g.healthy = false
 	cancelled := ctx.Err() != nil
 	cancel()
-	r = g.record
 	o.mu.Unlock()
 	if reason != "" && !cancelled {
-		_, _, err = o.registry.CommitObservation(r.Manifest.ServerID(), id, r.Revision, Observation{State: "failed", LastError: &LastError{Code: "app.unavailable", Message: reason}})
+		_, _, err = o.observeFailure(id, g, reason)
 		if !errors.Is(err, ErrStale) && !errors.Is(err, ErrRemoved) {
 			o.remember(err)
 		}
@@ -241,9 +296,14 @@ func (o *Owner) Stop(appID string) error {
 	o.mu.Lock()
 	g := o.generations[appID]
 	if g != nil {
+		g.retired = true
 		g.cancel()
 	}
+	o.retries[appID] = &retryState{suppressed: true}
 	r, err := o.registry.intentLocked(context.Background(), appID, "stopped")
+	if err == nil {
+		o.retries[appID].suppressed = false
+	}
 	o.mu.Unlock()
 	o.registry.mu.Unlock()
 	if g != nil {
@@ -273,12 +333,15 @@ func (o *Owner) Stop(appID string) error {
 func (o *Owner) Shutdown() error {
 	o.mu.Lock()
 	o.closed = true
+	o.reconcileCancel()
 	all := make([]*generation, 0, len(o.generations))
 	for _, g := range o.generations {
 		g.cancel()
 		all = append(all, g)
 	}
 	o.mu.Unlock()
+	o.unsubscribe()
+	<-o.reconciled
 	var result error
 	for _, g := range all {
 		<-g.done

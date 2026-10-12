@@ -87,6 +87,7 @@ func TestOwnerStopCommitAdmission(t *testing.T) {
 				}
 			}
 			committed := false
+			r.mu.Lock()
 			r.persist = func(root string, next snapshot) error {
 				if next.Records[0].Desired == "stopped" && !committed {
 					committed = true
@@ -97,6 +98,7 @@ func TestOwnerStopCommitAdmission(t *testing.T) {
 				}
 				return writeSnapshot(root, next)
 			}
+			r.mu.Unlock()
 			if err := o.Stop(testApp); err != nil {
 				t.Fatal(err)
 			}
