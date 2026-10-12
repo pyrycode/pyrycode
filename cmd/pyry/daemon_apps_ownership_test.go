@@ -85,7 +85,7 @@ func TestDaemonAppsRejectedDuplicateStartup(t *testing.T) {
 		t.Fatal("incumbent target unavailable", err)
 	}
 	// Rejection must also leave a previously absent app root and identity absent.
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv("HOME", testRealTempDir(t))
 	if err := runSupervisor(daemonAppSupervisorArgs(t, socket)); !errors.Is(err, control.ErrInstanceRunning) {
 		t.Fatal(err)
 	}
