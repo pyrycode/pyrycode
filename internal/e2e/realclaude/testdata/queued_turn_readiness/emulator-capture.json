@@ -1,8 +1,8 @@
 {
   "schema": 2,
   "run_id": "3071-emulator-20261011",
-  "status": "pending dispatcher admission; blocked on #3214 inherited legacy reconnect overflow; no historical readiness repair established",
-  "daemon_revision": "202c94d7411832ce7ebffa692377839be7375493",
+  "status": "pending dispatcher admission; merged #3214 reconnect repair included; no historical readiness repair established",
+  "daemon_revision": "fa4a696940e56d7cc41883d86080fc0d22bc3d7e",
   "daemon_source_variable": "PYRYCODE_SRC",
   "build_tags": "e2e_realclaude",
   "build_environment": {
@@ -112,7 +112,7 @@
   "ownership": "Wrapper-generated e2e-auto primary and second-host instances belong to this run; peer is an independent device; bypass and answer instances remain separately owned. Header observer records private instance/process/connection joins; export uses ordinals. Never count pre-restart children as retained afterward.",
   "private_input": {
     "RunID": "3071-emulator-20261011",
-    "SourceRevision": "202c94d7411832ce7ebffa692377839be7375493",
+    "SourceRevision": "fa4a696940e56d7cc41883d86080fc0d22bc3d7e",
     "Binary": "<mobile checkout>/build/e2e-bin/pyry",
     "Observations": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/observations.jsonl",
     "XML": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/emulator-results.xml",
@@ -131,7 +131,7 @@
     "PYRY_E2E_READINESS_RECORD": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/observations.jsonl"
   },
   "resource_sampler": "go test -tags e2e_realclaude -run ^TestReadinessEmulatorResources$ -timeout 75m ./internal/e2e/realclaude; set PYRY_E2E_READINESS_EMULATOR_INPUT to private input.json; start before admitted wrapper and await capture-complete on completion/cancellation; stop/join sidecar and all owned daemons before export. Private binary, observations, resources and persistence paths must be populated. Actual owned executables must equal the clean rebuilt Binary.",
-  "export": "From the clean final handoff checkout, after admitted acquisition and joined cleanup, run TestReadinessEmulatorExport with PYRY_E2E_READINESS_EMULATOR_INPUT. It validates typed provenance, runner status, resolved readbacks, persisted target and independent owned resources; exports sanitized XML durations and full named inventory including incomplete methods. It never starts Android and refuses an existing exported run. Both destination and recovery copies are deny-scanned and all pins/semantic joins are validated.",
+  "export": "From the clean final handoff checkout, after admitted acquisition and joined cleanup, run TestReadinessEmulatorExport with PYRY_E2E_READINESS_EMULATOR_INPUT. It validates typed provenance, runner status, resolved readbacks, persisted target and independent owned resources in private staging before publishing either destination or recovery copy. Rejected candidates leave no published run. It exports sanitized XML durations and full named inventory including incomplete methods, writes each manifest last and atomically publishes the complete run directory. It never starts Android and refuses an existing exported run.",
   "recovery_paths": [
     "/tmp/pyry-3071-live-records/3071-emulator-20261011/setup.json",
     "/tmp/pyry-3071-live-records/3071-emulator-20261011/request-events.jsonl",
@@ -208,7 +208,7 @@
     "path": "/tmp/pyry-3071-emulator-private/3071-emulator-20261011/acquisition-provenance.json",
     "record": {
       "RunID": "3071-emulator-20261011",
-      "Source": "202c94d7411832ce7ebffa692377839be7375493",
+      "Source": "fa4a696940e56d7cc41883d86080fc0d22bc3d7e",
       "MobileSource": "90d0407f06f70e325701603602d67fd2bcb96308",
       "MobileMerge": "4a5e624f6f630e75069c2ce729c63fcc2eb748e2",
       "MobileTree": "8564ff1d87ee16944c1b99cd577449bd96b1534b",

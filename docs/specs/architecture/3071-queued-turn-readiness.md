@@ -418,3 +418,11 @@ dispatcher Android export/sampler entry points skip. Ordinary scoped realclaude
 race checks, ordinary vet, tagged realclaude vet and the production daemon build
 pass. These are diagnostic publication checks; no Android or authenticated host
 run, captured artifacts or historical readiness repair is claimed.
+
+Pending acquisition pin: clean instrumented host revision
+`fa4a696940e56d7cc41883d86080fc0d22bc3d7e` includes the merged reconnect repair
+`bd85e998` and the publication repair. All three coupled host source fields and
+support hashes are refreshed together; support bytes match that committed tree.
+The tagged daemon build also passes. This following commit changes handoff
+metadata only. The run remains `3071-emulator-20261011`, pending Android dispatcher
+admission, with the existing eight-file recovery and both live labels retained.
