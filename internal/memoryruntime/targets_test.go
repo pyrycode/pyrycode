@@ -37,7 +37,8 @@ func TestTargetPins(t *testing.T) {
 		{"linux", "amd64", "openai", "ubuntu-24.04-amd64"},
 		{"darwin", "arm64", "openai", "macos-arm64"},
 		{"darwin", "amd64", "openai", ""},
-		{"darwin", "arm64", "local", ""},
+		{"darwin", "arm64", "local", "macos-arm64"},
+		{"linux", "amd64", "local", "ubuntu-24.04-amd64"},
 		{"darwin", "arm64", "", ""},
 		{"linux", "arm64", "openai", ""},
 		{"windows", "amd64", "openai", ""},
@@ -131,43 +132,87 @@ func TestMacOSHostGate(t *testing.T) {
 	}
 }
 
-func TestMacOSSmokeEvidence(t *testing.T) {
-	data, err := os.ReadFile("smoke-macos-arm64.json")
-	if err != nil {
-		t.Fatal(err)
+type smokeMode struct {
+	Versions map[string]string `json:"versions"`
+	Checks   map[string]string `json:"checks"`
+	Executed int               `json:"executed"`
+	Passed   int               `json:"passed"`
+}
+
+type smokeEvidence struct {
+	CapturedAt   string               `json:"captured_at_utc"`
+	OS           string               `json:"os"`
+	Invocation   string               `json:"invocation"`
+	Target       string               `json:"target"`
+	OSRelease    string               `json:"os_release"`
+	Architecture string               `json:"architecture"`
+	Libc         string               `json:"libc"`
+	MacOSVersion string               `json:"macos_version,omitempty"`
+	MacOSBuild   string               `json:"macos_build,omitempty"`
+	Modes        map[string]smokeMode `json:"modes"`
+	Executed     int                  `json:"executed"`
+	Passed       int                  `json:"passed"`
+}
+
+func smokeChecks(mode string) []string {
+	checks := []string{"installer", "repeat_verified_setup", "python_and_dependency_versions", "memsearch_pymilvus_milvus_lite_openai_imports", "memsearch_cli_version", "pip_dependency_compatibility", "temporary_database_open_close", "retained_launch_verified"}
+	if mode == "local" {
+		checks = append(checks, "local_imports_and_cpu_tensor")
 	}
-	var record struct {
-		OS           string            `json:"os"`
-		Architecture string            `json:"architecture"`
-		MacOSVersion string            `json:"macos_version"`
-		MacOSBuild   string            `json:"macos_build"`
-		Versions     map[string]string `json:"versions"`
-		Checks       map[string]string `json:"checks"`
-		Executed     int               `json:"executed"`
-		Passed       int               `json:"passed"`
-	}
-	if err := json.Unmarshal(data, &record); err != nil {
-		t.Fatal(err)
-	}
-	p, err := selectPins("darwin", "arm64", "openai")
-	if err != nil || record.OS != "darwin" || record.Architecture != "arm64" || !macOSAtLeast(record.MacOSVersion, p.MinimumMacOS) || record.MacOSBuild == "" {
-		t.Fatal("evidence target mismatch")
-	}
-	if record.Versions["python"] != p.Python || record.Versions["pip"] != p.Bootstrap || len(record.Versions) != len(p.Wheels)+2 {
-		t.Fatal("evidence bootstrap/closure mismatch")
-	}
-	for _, a := range p.Wheels {
-		if record.Versions[a.Name] != a.Version {
-			t.Fatalf("unproved pin: %s", a.Name)
-		}
-	}
-	checks := []string{"installer", "repeat_verified_setup", "python_and_dependency_versions", "memsearch_pymilvus_milvus_lite_openai_imports", "memsearch_cli_version", "pip_dependency_compatibility", "temporary_database_open_close"}
-	if record.Executed != len(checks) || record.Passed != len(checks) || len(record.Checks) != len(checks) {
-		t.Fatal("smoke checks unexecuted or incomplete")
-	}
-	for _, check := range checks {
-		if record.Checks[check] != "PASS" {
-			t.Fatalf("unproved check: %s", check)
-		}
+	return checks
+}
+
+func TestSmokeEvidence(t *testing.T) {
+	for _, target := range []struct{ file, goos, arch string }{{"smoke-linux-amd64.json", "linux", "amd64"}, {"smoke-macos-arm64.json", "darwin", "arm64"}} {
+		t.Run(target.goos, func(t *testing.T) {
+			data, err := os.ReadFile(target.file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record smokeEvidence
+			if err := json.Unmarshal(data, &record); err != nil {
+				t.Fatal(err)
+			}
+			if os.Getenv("PYRY_MEMORY_SMOKE_EVIDENCE") != "" && len(record.Modes) == 0 {
+				t.Skip("native capture is armed for legacy evidence; validate both committed modes after promotion")
+			}
+			if record.OS != target.goos || record.Architecture != target.arch || len(record.Modes) != 2 || record.CapturedAt == "" || !strings.Contains(record.Invocation, "-tags memory_runtime_smoke -run '^TestSmoke$'") {
+				t.Fatal("incomplete smoke identity/modes/invocation")
+			}
+			for _, mode := range []string{"openai", "local"} {
+				p, err := selectPins(target.goos, target.arch, mode)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if target.goos == "darwin" {
+					if !macOSAtLeast(record.MacOSVersion, p.MinimumMacOS) || record.MacOSBuild == "" {
+						t.Fatal("evidence target mismatch")
+					}
+				} else if !strings.Contains(record.OSRelease, "ID=ubuntu\n") || !strings.Contains(record.OSRelease, `VERSION_ID="24.04"`) || !macOSAtLeast(strings.TrimSpace(strings.TrimPrefix(record.Libc, "glibc ")), p.MinimumGLIBC) {
+					t.Fatal("evidence target mismatch")
+				}
+				result := record.Modes[mode]
+				if result.Versions["python"] != p.Python || result.Versions["pip"] != p.Bootstrap || len(result.Versions) != len(p.Wheels)+2 {
+					t.Fatal("evidence bootstrap/closure mismatch:", mode)
+				}
+				for _, a := range p.Wheels {
+					if result.Versions[a.Name] != a.Version {
+						t.Fatalf("unproved %s pin: %s", mode, a.Name)
+					}
+				}
+				checks := smokeChecks(mode)
+				if result.Executed != len(checks) || result.Passed != len(checks) || len(result.Checks) != len(checks) {
+					t.Fatal("smoke checks unexecuted or incomplete:", mode)
+				}
+				for _, check := range checks {
+					if result.Checks[check] != "PASS" {
+						t.Fatalf("unproved %s check: %s", mode, check)
+					}
+				}
+			}
+			if record.Executed != 17 || record.Passed != record.Executed {
+				t.Fatal("aggregate smoke checks unexecuted or incomplete")
+			}
+		})
 	}
 }
