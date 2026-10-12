@@ -250,6 +250,13 @@ Forbidden everywhere: `token`, `payload`, raw `frame` bytes, full `Headers` map 
 
 ## Test surface
 
+A held transport fixture must record its accepted prefix before signaling the
+cancellation gate, and signal callback exit on every return (for example with a
+`defer`). Otherwise cancellation can beat the recording callback and strand the
+completion wait without exercising partial-reply cutoff. The shared
+`testThreadQueryInterrupted` scenarios for catch-up and pages enforce this order;
+see [query/live completion fencing](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+
 Admission proofs must enter through `Connect` using `AllowInsecureScheme` for
 loopback sockets. `newTestConnection` wraps a prebuilt transport through
 `connectWithClient`, bypassing admission validation, header construction and

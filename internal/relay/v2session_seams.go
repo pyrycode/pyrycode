@@ -52,6 +52,9 @@ type V2SessionConfig struct {
 	// ThreadCatchUp returns a detached authoritative query result off Run and must
 	// honor cancellation. Nil explicitly fails catch-up; it never loads history.
 	ThreadCatchUp func(context.Context, protocol.ThreadCatchUpPayload) (thread.QueryResult, error)
+	// ThreadPage returns one detached authoritative older page off Run and must
+	// honor cancellation. Nil explicitly fails pages; it never loads history.
+	ThreadPage func(context.Context, protocol.ThreadPagePayload) (thread.QueryResult, error)
 
 	// ThreadLiveState returns a detached current-state cursor, including inactive
 	// retry/compaction and only outstanding prompts/questions with answer IDs.
