@@ -53,7 +53,12 @@ var migrationName = regexp.MustCompile(`^[0-9]{4}_[a-z0-9_]+\.sql$`)
 
 // ValidateArtifacts checks only retained artifacts in a completed private staging tree.
 // It runs no commands and modifies neither staging nor registration state.
-func ValidateArtifacts(ctx context.Context, staging, serverID, appID string) (RetainedBuild, error) {
+func ValidateArtifacts(ctx context.Context, staging, serverID, appID string) (build RetainedBuild, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("apps: validate retained artifacts: %w", err)
+		}
+	}()
 	dir, err := privateDir(staging)
 	if err != nil {
 		return RetainedBuild{}, err
@@ -152,12 +157,12 @@ func publicArtifact(p string) bool {
 func artifactDirAt(parent *os.File, name string, create bool) (*os.File, error) {
 	if create {
 		if e := unix.Mkdirat(int(parent.Fd()), name, 0700); e != nil && e != unix.EEXIST {
-			return nil, e
+			return nil, fmt.Errorf("apps: create artifact directory %q: %w", name, e)
 		}
 	}
 	fd, e := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if e != nil {
-		return nil, e
+		return nil, fmt.Errorf("apps: open artifact directory %q: %w", name, e)
 	}
 	return os.NewFile(uintptr(fd), name), nil
 }
