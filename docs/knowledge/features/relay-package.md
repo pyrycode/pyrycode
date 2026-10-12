@@ -4,7 +4,7 @@
 
 The binary side of the binary↔relay wire protocol. Three surfaces:
 
-1. **Outbound dial, established on WS upgrade** (`connection.go`, #248; binary↔relay handshake retired #582) — wraps `internal/transport.Client` (#247, the generic WSS primitive): builds the upgrade headers, treats the conn as established the moment the WS upgrade fires (the relay is content-blind — it registers the binary's server-id from the `x-pyrycode-server` header and sends no `hello_ack`), treats WS close-code `4409` as terminal after eight consecutive conflicts, and exposes inbound frames as `protocol.RoutingEnvelope` values via `Frames()`. No relay-originated `hello`/`hello_ack` ceremony on this leg. Knows nothing about per-envelope dispatch or supervisor lifecycle.
+1. **Outbound dial, established on WS upgrade** (`connection.go`, #248; binary↔relay handshake retired #582) — wraps `internal/transport.Client` (#247, the generic WSS primitive): builds the upgrade headers, treats the conn as established the moment the WS upgrade fires (the relay is content-blind — it registers the binary's server-id from the `x-pyrycode-server` header and sends no `hello_ack`), treats HTTP 401 as immediately terminal and WS close-code `4409` as terminal after eight consecutive conflicts, and exposes inbound frames as `protocol.RoutingEnvelope` values via `Frames()`. No relay-originated `hello`/`hello_ack` ceremony on this leg. Knows nothing about per-envelope dispatch or supervisor lifecycle.
 2. **Shared WS close-code constants** (`auth.go`) — `StatusUnauthorized` (4401) and `MsgInvalidToken`, consumed by the live Noise_IK v2 handshake in [`v2-session-manager.md`](v2-session-manager.md). `auth.go` originally (#249) held a pure v1 first-frame token-validation predicate, `AuthenticateFirstFrame`; that predicate's production caller was removed in #913 slice 1, the never-wired dead machinery it left behind (`dispatch.FirstFrameGate`/`Dispatcher`) was deleted in #1039, and `AuthenticateFirstFrame` itself (plus `AuthOutcome`, `ErrMalformedHelloFrame`, and the transitively-dead `buildResponse` helper) was deleted in #1040 — see [codebase/1040.md](../codebase/1040.md). The two close-code constants are all that remains; see § Auth below.
 3. **Per-envelope-type handlers** (`handlers/`, #250, signature rewrite #319) — sibling sub-package (`internal/relay/handlers`) of `dispatch.Handler` closures, one per inbound phone-traffic envelope type. Inhabitants today: `ListConversations` (#303) for `list_conversations`, `CreateConversation` (#666, mint+bind #677, per-`Cwd` spawn #685) for `create_conversation`, `RenameConversation` (#820) for `rename_conversation`, `PromoteConversation` (#949) for `promote_conversation`, `DeleteConversation` (#822) for `delete_conversation`, `ArchiveConversation` (#881) for both `archive_conversation` and `unarchive_conversation`, `SetConversationMuted` (#2572) for `set_conversation_muted` — same shape as `ArchiveConversation` but its reply is also fanned out, reusing `send_message`'s auto-naming `ConversationAnnouncer` push via a hoisted `announceConversationHook` closure rather than a second fan-out loop, see [`relay-package-handlers.md` § `SetConversationMuted` reuses `send_message`'s auto-naming push](relay-package-handlers.md#setconversationmuted-reuses-send_messages-auto-naming-push-2572) — `RegisterPushToken` (#250 logic, #319 signature) for `register_push_token`, and `SendMessage` (#322 + Activate ordering #396 + per-conversation routing #678 + enqueue-and-ack #721 + auto-naming #2159) for `send_message`. `RenameConversation` clones `CreateConversation`'s handler shape but is simpler (no session mint, no cwd): decode → empty-title guard → `conversations.Registry.Update` (single locked callback both renames and snapshots the reply, no find-then-read) → eager `Save` → reply with the reused `conversation_updated` record via its own consumer-declared `ConversationRenamer` interface (`Update` + `Save` + `WorkspaceLabel`, #2210) — see [codebase/820.md](../codebase/820.md); proven at the daemon boundary over the encrypted v2 wire by `TestRelayV2_Rename` (#974, split from the #960 verb-coverage sweep) — see [codebase/974.md](../codebase/974.md). `PromoteConversation` (#949) clones `RenameConversation`'s shape with one extra step: `conversations.Registry.Promote` returns only an `error`, not the updated row, so the handler reads it back via `Get` before building the `conversation_updated` reply, via its own consumer-declared `ConversationPromoter` interface (`Promote` + `Get` + `Save` + `WorkspaceLabel`, #2210). The payload's required `Cwd` is deliberately NOT consumed — the promoted channel inherits the scratch conversation's existing (already `$HOME`-confined) `Cwd` rather than the untrusted wire value, so unlike `change_workspace` this verb opens no untrusted-path surface — see [codebase/949.md](../codebase/949.md). `DeleteConversation` clones the same shape for a **hard, permanent** delete (the reversible path is archive/unarchive, #880/#881, a distinct verb): decode → `conversations.Registry.Delete` (a miss is `conversation.not_found`, idempotent-on-miss, no state change) → eager `Save` → reply `conversation_deleted` carrying only the deleted id via its own consumer-declared `ConversationDeleter` interface (`Delete` + `Save`) — no `conversation_updated` reuse, since the row no longer exists to project name/cwd/last_used_at from. Its malformed-decode branch deliberately diverges from the rename/create template: it logs `conn_id` only, never the decode `err` or `conversation_id`, since a `*json.SyntaxError` or a partially-decoded struct can carry attacker payload bytes — see [codebase/822.md](../codebase/822.md); proven at the daemon boundary over the encrypted v2 wire by `TestRelayV2_Delete` (#975, split from the #960 verb-coverage sweep, structure copied from the merged #974 rename test) — see [codebase/975.md](../codebase/975.md). `ArchiveConversation` (#881) is **one parameterized factory** (`func(reg, registryPath, logger, archived bool) dispatch.Handler`) registered twice — the reversible, **symmetric toggle** counterpart to `DeleteConversation`'s permanent removal: decode → `conversations.Registry.SetArchived(id, archived)` (#880's deterministic single-field mutator, a miss is `conversation.not_found`) → `Get` to snapshot the post-flip record for the reply (a concurrent-delete race surfacing as a `Get` miss also folds into `conversation.not_found`) → eager `Save` → reply with the reused `conversation_updated` record (now carrying `is_archived`) via its own consumer-declared `ConversationArchiver` interface (`SetArchived` + `Get` + `Save` + `WorkspaceLabel`, #2210). Diverges from `RenameConversation`'s snapshot approach deliberately: it flips via `SetArchived` + a follow-up `Get` rather than an `Update` closure, honoring #880's single-field mutator instead of a general closure. Copies `DeleteConversation`'s malformed-branch logging divergence (`conn_id` only) and carries the same `security-sensitive` label — see [codebase/881.md](../codebase/881.md); proven at the daemon boundary over the encrypted v2 wire by `TestRelayV2_Archive` (#976, split from the #960 verb-coverage sweep, structure copied from the merged #974 rename test): a single archive → unarchive round-trip sent as two frames over one Noise_IK-handshaked channel (no re-handshake between them), plus a not-found subtest — see [codebase/976.md](../codebase/976.md). Both verbs reply only to the requester, no live fan-out, same posture as rename/delete. `CreateConversation` mints a server-side id (`conversations.NewID`), **mints and binds a dedicated claude session for the conversation via the sessions pool** (#677 — eager bind: the conversation's `CurrentSessionID` points at a `Pool.Create`'d session so each discussion is isolated instead of sharing the bootstrap claude; the mint is bounded by a 30s timeout, and a mint failure replies `server.binary_offline` retryable with **no** row created), records a registry row with the effective cwd / promoted / name (server defaults for `null` fields) **plus the bound session id**, **eagerly** Saves so the row survives a daemon restart (diverging from the lazy archive-tick sweep, matching the `pyry pair` Add→Save precedent), and replies `conversation_created` (the wire reply is unchanged — the binding is internal registry state) — see [codebase/666.md](../codebase/666.md), [codebase/677.md](../codebase/677.md), [features/conversation-session-binding.md](conversation-session-binding.md). Each is a factory: `func(deps...) dispatch.Handler` returning a closure with `func(ctx, *dispatch.Conn, protocol.Envelope) error`. The handler reads the authenticated device via `c.Auth()` (#318), allocates response ids via `c.NextID()` (called inside `c.Reply`), and never stamps `id`/`in_reply_to`/`ts` itself. The sub-package does not import `internal/relay`, keeping it cycle-free; `SetHostSystemPrompt` imports `internal/sessions` only to translate its validation sentinels, while its store access remains consumer-declared (see [durable acknowledgement](relay-package-handlers.md#daemon-wide-instructions-and-durable-acknowledgement)); the `send_message` handler depends on its own `handlers.TurnWriter` interface (`Activate` + `WriteUserTurn`) that `*sessions.Session` satisfies structurally, and the `create_conversation` handler likewise depends on its own `handlers.SessionCreator` interface (`Create(ctx, label, spawnDir, agent string, settings CreateSettings) (sessionID, dir string, err error)`, #677; `spawnDir` added #685; `agent` added #2647; `settings` — the request's optional `model`/`effort` — added #2665, checked against the resolved agent's own vocabulary before anything is created) — adapted from `*sessions.Pool.CreateIn` at the `cmd/pyry` boundary (`sessionMinter`, mirroring `poolResolver`) so the sub-package still imports no `internal/sessions`. See [conversation-session-binding-create.md § The `SessionCreator` seam](conversation-session-binding-create.md#the-sessioncreator-seam-keeps-handlers-import-clean) for the full signature and the membership-check rationale. `sessionMinter` is also the **sole validator** of the phone-requested spawn workdir: `resolveSpawnDir` confines a set `spawnDir` to `$HOME` + trust-marks the realpath (#685, mirroring the daemon bootstrap's confine→trust posture) before `CreateIn`, and an escape (wrapping `handlers.ErrSpawnDirRejected`) maps to a non-retryable `protocol.malformed` reply with no half-bound row. The `send_message` handler gains a third consumer-declared seam, `handlers.SessionRouter` (`Route(conversationID) (TurnWriter, error)`, #678), which *returns* a `TurnWriter` rather than any `internal/sessions` type — adapted at `cmd/pyry` by `sessionRouter`/`boundSession` beside `sessionMinter`, preserving the import-clean property. `SendMessage` first resolves the frame's `ConversationID` to its bound session via `SessionRouter` (#678 — rejecting an unbound conversation *before* any `Pool.Lookup`, since `Pool.Lookup("")` would otherwise hand back the shared bootstrap; the routing target `CurrentSessionID` is server-stored, never phone-writable). Since #721 it then **enqueues** the turn into the daemon's `internal/msgqueue` backlog and **acks on acceptance** rather than delivering synchronously: the `Activate`-then-`WriteUserTurn` step (with the `#396` lazy-respawn of an idle-evicted **bound** session, re-activated through the cap-enforcing `Pool.Activate`) moved to the daemon's `msgqueue` drain (`cmd/pyry.newInboundDeliver`), which delivers one message at a time paced by claude reaching idle. The handler gained a fourth consumer-declared seam, `handlers.Enqueuer` (`EnqueueAttached(conversationID, messageID, text, delivery string, attachmentIDs []string) uint64` — widened from a bare `Enqueue(conversationID, text)` by #2038's `delivery`, #2092's `messageID`, and #2596's `attachmentIDs` — satisfied by `*msgqueue.Queue`, defined consumer-side so `handlers/` imports no `internal/msgqueue`). `attachmentIDs` is `resolveAttachments`' own deduplicated, first-occurrence-order return, so the ids the history log later stores on the operator's turn have already passed the resolver's canonical-shape check — never derived from `delivery`, which is the composed prompt naming on-host paths. The synchronous reject mapping is unchanged and runs **before enqueue**: an unknown conversation → `conversation.not_found` (not retryable); an unbound/dangling session → `protocol.CodeServerBinaryOffline` with `Retryable=true`; a routable send → `ack`. A post-ack delivery failure is absorbed and retried by the drain, not surfaced as a wire reply (see [features/conversation-session-binding-routing.md § Enqueue-and-ack (#721)](conversation-session-binding-routing.md#enqueue-and-ack-721), [features/msgqueue-package.md](msgqueue-package.md), [codebase/721.md](../codebase/721.md)). The outbound assistant-turn bridge still taps the bootstrap PTY — an explicit phased-migration asymmetry, see [features/conversation-session-binding.md](conversation-session-binding.md#edge-cases--limitations).
 
@@ -22,6 +22,8 @@ type Config struct {
     RelayURL      string            // must be wss:// (ws:// accepted only when AllowInsecureScheme=true)
     BinaryVersion string
     Logger        *slog.Logger      // required
+
+    AdmissionToken string          // optional selected startup credential; empty omits header
 
     // AllowInsecureScheme, when true, lets RelayURL use ws:// in addition
     // to wss://. Test-only seam for e2e suites pointing the daemon at an
@@ -45,10 +47,18 @@ func (*Connection) Wait() error                              // blocks until exi
 func (*Connection) Close() error                             // idempotent
 
 var (
+    ErrAdmissionFailed  = errors.New("relay: daemon admission failed (HTTP 401)")
     ErrServerIDConflict = errors.New("relay: server-id conflict (close 4409)")
     ErrInvalidConfig    = errors.New("relay: invalid config")
 )
 ```
+
+`Config.AdmissionToken` accepts the caller's selected startup credential. A
+nonempty value must be exactly 64 ASCII lowercase hexadecimal characters;
+`Connect` rejects any other shape before constructing transport or dialing,
+with fixed, value-free text wrapping `ErrInvalidConfig`. It does not trim,
+normalize, decode or accept comma lists. Empty means absent. The package does
+no credential generation, selection or configuration-file I/O.
 
 Run pattern:
 
@@ -75,7 +85,7 @@ if err := conn.Wait(); err != nil {
         // another pyry holds this server-id; operator escalation, exit non-zero
         return err
     }
-    // ctx.Err() or wrapped transport error
+    // ErrAdmissionFailed, ctx.Err() or wrapped transport error
     return err
 }
 ```
@@ -89,18 +99,30 @@ Built inside `Connect` from `Config`; the caller does NOT supply them:
 | `x-pyrycode-server` | `string(cfg.ServerID)` (UUIDv4 from `internal/identity`) |
 | `x-pyrycode-version` | `cfg.BinaryVersion` |
 | `user-agent` | `pyry/<cfg.BinaryVersion>` |
+| `x-pyrycode-admission-token` | Exactly one unchanged `cfg.AdmissionToken` value when nonempty; omitted when empty |
+
+Headers are constructed once and retained on the initial upgrade, failed-attempt
+retries and every reconnect. Retries never drop, replace or fall back from the
+selected admission credential. It enters no URL, pairing/QR payload, routing
+envelope or application frame. Empty input preserves off-mode compatibility.
 
 Source: [protocol reference](../../protocol-mobile.md#binary--relay). Current admission is first-claim-wins; an occupied server-id closes with `4409`. `Wait()` surfaces `ErrServerIDConflict` only after eight consecutive conflicts with the production configuration.
 
 ## Daemon admission security boundary (declared)
 
 The [authoritative admission contract](../../protocol-mobile.md#daemon-admission-declared)
-is declared ahead of implementation and production activation. Current admission
-remains unchanged until [Core #3197](https://github.com/pyrycode/pyrycode/issues/3197)
-and [Relay #167](https://github.com/pyrycode/pyrycode-relay/issues/167) ship and the
-operator enables enforce. Core owns credential delivery and terminal HTTP 401
-handling; Relay owns admission enforcement and its repository's threat-model
-update. Neither implementation nor live rollout is proved by this declaration.
+is implemented at the relay library boundary by
+[Core #3216](https://github.com/pyrycode/pyrycode/issues/3216): `Connect` validates
+and sends an optional selected credential, and the first HTTP 401 terminates
+the relay connection with `ErrAdmissionFailed`, even without a credential.
+This library contract does not activate identity admission. The production
+`startRelay` caller still omits `AdmissionToken`; private daemon configuration,
+identity selection and credential wiring remain with
+[Core #3217](https://github.com/pyrycode/pyrycode/issues/3217).
+[Relay #167](https://github.com/pyrycode/pyrycode-relay/issues/167) owns enforcement
+and its repository's threat-model update. Production enforcement remains disabled
+until both implementations ship and the operator explicitly enables enforce;
+no live rollout is proved by the library's loopback tests.
 
 Noise authenticates the daemon to paired phones but cannot prevent anonymous
 reservation of its public server-id or anonymous daemon-originated push requests.
@@ -157,6 +179,8 @@ WS close-code `4409` (server-id conflict) is counted independently of any frame 
 |---|---|
 | Transport drop (`1011`, `1006`, network error) | Inherits `internal/transport`'s backoff (1s/2s/4s/8s/16s/30s cap ±20% jitter, reset after ≥60s uptime). On each fresh conn, re-enters forwarding directly (no handshake). Frames flow on the SAME `Frames()` channel before and after reconnect — consumers see a contiguous in-order stream. |
 | WS close `4409` (server-id conflict) | Retry on the normal backoff ladder; after eight consecutive closes, `Wait()` returns `ErrServerIDConflict`. This lets transient self-conflicts clear while Relay reaps the old connection and applies its grace reclaim. Persistent conflicts need operator intervention. |
+| HTTP 401 on upgrade | First rejection ends all automatic attempts, initially or after an established connection, with or without a credential. `Frames()` closes and `Wait()` returns `ErrAdmissionFailed`; no further dial or 4409 conflict-budget consumption. |
+| HTTP 5xx on upgrade | Retry through transport's normal recovery policy with the same selected credential. |
 | Malformed JSON on an inbound frame | Logged WARN; frame dropped at the trust boundary; loop continues. Single bad frame does NOT tear the conn. |
 | `ctx` cancelled / `Close()` called | Clean shutdown. `Frames()` closes; `Wait()` returns `ctx.Err()` or `nil`. |
 
@@ -164,10 +188,15 @@ WS close-code `4409` (server-id conflict) is counted independently of any frame 
 close paths. Any cycle ending without 4409 resets the consecutive-conflict
 counter; a successful upgrade alone does not. Resetting on upgrade would keep a
 persistent duplicate reconnecting forever, since it can upgrade before being
-closed. The uptime-based backoff reset is a separate counter. The declared
-admission contract instead makes the first HTTP 401 immediately terminal for the
-relay leg while local daemon service remains available; correcting configuration
-and restarting the daemon retries. That HTTP behavior is pending Core #3197.
+closed. The uptime-based backoff reset is a separate counter. `Connect` always
+selects HTTP 401 in `transport.Config.TerminalUpgradeStatuses`, independently of
+whether `AdmissionToken` is set. `classifyTransportErr` maps only the numeric 401
+in `transport.UpgradeRejectionError` to the static `ErrAdmissionFailed` sentinel,
+retaining no transport cause or peer diagnostic. It is distinct from
+`ErrServerIDConflict`, cancellation and ordinary connection errors through
+`errors.Is`. The existing `startRelay` terminal-error handler leaves local daemon
+service running on admission failure; correcting configuration and restarting
+the daemon retries. Credential configuration and wiring remain pending #3217.
 
 ### Reconnect-state accessors for the v2 push drain (#874 `Connected`, #875 `Reconnected`)
 
@@ -182,12 +211,17 @@ Both are wired in `cmd/pyry/relay.go`'s `V2SessionConfig` literal (`Connected: c
 
 | Method | Returns |
 |---|---|
-| `Connect` | `nil` on success after sync validation; `ErrInvalidConfig` (wrapped, names the missing field or wrong scheme) on bad config. Never blocks — the `run` goroutine handles the dial. |
+| `Connect` | `nil` error after sync validation; `ErrInvalidConfig` (wrapped, names the missing field, wrong scheme or required admission-token shape) on bad config. Dialing runs asynchronously in `run`. |
 | `Frames` | `(env, ok)`. `ok=false` when the lifecycle exits. |
-| `Wait` | `ErrServerIDConflict` (fatal 4409), `ctx.Err()` (graceful shutdown), `nil` (Close called), or a wrapped `transport` error (unexpected halt). |
+| `Wait` | `ErrAdmissionFailed` (first HTTP 401), `ErrServerIDConflict` (fatal 4409), `ctx.Err()` (graceful shutdown), `nil` (Close called), or a wrapped `transport` error (unexpected halt). |
 | `Close` | Always `nil`. Idempotent. |
 
-Sentinels are distinguished via `errors.Is`. `ErrServerIDConflict`'s string contains no dynamic content — no token / server-id leakage via error messages.
+Sentinels are distinguished via `errors.Is`. `ErrAdmissionFailed` and
+`ErrServerIDConflict` contain no dynamic content. Admission validation errors
+name the required shape without retaining the supplied value. Transport's
+[diagnostic safety boundary](transport-package.md#http-status-recovery-and-diagnostic-safety)
+discards reflected HTTP bodies/headers and WebSocket close reasons rather than
+wrapping raw peer errors beneath sanitized text.
 
 ## Configuration constraints
 
@@ -215,6 +249,17 @@ Forbidden everywhere: `token`, `payload`, raw `frame` bytes, full `Headers` map 
 - **Race between `Connected` signal and conn drop:** if the conn drops right after the relay observes `Connected`, `forwardFrames`'s first `Receive` returns `ErrDisconnected`, `run` loops and catches the next `Connected` or `transportErrCh`. No stuck state.
 
 ## Test surface
+
+Admission proofs must enter through `Connect` using `AllowInsecureScheme` for
+loopback sockets. `newTestConnection` wraps a prebuilt transport through
+`connectWithClient`, bypassing admission validation, header construction and
+terminal-status wiring; its tests can stay green with those production steps
+missing. `TestAdmissionTokenValidation`, `TestAdmissionHeadersAndReconnect` and
+`TestAdmissionUnauthorizedTerminal` exercise that public boundary, including
+supplied/absent credentials, zero-dial validation, 503 recovery, exact header
+multiplicity across retries, unchanged frame bytes and counted terminal 401
+attempts. Diagnostic assertions traverse single- and multi-cause error chains
+and captured log attributes for reflected synthetic credentials and peer text.
 
 `internal/relay/connection_test.go` (~700 LOC, stdlib + `coder/websocket`):
 
@@ -271,36 +316,9 @@ Split out to [`relay-package-handlers.md`](relay-package-handlers.md): the sub-p
 
 ## Consumers and roadmap
 
-- **Supervisor wiring**: `runSupervisor` resolves the relay URL with precedence
-  `-pyry-relay` > `PYRY_RELAY_URL` > `cfg.RelayURL` > `DefaultConfig`.
-  `startRelay` loads the server-id via `identity.LoadOrCreate(resolveServerIDPath(name))`
-  (the same on-disk file as `pyry pair`), calls `relay.Connect`, and gives
-  `Frames()` to the v2 Noise manager. A separate supervisor-owned goroutine
-  classifies `conn.Wait()`. A persistent `relay.ErrServerIDConflict`, after
-  transport's bounded retry window, calls `relayWiring.shutdown(err)`, wired
-  to the daemon's `cancelCause`, to unwind `pool.Run` with the conflict as cause.
-  Other terminal errors log WARN and end that goroutine without cancelling the
-  daemon; an empty `relayURL` logs INFO and starts no relay goroutine.
-
-  The daemon cause context is a `context.WithCancelCause` child of the
-  `signal.NotifyContext` parent. Fatal relay errors cancel the child with their
-  error, rather than cancelling the signal parent. The first cause wins: a later
-  SIGTERM/SIGINT or cleanup's `cancelCause(nil)` cannot replace a recorded
-  conflict. `fatalCause` matches the child's cause against the signal parent's
-  cause, rather than checking whether that parent is cancelled, so the conflict
-  still produces ERROR shutdown and a non-zero exit. Operator stops produce
-  INFO shutdown and exit 0; see [daemon shutdown and exit status](cli-verb-dispatch.md#daemon-shutdown-and-exit-status).
-  Cleanup cancels the daemon context before joining relay drains that depend on
-  `ctx.Done()`. [`codebase/301.md`](../codebase/301.md) records the original wiring;
-  the current shutdown classification is covered by
-  [real-signal regression tests](development-verification.md#prove-that-tests-distinguish-the-change).
-- **Outbound sending** (#307, landed): `(*Connection).Send(env protocol.RoutingEnvelope) error` marshals the routing envelope and forwards via `transport.Client.Send`. Caller wraps the inner `protocol.Envelope` in `RoutingEnvelope` (the dispatcher's `Conn.Send` does this from the inside). Returns `transport.ErrDisconnected` / `ErrNotConnected` / `ErrClosed` verbatim when the underlying conn is dropped — frames sent during a disconnected window are lost, which is consistent with the protocol's connection-lifecycle semantics (reconnect re-establishes the conn on WS upgrade, so per-conn state on the relay is implicitly the wrong frame of reference for retry). First consumer is `internal/dispatch` via the dispatcher's `Outbound()` forwarder in `cmd/pyry/relay.go`.
-- **Relay-conn wiring (#308 + #318) — removed.** The v1 first-frame gate this bullet described (`dispatch.FirstFrameGate` extracting `RoutingEnvelope.Token`, calling `AuthenticateFirstFrame`, atomically publishing the close+error envelope) was production-live only until #913 slice 1; the orphaned machinery was deleted in #1039 and #1040. Token-based device auth today happens on the Noise_IK v2 handshake path — see [`v2-session-manager.md`](v2-session-manager.md) and § Auth above.
-- **Per-message dispatch** (`internal/dispatch`, #307+#308+#318): consumes `Frames()`, runs the optional `FirstFrame` gate, decodes the inner `protocol.Envelope` and branches on `Type`, routing to the registered handler in `internal/relay/handlers/`. `list_conversations` (#303), `create_conversation` (#666), `rename_conversation` (#820), `promote_conversation` (#949), `delete_conversation` (#822), `archive_conversation` / `unarchive_conversation` (#881), `change_workspace` (#823), `create_workspace_folder` (#887), `recent_workspaces` (#888), `register_push_token` (#319), and `send_message` (#322) are wired in `cmd/pyry/relay.go`'s `V2SessionConfig.Handlers` map (`startRelayV2`) — the **sole** dispatch table since #913 removed the legacy v1 `d.Register` block and the `PYRY_MOBILE_V2` switch (`startRelay` is now a thin wrapper that calls `startRelayV2` directly); the rest of the #256 catalog (the assistant-turn-delivery half of `send_message`) is deferred; the `backfill_since` wire flow that was once part of it has since been removed as dead code, never wired to a handler — see [codebase/967.md](../codebase/967.md). (`rename_conversation`, `promote_conversation`, `delete_conversation`, `archive_conversation`/`unarchive_conversation`, `change_workspace`, `create_workspace_folder`, and `recent_workspaces` were not part of the original #256 catalog — later additions, #820/#949/#822/#881/#823/#887/#888. `promote_conversation` was the last member of the family to define its full wire surface (payload, reply type) without a registered handler — #949 closed that gap; every write verb in the group now reuses `conversation_updated` as its reply. `change_workspace` is the first of the group whose untrusted input is a filesystem path rather than a display string or bare id — see [codebase/823.md](../codebase/823.md); proven at the daemon boundary over the encrypted v2 wire by `TestRelayV2_ChangeWorkspace` (#980, split from the #960 verb-coverage sweep, structure copied from the merged #974 rename test), one of the group's two e2e tests that certify a path-confinement containment property — a round-trip asserting the reply/on-disk `Cwd` is the confined **realpath** (not the raw path sent), a rejection subtest asserting neither the raw nor `EvalSymlinks`-resolved form of an escaping path leaks on the wire, and a not-found subtest using a *valid* target so confinement doesn't mask the lookup miss — see [codebase/980.md](../codebase/980.md). `promote_conversation` (#949) deliberately does NOT follow `change_workspace`'s confine pattern despite also carrying a `Cwd`-shaped field: the payload `Cwd` is read and discarded, the channel inherits the scratch conversation's existing cwd — see [codebase/949.md](../codebase/949.md). `create_workspace_folder` (#887) is the first of the group that touches **no conversations registry at all** — it creates a directory and replies with a brand-new type, `workspace_folder_created`, rather than reusing `conversation_updated` — see [codebase/887.md](../codebase/887.md); proven at the daemon boundary over the encrypted v2 wire by `TestRelayV2_CreateWorkspaceFolder` (#981, split from the same #960 verb-coverage sweep, structure copied from the merged #980 change_workspace test), the group's other path-confinement e2e and the first to certify **two independent** fail-closed guards (confinement to `$HOME` and the name-shape "directly under parent" check) in one ticket — see [codebase/981.md](../codebase/981.md). `recent_workspaces` (#888) is the group's first **read** verb since `list_conversations` — takes the registry directly with no `cmd/pyry` adapter (unlike every write verb in the group), and is the only member of the group explicitly labeled not-security-sensitive — see [codebase/888.md](../codebase/888.md); proven at the daemon boundary over the encrypted v2 wire by `TestRelayV2_RecentWorkspaces` (#982, split from the same #960 verb-coverage sweep, structure copied from the merged #980/#981 templates minus their not-found and on-disk-reassertion blocks — this verb is a pure read with no error path and Saves nothing), the group's first read-verb e2e — see [codebase/982.md](../codebase/982.md). `TestEveryInboundV2TypeHasHandler` (`cmd/pyry/relay_guard_test.go`, #950) is a structural, always-on guard against the #949 failure class recurring: it AST-reads the actual `Handlers` map keys in `relay.go` plus the actual `case protocol.Type*:` labels of `dispatchAppFrame`'s switch (`internal/relay/v2session.go`, the pre-`dispatch.Route` interception surface below) and fails, naming the type, if any inbound v2 verb is registered in neither — see [codebase/950.md](../codebase/950.md).)
-
-- **Reconnect-state accessors** (#874 `Connected` + #875 `Reconnected`, landed): sole consumer is `internal/relay.V2SessionManager` via the `V2SessionConfig.Connected` / `.Reconnect` optional seams wired in `cmd/pyry/relay.go`'s `startRelayV2`. See [§ Reconnect-state accessors](#reconnect-state-accessors-for-the-v2-push-drain-874-connected-875-reconnected) above.
-- **Push-wake trigger** (#2564, landed): `cmd/pyry`'s `pushWaker` is `SendPushWake`'s sole caller, fed by `interactiveTurnEmitterV2` and `streamApprovalBridge`'s two fan-out points; it also reads `V2SessionManager.ActiveConns` for the open-session snapshot and `devices.Registry.List` for the paired-device set. See [§ Push-wake surface](#push-wake-surface-sendpushwake-2564) above.
-- **Operator-message live push** (#2699, landed): `cmd/pyry`'s `operatorMessageEmitterV2` mirrors `qse`'s shape (a buffered hand-off from `msgqueue`'s `OnDelivered` seam, drained by one `Run` goroutine in `startRelayV2`), but also appends to the #647 replay ring before its fan-out, so a reconnecting conn replays the operator's own message like any other ring event. **Lesson: a new field on an aligned struct literal only touches its own line when it follows its own comment line.** `relayWiring`'s field list, and the `relayWiring{...}` literal built in `runSupervisor`, are gofmt-aligned blocks of consecutive `name: value,` lines; a comment-only line breaks gofmt's alignment group, so a much longer key like `operatorMessages` re-pads only the lines after that comment, not the whole block above it. Appending a long key straight into an existing group instead re-pads every sibling in it, turning a one-field addition into a diff that touches lines nothing else changed.
+| Document | Scope |
+|---|---|
+| [Consumers and daemon wiring](relay-package-consumers.md) | Supervisor lifecycle, outbound sending, handler wiring, reconnect observers and push emitters. |
 
 ## Dependencies
 
