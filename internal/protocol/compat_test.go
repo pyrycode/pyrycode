@@ -291,6 +291,11 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 // must not, so the partition is the architectural seam between v1 traffic
 // and v2 traffic.
 var v2OnlyTypes = map[string]bool{
+	TypeAppAssetRequest:     true,
+	TypeAppAPIRequest:       true,
+	TypeAppResponse:         true,
+	TypeAppResponseChunk:    true,
+	TypeAppResponseCredit:   true,
 	TypeListApps:            true,
 	TypeApps:                true,
 	TypeAppUpdated:          true,
@@ -445,6 +450,8 @@ var v2OnlyTypes = map[string]bool{
 // caught by the "in both" branch.
 func TestTypeConstants_V1V2Partition(t *testing.T) {
 	all := []string{
+		TypeAppAssetRequest, TypeAppAPIRequest, TypeAppResponse,
+		TypeAppResponseChunk, TypeAppResponseCredit,
 		TypeListApps, TypeApps, TypeAppUpdated, TypeAppRemoved,
 		TypeAppCancel, TypeAppCancelled,
 		// v1 application types.
