@@ -65,3 +65,6 @@ Pending documentation stage:
 - Threat model: output remains untrusted display data; no new actuation or privileges. #2963 owns catch-up and reconnect protocol work; existing prompt-injection and relay availability residual risks remain unchanged.
 **Reviewer:** builder (self-review per checklist)
 **Date:** 2026-10-12
+
+## Revisions
+2026-10-12: Retirement captures its boundary before publication. A commit while delivery is held must exceed that saved boundary and reload, rather than being marked consumed without publication; `TestDaemonThreadIdleCommit` covers the race. Recipient tracking is refreshed on each publication to avoid accumulating disconnected peers. Focused lifecycle coverage brings written work slightly over 800 lines; these checks belong to the single publisher deliverable and have no independent slice, so the handback floor rule keeps them here.
