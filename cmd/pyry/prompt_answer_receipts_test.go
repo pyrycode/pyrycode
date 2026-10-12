@@ -274,6 +274,21 @@ func (p *promptReceiptBroadcaster) Push(_ context.Context, id string, env protoc
 	return nil
 }
 
+func waitPromptReceipts(t *testing.T, p *promptAnswerPublisher) {
+	t.Helper()
+	p.mu.Lock()
+	done := p.done
+	p.mu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("receipt delivery did not finish")
+	}
+}
+
 func TestPromptAnswerReceiptsPublication(t *testing.T) {
 	for _, decision := range []string{"allow", "deny", "cancel", "answer", "refusal"} {
 		for _, connected := range []bool{true, false} {
@@ -346,6 +361,7 @@ func TestPromptAnswerReceiptsPublication(t *testing.T) {
 				if e.Type != protocol.TypeBanner || e.HistoryEntryID != h.ID || !e.TS.Equal(h.TS) || !bytes.Equal(e.Payload, h.Payload) {
 					t.Fatal("replay/history mismatch")
 				}
+				waitPromptReceipts(t, b.historyPublisher)
 				receipts := 0
 				probe.mu.Lock()
 				defer probe.mu.Unlock()
@@ -406,6 +422,7 @@ func TestPromptAnswerReceiptsConcurrent(t *testing.T) {
 	if gap || len(events) != count || len(historyEntries(t, store, testConvID)) != count {
 		t.Fatal("concurrent answer lost or duplicated")
 	}
+	waitPromptReceipts(t, b.historyPublisher)
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
 	receipts := []protocol.Envelope{}
