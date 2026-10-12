@@ -26,7 +26,26 @@ function integrity(db){const rows=db.prepare('PRAGMA main.integrity_check').all(
  const sealed=new DatabaseSync('app.sqlite',{...options,readOnly:true});try{integrity(sealed);}finally{sealed.close();}}
 })().catch(()=>{process.exitCode=1});`
 
-func runBackupNode(ctx context.Context, node string, dir *os.File, mode string) error {
+func backupSQLiteEntries(entries []backupEntry, sealed bool) (bool, error) {
+	var initialized, sidecars bool
+	for _, entry := range entries {
+		switch string(entry.Path) {
+		case "data/app.sqlite":
+			if entry.Kind != "file" {
+				return false, ErrInvalidStorage
+			}
+			initialized = entry.Size > 0
+		case "data/app.sqlite-wal", "data/app.sqlite-shm", "data/app.sqlite-journal":
+			sidecars = true
+		}
+	}
+	if sidecars && (sealed || !initialized) {
+		return false, fmt.Errorf("apps: SQLite transient sidecars without an initialized source database or inside a sealed backup: %w", ErrInvalidStorage)
+	}
+	return initialized, nil
+}
+
+func (o backupOps) runBackupNode(ctx context.Context, node string, dir *os.File, mode string) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	version := exec.CommandContext(ctx, node, "--version")
@@ -34,7 +53,7 @@ func runBackupNode(ctx context.Context, node string, dir *os.File, mode string) 
 	version.WaitDelay = time.Second
 	bytes, err := version.Output()
 	if err != nil {
-		return fmt.Errorf("apps: snapshot node version: %w", err)
+		return fmt.Errorf("apps: snapshot node version: %w", errors.Join(err, ctx.Err()))
 	}
 	if !supportedNode(strings.TrimSpace(string(bytes))) {
 		return errors.New("apps: unsupported snapshot node")
@@ -43,7 +62,13 @@ func runBackupNode(ctx context.Context, node string, dir *os.File, mode string) 
 	cmd.Env = []string{}
 	cmd.Dir = fmt.Sprintf("/dev/fd/%d", dir.Fd())
 	cmd.WaitDelay = time.Second
-	if err = errors.Join(cmd.Run(), ctx.Err()); err != nil {
+	if err = cmd.Start(); err != nil {
+		return fmt.Errorf("apps: start snapshot SQLite: %w", errors.Join(err, ctx.Err()))
+	}
+	if o.nodeStarted != nil {
+		o.nodeStarted(cmd.Process)
+	}
+	if err = errors.Join(cmd.Wait(), ctx.Err()); err != nil {
 		return fmt.Errorf("apps: snapshot SQLite: %w", err)
 	}
 	return nil
@@ -57,7 +82,7 @@ func (o backupOps) sqliteSnapshot(ctx context.Context, node string, root, data *
 		return err
 	}
 	defer work.Close()
-	if err = runBackupNode(ctx, node, work, "snapshot"); err != nil {
+	if err = o.runBackupNode(ctx, node, work, "snapshot"); err != nil {
 		return err
 	}
 	db, err := regularAt(work, "backup.sqlite", false)
@@ -73,26 +98,26 @@ func (o backupOps) sqliteSnapshot(ctx context.Context, node string, root, data *
 		return err
 	}
 	if err = unix.Renameat(int(work.Fd()), "backup.sqlite", int(data.Fd()), "app.sqlite"); err != nil {
-		return err
+		return fmt.Errorf("apps: replace snapshot database: %w", err)
 	}
-	for _, name := range []string{"app.sqlite-wal", "app.sqlite-shm"} {
+	for _, name := range []string{"app.sqlite-wal", "app.sqlite-shm", "app.sqlite-journal"} {
 		if err = unix.Unlinkat(int(data.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-			return err
+			return fmt.Errorf("apps: remove snapshot sidecar %q: %w", name, err)
 		}
 	}
 	if err = unix.Unlinkat(int(root.Fd()), "sqlite-work", unix.AT_REMOVEDIR); err != nil {
-		return err
+		return fmt.Errorf("apps: remove snapshot SQLite work directory: %w", err)
 	}
 	if err = o.sync(ctx, data); err != nil {
 		return err
 	}
-	return verifyBackupSQLite(ctx, node, root)
+	return o.verifyBackupSQLite(ctx, node, root)
 }
-func verifyBackupSQLite(ctx context.Context, node string, root *os.File) error {
+func (o backupOps) verifyBackupSQLite(ctx context.Context, node string, root *os.File) error {
 	data, err := backupDir(root, "data", false)
 	if err != nil {
 		return err
 	}
 	defer data.Close()
-	return runBackupNode(ctx, node, data, "verify")
+	return o.runBackupNode(ctx, node, data, "verify")
 }

@@ -78,3 +78,11 @@ Pending documentation stage: `docs/hosted-apps.md`, “Runtime and layout” and
 ## Revisions
 
 2026-10-12: Evidence uses canonical JSON with byte-preserving paths (bounded to 16 MiB) so altered/unknown fields are rejected. Snapshot copying also hardens source permissions after rejecting hard links; source bytes remain untouched. Standalone header/sidecar rejection runs inside the fixed Node verifier before opening SQLite.
+
+2026-10-12, verifier finding 1: `backupSQLiteEntries` rejects top-level WAL/SHM/journal sidecars when the source database is absent or uninitialized, and rejects every sealed sidecar independently of database size and persisted inventory. Absent and zero-byte states remain distinct. `TestBackupUninitializedSidecars` covers creation and fresh verification with matching tampered evidence and no source tree.
+
+2026-10-12, verifier finding 2: storage syscalls now carry operation context while preserving `errors.Is`, including nested traversal. Failed sealing joins the original failure with both evidence removal and invalidation-sync errors; invalidation runs despite cancellation. `TestBackupStorageErrors`, `TestBackupInvalidationErrors` and `TestBackupSQLiteStorageErrors` prove errno preservation, cleanup error aggregation and rejection of incomplete backups.
+
+2026-10-12, verifier finding 3: cancellation coverage now includes pre-start, copy, sealing, independent verification before/during traversal and started Node children in snapshot/verification. Per-instance process-start notification supports deterministic cancellation; every started child is waited on before return. `TestBackupCancellation` and `TestBackupSQLiteCancellation` assert cancellation, unchanged source/sealed bytes, no acceptable partial evidence and joined children.
+
+Security re-review of these revisions: PASS. The inventory guard closes the sidecar trust-boundary gap before sealing/SQL verification. Contextual local errors expose no data contents; failed invalidation is reported, never silently accepted. Process-start test hooks are per-instance, production callers install none, and the synchronous child wait preserves shutdown ownership. Other reviewed boundaries and documented out-of-scope consumers are unchanged.

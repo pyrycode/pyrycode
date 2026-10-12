@@ -28,14 +28,17 @@ type backupEvidence struct {
 	Reference BackupReference
 	Entries   []backupEntry
 }
-type backupOps struct{ hook func(string) error }
+type backupOps struct {
+	hook        func(string) error
+	nodeStarted func(*os.Process)
+}
 
 func (o backupOps) step(ctx context.Context, phase string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if o.hook != nil {
-		return o.hook(phase)
+		return errors.Join(o.hook(phase), ctx.Err())
 	}
 	return nil
 }
@@ -48,12 +51,12 @@ func backupIdentity(root, server, app string, ref BackupReference) error {
 func backupDir(parent *os.File, name string, create bool) (*os.File, error) {
 	if create {
 		if err := unix.Mkdirat(int(parent.Fd()), name, 0700); err != nil && !errors.Is(err, unix.EEXIST) {
-			return nil, err
+			return nil, fmt.Errorf("apps: create backup directory %q: %w", name, err)
 		}
 	}
 	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("apps: open backup directory %q: %w", name, err)
 	}
 	return os.NewFile(uintptr(fd), name), nil
 }
@@ -85,7 +88,7 @@ func (o backupOps) snapshot(ctx context.Context, root, server, app, publish, nod
 	if err = unix.Mkdirat(int(parent.Fd()), publish, 0700); errors.Is(err, unix.EEXIST) {
 		return BackupReference{}, ErrConflict
 	} else if err != nil {
-		return BackupReference{}, err
+		return BackupReference{}, fmt.Errorf("apps: create publish directory %q: %w", publish, err)
 	}
 	dest, err := backupDir(parent, publish, false)
 	if err != nil {
@@ -108,20 +111,14 @@ func (o backupOps) snapshot(ctx context.Context, root, server, app, publish, nod
 		if e != nil || !reflect.DeepEqual(expected, actual) {
 			return BackupReference{}, errors.Join(ErrInvalidStorage, e)
 		}
-		db, e := regularAt(target, "app.sqlite", false)
-		if e == nil {
-			info, e := db.Stat()
-			_ = db.Close()
-			if e != nil {
+		initialized, e := backupSQLiteEntries(expected, false)
+		if e != nil {
+			return BackupReference{}, e
+		}
+		if initialized {
+			if e = o.sqliteSnapshot(ctx, node, dest, target); e != nil {
 				return BackupReference{}, e
 			}
-			if info.Size() > 0 {
-				if e = o.sqliteSnapshot(ctx, node, dest, target); e != nil {
-					return BackupReference{}, e
-				}
-			}
-		} else if !errors.Is(e, os.ErrNotExist) {
-			return BackupReference{}, e
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return BackupReference{}, err
@@ -156,15 +153,13 @@ func (o backupOps) snapshot(ctx context.Context, root, server, app, publish, nod
 		}
 	}
 	if err = unix.Renameat(int(dest.Fd()), "verification.pending", int(dest.Fd()), "verification.json"); err != nil {
-		return BackupReference{}, err
+		return BackupReference{}, fmt.Errorf("apps: publish backup evidence: %w", err)
 	}
 	if err = o.step(ctx, "sealed"); err == nil {
 		err = o.sync(ctx, dest)
 	}
 	if err != nil {
-		_ = unix.Unlinkat(int(dest.Fd()), "verification.json", 0)
-		_ = dest.Sync()
-		return BackupReference{}, err
+		return BackupReference{}, errors.Join(err, invalidateBackupEvidence(dest))
 	}
 	return ref, nil
 }
@@ -172,6 +167,9 @@ func (o backupOps) snapshot(ctx context.Context, root, server, app, publish, nod
 // VerifyBackup verifies persisted identity, the exact tree and SQL integrity.
 // It needs no source tree, migrates nothing and never repairs sealed contents.
 func VerifyBackup(ctx context.Context, root, server, app string, ref BackupReference, node string) error {
+	return (backupOps{}).verify(ctx, root, server, app, ref, node)
+}
+func (o backupOps) verify(ctx context.Context, root, server, app string, ref BackupReference, node string) error {
 	if err := errors.Join(ctx.Err(), backupIdentity(root, server, app, ref)); err != nil {
 		return err
 	}
@@ -202,22 +200,37 @@ func VerifyBackup(ctx context.Context, root, server, app string, ref BackupRefer
 	if err != nil || !bytes.Equal(encoded, canonical) {
 		return ErrInvalidStorage
 	}
-	entries, err := (backupOps{}).tree(ctx, dir, nil, ".")
+	entries, err := o.tree(ctx, dir, nil, ".")
 	if err != nil || !reflect.DeepEqual(entries, evidence.Entries) {
 		return errors.Join(ErrInvalidStorage, err)
 	}
-	for _, entry := range entries {
-		if string(entry.Path) == "data/app.sqlite" && entry.Size > 0 {
-			return verifyBackupSQLite(ctx, node, dir)
-		}
+	initialized, err := backupSQLiteEntries(entries, true)
+	if err != nil {
+		return err
+	}
+	if initialized {
+		return o.verifyBackupSQLite(ctx, node, dir)
 	}
 	return ctx.Err()
 }
 func (o backupOps) sync(ctx context.Context, file *os.File) error {
 	if err := o.step(ctx, "sync"); err != nil {
-		return err
+		return backupError("sync snapshot entry "+file.Name(), err)
 	}
-	return errors.Join(file.Sync(), ctx.Err())
+	return backupError("sync snapshot entry "+file.Name(), errors.Join(file.Sync(), ctx.Err()))
+}
+
+func backupError(operation string, err error) error {
+	if err != nil {
+		return fmt.Errorf("apps: %s: %w", operation, err)
+	}
+	return nil
+}
+
+func invalidateBackupEvidence(dir *os.File) error {
+	removeErr := unix.Unlinkat(int(dir.Fd()), "verification.json", 0)
+	syncErr := dir.Sync()
+	return errors.Join(backupError("remove backup evidence", removeErr), backupError("sync backup invalidation", syncErr))
 }
 
 type backupReader struct {
@@ -264,14 +277,14 @@ func (o backupOps) tree(ctx context.Context, dir, dest *os.File, prefix string) 
 		if item.IsDir() {
 			child, e := backupDir(dir, name, false)
 			if e != nil {
-				return nil, e
+				return nil, fmt.Errorf("apps: traverse snapshot directory %q: %w", path, e)
 			}
 			var output *os.File
 			if dest != nil {
 				output, e = backupDir(dest, name, true)
 				if e != nil {
 					child.Close()
-					return nil, e
+					return nil, fmt.Errorf("apps: create snapshot directory %q: %w", path, e)
 				}
 			}
 			entries, e := o.tree(ctx, child, output, path)
