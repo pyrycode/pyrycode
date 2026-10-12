@@ -1,11 +1,15 @@
 package protocol
 
-// Thread live updates are declared outgoing vocabulary, not yet emitted.
-// They are not v1 application requests and must stay out of inboundAppTypeSet.
+// Thread vocabulary is v2; query handlers and wiring are declared separately.
+// These types must stay out of the v1 inboundAppTypeSet.
 const (
 	TypeThreadItemAdded   = "thread_item_added"
 	TypeThreadItemChanged = "thread_item_changed"
 	TypeThreadTextAppend  = "thread_text_append"
+	TypeThreadCatchUp     = "thread_catch_up"
+	TypeThreadPage        = "thread_page"
+	TypeThreadItems       = "thread_items"
+	TypeThreadReset       = "thread_reset"
 )
 
 // Error codes: wire values for the "code" field of an ErrorPayload
