@@ -44,15 +44,17 @@ type hostedOutput struct {
 	deliveryDone <-chan error
 }
 type hostedState struct {
-	inbox       *hostedInbox
-	deliveryCtx context.Context
-	pending     *hostedPage
-	reading     bool
-	walk        *hostedWalk
-	queue       []*hostedOutput
-	active      *hostedOutput
-	cancel      context.CancelFunc
-	rekey       bool
+	inbox        *hostedInbox
+	deliveryCtx  context.Context
+	pending      *hostedPage
+	reading      bool
+	walk         *hostedWalk
+	queue        []*hostedOutput
+	active       *hostedOutput
+	cancel       context.CancelFunc
+	rekey        bool
+	pushDeferred bool // Run observes an ordinary envelope queued upstream.
+	pushReserved bool // Run owns the temporary ordinary-drain reservation.
 }
 type hostedResult struct {
 	s        *V2Session
@@ -187,9 +189,14 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 	m.takeHostedChanges(ctx, s)
 	m.hostedMu.Lock()
 	in := h.inbox
-	full := in.retired || in.overflow || in.used >= hostedQueueLimit
+	reserved := h.pushReserved && o.env != nil
+	full := in.retired || in.overflow || (!reserved && in.used >= hostedQueueLimit)
 	if !full {
-		in.used++
+		if reserved {
+			h.pushReserved = false
+		} else {
+			in.used++
+		}
 	}
 	m.hostedMu.Unlock()
 	if full {
@@ -405,11 +412,21 @@ func (m *V2SessionManager) hostedNow() time.Time {
 
 // hostedEnvelope admits plaintext before sealing. IDs and Noise nonces are
 // allocated only when the ordered lane selects this envelope for delivery.
-func (m *V2SessionManager) hostedEnvelope(ctx context.Context, s *V2Session, env protocol.Envelope) {
+func (m *V2SessionManager) hostedEnvelope(ctx context.Context, s *V2Session, env protocol.Envelope) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if !s.hosted.pushReserved && env.Type != protocol.TypeRekeyRequest {
+		if !m.reserveHostedPush(s) {
+			if err := m.pushSource(ctx, s.connID, env, nil, true); err != nil {
+				m.cfg.Logger.Debug("relay: ordinary output handoff dropped", "event", "v2.push.drain_drop", "conn_id", s.connID, "err", err)
+			}
+			return true
+		}
+		defer m.releaseHostedPush(s)
+	}
 	m.hostedEnqueue(ctx, s, &hostedOutput{env: &env})
+	return false
 }
 func (m *V2SessionManager) retireHosted(s *V2Session) {
 	if h := s.hosted; h != nil {
