@@ -60,3 +60,6 @@ One deliverable; approximately 220 total written lines including plan, tests and
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+- 2026-10-12: Resolved the controlled-load question without another repair. Eight unchanged authenticated fixtures sharing CPU 0 failed before the first version-11 continuation on baseline `126d7ca6`; the identical diagnostic overlay against the repaired encoder passed all eight, including every retained assertion. `TestThreadFragmentSizingAllocations` fails pre-fix with 168 allocations per call and passes after with zero. All 732 protocol race test/subtest executions passed without skips. The design and wire contract are unchanged.
