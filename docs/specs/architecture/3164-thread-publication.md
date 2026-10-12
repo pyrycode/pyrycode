@@ -68,3 +68,9 @@ Pending documentation stage:
 
 ## Revisions
 2026-10-12: Retirement captures its boundary before publication. A commit while delivery is held must exceed that saved boundary and reload, rather than being marked consumed without publication; `TestDaemonThreadIdleCommit` covers the race. Recipient tracking is refreshed on each publication to avoid accumulating disconnected peers. Focused lifecycle coverage brings written work slightly over 800 lines; these checks belong to the single publisher deliverable and have no independent slice, so the handback floor rule keeps them here.
+
+2026-10-12, verifier finding 1: `drainOnce`, `drainLiveOnce` and `signalLiveDrain` quarantine output for a latched queue before Run handles its existing gap teardown. `TestRetiredThreadQueueDoesNotDrain` authenticates a held connection and deliberately drains before processing the ready teardown, proving dependent deltas cannot reach the wire.
+
+2026-10-12, verifier finding 2: relay-owned `ActiveThreadConns(ctx, conversation)` enumerates consumers on Run with delivery's shared membership/agent gates and excludes latched queues. Publication retains only eligible prior consumers and records successful enqueue recipients. New `handleConnSnapshot` and the optional `snapshotReq` conversation filter preserve ordinary `ActiveConns`. `TestDaemonThreadGapPreservesAgentIneligiblePeer` proves a Codex continuity gap retires the multi-agent consumer while the basic peer continues authenticated Claude publication. Security review: PASS; no additional access, I/O or goroutines, and negotiated session flags remain Run-owned.
+
+2026-10-12, verifier finding 3: `TestDaemonThreadPublication` explicitly checks the actual combined summary/text fold change after authenticated delivery to both thread peers: replacement precedes append, replacement uses the prior revision, append uses the replacement revision, and reconstructed complete items equal the usable fold observation.

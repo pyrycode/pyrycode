@@ -75,7 +75,7 @@ func TestDaemonThreadContinuity(t *testing.T) {
 	testShadowWait(t, func() bool { return store.Snapshot(id).State == thread.StateUsable })
 	var frames []protocol.Envelope
 	var retired []string
-	p := &daemonThreadPublisher{store: store, active: func(context.Context) []relay.ActiveConn {
+	p := &daemonThreadPublisher{store: store, active: func(context.Context, string) []relay.ActiveConn {
 		return []relay.ActiveConn{{ConnID: "phone", Interactive: true, Thread: true}}
 	}, push: func(_ context.Context, _ string, e protocol.Envelope) error { frames = append(frames, e); return nil }, retire: func(_ context.Context, id string) error { retired = append(retired, id); return nil }, log: discardLogger()}
 	w := &shadowConversation{}
@@ -137,6 +137,7 @@ func TestDaemonThreadPublication(t *testing.T) {
 	// Each recipient keeps separate conversation state and continuation assembly.
 	rows := map[string]map[string]map[uint64]protocol.ThreadItem{}
 	fragments := map[string]string{}
+	updates := map[string][]protocol.Envelope{}
 	continued := false
 	apply := func(peer string, e protocol.Envelope) string {
 		t.Helper()
@@ -165,6 +166,7 @@ func TestDaemonThreadPublication(t *testing.T) {
 			delete(fragments, key)
 		}
 		var added protocol.ThreadItemAddedPayload
+		updates[peer] = append(updates[peer], e)
 		var changed protocol.ThreadItemChangedPayload
 		var appended protocol.ThreadTextAppendPayload
 		_ = json.Unmarshal(e.Payload, &added)
@@ -261,10 +263,29 @@ func TestDaemonThreadPublication(t *testing.T) {
 	s.start()
 	await(testConvID, v, "phone", "again")
 	started := time.Now()
+	previousRev := v
+	updates = map[string][]protocol.Envelope{}
 	v = appendFact(testConvID, protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: testConvID, TurnID: "turn", Text: " second"})
 	await(testConvID, v, "phone", "again")
 	if time.Since(started) > 250*time.Millisecond {
 		t.Fatal("publication waiting exceeded 250 ms")
+	}
+	for _, peer := range []string{"phone", "again"} {
+		got := updates[peer]
+		if len(got) != 2 || got[0].Type != protocol.TypeThreadItemChanged || got[1].Type != protocol.TypeThreadTextAppend {
+			t.Fatalf("%s combined delivery did not replace before appending: %#v", peer, got)
+		}
+		var changed protocol.ThreadItemChangedPayload
+		var appended protocol.ThreadTextAppendPayload
+		if err := json.Unmarshal(got[0].Payload, &changed); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(got[1].Payload, &appended); err != nil {
+			t.Fatal(err)
+		}
+		if changed.BaseRev != previousRev || changed.Rev != v || appended.BaseRev != v || appended.Rev != v || changed.ItemID != appended.ItemID || string(changed.Changes["summary"]) != `"first second"` || appended.Text != " second" {
+			t.Fatalf("%s combined wire revision chain: %#v / %#v", peer, changed, appended)
+		}
 	}
 	v = appendFact(testConvIDB, protocol.TypeMessage, map[string]any{"role": "user", "text": "other"})
 	await(testConvIDB, v, "again")
@@ -379,7 +400,7 @@ func TestDaemonThreadRetirement(t *testing.T) {
 			}
 			entered := make(chan struct{})
 			var once sync.Once
-			p.active = func(context.Context) []relay.ActiveConn {
+			p.active = func(context.Context, string) []relay.ActiveConn {
 				return []relay.ActiveConn{{ConnID: "phone", Interactive: true, Thread: true}}
 			}
 			p.push = func(ctx context.Context, _ string, e protocol.Envelope) error {
@@ -476,7 +497,7 @@ func TestDaemonThreadIdleCommit(t *testing.T) {
 	var first sync.Once
 	var published atomic.Uint64
 	p := s.publisher
-	p.active = func(context.Context) []relay.ActiveConn {
+	p.active = func(context.Context, string) []relay.ActiveConn {
 		return []relay.ActiveConn{{ConnID: "phone", Interactive: true, Thread: true}}
 	}
 	p.retire = func(context.Context, string) error { return nil }

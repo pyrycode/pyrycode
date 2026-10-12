@@ -19,7 +19,7 @@ import (
 // Publication is owned by the existing conversation coordinator, never a writer.
 type daemonThreadPublisher struct {
 	store   *thread.Store
-	active  func(context.Context) []relay.ActiveConn
+	active  func(context.Context, string) []relay.ActiveConn
 	push    func(context.Context, string, protocol.Envelope) error
 	retire  func(context.Context, string) error
 	log     *slog.Logger
@@ -70,7 +70,7 @@ func startDaemonThreadPublisher(base context.Context, s *threadShadow, m *relay.
 		return func() {}
 	}
 	ctx, cancel := context.WithCancel(base)
-	p := &daemonThreadPublisher{store: store, active: m.ActiveConns, push: m.Push, retire: m.RetireLiveState, log: s.log, ctx: ctx}
+	p := &daemonThreadPublisher{store: store, active: m.ActiveThreadConns, push: m.Push, retire: m.RetireLiveState, log: s.log, ctx: ctx}
 	s.mu.Lock()
 	if s.publisher != nil {
 		s.mu.Unlock()
@@ -166,10 +166,11 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 	}
 	// Recipient selection follows observation capture. Reconnect history belongs
 	// to catch-up; this publisher does not initialize peers admitted later.
-	peers := p.active(ctx)
+	peers := p.active(ctx, string(id))
+	previousPeers := w.threadPeers
 	w.threadPeers = make(map[string]bool)
 	for _, peer := range peers {
-		if peer.Interactive && peer.Thread {
+		if previousPeers[peer.ConnID] {
 			w.threadPeers[peer.ConnID] = true
 		}
 	}
@@ -204,7 +205,9 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 					if !peer.Interactive || !peer.Thread {
 						continue
 					}
-					if err := p.push(ctx, peer.ConnID, e); err != nil && ctx.Err() == nil {
+					if err := p.push(ctx, peer.ConnID, e); err == nil {
+						w.threadPeers[peer.ConnID] = true
+					} else if ctx.Err() == nil {
 						p.log.Debug("relay: thread push failed", "event", "daemon.thread.push_err")
 					}
 				}
