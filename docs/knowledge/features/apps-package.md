@@ -350,6 +350,15 @@ on Linux, killed orphan zombies retained by container init are distinguished fro
 live processes. The owner joins its direct child and cleanup targets only its
 group; `TestOwnerDuplicateAndIsolation` verifies a sibling remains alive.
 
+PID-bearing readiness markers must publish complete contents atomically.
+`publishOwnerPID` writes a temporary file before renaming it into view for the
+controlled child's ready/descendant signals. Polling file existence after a
+direct `os.WriteFile` can observe its empty create-before-write window and fail
+PID parsing before cleanup assertions run. Requiring nonempty bytes in shared
+`waitFile` would instead break intentional empty existence-only handshake
+markers. `TestOwnerCleanupErrorContext` and `TestOwnerGroupCleanup` consume the
+published PIDs; delaying the temporary write must leave no partial PID visible.
+
 Inspect ownership immediately after the original concurrent start/stop operations.
 A second cleanup stop can conceal the child missed by a successful first stop.
 `TestOwnerStartStopRaces` asserts retirement without that extra operation;

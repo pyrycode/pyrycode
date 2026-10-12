@@ -35,7 +35,15 @@ The daemon builds the thread. Per conversation it keeps an ordered list of **ite
 
 **The apps own presentation:** keeping items by id, sorting and drawing, collapsing tool runs, pinning a running agent, scroll anchoring, the markdown reveal, and the status line built from live state. They also keep messages the daemon has not yet accepted, and their offline copy.
 
-**Live state is never an item.** Permission prompts and question batches, turn phase, stalls, API retries, compaction in progress, thinking progress, tool and task progress, reset status, rate limits, context usage, the announced model, session facts, MCP status, slash commands, the model list, reply suggestions and session errors stay live state. They are never stored as items, replayed or included in catch-up. On connect the daemon re-sends current values. Each live-state message gains a session tag, and retry and compaction status join the connect-time set.
+**Live state is never an item.** Permission prompts and question batches, turn phase, stalls, API retries, compaction in progress, thinking progress, tool and task progress, reset status, rate limits, context usage, the announced model, session facts, MCP status, slash commands, the model list, reply suggestions and session errors stay live state. They are never stored as items, replayed or included in catch-up. On connect the daemon re-sends current values. Each live-state message gains conversation routing identity alongside its session tag, and retry and compaction status join the connect-time set.
+
+Delivered supplied thread readings and family clears carry top-level
+`conversation_id` from the retained source. Session tags may be equal, null or
+omitted across conversations, so clients use that identity to route a clear to
+its conversation and family. Clears remain empty `{}` payloads with
+`session_state_cleared: true` and no request correlation. Conversation routing
+adds no item, history/replay identity or read evidence; see the
+[live-state wire contract](../../protocol-mobile.md#session-scoped-live-state-v2-supplied-delivery-contract).
 
 ### Item model
 

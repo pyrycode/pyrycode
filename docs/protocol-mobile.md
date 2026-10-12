@@ -380,12 +380,14 @@ Envelope-level fields beyond the v1 set:
 |---|---|---|---|
 | `event_id` | int | no (omitempty) | In-memory event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present on ring-backed interactive structured-stream frames and operator messages (binary → phone), including their reconnect replay; absent on session transitions and frames without ring recording. See [Interactive events](#interactive-events-v2-capability-gated). Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
 | `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present after a successful history append on direct live interactive-turn, session-transition and operator-message envelopes (#2861); reconnect replay of history-backed ring events carries that original append's id (#2909). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients **must fall back to history/list** for a durable read-mark target. |
-| `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082/#3162).** Omitted means no provenance was supplied; explicit `null` positively means no producing session; a nonempty string names the producing session. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. Daemon provider installation remains #3163; production negotiation remains #3164. |
-| `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears the family's session-scoped readings before fresh readings for the supplied session. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
+| `conversation_id` | nonempty string | required on delivered supplied thread live state; otherwise optional | **Thread-only supplied live-state routing (#3195).** Every delivered reading and generated/supplied clear names its retained source conversation, independently of session tags and request correlation. Absent source-envelope identity is stamped from that source; any supplied envelope/payload identity must be a nonempty string matching it. Null, empty, non-string or conflicting identity rejects the reading before any clear or fresh delivery. |
+| `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082/#3162).** Omitted means no provenance was supplied; explicit `null` positively means no producing session; a nonempty string names the producing session. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. Daemon provider installation is implemented (#3163); production negotiation remains #3164. |
+| `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears the family's session-scoped readings in the envelope's conversation before fresh readings for the supplied session. Generated and supplied clears omit `in_reply_to`. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
 
-The relay strips supplied session metadata from non-thread connections and
-omits explicit clear frames entirely on those connections. Production providers
-do not yet stamp this metadata. On connections that negotiated
+The relay strips supplied conversation/session metadata from non-thread
+connections and omits explicit clear frames entirely on those connections.
+Daemon source-bearing providers are installed (#3163); production `ThreadReady`
+activation remains #3164. On connections that negotiated
 [`thread`](#capability-negotiation-v2), live-state producers and consumers must
 validate `session_id` as null or a nonempty string and enforce payload `{}` for
 a clear. Omission cannot be read as a positive no-session fact. Clients must preserve omitted/null/string
@@ -394,9 +396,11 @@ An existing `payload.session_id` or other payload session field keeps its own
 meaning and is neither replaced nor overwritten by envelope metadata. When the
 new optional fields are unset, existing envelope serialization is unchanged.
 
-A delayed push or on-demand reply retains its source tag; the relay never
-substitutes the conversation's newer session binding. Fresh replies retain
-`in_reply_to`; automatically generated family clears are uncorrelated. Clients
+A delayed push or on-demand reply retains its source conversation and session
+tag; the relay never substitutes request identity or the conversation's newer
+session binding. Route live readings and clears by top-level `conversation_id`:
+two conversations can have equal, null or omitted session tags. Fresh replies
+retain `in_reply_to`; generated and supplied family clears are uncorrelated. Clients
 handle `session_state_cleared: true` before decoding the ordinary payload schema,
 because a clear's `{}` intentionally has none of that schema's required fields.
 Supplied thread live state carries neither `event_id` nor `history_entry_id`.
@@ -2005,12 +2009,11 @@ contract covers permission prompts and question batches (`modal_shown` /
 items; their transient progress remains live state.
 
 **Implementation boundary:** the relay delivery/reconciliation contract is
-implemented using supplied providers and fakes (#3082/#3162). The relay's five
-on-demand handler paths consume optional source-bearing providers; daemon
-provider installation remains #3163 and production negotiation remains #3164.
-Production `ThreadReady` remains unset, so production still does not negotiate
-`thread`. The behavior below applies when those source providers and readiness
-are supplied, and does not claim that existing daemon emitters have migrated.
+implemented (#3082/#3162/#3195). Daemon retained-reading snapshots, publication
+and the relay's five source-bearing on-demand providers are installed (#3163).
+Production `ThreadReady` remains unset pending #3164, so production still does
+not negotiate `thread`. The behavior below applies when those source providers and readiness
+are supplied.
 
 **Supplied on-demand replies.** On a thread connection, an installed optional
 provider is selected once for `request_context_usage`, `mcp_status_request`,
@@ -2030,6 +2033,16 @@ or repeats the query or mutation. A non-thread connection, or a handler without
 its optional provider, retains its legacy reply path and bytes. Existing typed
 providers and `SettingsUpdater` remain compatible.
 
+**Conversation routing.** Every delivered supplied live-state envelope carries
+a nonempty top-level `conversation_id` equal to retained `LiveState.ConversationID`.
+This includes detached connect readings, queued pushes/replies and generated or
+supplied clears. If the source envelope omits the field, the relay stamps it from
+the retained source, never from session binding or request correlation. Any
+supplied envelope or payload `conversation_id` must be a nonempty string matching
+that source; null, empty strings, non-string values and conflicts reject the
+reading before any clear/fresh delivery or delivery-watermark change. Payload
+identity may remain absent; stamping does not add or rewrite payload fields.
+
 Each supplied push or on-demand reply keeps its producing session metadata:
 omitted `session_id` means no provenance was supplied, explicit `null` positively
 means no producing session, and a nonempty string identifies the producer.
@@ -2038,17 +2051,22 @@ reply correlation retain their existing meanings. The relay uses the supplied
 conversation identity to check membership and agent access, including for `{}`
 clears and correlated replies. Unknown conversations, missing interactive access
 and Codex conversations withheld for missing `multi_agent` receive no such state.
-Session attribution never grants access.
+Session attribution never grants access. Clients route each family's readings
+and clears within the envelope's conversation even when two conversations have
+equal, null or omitted session tags; session provenance cannot identify a
+conversation.
 
 **Clear before fresh.** On the first supplied reading of a family for a session
 generation, the relay sends that family's envelope with
-`session_state_cleared: true`, payload `{}` and the supplied session tag, then
+`session_state_cleared: true`, payload `{}`, top-level source `conversation_id`
+and the supplied session tag, then
 sends the fresh reading on a later manager pass. This also initializes a fresh
 connection. A clear resets the family's held readings, without creating a thread
 item or resolving a prompt. Shown/dismissed modal types share the `modal_shown`
 clear family; shown/dismissed question types share `question_shown`; settings
-and their update acknowledgements share `session_settings`. Generated clears
-omit `in_reply_to`; the following reply preserves its original correlation.
+and their update acknowledgements share `session_settings`. Generated and
+supplied clears omit `in_reply_to`, even if the supplier attached correlation;
+the following fresh reply preserves its original correlation.
 Repeated supplied clears cannot erase already delivered fresh state.
 
 **Stale-state suppression.** Source-supplied positive session generations order
@@ -2076,13 +2094,16 @@ Delivery is paced at at most one envelope per manager pass, with a return to
 `Run` between clear and fresh state. A snapshot can exceed push/outbox capacity
 without being enqueued as a batch. Transport-down holds, cancellation and teardown
 stop consumption and sealing. Complete fresh and generated clear envelopes must
-each fit **65519 bytes** after JSON escaping and metadata; ordinary live state
-does not use thread-item continuation encoding.
+each fit **65519 bytes** (`protocol.MaxThreadEnvelopeBytes`) at admission after
+JSON escaping and conversation/session metadata. The final recipient-projected
+envelope is checked again before encryption, including model-list projection;
+ordinary live state does not use thread-item continuation encoding.
 
 These frames carry no replay or history identity, contribute no thread items or
 catch-up data, and never advance `last_shown_version` or read watermarks.
 Connections without `thread` retain their existing stream, snapshots and replay/resync, receive no
-envelope session metadata and receive no explicit clear frames. This work does
+envelope conversation/session metadata and receive no explicit clear frames;
+legacy payload and envelope bytes stay unchanged. This work does
 not replace legacy replay/resync with catch-up; thread catch-up/pages and that
 replacement remain #2963.
 
@@ -5787,8 +5808,8 @@ supplied mutation retains every existing error mapping and emits no success
 reading or generated clear. Neither falls back to a legacy provider or repeats
 the operation. Without `thread` or the relevant optional provider, the legacy
 reply path, bytes, enrichment and `SettingsUpdater` contract remain unchanged.
-Daemon provider installation remains #3163, production negotiation #3164, and
-thread catch-up/pages and replay replacement #2963.
+Daemon provider installation is implemented (#3163); production negotiation
+remains #3164, and thread catch-up/pages and replay replacement remain #2963.
 
 #### `set_session_settings`
 

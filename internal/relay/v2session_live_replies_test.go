@@ -17,9 +17,9 @@ import (
 )
 
 var suppliedReplyCases = []struct{ request, reply, body string }{
-	{protocol.TypeRequestContextUsage, protocol.TypeContextUsage, `{"conversation_id":"payload-conv","used_tokens":37,"window_tokens":100,"extra":{"keep":true}}`},
-	{protocol.TypeMCPStatusRequest, protocol.TypeMCPStatus, `{"conversation_id":"payload-conv","servers":[{"name":"s","status":"failed","error":"reason","scope":"project","version":"1"}],"dropped_servers":7}`},
-	{protocol.TypeRequestModelList, protocol.TypeModelList, `{"conversation_id":"payload-conv","models":[{"value":"m","display_name":"Model","agent":"claude","family":"family"}],"dropped_models":8}`},
+	{protocol.TypeRequestContextUsage, protocol.TypeContextUsage, `{"conversation_id":"source","used_tokens":37,"window_tokens":100,"extra":{"keep":true}}`},
+	{protocol.TypeMCPStatusRequest, protocol.TypeMCPStatus, `{"conversation_id":"source","servers":[{"name":"s","status":"failed","error":"reason","scope":"project","version":"1"}],"dropped_servers":7}`},
+	{protocol.TypeRequestModelList, protocol.TypeModelList, `{"conversation_id":"source","models":[{"value":"m","display_name":"Model","agent":"claude","family":"family"}],"dropped_models":8}`},
 	{protocol.TypeRequestSessionSettings, protocol.TypeSessionSettings, `{"session_id":"payload-session","model":"sonnet","effort":"high","yolo":true,"permission_mode":"bypassPermissions","used_tokens":37,"window_tokens":100,"extra":9}`},
 	{protocol.TypeSetSessionSettings, protocol.TypeSessionSettingsUpdated, `{"session_id":"payload-session","extra":10}`},
 }
@@ -89,7 +89,7 @@ func TestSuppliedLiveReplies(t *testing.T) {
 		for _, tag := range []string{"", "null", `"producing-session"`} {
 			t.Run(tc.request+tag, func(t *testing.T) {
 				var calls atomic.Int64
-				r := liveReading(tc.reply, "source-a", "reading", tag, 5, 7)
+				r := liveReading(tc.reply, "source", "reading", tag, 5, 7)
 				r.Envelope.Payload = json.RawMessage(tc.body)
 				_, frames, rec, send, recv, _ := suppliedReplyFixture(t, threadCaps, func(c *V2SessionConfig) {
 					installSuppliedReply(c, tc.request, func() (LiveState, bool) { calls.Add(1); return r, true }, func() (LiveState, error) { calls.Add(1); return r, nil })
@@ -105,6 +105,9 @@ func TestSuppliedLiveReplies(t *testing.T) {
 						if _, ok := fields["in_reply_to"]; ok {
 							t.Fatal("correlated generated clear")
 						}
+						if string(fields["conversation_id"]) != `"source"` {
+							t.Fatal("clear lost source conversation")
+						}
 					}
 					got, fields := suppliedWire(t, rec, recv, &seen)
 					if got.Type != tc.reply || !bytes.Equal(got.Payload, r.Envelope.Payload) || got.InReplyTo == nil || *got.InReplyTo != i {
@@ -112,6 +115,9 @@ func TestSuppliedLiveReplies(t *testing.T) {
 					}
 					if string(fields["session_id"]) != tag {
 						t.Fatalf("tag=%s want=%s", fields["session_id"], tag)
+					}
+					if string(fields["conversation_id"]) != `"source"` {
+						t.Fatal("reply used request conversation")
 					}
 					if got.SessionStateCleared {
 						t.Fatal("fresh reading cleared")
@@ -245,6 +251,7 @@ func TestSuppliedLiveReplyOvertaken(t *testing.T) {
 				}
 				// Another source conversation retains its independent generation/revision.
 				old.ConversationID = "source-b"
+				old.Envelope.Payload = replaceObjectField(old.Envelope.Payload, "conversation_id", json.RawMessage(`"source-b"`))
 				m.pushLiveReply(t.Context(), m.sessions[v2TestConnID], 78, old)
 				got = liveDrain(t, m, rec, recv, &seen, 3)
 				if len(got) != 2 || got[1].InReplyTo == nil || *got[1].InReplyTo != 78 {
@@ -439,6 +446,9 @@ func TestSuppliedLiveReplyCompatibility(t *testing.T) {
 					if _, ok := fields["session_id"]; ok {
 						t.Fatal("legacy source metadata")
 					}
+					if _, ok := fields["conversation_id"]; ok {
+						t.Fatal("legacy conversation metadata")
+					}
 				}
 				count := legacy.Load() + int64(len(updater.snapshot()))
 				if mode == "dual" {
@@ -540,7 +550,7 @@ func suppliedBody(t *testing.T, request, fallback string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(raw)
+	return string(replaceObjectField(raw, "conversation_id", json.RawMessage(`"source"`)))
 }
 
 func TestSuppliedLiveReplyWithheld(t *testing.T) {
