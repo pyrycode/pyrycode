@@ -309,15 +309,6 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}),
 		logRing,
 	))
-	appRegistry := openDaemonApps(*name, logger)
-	appOwner := newDaemonAppsOwner(appRegistry, "node", logger)
-	if appOwner != nil {
-		defer func() {
-			if err := appOwner.Shutdown(); err != nil {
-				logger.Warn("apps: shutdown failed", "reason", "owner_shutdown_failed")
-			}
-		}()
-	}
 	workspaceBase := resolveStartupWorkspaceBase(os.Getwd, logger)
 	// Rows recorded before #2568 carry the client's spelling of their folder —
 	// relative or "~"-prefixed — beside rows holding its realpath, so one folder
@@ -493,25 +484,36 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		return fmt.Errorf("pool init: %w", err)
 	}
 
-	// Claim instance ownership before loading pending posts or starting relay
-	// inbound delivery. Listen only binds; Serve waits until all hooks are wired.
+	// Claim instance ownership before opening app storage, loading pending posts
+	// or starting relay delivery. Listen binds; Serve waits until hooks are wired.
 	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, func() { cancelCause(nil) }, logger, pool)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
 	// Serve's cancellation watcher releases ownership, so its context must outlive
-	// the daemon's writers. This defer runs after their cancel/seal/join defers.
+	// the daemon's writers, including final app observations. This defer runs
+	// after their cancel/seal/join defers.
 	controlCtx, controlCancel := context.WithCancel(context.WithoutCancel(ctx))
 	var ctrlDone chan error
-	controlJoined := false
 	defer func() {
 		cancelCause(nil)
 		controlCancel()
 		_ = ctrl.Close()
-		if ctrlDone != nil && !controlJoined {
+		if ctrlDone != nil {
 			<-ctrlDone
 		}
 	}()
+	// Storage normalization and service reconciliation require the same exclusive
+	// instance claim. Join the owner before that claim is released on every exit.
+	appRegistry := openDaemonApps(*name, logger)
+	appOwner := newDaemonAppsOwner(appRegistry, "node", logger)
+	if appOwner != nil {
+		defer func() {
+			if err := appOwner.Shutdown(); err != nil {
+				logger.Warn("apps: shutdown failed", "reason", "owner_shutdown_failed")
+			}
+		}()
+	}
 
 	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
 	// PYRY_ALLOW_INSECURE_RELAY is a dev/test-only flag (set only by the e2e harness,
@@ -1080,10 +1082,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	relayCleanup()
 	relayJoined = true
 	_ = shadow.shutdown() // optional cache failure does not change daemon exit status
-	controlCancel()
-	_ = ctrl.Close()
-	<-ctrlDone
-	controlJoined = true
+	// Deferred owner shutdown commits its final observations before the control
+	// defer releases ownership and joins the sealed server.
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return fmt.Errorf("supervisor: %w", runErr)

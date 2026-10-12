@@ -64,3 +64,43 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+
+### 2026-10-12 — verifier finding 1: exclusive instance lifetime
+The original ordering admitted app storage normalization/reconciliation before
+instance ownership and released ownership before app shutdown. A rejected second
+daemon could therefore launch a competing generation and overwrite observations.
+`runSupervisor` now calls `ctrl.Listen` before `openDaemonApps` and `NewOwner`.
+Register control teardown first, then owner shutdown: their LIFO defers keep the
+listener bound through joined children and final observations on every exit.
+Normal shutdown seals handlers, joins existing writers and relay subscriptions,
+then uses those same defers instead of explicitly closing the listener early.
+App reconciliation still waits for neither spawn nor health before control readiness.
+
+Files read additionally: `internal/control/server.go` → `Listen`, `Serve`, `Close`
+and `internal/control/seal.go` → `Seal`: the detached control context and bound
+listener retain the claim while writers drain; `cmd/pyry/channel_delivery_test.go`
+→ `TestChannelDelivery_ShutdownRetainsOwnershipUntilWritersStop`: composition pattern.
+
+| Event | Race-enabled coverage |
+|---|---|
+| Duplicate startup with incumbent running / absent app storage | `TestDaemonAppsRejectedDuplicateStartup` |
+| Normal exit and post-owner startup failure while children await cleanup | `TestDaemonAppsShutdownRetainsOwnership` |
+
+#### Security review amendment
+**Verdict:** PASS with the revised ordering. [Trust boundaries / Files]
+`ctrl.Listen` grants exclusive instance ownership before app identity/root creation
+or registry normalization. [Subprocesses / Concurrency] The detached control context
+outlives owner shutdown, workers/descendants and final durable observations; failed
+claimants cannot construct an owner. Other reviewed boundaries and out-of-scope
+resource/publisher contracts are unchanged. Tests read daemon-written JSON directly,
+hold child termination at a controlled barrier and verify rejection while cleanup
+is pending, then claim release only after joined children and stopped observations.
+
+The focused channel proof exposed a startup assertion race: the bound listener
+can make the harness return before the daemon normalizes seeded running records.
+`hostedRunning` now waits for service process evidence before reading running
+observations, so the baseline cannot be the stopped-daemon seed. Snapshot mismatch
+diagnostics retain the before/after evidence. This changes no production readiness
+or lifecycle contract and stays within the ticket's asynchronous test adaptation.

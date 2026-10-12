@@ -81,6 +81,9 @@ func hostedWait(t *testing.T, check func() bool) {
 }
 func hostedRunning(t *testing.T, home string) hostedSnapshot {
 	t.Helper()
+	// Listen can precede registry normalization. Spawn evidence prevents a seeded
+	// running observation from satisfying this wait before the daemon opens apps.
+	hostedProof(t, home, hostedAppID)
 	var s hostedSnapshot
 	hostedWait(t, func() bool {
 		s, _ = hostedRead(t, home)

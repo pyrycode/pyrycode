@@ -196,7 +196,7 @@ func TestHostedAppsChannelIndependence(t *testing.T) {
 	}
 	_, after := hostedRead(t, home)
 	if !bytes.Equal(baseline, after) {
-		t.Fatal("channel clear/stop changed apps")
+		t.Fatalf("channel clear/stop changed apps:\nbefore %s\nafter %s", baseline, after)
 	}
 	hostedAssertData(t, home, "Channel independent")
 	_ = phone.Close()

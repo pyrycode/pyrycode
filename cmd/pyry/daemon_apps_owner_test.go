@@ -39,7 +39,23 @@ func TestDaemonAppProcess(t *testing.T) {
 	server := &http.Server{Addr: "127.0.0.1:" + os.Getenv("PYRY_APP_PORT"), ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "app_id": os.Getenv("PYRY_APP_ID"), "release_version": os.Getenv("PYRY_APP_RELEASE")})
 	})}
-	go func() { <-sig; _ = child.Process.Kill(); _ = child.Wait(); _ = server.Close() }()
+	go func() {
+		<-sig
+		if _, err := os.Stat(filepath.Join(data, "hold-shutdown")); err == nil {
+			if err := os.WriteFile(filepath.Join(data, "shutdown-started"), nil, 0600); err != nil {
+				os.Exit(5)
+			}
+			for {
+				if _, err := os.Stat(filepath.Join(data, "release-shutdown")); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		_ = server.Close()
+	}()
 	_ = server.ListenAndServe()
 	os.Exit(0)
 }
