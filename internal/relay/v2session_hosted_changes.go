@@ -15,6 +15,7 @@ type hostedInbox struct {
 	subscribed, retired, overflow bool
 	ctx                           context.Context
 	cancel                        context.CancelFunc
+	capacity                      chan struct{}
 }
 type hostedClose struct{ cancel context.CancelFunc }
 
@@ -54,7 +55,7 @@ func (m *V2SessionManager) HostedAppsChanged(change apps.Change) {
 }
 func (m *V2SessionManager) initHosted(ctx context.Context, s *V2Session) {
 	inCtx, cancel := context.WithCancel(ctx)
-	in := &hostedInbox{subscribed: s.hostedApps, ctx: inCtx, cancel: cancel}
+	in := &hostedInbox{subscribed: s.hostedApps, ctx: inCtx, cancel: cancel, capacity: make(chan struct{})}
 	s.hosted = &hostedState{inbox: in}
 	m.hostedMu.Lock()
 	defer m.hostedMu.Unlock()
@@ -100,6 +101,8 @@ func (m *V2SessionManager) releaseHosted(s *V2Session, count int) {
 	defer m.hostedMu.Unlock()
 	if in := s.hosted.inbox; !in.retired {
 		in.used -= count
+		close(in.capacity)
+		in.capacity = make(chan struct{})
 		select {
 		case m.drainCh <- struct{}{}:
 		default:
