@@ -25,7 +25,8 @@ var (
 // UpdateID is SHA-256(type + NUL + serialized logical payload), in lowercase hex.
 // Index and Offset start at zero. TotalBytes counts decoded Data bytes.
 // Consumers require consecutive indices/offsets and identical assembly metadata;
-// Final commits only after length, digest, routing and base_rev validation.
+// Final commits only after length, digest, routing, request correlation and
+// applicable base_rev validation. It never certifies query coverage.
 // A failed assembly requires catch-up without advancing completed rev/version.
 type ThreadContinuation struct {
 	UpdateID   string `json:"update_id"`

@@ -25,7 +25,7 @@ type ThreadCatchUpPayload struct {
 }
 
 // ThreadPagePayload requests the ordered window below exclusive BeforeOrder.
-// Limits count ordered rows; ties, active and parent extras may exceed them.
+// Limits count ordered rows; ties and parent extras may exceed them.
 type ThreadPagePayload struct {
 	ConversationID string `json:"conversation_id"`
 	BeforeOrder    uint64 `json:"before_order"`
