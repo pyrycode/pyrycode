@@ -174,6 +174,23 @@ authorization: a supplied reply and its clear require interactive access, a
 known source conversation and the existing Codex gate. Withheld readings do not
 advance delivery state. See the [wire contract](../../protocol-mobile.md#session-scoped-live-state-v2-supplied-delivery-contract).
 
+`forwardLiveState` stamps omitted `Envelope.ConversationID` from that retained
+source on detached snapshots, queued pushes/replies and generated/supplied
+clears. Equal, null or omitted session tags cannot distinguish conversations;
+the top-level routing key must survive even when the payload stays `{}` and
+`in_reply_to` is removed. `validateLiveState` rejects malformed or conflicting
+envelope/payload identity before admission or delivery changes any watermark.
+`PushLiveState` clones the raw routing buffer so caller reuse cannot reroute
+queued state. `TestLiveStateConversationRouting`,
+`TestLiveStateConversationIdentityDetached` and `TestLiveStateRoutingLegacyBytes`
+inspect authenticated decrypted bytes, including key presence and legacy omission.
+
+Supplied-reply fixtures must align payload identity with the retained source,
+while deliberately allowing the request to name a different conversation.
+Otherwise identity validation rejects the fixture before it can prove that
+source access gates ignore request correlation. The source-bearing reply tests
+exercise this distinction; a request ID identifies the answer, not its authority.
+
 Prompt shows use detached captured `Answerable`; the daemon snapshot excludes
 missing/false eligibility, and relay delivery withholds false eligibility without
 re-reading mutable prompt state. Existing authorized resolvers remain the answer
