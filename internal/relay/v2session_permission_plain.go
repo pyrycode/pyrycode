@@ -9,6 +9,10 @@ type permissionQueueObserver struct{}
 type permissionObservation struct{}
 
 func (m *V2SessionManager) newPermissionQueue() permissionQueueObserver {
+	return m.permissionObserver.newQueue()
+}
+
+func (permissionObserver) newQueue() permissionQueueObserver {
 	return permissionQueueObserver{}
 }
 func (m *V2SessionManager) permissionAttempt(*pushQueue, protocol.Envelope, *LiveState) permissionObservation {
