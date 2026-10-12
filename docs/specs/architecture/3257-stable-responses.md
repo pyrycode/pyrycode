@@ -68,3 +68,7 @@ Pending for the documentation stage: `docs/hosted-apps.md` § Client resource br
 - Threat model: OUT OF SCOPE: transport ceilings/credit/deadlines/authentication and late-wire-delivery suppression belong to #3247; asset confinement to #3258; API projection to #3246.
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+
+2026-10-12: Chunk filling uses `io.ReadFull` behind an error-sanitizing, zero-progress-bounded reader: raw source `io.ErrUnexpectedEOF` must remain an I/O failure, while EOF-derived short reads finish staging normally. Source Close must promptly unblock Read on every retirement; caller-only cancellation is insufficient. Same-release restart coverage is consolidated into `TestResponseRetirement/stop` to reuse its blocked-source and partially consumed result assertions. Final sizing: 800 written lines, three exported types, zero consumer migrations and no new owner lifecycle states.
