@@ -19,7 +19,7 @@ func TestLocalPins(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(base.Wheels) != 32 || len(local.Wheels) != 60 || local.Python != base.Python || local.Runtime != base.Runtime {
+			if base.Local || !local.Local || len(base.Wheels) != 32 || len(local.Wheels) != 60 || local.Python != base.Python || local.Runtime != base.Runtime {
 				t.Fatal("local closure changed base runtime or lacks dependencies")
 			}
 			pins := map[string]artifact{}
