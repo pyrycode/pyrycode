@@ -432,6 +432,11 @@ func testThreadQueryInterrupted(t *testing.T, page bool) {
 				}
 			}
 			if mode == "reuse" || mode == "down" {
+				if mode == "down" {
+					// Session removal precedes asynchronous terminal delivery. Await that
+					// delivery before taking the new handshake's recorder boundary.
+					testHostedClose(t, p)
+				}
 				up.Store(true)
 				p.open(append(threadCaps, protocol.CapabilityHostedAppsV1))
 				testThreadQueryRequest(p, page, 42, 20)
