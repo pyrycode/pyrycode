@@ -40,7 +40,7 @@ func TestOwnerPreparationErrorContext(t *testing.T) {
 }
 
 func TestRuntimeFileErrorContext(t *testing.T) {
-	dir := t.TempDir()
+	dir := testRoot(t)
 	if _, err := privateDir(filepath.Join(dir, "missing")); !errors.Is(err, syscall.ENOENT) || !strings.Contains(err.Error(), "open directory component") {
 		t.Fatalf("directory error: %v", err)
 	}

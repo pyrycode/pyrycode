@@ -171,11 +171,12 @@ duplicates at nested levels and alias shadowing; a DTO round-trip cannot produce
 these failures. See [implemented discovery validation](../../protocol-mobile.md#paging-cancellation-and-validation).
 
 The [hosted-app contract](../../hosted-apps.md#client-resource-bridge) is defined
-ahead of resource/native implementation; discovery and list cancellation are
-implemented, while lifecycle producers remain #3158 and resource-scoped
-cancellation remains #3123. Android `WebResourceRequest` exposes no request
-body, and `WebResourceResponse` rejects 3xx statuses. Resource interception alone
-would silently lose POST bodies or fail redirect responses. Electron and Android
+ahead of resource/native implementation; discovery, list cancellation and
+committed lifecycle delivery are implemented. Resource payloads are declared,
+while resource routing/producers and resource-scoped cancellation remain #3247;
+production capability activation remains #3248. Android `WebResourceRequest`
+exposes no request body, and `WebResourceResponse` rejects 3xx statuses. Resource
+interception alone would silently lose POST bodies or fail redirect responses. Electron and Android
 therefore need a narrow body-capable Fetch adapter alongside resource loaders:
 Fetch returns API status 200–599 without following redirects or exposing
 `location`; resource loaders accept only 200–299/400–599. Reject raw non-GET
@@ -194,6 +195,18 @@ for encryption, not `PayloadEncrypted`. The
 [shared fixtures](../../specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 belong to the design; complete production hosting and native conformance remain
 downstream.
+
+Decoded query/header lengths understate the encrypted frame size: JSON escaping
+expands characters such as `&` and `<`, and base64 expands body bytes. Hosted
+header objects have their own 4096-byte **serialized** limit, independent of the
+1024-byte value bound. First measure that object, then the complete escaped
+envelope against 65519 plaintext bytes; counting only decoded fields would let
+an oversized frame pass. `TestHostedApps_ResourceEnvelopeSizes` combines bounded
+path/query/headers, 32768 decoded body/chunk bytes and safe-integer ID/correlation
+boundaries. Producers must repeat final serialization checks as additive fields
+change; DTOs perform no admission checks. See
+[resource payload declarations](../../protocol-mobile.md#resource-payload-declarations)
+and [protocol boundary tests](development-verification.md#protocol-boundaries).
 
 ## Testing payload absence
 

@@ -64,3 +64,81 @@ type AppCancelPayload struct {
 	AppID     string `json:"app_id,omitempty"`
 	RequestID uint64 `json:"request_id"`
 }
+
+// Resource payloads are data-only. Consumers validate required presence, exact
+// JSON types, safe integers, URL/header validity, byte bounds and authorization.
+// Hosted envelopes omit conversation/session/replay metadata and payload_encrypted.
+
+// AppAssetRequestPayload requests a pinned public asset with GET semantics.
+// Navigation is native-stamped; false distinguishes subresources from SPA loads.
+// Path and Query preserve escaped URL bytes; an empty Query is omitted.
+type AppAssetRequestPayload struct {
+	AppID          string `json:"app_id"`
+	ReleaseVersion string `json:"release_version"`
+	Path           string `json:"path"`
+	Navigation     bool   `json:"navigation"`
+	Query          string `json:"query,omitempty"`
+}
+
+// AppAPIRequestPayload requests a pinned service API. Headers map permitted
+// lowercase names to strings. Body is standard padded base64 of opaque bytes,
+// including the required empty string for no body, with at most 32768 decoded bytes.
+type AppAPIRequestPayload struct {
+	AppID          string            `json:"app_id"`
+	ReleaseVersion string            `json:"release_version"`
+	Path           string            `json:"path"`
+	Query          string            `json:"query,omitempty"`
+	Method         string            `json:"method"`
+	Headers        map[string]string `json:"headers"`
+	Body           string            `json:"body"`
+}
+
+// MarshalJSON emits the required header object even when Headers is nil.
+func (p AppAPIRequestPayload) MarshalJSON() ([]byte, error) {
+	type wire AppAPIRequestPayload
+	if p.Headers == nil {
+		p.Headers = map[string]string{}
+	}
+	return json.Marshal(wire(p))
+}
+
+// AppResponsePayload supplies metadata once, with Envelope.InReplyTo naming the
+// original asset/API request. Completion requires the exact decoded SizeBytes,
+// TotalChunks and lowercase whole-body SHA256, including the empty-body digest.
+// Assets allow 8388608 bytes/256 chunks; APIs allow 1048576 bytes/32 chunks.
+type AppResponsePayload struct {
+	AppID          string            `json:"app_id"`
+	ReleaseVersion string            `json:"release_version"`
+	Status         int               `json:"status"`
+	Headers        map[string]string `json:"headers"`
+	SizeBytes      uint64            `json:"size_bytes"`
+	TotalChunks    uint64            `json:"total_chunks"`
+	SHA256         string            `json:"sha256"`
+}
+
+// MarshalJSON emits the required header object even when Headers is nil.
+func (p AppResponsePayload) MarshalJSON() ([]byte, error) {
+	type wire AppResponsePayload
+	if p.Headers == nil {
+		p.Headers = map[string]string{}
+	}
+	return json.Marshal(wire(p))
+}
+
+// AppResponseChunkPayload carries 1..32768 opaque bytes as standard padded base64.
+// Index is consecutive from zero; Envelope.InReplyTo names the original resource
+// request, never the response metadata ID. Producers bound final envelopes to 65519 bytes.
+type AppResponseChunkPayload struct {
+	AppID string `json:"app_id"`
+	Index uint64 `json:"index"`
+	Data  string `json:"data"`
+}
+
+// AppResponseCreditPayload grants one next chunk of the original resource request.
+// RequestID is in 0..9007199254740991; NextIndex is the expected index in 0..255.
+// Credit carries no Envelope.InReplyTo and receives no reply.
+type AppResponseCreditPayload struct {
+	AppID     string `json:"app_id"`
+	RequestID uint64 `json:"request_id"`
+	NextIndex uint64 `json:"next_index"`
+}
