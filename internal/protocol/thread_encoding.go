@@ -158,27 +158,32 @@ func threadStampBudget(env Envelope) Envelope {
 	return env
 }
 
-// JSON strings cost at most six serialized bytes per input byte. Search actual
-// escaped cost so plain text can use the remaining frame budget too.
+// Count encoding/json's default string escaping without serializing candidate
+// prefixes. Inputs are valid UTF-8; the result ends before any rune exceeding room.
 func threadFragmentLength(data []byte, room int) int {
-	lo, hi := 0, min(len(data), room)
-	for lo < hi {
-		mid := lo + (hi-lo+1)/2
-		end := mid
-		for end > 0 && end < len(data) && !utf8.RuneStart(data[end]) {
-			end--
+	end := 0
+	for end < len(data) {
+		width, cost := 1, 1
+		c := data[end]
+		switch {
+		case c >= utf8.RuneSelf:
+			r, n := utf8.DecodeRune(data[end:])
+			width, cost = n, n
+			if r == '\u2028' || r == '\u2029' {
+				cost = 6
+			}
+		case c == '"' || c == '\\' || c == '\b' || c == '\f' || c == '\n' || c == '\r' || c == '\t':
+			cost = 2
+		case c < 0x20 || c == '<' || c == '>' || c == '&':
+			cost = 6
 		}
-		encoded, _ := json.Marshal(string(data[:end])) // valid UTF-8 string cannot fail
-		if len(encoded)-2 <= room {
-			lo = mid
-		} else {
-			hi = mid - 1
+		if cost > room {
+			break
 		}
+		room -= cost
+		end += width
 	}
-	for lo > 0 && lo < len(data) && !utf8.RuneStart(data[lo]) {
-		lo--
-	}
-	return lo
+	return end
 }
 
 // Reject invalid strings before encoding/json can silently replace their bytes.
