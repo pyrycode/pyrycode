@@ -9,6 +9,7 @@ import socket
 import stat
 import subprocess
 import time
+import uuid
 
 os.umask(0o077)
 channel = socket.socket(fileno=3)
@@ -80,17 +81,18 @@ def worker(control, request):
         compatibility["dimension"] = dimension
         if existing is not None and compatibility != existing:
             raise ValueError("incompatible")
+        if existing is None:
+            temporary = metadata + "." + uuid.uuid4().hex
+            with open(temporary, "x") as f:
+                json.dump(compatibility, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, metadata)
         # The pinned fresh constructor is lazy. Connect/create without indexing.
         memory.store._ensure_collection_for_write()
         memory.store._connected_client().list_collections()
         if globals().get("PYRY_TEST_EMPTY", False):
             assert int(memory.store.count()) == 0
-        if existing is None:
-            with open(metadata + ".new", "x") as f:
-                json.dump(compatibility, f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(metadata + ".new", metadata)
         control.sendall(b"ready\n")
         control.recv(1)
     except BaseException:
