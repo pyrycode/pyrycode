@@ -151,7 +151,12 @@ func (s *Store) checkDirectory() error {
 }
 
 func (s *Store) lock(ctx context.Context) (*os.File, error) {
-	f, err := privateFile(s.dir, ".lock", unix.O_CREAT|unix.O_RDWR)
+	// Create exclusively, then open the existing file. On macOS, concurrent
+	// non-exclusive creates of a missing file can fail with ENOENT.
+	f, err := privateFile(s.dir, ".lock", unix.O_CREAT|unix.O_EXCL|unix.O_RDWR)
+	if errors.Is(err, unix.EEXIST) {
+		f, err = privateFile(s.dir, ".lock", unix.O_RDWR)
+	}
 	if err != nil {
 		return nil, err
 	}
