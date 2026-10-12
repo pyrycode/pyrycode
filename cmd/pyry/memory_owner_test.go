@@ -156,9 +156,25 @@ func TestMemoryOwnerProviders(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			stores, err := filepath.Glob(filepath.Join(home, ".pyry", "memory", "stores", "*"))
+			if err != nil || len(stores) != 1 {
+				t.Fatal("store identity")
+			}
+			database := filepath.Join(stores[0], "milvus.db")
+			if err := os.WriteFile(database, []byte("sentinel retained across reopen"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, cacheErr := os.Stat(filepath.Join(stores[0], "models", "selected"))
+			if (cacheErr == nil) != (provider == "local") {
+				t.Fatal("provider cache isolation")
+			}
 			owner = testStartMemoryOwner(t, rt, s, e)
 			if err := owner.close(); err != nil {
 				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(database)
+			if err != nil || string(contents) != "sentinel retained across reopen" {
+				t.Fatal("compatible reopen replaced contents")
 			}
 		})
 	}
@@ -453,4 +469,23 @@ func TestMemoryOwnerFreshCredential(t *testing.T) {
 	if _, err := startMemoryOwnerWith(context.Background(), rt, s, e, memoryOwnerOptions{shim: testMemoryShim}); !errors.Is(err, errMemoryOwner) {
 		t.Fatalf("fresh resolution: %v", err)
 	}
+}
+
+func TestMemoryOwnerInterruptedOpen(t *testing.T) {
+	rt, s, e, home := testMemoryOwner(t, "model")
+	path, lock, err := memoryOwnerStorage(context.Background(), home, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = lock.Close()
+	if err := os.WriteFile(filepath.Join(path, "compatibility.json.stale"), []byte("interrupted temporary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Fail the actual backend connection after provider probe and compatibility
+	// publication. The same model can retry without deleting partial bookkeeping.
+	shim := strings.Replace(testMemoryShim, "    def _ensure_collection_for_write(self):", "    def _ensure_collection_for_write(self):\n        raise ValueError('controlled backend failure')", 1)
+	if _, err := startMemoryOwnerWith(context.Background(), rt, s, e, memoryOwnerOptions{shim: shim}); !errors.Is(err, errMemoryOwner) {
+		t.Fatalf("failed open: %v", err)
+	}
+	testStartMemoryOwner(t, rt, s, e)
 }

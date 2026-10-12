@@ -194,8 +194,16 @@ func TestMemoryOwnerNativeEvidence(t *testing.T) {
 			if _, err := os.Stat(path); os.IsNotExist(err) {
 				t.Skip("blocked on #3290: native owner capture pending dispatcher companion execution; requires committed record")
 			}
-			if _, err := readMemoryOwnerEvidence(path); err != nil {
+			record, err := readMemoryOwnerEvidence(path)
+			if err != nil {
 				t.Fatal(err)
+			}
+			expected := target
+			if target == "macos-arm64" {
+				expected = "darwin-arm64"
+			}
+			if record.OS+"-"+record.Architecture != expected {
+				t.Fatal("record target does not match required native artifact")
 			}
 		})
 	}

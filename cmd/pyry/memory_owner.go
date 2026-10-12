@@ -126,7 +126,7 @@ func startMemoryOwnerWith(ctx context.Context, rt memoryruntime.Runtime, s confi
 	}
 	cmd := exec.Command(rt.Python, "-I", "-B", "-c", shim)
 	cmd.Dir = store
-	cmd.Env = []string{"HOME=" + store, "PATH=" + filepath.Dir(rt.Python) + ":/usr/bin:/bin", "LANG=C.UTF-8", "HF_HOME=" + filepath.Join(store, "models"), "XDG_CACHE_HOME=" + filepath.Join(store, "models"), "PYTHONDONTWRITEBYTECODE=1"}
+	cmd.Env = []string{"HOME=" + store, "PATH=" + filepath.Dir(rt.Python) + ":/usr/bin:/bin", "LANG=C.UTF-8", "HF_HOME=" + filepath.Join(store, "models"), "XDG_CACHE_HOME=" + filepath.Join(store, "models"), "PYTHONDONTWRITEBYTECODE=1", "HF_HUB_DISABLE_IMPLICIT_TOKEN=1"}
 	cmd.ExtraFiles = []*os.File{child, lock}
 	// Arbitrary provider output has no diagnostic or persistence sink.
 	output := &memoryOwnerOutput{stop: func() { _ = conn.(*net.UnixConn).CloseWrite() }}
