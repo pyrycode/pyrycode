@@ -265,8 +265,8 @@ into `streamApprovalBridge`. Remote permission resolutions through
 `modalResolverV2` and question resolutions through `questionResolverV2` append
 one `prompt_answered` fact per modal or question batch, through
 `recordPromptAnswer` and `appendConversationHistory`. This covers the supported
-Claude and Codex remote paths. Local control-socket approvals and the future
-thread fold/protocol remain downstream of this producer; see
+Claude and Codex remote paths. Local control-socket approvals remain outside
+this producer; see
 [ADR 042's prompt decision](../decisions/042-daemon-built-thread.md#the-six-approved-decisions).
 
 The payload carries `conversation_id`, the modal/batch `correlation_id`, the
@@ -331,20 +331,75 @@ Writes are best effort. Nil storage is silent; failed storage preserves
 resolution and dismissal without retrying the answer or inventing a durable
 success. Child delivery and storage are not crash-atomic. `historyEntryShown`
 marks the fact explicitly `shown: true`, raising the raw shown-entry watermark
-in warm and reopened logs for the future fold. It remains excluded from legacy
-history pages, including nonvisual receipts, reconnect replay and live content.
-Legacy publication and the bounded raw page's cursor/`AtStart` are unchanged;
-see [visibility versus transport eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
+in warm and reopened logs. The raw `prompt_answered` payload
+remains outside `legacyHistoryType` and all legacy transports.
+
+**Validated answers account for their original IDs (#3222).**
+`legacyRuntimeReceipt` delegates to `validPromptAnswerFact`, then reconstructs
+only the five-field nonvisual `banner`:
+`{conversation_id, level:"info", text:"", truncated:false, stops_turn:false}`.
+It requires a nonzero durable ID and entry timestamp, matching conversation,
+nonempty original `correlation_id`, exactly `source: remote` and nonzero
+`resolved_at` equal to the entry timestamp. All producer fields above except
+`session_id` must be present and nonnull, including explicit boolean
+`session_grant` and `truncated`. Only `allow`/`answer` with `behavior: allow`
+and `deny`/`cancel`/`refusal` with `behavior: deny` qualify; denied decisions
+cannot claim a session grant.
+
+`context` must be an object whose encoded size is at most 16 KiB. Typed decoding
+rejects unknown context/question/value fields and malformed shapes. Optional
+`tool` and `class` are strings; optional `questions` contains at most four
+questions with consecutive zero-based `index`, string `text` and explicit
+boolean `multi_select`. Each question may retain at most 128 values, each with
+required string `text` and optional string `meaning`. An empty context object
+is valid. Optional asking-session identity and original metadata provenance
+remain optional; validation never consults today's active session or stored
+`shown`. Invalid, foreign, unknown-source/decision, missing-field or unidentified
+facts remain holes. Raw decisions, prompt/question/tool context, answers,
+correlation/session identities and provenance never cross in the receipt.
+
+**Serialize successful append and publication together.** `recordPromptAnswer`
+uses `promptAnswerPublisher`'s dedicated mutex across its single durable append
+and `publishLegacyHistory` fan-out, outside bridge and registry locks. Reusing
+the operator emitter's bounded `notifyReceipt` mailbox could drop a successful
+answer receipt when full, leaving a live/replay checkpoint hole despite a valid
+page. Synchronous publication preserves append order under concurrent answers
+and records into the shared replay ring before peer delivery, even without
+connected clients. `startRelayV2` installs the publisher and its shared ring
+before manager answer workers start: attaching the ring at the later interactive
+emitter setup would race early answers. Existing interactive, conversation
+membership and agent-access gates apply to the captured original conversation.
+Nil/failed appends and duplicate/losing resolutions produce no receipt.
+
+History, live publication and reconnect replay use identical receipt bytes and
+the original durable ID/timestamp, without another append. Valid receipts count
+toward legacy latest regardless of absent/false/true visibility, but confer no
+presentation, prompt actuation or read-mark advancement. `newHistoryPager`
+retains one bounded raw page's limit, cursor and `AtStart` without scanning ahead.
+Raw history, metadata and authoritative thread behavior remain unchanged; see
+[visibility versus transport eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)
+and [the durable join](../../protocol-mobile.md#joining-a-page-to-the-live-stream).
+Mobile [#2098](https://github.com/pyrycode/pyrycode-mobile/issues/2098) owns the
+pending live notification gate; deterministic daemon accounting does not prove
+background completion, FCM delivery or notification preview privacy.
 
 `TestPromptAnswerHistoryPermission` and `TestPromptAnswerHistoryQuestion` use
 the production resolvers/bridge and real store to check decisions, original
-ownership, exactly-once capture and legacy exclusion. The after-consumption
-expiry fixture in `TestPromptAnswerHistoryLosingResolution` distinguishes
+ownership, exactly-once capture, raw legacy exclusion and safe receipts. The
+after-consumption expiry fixture in `TestPromptAnswerHistoryLosingResolution` distinguishes
 surface success from a winning parked resolution. `TestPromptAnswerHistoryRetirement`
 checks that retirement cannot erase captured ownership;
 `TestPromptAnswerHistoryUnauthenticatedCancel` prevents invented operator
 answers. Bounded-projection and storage tests cover escaping, unchanged child
-answers and content-free failures. `TestInteractiveStreamStdioModalAllow`,
+answers and content-free failures. `TestPromptAnswerReceiptsValidation` exercises
+all decision pairs and rejected fields through the real pager;
+`TestPromptAnswerReceiptsPages` pins projected original IDs and each raw page's
+bounds for completed turns, receipt-only and mixed valid/invalid logs, every
+visibility state and reopened stores. `TestPromptAnswerReceiptsPublication`
+compares exact page/live/replay bytes and identity with and without clients,
+including rebinding and duplicate attempts; `TestPromptAnswerReceiptsConcurrent`
+checks serialized order under concurrent duplicate answers.
+`TestInteractiveStreamStdioModalAllow`,
 `TestInteractiveStreamStdioPermissionDeny`, `TestInteractiveStreamQuestionAnswer`
 and `TestInteractiveStreamQuestionRefusal` assert the raw durable fact after
 actual Claude resolution; the deterministic resolver tests also cover Codex.
