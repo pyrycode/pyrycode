@@ -141,6 +141,33 @@ func testHostedPayloadKeys(t *testing.T, typ string, raw []byte) {
 		}
 	case TypeAppRemoved:
 		testHostedKeys(t, raw, "app_id", "revision")
+	case TypeAppAssetRequest, TypeAppAPIRequest:
+		keys := []string{"app_id", "release_version", "path"}
+		if typ == TypeAppAssetRequest {
+			keys = append(keys, "navigation")
+		} else {
+			keys = append(keys, "method", "headers", "body")
+		}
+		var query struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(raw, &query); err != nil {
+			t.Fatal(err)
+		}
+		if query.Query != "" {
+			keys = append(keys, "query")
+		}
+		fields := testHostedKeys(t, raw, keys...)
+		if typ == TypeAppAPIRequest {
+			testHostedHeaders(t, fields["headers"])
+		}
+	case TypeAppResponse:
+		fields := testHostedKeys(t, raw, "app_id", "release_version", "status", "headers", "size_bytes", "total_chunks", "sha256")
+		testHostedHeaders(t, fields["headers"])
+	case TypeAppResponseChunk:
+		testHostedKeys(t, raw, "app_id", "index", "data")
+	case TypeAppResponseCredit:
+		testHostedKeys(t, raw, "app_id", "request_id", "next_index")
 	case TypeAppCancel, TypeAppCancelled:
 		var p AppCancelPayload
 		if err := json.Unmarshal(raw, &p); err != nil {

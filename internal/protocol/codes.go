@@ -1128,3 +1128,13 @@ const (
 	TypeAppCancel    = "app_cancel"    // client → daemon, list or resource cancellation
 	TypeAppCancelled = "app_cancelled" // daemon → client, correlated cancellation reply
 )
+
+// Hosted resource vocabulary is v2-only. Handlers, producers and capability
+// activation are separate from these declarations.
+const (
+	TypeAppAssetRequest   = "app_asset_request"   // client → daemon, asset request
+	TypeAppAPIRequest     = "app_api_request"     // client → daemon, API request
+	TypeAppResponse       = "app_response"        // daemon → client, correlated metadata
+	TypeAppResponseChunk  = "app_response_chunk"  // daemon → client, correlated body chunk
+	TypeAppResponseCredit = "app_response_credit" // client → daemon, one-chunk credit
+)
