@@ -64,3 +64,9 @@ Pending documentation stage: `docs/knowledge/features/v2-session-manager-state-m
 - Concurrency: atomically fence live admission against final selection under hostedMu; do not nest queue locks; cancellation follows generation-specific inbox ownership.
 - Threat model: paired authenticated peers alone reach queries; registry/agent gates prevent foreign conversation disclosure. Production-provider storage security remains #3236.
 **Reviewer:** builder self-review. **Date:** 2026-10-12.
+
+## Revisions
+- 2026-10-12: `ThreadCatchUp(context.Context, protocol.ThreadCatchUpPayload) (thread.QueryResult, error)` is an additive function field, requiring no exported interface or provider migration. The worker's context is already fenced by the generation-specific inbox.
+- 2026-10-12: Updated `TestV2Session_ThreadReplay` to require an untouched replay watermark. Its earlier advancement assertion conflicts with this ticket's explicit replay bypass. Added `TestThreadCatchUpRequestedScope` for a gap-producing hello and simultaneous legacy history/resync, plus `TestThreadCatchUpProviderShutdown` for blocked-provider cancellation.
+- 2026-10-12: Written work slightly exceeds 800 lines (approximately 820 after this revision). #3253 has parent #3234 and grandparent #2963; the grandchild rule requires building through the overage. Recorded `needs-human:sizing` and the independently checkable replay-bypass/catch-up split proposal on the issue.
+- 2026-10-12: Self-review found that initializing an ordered lane solely to refuse a legacy request would close an Outbound-only peer without its owed error. `TestThreadCatchUpLegacyRefusal` covers the existing Run-owned forwarding path for those content-free refusals; accepted query sequences still require cancellable ordered delivery. The interrupted transport case now also reconnects after down/up.
