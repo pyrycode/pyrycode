@@ -132,11 +132,17 @@ this build. Whether all fourteen live leaves pass remains dispatcher-owned work.
 
 ## Documentation handoff
 
-Pending for the documentation stage:
+Satisfied by the documentation stage on 2026-10-12:
 
 - In `docs/knowledge/features/history-package-producers.md`, **Resolved remote prompt answers (#2973)** / **Serialize successful append and publication together**, replace synchronous fan-out with the landed contract: append/replay admission stay serialized; one bounded ordered worker delivers outside the recording lock; mailbox overflow drops only live delivery, retaining history/replay; cancellation frees delivery without blocking later answers.
 - In `docs/knowledge/features/history-package-producers-legacy-compatibility.md`, the paragraph beginning **Prompt answers also bypass `emit`**, make the same contract correction.
 - Both updates must distinguish the repair evidence from pending live acceptance.
+
+Both passages now describe the landed worker contract and distinguish the
+race regressions from separately counted live acceptance. The binary/fixture
+override lesson is also recorded in `development-verification.md` under
+**Test execution and artifact survival**. No documents were added or removed,
+so the catalog and startup map need no change.
 
 ## Security review
 
@@ -190,3 +196,24 @@ no Claude version or live results are claimed by these offline checks.
 One full uncached package rerun passed: 15286 leaves executed, 15286 passed,
 zero failed and the same three skipped. This completes the builder's scoped
 race check without claiming that #3251's intermittent failure is repaired.
+
+2026-10-12 — Documentation-stage check of the dispatcher's subsequent
+[full live gate](https://github.com/pyrycode/pyrycode/issues/3256#issuecomment-6134604398).
+It tested `feature/3256` at `db3ce1ad8c93660509adab436cc97f1f6e1cbaa4`
+merged with `origin/main` at `bd00b250fbf4`, building the daemon from that tested
+tree. This includes #3279; no prompt-answer residual repair was introduced.
+The retained Go-JSON report at
+`/work/Projects/pyrycode-agents/logs/2026-10-12T23-22-56-595Z_real-claude-gate_#3256.log`
+records Claude **2.1.280 (Claude Code)** in the composer-stop version outputs
+and the initialize-control probe.
+
+| Live scope | Executed leaves | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| Full configured real-Claude suite | 1987 | 1987 | 0 | 27 |
+| All fourteen exact leaves listed above, including both modal-resolution subtests | 14 | 14 | 0 | 0 |
+
+Each of the fourteen names has its own `run` and `pass` action in that report;
+none is absent or skipped. The earlier pending-live statements describe the
+offline validation stage. This separate dispatcher run supplies the named live
+proof; it does not retroactively establish a single cause for every historical
+failure or accept #3071's separate readiness/Android work.
