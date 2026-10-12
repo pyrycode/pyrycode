@@ -129,6 +129,8 @@ func TestOwnerReservations(t *testing.T) {
 		t.Fatal(port, o.ports)
 	}
 	o.node = writeNodeDouble(t, "v24.15.0", false)
+	recoveryAdvance(o, time.Second)
+	healthWait(t, func() bool { return recoveryGeneration(o, testApp) != g })
 	if e := o.Start(context.Background(), testApp); e != nil {
 		t.Fatal(e)
 	}
@@ -150,8 +152,13 @@ func TestOwnerStaleAndPersistence(t *testing.T) {
 				if e := o.Start(context.Background(), testApp); !errors.Is(e, failure) {
 					t.Fatal(e)
 				}
-				<-o.generations[testApp].done
-				if o.generations[testApp].cmd != nil {
+				if g := recoveryGeneration(o, testApp); g != nil {
+					<-g.done
+					if g.cmd != nil {
+						t.Fatal("spawned after write failure")
+					}
+				}
+				if len(o.ports) != 0 {
 					t.Fatal("spawned after write failure")
 				}
 				r.persist = writeSnapshot

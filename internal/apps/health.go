@@ -102,6 +102,9 @@ func (o *Owner) supervise(ctx context.Context, id string, g *generation, spawned
 			o.mu.Lock()
 			if healthy {
 				g.healthFailures = 0
+				if o.now().Sub(g.healthySince) >= healthyReset {
+					o.retryLocked(id).delay = 0
+				}
 			} else {
 				g.healthFailures++
 			}
@@ -151,6 +154,7 @@ func (o *Owner) confirmRunning(ctx context.Context, id string, g *generation) er
 	default:
 	}
 	g.healthy = true
+	g.healthySince = o.now()
 	return nil
 }
 
