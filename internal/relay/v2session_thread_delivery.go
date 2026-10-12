@@ -24,6 +24,10 @@ var (
 // connection because its nonce may have reached the peer. Retirement, manager
 // shutdown, or a missing ordered lane returns ErrConnNotFound. Legacy callers use Push.
 func (m *V2SessionManager) DeliverThread(ctx context.Context, connID string, env protocol.Envelope) error {
+	return m.deliverThread(ctx, connID, env, nil)
+}
+
+func (m *V2SessionManager) deliverThread(ctx context.Context, connID string, env protocol.Envelope, query *threadQuery) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -47,7 +51,7 @@ func (m *V2SessionManager) DeliverThread(ctx context.Context, connID string, env
 		return ErrConnNotFound
 	}
 	done := make(chan error, 1)
-	o := &hostedOutput{env: &detached, callerCtx: ctx, outcome: done}
+	o := &hostedOutput{env: &detached, callerCtx: ctx, outcome: done, query: query}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err

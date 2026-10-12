@@ -111,10 +111,12 @@ Production `startRelayV2` installs the real fold publisher and authoritative
 `ThreadLastShownVersion` through `installDaemonThreadRelay`, after the retained
 `ThreadLiveState` and `LiveStateCurrent` providers. Readiness stays false without
 that live-state installation or a running publisher, and becomes false before
-publisher teardown. Production negotiation and live publication are active;
-catch-up/pages, reconnect thread history initialization and replay replacement
-remain #2963. Readiness attests installed providers, not that every conversation
-has completed replay. See [daemon publication and lifecycle](thread-package.md#shadow-lifecycle-and-evidence).
+publisher teardown. Production negotiation and live publication are active.
+Relay catch-up handling and thread-only replay/resync bypass are implemented;
+production query provider installation remains #3236 and history pages remain
+\#3235. Readiness attests live providers, not query availability or that every
+conversation has completed replay. See
+[daemon publication and lifecycle](thread-package.md#shadow-lifecycle-and-evidence).
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
 replies, but `threadWithheld` independently gates live additions/changes/text
@@ -130,11 +132,15 @@ or Noise nonce. Withheld heads release lane capacity and do not strand permitted
 output. Missing conversation identity fails closed. Neither `thread` alone nor
 `in_reply_to` grants interactive or multi-agent access. Unaffected legacy caller
 and provider signatures and reply behavior remain unchanged. Unsolicited content
-replaced by the thread is suppressed on live, replay and connect-reconcile
-paths. Supplied live state has independent source-conversation gates, including
-for correlated replies and empty clears; see [supplied live-state ordering](#supplied-live-state-ordering).
-Suppression returns normally: an error would abandon replay and strand buffered
-live traffic even if a one-frame denial test passed. See the
+replaced by the thread is suppressed on live and connect-reconcile paths.
+`handleNoiseInit` bypasses event-ring replay and `resync` entirely for thread
+connections, including a gap-producing `hello.last_event_id`; supplied current
+live-state reconciliation continues. Legacy peers retain replay/resync and raw
+`request_history`. Supplied live state has independent source-conversation gates,
+including for correlated replies and empty clears; see
+[supplied live-state ordering](#supplied-live-state-ordering).
+Suppression returns normally so a withheld head cannot strand permitted output.
+See the
 [wire filtering contract](../../protocol-mobile.md#daemon-thread-updates-v2-supplied-delivery-contract)
 and [replay drain](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
 
@@ -149,12 +155,48 @@ and `TestThreadDeliveryLateEligibility` covers queued thread-content denial.
 
 `DeliverThread` certifies each envelope only after the ordered transport callback
 returns success. Enqueue, Run handoff and batch assembly completion are weaker
-boundaries; future query callers must deliver serially and stop on any error
-before their separate success marker. See [ordered delivery and eligibility](../../protocol-mobile.md#ordered-delivery-and-eligibility)
+boundaries; `runThreadCatchUp` delivers serially and stops on any error before
+its separate success marker. See [ordered delivery and eligibility](../../protocol-mobile.md#ordered-delivery-and-eligibility)
 for withholding, failure, retirement and cancellation outcomes, and
 [lane ownership](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery)
-for capacity and detached input. Query handlers/providers remain pending #3253
-and #3235; production query wiring remains #3236.
+for capacity and detached input.
+
+`admitThreadCatchUp` validates field presence/types, canonical conversation ID,
+current pairing, `thread`/interactive capability, `KnownConversation` and the
+Codex/`multi_agent` gate before invoking `ThreadCatchUp`. Normalize limits even
+for nonzero catch-up: the backend ignoring its window limit does not authorize
+a negative wire limit. Only an explicit request selects its named conversation;
+handshake and listing do not query, and the active cursor cannot substitute.
+The worker maps detached full items and authoritative coverage without deriving
+either coverage or reset from item revisions. Missing/nonusable/erroring
+providers and codec failures return a content-free `thread.query_failed` error;
+reset and failure cannot certify partial items. Production provider installation
+and history pages remain #3236 and #3235. See the
+[wire query contract](../../protocol-mobile.md#thread-query-messages).
+
+**A refusal must preserve the legacy delivery path.** An Outbound-only peer has
+no cancellable ordered sender. Initializing a lane merely to deny an unnegotiated
+query would close it before its owed correlated error. `admitThreadCatchUp`
+uses Run-owned `forwardEnvelope` when no lane exists; accepted sequences require
+the cancellable ordered sender. `TestThreadCatchUpLegacyRefusal` pins that split.
+
+**Completion must fence live admission.** One generation-specific query token
+owns each connection's unfinished catch-up. `cancelThreadQuery` cancels it when
+a live item update for that conversation is admitted; `threadQueryGate` catches
+already queued updates immediately before sealing. No extra live buffer is
+introduced. At the separate success marker, cancellation checking and capture
+watermark installation share `hostedMu`; checking them separately could let a
+live patch cross the completion cut and be overwritten by older full items.
+Matching-epoch updates at or below the captured version are withheld, including
+fragments. Later updates retain source order, even when distinct patches share
+one consumed version; the capture watermark is not advanced for each patch.
+The map caps joined conversations at 256 per connection and rejects further
+new joins. Existing queue bounds and generation fencing remain authoritative;
+lost/withheld/cancelled parts never earn a success marker, and retirement cannot
+carry a join into a reused connection ID. `TestThreadCatchUpLiveRace`,
+`TestThreadCatchUpInterrupted` and `TestThreadCatchUpJoinedLive` exercise these
+cuts; `TestThreadCatchUpRequestedScope` pairs gap-producing thread and legacy
+handshakes with named requests.
 
 **Project fields without round-tripping a partial DTO.** `conversation_updated`
 has supplied fields that `ConversationUpdatedPayload` does not represent,
@@ -175,9 +217,10 @@ strips the reading and envelope session metadata and omits clear frames entirely
 `TestV2Session_ThreadSummaries` checks distinct readings, zero/unavailable,
 legacy literal bytes and unrelated field presence, including the combination
 with agent tagging. `TestV2Session_ThreadDelivery` covers item denial even in
-handler replies, and `TestV2Session_ThreadReplay` checks suppression followed by
-permitted replay and live traffic. Continuation payload/order and the envelope
-budget are pinned by `TestV2Session_ThreadContinuations`; projection must not
+handler replies, and `TestV2Session_ThreadReplay` checks thread replay bypass,
+an untouched replay watermark and permitted live traffic. Continuation
+payload/order and the envelope budget are pinned by
+`TestV2Session_ThreadContinuations`; projection must not
 grow the codec's supplied `SessionID`. See the
 [summary contract](../../protocol-mobile.md#conversations).
 
@@ -209,9 +252,9 @@ original payload session fields and prompt answer IDs stay intact. This wiring
 now participates in production `ThreadReady` alongside the installed fold
 publisher and watermark provider. Negotiated thread connections receive current
 readings at connect/reconnect and source-bound live updates; these snapshots
-initialize transient state only. Thread history initialization, catch-up/pages
-and replay replacement remain
-[#2963](https://github.com/pyrycode/pyrycode/issues/2963).
+initialize transient state only. Thread item backfill requires explicit catch-up;
+relay handling and replay bypass are implemented, while production query
+provider installation remains #3236 and history pages remain #3235.
 
 Carry provenance with the originating reading through `PushLiveState` and
 `ThreadLiveState`, rather than resolving a conversation's current binding when
