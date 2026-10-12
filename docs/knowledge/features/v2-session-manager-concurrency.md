@@ -284,6 +284,24 @@ and revision checks from being applied twice. Supplying a fresh reading behind
 a deferred clear preserves their upstream order; see
 [supplied current-state delivery](#supplied-current-state-delivery).
 
+Off-Run `DeliverThread` callers wait for this same inbox's capacity and terminal
+transport outcome; a full lane must defer admission rather than report success
+or overflow for a legal codec sequence. Keep the capacity notification tied to
+the captured inbox generation, so a reused connection ID cannot admit old work
+into its replacement. Buffered result publication never blocks Run. The caller
+retains its own result-channel reference: `hostedOutput.finish` clears the
+output's mutable field, so reading that field again could strand the waiter.
+Enqueue, `forwardToRun` handoff and source flush do not prove callback acceptance;
+see [delivery outcomes](../../protocol-mobile.md#ordered-delivery-and-eligibility).
+
+`DeliverThread`'s JSON round-trip detaches input only when decoding into a fresh
+zero-value `Envelope`. Decoding into a shallow copy can reuse borrowed
+`json.RawMessage` backing arrays and pointer fields, rewriting producer bytes
+and allowing later mutations to change queued output. `TestThreadDeliveryInputIsolation`
+uses whitespace-bearing JSON and shared metadata, authenticates reuse for a
+second recipient, and mutates producer data after admission to verify the queued
+snapshot stays independent.
+
 `hostedEnvelope` admits plaintext; `hostedDeliver` assigns a fresh connection-local
 sender ID and seals only the selected head on `Run`. Mixing pre-sealed legacy
 pushes/replies with queued hosted plaintext would spend Noise nonces in a different
@@ -322,9 +340,17 @@ old events and overflow signals out of a reused connection. `TestHostedLifecycle
 holds both predecessor delivery and terminal close through the replacement
 handshake, then releases them and decrypts new discovery/notification output.
 An admission or completion-only assertion would miss a late predecessor close.
+A down/up fixture must also await terminal-close publication before recording
+the next handshake's output offset: session deletion alone can leave the old
+close looking like the new Noise response. `TestThreadDeliveryFailure` uses
+`testHostedClose` to fence both publication and retirement before reopening.
 
 `hostedSender` selects `HostedAppsSend` or `OutboundContext`, never context-free
-`Outbound`. The callback must honor cancellation/deadlines through actual I/O
+`Outbound`. A thread handshake initializes this lane only with `OutboundContext`
+(or the existing hosted configuration); installing it on an outbound-only legacy
+connection would retire otherwise valid traffic. `DeliverThread` returns
+`ErrConnNotFound` when no ordered lane exists. The callback must honor
+cancellation/deadlines through actual I/O
 and suppress publication after retirement. A goroutine around a synchronous
 callback cannot establish that guarantee. Missing safe adapters retire locally
 before sealing or worker creation, including unsupported controls while
