@@ -224,7 +224,7 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		if o.callerCtx != nil {
 			rejection = o.callerCtx.Err()
 		}
-		if rejection == nil && o.env != nil && (m.threadWithheld(s, *o.env) || (o.callerCtx != nil && (!s.thread || !s.interactive))) {
+		if rejection == nil && o.env != nil && ((threadContent(o.env.Type) && m.threadWithheld(s, *o.env)) || (o.callerCtx != nil && (!s.thread || !s.interactive))) {
 			rejection = ErrThreadWithheld
 		}
 		if rejection == nil {
