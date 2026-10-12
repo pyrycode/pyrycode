@@ -25,22 +25,36 @@ func TestDaemonAppProcess(t *testing.T) {
 	if len(os.Args) < 2 || os.Args[len(os.Args)-1] != "daemon-app-child" {
 		return
 	}
-	child := exec.Command("/bin/sleep", "99999")
-	if err := child.Start(); err != nil {
-		os.Exit(2)
-	}
-	data := os.Getenv("PYRY_APP_DATA_DIR")
-	proof, _ := json.Marshal(map[string]int{"pid": os.Getpid(), "descendant": child.Process.Pid})
-	if err := os.WriteFile(filepath.Join(data, "process.json"), proof, 0600); err != nil {
-		os.Exit(3)
-	}
+	os.Exit(daemonAppProcess())
+}
+
+func daemonAppProcess() (exitCode int) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM)
+	defer signal.Stop(sig)
+	child := exec.Command("/bin/sleep", "99999")
+	if err := child.Start(); err != nil {
+		return 2
+	}
+	data := os.Getenv("PYRY_APP_DATA_DIR")
+	defer func() {
+		_ = child.Process.Kill() // Best effort if group termination already killed it.
+		_ = child.Wait()         // A signal exit still reaps the descendant.
+		if err := os.WriteFile(filepath.Join(data, "descendant-reaped"), nil, 0600); err != nil {
+			exitCode = 7
+		}
+	}()
 	server := &http.Server{Addr: "127.0.0.1:" + os.Getenv("PYRY_APP_PORT"), ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "app_id": os.Getenv("PYRY_APP_ID"), "release_version": os.Getenv("PYRY_APP_RELEASE")})
 	})}
+	stop, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
-		<-sig
+		defer close(stopped)
+		select {
+		case <-sig:
+		case <-stop:
+			return
+		}
 		if _, err := os.Stat(filepath.Join(data, "hold-shutdown")); err == nil {
 			if err := os.WriteFile(filepath.Join(data, "shutdown-started"), nil, 0600); err != nil {
 				os.Exit(5)
@@ -52,12 +66,40 @@ func TestDaemonAppProcess(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 			}
 		}
-		_ = child.Process.Kill()
-		_ = child.Wait()
 		_ = server.Close()
 	}()
+	defer func() { close(stop); <-stopped }()
+	proof, _ := json.Marshal(map[string]int{"pid": os.Getpid(), "descendant": child.Process.Pid})
+	// Publish complete PID readiness only after termination and reaping are armed.
+	path := filepath.Join(data, "process.json")
+	if err := os.WriteFile(path+".tmp", proof, 0600); err != nil {
+		return 3
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		return 3
+	}
+	if err := daemonAppStartupPause(data, stopped); err != nil {
+		return 6
+	}
 	_ = server.ListenAndServe()
-	os.Exit(0)
+	return 0
+}
+
+// The bounded gate lets the parent terminate a fixture immediately after its
+// PID publication, while service startup has not completed.
+func daemonAppStartupPause(data string, stopped <-chan struct{}) error {
+	if _, err := os.Stat(filepath.Join(data, "hold-startup")); err != nil {
+		return nil
+	}
+	if err := os.WriteFile(filepath.Join(data, "startup-paused"), nil, 0600); err != nil {
+		return err
+	}
+	select {
+	case <-stopped:
+		return os.WriteFile(filepath.Join(data, "startup-interrupted"), nil, 0600)
+	case <-time.After(5 * time.Second):
+	}
+	return nil
 }
 
 func daemonOwnerFixture(t *testing.T) (*apps.Registry, string, string) {
@@ -124,14 +166,25 @@ func daemonProcesses(t *testing.T, root, id string) map[string]int {
 }
 func daemonAssertGone(t *testing.T, proof map[string]int) {
 	t.Helper()
-	daemonAwait(t, func() bool {
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		gone := true
 		for _, pid := range proof {
 			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-				return false
+				gone = false
 			}
 		}
-		return true
-	})
+		if gone {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for role, pid := range proof {
+		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+			state, stateErr := exec.Command("ps", "-o", "stat=", "-p", fmt.Sprint(pid)).Output()
+			t.Errorf("app cleanup: role=%s pid=%d state=%q probe=%v ps=%v", role, pid, strings.TrimSpace(string(state)), err, stateErr)
+		}
+	}
 }
 func TestDaemonAppsOwnerLifetime(t *testing.T) {
 	r, node, root := daemonOwnerFixture(t)
@@ -195,17 +248,52 @@ func TestDaemonAppsOwnerLifetime(t *testing.T) {
 	}
 }
 func TestHostedAppsStartupFailureCleanup(t *testing.T) {
-	_, node, root := daemonOwnerFixture(t)
-	t.Setenv("PATH", filepath.Dir(node)+":"+os.Getenv("PATH"))
-	expected := errors.New("delivery failure")
-	err := runSupervisor([]string{"-pyry-name=test", "-pyry-workdir=" + os.Getenv("HOME"), "-pyry-socket=" + filepath.Join(shortTempDir(t), "control.sock"), "-pyry-relay=", "-pyry-claude=/bin/sleep"}, func(_ string, _ channelDeliveryHistory, _ func(conversations.ConversationID, string), _ *slog.Logger) (*channelDelivery, error) {
-		daemonProcesses(t, root, daemonAppID)
-		return nil, expected
-	})
-	if !errors.Is(err, expected) {
-		t.Fatal(err)
-	}
-	for _, id := range []string{daemonAppID, "33333333-3333-4333-8333-333333333333"} {
-		daemonAssertGone(t, daemonProcesses(t, root, id))
+	for _, mode := range []string{"normal", "publication-pause"} {
+		t.Run(mode, func(t *testing.T) {
+			_, node, root := daemonOwnerFixture(t)
+			t.Setenv("PATH", filepath.Dir(node)+":"+os.Getenv("PATH"))
+			if mode == "publication-pause" {
+				for _, id := range []string{daemonAppID, "33333333-3333-4333-8333-333333333333"} {
+					data := filepath.Join(root, id, "data")
+					if err := os.MkdirAll(data, 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(data, "hold-startup"), nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			expected := errors.New("delivery failure")
+			var proofs []map[string]int
+			err := runSupervisor([]string{"-pyry-name=test", "-pyry-workdir=" + os.Getenv("HOME"), "-pyry-socket=" + filepath.Join(shortTempDir(t), "control.sock"), "-pyry-relay=", "-pyry-claude=/bin/sleep"}, func(_ string, _ channelDeliveryHistory, _ func(conversations.ConversationID, string), _ *slog.Logger) (*channelDelivery, error) {
+				for _, id := range []string{daemonAppID, "33333333-3333-4333-8333-333333333333"} {
+					proofs = append(proofs, daemonProcesses(t, root, id))
+					if mode == "publication-pause" {
+						daemonAwait(t, func() bool { _, err := os.Stat(filepath.Join(root, id, "data/startup-paused")); return err == nil })
+					}
+				}
+				return nil, expected
+			})
+			if !errors.Is(err, expected) {
+				t.Fatal(err)
+			}
+			for _, proof := range proofs {
+				daemonAssertGone(t, proof)
+			}
+			for i, id := range []string{daemonAppID, "33333333-3333-4333-8333-333333333333"} {
+				if mode == "publication-pause" {
+					if _, err := os.Stat(filepath.Join(root, id, "data/startup-interrupted")); err != nil {
+						t.Errorf("app %s shutdown did not interrupt its startup pause: %v", id, err)
+					}
+				}
+				if _, err := os.Stat(filepath.Join(root, id, "data/descendant-reaped")); err != nil {
+					t.Errorf("app %s did not acknowledge descendant reaping: %v", id, err)
+					for role, pid := range proofs[i] {
+						state, _ := exec.Command("ps", "-o", "stat=", "-p", fmt.Sprint(pid)).Output()
+						t.Logf("role=%s pid=%d state=%q probe=%v", role, pid, strings.TrimSpace(string(state)), syscall.Kill(pid, 0))
+					}
+				}
+			}
+		})
 	}
 }
