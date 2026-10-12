@@ -73,3 +73,7 @@ Pending documentation stage: `docs/hosted-apps.md`, “Runtime and layout” and
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+
+2026-10-12: Supplemental coverage in `TestRestoreSQLiteGenericAndCancellation` proves initialized arbitrary schema restoration without inventing a ledger, cancellation/subprocess failure during restored SQLite verification, joined children and fresh-caller retry. `TestRestoreContainment` also asserts sibling-app preservation. The API, replacement design and security verdict remain unchanged; actual written work is approximately 590 lines, within all five sizing limits.

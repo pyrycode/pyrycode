@@ -29,8 +29,9 @@ type backupEvidence struct {
 	Entries   []backupEntry
 }
 type backupOps struct {
-	hook        func(string) error
-	nodeStarted func(*os.Process)
+	hook           func(string) error
+	nodeStarted    func(*os.Process)
+	readOnlySource bool
 }
 
 func (o backupOps) step(ctx context.Context, phase string) error {
@@ -250,7 +251,13 @@ func (o backupOps) tree(ctx context.Context, dir, dest *os.File, prefix string) 
 		return nil, err
 	}
 	if dest != nil {
-		if err = dir.Chmod(0700); err != nil {
+		if !o.readOnlySource {
+			err = dir.Chmod(0700)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err = dest.Chmod(0700); err != nil {
 			return nil, err
 		}
 	} else if info.Mode().Perm() != 0700 {
@@ -331,12 +338,18 @@ func (o backupOps) copyFile(ctx context.Context, file, dest *os.File, name, path
 	var writer io.Writer = h
 	var output *os.File
 	if dest != nil {
-		if err = file.Chmod(0600); err != nil {
+		if !o.readOnlySource {
+			err = file.Chmod(0600)
+		}
+		if err != nil {
 			return backupEntry{}, err
 		}
 		output, err = regularAt(dest, name, true)
 		if err != nil {
 			return backupEntry{}, err
+		}
+		if err = output.Chmod(0600); err != nil {
+			return backupEntry{}, errors.Join(err, output.Close())
 		}
 		writer = io.MultiWriter(h, output)
 	} else if info.Mode().Perm() != 0600 {
