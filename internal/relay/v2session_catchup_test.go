@@ -327,12 +327,12 @@ func TestThreadCatchUpInterrupted(t *testing.T) {
 						target = 1
 					}
 					if frame.Type == protocol.TypeNoiseMsg && sends.Add(1) == target {
-						close(entered)
+						defer close(exited)
 						if mode == "withheld" || mode == "down" {
+							close(entered)
 							select {
 							case <-release:
 							case <-ctx.Done():
-								close(exited)
 								return ctx.Err()
 							}
 						} else {
@@ -341,19 +341,19 @@ func TestThreadCatchUpInterrupted(t *testing.T) {
 							if err := out(ctx, e); err != nil {
 								return err
 							}
+							// Only interrupt once the prefix was actually accepted. Signalling
+							// before out races cancellation against that prerequisite.
+							close(entered)
 							select {
 							case <-release:
 							case <-ctx.Done():
-								close(exited)
 								return ctx.Err()
 							}
-							close(exited)
 							if mode == "failed" {
 								return errors.New("secret transport failure")
 							}
 							return ctx.Err()
 						}
-						close(exited)
 					}
 					return out(ctx, e)
 				}
