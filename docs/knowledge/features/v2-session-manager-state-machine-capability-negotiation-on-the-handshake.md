@@ -107,17 +107,22 @@ authoritative watermark lookup and session-state reconciliation providers are
 installed. Nil/false disables `thread`; advertisement alone is insufficient.
 `handleNoiseInit` records `s.thread` only on authenticated admission, and rekey
 preserves it. `ActiveConn.Thread` exposes the decision for open connections.
-Production leaves readiness unwired until #3164. The relay's supplied-state
-reconciliation (#3082), on-demand handlers (#3162) and daemon producer/provider
-installation (#3163) are implemented. Folded-item publication and production
-`thread` negotiation still await #3164; catch-up/pages and replay replacement
-remain #2963.
+Production `startRelayV2` installs the real fold publisher and authoritative
+`ThreadLastShownVersion` through `installDaemonThreadRelay`, after the retained
+`ThreadLiveState` and `LiveStateCurrent` providers. Readiness stays false without
+that live-state installation or a running publisher, and becomes false before
+publisher teardown. Production negotiation and live publication are active;
+catch-up/pages, reconnect thread history initialization and replay replacement
+remain #2963. Readiness attests installed providers, not that every conversation
+has completed replay. See [daemon publication and lifecycle](thread-package.md#shadow-lifecycle-and-evidence).
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
 replies, but `threadWithheld` independently gates all three thread update kinds
 and their continuations at `forwardEnvelope` and `forwardAppReply`, before
 Noise encryption. A frame must name its conversation, and the connection must
-be open, thread-capable, interactive and pass the existing Codex restriction.
+be open, thread-capable, interactive, name a currently registered conversation
+and pass the existing Codex restriction. Membership is rechecked at delivery,
+so a queued item cannot reach a removed conversation.
 A missing conversation ID fails closed for items. Neither `thread` alone nor
 `in_reply_to` grants interactive or multi-agent access. Unsolicited content
 replaced by the thread is suppressed on live, replay and connect-reconcile
@@ -153,6 +158,22 @@ budget are pinned by `TestV2Session_ThreadContinuations`; projection must not
 grow the codec's supplied `SessionID`. See the
 [summary contract](../../protocol-mobile.md#conversations).
 
+**Retirement quarantines before teardown.** A fold continuity loss uses
+`RetireLiveState`'s existing queue-overflow gap close. Latching the queue must
+immediately stop `drainOnce`, `drainLiveOnce` and `signalLiveDrain` from consuming
+dependent items or current readings: Run may select a ready drain before the
+queued teardown. `TestRetiredThreadQueueDoesNotDrain` authenticates a held
+append and explicitly drains in that order before checking final removal.
+
+`ActiveThreadConns(ctx, conversation)` enumerates on Run using delivery's
+shared conversation/interactive/agent gates, excluding latched queues. Ordinary
+`ActiveConns` keeps its existing enumeration. The publisher refreshes prior
+consumer tracking from eligible peers and records successful enqueues. Recording
+every negotiated peer would let a Codex gap retire a basic connection that
+never received the affected items. `TestDaemonThreadGapPreservesAgentIneligiblePeer`
+checks that only the eligible consumer is retired and that the basic peer
+continues authenticated Claude publication.
+
 ### Supplied live-state ordering
 
 `startRelayV2` installs the [daemon retained-reading delivery path](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery):
@@ -162,8 +183,11 @@ publication, and `installDaemonLiveRelay` wires all five source-bearing reply/
 settings providers. Accepted producers hand off publication before legacy
 enumeration or fan-in can refuse/delay delivery. Captured source/order fields survive adaptation;
 original payload session fields and prompt answer IDs stay intact. This wiring
-leaves production `ThreadReady` unset pending
-[#3164](https://github.com/pyrycode/pyrycode/issues/3164); catch-up/pages remain
+now participates in production `ThreadReady` alongside the installed fold
+publisher and watermark provider. Negotiated thread connections receive current
+readings at connect/reconnect and source-bound live updates; these snapshots
+initialize transient state only. Thread history initialization, catch-up/pages
+and replay replacement remain
 [#2963](https://github.com/pyrycode/pyrycode/issues/2963).
 
 Carry provenance with the originating reading through `PushLiveState` and

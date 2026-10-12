@@ -272,7 +272,17 @@ use relay watermarks rather than this retention check. See
 Hermetic `TestDaemonLiveRelayPublication`, `TestDaemonLiveRelayPrompts`,
 `TestDaemonLiveRelayReplies` and the ordering/retirement regressions exercise
 actual producers through authenticated decrypted wire, with explicit test-only
-readiness and legacy-byte comparisons. Production `ThreadReady` remains unset:
-folded-item publication and production `thread` negotiation await
-[#3164](https://github.com/pyrycode/pyrycode/issues/3164); catch-up/pages remain
+readiness and legacy-byte comparisons. Production `startRelayV2` now installs
+`installDaemonThreadRelay` and starts `startDaemonThreadPublisher`, activating
+`ThreadReady` only with the real fold/watermark and retained live-state providers.
+`TestDaemonThreadPublication` exercises that installation with simultaneous
+authenticated thread/legacy peers, complete item reconstruction and current
+readings. Fold publication remains coordinator-owned and independent of source
+admission and history writers; held peer delivery cannot block either producer.
+Both publishers cancel and join before releasing their installation slots.
+See [fold publication and gap recovery](thread-package.md#shadow-lifecycle-and-evidence)
+and [relay quarantine](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+Production live thread publication and supplied-state reconciliation are active;
+connect/reconnect snapshots still initialize only transient readings. Client
+thread history initialization, catch-up/pages and replay replacement remain
 [#2963](https://github.com/pyrycode/pyrycode/issues/2963).

@@ -167,7 +167,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	// A fresh reading parked behind its clear completes before another clear
 	// can replace the single pending slot. Each call still sends only one frame.
 	for _, s := range m.sessions {
-		if s.livePending != nil {
+		if s.livePending != nil && !m.pushRetired(s.connID) {
 			m.drainLiveOnce(ctx, true)
 			return
 		}
@@ -215,7 +215,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	// Go randomises map-range order, giving rough fairness across the
 	// realistically-tiny open-conn count.
 	for id, q := range m.queues {
-		if len(q.items) == 0 {
+		if q.overflowed || len(q.items) == 0 {
 			continue
 		}
 		if _, gated := replayPending[id]; gated {
@@ -234,7 +234,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	more := false
 	if found {
 		for id, q := range m.queues {
-			if len(q.items) == 0 {
+			if q.overflowed || len(q.items) == 0 {
 				continue
 			}
 			if _, gated := replayPending[id]; gated {

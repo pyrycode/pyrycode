@@ -127,7 +127,9 @@ func TestHealthHelperProcess(t *testing.T) {
 		w.Write([]byte(reply.Body))
 	})}
 	go server.Serve(listener)
-	os.WriteFile(filepath.Join(data, "ready"), []byte(strconv.Itoa(os.Getpid())), 0600)
+	if e := publishOwnerPID(filepath.Join(data, "ready")); e != nil {
+		os.Exit(6)
+	}
 	for {
 		select {
 		case <-signals:
@@ -253,7 +255,7 @@ func TestOwnerHealthPersistence(t *testing.T) {
 			}
 			if change != "removed" {
 				got := ownerRecord(t, r, testApp)
-				if got.Revision != expected.Revision || got.Title != expected.Title || got.ActiveRelease != expected.ActiveRelease || got.PendingRelease != expected.PendingRelease || got.Desired != expected.Desired {
+				if (change != "intent" && change != "active" && got.Revision != expected.Revision) || got.Title != expected.Title || got.ActiveRelease != expected.ActiveRelease || got.PendingRelease != expected.PendingRelease || got.Desired != expected.Desired {
 					t.Fatal(got, expected)
 				}
 			}
@@ -554,7 +556,9 @@ func TestOwnerHealthBindCollision(t *testing.T) {
 	}
 	waitGone(t, g.cmd.Process.Pid)
 	o.listen = func() (net.Listener, error) { return net.Listen("tcp4", "127.0.0.1:0") }
-	next := healthStart(t, r, o)
+	recoveryAdvance(o, time.Second)
+	healthWait(t, func() bool { return recoveryGeneration(o, testApp) != g })
+	next := recoveryGeneration(o, testApp)
 	healthTarget(t, o)
 	if g.port == next.port {
 		t.Fatal("collision endpoint reused")

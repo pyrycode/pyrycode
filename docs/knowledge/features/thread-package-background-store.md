@@ -83,6 +83,24 @@ Hiding a queued item with `Shown == false` retains its row and can use ordinary
 field changes. Rebuilding/unavailable observations expose their state, with no
 partial usable items, epoch, versions or fabricated watermark.
 
+The daemon's installed `daemonThreadPublisher.publish` uses these observations
+as its only item source: full additions from a usable baseline, then ordered
+changes from its saved epoch/version. It never reconstructs items from legacy
+emitter facts. Field replacements are translated to `ThreadItem` JSON keys;
+combined replacements/text become consecutive changed/append messages with the
+same final revision. See [daemon publication](thread-package.md#shadow-lifecycle-and-evidence).
+
+**A fresh baseline cannot repair an existing consumer silently.** Unload/reload
+and retry release retained live batches even if cache validation preserves the
+epoch. Nonusable state, epoch mismatch, evicted ranges or linked-delivery
+suppression require `RetireLiveState` for affected thread consumers before the
+publisher forgets its cursor and obtains a fresh usable `Observe`. Pending
+dependent deltas are quarantined immediately, rather than drained while gap
+teardown waits on relay Run. No `base_rev` is guessed and no partial recovery
+is published. `Store.CatchUp` proves a separate reconstructed query range;
+its backend does not install client catch-up/pages or a reconnect initializer,
+which remain #2963.
+
 ### Snapshots and retry
 
 `Snapshot(conversationID) Snapshot` performs no history I/O. Its fields are
