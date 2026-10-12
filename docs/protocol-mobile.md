@@ -6893,7 +6893,8 @@ The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, wi
 ## Hosted apps (v2)
 
 **Discovery, committed lifecycle delivery and list cancellation are implemented
-in the relay; production activation remains pending.** The
+in the relay; resource payloads are declared ahead of routing/producers (#3247),
+and production capability activation remains pending (#3248).** The
 [hosted-app reference](hosted-apps.md) and
 [approved v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 fix manifest fields, runtime/layout, resource/Fetch semantics, limits and safe
@@ -6906,9 +6907,13 @@ cancellation types: `list_apps`, `apps`, `app_updated`, `app_removed`, `app_canc
 and `app_cancelled`. Only `list_apps` and `app_cancel` are client directions.
 Paged discovery and list-scoped cancellation have handlers (#3157), and committed
 lifecycle notifications have a registry-compatible relay consumer (#3158).
-Daemon subscription installation/unsubscribe ownership remains #3139; resource
-requests, credit and resource-scoped cancellation remain #3123. These types do
-not join the v1 `inboundAppTypeSet`.
+Daemon subscription installation/unsubscribe ownership remains #3139. Five more
+v2-only names have Go-backed data-only declarations (#3244): `app_asset_request`,
+`app_api_request`, `app_response`, `app_response_chunk` and `app_response_credit`.
+Resource request/credit handlers, response/chunk producers, semantic validation
+and resource-scoped cancellation remain pending #3247 (within #3123). All eleven
+hosted names remain outside the v1 `inboundAppTypeSet`; declaring resource
+payloads does not install routing or enable the capability.
 
 The additive capability constant `CapabilityHostedAppsV1` is exactly
 `hosted_apps_v1`. Clients offer it through `HelloClientPayload.capabilities`;
@@ -6935,13 +6940,13 @@ version `1`, app `release_version` and transport `v2` are distinct.
 | `apps` | Daemon → client | `AppsPayload`: reply to list ID; atomic host `revision`, at most 16 whole records sorted by `app_id`, required nullable `next_cursor` (#3157). |
 | `app_updated` | Daemon → client | Implemented (#3158): committed `HostedAppRecord`, unsolicited whole record, omitting `in_reply_to`. |
 | `app_removed` | Daemon → client | Implemented (#3158): `AppRemovedPayload`, unsolicited `{app_id, revision}` tombstone, omitting `in_reply_to`; saved data is retained. |
-| `app_asset_request` | Client → daemon | Selected app/release asset GET, with native-stamped navigation. |
-| `app_api_request` | Client → daemon | Selected app/release API method, permitted headers and base64 body. |
-| `app_response` | Daemon → client | Once per asset/API request; status, headers, byte/chunk counts and digest. |
-| `app_response_chunk` | Daemon → client | Ordered base64 body chunks replying to the same asset/API ID. |
-| `app_response_credit` | Client → daemon | Grants one next chunk via original `request_id` and `next_index`; no reply. |
-| `app_cancel` | Client → daemon | `AppCancelPayload`: original target `request_id`; omit `app_id` to cancel this connection's pending list page (#3157). Valid resource scope with `app_id` returns `protocol.unsupported` until #3123. |
-| `app_cancelled` | Daemon → client | List-cancel reply to the cancel ID, echoing target `request_id` and omitting `app_id`; duplicate/unknown/finished targets are idempotent (#3157). Resource acknowledgements remain #3123. |
+| `app_asset_request` | Client → daemon | Declared `AppAssetRequestPayload`; handler pending #3247. Selected app/release asset GET, with native-stamped navigation; no `in_reply_to`. |
+| `app_api_request` | Client → daemon | Declared `AppAPIRequestPayload`; handler pending #3247. Selected app/release API method, permitted headers and base64 body; no `in_reply_to`. |
+| `app_response` | Daemon → client | Declared `AppResponsePayload`; producer pending #3247. Once per asset/API request; status, headers, byte/chunk counts and digest; `in_reply_to` names that original request. |
+| `app_response_chunk` | Daemon → client | Declared `AppResponseChunkPayload`; producer pending #3247. Ordered base64 body chunks; `in_reply_to` names the original asset/API request, never the metadata ID. |
+| `app_response_credit` | Client → daemon | Declared `AppResponseCreditPayload`; handler pending #3247. Grants one next chunk via original `request_id` and `next_index`; no `in_reply_to` and no reply. |
+| `app_cancel` | Client → daemon | `AppCancelPayload`: original target `request_id`; omit `app_id` to cancel this connection's pending list page (#3157). Valid resource scope with `app_id` returns `protocol.unsupported` until #3247. |
+| `app_cancelled` | Daemon → client | List-cancel reply to the cancel ID, echoing target `request_id` and omitting `app_id`; duplicate/unknown/finished targets are idempotent (#3157). Resource acknowledgements remain #3247. |
 | `error` | Daemon → client | Static bridge error replying to the failing ID: required `code`, `message`, `retryable`; optional `retry_after_s` for busy. |
 
 ### Discovery and lifecycle payloads
@@ -6987,7 +6992,7 @@ Envelope IDs, correlations, cancellation `request_id` and page revisions permit
 `uint64` preserves the integers but does not enforce these bounds. Required-key
 presence, safe-integer bounds, cursor validity, direction and forbidden metadata
 are enforced for discovery/list cancellation at the encrypted boundary.
-Resource enforcement remains #3123. Ordinary DTO decoding validates none of
+Resource enforcement remains #3247. Ordinary DTO decoding validates none of
 those rules.
 
 `V2SessionManager.HostedAppsChanged` accepts current-process committed registry
@@ -7083,6 +7088,50 @@ has a fresh sender connection-local safe-integer `id`, without reusing
 `hello_ack`'s ID. Replies use `in_reply_to` naming the request they answer;
 lifecycle notifications omit it. App data enters neither history nor event rings;
 output omits conversation/session/replay metadata.
+
+### Resource payload declarations
+
+The five resource DTOs use the existing `Envelope`; bridge errors reuse
+`ErrorPayload`, and resource cancellation reuses `AppCancelPayload`.
+Their fields match the
+[approved field tables](specs/architecture/3120-hosted-app-contract.md#6-assetapi-fields-and-http-semantics):
+
+| Go payload | Payload keys |
+|---|---|
+| `AppAssetRequestPayload` | `app_id`, `release_version`, `path`, `navigation`; optional `query`. |
+| `AppAPIRequestPayload` | `app_id`, `release_version`, `path`, `method`, `headers`, `body`; optional `query`. |
+| `AppResponsePayload` | `app_id`, `release_version`, `status`, `headers`, `size_bytes`, `total_chunks`, `sha256`. |
+| `AppResponseChunkPayload` | `app_id`, `index`, `data`. |
+| `AppResponseCreditPayload` | `app_id`, `request_id`, `next_index`. |
+
+Only empty `query` is omitted. Required `navigation: false`, API `body: ""`,
+`headers: {}` and zero `size_bytes`, `total_chunks`, `index` and `next_index`
+remain present. Headers are `map[string]string`; API request and response
+marshal methods normalize nil maps to `{}` without mutating the caller.
+Body/chunk strings preserve standard padded base64 of opaque bytes. Request IDs,
+sizes, counts and indices use `uint64`, HTTP status uses `int`; decoding these
+DTOs does not enforce required presence, exact JSON types, safe-integer bounds,
+URL/header validity, authorization or transfer limits. Consumer enforcement
+and routing/producers remain #3247; production capability activation remains #3248.
+
+API bodies decode to at most 32768 bytes. Paths and queries are bounded to
+2048 and 1024 ASCII bytes; permitted header objects are at most 4096 serialized
+UTF-8 bytes, with at most 8 entries and 1024 UTF-8 bytes per value.
+Response limits are 8388608 bytes/256 chunks for assets and 1048576 bytes/32
+chunks for APIs. Empty responses require `size_bytes: 0`, `total_chunks: 0`
+and the lowercase SHA-256 of empty bytes; they emit no chunks. Nonempty chunks
+decode to 1–32768 bytes, with consecutive indices from 0; credits name the
+same original request and expected next index (0–255 within the active transfer).
+Responses and chunks correlate to the resource request, while cancellation
+acknowledgements correlate to the distinct cancel ID as described above.
+
+The unchanged shared examples are decoded and typed payloads re-encoded by
+`TestHostedApps_ResourceSharedExamples`, with key/correlation checks on both
+wire forms. Boundary tests preserve IDs/correlations at 0 and 9007199254740991,
+indices at 0 and 255, required empty fields and opaque binary bytes.
+`TestHostedApps_ResourceEnvelopeSizes` measures complete serialized asset/API
+requests and chunks, including 32768-byte bodies/chunks and escaped query/header
+values. These declaration tests do not establish runtime transfer behavior.
 
 ### Host scope and pending resource contract
 

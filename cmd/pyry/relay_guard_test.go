@@ -263,6 +263,11 @@ var inboundTypes = map[string]string{
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
 // a request verb mis-filed as reply/push/etc. is visually obvious in review.
 var excludedTypes = map[string]string{
+	"TypeAppAssetRequest":   "request (declared; handler pending #3247)",
+	"TypeAppAPIRequest":     "request (declared; handler pending #3247)",
+	"TypeAppResponseCredit": "request (declared; handler pending #3247)",
+	"TypeAppResponse":       "reply (declared; producer pending #3247)",
+	"TypeAppResponseChunk":  "reply (declared; producer pending #3247)",
 	// Hosted discovery replies are implemented; lifecycle producers remain pending.
 	"TypeApps":         "reply (host discovery)",
 	"TypeAppUpdated":   "push (producer pending #3158)",
