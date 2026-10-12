@@ -12,6 +12,19 @@ The relay↔binary leg had no per-phone disconnect notice: a backgrounded or dro
 
 **Why this matters for push wake.** `cmd/pyry`'s `pushWaker` (see [`relay-package.md` § Push-wake surface](relay-package.md#push-wake-surface-sendpushwake-2564)) wakes a device only when it is *absent* from `ActiveConns`. Before this ticket, a phone that had just backgrounded stayed listed as an open session until the idle sweep fired, so a turn ending or a modal appearing while the phone was briefly away sent no wake at all. The close notice makes that absence appear the instant the phone's WebSocket actually ends, closing that gap without changing `pushWaker`'s own absence-based trigger.
 
+## Testing teardown and queued wakes
+
+`ActiveConns` and an outbound-recorder snapshot are separate observations: a
+surviving session's short idle deadline can legitimately publish 4408 between
+them, breaking a no-reply assertion about the closed peer. Keep unrelated idle
+delivery outside the bounded peer-close test window and identify unexpected
+frames by connection/code. `TestV2Session_PeerClose_TearsDownWithoutReply`
+retains the peer session on Run, joins Run before inspecting state, then delivers
+two stale idle wakes synchronously. This proves timer/worker/queue removal,
+closed-state suppression of late replies and survivor isolation without relying
+on automatic idle timing. Stopping a timer alone cannot prove that an already
+queued callback is inert. See [relay test fixtures](v2-session-manager-test-surface-same-package-unit-tests-internal-relay.md).
+
 ## Related
 
 - [Idle-session teardown (#774)](v2-session-manager-state-machine-idle-session-teardown-per-session-idle.md) — the fallback reaper this notice preempts; both call the same `teardown`.

@@ -75,10 +75,12 @@ paragraph breaks instead, and the document stops being retrievable.
 
 | File | Topic |
 |------|-------|
-| [apps-package.md](features/apps-package.md) | `internal/apps` topic map, template toolchain/SQL validation and candidate manifest/retention boundaries. |
+| [apps-package.md](features/apps-package.md) | `internal/apps` entry point: validation and stored identity, template toolchain/SQL, persistent-data snapshots and links to lifecycle, resource-serving, concurrency and testing. |
+| [apps-package-lifecycle.md](features/apps-package-lifecycle.md) | `internal/apps` lifecycle commits, committed-release processes, health/reconciliation, private runtime environments and restart normalization. |
+| [apps-package-resource-serving.md](features/apps-package-resource-serving.md) | `internal/apps` confined callable assets, private targets and generation-bound stable response preparation, staging, reservation and disposal. |
+| [apps-package-concurrency-and-testing.md](features/apps-package-concurrency-and-testing.md) | `internal/apps` lock ordering, persistence, ordered subscriptions and discriminating storage, process, template and snapshot fixtures. |
 | [apps-package-validation-and-stored-identity.md](features/apps-package-validation-and-stored-identity.md) | Exact manifest/storage schemas, raw create-title validation, committed identities and release/journal metadata. |
 | [apps-package-lifecycle-and-restart-state.md](features/apps-package-lifecycle-and-restart-state.md) | Conditional lifecycle commits, owned committed-release processes, health/retries, private environments/targets, group cleanup and restart normalization. |
-| [apps-package-resource-serving.md](features/apps-package-resource-serving.md) | Confined active-release assets, expected-generation lookup binding, navigation/404 and stable response reservation/disposal ownership. |
 | [apps-package-concurrency-and-persistence.md](features/apps-package-concurrency-and-persistence.md) | Lock order, source-unblocking cancellation, committed detached snapshots, ordered subscriptions and discovery delivery ownership. |
 | [apps-package-testing.md](features/apps-package-testing.md) | Controlled-child/storage fixtures, compiled template exclusion, stable response source-error and toolchain/SQL regression proofs. |
 | [streamsup-package-testing.md](features/streamsup-package-testing.md) | `internal/streamsup` test-harness patterns, discriminating concurrency tests, and content-free log assertions split from the package overview. |

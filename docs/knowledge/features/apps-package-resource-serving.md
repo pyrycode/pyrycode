@@ -1,6 +1,6 @@
 # `internal/apps` — resource-serving
 
-See the [package overview](apps-package.md) for the topic map.
+Part of the [apps package overview](apps-package.md).
 
 ## Resource-serving
 
@@ -86,10 +86,11 @@ disposal may race metadata access, consumption and cancellation safely.
 
 Bodies must support concurrent `Close` that promptly unblocks a pending `Read`,
 including on generation retirement. Caller-context cancellation alone cannot
-satisfy this obligation. See [concurrency](apps-package-concurrency-and-persistence.md#concurrency-and-persistence) for cleanup
-ordering and [testing](apps-package-testing.md#testing) for the source-error regression.
+satisfy this obligation. See [concurrency](apps-package-concurrency-and-testing.md#concurrency-and-persistence) for cleanup
+ordering and [testing](apps-package-concurrency-and-testing.md#testing) for the source-error regression.
 
-API forwarding, backend header projection and HEAD/204/205/304 no-body semantics belong to
+API forwarding,
+backend header projection and HEAD/204/205/304 no-body semantics belong to
 [#3246](https://github.com/pyrycode/pyrycode/issues/3246); delivery admission,
 connection ceilings, credit, deadlines, wire serialization and transport error
 mapping belong to [#3247](https://github.com/pyrycode/pyrycode/issues/3247).

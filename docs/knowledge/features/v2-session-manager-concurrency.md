@@ -255,7 +255,7 @@ calls the registry/unsubscribe. Waiting for transport here would block both
 mutations and registry readers. `Run` drains distinct generation inboxes and
 rechecks paired authorization before sealing. Handshake installs the inbox
 before any list request; list cancellation retires list work without removing
-lifecycle eligibility. See [registry callback ownership](apps-package-concurrency-and-persistence.md#concurrency-and-persistence).
+lifecycle eligibility. See [registry callback ownership](apps-package-concurrency-and-testing.md#concurrency-and-persistence).
 
 The hosted output lane and callback handoff share at most 16 envelopes per
 connection, including active delivery, queued output, pending lifecycle callbacks
@@ -351,7 +351,17 @@ An admission or completion-only assertion would miss a late predecessor close.
 A down/up fixture must also await terminal-close publication before recording
 the next handshake's output offset: session deletion alone can leave the old
 close looking like the new Noise response. `TestThreadDeliveryFailure` uses
-`testHostedClose` to fence both publication and retirement before reopening.
+`testHostedClose` to fence both publication and retirement before reopening;
+`testThreadQueryInterrupted` uses the same fence in its transport-down arm.
+Peer-close reuse remains silent and has no terminal envelope to await.
+
+An interruption fixture's sender-ready signal must follow accepted prefix
+delivery. Signalling before `OutboundContext` accepts the prefix allows a live
+update or peer cancellation to abort that first send, leaving the test waiting
+for progress it never established. Register sender-exit notification before any
+return so failed/cancelled prefix sends cannot strand the observer. The shared
+catch-up/page fixture in `testThreadQueryInterrupted` applies these two barriers
+before interrupting and awaiting sender completion.
 
 `hostedSender` selects `HostedAppsSend` or `OutboundContext`, never context-free
 `Outbound`. A thread handshake initializes this lane only with `OutboundContext`

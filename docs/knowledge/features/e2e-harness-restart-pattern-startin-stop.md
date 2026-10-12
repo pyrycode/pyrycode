@@ -36,7 +36,7 @@ SQL data remain intact. Keeping another home with a distinct
 persisted host ID and the same app ID running during that restart detects
 cross-host state aliasing. Never resume writes through the seeding registry;
 its stale snapshot could overwrite normalization and move revisions backwards.
-See [registry ownership](apps-package-concurrency-and-persistence.md#concurrency-and-persistence).
+See [registry ownership](apps-package-concurrency-and-testing.md#concurrency-and-persistence).
 
 A dialable control socket can precede app registry normalization. A seeded
 `running` record alone can therefore satisfy a readiness wait before the daemon
@@ -49,7 +49,7 @@ does not by itself prove joined owner shutdown. `TestHostedAppsRecoverySQL` also
 requires a clean daemon exit and reads committed stopped observations with
 available intent retained. Its `GORACE=atexit_sleep_ms=0` removes the race
 runtime's exit delay so the harness grace measures actual cleanup. See
-[daemon-owned lifetimes and SQL evidence](apps-package-lifecycle-and-restart-state.md#lifecycle-and-restart-state).
+[daemon-owned lifetimes and SQL evidence](apps-package-lifecycle.md#lifecycle-and-restart-state).
 
 ### Why `os.MkdirTemp` instead of `t.TempDir()` for the HOME
 

@@ -1,8 +1,9 @@
 # `internal/apps` — durable host-app registrations
 
 This package owns strict manifest validation, bundled registered source creation
-and identity-based inspection, durable registrations and callable
-health-confirmed committed-release process ownership, generation-bound stable
+and identity-based inspection, durable registrations, persistent-data snapshots
+with restart verification and callable health-confirmed committed-release
+process ownership and generation-bound stable
 response preparation and confined callable assets independent of conversations.
 The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
 owns the field tables and registration behavior; the
@@ -14,6 +15,18 @@ exposing private targets; owner construction reconciles registrations and recove
 failed generations automatically. The daemon owns one owner for its discovery
 registry, independently of channels; publication (#3125) and encrypted resource
 activation (#3123) remain separate responsibilities.
+
+## Package topics
+
+| Document | Topic |
+|---|---|
+| [Lifecycle and restart state](apps-package-lifecycle.md) | Conditional commits, process ownership, health, reconciliation and restart normalization. |
+| [Resource-serving](apps-package-resource-serving.md) | Private targets, stable responses and generation-bound cancellation. |
+| [Concurrency and testing](apps-package-concurrency-and-testing.md) | Lock ordering, persistence, subscriptions and discriminating fixtures. |
+
+## Validation and stored identity
+
+See [validation and stored identity](apps-package-validation-and-stored-identity.md#validation-and-stored-identity) for the schema and identity contracts.
 
 ## Topic map
 
@@ -27,6 +40,50 @@ activation (#3123) remain separate responsibilities.
 | [Resource-serving](apps-package-resource-serving.md#resource-serving) | Confined callable assets and stable response ownership. |
 | [Concurrency and persistence](apps-package-concurrency-and-persistence.md#concurrency-and-persistence) | Lock order, cancellation, committed snapshots and subscriptions. |
 | [Testing](apps-package-testing.md#testing) | Discriminating fixtures, source-error proofs and toolchain checks. |
+
+## Persistent-data snapshots
+
+Registry validation of `BackupReference` proves identity/root shape, not backup
+contents. `SnapshotData` and `VerifyBackup` supply independent data guarantees;
+[the reference](../../hosted-apps.md#runtime-and-layout) owns their layout and
+[publication contract](../../hosted-apps.md#publication-and-recovery) owns caller
+serialization, writer quiescence and durable recovery. Neither primitive changes
+registry lifecycle, selects releases or restores data (#3285).
+
+A main-file copy can omit committed SQLite writes still in WAL. `sqliteSnapshot`
+uses the selected supported Node's backup API on the private copied database and
+sidecars, then normalizes the replacement to DELETE journal mode before sealing.
+Read-only SQLite opening alone is insufficient: a WAL-mode file can create
+sidecars during verification. `backupSQL` rejects non-standalone headers before
+opening and checks integrity/foreign keys without schema-specific queries or
+migrations; existing migration-ledger rows survive unchanged.
+
+Sidecar rejection must precede the initialized-SQL branch. Otherwise absent or
+zero-byte `app.sqlite` bypasses SQL opening and allows transient WAL/SHM/journal
+files to be inventoried as durable data. `backupSQLiteEntries` rejects orphan
+source sidecars and every sealed sidecar, even when altered evidence describes
+them accurately. Absence, an empty data directory and an uninitialized main file
+remain distinct; verification must never manufacture schema to make them agree.
+
+Inventory directory entries are necessary to detect added/missing empty
+directories. `backupEntry.Path` preserves Unix filename bytes through JSON:
+ordinary strings replace invalid UTF-8 and would change the path being verified.
+`backupEvidence` binds the exact reference to an ordered kind/size/SHA-256
+inventory. `VerifyBackup` requires canonical evidence and freshly compares the
+whole tree without consulting source data or trusting a cached verdict. Evidence
+is a consistency check, not authentication against an OS-account attacker who
+rewrites both the tree and evidence.
+
+Exclusive destination creation rejects repeated publish IDs, including incomplete
+attempts. Evidence is published only after files, directories and its parent are
+synced, followed by a final backup-directory sync. A reported final failure must
+invalidate evidence even after cancellation. `invalidateBackupEvidence` joins
+the sealing failure with evidence-removal and invalidation-sync errors; hiding
+those cleanup errors would conceal uncertainty about persisted evidence. Callers
+must treat every snapshot error as failure, retain recoverable source data and
+retry with a new publish ID. Context cancellation joins started Node children
+before return; per-instance hooks avoid shared failure-injection races. See
+[snapshot testing](apps-package-concurrency-and-testing.md#testing).
 
 ## Template toolchain
 
