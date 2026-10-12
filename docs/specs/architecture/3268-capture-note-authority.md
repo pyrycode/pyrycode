@@ -93,3 +93,24 @@ reporting. Do not claim any agent or daemon is activated.
 - Concurrency: descriptors and handle lock protect lifetime; no goroutines. OUT OF SCOPE: execution serialization/crash accounting belong to #3269.
 - Threat model: untrusted backend paths and mutable local directories; no host credential or transport authority is added.
 **Reviewer:** builder (self-review). **Date:** 2026-10-12.
+
+## Revisions
++- 2026-10-12: formatted first implementation measures about 934 lines including
+  tests and plan, exceeding the 800-line forecast. Native parentage is #3174 under
+  #3101; the grandchild rule requires building through the overage. Applied
+  `needs-human:sizing` and recorded read/search versus write-publication candidate
+  seams on the issue. No new consumer migration or deliverable is added.
+- 2026-10-12: protect canonical vault ancestors too, so a selected vault alias
+  inside `.claude/rules` cannot turn rule notes into writable ordinary paths.
+  Literal search uses Unicode simple folding, including final sigma. Extend
+  substitution proof to equal-content regular replacements and cancellation
+  proof to I/O/enumeration checkpoints (`TestNotesCancellationDuringIO`).
+- 2026-10-12: staging files start private, retain a duplicate descriptor while
+  checking writer close, and exclusive create publication unlinks the staging
+  name before directory sync. This avoids leaving a second link after a
+  successful create while keeping source identity alive.
+- 2026-10-12: final work is approximately 1120 lines (563 production, 444 tests,
+  111 plan before this entry), with the same two exported types and no consumer
+  migration. `TestNotesLateHardLink` also rejects a link introduced during an
+  identical-content request. Final package proof: 41 note cases passed under
+  race detection; package total 139 passed and one existing ownership-test skip.
