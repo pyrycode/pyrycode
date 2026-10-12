@@ -388,7 +388,13 @@ func TestOwnerHealthBounds(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 			defer cancel()
 			start := time.Now()
-			got := probeHealth(ctx, privateClient((&net.Dialer{}).DialContext), g)
+			// g's own supervise goroutine is running concurrently and writes
+			// g.record under o.mu (see confirmRunning). Snapshot under the
+			// same lock so this direct probe doesn't race that write.
+			o.mu.Lock()
+			snapshot := *g
+			o.mu.Unlock()
+			got := probeHealth(ctx, privateClient((&net.Dialer{}).DialContext), &snapshot)
 			want := reply.Status == 0 && reply.Delay == 0 && reply.BodyDelay == 0 && len(reply.Body) <= healthReplyLimit
 			if got != want {
 				t.Fatal("probe result", got, want)

@@ -495,7 +495,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	s.thread = slices.Contains(negotiated, protocol.CapabilityThread)
 	s.hostedApps = slices.Contains(negotiated, protocol.CapabilityHostedAppsV1)
 	s.nextID = 2
-	if m.cfg.HostedAppsSend != nil || m.cfg.HostedAppsDiscovery != nil || slices.Contains(helloPayload.Capabilities, protocol.CapabilityHostedAppsV1) {
+	if (s.thread && m.cfg.OutboundContext != nil) || m.cfg.HostedAppsSend != nil || m.cfg.HostedAppsDiscovery != nil || slices.Contains(helloPayload.Capabilities, protocol.CapabilityHostedAppsV1) {
 		m.initHosted(ctx, s)
 	}
 	// Retain what the client reported about ITSELF, for the session's appended
@@ -546,9 +546,6 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 			m.signalLiveDrain()
 		}
 		// Thread state comes from current source readings, never legacy snapshots.
-		if helloPayload.LastEventID != nil {
-			m.replayMissed(ctx, s, *helloPayload.LastEventID)
-		}
 		return
 	}
 

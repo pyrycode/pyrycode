@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"log/slog"
+	"sync"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -11,6 +16,71 @@ import (
 
 const historyPromptAnswered = "prompt_answered"
 const maxPromptAnswerProjection = 16 * 1024
+
+// promptAnswerPublisher serializes durable appends and replay admission. A single
+// worker fans accepted receipts out in that order, outside mu: ActiveConns asks
+// the relay dispatch loop, which may itself be recording the next answer.
+type promptAnswerPublisher struct {
+	mu      sync.Mutex
+	ring    *eventring.Ring
+	nextID  uint64 // owned by the delivery worker
+	pending []protocol.Envelope
+	running bool
+	done    chan struct{}
+}
+
+// enqueue runs under mu after the durable append. Replay retains every receipt,
+// including those whose live delivery is dropped when the mailbox is full.
+func (p *promptAnswerPublisher) enqueue(ctx context.Context, bcast interactiveBroadcaster, logger *slog.Logger, convID string, payload json.RawMessage, ts time.Time, historyID *uint64) {
+	env := protocol.Envelope{Type: protocol.TypeBanner, TS: ts, Payload: payload, HistoryEntryID: historyID}
+	if p.ring != nil {
+		id := p.ring.AppendWithHistoryID(convID, env.Type, payload, ts, historyID)
+		env.EventID = &id
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if len(p.pending) >= 256 {
+		logger.Warn("relay: prompt receipt mailbox full", "event", "prompt_answer.queue_full")
+		return
+	}
+	p.pending = append(p.pending, env)
+	if !p.running {
+		p.running = true
+		p.done = make(chan struct{})
+		go p.deliver(ctx, bcast, logger)
+	}
+}
+
+func (p *promptAnswerPublisher) deliver(ctx context.Context, bcast interactiveBroadcaster, logger *slog.Logger) {
+	for {
+		p.mu.Lock()
+		if len(p.pending) == 0 || ctx.Err() != nil {
+			p.pending = nil
+			p.running = false
+			close(p.done)
+			p.mu.Unlock()
+			return
+		}
+		env := p.pending[0]
+		p.pending[0] = protocol.Envelope{}
+		p.pending = p.pending[1:]
+		p.mu.Unlock()
+		for _, c := range bcast.ActiveConns(ctx) {
+			if !c.Interactive {
+				continue
+			}
+			p.nextID++
+			env.ID = p.nextID
+			if err := bcast.Push(ctx, c.ConnID, env); err != nil {
+				if ctx.Err() != nil {
+					break
+				}
+				logger.Debug("relay: prompt receipt push dropped", "event", "prompt_answer.push_err", "conn_id", c.ConnID, "err", err)
+			}
+		}
+	}
+}
 
 // promptHistoryOwner is immutable after surfacing. It contains no permission
 // inputs, credentials or transport envelopes and survives retirement by value.
@@ -71,6 +141,10 @@ func (b *streamApprovalBridge) recordPromptAnswer(id string, owner promptHistory
 	if b.hist == nil {
 		return
 	}
+	if b.historyPublisher != nil {
+		b.historyPublisher.mu.Lock()
+		defer b.historyPublisher.mu.Unlock()
+	}
 	projection := promptAnswerProjection{Tool: owner.tool, Class: owner.class}
 	truncated := false
 	for i, q := range owner.questions {
@@ -106,7 +180,12 @@ func (b *streamApprovalBridge) recordPromptAnswer(id string, owner promptHistory
 		b.logger.Warn("relay: prompt answer history marshal failed", "event", "prompt_answer.marshal_err")
 		return
 	}
-	appendConversationHistory(b.hist, b.logger, "prompt_answer.history_append_err", owner.conversationID, historyPromptAnswered, payload, ts, owner.source)
+	historyID := appendConversationHistory(b.hist, b.logger, "prompt_answer.history_append_err", owner.conversationID, historyPromptAnswered, payload, ts, owner.source)
+	receipt, ok := legacyRuntimeReceipt(owner.conversationID, historyPromptAnswered, payload, historyID, ts)
+	if ok && b.historyPublisher != nil {
+		p := b.historyPublisher
+		p.enqueue(b.ctx, b.bcast, b.logger, owner.conversationID, receipt, ts, historyID)
+	}
 }
 
 // boundPromptAnswerProjection budgets encoded bytes, including JSON escaping.
@@ -138,4 +217,80 @@ func boundPromptAnswerProjection(p promptAnswerProjection) (json.RawMessage, boo
 		// even their empty-string encoding fits the cap, so the loop terminates.
 		truncated = true
 	}
+}
+
+// validPromptAnswerFact recognizes original producer facts, independently of
+// visibility and today's session binding. Context is checked but never forwarded.
+func validPromptAnswerFact(convID string, raw json.RawMessage, ts time.Time) bool {
+	if !promptObjectFields(raw, "conversation_id", "correlation_id", "resolved_at", "source", "decision", "behavior", "session_grant", "context", "truncated") {
+		return false
+	}
+	var f promptAnswerFact
+	if json.Unmarshal(raw, &f) != nil || f.ConversationID != convID || f.CorrelationID == "" || f.Source != "remote" || f.ResolvedAt.IsZero() || !f.ResolvedAt.Equal(ts) {
+		return false
+	}
+	switch f.Decision {
+	case "allow", "answer":
+		if f.Behavior != "allow" {
+			return false
+		}
+	case "deny", "cancel", "refusal":
+		if f.Behavior != "deny" || f.SessionGrant {
+			return false
+		}
+	default:
+		return false
+	}
+	if len(f.Context) > maxPromptAnswerProjection || !promptObjectFields(f.Context) {
+		return false
+	}
+	var p promptAnswerProjection
+	decoder := json.NewDecoder(bytes.NewReader(f.Context))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&p) != nil || len(p.Questions) > 4 {
+		return false
+	}
+	var contextFields struct {
+		Questions []json.RawMessage `json:"questions"`
+	}
+	if json.Unmarshal(f.Context, &contextFields) != nil {
+		return false
+	}
+	for i, q := range p.Questions {
+		if q.Index != i || len(q.Values) > 128 || !promptObjectFields(contextFields.Questions[i], "index", "text", "multi_select") {
+			return false
+		}
+		var fields struct {
+			Values []json.RawMessage `json:"values"`
+		}
+		if json.Unmarshal(contextFields.Questions[i], &fields) != nil {
+			return false
+		}
+		for _, v := range fields.Values {
+			if !promptObjectFields(v, "text") {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// promptObjectFields rejects null fields as well as missing required fields;
+// decoding into Go zero values alone cannot establish producer field presence.
+func promptObjectFields(raw json.RawMessage, required ...string) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	for _, value := range fields {
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return false
+		}
+	}
+	for _, key := range required {
+		if _, ok := fields[key]; !ok {
+			return false
+		}
+	}
+	return true
 }

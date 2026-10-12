@@ -57,6 +57,7 @@ func (f *Failure) Unwrap() error { return f.Err }
 
 type artifact struct{ Name, Version, File, URL, SHA256 string }
 type lock struct {
+	Local        bool       `json:"local,omitempty"`
 	Target       string     `json:"target"`
 	MinimumGLIBC string     `json:"minimum_glibc"`
 	MinimumMacOS string     `json:"minimum_macos,omitempty"`
@@ -75,7 +76,7 @@ type engine struct {
 
 const managed = ".pyry/memory/runtime"
 
-// Install supports OpenAI mode on Ubuntu 24.04 amd64 with glibc >=2.39
+// Install supports OpenAI and local modes on Ubuntu 24.04 amd64 with glibc >=2.39
 // and macOS arm64 >=26.6.2.
 // It requires no credentials, starts no service and never resolves dependencies.
 func Install(ctx context.Context, o Options) (Runtime, error) {
@@ -101,7 +102,7 @@ func (e engine) install(ctx context.Context, o Options) (result Runtime, err err
 			o.Progress(s)
 		}
 	}
-	if o.Mode != "openai" {
+	if o.Mode != "openai" && o.Mode != "local" {
 		return result, ErrUnsupported
 	}
 	if err := ctx.Err(); err != nil {

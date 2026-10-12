@@ -1003,10 +1003,18 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		return
 	}
 	var probeEnv protocol.Envelope
-	if err := json.Unmarshal(plaintext, &probeEnv); err == nil {
-		switch probeEnv.Type {
+	var probeType struct {
+		Type string `json:"type"`
+	}
+	// Query admission owns invalid envelope identity, including IDs that cannot
+	// decode into Envelope. Preserve other malformed requests' dispatch fallback.
+	if err := json.Unmarshal(plaintext, &probeType); err == nil && (json.Unmarshal(plaintext, &probeEnv) == nil || probeType.Type == protocol.TypeThreadCatchUp || probeType.Type == protocol.TypeThreadPage) {
+		switch probeType.Type {
 		case protocol.TypeListApps, protocol.TypeAppCancel:
 			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
+			return
+		case protocol.TypeThreadCatchUp, protocol.TypeThreadPage:
+			m.admitThreadQuery(ctx, s, plaintext)
 			return
 		case protocol.TypeRekeyRequest:
 			m.handleRekeyRequest(ctx, s, probeEnv)

@@ -71,7 +71,12 @@ func testEngine(t *testing.T) (engine, Options, *atomic.Int32) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return e, Options{Home: home, Mode: "openai"}, hits
+	mode := os.Getenv("MEMORY_RUNTIME_TEST_MODE")
+	if mode == "" {
+		mode = "openai"
+	}
+	e.pins.Local = mode == "local"
+	return e, Options{Home: home, Mode: mode}, hits
 }
 func testInstall(t *testing.T, e engine, o Options) Runtime {
 	t.Helper()
@@ -355,7 +360,7 @@ func TestHelperProcess(t *testing.T) {
 		}
 		return map[string]string{"python": p.Python}, nil
 	}
-	if _, err := e.install(context.Background(), Options{Home: home, Mode: "openai"}); err != nil {
+	if _, err := e.install(context.Background(), Options{Home: home, Mode: os.Getenv("MEMORY_RUNTIME_HELPER_MODE")}); err != nil {
 		os.Exit(4)
 	}
 	os.Exit(0)
@@ -370,7 +375,7 @@ func testHolder(t *testing.T, e engine, o Options) *exec.Cmd {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
-	cmd.Env = append(os.Environ(), "MEMORY_RUNTIME_HELPER_HOME="+o.Home)
+	cmd.Env = append(os.Environ(), "MEMORY_RUNTIME_HELPER_HOME="+o.Home, "MEMORY_RUNTIME_HELPER_MODE="+o.Mode)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +436,7 @@ func TestInterruptedRetry(t *testing.T) {
 	}
 }
 func TestUnsupported(t *testing.T) {
-	for _, mode := range []string{"local", "unknown", ""} {
+	for _, mode := range []string{"unknown", ""} {
 		_, err := Install(context.Background(), Options{Home: t.TempDir(), Mode: mode})
 		if !errors.Is(err, ErrUnsupported) {
 			t.Fatalf("mode %q: %v", mode, err)

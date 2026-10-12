@@ -185,6 +185,8 @@ var inboundTypes = map[string]string{
 	// and the guard reads case SELECTORS rather than case bodies. Its reply half,
 	// TypeHistoryPage, is outbound-only and stays excluded.
 	"TypeRequestHistory": "switch-intercepted",
+	"TypeThreadCatchUp":  "switch-intercepted",
+	"TypeThreadPage":     "switch-intercepted",
 	// The pairing-mint request verb (#2127), moved up from excludedTypes' "pending
 	// handler (#2127)" when dispatchAppFrame gained its case — the move that entry
 	// named in advance, and mandatory rather than tidy-up: Assertion #2 fails a
@@ -263,6 +265,11 @@ var inboundTypes = map[string]string{
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
 // a request verb mis-filed as reply/push/etc. is visually obvious in review.
 var excludedTypes = map[string]string{
+	"TypeAppAssetRequest":   "request (declared; handler pending #3247)",
+	"TypeAppAPIRequest":     "request (declared; handler pending #3247)",
+	"TypeAppResponseCredit": "request (declared; handler pending #3247)",
+	"TypeAppResponse":       "reply (declared; producer pending #3247)",
+	"TypeAppResponseChunk":  "reply (declared; producer pending #3247)",
 	// Hosted discovery replies are implemented; lifecycle producers remain pending.
 	"TypeApps":         "reply (host discovery)",
 	"TypeAppUpdated":   "push (producer pending #3158)",
@@ -272,8 +279,6 @@ var excludedTypes = map[string]string{
 	"TypeThreadItemAdded":   "push (declared, not yet emitted)",
 	"TypeThreadItemChanged": "push (declared, not yet emitted)",
 	"TypeThreadTextAppend":  "push (declared, not yet emitted)",
-	"TypeThreadCatchUp":     "request (declared; handler pending #3234)",
-	"TypeThreadPage":        "request (declared; handler pending #3235)",
 	"TypeThreadItems":       "reply (declared; query wiring pending #3236)",
 	"TypeThreadReset":       "reply (declared; query wiring pending #3236)",
 	// handshake — consumed on the Noise_IK v2 handshake path

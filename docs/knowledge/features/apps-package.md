@@ -1,7 +1,9 @@
 # `internal/apps` — durable host-app registrations
 
-This package owns strict manifest validation, durable registrations and callable
-health-confirmed committed-release process ownership independent of conversations.
+This package owns strict manifest validation, bundled registered source creation
+and identity-based inspection, durable registrations and callable
+health-confirmed committed-release process ownership and generation-bound stable
+response preparation independent of conversations.
 The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
 owns the field tables and registration behavior; the
 [v1 contract](../../specs/architecture/3120-hosted-app-contract.md) owns the broader
@@ -20,9 +22,13 @@ Exact JSON schema validation must precede Go struct decoding. A decoder using
 `APP_ID` or `REVISION` can mask an invalid canonical value. `strictJSON` rejects
 duplicates, nulls and trailing values; `validStorageSchema` and `storageObject`
 then require exact mandatory/optional keys at snapshot, record, tombstone and
-last-error levels. `ValidateManifest` separately enforces exact manifest keys and
-the fixed v1 values. Do not relax storage validation to the wire contract's
-additive unknown-field policy.
+last-error levels. `validMetadataSchema` extends this check to release-history
+entries, publish journals and their release/backup references. Supplied metadata
+must have the exact nested keys and types, including an explicit boolean
+`activation_committed` even when false; optional means omitted, never null.
+`ValidateManifest` separately enforces exact manifest keys and the fixed v1
+values. Do not relax storage validation to the wire contract's additive
+unknown-field policy.
 
 Existing storage must decode into a zero-value snapshot. Prefilling it with the
 caller's host ID makes a missing stored `server_id` appear local and can open the
@@ -31,6 +37,42 @@ only when storage is missing, validates the stored host otherwise, and leaves
 rejected bytes untouched. The canonical UUIDv4 check reuses
 [`identity.ParseServerID`](identity-package.md#parseserverid--validation).
 Identity is `(server_id, app_id)`; separate hosts require separate roots.
+
+Validate a create title before JSON encoding: Go replaces malformed UTF-8 in
+strings, so validating only the encoded manifest would silently accept a changed
+title. `Registry.Create` checks raw `validText` first, validates the stamped
+manifest before writes and revalidates the generated manifest before committing.
+`Registry.Inspect` resolves committed identity and derived editable locations
+without reading source; edited bytes cannot mint another identity or establish
+activation. See [creation and inspection](../../hosted-apps.md#registered-creation-and-inspection).
+
+`registry.json` records optionally store `release_history` (`Record.ReleaseHistory`)
+and `publish_journal` (`Record.PublishJournal`). Absence means empty history and
+no outstanding publish. Legacy active/pending release pointers remain valid
+without invented history; reopen preserves identities, intent, releases,
+tombstones and metadata apart from existing observed-state/revision normalization.
+`validateSnapshot` checks supplied metadata before normalization or persistence;
+invalid metadata returns `ErrInvalidStorage` and leaves stored bytes untouched.
+
+Each `Release` stores `release_version`, `build_id`, `build_root`, `node_version`,
+`npm_version` and `lockfile_digest`. Build ID and lockfile digest are lowercase
+64-hex SHA-256 encodings; release and exact Node/npm versions use canonical
+numeric `major.minor.patch` strings, never ranges. `build_root` must exactly equal
+the absolute daemon-selected `APPS_ROOT/<app_id>/builds/<build_id>`.
+`Registry.RecordRelease` appends while retaining prior entries. Release versions
+are unique per app: an identical entry is a no-op, and replacing an existing
+version's metadata returns `ErrConflict`.
+
+A `PublishJournal` contains `candidate`, optional `previous`, `verified_backup`
+and `activation_committed`. Both `ReleaseReference` values carry `server_id`,
+`app_id` and `release_version` scoped to the containing local registration.
+Do not require a matching history entry: that would prevent recovery of a legacy
+active release whose build metadata was never recorded. `BackupReference` carries
+the same identities, a canonical UUIDv4 `publish_id` and `root` exactly equal to
+`APPS_ROOT/<app_id>/backups/<publish_id>`. Foreign identities, arbitrary locations
+and escaping or unclean path spellings are rejected. Storage validates these
+references without opening their targets or verifying digest contents; see the
+[runtime/root contract](../../specs/architecture/3120-hosted-app-contract.md#3-runtime-roots-and-service-conventions).
 
 ## Template toolchain
 
@@ -51,12 +93,20 @@ and `esbuild-wasm` instead. TypeScript 6's side-effect import checking needs the
 explicit `declare module '*.css'` in `assets.d.ts` for the frontend stylesheet
 import; removing it breaks frontend typechecking.
 
-`scaffold` copies an explicit `files` inventory rather than the whole source
-tree. New shared service modules, migration SQL, browser scripts and tests must
-enter that inventory; testing the maintained source tree alone can pass while generated
-apps lack dependencies or service coverage. Verify a fresh generated app through
-install, frontend/service typecheck, tests and build. `npm test` compiles its
+`scaffold` and `Registry.Create` share `templates/hosted-app/inventory.json` and
+the original assets, including required dotfiles, without a second maintained
+copy. New shared service modules, migration SQL, browser scripts and tests must
+enter that inventory; testing the maintained source tree alone can pass while
+generated apps lack dependencies or service coverage. Verify a fresh generated
+app through install, frontend/service typecheck, tests and build. `npm test` compiles its
 service dependencies itself, so a prior build cannot mask missing test setup.
+
+Inventory edits must also update the exact embed paths in `hostedtemplate.Assets`.
+Go directory embedding ignores `.gitignore`; filtering generated output happens
+after compilation and cannot protect the distributed executable from private
+working-tree bytes. Embed exact maintained files, never directories or globs,
+so environment files, SQLite data/sidecars, dependencies, build output and
+unlisted adjacent source stay outside the binary even when present at build time.
 
 ## Template SQL and readiness
 
@@ -140,6 +190,35 @@ Validation cannot establish safe provenance of text. Health confirmation belongs
 to callers; the registry runs no processes or probes. A cutover supplies new
 title/active release, running state and unset pending/error in one mutation,
 avoiding an observable mix of old and new release fields.
+
+`Registry.UpdatePublish(serverID, appID, journal, fields)` replaces or clears the
+one outstanding journal and optionally replaces all `Lifecycle` fields in the
+same durable snapshot. Nil `fields` preserves lifecycle; nil `journal` clears
+the journal. A different publish ID returns `ErrConflict` until the current
+journal is explicitly cleared. Ordinary registration, manifest, lifecycle and
+observation operations preserve release history and journal metadata.
+
+Before activation, `ActivationCommitted == false` directs recovery to restore
+previous data/release; first publish has no `Previous` and no prior release to
+reactivate. After activation, `ActivationCommitted == true` selects `Candidate`.
+Activation callers commit that decision together with candidate active release,
+title/state and cleared pending release/error in one `UpdatePublish` call.
+Recovery callers clear the journal together with their resulting lifecycle
+fields. The registry validates and persists caller-supplied results; it neither
+derives those fields from the journal nor performs the recovery itself.
+Publishers and recovery remain downstream consumers ([checked builds #3260](https://github.com/pyrycode/pyrycode/issues/3260),
+[cutover #3262](https://github.com/pyrycode/pyrycode/issues/3262),
+[recovery #3263](https://github.com/pyrycode/pyrycode/issues/3263)). Stored references
+and decisions alone prove neither readiness nor verified or restored data.
+
+Both metadata mutations use `changeLocked`: validation, persistence, snapshot
+swap and ordered notifications share the registry mutex. Failed validation or
+persistence changes neither committed memory, revisions nor notifications;
+identical mutations are no-ops. `cloneRecord` detaches the history slice, journal,
+optional previous reference and last error for mutation inputs, read results and
+each subscription delivery. Caller/subscriber edits cannot change committed
+metadata, another consumer's delivery or another app's metadata. This local
+storage addition does not widen discovery wire records.
 
 `Registry.CommitObservation` checks the expected app record revision under the
 registry lock before applying `Observation`. Preserve identity, manifest, title
@@ -336,7 +415,85 @@ Backoff is a delay, never another registry state. No live Claude was used or
 required; seeded persistence supplies no resource-routing or publisher
 migration/rollback acceptance. See the [runtime reference](../../hosted-apps.md#runtime-and-layout).
 
+## Resource-serving
+
+`Owner.Prepare(ctx, serverID, appID, release, ResponseInput)` resolves committed
+local registration and active release before staging a caller-supplied
+identity-encoded body. The authenticated boundary supplies `serverID`; this
+method does not authenticate connections. Unknown, removed and foreign-host apps
+return `ErrNotFound`; an accessible app with another active release returns
+`ErrReleaseChanged`; a matching release without a live, health-confirmed owned
+generation returns `ErrUnavailable`. Preparation and every `Metadata`/`Read`
+remain bound to that process generation. Removal, release replacement, stop,
+exit or retirement invalidates in-flight and retained results; even a restart
+of the same release cannot revive them. Healthy metadata-only commits preserve
+the generation.
+
+`ResponseInput` supplies `Body`, `Size` (-1 for unknown), nonnegative decoded
+`Limit`, `Status`, `Headers`, and required `Reserve`/`Release` callbacks. A nonnil
+body transfers to preparation immediately on invocation, including identity or
+metadata failure, and is closed exactly once before successful return. Do not
+mutate the source or headers during preparation. Afterwards, source/header edits
+cannot alter the staged bytes, metadata or digest. `ResponseMetadata` contains
+status, detached headers, exact size and lowercase 64-hex SHA-256 of the complete
+body, including empty, binary and HTTP-error bodies.
+
+Status must be 200–599; only lowercase `content-type`, `cache-control`, `etag`
+and `last-modified` are accepted. Header objects allow at most 8 entries and
+4096 serialized JSON UTF-8 bytes; values must be valid, control-free UTF-8 of at
+most 1024 bytes. Empty/nil input headers become `{}`. Invalid metadata, size,
+limit or missing callbacks returns `ErrResponseMetadata`. Ordinary HTTP errors
+are successful preparation; consumer-specific policy is described in the
+[HTTP reference](../../hosted-apps.md#assetapi-fields-and-http-semantics).
+
+Staging uses immutable memory chunks, with no private disk spool. A known size
+above the limit fails with `ErrResponseLimit` before body allocation/read; other
+known sizes are reserved before either. Unknown sizes and growth reserve
+incrementally before allocation/read and are checked through EOF, never truncated
+into success. `Reserve(n)` atomically acquires all positive `n` bytes or refuses;
+refusal returns `ErrResponseCapacity` before further unreserved I/O. Both callbacks
+must return promptly and never reenter the result. Proving EOF at the decoded
+limit requires a reserved probe byte: even an empty or exact-limit body may need
+one temporary byte beyond its final size. Refusing that reservation must stop
+before the probe read. EOF releases unused reservations, retaining exactly the
+stable body size until delivery completion/disposal, even after consumption.
+
+The caller owns delivery. `PreparedResponse.Metadata` returns a detached snapshot
+while usable; `Read` serializes checked consumption. Copied metadata expires on
+retirement, and the delivery boundary must suppress retired work. After successful
+delivery call `Complete(nil)`; report delivery failure with `Complete(deliveryErr)`;
+use `Close` to abandon delivery. EOF alone does not release capacity. Source
+read/close failures and delivery failures reported while usable yield static
+`ErrResponseIO`, exposing no source path, endpoint or request diagnostics. Caller
+cancellation preserves standard context errors. Preparation failure, cancellation,
+generation retirement and disposal close the source and release acquired reservations exactly once;
+cleanup also reaches retained, unconsumed results. `Close` is idempotent, and
+disposal may race metadata access, consumption and cancellation safely.
+
+Bodies must support concurrent `Close` that promptly unblocks a pending `Read`,
+including on generation retirement. Caller-context cancellation alone cannot
+satisfy this obligation. See [concurrency](#concurrency-and-persistence) for cleanup
+ordering and [testing](#testing) for the source-error regression.
+
+Confined callable assets, MIME/path handling and navigation/SPA fallback remain
+pending in [#3258](https://github.com/pyrycode/pyrycode/issues/3258). API forwarding,
+backend header projection and HEAD/204/205/304 no-body semantics belong to
+[#3246](https://github.com/pyrycode/pyrycode/issues/3246); delivery admission,
+connection ceilings, credit, deadlines, wire serialization and transport error
+mapping belong to [#3247](https://github.com/pyrycode/pyrycode/issues/3247).
+Paired resource routing and `hosted_apps_v1` capability activation remain pending
+under [#3123](https://github.com/pyrycode/pyrycode/issues/3123).
+
 ## Concurrency and persistence
+
+Stable preparation subscribes before committed identity resolution to close the
+registration race. Registry callbacks only cancel incompatible work; taking a
+result lock there would invert the result → registry → owner checks. Its watcher
+observes caller cancellation, generation cancellation and process exit, closes
+the source before waiting for the staging mutex, then drops chunks, releases
+capacity and unsubscribes. Waiting for that mutex before source closure deadlocks
+when a staging read needs `Close` to unblock. `Complete`/`Close` join the watcher;
+independent once guards serialize source closure and disposal.
 
 Capture/cancel ownership and commit stopped intent under registry-then-owner
 locks, also used by start admission and final spawn. Capturing ownership before
@@ -408,6 +565,37 @@ original reader returns. Starting a replacement reader on every cancel would
 accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 
 ## Testing
+
+Inspect the compiled bundle itself, not only generated output.
+`TestBundleInventory` requires exactly the shared inventory plus the manifest
+and inventory JSON; `TestBundleExcludesWorkingFiles` recompiles the production
+embed declaration in a temporary package seeded with synthetic private files.
+An output-only assertion stays green with recursive embedding because generation
+filters the inventory after those extra bytes have entered the binary.
+
+`TestCreateAndInspect` compares generated inventory/content with maintained
+assets and preserves edited bytes across reopen and repeated inspection.
+`TestCreateOutsideCheckout` runs the compiled test binary from another directory
+with empty `PATH`, proving bundled creation needs neither checkout reads nor
+commands. Bundle exclusion and generated-content checks prove separate boundaries.
+
+`TestResponseIOAtChunkBoundary` returns bytes together with raw
+`io.ErrUnexpectedEOF` or a private source error at known-size and incremental
+chunk boundaries. `io.ReadFull` discards even sanitized source errors when those
+bytes fill its buffer; error sanitization alone therefore allowed failed sources
+to produce successful responses while the original tests stayed green.
+`PreparedResponse.stage` records non-EOF source failure independently and rejects
+the chunk before retaining it. EOF-derived short reads remain valid; raw source
+`io.ErrUnexpectedEOF` remains I/O failure. Each regression checks no result, no
+further read, one source close and complete reservation release.
+
+`TestResponseBounds` checks reserved EOF probing and refusal before unreserved
+I/O. `TestResponseCancellation` and `TestResponseRetirement` use a source whose
+read blocks until concurrent close, proving caller cancellation and generation
+retirement unblock staging. The retirement test's stop arm restarts the same
+release and rejects old partially consumed results. `TestResponseDisposalRace`
+races reading, metadata, delivery-failure completion, close and cancellation,
+checking exactly-once closure and zero retained capacity.
 
 Prepare a fixture's committed build before making its release available.
 Construction-time reconciliation can execute immediately after the lifecycle

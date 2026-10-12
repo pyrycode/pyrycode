@@ -48,6 +48,14 @@ logs, but cannot overtake preceding held output. See
 [presence contract](protocol-package-types-session-settings-payloads.md#agent-switch-presence-and-round-trip-testing)
 and [completion-test barriers](development-verification.md#prove-that-tests-distinguish-the-change).
 
+A control reply can overtake undrained source pushes. Before using one as a
+trailing sentinel for absent stale patches or extra completion frames, await
+`FlushPushes` so all earlier pushes have entered the ordered lane. The sentinel
+can then bound the wire observation; the flush alone still does not certify
+transport acceptance. `TestThreadCatchUpJoinedLive` fences stale and later
+same-version patches before its control reply. See the
+[query/live completion cut](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+
 `attachment_chunk` (#1897) is a second control-class arm that also runs off `Run`, but through this same `appFrameWorker` queue rather than a new per-request goroutine like `debug_bundle`'s — its per-chunk work (hash + write, on the completing chunk, up to the per-upload byte bound) is exactly the class #1491 had to move off `Run`, but it recurs per-chunk rather than once per request, which fits the existing FIFO worker better than a fresh goroutine per frame would. This is the first type to make `V2Session.appFrames` carry more than one shape: the channel's element widened from `[]byte` to a two-field `appFrameJob{plaintext []byte; attachment bool}`, and the worker branched on the tag to send the frame to `handleAttachmentChunk` instead of `dispatch.Route`. The routing decision is made exactly once, in `dispatchAppFrame`'s case selector — the alternative considered and rejected was re-probing the envelope type inside the worker instead of tagging the job, which would let the routing decision live in two places that could silently disagree, and would let a future edit delete the `dispatchAppFrame` case (breaking `TestEveryInboundV2TypeHasHandler`, which reads case selectors as the registry of these decisions) while the worker-side probe kept the frame working anyway, masking the guard's whole point. See [Inbound attachment_chunk](v2-session-manager-state-machine-inbound-attachment-chunk-attachmentintake-seam.md). — freeing `Run` to service every other select arm (other conns' frames, `m.wake`, `m.modalTimeout`, `m.manualRekey`) while the worker executes the handler. The worker drains `s.appFrames` in strict FIFO order — one frame fully routed (its `Route` call returned and every reply forwarded) before the next is dequeued — so no two handlers for the same conn ever run concurrently, and each reply crosses back to `Run` via a new unbuffered `V2SessionManager.appReply` channel (`chan appReplyMsg`), where `forwardAppReply` (now gated on `s.state == V2StateOpen`, dropping replies for a session torn down mid-handler) seals it under `s.send`. Every Noise cipher operation — `s.send.Encrypt`, `s.recv.Decrypt` — and every mutation of `s.state`/timers/`m.sessions`/`m.queues` keys stays exclusively on `Run`; the worker only ever touches its own conn's `s.appFrames`/`s.done` (safe unsynchronized channel ops), never `s.send`/`s.recv`/`s.state` directly, so `V2Session` still carries no lock. This closes the reply-*latency* head-of-line stall #909 explicitly deferred (#909 fixed the reply-*count* deadlock — a handler emitting more than `handlerOutboundBuf` replies — not this one). (Since #721 `send_message` is no longer the worst case for this reason alone: it now enqueues non-blocking and acks, so its `Activate`/`WriteUserTurn` blocking moved off the dispatch goroutine onto the daemon's `msgqueue` drain — see [features/msgqueue-package.md](msgqueue-package.md). `create_conversation`'s 30s `Activate` wait remains the concrete slow-handler case #965 targets.)
 
 `request_attachment` (#2054) is the third such arm and the second to run off `Run` through `appFrameWorker`, joining `attachment_chunk` for the same reason — answering it reads a stored file, hashes it and base64-marshals one envelope per chunk. Its arrival widened the lone `attachment bool` into a typed `appFrameKind` (`appFrameRoute` / `appFrameAttachmentChunk` / `appFrameAttachmentRequest`), because a second bool would let both flags be true at once — a state the type can express but the worker cannot correctly route — where the enum's members are mutually exclusive by construction. The worker now `switch`es on `job.kind`, with `appFrameRoute` (the zero value) taking the v1 `dispatch.Route` chain and an explicit `default:` arm doing the same for any future kind added without an arm, since Go does not check a `switch` for exhaustiveness.
@@ -284,6 +292,24 @@ and revision checks from being applied twice. Supplying a fresh reading behind
 a deferred clear preserves their upstream order; see
 [supplied current-state delivery](#supplied-current-state-delivery).
 
+Off-Run `DeliverThread` callers wait for this same inbox's capacity and terminal
+transport outcome; a full lane must defer admission rather than report success
+or overflow for a legal codec sequence. Keep the capacity notification tied to
+the captured inbox generation, so a reused connection ID cannot admit old work
+into its replacement. Buffered result publication never blocks Run. The caller
+retains its own result-channel reference: `hostedOutput.finish` clears the
+output's mutable field, so reading that field again could strand the waiter.
+Enqueue, `forwardToRun` handoff and source flush do not prove callback acceptance;
+see [delivery outcomes](../../protocol-mobile.md#ordered-delivery-and-eligibility).
+
+`DeliverThread`'s JSON round-trip detaches input only when decoding into a fresh
+zero-value `Envelope`. Decoding into a shallow copy can reuse borrowed
+`json.RawMessage` backing arrays and pointer fields, rewriting producer bytes
+and allowing later mutations to change queued output. `TestThreadDeliveryInputIsolation`
+uses whitespace-bearing JSON and shared metadata, authenticates reuse for a
+second recipient, and mutates producer data after admission to verify the queued
+snapshot stays independent.
+
 `hostedEnvelope` admits plaintext; `hostedDeliver` assigns a fresh connection-local
 sender ID and seals only the selected head on `Run`. Mixing pre-sealed legacy
 pushes/replies with queued hosted plaintext would spend Noise nonces in a different
@@ -322,9 +348,17 @@ old events and overflow signals out of a reused connection. `TestHostedLifecycle
 holds both predecessor delivery and terminal close through the replacement
 handshake, then releases them and decrypts new discovery/notification output.
 An admission or completion-only assertion would miss a late predecessor close.
+A down/up fixture must also await terminal-close publication before recording
+the next handshake's output offset: session deletion alone can leave the old
+close looking like the new Noise response. `TestThreadDeliveryFailure` uses
+`testHostedClose` to fence both publication and retirement before reopening.
 
 `hostedSender` selects `HostedAppsSend` or `OutboundContext`, never context-free
-`Outbound`. The callback must honor cancellation/deadlines through actual I/O
+`Outbound`. A thread handshake initializes this lane only with `OutboundContext`
+(or the existing hosted configuration); installing it on an outbound-only legacy
+connection would retire otherwise valid traffic. `DeliverThread` returns
+`ErrConnNotFound` when no ordered lane exists. The callback must honor
+cancellation/deadlines through actual I/O
 and suppress publication after retirement. A goroutine around a synchronous
 callback cannot establish that guarantee. Missing safe adapters retire locally
 before sealing or worker creation, including unsupported controls while
