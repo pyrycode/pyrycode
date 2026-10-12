@@ -21,18 +21,25 @@ type Config struct {
     WriteTimeout time.Duration
     Logger       *slog.Logger // required; nil panics at New time
 
-    // FatalCloseCodes lists WS close codes that terminate Connect's reconnect
-    // loop with ErrFatalClose. Empty (default) preserves the generic
-    // "reconnect on every drop" behaviour. The relay layer (#248) passes
-    // []websocket.StatusCode{4409} so a server-id conflict halts immediately.
+    // First selected non-101 HTTP rejection terminates Connect. Empty retries.
+    TerminalUpgradeStatuses []int
+
+    // Listed WS close codes terminate Connect at the consecutive threshold.
+    // Empty preserves reconnect on every drop.
     FatalCloseCodes []websocket.StatusCode
+    // Zero or one terminates on the first listed close; larger values retry
+    // below the threshold. A cycle ending without a listed close resets it.
+    FatalCloseThreshold int
 }
 
 type Client struct { /* opaque */ }
 
+// Contains only the numeric HTTP status; Unwrap returns ErrUpgradeRejected.
+type UpgradeRejectionError struct { StatusCode int }
+
 func New(cfg Config) *Client
 
-func (*Client) Connect(ctx context.Context) error // blocking; ctx.Err() | ErrClosed | wrapped ErrFatalClose
+func (*Client) Connect(ctx context.Context) error // blocking; ctx.Err() | ErrClosed | wrapped ErrFatalClose | wrapped *UpgradeRejectionError
 func (*Client) Send(frame []byte) error           // ErrNotConnected | ErrClosed | ErrDisconnected | nil
 func (*Client) SendContext(ctx context.Context, frame []byte) error // ordered socket completion; cancellation/deadline bounded
 func (*Client) Receive(ctx context.Context) ([]byte, error) // ErrClosed | ErrDisconnected | ctx.Err() | frame
@@ -46,7 +53,7 @@ var (
     ErrClosed          = errors.New("transport: client closed")
     ErrDisconnected    = errors.New("transport: connection lost")            // #248
     ErrFatalClose      = errors.New("transport: fatal close code")           // #248; status via websocket.CloseStatus(err)
-    ErrUpgradeRejected = errors.New("transport: websocket upgrade rejected") // #631; non-101 HTTP upgrade response (HTTP status in wrapped string)
+    ErrUpgradeRejected = errors.New("transport: websocket upgrade rejected") // HTTP handshake failure; status via errors.As to *UpgradeRejectionError
 )
 ```
 
@@ -89,6 +96,23 @@ Attempt counter increments per failed dial; resets to 1 after a serve loop that 
 
 Per Client lifetime: one caller-owned goroutine running `Connect`. Per live conn: three pump goroutines (`recvPump`, `sendPump`, `pingLoop`) under a child ctx. All three drain before `serve` returns to the outer dial loop — no goroutine outlives its `serve` call.
 
+`Connect` owns the retry-policy state. With `Config.TerminalUpgradeStatuses`
+unset, HTTP upgrade failures retry through cancellable backoff. A selected
+non-101 rejection (for example, 401) ends the loop on its first occurrence,
+either at initial dial or after a live connection drops; there is no further
+dial or threshold wait. Unselected statuses, including 5xx, and network failures
+continue to retry. A malformed HTTP 101 handshake remains retryable even if 101
+is listed in the policy.
+
+Configured fatal WebSocket closes, including 4409, use
+`Config.FatalCloseThreshold` across both dial and established-connection paths.
+Below the threshold, `retryFatalClose` warns and sleeps through the backoff
+ladder; at the threshold, `Connect` returns `ErrFatalClose`. Upgrade success
+alone does not reset this consecutive counter: a cycle ending without a listed
+close does. The counter is independent of the backoff attempt counter, which
+resets after at least 60s uptime. Terminal HTTP rejection bypasses the close
+counter entirely.
+
 `Client.Send` and `Client.SendContext` share the same unbuffered `sendPump`
 admission path. `Send` returns when accepted; `SendContext` waits for the pump's
 socket-write acknowledgement. Its caller context and `WriteTimeout` bound both
@@ -107,13 +131,14 @@ still owns sender IDs and [sealing order](v2-session-manager-concurrency.md#host
 ```
 caller's goroutine: client.Connect(ctx)
   for {
-    dial → backoff on fail → repeat
+    dial → selected non-101 rejection: return
+         → other failure: classify close threshold, then backoff and repeat
     on success: serve(ctx, conn) {
       go recvPump(ctx, conn) → recvCh
       go sendPump(ctx, conn) ← sendCh
       go pingLoop(ctx, conn)
       setConn(conn)     // AFTER the three go statements (lessons.md:290)
-      wait for first errCh return; cancel; drain other two
+      wait for first errCh return; bounded close-status grace; cancel; drain
     }
   }
 ```
@@ -136,19 +161,61 @@ Shutdown sequence (either `Close()` or `ctx` cancellation):
 
 | Method | Returns |
 |---|---|
-| `Connect` | `ctx.Err()` (ctx cancellation), `ErrClosed` (Close called), or `ErrFatalClose` wrapping a `Config.FatalCloseCodes` hit (#248). Never `nil`. |
+| `Connect` | `ctx.Err()` (ctx cancellation), `ErrClosed` (Close called), wrapped `*UpgradeRejectionError` for a selected non-101 HTTP status, or wrapped `ErrFatalClose` when the configured consecutive close threshold is reached. Never `nil`. |
 | `Send` | `nil` (frame queued to send pump — not "written on the wire"), `ErrNotConnected` (no live conn), `ErrDisconnected` (live conn dropped while Send was blocked enqueuing — #248), `ErrClosed`. |
+| `SendContext` | Admission sentinels as for `Send`, context cancellation/deadline, or a sanitized socket-write error; `nil` means the accepted write completed. |
 | `Receive` | `(frame, nil)`, `(nil, ctx.Err())`, `(nil, ErrClosed)`, `(nil, ErrDisconnected)` (#248 — the underlying conn dropped while Receive was blocked, OR no conn is currently live; observe `Connected()` to learn when a fresh conn becomes available). |
 | `Close` | Always `nil`. Idempotent. |
 
 `Send` returning `nil` means "queued to the send pump"; the pump may still fail to write (then the conn drops and reconnect kicks in). The caller cannot distinguish "frame hit the wire" from "frame queued and then dropped" — that's by design for an async transport. Re-issue on the next live conn if needed.
+
+### HTTP status recovery and diagnostic safety
+
+Select terminal HTTP statuses with `Config.TerminalUpgradeStatuses`, for example
+`[]int{http.StatusUnauthorized}`. Recover the numeric status without matching
+text:
+
+```go
+var rejection *transport.UpgradeRejectionError
+if errors.As(err, &rejection) {
+    log.Error("relay upgrade rejected", "http_status", rejection.StatusCode)
+}
+```
+
+`UpgradeRejectionError` holds only `StatusCode`; its `Unwrap` returns only
+`ErrUpgradeRejected`. Thus `errors.Is(err, ErrUpgradeRejected)` remains valid,
+and a terminal HTTP rejection is distinct from `ErrFatalClose` and context
+cancellation. HTTP policy selection belongs to the caller; this transport
+change does not activate production daemon admission. See the declared
+[admission and reconnect contract](../../protocol-mobile.md#admission-failure-and-reconnect)
+and the [relay consumer](relay-package.md). Relay policy selection and private
+daemon configuration/startup wiring are owned by #3216 and #3217 respectively;
+enforcement requires both daemon and Relay implementations and operator activation.
+
+`safeTransportError` rebuilds errors at dial, receive, send and ping boundaries,
+including the injected dial boundary in `Connect`. Diagnostics use fixed
+operation categories (`dial`, `recv`, `send`, `ping`), numeric HTTP/close codes,
+known transport sentinels and canonical cancellation/deadline values. Logs use
+numeric `http_status`, `close_status` or `status` attributes where applicable.
+Raw HTTP response objects, headers and bodies, original library errors and
+peer-authored WebSocket close reasons are discarded from both logs and every
+reachable error-chain branch. Wrapping the original error beneath safe text
+would still expose reflected credentials to callers inspecting its causes.
+
+Close errors are reconstructed as `websocket.CloseError` with the observed code
+and an empty reason. `websocket.CloseStatus` and `errors.Is` matching for known
+sentinels and cancellation survive, including on returned `ErrFatalClose`
+errors. Arbitrary library error identities and text do not. The same boundary
+applies to ping warnings, below-threshold close warnings and write
+acknowledgements delivered to `SendContext`; `serve` still prefers a returned
+close status and retains its bounded grace when pumps race.
 
 ### #248 additions
 
 The deferred-decision note in #247's spec assigned four additions to #248 (the relay layer). All are purely additive:
 
 - **`Connected() <-chan struct{}`** — buffer-1 with drop-on-full emit. Fires AFTER `setConn` in `serve` so consumers waking on `Connected` find `Send`/`Receive` already wired against the live conn (same precedent as `docs/lessons.md:290`). Single-observer — multiple observers can miss events by design.
-- **`Config.FatalCloseCodes` + `ErrFatalClose`** — close codes in this list halt `Connect`'s reconnect loop. The check fires on BOTH the post-`serve` path AND the post-`dialFn` path (when `coder/websocket` surfaces a close error directly from `Dial` rather than from a subsequent `Read` — happens when the peer closes during/immediately after the WS upgrade). The post-`serve` path also walks the three pump-return errors and PREFERS one with a recognizable `websocket.CloseStatus` (recvPump observes the `CloseError` but sendPump/pingLoop can return generic `use of closed network connection`; without preferring the close-status error, fatal-close classification flakes under `-race`). To keep the `CloseError` actually present in `errs[]` for the preference loop to pick, `serve` grants a bounded `closeFrameGrace = 50ms` wait when the first pump return has no close status before calling `cancel()` (#290) — without the grace, `coder/websocket`'s `prepareRead.done()` deferred override replaces `recvPump`'s pending `CloseError` with `ctx.Err()` when ctx fires mid-Read, and no slot of `errs[]` carries the status. Grace is wire-internal (no `Config` knob; tests substitute via `testOpts.closeFrameGrace`).
+- **`Config.FatalCloseCodes` + `ErrFatalClose`** — close codes in this list halt `Connect`'s reconnect loop when `Config.FatalCloseThreshold` consecutive observations are reached. The check fires on BOTH the post-`serve` path AND the post-`dialFn` path (when `coder/websocket` surfaces a close error directly from `Dial` rather than from a subsequent `Read` — happens when the peer closes during/immediately after the WS upgrade). The post-`serve` path also walks the three pump-return errors and PREFERS one with a recognizable `websocket.CloseStatus` (recvPump observes the `CloseError` but sendPump/pingLoop can return generic `use of closed network connection`; without preferring the close-status error, fatal-close classification flakes under `-race`). To keep the `CloseError` actually present in `errs[]` for the preference loop to pick, `serve` grants a bounded `closeFrameGrace = 50ms` wait when the first pump return has no close status before calling `cancel()` (#290) — without the grace, `coder/websocket`'s `prepareRead.done()` deferred override replaces `recvPump`'s pending `CloseError` with `ctx.Err()` when ctx fires mid-Read, and no slot of `errs[]` carries the status. Grace is wire-internal (no `Config` knob; tests substitute via `testOpts.closeFrameGrace`).
 - **`ErrDisconnected` + per-conn `connDone`** — `connDone` is per-conn, pre-closed at construction (`Receive`/`Send` before `Connect` return `ErrDisconnected` immediately rather than blocking forever), replaced with a fresh open channel inside `serve` before pumps install, closed in `serve`'s deferred teardown. `Receive` and `Send` capture `connDone` once under `connDoneMu` then select — a serve iteration that replaces `c.connDone` between the capture and the select cannot accidentally wake the caller on the new channel. Without this, a `Receive` blocked when the conn drops would stay blocked until the next conn delivers a frame, wedging the relay's `forwardFrames` receive loop above this layer permanently.
 - **`DropConn()`** — force-closes the live conn (if any) via `conn.CloseNow()` (abrupt 1006-equivalent, no close-frame round-trip). The serve loop sees the closed conn, returns to the dial loop, reconnects via backoff. Does NOT halt the dial loop. Idempotent (no-op when no conn is live). `CloseNow` over `Close(status, reason)` so the caller is not blocked for up to 10s on a close handshake when the only purpose is to recycle the conn. It exists for a consumer wanting to recycle a transport-healthy-but-application-stuck conn; the relay package was its original caller (the binary↔relay handshake-failure path), which #582 retired — `DropConn` now has no caller in `internal/relay` but remains for future consumers.
 
@@ -160,11 +227,34 @@ Added for the v2 push drain's pre-seal transport probe ([`relay.V2SessionConfig.
 
 ### #631 additions — loud on a rejected upgrade
 
-A non-101 HTTP response to the WS upgrade (e.g. a `404` because the relay URL has the wrong path) used to vanish into the INFO backoff line and spin forever silently. #631 makes the **first** such failure per outage loud, while keeping the retry-forever posture:
+A non-101 HTTP response to the WS upgrade (for example, a `404` because the
+relay URL has the wrong path) gets a first-failure warning per outage. The
+current classification and policy are:
 
-- **`ErrUpgradeRejected` classification (`realDial`).** `websocket.Dial` returns a non-nil `*http.Response` **iff** the relay answered the upgrade with a non-101 status; a network-level failure (DNS, refused, TLS) leaves `resp == nil`. So `realDial` branches on the response pointer — no string-matching: `resp != nil` → `fmt.Errorf("%w (HTTP %d): %w", ErrUpgradeRejected, resp.StatusCode, err)` (double-`%w` keeps both the sentinel and the underlying error chain — the `websocket.CloseStatus(err)` fatal-close check still takes precedence); `resp == nil` → the unchanged `"dial: %w"`.
-- **Loud-once-per-outage WARN (`Connect`).** A loop-local `warnedUpgrade` bool gates a single `Logger.Warn("transport: relay rejected the WebSocket upgrade; verify the relay URL path is correct", …)` on the first `errors.Is(err, ErrUpgradeRejected)`; subsequent rejects fall to the existing INFO backoff line. `warnedUpgrade` is re-armed (`= false`) on the successful-connect path, so a *fresh* outage after a healthy connection gets its own first-failure WARN. The WARN message carries **no pyrycode-specific path** ("verify the relay URL path is correct") — `transport` stays protocol-agnostic; the layer that knows about `/v1/server` is `internal/relay` (which appends it, see [relay-package.md](relay-package.md) § Configuration constraints).
-- **Not fatal.** `ErrUpgradeRejected` is deliberately **not** in `FatalCloseCodes` and does not unwind the daemon — it is a log-classification signal only. The relay or config may be fixed live and the next dial succeeds, re-arming the warning. Network failures (relay down) stay at INFO — transient, not a config error. See [codebase/631.md](../codebase/631.md).
+- **Numeric classification (`realDial`).** A failed `websocket.Dial` with a
+  non-nil response produces a sanitized `*UpgradeRejectionError` carrying only
+  `resp.StatusCode`; `errors.Is(err, ErrUpgradeRejected)` remains true. A non-nil
+  response can also be HTTP 101 with invalid handshake headers. Response
+  presence alone therefore cannot select a terminal rejection. Such a malformed
+  101 remains retryable even if configured as terminal; the library error may
+  contain reflected header values and must be discarded. A network failure
+  with no response gets a fixed `dial` category and any supported safe
+  classifications, without retaining the original error.
+- **Loud-once-per-outage WARN (`Connect`).** For retryable upgrade failures, a
+  loop-local `warnedUpgrade` gates one WARN with the hint “verify the relay URL
+  path is correct”; later attempts use INFO. Successful connection re-arms the
+  warning for the next outage. Logs carry the sanitized error and numeric
+  `http_status` (0 if no typed HTTP status is available), without response data.
+  The hint contains no protocol-specific path: the layer that knows about
+  `/v1/server` is [relay](relay-package.md#configuration-constraints). Network
+  failures remain at INFO.
+- **Caller-selected termination.** With `TerminalUpgradeStatuses` unset, even
+  401 retries, preserving recovery if the relay or config is fixed live. With
+  a policy, the first selected non-101 status returns immediately, before the
+  warning/backoff branch. HTTP rejection does not use `FatalCloseCodes` or its
+  consecutive threshold. See [HTTP status recovery and diagnostic
+  safety](#http-status-recovery-and-diagnostic-safety) for the typed error
+  contract and the separate production admission rollout.
 
 ## Edge cases and gotchas
 
@@ -190,6 +280,20 @@ later transport marker to prove no abandoned reply remains. Transport's
 shutdown from caller cancellation. These are controlled scheduling proofs,
 not timing-only assertions.
 
+Diagnostic safety tests must inspect every single-error and multi-error unwrap
+branch, plus captured log attributes; checking only `Error()` can miss an
+unsafe cause or response object. `assertSafeTransportError` and
+`assertSafeTransportLogs` exercise this with synthetic reflected credentials in
+HTTP bodies/headers and peer close reasons. Preserve the reason-bearing error
+at the boundary being tested: reading a peer close before invoking ping or send
+can replace it with a generic closed-socket failure. A test can then stay green
+with that pump's sanitizer removed. The ping/send cases in
+`TestSafePumpDiagnostics` have this coverage limitation; a controlled test of
+each boundary must fail when its sanitizer is removed. The classification
+helper's independent test proves reason removal but cannot prove every caller
+uses it. See [verification practices](development-verification.md#prove-that-tests-distinguish-the-change) and the
+[review finding](https://github.com/pyrycode/pyrycode/pull/3219#issuecomment-6115369696).
+
 `internal/transport/wssclient_test.go` (~520 LOC, stdlib + `coder/websocket`):
 
 - `newClientForTest(t, cfg, testOpts)` — shorter cadence constants + deterministic seed for sub-second tests.
@@ -209,14 +313,18 @@ Pinned behaviour:
 - `TestNew_PanicsWithoutLogger` — pins the "Logger is required" contract.
 - `TestAwaitCloseStatus_GraceBranchPreservesCloseError` (#290) — three flat sub-tests against the `awaitCloseStatus` helper: close-first skips the grace, non-close-first lets a subsequent CloseError land within grace (the regression-catching case), non-close-first with no follower expires after the grace deadline. Pins the contract for the close-frame-race grace branch independently of goroutine scheduling.
 - `TestRealDial_UpgradeRejected` (#631) — `realDial` against an `httptest` handler that 404s (never upgrades) → error `errors.Is` `ErrUpgradeRejected` and contains the status.
-- `TestRealDial_NetworkFailureNotUpgradeRejected` (#631) — `realDial` against a reserved-then-released port (refused, `resp == nil`) → plain `"dial:"` error, **not** `ErrUpgradeRejected`. Together these pin the coder/websocket `resp != nil ⟺ non-101 response` classification.
+- `TestRealDial_NetworkFailureNotUpgradeRejected` (#631) — `realDial` against a reserved-then-released port (refused, `resp == nil`) → fixed `dial` failure category, **not** `ErrUpgradeRejected`. Response-bearing handshake failures also include malformed 101 responses, covered by `TestSafeUpgradeDiagnostics`.
 - `TestConnect_LoudOnFirstUpgradeReject` (#631) — `dialFn` returns an `ErrUpgradeRejected`-wrapped error every attempt; a recording `slog.Handler` asserts exactly **one** WARN (carrying the actionable path hint) on the first attempt with subsequent attempts demoted to INFO — pins AC#1's "loud on the first failed upgrade, not buried".
+- `TestTerminalUpgradeRejection` — selected 401/403 returns a typed numeric status after exactly one initial dial or two dials when reconnecting; even a high fatal-close threshold cannot postpone HTTP termination.
+- `TestUpgradeRetryRecovery` / `TestUpgradeRetryShutdown` — default warning re-arming, unselected 403/503 and network recovery, malformed 101 retry despite policy selection, and cancellation/Close during rejection backoff.
+- `TestSafeTransportErrorClassifications` / `TestSafeUpgradeDiagnostics` — supported sentinels, cancellation and numeric codes survive reconstruction; raw response objects, reflected HTTP data and close reasons do not remain in the reachable error chain.
+- `TestSafeFatalCloseDiagnostics` — safe below-threshold warnings and fatal returns across dial/serve paths; an upgrade success alone does not reset consecutive 4409 observations. Existing `TestFatalCloseThreshold_DialPathCounts` and `TestFatalCloseThreshold_CounterResetsOnHealthyConn` cover cross-path counts and reset on a non-fatal cycle, separately from uptime/backoff reset.
 - `TestClient_IsConnected` (#874) — `false` before `Connect`; `true` once a live conn is established (agrees with `Send` no longer returning `ErrNotConnected`); `false` after `Close` (the `closeCh` gate, despite `c.conn` staying non-nil).
 - `TestConnected_FiresOnEveryConnect` (#1803) — four ordered gates, not two: wait for the relay to register conn #1, drain `Connected()`, force-close, then wait for the relay to register conn #2 *before* re-checking `Connected()`. Splitting the reconnect wait from the signal check gives a red run a single cause — `client never reconnected to the relay` (harness/dial fault) is now unreachable from the same assertion as `Connected did not fire after reconnect` (a real signal regression), where before both collapsed into one message. Confirmed non-vacuous by mutant: a `sync.Once`-gated `connectedCh` push (fires once, never again) reddens this test at the signal gate specifically, not the reconnect gate.
 
 ## Consumers and roadmap
 
-- **`internal/relay`** (#248, landed): wraps `Send`/`Receive` with `protocol.Envelope` marshal/unmarshal, treats the conn as established on each `Connected()` signal and goes straight to forwarding (the binary↔relay `hello`/`hello_ack` handshake was retired #582), classifies WS close `4409` as terminal via `Config.FatalCloseCodes`. See [`features/relay-package.md`](relay-package.md) and [`codebase/248.md`](../codebase/248.md). Per-envelope dispatch (`4401`/`4404` interpretation, `Envelope.ID` monotonicity) lives in a future ticket above the relay layer.
+- **`internal/relay`** (#248, landed): wraps `Send`/`Receive` with `protocol.Envelope` marshal/unmarshal, treats the conn as established on each `Connected()` signal and goes straight to forwarding (the binary↔relay `hello`/`hello_ack` handshake was retired #582), classifies WS close `4409` via `Config.FatalCloseCodes` and the consecutive `FatalCloseThreshold` (8), allowing a stale relay claim to clear before halting a persistent conflict. See [`features/relay-package.md`](relay-package.md) and [`codebase/248.md`](../codebase/248.md). Per-envelope dispatch (`4401`/`4404` interpretation, `Envelope.ID` monotonicity) lives in a future ticket above the relay layer.
 - **`internal/protocol`** (#255, landed): the envelope types this transport's frames will (mostly) carry.
 - **`internal/relay.V2SessionManager`** (#874, landed): via the `Connection.Connected` → `Client.IsConnected` passthrough, gates the v2 push drain's pre-seal transport-down probe — see [`features/v2-session-manager.md`](v2-session-manager.md#transport-down-hold-on-the-push-drain-874--connected-probe--transportdown).
 
