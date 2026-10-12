@@ -184,14 +184,14 @@
     "queued_turn_readiness_prefix_test.go": "8bb598ab2b32768df4dc0cb00310384abc776e26a29d15d46d0409692a885518",
     "queued_turn_readiness_effects_test.go": "339a6c997117a5588520ce4a3831b698b8095f585abc02dd7b8f3c93f6c93367",
     "queued_turn_readiness_dependency_test.go": "c11638eebced4c1c64d8a4d1f496badfe08e7ea510e3e95d08ba1e5cd63b960c",
-    "queued_turn_readiness_runtime_test.go": "11c0260b393b28794dcc6f64217ff88f2da916929276aadb8f02719b1e57172a",
+    "queued_turn_readiness_runtime_test.go": "2d07544d4457d0e3d070350aafbb58b9ba3d3b77f8a47a66a410875d1e10d56f",
     "queued_turn_readiness_emulator_test.go": "8abeb0cac0fe4128a96a1d5d376fa978ca1467012a816df1c3b9dbf1d7f22e44",
     "../../streamsup/readiness_observation_live.go": "61bba5c52511949572a1e241c35fb19e3844992a4920ae5c07c7b70eb95d0f48",
     "../../dispatch/dispatch.go": "ee7e5362434f0f3e2c7d009eead1674b601ad4c6cb90afc16ad9efbd8daf6d59",
     "queued_turn_readiness_emulator_join_test.go": "7a0812ca63cc46a41caaa5f3ec00752a0a84db107c8a42c5732f7ad1cc79e2b8",
     "queued_turn_readiness_emulator_semantics_test.go": "3d2dad7e9aaa3c6a9c913c49cfb6cf348a9246dd42e9e7bd1b76bd9e0e8843a7",
     "queued_turn_readiness_emulator_sampling_test.go": "2483f408fe1fbc3d775a54bdb0d3eb1c59b674a6f63c9c19bf6372aec29c445e",
-    "queued_turn_readiness_emulator_contract_test.go": "070eb10d30a5258ec8a13b72822b93e16b1da78231a50ffa27836462e0fb89a8"
+    "queued_turn_readiness_emulator_contract_test.go": "576248c0956bbd28d9455bb05bb6051ecef8b241d47dbc45eaecfe64fe77726f"
   },
   "exporter_checkout": "Use the final clean feature/3071 handoff checkout for exporter/readers and this updated contract. Build the instrumented host from daemon_revision in its separate clean checkout via PYRYCODE_SRC. Source support bytes are pinned below and are identical; the later commit changes capture metadata only.",
   "instrumentation_status_capture": {

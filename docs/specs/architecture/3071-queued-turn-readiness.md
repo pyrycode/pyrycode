@@ -409,3 +409,12 @@ Owned staging cleanup is synchronous and introduces no lock ordering. The existi
 deny scan remains an additional check. Verdict for the revised design: PASS;
 reviewer: builder, 2026-10-12. Documentation records the established mechanism only
 after the pending actual-client acquisition localizes it.
+
+Rework validation: the nine rejected configuration/provenance/record scenarios
+and the overwrite regression failed against the pre-repair exporter. The same
+focused run now executes and passes eleven leaves, zero failed/skipped. Coupled
+tagged race checks execute and pass ninety leaves; only the two unconfigured
+dispatcher Android export/sampler entry points skip. Ordinary scoped realclaude
+race checks, ordinary vet, tagged realclaude vet and the production daemon build
+pass. These are diagnostic publication checks; no Android or authenticated host
+run, captured artifacts or historical readiness repair is claimed.

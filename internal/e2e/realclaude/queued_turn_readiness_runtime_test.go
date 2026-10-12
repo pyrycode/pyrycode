@@ -188,19 +188,56 @@ func readinessExportRuntime(dir, runID string, r *readinessCapture, denied []str
 			}
 		}
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("runtime directory: %w", err)
+	private, err := os.MkdirTemp("", "pyry-readiness-private-")
+	if err != nil {
+		return fmt.Errorf("runtime private staging: %w", err)
 	}
-	for name, b := range files {
-		path := filepath.Join(dir, name)
-		if e := os.WriteFile(path+".tmp", b, 0600); e != nil {
-			return e
-		}
-		if e := os.Rename(path+".tmp", path); e != nil {
-			return e
+	defer os.RemoveAll(private) // best-effort cleanup of this export's private candidate
+	if err := readinessWriteRuntime(private, files); err != nil {
+		return err
+	}
+	if err := readinessValidateRuntime(private); err != nil {
+		return err
+	}
+	// Only validated bytes enter destination-side staging. The directory rename
+	// publishes the complete run; a manifest never advertises a partial candidate.
+	if _, err := os.Lstat(dir); err == nil {
+		return fmt.Errorf("runtime already published; preserve executed evidence")
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("runtime destination unavailable")
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0700); err != nil {
+		return fmt.Errorf("runtime parent directory: %w", err)
+	}
+	publication, err := os.MkdirTemp(filepath.Dir(dir), ".readiness-publish-")
+	if err != nil {
+		return fmt.Errorf("runtime publication staging: %w", err)
+	}
+	defer os.RemoveAll(publication) // best-effort cleanup if publication fails
+	if err := readinessWriteRuntime(publication, files); err != nil {
+		return err
+	}
+	if err := os.Rename(publication, dir); err != nil {
+		return fmt.Errorf("runtime publication: %w", err)
+	}
+	return nil
+}
+
+func readinessWriteRuntime(dir string, files map[string][]byte) error {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		if name != "manifest.json" {
+			names = append(names, name)
 		}
 	}
-	return readinessValidateRuntime(dir)
+	sort.Strings(names)
+	names = append(names, "manifest.json")
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(dir, name), files[name], 0600); err != nil {
+			return fmt.Errorf("runtime staging write: %w", err)
+		}
+	}
+	return nil
 }
 
 func readinessValidateRuntime(dir string) error {
