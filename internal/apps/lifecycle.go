@@ -21,6 +21,7 @@ type lifecycleUpdate struct {
 	observation *Observation
 	result      Record
 	ctx         context.Context
+	metadata    func(*Record) error
 }
 
 // Observation changes state/error and optionally explicit desired intent. Display
@@ -72,6 +73,17 @@ func applyLifecycle(record *Record, fields Lifecycle) {
 }
 
 func cloneRecord(record Record) Record {
+	if record.ReleaseHistory != nil {
+		record.ReleaseHistory = append([]Release{}, record.ReleaseHistory...)
+	}
+	if record.PublishJournal != nil {
+		copy := *record.PublishJournal
+		if copy.Previous != nil {
+			previous := *copy.Previous
+			copy.Previous = &previous
+		}
+		record.PublishJournal = &copy
+	}
 	if record.LastError != nil {
 		copy := *record.LastError
 		record.LastError = &copy
