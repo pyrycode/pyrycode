@@ -1008,6 +1008,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeListApps, protocol.TypeAppCancel:
 			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
 			return
+		case protocol.TypeThreadCatchUp:
+			m.admitThreadCatchUp(ctx, s, plaintext)
+			return
 		case protocol.TypeRekeyRequest:
 			m.handleRekeyRequest(ctx, s, probeEnv)
 			return
