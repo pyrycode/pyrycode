@@ -358,7 +358,7 @@ func TestThreadDeliveryFailure(t *testing.T) {
 			}
 			down.Store(false)
 			if cause == "down" {
-				testHostedGone(t, p)
+				testHostedClose(t, p)
 				p.open(threadCaps)
 				env.Type = protocol.TypeThreadReset
 				if retry := p.mgr.DeliverThread(t.Context(), p.conn, env); retry != nil {
