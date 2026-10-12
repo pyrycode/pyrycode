@@ -81,3 +81,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+
+- 2026-10-12: The shared wire fixture requires the existing `OutboundContext` seam for ordered query delivery; install it in the local integration setup. Page finals carry numeric continuation, so assembly distinguishes that from object fragments. Lower-order ties remain covered by `TestQuerySelection`: current durable producers give each placed row a unique order, and claiming one delivery twice is rejected by the fold. Installation preserves that backend contract by forwarding the entire result.
