@@ -84,12 +84,15 @@ and publication are downstream work.
 
 ## Documentation handoff
 
-Pending for the documentation stage: `docs/hosted-apps.md` § Template and saved
-preferences and § Create, publish and update: document daemon-minted identity,
-bundled-source creation, identity-based inspection and the unpublished
-`available`/`stopped` state with no active release or open link. Distinguish standalone
-scaffold generation from local registration and identify local-control/channel
-exposure as downstream work.
+Satisfied in [Template and saved preferences](../../hosted-apps.md#template-and-saved-preferences)
+and [Create, publish and update](../../hosted-apps.md#create-publish-and-update):
+daemon-minted identity, bundled-source creation, identity-based inspection and
+unpublished `available`/`stopped` state without an active release or open link;
+standalone source generation versus local registration; downstream local-control
+(#3265), daemon composition (#3266), channel exposure (#3126) and publication.
+The reference and [package overview](../../knowledge/features/apps-package.md#template-toolchain)
+also record the exact embed-path requirement and compiled-bundle exclusion lesson
+from the verifier's packaging finding.
 
 ## Security review
 
