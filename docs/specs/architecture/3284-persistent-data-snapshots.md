@@ -74,3 +74,7 @@ Pending documentation stage: `docs/hosted-apps.md`, “Runtime and layout” and
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+
+2026-10-12: Evidence uses canonical JSON with byte-preserving paths (bounded to 16 MiB) so altered/unknown fields are rejected. Snapshot copying also hardens source permissions after rejecting hard links; source bytes remain untouched. Standalone header/sidecar rejection runs inside the fixed Node verifier before opening SQLite.
