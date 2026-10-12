@@ -229,22 +229,38 @@ func TestV2Session_IdleChurn_ReturnsToBaseline(t *testing.T) {
 // Frames is unbuffered so each send is serviced by Run before the next
 // ActiveConns snapshot.
 func TestV2Session_PeerClose_TearsDownWithoutReply(t *testing.T) {
-	setIdleTimeout(t, 100*time.Millisecond)
+	// Idle delivery is explicit here; an unrelated survivor deadline must not
+	// race the ActiveConns and recorder observations.
+	setIdleTimeout(t, time.Hour)
 
 	respPriv, respPub := genV2Keypair(t)
 	initPriv, _ := genV2Keypair(t)
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
-		Frames:     frames,
-		Outbound:   rec.outbound,
+	var mgr *V2SessionManager
+	var gone *V2Session
+	var stop func()
+	mgr, stop = startManager(t, V2SessionConfig{
+		Frames: frames,
+		Outbound: func(e protocol.RoutingEnvelope) error {
+			// Capture on Run; inspect only after stop has joined it.
+			if e.ConnID == "c-gone" && e.CloseCode == 0 {
+				gone = mgr.sessions[e.ConnID]
+			}
+			return rec.outbound(e)
+		},
 		StaticPriv: respPriv,
 		Devices:    reg,
 		ServerID:   v2TestServerID,
 		Logger:     silentLogger(),
 	})
-	t.Cleanup(stop)
+	t.Cleanup(func() {
+		stop()
+		for _, s := range mgr.sessions {
+			mgr.teardown(s)
+		}
+	})
 
 	bg := context.Background()
 	handshakeConnToOpen(t, frames, rec, "c-gone", respPub, initPriv)
@@ -260,27 +276,53 @@ func TestV2Session_PeerClose_TearsDownWithoutReply(t *testing.T) {
 		t.Fatalf("after close notice: ActiveConns = %v, want exactly [c-stays]", conns)
 	}
 	if envs := rec.snapshot(); len(envs) != 2 {
+		for _, e := range envs {
+			t.Logf("conn_id=%s close_code=%d", e.ConnID, e.CloseCode)
+		}
 		t.Fatalf("recorded %d envelopes, want 2 (the two noise_resps; the close notice publishes nothing)", len(envs))
 	}
 
-	// Past the idle window: the torn-down conn's idle timer must not surface a
-	// late 4408 for it. The surviving conn's own sweep is allowed.
-	time.Sleep(250 * time.Millisecond)
-	for _, e := range rec.snapshot() {
-		if e.ConnID == "c-gone" && e.CloseCode != 0 {
-			t.Errorf("close envelope published for c-gone (close_code %d); want none", e.CloseCode)
-		}
-	}
-
 	stop()
+	if gone == nil || gone.state != V2StateClosed {
+		t.Fatal("peer session was not captured and closed")
+	}
+	if gone.idleTimer != nil || gone.rekeyTimer != nil || gone.rekeyReplyTimer != nil {
+		t.Error("peer session retained a timer after teardown")
+	}
+	select {
+	case <-gone.done:
+	default:
+		t.Error("peer session worker was not stopped")
+	}
+	// A timer callback may already have queued a wake when teardown stops it.
+	// With Run joined, deliver that stale wake synchronously, twice.
+	for range 2 {
+		mgr.handleWake(bg, wakeSignal{s: gone, kind: wakeIdleTimeout})
+	}
+	if gone.idleTimer != nil {
+		t.Error("stale idle wake rearmed the closed session")
+	}
+	if envs := rec.snapshot(); len(envs) != 2 {
+		for _, e := range envs {
+			t.Logf("conn_id=%s close_code=%d", e.ConnID, e.CloseCode)
+		}
+		t.Errorf("stale idle wake published a late reply: recorded %d envelopes, want 2", len(envs))
+	}
+	if survivor := mgr.sessions["c-stays"]; survivor == nil || survivor.state != V2StateOpen || survivor.idleTimer == nil {
+		t.Error("peer teardown or stale wake changed the survivor")
+	}
 	if _, ok := mgr.sessions["c-gone"]; ok {
 		t.Errorf("sessions[c-gone] still present after close notice")
 	}
 	mgr.pushMu.Lock()
 	_, qok := mgr.queues["c-gone"]
+	_, survivorQueue := mgr.queues["c-stays"]
 	mgr.pushMu.Unlock()
 	if qok {
 		t.Errorf("queues[c-gone] still present after close notice")
+	}
+	if !survivorQueue {
+		t.Error("peer teardown removed the survivor queue")
 	}
 }
 

@@ -41,6 +41,7 @@ Synchronous functions; no background goroutines or shared mutable hooks. Caller 
 | Repeated publish ID after success or partial failure | `TestBackupStates`, `TestBackupFailures` |
 | Evidence/tree mutation after sealing | `TestBackupTampering` |
 | Cancellation before/during copy and sealing | `TestBackupFailures` |
+| Peer close followed by repeated queued idle wakes (rework revision) | `TestV2Session_PeerClose_TearsDownWithoutReply` |
 
 ## Error handling
 
@@ -86,3 +87,14 @@ Pending documentation stage: `docs/hosted-apps.md`, “Runtime and layout” and
 2026-10-12, verifier finding 3: cancellation coverage now includes pre-start, copy, sealing, independent verification before/during traversal and started Node children in snapshot/verification. Per-instance process-start notification supports deterministic cancellation; every started child is waited on before return. `TestBackupCancellation` and `TestBackupSQLiteCancellation` assert cancellation, unchanged source/sealed bytes, no acceptable partial evidence and joined children.
 
 Security re-review of these revisions: PASS. The inventory guard closes the sidecar trust-boundary gap before sealing/SQL verification. Contextual local errors expose no data contents; failed invalidation is reported, never silently accepted. Process-start test hooks are per-instance, production callers install none, and the synchronous child wait preserves shutdown ownership. Other reviewed boundaries and documented out-of-scope consumers are unchanged.
+
+2026-10-12, verifier finding on `f0535807`: a controlled 150 ms delay between `ActiveConns` and the recorder snapshot reproduces the three-envelope failure; the additional envelope is `c-stays` at close code 4408. `TestV2Session_PeerClose_TearsDownWithoutReply` now holds automatic idle delivery outside the bounded test window, retains the actual peer session on Run, and explicitly delivers two stale idle wakes after joining Run. Assertions cover silent handling of the junk notice, closed state, worker shutdown, timer/session/queue removal, no late replies and survivor isolation. No relay production behavior changes. Focused race repeats under constrained scheduling and both touched package suites cover the repair; the dispatcher still owns the complete gate rerun and independent review.
+
+Additional files read for this repair:
+- `internal/relay/v2session_idle_test.go` → `TestV2Session_PeerClose_TearsDownWithoutReply`, `handshakeConnToOpen`: separate observations let an unrelated idle deadline change the recorder.
+- `internal/relay/v2session_test.go` → `startManager`, `v2Recorder`: joined Run permits race-free state inspection and synchronous stale-wake delivery.
+- `internal/relay/v2session.go` → `handleWake`, `armIdleTimer`, `teardown`: closed-state guard suppresses queued wakes; teardown stops timers and removes only the selected queue/session.
+- `internal/relay/v2session_handshake.go` → `handleNoiseInit`: outbound callback executes on Run and the opened session owns its worker and timers.
+- `docs/knowledge/features/v2-session-manager-state-machine-inbound-peer-close-handlepeerclose-teardown.md`: peer notice must publish nothing and preserve other sessions; idle sweeping is a separate fallback.
+
+Overlap check after fetching feature branches: no other feature branch changes `internal/relay/v2session_idle_test.go`. Security re-review: PASS; this repair changes only the fixture and its evidence, with joined dispatch before state inspection and cleanup of surviving timers.
