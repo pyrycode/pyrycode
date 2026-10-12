@@ -62,3 +62,7 @@ Pending documentation stage: update **Isolated permission observation** in `docs
 - Threat model: existing authentication and confidentiality boundaries unchanged. Prompt injection and remote authorization policy are outside this observation ticket; activation/output is #3226.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-12
+
+## Revisions
+- 2026-10-12: Cancellation and transport-hold hooks use pushMu.TryLock with an atomically published recorder; contention marks incomplete coverage instead of adding a wait to paths that previously returned without the queue lock. Normal admission retains the existing pushMu acquisition. `TestPermissionQueueAttachment` covers replacement/detach origins and a stalled queue lock.
+- Final lifecycle coverage also includes `TestPermissionQueueDisabled`, `TestPermissionQueueContention` and `TestObservationQueueBounds`: unchanged decrypted payload with no retained identities, concurrent recorder pressure through real forwarding/teardown, and shared alias/counter exhaustion.

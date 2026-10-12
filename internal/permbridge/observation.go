@@ -4,6 +4,7 @@ package permbridge
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -25,9 +26,9 @@ const (
 // Copy live identities for Submit; numerical fields cannot be edited or restored
 // from serialization. The zero value represents wholly unknown numerical identity.
 type ObservationIdentity struct {
-	Run, Epoch, Generation                            uint64
-	Conversation, Session, Request, Modal, Connection string
-	issued                                            [3]uint64
+	Run, Epoch, Generation                                      uint64
+	Conversation, Session, Request, Modal, Connection, Envelope string
+	issued                                                      [3]uint64
 }
 
 // ObservationRecord carries no caller content. Nanoseconds use the monotonic
@@ -41,7 +42,7 @@ type ObservationRecord struct {
 
 // ObservationSnapshot is detached and safe to serialize away from approval paths.
 // Complete requires ended coverage without any loss, including previous resets.
-// Even complete evidence proves only registry events, never modal receipt.
+// Complete evidence establishes recorded stages, never transport or peer receipt.
 type ObservationSnapshot struct {
 	Schema, Clock                string
 	Run, Epoch                   uint64
@@ -55,9 +56,11 @@ type ObservationSnapshot struct {
 // ObservationRecorder is opt-in, bounded and content-free. Submit and Identity
 // make one TryLock attempt; contention permanently marks evidence incomplete.
 // Snapshot, Reset and End may block each other, but never approval operations.
-// Stages: coverage, register, terminal, bridge, relay, modal, answer, connection.
+// Stages include registry, bridge, relay and queue_modal_shown/queue_modal_dismissed.
 // Reasons: start, end, reset, accepted, empty, duplicate, allow, deny, timeout,
-// unknown, seen, sent, rejected, absent, connected, disconnected.
+// unknown, seen, sent, rejected, absent, connected, disconnected; queue reasons are
+// admitted, cancelled, byte_ceiling, hold_transport, hold_replay, quarantined,
+// dequeued and discarded.
 // Loss keys: record_capacity, identity_capacity, identity_oversize,
 // identity_exhausted, counter_exhausted, contention, reset_truncation,
 // incomplete_coverage, closed_submission, invalid_vocabulary, invalid_identity,
@@ -111,12 +114,12 @@ func (o *ObservationRecorder) try() bool {
 
 func observationVocabulary(stage, reason string) bool {
 	switch stage {
-	case "coverage", "register", "terminal", "bridge", "relay", "modal", "answer", "connection":
+	case "coverage", "register", "terminal", "bridge", "relay", "modal", "answer", "connection", "queue_modal_shown", "queue_modal_dismissed":
 	default:
 		return false
 	}
 	switch reason {
-	case "start", "end", "reset", "accepted", "empty", "duplicate", "allow", "deny", "timeout", "unknown", "seen", "sent", "rejected", "absent", "connected", "disconnected":
+	case "start", "end", "reset", "accepted", "empty", "duplicate", "allow", "deny", "timeout", "unknown", "seen", "sent", "rejected", "absent", "connected", "disconnected", "admitted", "cancelled", "byte_ceiling", "hold_transport", "hold_replay", "quarantined", "dequeued", "discarded":
 		return true
 	}
 	return false
@@ -141,14 +144,14 @@ func (o *ObservationRecorder) Submit(stage, reason string, id ObservationIdentit
 	}
 	// Resolve supplied aliases through the private issued vocabulary, preventing
 	// callers from using an identity field as an arbitrary content channel.
-	for i, a := range []*string{&id.Conversation, &id.Session, &id.Request, &id.Modal, &id.Connection} {
+	for i, a := range []*string{&id.Conversation, &id.Session, &id.Request, &id.Modal, &id.Connection, &id.Envelope} {
 		if *a == "unknown" || *a == "" {
 			*a = "unknown"
 			continue
 		}
 		valid := false
 		for key, issued := range o.aliases {
-			if *a == string(key[0])+":"+strconv.FormatUint(issued, 10) && (*a)[0] == "csrml"[i] {
+			if *a == string("csrmle"[i])+":"+strconv.FormatUint(issued, 10) && (key[0] == "csrmle"[i] || i == 4 && key[0] == 'L') {
 				valid = true
 				break
 			}
@@ -162,7 +165,7 @@ func (o *ObservationRecorder) Submit(stage, reason string, id ObservationIdentit
 }
 
 func (o *ObservationRecorder) append(stage, reason string, id ObservationIdentity) bool {
-	for _, a := range []*string{&id.Conversation, &id.Session, &id.Request, &id.Modal, &id.Connection} {
+	for _, a := range []*string{&id.Conversation, &id.Session, &id.Request, &id.Modal, &id.Connection, &id.Envelope} {
 		if *a == "" {
 			*a = "unknown"
 		}
@@ -221,17 +224,56 @@ func (o *ObservationRecorder) alias(kind byte, value string) string {
 }
 
 func (o *ObservationRecorder) identity(conversation, session, request, modal, connection string) ObservationIdentity {
-	return ObservationIdentity{Run: o.run, Epoch: o.epoch, issued: [3]uint64{o.run, o.epoch, 0}, Conversation: o.alias('c', conversation), Session: o.alias('s', session), Request: o.alias('r', request), Modal: o.alias('m', modal), Connection: o.alias('l', connection)}
+	return ObservationIdentity{Run: o.run, Epoch: o.epoch, issued: [3]uint64{o.run, o.epoch, 0}, Conversation: o.alias('c', conversation), Session: o.alias('s', session), Request: o.alias('r', request), Modal: o.alias('m', modal), Connection: o.alias('l', connection), Envelope: "unknown"}
 }
 
 // Identity aliases bounded identifiers without retaining their verbatim bytes.
 // Missing values are unknown. Canonical session and conversation are independent.
-func (o *ObservationRecorder) Identity(conversation, session, request, modal, connection string) ObservationIdentity {
+// The optional envelope input must identify a known source lifetime/revision,
+// never a reusable envelope ID alone; it is aliased with kind e.
+func (o *ObservationRecorder) Identity(conversation, session, request, modal, connection string, envelope ...string) ObservationIdentity {
 	if !o.try() {
-		return ObservationIdentity{Conversation: "unknown", Session: "unknown", Request: "unknown", Modal: "unknown", Connection: "unknown"}
+		return ObservationIdentity{Conversation: "unknown", Session: "unknown", Request: "unknown", Modal: "unknown", Connection: "unknown", Envelope: "unknown"}
 	}
 	defer o.mu.Unlock()
-	return o.identity(conversation, session, request, modal, connection)
+	id := o.identity(conversation, session, request, modal, connection)
+	if len(envelope) == 1 {
+		id.Envelope = o.alias('e', envelope[0])
+	}
+	return id
+}
+
+// NewConnectionIdentity issues a fresh lifetime alias, independent of routing IDs.
+// It shares the bounded alias budget and allocator with Identity.
+func (o *ObservationRecorder) NewConnectionIdentity() ObservationIdentity {
+	id := ObservationIdentity{Connection: "unknown", Envelope: "unknown"}
+	if !o.try() {
+		return id
+	}
+	defer o.mu.Unlock()
+	if len(o.aliases) == ObservationMaxIdentities {
+		o.loss["identity_capacity"] = true
+		return id
+	}
+	n := o.number()
+	if n == 0 {
+		return id
+	}
+	// Domain-separated private keys cannot collide with Identity's SHA-256 keys.
+	key := [33]byte{'L'}
+	binary.BigEndian.PutUint64(key[1:], n)
+	o.aliases[key] = n
+	id = o.identity("", "", "", "", "")
+	id.Connection = "l:" + strconv.FormatUint(n, 10)
+	return id
+}
+
+// MarkIncomplete marks attachment gaps without waiting on the recorder.
+func (o *ObservationRecorder) MarkIncomplete() {
+	if o.try() {
+		o.loss["incomplete_coverage"] = true
+		o.mu.Unlock()
+	}
 }
 
 // Reset truncates records and starts a new epoch. Aliases, counts and loss remain
@@ -349,7 +391,7 @@ func (l observationLifetime) terminal(v Verdict, expired bool) {
 // across resets or recorder replacement. Zero generation indicates lost evidence.
 func (p *Pending) ObservationIdentity() ObservationIdentity {
 	id := p.observation.id
-	for _, a := range []*string{&id.Conversation, &id.Session, &id.Request, &id.Modal, &id.Connection} {
+	for _, a := range []*string{&id.Conversation, &id.Session, &id.Request, &id.Modal, &id.Connection, &id.Envelope} {
 		if *a == "" {
 			*a = "unknown"
 		}

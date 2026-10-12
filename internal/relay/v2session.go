@@ -490,6 +490,7 @@ func (s *V2Session) State() V2SessionState { return s.state }
 // responder and hosted delivery lane change CipherStates only on this
 // goroutine, with noise_resp ordering the old-key and new-key output.
 type V2SessionManager struct {
+	permissionObserver permissionObserver // guarded by pushMu
 	hostedMu           sync.Mutex
 	hostedInboxes      map[string]*hostedInbox
 	hostedCloses       map[string]*hostedClose
@@ -1342,6 +1343,7 @@ func (m *V2SessionManager) teardown(s *V2Session) bool {
 	// bypassing the buffer (it is terminal, not part of the ordered push stream).
 	m.pushMu.Lock()
 	if q := m.queues[s.connID]; q != nil {
+		q.observePermissions("discarded")
 		for _, item := range q.items {
 			if item.barrier != nil {
 				close(item.barrier)

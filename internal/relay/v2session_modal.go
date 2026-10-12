@@ -26,9 +26,10 @@ import (
 // gap the phone's recv nonce (MAC failure → 4421 close). Sealing happens on
 // the Run goroutine, in order, only for the frames that are actually sent.
 type queuedEnv struct {
-	env       protocol.Envelope
-	live      *LiveState
-	droppable bool // env.Type == protocol.TypeAssistantDelta
+	permissionObservation permissionObservation
+	env                   protocol.Envelope
+	live                  *LiveState
+	droppable             bool // env.Type == protocol.TypeAssistantDelta
 	// barrier is an internal FIFO completion marker, never a wire envelope.
 	barrier chan struct{}
 }
@@ -39,8 +40,9 @@ type queuedEnv struct {
 // policy lives in enqueue (ADR 025 § Backpressure: assistant_delta drop-oldest,
 // control never drops).
 type pushQueue struct {
-	items   []queuedEnv // FIFO; bounded by the drop policy at pushQueueCap
-	dropped uint64      // observability counter; no app content
+	permissionObserver permissionQueueObserver
+	items              []queuedEnv // FIFO; bounded by the drop policy at pushQueueCap
+	dropped            uint64      // observability counter; no app content
 
 	// bytes is the retained PAYLOAD total, Σ len(item.env.Payload) over items.
 	// It is a length, never content. Invariant: bytes == that sum at every
@@ -163,6 +165,7 @@ func (q *pushQueue) enqueue(env protocol.Envelope) bool {
 // pop path, so the byte counter cannot drift: drainOnce calls this rather than
 // hand-rolling the three-line slice pop it used before #1505.
 func (q *pushQueue) popHead() protocol.Envelope {
+	q.items[0].permissionObservation.record("dequeued")
 	env := q.items[0].env
 	q.bytes -= len(env.Payload)
 	q.items[0] = queuedEnv{} // release the envelope for GC; slot slides out below

@@ -518,7 +518,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// queue under pushMu without reading Run-owned m.sessions. Mutating the map
 	// here (on Run) and in closeWith (on Run) keeps the key set Run-owned.
 	m.pushMu.Lock()
-	m.queues[s.connID] = &pushQueue{}
+	m.queues[s.connID] = &pushQueue{permissionObserver: m.newPermissionQueue()}
 	m.pushMu.Unlock()
 	// Spawn this conn's app-frame worker (#965) now that the session is open:
 	// s.device is set and s.state == V2StateOpen, so the `go` here is the

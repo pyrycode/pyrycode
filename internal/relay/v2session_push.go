@@ -52,16 +52,29 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 
 func (m *V2SessionManager) push(ctx context.Context, connID string, env protocol.Envelope, live *LiveState) error {
 	if err := ctx.Err(); err != nil {
+		m.observePermissionCancellation(connID, env, live)
 		return err
 	}
 	m.pushMu.Lock()
 	q, ok := m.queues[connID]
 	if !ok {
+		m.permissionAttempt(nil, env, live).record("absent")
 		m.pushMu.Unlock()
 		return ErrConnNotFound
 	}
 	before := q.overflowed
+	observation := m.permissionAttempt(q, env, live)
+	count := len(q.items)
 	dropped := q.enqueue(env)
+	if len(q.items) > count || dropped && env.Type != protocol.TypeAssistantDelta {
+		observation.record("admitted")
+		q.items[len(q.items)-1].permissionObservation = observation
+		if q.overflowed {
+			observation.record("quarantined")
+		}
+	} else {
+		observation.record("byte_ceiling")
+	}
 	if live != nil && !q.overflowed {
 		q.items[len(q.items)-1].live = live
 	}
@@ -184,6 +197,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	// (ErrConnNotFound / ErrSessionNotOpen / seal failure) still drop, downstream
 	// in forwardEnvelope, reached only on this transport-up path (AC2).
 	if m.transportDown() {
+		m.observePermissionTransportHold()
 		return
 	}
 	// A conn with an in-flight reconnect-replay tail must keep its live push
@@ -215,10 +229,14 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	// Go randomises map-range order, giving rough fairness across the
 	// realistically-tiny open-conn count.
 	for id, q := range m.queues {
+		if q.overflowed {
+			q.observePermissions("quarantined")
+		}
 		if q.overflowed || len(q.items) == 0 {
 			continue
 		}
 		if _, gated := replayPending[id]; gated {
+			q.observePermissions("hold_replay")
 			continue // replay in flight for this conn; hold its live events (#777).
 		}
 		connID = id
