@@ -25,46 +25,10 @@ Wire values for `Envelope.Type` (spec § Message types). Two architectural parti
 
 These six live in their **own** const block (not merged into the `TypeRekeyRequest` block) so the doc comment can distinguish control envelopes from application events — but both are "v2-only" for the partition's purpose. `TypeStall` (#638) is the wire form of an internal-only `turnevent.Stall` signal; on the wire it is just another v2 capability-gated event, so it lives in this block with its ACP-shaped siblings (the internal-vs-ACP distinction is an adapter concern, invisible to the phone). `CapabilityInteractive = "interactive"` (the wire-vocabulary constant a phone advertises to opt into this stream) lives in `handshake.go` next to the `Capabilities` field, not here.
 
-**v2 daemon thread update contracts**
+**v2 daemon thread messages**
 
-`TypeThreadItemAdded = "thread_item_added"`,
-`TypeThreadItemChanged = "thread_item_changed"` and
-`TypeThreadTextAppend = "thread_text_append"` are outbound v2 declarations,
-not yet emitted. They stay outside `inboundAppTypeSet`; declaring outgoing
-vocabulary must not admit it into the inbound handler chain.
-`TestThreadKinds`, `TestTypeConstants_V1V2Partition` and
-`TestEveryInboundV2TypeHasHandler` pin that boundary. See the
-[full item and update schemas](../../protocol-mobile.md#daemon-thread-updates-v2-supplied-delivery-contract).
-
-`ThreadItem` carries the fold's facts as pure data. Mapping stays in consumers:
-the fold already imports protocol, so importing `internal/thread` here would
-reverse the dependency and create a cycle. `Content` and `Changes` retain inert
-raw JSON so unknown fields survive, and absent patch keys remain distinct from
-explicit empty/false/zero/null replacements. A content patch replaces the whole
-value; decoding it into a partial content struct would discard unknown facts.
-Consumers own numeric bounds, stable identity/kind and patch applicability.
-`TestThreadItemAddedRoundTrip`, `TestThreadItemOptionalFacts`,
-`TestThreadChangesRoundTrip` and `TestThreadTextAppendRoundTrip` re-encode decoded
-DTOs with distinct item/order/revision/version values and inspect emitted JSON.
-Negotiation/publication and catch-up/pages remain downstream; bounded encoding
-is available through `EncodeThreadUpdate`. The DTO declarations perform no
-validation, fold I/O or patch application.
-
-Split the serialized logical update, not just kind-specific content: a large
-`summary` or other metadata can exceed the cap even when content fits. This
-also preserves unknown JSON and patch omission versus explicit clears without
-a known-kind field list. `ThreadUpdatePart` fragments require ordered, complete
-assembly before committing item fields, `rev` and `version`; changes/appends
-still require the original `base_rev`. Fragment progress never becomes history
-progress. See the
-[assembly contract](../../protocol-mobile.md#bounded-thread-encoding-and-assembly).
-
-Measure the whole escaped envelope: fragment strings escape logical JSON again,
-so an ordinary-payload size check can leave continuations over cap. Reserve
-later numeric/timestamp/boolean stamps and supply variable `SessionID` before
-encoding. If repeated metadata leaves no fragment room, return a content-free
-error and no partial sequence. See the
-[measured budgets](../../protocol-mobile.md#thread-update-byte-budgets).
+See [daemon thread messages](protocol-package-thread-messages.md) for live update
+vocabulary, bounded assembly, query coverage and encoding failure tests.
 
 **v2 PTY-derived status-peer types** (#1074; spec `docs/protocol-mobile.md` § api_retry / § compacting):
 
