@@ -1,0 +1,8 @@
+[
+  "package.json", "package-lock.json", ".npmrc", ".gitignore",
+  "tsconfig.web.json", "tsconfig.service.json", "scripts/build.mjs", "scripts/browser-smoke.mjs",
+  "src/web/App.tsx", "src/web/main.tsx", "src/web/style.css", "src/web/assets.d.ts",
+  "src/service/main.ts", "src/service/migrate.ts", "src/service/runtime.mjs", "src/service/environment.ts",
+  "src/service/database.ts", "src/service/migrations.ts", "src/service/health.ts", "sql/migrations/0001_preferences.sql",
+  "test/app.test.mjs", "test/service.test.mjs"
+]
