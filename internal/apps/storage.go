@@ -58,7 +58,7 @@ func openRegistry(root, serverID string, persist func(string, snapshot) error) (
 		if s.ServerID != serverID {
 			return nil, ErrForeignHost
 		}
-		if e := validateSnapshot(s); e != nil {
+		if e := validateSnapshot(root, s); e != nil {
 			return nil, e
 		}
 		sortSnapshot(&s)
@@ -85,8 +85,8 @@ func validStorageSchema(value any) bool {
 		return false
 	}
 	for _, value := range records {
-		record, ok := storageObject(value, []string{"app_id", "manifest", "title", "desired", "state", "revision"}, "active_release", "pending_release", "last_error")
-		if !ok {
+		record, ok := storageObject(value, []string{"app_id", "manifest", "title", "desired", "state", "revision"}, "active_release", "pending_release", "last_error", "release_history", "publish_journal")
+		if !ok || !validMetadataSchema(record) {
 			return false
 		}
 		if lastError, exists := record["last_error"]; exists {
@@ -122,7 +122,7 @@ func storageObject(value any, required []string, optional ...string) (map[string
 	return fields, true
 }
 
-func validateSnapshot(s snapshot) error {
+func validateSnapshot(root string, s snapshot) error {
 	if s.Revision > maxRevision || len(s.Records) > maxApps {
 		return ErrInvalidStorage
 	}
@@ -147,6 +147,9 @@ func validateSnapshot(s snapshot) error {
 			return ErrInvalidStorage
 		}
 		if (r.ActiveRelease != "" && !validRelease(r.ActiveRelease)) || (r.PendingRelease != "" && !validRelease(r.PendingRelease)) || (r.State == "running" && r.ActiveRelease == "") {
+			return ErrInvalidStorage
+		}
+		if !validMetadata(root, s.ServerID, r) {
 			return ErrInvalidStorage
 		}
 		if r.LastError != nil && (!validErrorCode(r.LastError.Code) || !validText(r.LastError.Message, 160, true)) {
