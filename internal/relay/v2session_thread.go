@@ -19,7 +19,7 @@ func threadItemUpdate(typ string) bool {
 // threadWithheld gates items independently of reply correlation and filters
 // replaced unsolicited content. It runs before sealing, so drops spend no nonce.
 func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) bool {
-	if threadItemUpdate(env.Type) {
+	if threadContent(env.Type) {
 		id := pushedConversationID(env)
 		return !s.thread || m.liveWithheld(s, id)
 	}
