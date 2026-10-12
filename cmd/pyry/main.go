@@ -310,6 +310,14 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		logRing,
 	))
 	appRegistry := openDaemonApps(*name, logger)
+	appOwner := newDaemonAppsOwner(appRegistry, "node", logger)
+	if appOwner != nil {
+		defer func() {
+			if err := appOwner.Shutdown(); err != nil {
+				logger.Warn("apps: shutdown failed", "reason", "owner_shutdown_failed")
+			}
+		}()
+	}
 	workspaceBase := resolveStartupWorkspaceBase(os.Getwd, logger)
 	// Rows recorded before #2568 carry the client's spelling of their folder —
 	// relative or "~"-prefixed — beside rows holding its realpath, so one folder
