@@ -395,6 +395,16 @@ Before accepting a baseline comparison as attribution, compare suite composition
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.
 
+Record the source of the daemon actually executed, not only the checkout's ancestry.
+The historical #3071 candidate's `spawnPermissionDaemon` honored
+`PYRY_E2E_READINESS_BIN` and `PYRY_E2E_READINESS_MCP_CONFIG`, changing the binary
+and MCP fixture independently of the tested tree; the current harness builds
+through `ensurePyryBuilt` without those overrides. A merged repair can coexist
+with a stale overridden daemon when comparing historical runs;
+retain the override inputs, actual binary source, Claude version and exact named
+leaf outcomes alongside suite counts. See
+[the prompt-answer recovery evidence](../../specs/architecture/3256-shared-live-repair-evidence.md#context).
+
 A temporary worktree is not durable storage. For an agent-produced artifact, commit it.
 For a gate-produced capture, retain an external recovery copy and use the documented
 promotion step. Staging alone does not survive worktree removal. Require the committed
