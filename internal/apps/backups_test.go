@@ -15,7 +15,8 @@ import (
 
 func backupFixture(t *testing.T) (string, string, BackupReference) {
 	t.Helper()
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	backupOK(t, err)
 	app := filepath.Join(root, testApp)
 	backupOK(t, os.Mkdir(app, 0700))
 	ref := BackupReference{testHost, testApp, testID(42), filepath.Join(app, "backups", testID(42))}
@@ -30,6 +31,14 @@ func backupCreate(t *testing.T, root string, ref BackupReference, node string) {
 	t.Helper()
 	got, err := SnapshotData(context.Background(), root, testHost, testApp, ref.PublishID, node)
 	backupCheck(t, err == nil && got == ref, got, err)
+}
+func TestBackupAliasedTempRoot(t *testing.T) {
+	dir := t.TempDir()
+	alias := filepath.Join(dir, "alias")
+	backupOK(t, os.Symlink(dir, alias))
+	t.Setenv("TMPDIR", alias)
+	t.Run("states", TestBackupStates)
+	t.Run("containment", TestBackupContainment)
 }
 func TestBackupStates(t *testing.T) {
 	for _, state := range []string{"absent", "empty", "zero", "nested"} {
