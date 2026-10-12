@@ -1,0 +1,76 @@
+# Persistent app-data snapshots (#3284)
+
+## Files read
+
+- `internal/apps/runtime.go` → `privateDir`, `regularAt`, `supportedNode`: no-follow storage descriptors and actual selected-runtime validation.
+- `internal/apps/releases.go` → `BackupReference`, `validMetadata`: host/app/publish identity and exact backup-root contract.
+- `internal/apps/manifest.go` → `validID`: canonical UUIDv4 validation.
+- `internal/apps/owner_test.go` → `TestOwnerSupportedNode`: explicit supported Node selection and skip semantics.
+- `templates/hosted-app/source/src/service/database.ts` → `database`, `schema`: defensive SQLite, integrity and foreign-key conventions.
+- `templates/hosted-app/source/src/service/migrations.ts` → `ledger`: preserve main migration rows without invoking migrations.
+- `docs/knowledge/features/apps-package.md` § Validation and stored identity, Template SQL and readiness, Lifecycle and restart state: metadata validation proves no content verification; startup must not migrate.
+- `docs/knowledge/features/development-verification.md` § Prove that tests distinguish the change, Test execution and artifact survival: actual WAL proof and executed counts are necessary.
+- `docs/specs/architecture/3120-hosted-app-contract.md` § Runtime, roots and service conventions, Registration, observed state and safe publication: all-data snapshot before mutation with caller-owned serialization/quiescence.
+- Node 24 SQLite API, `sqlite.backup` and `DatabaseSync`: supported backup and read-only integrity API.
+
+## Context
+
+Publication and recovery need restart-verifiable all-data snapshots; registry references alone prove no integrity. This primitive excludes restoration (#3285), release selection, retirement, migrations and journals. No separate decision record is needed.
+
+## Design
+
+`SnapshotData(ctx, root, serverID, appID, publishID, node) (BackupReference, error)` creates a new private exact-root backup. `VerifyBackup(ctx, root, serverID, appID, reference, node) error` independently checks persisted evidence and the exact tree, without source access or cached state. Both validate daemon-selected clean absolute root and selected identity before I/O. Existing destination directories are conflicts, including incomplete ones; retry uses a new publish ID.
+
+The backup contains `data/` when source data exists and `verification.json` with a version, exact reference and ordered path/kind/size/SHA-256 inventory. Absence of `data/`, an empty `data/`, and zero-byte `app.sqlite` remain distinct. Directory entries, including empty directories, are part of the inventory. Evidence is not an authenticity signature against an attacker rewriting both files and evidence under the daemon's OS account.
+
+No-follow descriptor-relative traversal accepts only directories and single-link regular files; directories/files become 0700/0600. Copy hashes are compared with independently read destination hashes. An initialized top-level `app.sqlite` is copied with its WAL/SHM into the private backup, then Node's backup API creates a standalone replacement through a private work directory. Normalize that replacement to DELETE journal mode, check integrity/foreign keys, replace the copied main file and discard WAL/SHM. Preserve all migration-ledger rows without schema-specific SQL. Verification rejects sidecars and WAL-mode headers before a read-only SQLite integrity check. Node receives fixed script/argv, empty environment and pinned private cwd, never app code.
+
+Sync every snapshot file and directory, evidence and backup parent before publishing evidence via rename; sync the backup directory after rename. Remove evidence on a reported final sync/cancellation failure. Incomplete destinations remain recoverable but unverified and cannot overwrite any prior backup.
+
+No overlapping feature branch currently changes the new snapshot-family files. Estimated written work: 760 lines (production/tests/plan), zero exported types, zero existing consumer updates, four acceptance criteria, at most ten reject categories. Recount before plan commit: within all five limits.
+
+## Concurrency model
+
+Synchronous functions; no background goroutines or shared mutable hooks. Caller serializes app operations and quiesces all writers for the entire snapshot. Context cancels traversal/copy and the selected Node child; subprocess is joined before return. Hooks belong to each internal operation instance for deterministic failure tests.
+
+## State transitions and identity reuse
+
+| Event | Race-enabled coverage |
+|---|---|
+| New snapshot / restart with source removed | `TestBackupStates`, `TestBackupSQLiteWAL` |
+| Repeated publish ID after success or partial failure | `TestBackupStates`, `TestBackupFailures` |
+| Evidence/tree mutation after sealing | `TestBackupTampering` |
+| Cancellation before/during copy and sealing | `TestBackupFailures` |
+
+## Error handling
+
+Return identity/storage/conflict or wrapped copy/SQLite/verification/sync errors. No migration, repair, source writes, cached verification, or accepted partial evidence. Invalid source entries reject before SQLite runs. Verified backups are never overwritten. Source corruption is an error, not an uninitialized database.
+
+## Testing strategy
+
+Tests first: absent/empty/zero-byte/nested data and fresh verification without source; missing/changed/added entries and malformed/foreign evidence; escaping identities, symlink components/entries and nonregular files; cancellation and per-instance copy/SQLite/verification/sync failure hooks. Real Node 24.15+ SQL test keeps its writer connection open with checkpoint disabled, proves preference absent from main alone but present in WAL, and asserts ledger/file preservation, standalone DELETE mode, stable sealed bytes and no sidecars across repeat verification. Record JSON test counts. Run `go test -race ./internal/apps/...`, `go vet ./...`, `go build ./cmd/pyry`; full-module verifier gate remains downstream.
+
+## Open questions
+
+None.
+
+## Documentation handoff
+
+Pending documentation stage: `docs/hosted-apps.md`, “Runtime and layout” and “Create, publish and update”: document all-data/WAL snapshots, private storage, persisted verification after restart, explicit absent/empty/uninitialized states, immutable verified backups and caller-owned writer quiescence. State that #3285 supplies restoration, durable recovery completion is caller-owned, and arbitrary OS/fleet effects are outside these data guarantees.
+
+## Security review
+
+**Verdict:** PASS
+
+- Trust boundaries: exact reference/identity checks precede disk access; evidence is compared with a fresh inventory, not trusted as a cached verdict.
+- Tokens/secrets: no credentials generated or inherited; private data never logged.
+- File operations: no-follow pinned directories/files, reject hard links/nonregular entries, 0700/0600; exclusive destination creation and last-step evidence publication prevent overwrite/partial acceptance.
+- Subprocesses: selected executable version validated without fallback, fixed Node script, argv (no shell), empty environment, bounded context and joined child. Only private copied SQL data is processed.
+- Cryptography: standard SHA-256 content digests, no secret comparisons or key/nonce lifecycle.
+- Network/I/O: no network; local evidence parse bounded; copy checks cancellation between bounded reads.
+- Errors/logs: return contextual errors to local consumers; wire translation belongs to consumers; no payload logging.
+- Concurrency: callers own writer quiescence and serialization; partial snapshots lack published evidence; no worker survives return.
+- Threat model: trusted services/local OS account per hosted-app contract. OUT OF SCOPE: restoration #3285, publication quiescence/journals #3262, interrupted-publication recovery #3263, arbitrary OS/fleet effects.
+
+**Reviewer:** builder (self-review per security-review checklist)
+**Date:** 2026-10-12
