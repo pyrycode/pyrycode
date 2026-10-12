@@ -107,6 +107,29 @@ history is read. Bare mode is unsuitable here because it also skips installed
 subscription OAuth/keychain login; isolate context while preserving existing
 authentication rather than requiring an API key.
 
+`replyFallbackEnv` explicitly disables extended thinking for this isolated
+helper: remove every inherited `MAX_THINKING_TOKENS` entry, then supply exactly
+one `MAX_THINKING_TOKENS=0`. A short final-reply instruction constrains final
+text, not the thinking work before it. Empty setting sources leave default
+thinking enabled; a settings-only disable can be overridden by a positive
+ambient budget. The override leaves the persistent interactive child's
+thinking configuration unchanged. Keep the same Haiku alias, one attempt,
+selected-account isolation, deadline and successful-Wait/cancellation/stale-result
+requirements; a CLI that ignores disable still must return a valid reply and
+complete within that bound or publish nothing.
+
+The [thinking-progress diagnosis](../../specs/architecture/3200-fallback-thinking.md#diagnosis-records)
+witnessed active thinking until the own-deadline kill without a result,
+successful completion or publication. Init-only daemon progress hid that work
+because the classifier ignores thinking frames. `TestReplyFallbackThinkingIsolation`
+reproduces budget exhaustion with the existing subprocess fixture;
+`TestReplyFallbackThinkingEnv` prevents inherited or duplicate budgets from
+restoring thinking. The red/green regression supplies cause/fix proof; the
+[six authenticated corrected runs](../../specs/architecture/3200-fallback-thinking.md#six-run-results)
+(6/6/0/0 executed/passed/failed/skipped) establish live non-reproduction.
+Historical failures remain failures, and their init-only records alone cannot
+uniquely identify the cause; see [the source and evidence contract](e2e-realclaude-test-infrastructure.md#test-infrastructure).
+
 A configured provider is re-read inside the deadline and replaces ambient
 OAuth/API credentials; refusal prevents the launch rather than selecting a
 different account. `replyFallbackBudget` bounds the attempt at 30 seconds,

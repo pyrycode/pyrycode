@@ -95,6 +95,13 @@ func TestReplyFallbackHelperProcess(t *testing.T) {
 			time.Sleep(time.Second)
 		}
 	}
+	if os.Getenv("PYRY_REPLY_THINKING_SCENARIO") == "1" && os.Getenv("MAX_THINKING_TOKENS") != "0" {
+		_, _ = os.Stdout.WriteString(`{"type":"system","subtype":"init"}` + "\n")
+		for {
+			_, _ = os.Stdout.WriteString(`{"type":"system","subtype":"thinking_tokens","estimated_tokens":3750}` + "\n")
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 	if delay, err := time.ParseDuration(os.Getenv("PYRY_REPLY_RESULT_DELAY")); err == nil {
 		time.Sleep(delay)
 	}
