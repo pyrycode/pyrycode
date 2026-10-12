@@ -208,13 +208,8 @@ func readRecord(dir int, name string, id Identity) (_ *record, _ []byte, _ *os.F
 	var r record
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&r) != nil || dec.Decode(new(any)) != io.EOF || r.Version != 1 || r.Identity != id || !validPayload(r.Batch.Payload) || r.Batch.ID != batchID(id, r.Batch.Payload) || r.Checksum != checksum(r) {
+	if dec.Decode(&r) != nil || dec.Decode(new(any)) != io.EOF || r.Identity != id || !validRecord(r) || r.Checksum != checksum(r) {
 		return nil, nil, nil, ErrCorrupt
-	}
-	for i, p := range r.Batch.ChangedPaths {
-		if !validPath(p) || i > 0 && p <= r.Batch.ChangedPaths[i-1] {
-			return nil, nil, nil, ErrCorrupt
-		}
 	}
 	// A previous rename may have succeeded while its parent sync failed. Recovery
 	// must make the complete surviving record durable before authorizing execution.
