@@ -231,7 +231,7 @@ Offline leaf counts executed/passed/failed/skipped: capture/admission race
 33/33/0/0; tagged recorder race 2/2/0/0; default daemon race 15287/15287/0/3
 (existing skips); focused parser preservation race 20/20/0/0. Portable driver
 4/4/0/0. Default vet, tagged realclaude vet and scratch daemon build passed.
-This rework adds 583 lines including the committed plan, within its incremental
+This rework adds approximately 620 written lines including plan/check records, within its incremental
 estimate; no new exports or production parser changes.
 
 Managed task
