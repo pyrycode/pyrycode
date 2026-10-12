@@ -2,6 +2,8 @@
 
 ## Files read
 
+- `internal/e2e/realclaude/testdata/tool_then_text_mobile_stream_event_v2.1.280.json` and its mobile-evidence companion: the completed managed diagnostic and coupled counted XML.
+- `internal/e2e/realclaude/stream_event_tool_then_text_mobile_capture_test.go` → `tttMobileAdmit`, `tttReadMobileFixture`, `tttMobileProofComplete`: faithful source, replay and XML admission remains separate from cause proof.
 - `internal/streamsup/parser_stream_event.go` → `emitStreamEvent`, `resetStreamEventState`: decoding, subtype and attribution rejection guards.
 - `internal/streamsup/parser_assistant.go` → `emitAssistant`: completed text suppression and completed tool ownership.
 - `internal/streamsup/parser.go` → `consumeLine`, `emitUnrecognized`: result reset and content-free diagnostics.
@@ -120,3 +122,9 @@ Offline validation: recorder/admission/regression race checks pass; the two port
 The returned gate's sole failure is missing mobile evidence in `TestRealClaude_StreamEventCapture`; it supplies no rejecting parser input. The managed `android-tool-then-text` / `android-emulator` task `f98172ae8af747690d9b6ab50e9cee53ba05e11287d573d3bb36d3d1428597d7` requests the unchanged named method and recorder on pushed candidate `7d1a4a6371aa72c072d20407bb85750c88a8e95c`. It is queued, not a failed or passed native test. Retrieve its exact result with `fleet-task.py await <task-id> --out <fresh-directory>` before promoting any mobile fixture or claiming diagnosis. No parser guard changed in this audit.
 
 Focused offline checks at that candidate: 34/34/0/0 capture/admission race checks, 22/22/0/0 parser replay/reset/refusal/thinking race checks, 1/1/0/0 daemon recorder race check, and 2/2 portable-driver tests. These do not discharge mobile evidence or the subsequent dispatcher-owned full live gate. Security review remains PASS: the request uses the fixed admitted recipe, and artifact promotion still requires the existing redactor, deny-scan and source/binary/XML/loss validation.
+
+### 2026-10-12 — completed managed mobile diagnostic retained
+
+Task `f98172ae8af747690d9b6ab50e9cee53ba05e11287d573d3bb36d3d1428597d7` completed the unchanged named method against daemon `7d1a4a6371aa72c072d20407bb85750c88a8e95c` and mobile `83a277afe045ddc734d513f47aad6aa6e2aeeb63`. The counted XML records 1 executed, 1 passed, 0 failed and 0 skipped. The admitted producer wrote the version-pinned mobile record and its evidence companion. Retain those exact bytes in this branch. The coupled record contains 48 ordered rows through result, zero rejected rows and zero recording loss. Its recorded XML hash and companion agree.
+
+This is diagnostic evidence. The producer left the rejecting guard unestablished. Its existing admission check failed deliberately on the remaining cause requirement. The recorded focused pass does not prove that the historical rejection is repaired. No production parser guard, mobile assertion or proof-completion condition was changed. Preserve the two earlier non-rejecting managed captures in their native task records. Diagnose the original full-run context from these retained inputs before requesting another identical standalone capture.
