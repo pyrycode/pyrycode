@@ -150,6 +150,8 @@ type smokeEvidence struct {
 	MacOSVersion string               `json:"macos_version,omitempty"`
 	MacOSBuild   string               `json:"macos_build,omitempty"`
 	Modes        map[string]smokeMode `json:"modes"`
+	Executed     int                  `json:"executed"`
+	Passed       int                  `json:"passed"`
 }
 
 func smokeChecks(mode string) []string {
@@ -170,6 +172,9 @@ func TestSmokeEvidence(t *testing.T) {
 			var record smokeEvidence
 			if err := json.Unmarshal(data, &record); err != nil {
 				t.Fatal(err)
+			}
+			if os.Getenv("PYRY_MEMORY_SMOKE_EVIDENCE") != "" && len(record.Modes) == 0 {
+				t.Skip("native capture is armed for legacy evidence; validate both committed modes after promotion")
 			}
 			if record.OS != target.goos || record.Architecture != target.arch || len(record.Modes) != 2 || record.CapturedAt == "" || !strings.Contains(record.Invocation, "-tags memory_runtime_smoke -run '^TestSmoke$'") {
 				t.Fatal("incomplete smoke identity/modes/invocation")
@@ -204,6 +209,9 @@ func TestSmokeEvidence(t *testing.T) {
 						t.Fatalf("unproved %s check: %s", mode, check)
 					}
 				}
+			}
+			if record.Executed != 17 || record.Passed != record.Executed {
+				t.Fatal("aggregate smoke checks unexecuted or incomplete")
 			}
 		})
 	}

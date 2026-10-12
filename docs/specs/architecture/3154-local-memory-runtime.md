@@ -81,3 +81,7 @@ Pending documentation stage: `docs/deployment.md`, “Managed memory runtime”:
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+
+- 2026-10-12: The managed native recipe runs package tests before smoke capture and reads aggregate executed/passed counters. Preserve aggregate counts alongside both mode records. When an explicit `PYRY_MEMORY_SMOKE_EVIDENCE` capture is armed, the reader defers legacy single-mode records so capture can execute; ordinary hermetic checks still reject them, and final committed evidence must validate both modes. The first macOS task stopped before capture on the legacy record. Linux native imports, CPU tensor execution and all 17 checks passed without additional host minimums; macOS compatibility remains subject to its executed capture.

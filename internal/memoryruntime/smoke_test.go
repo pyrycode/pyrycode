@@ -103,6 +103,7 @@ print('temporary_database_open_close: PASS')`
 		Invocation: "PYRY_MEMORY_SMOKE_EVIDENCE=" + os.Getenv("PYRY_MEMORY_SMOKE_EVIDENCE") + " go test -tags memory_runtime_smoke -run '^TestSmoke$' -count=1 -v ./internal/memoryruntime",
 		Target:     target, OSRelease: string(release), Architecture: runtime.GOARCH, Libc: string(libc),
 		MacOSVersion: strings.TrimSpace(string(macVersion)), MacOSBuild: strings.TrimSpace(string(macBuild)), Modes: modes,
+		Executed: modes["openai"].Executed + modes["local"].Executed, Passed: modes["openai"].Passed + modes["local"].Passed,
 	}
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
