@@ -1503,6 +1503,7 @@ func startRelayV2(
 		SettingsUpdater: w.settings,
 	}
 	installDaemonLiveRelay(&sessionConfig, w, liveContextUsage)
+	installDaemonThreadRelay(&sessionConfig, w.shadow)
 	mgr, detachApps, err := newDaemonAppsManager(sessionConfig, w.appRegistry)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
@@ -1677,6 +1678,7 @@ func startRelayV2(
 		surface = bridge.Surface
 	}
 
+	stopThreadPublication := startDaemonThreadPublisher(ctx, w.shadow, mgr)
 	stopLivePublication := func() {}
 	if w.streamSink != nil {
 		stopLivePublication = startDaemonLivePublisher(ctx, w.streamSink.live, mgr.ActiveConns, mgr.PushLiveState, func(ctx context.Context, id string) {
@@ -1879,6 +1881,7 @@ func startRelayV2(
 		streamResettingCleanup()
 		streamReplySuggestionsCleanup()
 		stopLivePublication()
+		stopThreadPublication()
 		<-mgrDone
 	}, surface, announce, announceConversation, announcePost, pairingMinter.MintLocalPairing, nil
 }

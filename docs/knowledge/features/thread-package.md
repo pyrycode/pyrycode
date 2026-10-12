@@ -3,8 +3,9 @@
 `Fold` builds deterministic items from supplied raw `history.Entry` values for
 one conversation. `Store` owns background replay and tailing for independently
 loaded conversations. Both implement the history-backed storage design of
-[ADR 042](../decisions/042-daemon-built-thread.md). The daemon runs the store in
-shadow; app publication remains downstream.
+[ADR 042](../decisions/042-daemon-built-thread.md). The daemon publishes usable
+fold observations to eligible apps that negotiate `thread`; client catch-up,
+pages and reconnect history initialization remain #2963.
 Use [raw history and its metadata](history-package-shape.md#shape), including
 hidden facts; legacy receipt projections discard facts needed by the fold.
 
@@ -32,7 +33,42 @@ unload, including `channelDelivery.deliver`, which bypasses
 `appendConversationHistory`. Waking only from that helper would miss direct
 posts. Loaded workers use the same reader for replay and committed tailing;
 settled items/revisions match full replay through the consumed version.
-Replay/cache I/O and joins run outside producer/publication paths and gates.
+Replay/cache I/O, publication and joins run outside history writers and producer
+gates. Held peer delivery cannot block history commits.
+
+`startRelayV2` installs `installDaemonThreadRelay` after the retained live-state
+providers and starts `startDaemonThreadPublisher` before connection admission.
+`ThreadReady` attests an installed running fold publisher, the real store's
+watermark lookup and `ThreadLiveState`/`LiveStateCurrent` delivery. Missing
+providers withhold negotiation; individual not-loaded, rebuilding or unavailable
+conversations supply neither items nor a usable watermark. Registered usable
+zero is authoritative. The no-relay composition continues folding without wire
+publication; legacy connections retain their existing stream and access gates.
+
+Each existing conversation coordinator owns one publication cursor. It starts
+from a complete usable `Store.Observe` baseline, sending full additions to
+eligible peers present at publication, then follows only proven `Store.Changes`
+ranges. It does not initialize connections admitted after that baseline.
+`BaselineRequired`, epoch change, a withdrawn usable view or encoding failure
+retires prior consumers through `RetireLiveState`, forgets the cursor and
+reacquires a usable baseline. Same-epoch reload cannot establish retained-range
+continuity; full additions over stale peer state cannot repair a suppressed row.
+See [observation readiness](thread-package-background-store.md#loading-and-replay-readiness)
+and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+
+`daemonThreadUpdates` maps exported fold field names through `ThreadItem`'s JSON
+tags. Copying `EndedOrder` or `NoChild` directly would produce unusable wire
+patches instead of `ended_order` or `no_child`. A combined field/text change
+emits replacements first, using `PreviousRev` as `base_rev` and the final `Rev`,
+then the suffix with that same final revision as both `base_rev` and `rev`.
+Both carry the same consumed version; no intermediate history revision exists.
+Every logical update uses `EncodeThreadUpdate`, with consecutive continuation
+parts before the next update. Discovery and following each wait at most 50 ms;
+store batches coalesce text without an additional timer. Ordered updates flush
+before dependent non-text changes, adding at most 100 ms of scheduled waiting
+within the total 250 ms publication/coalescing budget. This bounds waiting to
+enqueue, not replay, encoding or network delivery time. See the
+[wire assembly contract](../../protocol-mobile.md#bounded-thread-encoding-and-assembly).
 
 A caught-up usable fold unloads only when `Snapshot.Active` is false and
 `shadowQuiescent` finds producer/transition processing quiescent. Active
@@ -42,13 +78,22 @@ retirement. Idle sleep must publish and fold its closure/divider facts first.
 Unload releases items, private joins and pending reports while coordination
 retains the consumed version. Later commits reload through cache validation and
 fresh log replay, including a direct post or an append racing `Unload`; cached
-public items never seed continuation state.
+public items never seed continuation state. Capture the consumed snapshot
+boundary before publication can wait on delivery, then retain that boundary at
+unload. Reading a newer boundary after held delivery can mark an unpublished
+commit consumed and prevent its reload. `TestDaemonThreadIdleCommit` exercises
+this race; reload must still prove the publication range or retire consumers.
 
 `dropRingOnConversationDelete` retains the registry's single removal observer
 for explicit deletion and sweep, including with the relay disabled. It preserves
 ring/reply-suggestion cleanup, tombstones the ID, joins shadow coordination and
 unloads the store worker. Registry membership checks and tombstones prevent late
 commits, callbacks or discovery from reopening removed conversations.
+Publication operations follow both conversation cancellation and publisher
+retirement. Publisher stop withdraws readiness, seals admission, cancels and
+joins admitted operations before freeing the installation slot; freeing it
+before joining permits duplicate publishers. `TestDaemonThreadRetirement`
+checks held delivery, removal, shutdown and duplicate installation.
 
 Shutdown seals producer admission and joins/drains writers before final history
 versions are established. Shadow contexts are detached from daemon cancellation
@@ -65,9 +110,20 @@ created. `thread_shadow.clean_exit` requires both complete final folding and
 successful `Store.Shutdown` persistence. Fixed failure reasons and validated IDs
 are the diagnostic boundary; content, payloads and host paths are excluded.
 
-No app receives thread items yet: shadow advertises no `thread` capability and
-sends no thread frames. Nil or failed shadow storage leaves legacy traffic
-operational. `TestThreadShadowLegacy` checks an authenticated Noise peer through
+`TestDaemonThreadPublication` decrypts simultaneous authenticated thread and
+legacy peers, reconstructing complete fold items after additions, field/text
+changes, dropped sends, dividers and channel posts. It checks combined
+replacement-before-append delivery, both base revisions, the waiting bound,
+escaping-heavy continuation assembly and retained current readings, while
+legacy traffic keeps its expected shape. Mapper-only assertions would miss
+wire ordering or recipient projection errors. `TestDaemonThreadReadiness`,
+`TestDaemonThreadUnusable` and `TestDaemonThreadContinuity` cover usable zero,
+missing providers/views and lost ranges. Catch-up/pages, replay replacement and
+connect-time thread history initialization remain
+[#2963](https://github.com/pyrycode/pyrycode/issues/2963).
+
+Nil or failed shadow storage leaves legacy traffic operational.
+`TestThreadShadowLegacy` checks an authenticated Noise peer through
 the production session manager, comparing live frames, reconnect replay, history
 requests and negotiated capabilities with enabled, nil and failed storage.
 Fake broadcaster capture or direct ring/pager reads alone miss those client
