@@ -96,6 +96,7 @@ func daemonAppStartupPause(data string, stopped <-chan struct{}) error {
 	}
 	select {
 	case <-stopped:
+		return os.WriteFile(filepath.Join(data, "startup-interrupted"), nil, 0600)
 	case <-time.After(5 * time.Second):
 	}
 	return nil
@@ -280,6 +281,11 @@ func TestHostedAppsStartupFailureCleanup(t *testing.T) {
 				daemonAssertGone(t, proof)
 			}
 			for i, id := range []string{daemonAppID, "33333333-3333-4333-8333-333333333333"} {
+				if mode == "publication-pause" {
+					if _, err := os.Stat(filepath.Join(root, id, "data/startup-interrupted")); err != nil {
+						t.Errorf("app %s shutdown did not interrupt its startup pause: %v", id, err)
+					}
+				}
 				if _, err := os.Stat(filepath.Join(root, id, "data/descendant-reaped")); err != nil {
 					t.Errorf("app %s did not acknowledge descendant reaping: %v", id, err)
 					for role, pid := range proofs[i] {
