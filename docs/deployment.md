@@ -380,16 +380,15 @@ reference.
 ## Managed memory runtime
 
 `internal/memoryruntime.Install(ctx, Options)` supplies an isolated, resumable
-installer for OpenAI mode. It is independently callable inside Pyrycode; this
-slice has no daemon or CLI setup wiring. It neither starts managed memory nor
+installer for OpenAI and local embedding modes. It is independently callable
+inside Pyrycode; this slice has no daemon or CLI setup wiring. It neither starts managed memory nor
 migrates or stops the existing pyrybox memsearch watcher. The daemon consumer,
-provider/model initialization and single production database owner belong to
-[#3148](https://github.com/pyrycode/pyrycode/issues/3148). Local embeddings
-await [#3154](https://github.com/pyrycode/pyrycode/issues/3154).
+provider/model initialization, private selected-model caches and single production
+database owner belong to [#3148](https://github.com/pyrycode/pyrycode/issues/3148).
 
 ### Supported targets and pinned stack
 
-Both supported targets use **OpenAI mode**:
+Both supported targets accept `Mode: "openai"` and `Mode: "local"`:
 
 | Platform | Architecture | Minimum requirements | Executed smoke host |
 | --- | --- | --- | --- |
@@ -398,17 +397,19 @@ Both supported targets use **OpenAI mode**:
 
 The macOS minimum is the oldest version with executed smoke evidence; wheel
 availability alone does not establish support for an older OS or Intel Mac.
+Native local imports and CPU tensor execution passed on both listed smoke hosts;
+local mode adds no host minimum and requires no CUDA installation or GPU.
 Setup checks architecture and the macOS version, or the Linux distribution,
 release and libc. Older or malformed macOS versions, other Linux
 distributions/releases, unsupported architectures/operating systems and other
-modes return a recoverable unsupported error before setup.
+modes return recoverable `ErrUnsupported` before setup.
 
 The managed interpreter is standalone **CPython 3.12.11, build 20250918**,
 with bundled bootstrap **pip 24.3.1** on both targets. The shipped
 [macOS artifact lock](../internal/memoryruntime/macos-arm64.lock.json) and
 [Linux artifact lock](../internal/memoryruntime/linux-amd64.lock.json) fix each
 target's Python archive and every wheel's URL, filename and SHA-256 digest.
-They share the following complete 32-wheel dependency closure, including
+They share the following complete 32-wheel base dependency closure, including
 **memsearch 0.4.21**, **pymilvus 2.5.16** and **Milvus Lite 2.5.1**:
 
 | Distribution | Exact version |
@@ -446,16 +447,57 @@ They share the following complete 32-wheel dependency closure, including
 | ujson | 6.0.0 |
 | watchdog | 6.0.0 |
 
+OpenAI mode uses only that base closure. Local mode adds the following exact
+28-wheel closure from each platform lock's `local_wheels`, for **60 distributions
+total**. Artifact identities remain platform-specific; only torch's version
+differs between targets. Linux uses the CPU-only build.
+
+| Additional distribution | Linux exact version | macOS exact version |
+| --- | --- | --- |
+| charset-normalizer | 3.5.2 | 3.5.2 |
+| cloudpickle | 3.1.2 | 3.1.2 |
+| einops | 0.8.2 | 0.8.2 |
+| filelock | 4.1.1 | 4.1.1 |
+| fsspec | 2026.9.0 | 2026.9.0 |
+| hf-xet | 1.7.0 | 1.7.0 |
+| huggingface-hub | 0.36.2 | 0.36.2 |
+| jinja2 | 3.1.6 | 3.1.6 |
+| joblib | 1.6.0 | 1.6.0 |
+| markupsafe | 3.0.4 | 3.0.4 |
+| mpmath | 1.3.0 | 1.3.0 |
+| narwhals | 2.27.1 | 2.27.1 |
+| networkx | 3.7 | 3.7 |
+| packaging | 26.3 | 26.3 |
+| pillow | 12.3.0 | 12.3.0 |
+| pyyaml | 6.0.3 | 6.0.3 |
+| regex | 2026.9.29 | 2026.9.29 |
+| requests | 2.34.2 | 2.34.2 |
+| safetensors | 0.8.0 | 0.8.0 |
+| scikit-learn | 1.9.1 | 1.9.1 |
+| scipy | 1.18.1 | 1.18.1 |
+| sentence-transformers | 5.1.1 | 5.1.1 |
+| sympy | 1.14.0 | 1.14.0 |
+| threadpoolctl | 3.7.0 | 3.7.0 |
+| tokenizers | 0.22.2 | 0.22.2 |
+| torch | 2.8.0+cpu | 2.8.0 |
+| transformers | 4.57.1 | 4.57.1 |
+| urllib3 | 2.8.0 | 2.8.0 |
+
 Setup verifies artifacts against these shipped hashes before extraction or
 execution, then installs only verified local wheels. It performs no moving
 dependency resolution, source builds or build-dependency installation. It
-requires no system Python or credentials, installs no local embedding extra,
-initializes no embedding provider and downloads no model weights. User/system
+requires no system Python or credentials. OpenAI requests download and install
+no local extra. Neither mode initializes an embedding provider or downloads model
+weights. Local verification imports `einops`, `sentence_transformers` and
+`memsearch.embeddings.local` and executes a tiny CPU tensor operation without
+constructing a model. Both modes check every exact distribution version,
+Python/pip, the memsearch CLI version and `pip --isolated check`. User/system
 Python, existing memsearch installations and shell profiles remain unchanged.
 
 ### Private storage and resumable setup
 
-Run the callable installer as the service-account user with `Mode: "openai"`.
+Run the callable installer as the service-account user with `Mode: "openai"`
+or `Mode: "local"`.
 `Options.Home` selects an existing absolute, canonical home owned by that user;
 an omitted home uses `os.UserHomeDir`. Storage belongs to that account:
 
@@ -465,6 +507,9 @@ an omitted home uses `os.UserHomeDir`. Storage belongs to that account:
 | `~/.pyry/memory/runtime/install-<random>/` | Permanent runtime generation, including managed Python, memsearch and a private subprocess home |
 | `~/.pyry/memory/runtime/current.json` | Published generation, artifact-lock identity and tree seal; no credentials |
 | `~/.pyry/memory/runtime/install.lock` | Cross-process installation exclusion |
+
+The private subprocess home isolates installation and import checks. Selected-model
+cache initialization belongs to #3148; this installer does not load a model.
 
 This root is separate from `~/.pyry/memory/credentials/`, recent transcripts,
 vaults and `~/.memsearch`. New directories are created at 0700 and metadata at
@@ -480,8 +525,17 @@ are ignored, and a retry creates a fresh generation. The installer retains old
 generations and does not move their absolute launch paths, so replacement keeps
 previously returned verified locations usable. It publishes a new generation
 only after imports, exact versions, the memsearch CLI version, dependency
-compatibility and the tree seal succeed. Repeat calls verify the current seal
-and rerun probes before returning the same generation.
+compatibility and the tree seal succeed. Repeat calls reuse the current generation
+only when its lock matches the requested mode's exact pins, its seal verifies
+and fresh probes pass. Missing or incompatible local dependencies cause safe
+provisioning of a new generation.
+
+The single `current.json` publication describes the most recently verified mode.
+Switching modes provisions a new permanent generation when the current lock does
+not match; switching back does not scan older generations for reuse. Previously
+returned launch paths stay usable through switching and replacement. When switching
+from OpenAI, failed or cancelled local setup leaves the verified OpenAI runtime and
+its publication usable, returns no launch paths and publishes no partial local runtime.
 
 Concurrent calls, including separate processes for the same account, serialize
 through the installation lock. A waiting caller can cancel without cancelling
@@ -500,8 +554,8 @@ to assess access for the selected agent and workspace independently.
 
 ### Opt-in installer smoke
 
-Run the smoke natively from the repository root on the supported target.
-On macOS arm64:
+Run the both-mode `TestSmoke` natively from the repository root on each supported
+target. On macOS arm64:
 
 ```bash
 PYRY_MEMORY_SMOKE_EVIDENCE="$PWD/internal/memoryruntime/smoke-macos-arm64.json" \
@@ -516,16 +570,24 @@ PYRY_MEMORY_SMOKE_EVIDENCE="$PWD/internal/memoryruntime/smoke-linux-amd64.json" 
 ```
 
 This network/download test is outside `make check`. It installs into a temporary
-home, verifies imports and exact versions, CLI version, dependency compatibility
-and repeated setup, then opens and closes Milvus Lite in a separate temporary
-database. It needs no credentials or model downloads. The committed
+home, installs/reuses OpenAI then local mode, verifies imports and exact versions,
+CLI version and dependency compatibility, and freshly verifies retained launch
+paths after switching. Local checks include CPU tensor execution. Each mode opens
+and closes Milvus Lite in a separate temporary database. It needs no credentials,
+provider construction or model downloads. The committed
 [macOS evidence](../internal/memoryruntime/smoke-macos-arm64.json) and
 [Linux evidence](../internal/memoryruntime/smoke-linux-amd64.json) record the
 invocation, architecture, every component version and named results, plus
-macOS version/build or Linux distribution/libc. Each records **seven checks
-executed and seven passed**. Skipped or unexecuted checks do not establish
+macOS version/build or Linux distribution/libc. Each records **17 checks
+executed and 17 passed**: OpenAI **8/8**, local **9/9**, with complete exact version
+maps and named results for each mode. Skipped or unexecuted checks do not establish
 support. When recapturing evidence for a change, review and commit the generated
-file; a passing run alone does not preserve it.
+file; a passing run alone does not preserve it. Validate both committed records
+without arming capture; this command performs no downloads:
+
+```bash
+go test -tags memory_runtime_smoke -run '^TestSmokeEvidence$' -count=1 -v ./internal/memoryruntime
+```
 
 For the integrity, publication and probe design, see the
 [package overview](knowledge/features/memoryruntime-package.md) and
