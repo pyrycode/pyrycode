@@ -383,6 +383,49 @@ func TestResponseIO(t *testing.T) {
 	responseClean(t, s, b)
 }
 
+func TestResponseIOAtChunkBoundary(t *testing.T) {
+	_, o := responseOwner(t)
+	for _, failure := range []struct {
+		name string
+		err  error
+	}{
+		{"unexpected EOF", io.ErrUnexpectedEOF},
+		{"source error", errors.New("secret native path and request content")},
+	} {
+		for _, boundary := range []struct {
+			name        string
+			size, limit int64
+		}{
+			{"known", 3, 3},
+			{"incremental", -1, 32768},
+		} {
+			t.Run(failure.name+"/"+boundary.name, func(t *testing.T) {
+				body := strings.NewReader(strings.Repeat("x", int(boundary.limit)))
+				s := &responseSource{Reader: responseReadFunc(func(buf []byte) (int, error) {
+					n, err := body.Read(buf)
+					if n > 0 {
+						return n, failure.err
+					}
+					return n, err
+				})}
+				b := &responseBudget{ceiling: boundary.limit + 1}
+				p, err := o.Prepare(context.Background(), testHost, testApp, "1.0.0", responseInput(s, boundary.size, boundary.limit, b))
+				if p != nil {
+					p.Close()
+					t.Fatal("prepared a body after a source failure")
+				}
+				if err != ErrResponseIO {
+					t.Fatalf("got %v, want sanitized ErrResponseIO", err)
+				}
+				if s.reads.Load() != 1 {
+					t.Fatalf("read %d times after a source failure", s.reads.Load())
+				}
+				responseClean(t, s, b)
+			})
+		}
+	}
+}
+
 type responseErrorReader struct{}
 
 func (responseErrorReader) Read([]byte) (int, error) { return 0, errors.New("secret native path") }

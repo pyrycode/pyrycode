@@ -29,6 +29,7 @@ func (p *PreparedResponse) stage(in ResponseInput) error {
 		return ErrResponseCapacity
 	}
 	emptyReads := 0
+	readFailed := false
 	reader := responseReadFunc(func(buf []byte) (int, error) {
 		n, err := p.source.Read(buf)
 		if n == 0 && err == nil {
@@ -40,6 +41,7 @@ func (p *PreparedResponse) stage(in ResponseInput) error {
 			emptyReads = 0
 		}
 		if err != nil && err != io.EOF {
+			readFailed = true // ReadFull discards errors when the returned bytes fill its buffer.
 			err = ErrResponseIO
 		}
 		return n, err
@@ -68,7 +70,7 @@ func (p *PreparedResponse) stage(in ResponseInput) error {
 		if int64(filled) > in.Limit-total {
 			return ErrResponseLimit
 		}
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		if readFailed || (err != nil && err != io.EOF && err != io.ErrUnexpectedEOF) {
 			return ErrResponseIO
 		}
 		total += int64(filled)
