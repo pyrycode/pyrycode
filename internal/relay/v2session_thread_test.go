@@ -355,8 +355,8 @@ func TestV2Session_ThreadReplay(t *testing.T) {
 		t.Fatalf("replay: %#v", got)
 	}
 	stop()
-	if mgr.sessions[v2TestConnID].replayThrough != 3 || len(mgr.sessions[v2TestConnID].replayQueue) != 0 {
-		t.Fatal("replay failed to advance/drain")
+	if mgr.sessions[v2TestConnID].replayThrough != 0 || len(mgr.sessions[v2TestConnID].replayQueue) != 0 {
+		t.Fatal("thread connection entered legacy replay")
 	}
 }
 

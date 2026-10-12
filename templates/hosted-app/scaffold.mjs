@@ -5,12 +5,7 @@ import { parseArgs } from 'node:util';
 import './source/src/service/runtime.mjs';
 
 const source = fileURLToPath(new URL('./source/', import.meta.url));
-const files = ['package.json', 'package-lock.json', '.npmrc', '.gitignore',
-  'tsconfig.web.json', 'tsconfig.service.json', 'scripts/build.mjs',
-  'src/web/App.tsx', 'src/web/main.tsx', 'src/web/style.css', 'src/web/assets.d.ts',
-  'src/service/main.ts', 'src/service/migrate.ts', 'src/service/runtime.mjs',
-  'src/service/environment.ts', 'src/service/database.ts', 'src/service/migrations.ts', 'src/service/health.ts',
-  'sql/migrations/0001_preferences.sql', 'test/app.test.mjs', 'test/service.test.mjs'];
+const files = JSON.parse(readFileSync(new URL('./inventory.json', import.meta.url), 'utf8'));
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const space = /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]$/u;
 

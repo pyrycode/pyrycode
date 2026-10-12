@@ -195,14 +195,12 @@ type wakeSignal struct {
 	kind wakeKind
 }
 
-// snapshotReq is enqueued by (*V2SessionManager).ActiveConns and dequeued
-// by Run on the snapshot channel arm. reply is per-request (cap=1) so Run's
-// reply send is non-blocking even if the caller's ctx fires between enqueue
-// and reply. Mirrors manualRekeyReq minus the per-conn inputs — a snapshot
-// takes no addressed-conn argument. The reply carries the capability-aware
-// enumeration ([]ActiveConn).
+// snapshotReq serializes connection enumeration on Run. The optional conversation
+// restricts the snapshot to its eligible thread consumers. A buffered reply lets
+// Run complete even when the requesting context is cancelled.
 type snapshotReq struct {
-	reply chan []ActiveConn
+	reply              chan []ActiveConn
+	threadConversation *string
 }
 
 // appReplyMsg carries one handler reply from a per-conn worker goroutine
@@ -806,7 +804,7 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 		case <-m.replayCh:
 			m.drainReplayOnce(runCtx)
 		case req := <-m.snapshot:
-			req.reply <- m.handleActiveConns()
+			req.reply <- m.handleConnSnapshot(req)
 		case rep := <-m.appReply:
 			// A per-conn worker (routeAppFrame) produced a handler reply
 			// off-Run; seal it here so every s.send.Encrypt stays on the
@@ -1009,6 +1007,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		switch probeEnv.Type {
 		case protocol.TypeListApps, protocol.TypeAppCancel:
 			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
+			return
+		case protocol.TypeThreadCatchUp:
+			m.admitThreadCatchUp(ctx, s, plaintext)
 			return
 		case protocol.TypeRekeyRequest:
 			m.handleRekeyRequest(ctx, s, probeEnv)

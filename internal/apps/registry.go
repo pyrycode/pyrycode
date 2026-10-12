@@ -19,6 +19,7 @@ var (
 	ErrCapacity         = errors.New("apps: registration capacity reached")
 	ErrExhausted        = errors.New("apps: revision exhausted")
 	ErrInvalidLifecycle = errors.New("apps: invalid lifecycle")
+	ErrStale            = errors.New("apps: obsolete observation")
 )
 
 // LastError holds a safe lifecycle failure, never process output or file paths.
@@ -30,15 +31,17 @@ type LastError struct {
 // Record is a committed registration. Empty release strings mean unset.
 // Manifest updates preserve all committed display and lifecycle fields.
 type Record struct {
-	AppID          string     `json:"app_id"`
-	Manifest       Manifest   `json:"manifest"`
-	Title          string     `json:"title"`
-	Desired        string     `json:"desired"`
-	State          string     `json:"state"`
-	ActiveRelease  string     `json:"active_release,omitempty"`
-	PendingRelease string     `json:"pending_release,omitempty"`
-	LastError      *LastError `json:"last_error,omitempty"`
-	Revision       uint64     `json:"revision"`
+	AppID          string          `json:"app_id"`
+	Manifest       Manifest        `json:"manifest"`
+	Title          string          `json:"title"`
+	Desired        string          `json:"desired"`
+	State          string          `json:"state"`
+	ActiveRelease  string          `json:"active_release,omitempty"`
+	PendingRelease string          `json:"pending_release,omitempty"`
+	LastError      *LastError      `json:"last_error,omitempty"`
+	Revision       uint64          `json:"revision"`
+	ReleaseHistory []Release       `json:"release_history,omitempty"`
+	PublishJournal *PublishJournal `json:"publish_journal,omitempty"`
 }
 
 // Registry serializes durable mutations and readers. Open one owner per root;
@@ -73,7 +76,15 @@ func (r *Registry) Remove(appID string) (bool, error) { return r.change("remove"
 func (r *Registry) change(action, appID string, data []byte, update *lifecycleUpdate) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.changeLocked(action, appID, data, update)
+}
+
+// changeLocked validates, persists and notifies with the registry mutex held.
+func (r *Registry) changeLocked(action, appID string, data []byte, update *lifecycleUpdate) (bool, error) {
 	if update != nil {
+		if update.ctx != nil && update.ctx.Err() != nil {
+			return false, update.ctx.Err()
+		}
 		if !validID(update.serverID) {
 			return false, ErrInvalidIdentity
 		}
@@ -114,6 +125,9 @@ func (r *Registry) change(action, appID string, data []byte, update *lifecycleUp
 	if index < 0 && action != "register" {
 		return false, ErrNotFound
 	}
+	if update != nil && update.expected != 0 && update.expected != r.snapshot.Records[index].Revision {
+		return false, ErrStale
+	}
 	if index >= 0 && (action == "register" || action == "update") {
 		if r.snapshot.Records[index].Manifest == manifest {
 			return false, nil
@@ -127,11 +141,37 @@ func (r *Registry) change(action, appID string, data []byte, update *lifecycleUp
 	}
 	next := cloneSnapshot(r.snapshot)
 	if update != nil {
-		applyLifecycle(&next.Records[index], update.fields)
-		if e := validateSnapshot(next); e != nil {
+		if update.metadata != nil {
+			if e := update.metadata(&next.Records[index]); e != nil {
+				return false, e
+			}
+			next.Records[index] = cloneRecord(next.Records[index])
+		} else if update.observation == nil {
+			applyLifecycle(&next.Records[index], update.fields)
+		} else {
+			record := &next.Records[index]
+			o := update.observation
+			if o.Desired != "" {
+				record.Desired = o.Desired
+			}
+			if o.State != "" {
+				record.State = o.State
+				record.LastError = o.LastError
+			}
+			if update.expected == 0 && o.Desired == "available" {
+				record.State = normalizedState(*record)
+				record.LastError = nil
+			}
+			*record = cloneRecord(*record)
+		}
+		if e := validateSnapshot(r.root, next); e != nil {
+			if update.metadata != nil {
+				return false, ErrInvalidStorage
+			}
 			return false, ErrInvalidLifecycle
 		}
 		if reflect.DeepEqual(next.Records[index], r.snapshot.Records[index]) {
+			update.result = cloneRecord(next.Records[index])
 			return false, nil
 		}
 	}
@@ -156,6 +196,9 @@ func (r *Registry) change(action, appID string, data []byte, update *lifecycleUp
 		return false, e
 	}
 	r.snapshot = next
+	if update != nil {
+		update.result = cloneRecord(next.Records[index])
+	}
 	r.notify(appID)
 	return true, nil
 }

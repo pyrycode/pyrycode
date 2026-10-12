@@ -1,11 +1,15 @@
 package protocol
 
-// Thread live updates are declared outgoing vocabulary, not yet emitted.
-// They are not v1 application requests and must stay out of inboundAppTypeSet.
+// Thread vocabulary is v2; query handlers and wiring are declared separately.
+// These types must stay out of the v1 inboundAppTypeSet.
 const (
 	TypeThreadItemAdded   = "thread_item_added"
 	TypeThreadItemChanged = "thread_item_changed"
 	TypeThreadTextAppend  = "thread_text_append"
+	TypeThreadCatchUp     = "thread_catch_up"
+	TypeThreadPage        = "thread_page"
+	TypeThreadItems       = "thread_items"
+	TypeThreadReset       = "thread_reset"
 )
 
 // Error codes: wire values for the "code" field of an ErrorPayload
@@ -1123,4 +1127,14 @@ const (
 	TypeAppRemoved   = "app_removed"   // daemon → client, tombstone notification
 	TypeAppCancel    = "app_cancel"    // client → daemon, list or resource cancellation
 	TypeAppCancelled = "app_cancelled" // daemon → client, correlated cancellation reply
+)
+
+// Hosted resource vocabulary is v2-only. Handlers, producers and capability
+// activation are separate from these declarations.
+const (
+	TypeAppAssetRequest   = "app_asset_request"   // client → daemon, asset request
+	TypeAppAPIRequest     = "app_api_request"     // client → daemon, API request
+	TypeAppResponse       = "app_response"        // daemon → client, correlated metadata
+	TypeAppResponseChunk  = "app_response_chunk"  // daemon → client, correlated body chunk
+	TypeAppResponseCredit = "app_response_credit" // client → daemon, one-chunk credit
 )

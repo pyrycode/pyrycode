@@ -9,8 +9,9 @@ from `turnbridge.MapEvent`/`MapState`, operator messages and session transitions
 A new history-only type's raw payload is excluded from every connection's legacy
 history, live fan-out and reconnect replay, whether its stored `Shown` is nil,
 false or true. Only the validated runtime/startup,
-[queued-send facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) and
+[queued-send facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972),
 [agent/task facts](history-package-producers-runtime-lifecycle.md#agenttask-attribution-and-reported-endings-3030)
+and [remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973)
 have a receipt projection.
 Visibility controls the raw
 [unread watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954),
@@ -26,18 +27,19 @@ publication unless `legacyRuntimeReceipt` validates their receipt projection.
 Successful appends remain readable through raw `Store.Page` after reopening.
 Raw storage accepts arbitrary types; the transport vocabulary is closed independently.
 
-**Account known runtime, queued-send and agent/task IDs without certifying unseen content (#3026, #3030, #3031, #3032, #3167).**
+**Account known runtime, queued-send, agent/task and prompt-answer IDs without certifying unseen content (#3026, #3030, #3031, #3032, #3167, #3222).**
 `legacyRuntimeReceipt` handles exactly `main_turn_opened`, `main_tool_interrupted`,
 `main_turn_interrupted`, `session_divider`, `agent_call_observed`,
 `agent_call_result`, `agent_call_denied`, `background_task_observed`,
 `background_task_linked`, `background_task_outcome`, `background_task_gone`,
-`agent_ended_with_session`, `send_accepted`, `send_delivered`, `send_dropped` and
-`send_lost`.
+`agent_ended_with_session`, `send_accepted`, `send_delivered`, `send_dropped`,
+`send_lost` and `prompt_answered`.
 It emits `banner` with all five required fields:
 `{conversation_id, level:"info", text:"", truncated:false,
 stops_turn:false}`. It requires a nonzero successful durable ID, nonzero entry
 timestamp and matching conversation. Queued acceptance requires nonzero
-`accepted_at`; every other supported fact requires nonzero `occurred_at`.
+`accepted_at`; prompt answers require nonzero `resolved_at` equal to the entry
+timestamp; other supported facts require nonzero `occurred_at`.
 `validQueuedSendFact` additionally requires nonzero `accepted_entry_id` for
 queued outcomes. Delivery needs nonzero `delivery_entry_id` and exactly
 `reason: delivered`; drops accept only `removed` or `give_up`; loss accepts only
@@ -62,6 +64,15 @@ missing identity. This admits legacy recovery with unavailable lifetime/source
 attribution without fabricating it. Receipt validation checks this shape;
 [recovery matching](history-package-producers-runtime-lifecycle.md#recover-agenttask-work-and-original-identities-3032)
 separately uses original observations and identities to suppress repeated endings.
+`validPromptAnswerFact` requires the original nonempty correlation, remote actor
+source, present/nonnull producer fields (including explicit booleans), bounded
+typed context and known decision/behavior pairs. `allow`/`answer` require `allow`;
+`deny`/`cancel`/`refusal` require `deny` without a session grant. Unknown context
+fields or invalid question/value shapes are rejected. Optional asking-session
+identity/provenance remains optional; current routing and stored visibility
+cannot authorize accounting. Only the neutral banner crosses: no decisions,
+prompt/answer/tool context, correlations, session identities or provenance.
+See the [full answer validation contract](history-package-producers.md#resolved-remote-prompt-answers-2973).
 Malformed facts and arbitrary unknown types stay holes, never harmless receipts.
 The unchanged mobile decoder counts valid info receipts toward legacy latest
 without drawing content or changing turn, permission, model or status state.
@@ -96,6 +107,15 @@ access and isolation gates apply on every lane. Receipt notification uses the
 to keep queue callbacks independent of peer delivery. `closeStartupSends` stays
 history-only: valid `send_lost` entries appear as paged receipts without startup
 live traffic or replay backfill.
+
+Prompt answers also bypass `emit`. `recordPromptAnswer` serializes its single
+append and synchronous receipt publication using `promptAnswerPublisher`,
+without holding bridge/registry locks across delivery. A bounded notification
+mailbox could silently lose successfully appended answers. Its shared ring is
+installed before answer workers start, records even without recipients and
+retains the captured conversation. Page/live/replay bytes, durable ID and
+timestamp agree; nil/failed storage and losing/duplicate resolutions produce no
+receipt. Child verdicts, dismissal and authoritative thread behavior stay intact.
 
 Raw visibility and legacy unread targets differ (#3029): the
 [legacy watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
@@ -149,7 +169,7 @@ recipient gates keep their original meaning.
 | Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; validated nonvisual receipts count toward legacy latest. |
 | Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Raw payloads stay off legacy transports; validated receipts count toward legacy latest for either visibility value and confer no foreground presentation. |
 | [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. Raw payloads stay off legacy transports; validated receipts count toward legacy latest regardless of visibility and confer no sight. Running facts share page/live/replay identities; startup loss is page-only. |
-| [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the future fold, with original asking-session provenance when known. Excluded from legacy pages, live traffic, reconnect replay and nonvisual receipts; open prompts remain live-only. |
+| [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the fold, with optional original asking-session provenance. Raw payloads stay off legacy transports; validated five-field nonvisual receipts count toward legacy latest regardless of visibility, with identical page/live/replay bytes and original durable ID/timestamp. Invalid facts remain holes; receipts confer no presentation or read-mark authority. Open prompts remain live-only. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -354,6 +374,12 @@ again:**
   `TestAgentHistory_GoneReceiptBarriers` rejects malformed gone facts, incorrect
   gone statuses, unrelated unknown types and absent storage identities; a valid
   receipt bridges its own durable checkpoint hole only.
+- **Probe both approval locks during receipt delivery.**
+  `promptReceiptBroadcaster.Push` snapshots the registry while holding the bridge
+  mutex, releases it, then uses `Lookup` to acquire the registry mutex. This
+  checks that answer publication holds neither lock across peer delivery.
+  Adjacent `Lock`/`Unlock` alone triggers staticcheck SA2001; a meaningful snapshot
+  preserves the deadlock probe while passing lint.
 - **Reuse legacy IDs after recovery, not just across repeated starts.**
   `TestStartupHistoryReferenceIsolation` saves full and tool-only recovery before
   newer scoped work reuses the turn/tool IDs, then checks that the newer work

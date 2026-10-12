@@ -12,9 +12,21 @@ import (
 	"time"
 )
 
+// testRoot resolves t.TempDir() to its real path. On macOS the default temp
+// directory sits under a symlink (/var -> /private/var), and privateDir
+// deliberately refuses to traverse a symlinked path component, so an
+// unresolved TempDir looks identical to a path-traversal attack.
+func testRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 func testOpen(t *testing.T) *Registry {
 	t.Helper()
-	r, e := Open(filepath.Join(t.TempDir(), "apps"), testHost)
+	r, e := Open(filepath.Join(testRoot(t), "apps"), testHost)
 	if e != nil {
 		t.Fatal(e)
 	}

@@ -35,12 +35,26 @@ protect the row: `agentTaggedForConn` and `withheldFromConn` read its binding
 when `Run` seals, so a later switch could otherwise change the first outcome's
 agent or recipients. `FlushPushes` inserts payload-free FIFO markers in the
 current connections' push queues and waits off `Run` for preceding pushes to
-pass gates and sealing, or for each connection to close. Transport-down and
-replay holds retain markers until recovery; later pushes cannot extend the wait,
-and daemon cancellation releases it. Markers never reach the wire or logs.
-See [switch publication and exclusion](conversation-session-binding.md#switching-to-the-other-agent-2672), the
+pass gates and forwarding, or for each connection to close. Transport-down,
+replay and ordered-lane capacity holds retain markers until recovery, including
+a supplied reading's pending fresh half after its clear. Later pushes cannot
+extend the wait; caller cancellation, including daemon shutdown, releases it.
+This is a source-queue fence: hosted forwarding admits unsealed plaintext to
+the ordered lane, so flush completion does not establish transport receipt or
+peer consumption. Markers need no delivery slot and never reach the wire or
+logs, but cannot overtake preceding held output. See
+[ordered delivery](#hosted-discovery-and-ordered-delivery),
+[switch publication and exclusion](conversation-session-binding.md#switching-to-the-other-agent-2672), the
 [presence contract](protocol-package-types-session-settings-payloads.md#agent-switch-presence-and-round-trip-testing)
 and [completion-test barriers](development-verification.md#prove-that-tests-distinguish-the-change).
+
+A control reply can overtake undrained source pushes. Before using one as a
+trailing sentinel for absent stale patches or extra completion frames, await
+`FlushPushes` so all earlier pushes have entered the ordered lane. The sentinel
+can then bound the wire observation; the flush alone still does not certify
+transport acceptance. `TestThreadCatchUpJoinedLive` fences stale and later
+same-version patches before its control reply. See the
+[query/live completion cut](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
 
 `attachment_chunk` (#1897) is a second control-class arm that also runs off `Run`, but through this same `appFrameWorker` queue rather than a new per-request goroutine like `debug_bundle`'s — its per-chunk work (hash + write, on the completing chunk, up to the per-upload byte bound) is exactly the class #1491 had to move off `Run`, but it recurs per-chunk rather than once per request, which fits the existing FIFO worker better than a fresh goroutine per frame would. This is the first type to make `V2Session.appFrames` carry more than one shape: the channel's element widened from `[]byte` to a two-field `appFrameJob{plaintext []byte; attachment bool}`, and the worker branched on the tag to send the frame to `handleAttachmentChunk` instead of `dispatch.Route`. The routing decision is made exactly once, in `dispatchAppFrame`'s case selector — the alternative considered and rejected was re-probing the envelope type inside the worker instead of tagging the job, which would let the routing decision live in two places that could silently disagree, and would let a future edit delete the `dispatchAppFrame` case (breaking `TestEveryInboundV2TypeHasHandler`, which reads case selectors as the registry of these decisions) while the worker-side probe kept the frame working anyway, masking the guard's whole point. See [Inbound attachment_chunk](v2-session-manager-state-machine-inbound-attachment-chunk-attachmentintake-seam.md). — freeing `Run` to service every other select arm (other conns' frames, `m.wake`, `m.modalTimeout`, `m.manualRekey`) while the worker executes the handler. The worker drains `s.appFrames` in strict FIFO order — one frame fully routed (its `Route` call returned and every reply forwarded) before the next is dequeued — so no two handlers for the same conn ever run concurrently, and each reply crosses back to `Run` via a new unbuffered `V2SessionManager.appReply` channel (`chan appReplyMsg`), where `forwardAppReply` (now gated on `s.state == V2StateOpen`, dropping replies for a session torn down mid-handler) seals it under `s.send`. Every Noise cipher operation — `s.send.Encrypt`, `s.recv.Decrypt` — and every mutation of `s.state`/timers/`m.sessions`/`m.queues` keys stays exclusively on `Run`; the worker only ever touches its own conn's `s.appFrames`/`s.done` (safe unsynchronized channel ops), never `s.send`/`s.recv`/`s.state` directly, so `V2Session` still carries no lock. This closes the reply-*latency* head-of-line stall #909 explicitly deferred (#909 fixed the reply-*count* deadlock — a handler emitting more than `handlerOutboundBuf` replies — not this one). (Since #721 `send_message` is no longer the worst case for this reason alone: it now enqueues non-blocking and acks, so its `Activate`/`WriteUserTurn` blocking moved off the dispatch goroutine onto the daemon's `msgqueue` drain — see [features/msgqueue-package.md](msgqueue-package.md). `create_conversation`'s 30s `Activate` wait remains the concrete slow-handler case #965 targets.)
 
@@ -244,12 +258,58 @@ before any list request; list cancellation retires list work without removing
 lifecycle eligibility. See [registry callback ownership](apps-package.md#concurrency-and-persistence).
 
 The hosted output lane and callback handoff share at most 16 envelopes per
-connection, including active delivery. Separate inbox/queue limits would exceed
-that total; `hostedEnqueue` and `HostedAppsChanged` reserve from the same counter.
-Overflow cancels the generation and signals `Run` to close it, allowing fresh
-discovery to recover without silently skipping a committed revision. Completed
-and cancelled queue entries are cleared as well as releasing their reservations:
+connection, including active delivery, queued output, pending lifecycle callbacks
+and temporary ordinary-push reservations. Separate inbox/queue limits would
+exceed that total; `reserveHostedPush`, `hostedEnqueue` and `HostedAppsChanged`
+use the same counter under `hostedMu`. Lifecycle callback overflow still cancels
+only the affected generation and signals `Run` to close it at 4413, allowing
+fresh discovery to recover without silently skipping a committed revision.
+Hosted controls and rekey retain terminal admission on overflow. Completed and
+cancelled queue entries are cleared as well as releasing their reservations:
 slice backing arrays would otherwise retain envelopes beyond the logical queue.
+
+Ordinary bounded pushes wait unsealed upstream when this lane is full. A legal
+reconnect batch can exceed the destination's 16 slots even for an
+`interactive`-only client whose handshake installs hosted delivery; popping the
+batch without destination admission would turn delayed transport completion
+into an overflow close. `drainOnce` reserves one slot before popping, transfers
+it once into `hostedEnqueue`, and releases unused capacity if forwarding filters
+or rejects the head. Callback admission competes atomically with that reservation
+and may still retire the generation on genuine overflow. `pushMu` and `hostedMu`
+are taken separately. Candidate selection alone cannot protect quarantine across
+that off-lock admission: the final pop must reread the queue's retirement latch
+under `pushMu`, or `RetireLiveState` or byte-ceiling retirement could leave a
+quarantined head eligible for delivery. `TestHostedPushAdmissionRetirement`
+forces both races and checks that declined output returns its reservation.
+
+`releaseHosted` signals the drain when capacity returns, including delivery
+completion through `handleHostedDone` and cancelled queued pages. Capacity-held
+connections do not re-signal themselves; another connection and manager control
+work can progress, and held output resumes without another producer push.
+Inline ordinary replies use the same reservation or enter the bounded upstream
+FIFO as already-projected plaintext. The queue's `ready` tag prevents projection
+and revision checks from being applied twice. Supplying a fresh reading behind
+a deferred clear preserves their upstream order; see
+[supplied current-state delivery](#supplied-current-state-delivery).
+
+Off-Run `DeliverThread` callers wait for this same inbox's capacity and terminal
+transport outcome; a full lane must defer admission rather than report success
+or overflow for a legal codec sequence. Keep the capacity notification tied to
+the captured inbox generation, so a reused connection ID cannot admit old work
+into its replacement. Buffered result publication never blocks Run. The caller
+retains its own result-channel reference: `hostedOutput.finish` clears the
+output's mutable field, so reading that field again could strand the waiter.
+Enqueue, `forwardToRun` handoff and source flush do not prove callback acceptance;
+see [delivery outcomes](../../protocol-mobile.md#ordered-delivery-and-eligibility).
+
+`DeliverThread`'s JSON round-trip detaches input only when decoding into a fresh
+zero-value `Envelope`. Decoding into a shallow copy can reuse borrowed
+`json.RawMessage` backing arrays and pointer fields, rewriting producer bytes
+and allowing later mutations to change queued output. `TestThreadDeliveryInputIsolation`
+uses whitespace-bearing JSON and shared metadata, authenticates reuse for a
+second recipient, and mutates producer data after admission to verify the queued
+snapshot stays independent.
+
 `hostedEnvelope` admits plaintext; `hostedDeliver` assigns a fresh connection-local
 sender ID and seals only the selected head on `Run`. Mixing pre-sealed legacy
 pushes/replies with queued hosted plaintext would spend Noise nonces in a different
@@ -262,6 +322,23 @@ the connection. `TestHostedDiscoveryOrderedDelivery` and
 `TestHostedDiscoveryRekeyOrdering` decrypt resumed output and check IDs; merely
 running the race detector would miss ordering defects.
 
+`TestReadinessLegacyReconnectSnapshotCapacity` holds the real transport's
+acknowledgment through handshake completion, proves `FlushPushes` is still
+waiting, releases delivery, then decrypts 64 distinct retained model lists once
+in FIFO order with increasing sender IDs. Transport entry alone is too early
+to fence handshake reconciliation: wait for the separate Run barrier before
+starting flush, or an empty source queue could make a broken drain appear sound.
+Awaiting successful flush before releasing acknowledgment would deadlock the
+correct capacity hold. Fixture observation channels must accommodate the full
+batch or be consumed concurrently; a 32-entry tap can block a 64-frame proof
+independently of production capacity. A subsequent transport receipt and wire
+marker check for trailing duplicate or terminal output beyond the source fence.
+`TestHostedPushCapacityPendingFence` additionally prevents a marker passing an
+admitted clear while its fresh reading still waits outside the lane; ordinary
+FIFO ordering alone would miss that violation. `TestHostedPushCapacityDelivery`
+and `TestHostedPushCapacityTeardown` cover resume, disconnect and caller
+cancellation. See [completion-test barriers](development-verification.md#prove-that-tests-distinguish-the-change).
+
 Checking the original session on completion does not fence a delayed terminal
 close addressed by connection ID. `hostedCloseContext` gives it a cancellable
 lifetime; `handleFrame` calls `cancelHostedClose` when creating a replacement,
@@ -271,9 +348,17 @@ old events and overflow signals out of a reused connection. `TestHostedLifecycle
 holds both predecessor delivery and terminal close through the replacement
 handshake, then releases them and decrypts new discovery/notification output.
 An admission or completion-only assertion would miss a late predecessor close.
+A down/up fixture must also await terminal-close publication before recording
+the next handshake's output offset: session deletion alone can leave the old
+close looking like the new Noise response. `TestThreadDeliveryFailure` uses
+`testHostedClose` to fence both publication and retirement before reopening.
 
 `hostedSender` selects `HostedAppsSend` or `OutboundContext`, never context-free
-`Outbound`. The callback must honor cancellation/deadlines through actual I/O
+`Outbound`. A thread handshake initializes this lane only with `OutboundContext`
+(or the existing hosted configuration); installing it on an outbound-only legacy
+connection would retire otherwise valid traffic. `DeliverThread` returns
+`ErrConnNotFound` when no ordered lane exists. The callback must honor
+cancellation/deadlines through actual I/O
 and suppress publication after retirement. A goroutine around a synchronous
 callback cannot establish that guarantee. Missing safe adapters retire locally
 before sealing or worker creation, including unsupported controls while
@@ -318,9 +403,10 @@ or sealing from its producer would violate `Run`'s single-writer ownership.
 `ThreadLiveState` instead returns a detached, nonblocking cursor with no resource
 needing closure. `drainLiveOnce` consumes at most one reading per pass; the
 generated family clear and its fresh reading take separate passes. `Run` owns
-the cursor, pending fresh state and delivered watermarks. Transport-down holds
-before consuming a cursor or popping queued input; reconnect re-signals the
-pump, and cancellation/teardown end delivery. `TestLiveStatePacing` and
+the cursor, pending fresh state and delivered watermarks. Transport-down and
+ordered-lane capacity holds apply before consuming a cursor or popping queued
+input; reconnect or capacity release re-signals the pump, and
+cancellation/teardown end delivery. `TestLiveStatePacing` and
 `TestLiveStateRun` exercise a snapshot larger than push capacity without overflow.
 
 Queued live updates drain before the next snapshot reading, so connect state
@@ -329,6 +415,11 @@ can be overtaken. Snapshot and live delivery must use the same
 to keep that snapshot from restoring stale state. `PushLiveState` copies payload,
 session tag and correlation values beside the unsealed queue entry; looking up
 the current binding later could retag old output as fresh. A fresh reading is
-parked only after its clear forwards successfully. Retaining it earlier turns a
-failed clear into an endlessly re-signaled pending read, blocking unrelated
-queued and snapshot state; see [complete-envelope validation](protocol-package-types-envelope.md#live-state-session-metadata).
+parked in `livePending` only after its clear forwards successfully into the
+delivery lane. If inline delivery instead defers the clear upstream, its fresh
+reading follows in the same bounded FIFO. A capacity-held `livePending` gates
+that connection's queued heads, including flush markers, until admission;
+otherwise a fence could report completion between clear and fresh. Retaining
+fresh state after a failed clear would create an endlessly re-signaled pending
+read, blocking unrelated queued and snapshot state; see
+[complete-envelope validation](protocol-package-types-envelope.md#live-state-session-metadata).

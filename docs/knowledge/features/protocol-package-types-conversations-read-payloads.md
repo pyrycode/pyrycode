@@ -87,7 +87,10 @@ const (
   `last_shown_version > read_up_to`; this changes neither read-mark storage nor
   the legacy watermark, and `CurrentSessionID` remains the stored binding.
   Projection adds no absent binding/watermark fields to `conversation_updated`.
-  Production providers remain pending #3077. See
+  Production installs the fold-backed provider through `installDaemonThreadRelay`;
+  registered usable zero is authoritative, while missing/not-loaded or failed
+  replay cannot supply a reading. Client thread catch-up/pages and reconnect
+  history initialization remain #2963. See
   [relay projection](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection)
   and [the summary contract](../../protocol-mobile.md#conversations).
 - **`WorkspaceLabel` (#2208) is resolved per row from that row's own `Cwd`, never inherited.** It belongs to the workspace, not the conversation — N rows sharing one `Cwd` carry one label — and is filled by `internal/relay/handlers.ListConversations` via a `ConversationLister.WorkspaceLabel(cwd string) (string, bool)` read method, widened onto the narrow interface for this handler alone. Presence comes from that method's second return, never from `label != ""`: the registry keeps a stored empty label distinct from an absent one (see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `WorkspaceLabel`), and deriving the pointer from the string would collapse the two into the same `null`.

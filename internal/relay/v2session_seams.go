@@ -8,6 +8,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
 // V2SessionConfig parameterises V2SessionManager. Frames, Outbound, StaticPriv,
@@ -48,12 +49,19 @@ type V2SessionConfig struct {
 	// withholds the capability: context-free Outbound cannot promise retirement.
 	HostedAppsSend func(context.Context, protocol.RoutingEnvelope) error
 
+	// ThreadCatchUp returns a detached authoritative query result off Run and must
+	// honor cancellation. Nil explicitly fails catch-up; it never loads history.
+	ThreadCatchUp func(context.Context, protocol.ThreadCatchUpPayload) (thread.QueryResult, error)
+
 	// ThreadLiveState returns a detached current-state cursor, including inactive
 	// retry/compaction and only outstanding prompts/questions with answer IDs.
 	// Factory and cursor run on Run and must be nonblocking, hold no resources
 	// needing closure, and never consult replay. Each cursor call yields one
 	// source-bound reading; false ends it. Nil supplies no readings.
 	ThreadLiveState func() func() (LiveState, bool)
+	// LiveStateCurrent checks unsolicited captures immediately before Run delivery.
+	// It must be a bounded memory read; correlated replies keep captured evidence.
+	LiveStateCurrent func(LiveState) bool
 
 	// ThreadReady must attest installation of live publication, authoritative
 	// watermark lookup and session-state reconciliation. Nil/false disables thread;
@@ -249,7 +257,8 @@ type V2SessionConfig struct {
 	ContextUsageReadingFor func(ctx context.Context, conversationID string) (LiveState, bool)
 	MCPStatusReadingFor    func(ctx context.Context, conversationID string) (LiveState, bool)
 	// ModelListReadingFor must be a bounded in-memory read. multiAgent selects the
-	// same inventory projection as ModelListFor.
+	// same inventory availability/projection as ModelListFor. A reading marked
+	// ModelListUnprojected defers capability projection to relay delivery.
 	ModelListReadingFor func(conversationID string, multiAgent bool) (LiveState, bool)
 	// SessionSettingsReadingFor supplies the base session_settings payload. Relay
 	// enriches it once with EffectiveEffortFor, CapabilitiesFor and MemorySearchFor,

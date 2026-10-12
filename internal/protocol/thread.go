@@ -32,7 +32,7 @@ type ThreadItem struct {
 	Content json.RawMessage `json:"content"`
 }
 
-// ThreadItemAddedPayload declares a new full item. It is not yet emitted.
+// ThreadItemAddedPayload declares a new full item emitted by the daemon fold publisher.
 // Version is the newest folded history entry; Epoch changes when item identities
 // may no longer have the same meaning and clients must reload the conversation.
 type ThreadItemAddedPayload struct {
@@ -42,7 +42,7 @@ type ThreadItemAddedPayload struct {
 	Item           ThreadItem `json:"item"`
 }
 
-// ThreadItemChangedPayload declares an in-place item update, not yet emitted.
+// ThreadItemChangedPayload declares an in-place item update emitted by the daemon fold publisher.
 // Clients apply it only when their item's revision equals BaseRev, otherwise
 // requesting catch-up. Rev is the resulting revision; identity and kind stay fixed.
 type ThreadItemChangedPayload struct {
@@ -59,7 +59,7 @@ type ThreadItemChangedPayload struct {
 	Changes map[string]json.RawMessage `json:"changes"`
 }
 
-// ThreadTextAppendPayload declares a message text suffix, not yet emitted.
+// ThreadTextAppendPayload declares a message text suffix emitted by the daemon fold publisher.
 // Text is appended only when the item's revision equals BaseRev; Rev is the
 // resulting revision. A mismatch requires catch-up rather than guessing.
 type ThreadTextAppendPayload struct {

@@ -295,7 +295,9 @@ type relayWiring struct {
 	// The value is already primitive to internal/relay (protocol is imported both
 	// sides), so it crosses into V2SessionConfig unwrapped. nil in foreground/v1 ⇒
 	// the verb refuses every request as model_list.unavailable.
-	modelListFor func(convID string, multiAgent bool) (protocol.ModelListPayload, bool)
+	modelListFor     func(convID string, multiAgent bool) (protocol.ModelListPayload, bool)
+	modelListReading func(string, bool) (daemonLiveReading, bool)
+	mcpStatusReading func(context.Context, string) (daemonLiveReading, bool)
 	// pushedModelOptions merges a pushed model_list's Claude entries with the
 	// daemon's Codex entries for a multi_agent conn (#2652 fills
 	// V2SessionConfig.MergedModelOptions), through the tagging modelListFor's merged
@@ -757,31 +759,12 @@ func conversationAgent(convReg *conversations.Registry, harnessFor handlers.Sess
 // sessions directory still hosts conversations bound to real sessions with real
 // settings; an unwired usage half degrades two integers and must not make a
 // resolved conversation unresolvable.
-func runConfigFor(
-	resolve func(convID string) (boundRunSettings, bool),
-	usage func(sessionID string) (usedTokens, windowTokens int),
-) func(convID string) (relay.RunConfig, bool) {
-	if resolve == nil {
+func runConfigFor(resolve func(string) (boundRunSettings, bool), usage func(string) (int, int)) func(string) (relay.RunConfig, bool) {
+	result := runConfigResultFor(resolve, usage)
+	if result == nil {
 		return nil
 	}
-	return func(convID string) (relay.RunConfig, bool) {
-		b, ok := resolve(convID)
-		if !ok {
-			return relay.RunConfig{}, false
-		}
-		cfg := relay.RunConfig{
-			SessionID:      b.sessionID,
-			Model:          b.model,
-			Effort:         b.effort,
-			YOLO:           b.yolo,
-			PermissionMode: b.permissionMode,
-		}
-		if usage != nil && b.live {
-			cfg.UsedTokens, cfg.WindowTokens = usage(b.sessionID)
-		}
-		runSettingsReading(b, cfg, protocol.Envelope{})
-		return cfg, true
-	}
+	return func(conv string) (relay.RunConfig, bool) { cfg, ok, _ := result(conv); return cfg, ok }
 }
 
 // systemPromptFor composes the conversation system-prompt read seam (#2152) into
@@ -891,6 +874,9 @@ func startRelayV2(
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("load static key: %w", err)
 	}
 	priv := staticKey.PrivateKey()
+	if w.streamSink != nil && w.streamSink.live == nil {
+		w.streamSink.live = newDaemonLiveState(func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) })
+	}
 
 	// Daemon-singleton outstanding-modal registry. Its sole live producer is the
 	// stream-json approval bridge's Surface (#1080, newStreamApprovalBridge below),
@@ -985,11 +971,13 @@ func startRelayV2(
 	}
 
 	var contextUsage func(context.Context, string) (protocol.ContextUsagePayload, bool)
+	var liveContextUsage *contextUsageResolver
 	if w.contextUsageResolve != nil {
 		resolver := newContextUsageResolver(ctx, w.contextUsageResolve, w.busy, nil)
 		resolver.rec = contextUsageRec
 		resolver.live = &daemonLiveBindings{sink: w.streamSink, reg: w.convReg}
 		contextUsage = resolver.Get
+		liveContextUsage = resolver
 	}
 
 	// Inbound attachment-upload service (#1897): the one thing the v2 session
@@ -1144,7 +1132,7 @@ func startRelayV2(
 		queueSender = suggestionQueueSender{inner: w.queue, s: suggestions}
 	}
 
-	mgr, detachApps, err := newDaemonAppsManager(relay.V2SessionConfig{
+	sessionConfig := relay.V2SessionConfig{
 		Frames:          conn.Frames(),
 		Outbound:        conn.Send,
 		OutboundContext: conn.SendContext,
@@ -1513,7 +1501,10 @@ func startRelayV2(
 		// sentinel, so internal/relay imports neither internal/sessions nor cmd/pyry.
 		// nil in foreground / v1 makes the verb reply "unavailable" deterministically.
 		SettingsUpdater: w.settings,
-	}, w.appRegistry)
+	}
+	installDaemonLiveRelay(&sessionConfig, w, liveContextUsage)
+	installDaemonThreadRelay(&sessionConfig, w.shadow)
+	mgr, detachApps, err := newDaemonAppsManager(sessionConfig, w.appRegistry)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
 	}
@@ -1596,6 +1587,10 @@ func startRelayV2(
 	// mgr.Run starts below, so streamApprovals is set before any modal_answer can
 	// dispatch on the Run goroutine — no data race on the resolver field. nil
 	// approvals (foreground/v1) leaves streamApprovals nil ⇒ nothing is actuated.
+	promptPublisher := &promptAnswerPublisher{}
+	if w.streamSink != nil {
+		promptPublisher.ring = eventring.New(eventring.MaxEventsPerConversation)
+	}
 	if w.approvals != nil {
 		bridge := newStreamApprovalBridge(w.approvals, modalReg, mgr, w.active.CurrentConversation, ctx, logger)
 		// The question arm (#1973), assigned after construction rather than passed
@@ -1608,6 +1603,7 @@ func startRelayV2(
 		// streamApprovals — no data race on the field.
 		bridge.live = &daemonLiveBindings{sink: w.streamSink, reg: w.convReg}
 		bridge.hist = w.hist
+		bridge.historyPublisher = promptPublisher
 		bridge.sessionHarness = w.sessionHarness
 		bridge.questions = questionReg
 		bridge.waker = waker
@@ -1687,6 +1683,15 @@ func startRelayV2(
 		surface = bridge.Surface
 	}
 
+	stopThreadPublication := startDaemonThreadPublisher(ctx, w.shadow, mgr)
+	stopLivePublication := func() {}
+	if w.streamSink != nil {
+		stopLivePublication = startDaemonLivePublisher(ctx, w.streamSink.live, mgr.ActiveConns, mgr.PushLiveState, func(ctx context.Context, id string) {
+			if err := mgr.RetireLiveState(ctx, id); err != nil && ctx.Err() == nil {
+				logger.Debug("relay: live retirement failed", "event", "daemon.live.retire_err")
+			}
+		}, logger)
+	}
 	mgrDone := make(chan struct{})
 	go func() {
 		defer close(mgrDone)
@@ -1724,6 +1729,7 @@ func startRelayV2(
 		// and the session-scoped replay source it registers. SetReplaySource runs at
 		// most once, because this branch does.
 		emitter := newInteractiveTurnEmitterV2(w.active, mgr, logger)
+		emitter.ring = promptPublisher.ring
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
 		// Free a removed conversation's replay events when the registry drops it
 		// (#1502); installed here because this is where the ring is born.
@@ -1880,6 +1886,8 @@ func startRelayV2(
 		streamSessionErrCleanup()
 		streamResettingCleanup()
 		streamReplySuggestionsCleanup()
+		stopLivePublication()
+		stopThreadPublication()
 		<-mgrDone
 	}, surface, announce, announceConversation, announcePost, pairingMinter.MintLocalPairing, nil
 }

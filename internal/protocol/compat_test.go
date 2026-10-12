@@ -291,6 +291,11 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 // must not, so the partition is the architectural seam between v1 traffic
 // and v2 traffic.
 var v2OnlyTypes = map[string]bool{
+	TypeAppAssetRequest:     true,
+	TypeAppAPIRequest:       true,
+	TypeAppResponse:         true,
+	TypeAppResponseChunk:    true,
+	TypeAppResponseCredit:   true,
 	TypeListApps:            true,
 	TypeApps:                true,
 	TypeAppUpdated:          true,
@@ -300,6 +305,10 @@ var v2OnlyTypes = map[string]bool{
 	TypeThreadItemAdded:     true,
 	TypeThreadItemChanged:   true,
 	TypeThreadTextAppend:    true,
+	TypeThreadCatchUp:       true,
+	TypeThreadPage:          true,
+	TypeThreadItems:         true,
+	TypeThreadReset:         true,
 	TypeRekeyRequest:        true,
 	TypeTurnState:           true,
 	TypeReplySuggestion:     true,
@@ -441,6 +450,8 @@ var v2OnlyTypes = map[string]bool{
 // caught by the "in both" branch.
 func TestTypeConstants_V1V2Partition(t *testing.T) {
 	all := []string{
+		TypeAppAssetRequest, TypeAppAPIRequest, TypeAppResponse,
+		TypeAppResponseChunk, TypeAppResponseCredit,
 		TypeListApps, TypeApps, TypeAppUpdated, TypeAppRemoved,
 		TypeAppCancel, TypeAppCancelled,
 		// v1 application types.
@@ -463,6 +474,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRegisterPushToken,
 		// v2 thread live updates.
 		TypeThreadItemAdded, TypeThreadItemChanged, TypeThreadTextAppend,
+		TypeThreadCatchUp, TypeThreadPage, TypeThreadItems, TypeThreadReset,
 		// v2 control types.
 		TypeRekeyRequest,
 		// v2 interactive application events.

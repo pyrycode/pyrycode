@@ -233,7 +233,7 @@ test('startup and readiness failures', async (t) => {
     for (const entry of ['main', 'migrate', 'health']) run(f, entry, env, false);
   }
   const invalid = { PYRY_APP_ID: ['AAAAAAAA-1111-4111-8111-111111111111', 'cccccccc-1111-4111-8111-111111111111'],
-    PYRY_SERVER_ID: ['bad'], PYRY_APP_RELEASE: ['01.0.0', '2147483648.0.0', '1.0.0\n', '1.0.1'],
+    PYRY_SERVER_ID: ['bad'], PYRY_APP_RELEASE: ['01.0.0', '2147483648.0.0', '1.0.0\n', f.env.PYRY_APP_RELEASE === '1.0.1' ? '1.0.0' : '1.0.1'],
     PYRY_APP_DATA_DIR: ['relative'], PYRY_APP_DB_PATH: ['relative', join(f.root, 'other.sqlite')],
     PYRY_APP_BIND_HOST: ['localhost', '0.0.0.0'], PYRY_APP_PORT: ['0', '65536', '1.5', '1e3', '1\n'], NODE_ENV: ['development'] };
   for (const [key, values] of Object.entries(invalid)) for (const value of values) run(f, 'migrate', { ...f.env, [key]: value }, false);

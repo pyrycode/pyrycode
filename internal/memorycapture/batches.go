@@ -1,5 +1,5 @@
 // Package memorycapture persists immutable capture inputs and caller-reported
-// attempt evidence. It does not execute agents or advance capture progress.
+// attempt evidence and acknowledged processing receipts. It does not execute agents.
 package memorycapture
 
 import (
@@ -59,10 +59,11 @@ type Store struct {
 }
 
 type record struct {
-	Version  int
-	Identity Identity
-	Batch    Batch
-	Checksum string
+	Version   int
+	Identity  Identity
+	Batch     Batch
+	Checksum  string
+	Completed []Batch `json:",omitempty"`
 }
 
 func digest(v any) string {
@@ -116,11 +117,12 @@ func New(home string) (*Store, error) {
 }
 
 // Publish durably publishes a payload or returns the existing pending batch.
-// A nil batch accompanies every error, including ambiguous post-rename failures.
+// A nil batch accompanies every error, including ambiguous post-rename failures,
+// and successful publication of an already acknowledged payload.
 func (s *Store) Publish(ctx context.Context, id Identity, p Payload) (*Batch, error) {
 	var result *Batch
 	err := s.transaction(ctx, id, func(r *record) (*record, error) {
-		if r != nil {
+		if r != nil && r.Batch.ID != "" {
 			result = &r.Batch
 			return nil, nil
 		}
@@ -136,9 +138,18 @@ func (s *Store) Publish(ctx context.Context, id Identity, p Payload) (*Batch, er
 		if err = json.Unmarshal(raw, &frozen); err != nil {
 			return nil, ErrInvalid
 		}
-		next := &record{Version: 1, Identity: id, Batch: Batch{ID: batchID(id, frozen), Payload: frozen}}
-		result = &next.Batch
-		return next, nil
+		batch := Batch{ID: batchID(id, frozen), Payload: frozen}
+		if r == nil {
+			r = &record{Identity: id}
+		}
+		for _, done := range r.Completed {
+			if done.ID == batch.ID {
+				return nil, nil
+			}
+		}
+		r.Version, r.Batch = 2, batch
+		result = &r.Batch
+		return r, nil
 	})
 	if err != nil {
 		return nil, err
@@ -150,7 +161,7 @@ func (s *Store) Publish(ctx context.Context, id Identity, p Payload) (*Batch, er
 func (s *Store) Pending(ctx context.Context, id Identity) (*Batch, error) {
 	var result *Batch
 	err := s.transaction(ctx, id, func(r *record) (*record, error) {
-		if r != nil {
+		if r != nil && r.Batch.ID != "" {
 			result = &r.Batch
 		}
 		return nil, nil
@@ -170,7 +181,7 @@ func (s *Store) Report(ctx context.Context, id Identity, batch string, paths []s
 		}
 	}
 	return s.transaction(ctx, id, func(r *record) (*record, error) {
-		if r == nil || r.Batch.ID != batch {
+		if r == nil || r.Batch.ID == "" || r.Batch.ID != batch {
 			return nil, ErrMismatch
 		}
 		union := make(map[string]bool)

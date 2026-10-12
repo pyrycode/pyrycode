@@ -1,5 +1,7 @@
 package apps
 
+import "context"
+
 // Lifecycle replaces the committed display and lifecycle fields as one change.
 // Empty releases and a nil LastError mean unset. Callers supply confirmed observed
 // state and static safe errors, never raw parser, process or I/O diagnostics.
@@ -13,8 +15,47 @@ type Lifecycle struct {
 }
 
 type lifecycleUpdate struct {
-	serverID string
-	fields   Lifecycle
+	serverID    string
+	fields      Lifecycle
+	expected    uint64
+	observation *Observation
+	result      Record
+	ctx         context.Context
+	metadata    func(*Record) error
+}
+
+// Observation changes state/error and optionally explicit desired intent. Display
+// fields and releases are preserved. Empty Desired retains the current intent.
+// Empty State retains state/error; a supplied State replaces LastError too.
+type Observation struct {
+	Desired   string
+	State     string
+	LastError *LastError
+}
+
+// CommitObservation rejects an obsolete app revision without writes or events.
+// A successful no-op also returns the current detached record.
+func (r *Registry) CommitObservation(serverID, appID string, expectedRevision uint64, observation Observation) (Record, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.commitObservationLocked(serverID, appID, expectedRevision, observation)
+}
+
+// commitObservationLocked shares the public observation contract under the registry lock.
+func (r *Registry) commitObservationLocked(serverID, appID string, expectedRevision uint64, observation Observation) (Record, bool, error) {
+	if expectedRevision == 0 {
+		return Record{}, false, ErrStale
+	}
+	u := &lifecycleUpdate{serverID: serverID, expected: expectedRevision, observation: &observation}
+	changed, err := r.changeLocked("lifecycle", appID, nil, u)
+	return u.result, changed, err
+}
+
+// intentLocked preserves committed fields under the caller-held registry mutex.
+func (r *Registry) intentLocked(ctx context.Context, appID, desired string) (Record, error) {
+	u := &lifecycleUpdate{serverID: r.snapshot.ServerID, observation: &Observation{Desired: desired}, ctx: ctx}
+	_, err := r.changeLocked("lifecycle", appID, nil, u)
+	return u.result, err
 }
 
 // UpdateLifecycle commits confirmed observations for an existing local identity.
@@ -32,6 +73,17 @@ func applyLifecycle(record *Record, fields Lifecycle) {
 }
 
 func cloneRecord(record Record) Record {
+	if record.ReleaseHistory != nil {
+		record.ReleaseHistory = append([]Release{}, record.ReleaseHistory...)
+	}
+	if record.PublishJournal != nil {
+		copy := *record.PublishJournal
+		if copy.Previous != nil {
+			previous := *copy.Previous
+			copy.Previous = &previous
+		}
+		record.PublishJournal = &copy
+	}
 	if record.LastError != nil {
 		copy := *record.LastError
 		record.LastError = &copy

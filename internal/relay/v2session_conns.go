@@ -94,7 +94,17 @@ type ActiveConn struct {
 // empty non-nil slice are interchangeable (both len 0); a snapshot has no
 // failure the caller can act on, so no error is returned.
 func (m *V2SessionManager) ActiveConns(ctx context.Context) []ActiveConn {
-	req := snapshotReq{reply: make(chan []ActiveConn, 1)}
+	return m.activeConns(ctx, nil)
+}
+
+// ActiveThreadConns returns open thread consumers eligible for this conversation.
+// Selection shares delivery's membership and agent gates; delivery rechecks them.
+func (m *V2SessionManager) ActiveThreadConns(ctx context.Context, conversation string) []ActiveConn {
+	return m.activeConns(ctx, &conversation)
+}
+
+func (m *V2SessionManager) activeConns(ctx context.Context, conversation *string) []ActiveConn {
+	req := snapshotReq{reply: make(chan []ActiveConn, 1), threadConversation: conversation}
 	select {
 	case m.snapshot <- req:
 	case <-ctx.Done():
@@ -106,6 +116,21 @@ func (m *V2SessionManager) ActiveConns(ctx context.Context) []ActiveConn {
 	case <-ctx.Done():
 		return nil
 	}
+}
+
+func (m *V2SessionManager) handleConnSnapshot(req snapshotReq) []ActiveConn {
+	conns := m.handleActiveConns()
+	if req.threadConversation == nil {
+		return conns
+	}
+	eligible := conns[:0]
+	for _, conn := range conns {
+		s := m.sessions[conn.ConnID]
+		if s.thread && !m.liveWithheld(s, *req.threadConversation) && !m.pushRetired(conn.ConnID) {
+			eligible = append(eligible, conn)
+		}
+	}
+	return eligible
 }
 
 // handleActiveConns runs on Run's dispatch goroutine — the only site that
