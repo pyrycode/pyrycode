@@ -78,6 +78,16 @@ func liveDrain(t *testing.T, mgr *V2SessionManager, rec *v2Recorder, recv *noise
 		if mgr.sessions[v2TestConnID].thread && (env.EventID != nil || env.HistoryEntryID != nil) {
 			t.Fatal("live state has replay/history identity")
 		}
+		if mgr.sessions[v2TestConnID].thread {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			var conversation string
+			if json.Unmarshal(fields["conversation_id"], &conversation) != nil || conversation == "" {
+				t.Fatal("live state lacks conversation routing identity")
+			}
+		}
 		out = append(out, env)
 	}
 	*seen = len(rec.snapshot())
@@ -365,6 +375,7 @@ func TestLiveStateGeneratedClearBound(t *testing.T) {
 	t.Parallel()
 	bad := liveReading("turn_state", gateClaudeConv, "", `"s"`, 1, 1)
 	bad.Envelope.Payload = json.RawMessage(`{}`)
+	bad.Envelope.ConversationID, _ = json.Marshal(bad.ConversationID)
 	raw, err := json.Marshal(bad.Envelope)
 	if err != nil {
 		t.Fatal(err)
@@ -505,5 +516,40 @@ func TestLiveStateRun(t *testing.T) {
 	}
 	if got := mgr.ActiveConns(t.Context()); len(got) != 1 {
 		t.Fatal("snapshot overflow closed connection")
+	}
+}
+
+func TestLiveStateCapturedEligibility(t *testing.T) {
+	m, s, rec, _ := liveFixture(t, threadCaps, nil)
+	r := liveReading(protocol.TypeModalShown, gateClaudeConv, "prompt", `"source"`, 1, 1)
+	eligible := false
+	r.Answerable = &eligible
+	before := len(rec.snapshot())
+	if err := m.PushLiveState(t.Context(), s.connID, r); err != nil {
+		t.Fatal(err)
+	}
+	eligible = true
+	m.drainOnce(t.Context())
+	if len(rec.snapshot()) != before || len(s.liveWatermarks) != 0 {
+		t.Fatal("queued prompt eligibility was reconstructed or advanced ordering")
+	}
+}
+
+func TestRetireLiveState(t *testing.T) {
+	m, s, _, _ := liveFixture(t, threadCaps, nil)
+	if err := m.RetireLiveState(t.Context(), s.connID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-m.pushOverflow:
+		m.handlePushOverflow(t.Context(), id)
+	default:
+		t.Fatal("missing retirement")
+	}
+	if _, ok := m.queues[s.connID]; ok {
+		t.Fatal("retirement retained publication queue")
+	}
+	if err := m.RetireLiveState(t.Context(), s.connID); !errors.Is(err, ErrConnNotFound) {
+		t.Fatalf("repeated retirement=%v", err)
 	}
 }

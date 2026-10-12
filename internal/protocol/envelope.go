@@ -43,6 +43,12 @@ type Envelope struct {
 	// append's ID; absent or failed storage omits it. This conveys no authorization.
 	HistoryEntryID *uint64 `json:"history_entry_id,omitempty"`
 
+	// ConversationID routes supplied thread live state independently of session
+	// provenance. Nil omits metadata; a supplied value must be a nonempty JSON
+	// string matching the retained source. RawMessage preserves malformed/null
+	// values for delivery-boundary validation. It conveys no authorization.
+	ConversationID json.RawMessage `json:"conversation_id,omitempty"`
+
 	// SessionID is live-state metadata supplied only for thread-capable delivery.
 	// Nil omits metadata; JSON null positively means no producing session; a JSON
 	// nonempty string names the producing session. RawMessage preserves omission

@@ -311,15 +311,17 @@ func Deny(message string) Verdict {
 // in Register under mu, and never reassigned — expire calls Reset on the same
 // object — which is why resolve may read it outside mu.
 type pending struct {
-	req   Request
-	ch    chan Verdict
-	timer *time.Timer
+	req         Request
+	ch          chan Verdict
+	timer       *time.Timer
+	observation observationLifetime
 }
 
 // Pending is the caller's handle on a parked request: block on Await for the
 // verdict.
 type Pending struct {
-	ch <-chan Verdict
+	ch          <-chan Verdict
+	observation observationLifetime
 }
 
 // Await blocks until the request is resolved and returns its verdict. With no
@@ -349,13 +351,14 @@ func (p *Pending) Await() Verdict {
 type AnswerableFunc func(id string, req Request) bool
 
 // Registry is the in-memory pending-approval store, keyed by an opaque id (a
-// tool-use id — a correlation key, not a credential). mu is a leaf lock: held
-// only around O(1) map ops and the answerable read, never nested with another
-// lock, and never across the channel send or the AnswerableFunc call.
+// tool-use id — a correlation key, not a credential). mu protects pending
+// entries and the answerable report, never spanning channel sends or report calls.
+// Diagnostic observation only attempts a nonblocking recorder lock under mu.
 type Registry struct {
-	mu         sync.Mutex
-	pending    map[string]*pending
-	answerable AnswerableFunc
+	mu          sync.Mutex
+	pending     map[string]*pending
+	answerable  AnswerableFunc
+	observation observationState
 }
 
 // New returns an empty Registry ready for use, with no AnswerableFunc installed:
@@ -392,18 +395,21 @@ func (r *Registry) SetAnswerable(ask AnswerableFunc) {
 // report says the approval can still be answered. It stays the only knob — an
 // extension re-arms the duration Register was handed, never a different one.
 func (r *Registry) Register(id string, req Request, timeout time.Duration) (*Pending, error) {
-	if id == "" {
-		return nil, ErrDuplicateID
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if id == "" {
+		r.observation.register(id, req, "empty")
+		return nil, ErrDuplicateID
+	}
 	if _, exists := r.pending[id]; exists {
+		r.observation.register(id, req, "duplicate")
 		return nil, ErrDuplicateID
 	}
 	p := &pending{req: req, ch: make(chan Verdict, 1)}
-	p.timer = time.AfterFunc(timeout, func() { r.expire(id, timeout) })
+	p.observation = r.observation.register(id, req, "accepted")
+	p.timer = time.AfterFunc(timeout, func() { r.expire(id, p, timeout) })
 	r.pending[id] = p
-	return &Pending{ch: p.ch}, nil
+	return &Pending{ch: p.ch, observation: p.observation}, nil
 }
 
 // Resolve satisfies the pending request id with v and returns true if it
@@ -446,7 +452,7 @@ func (r *Registry) Lookup(id string) (Request, bool) {
 // next firing cannot be scheduled while this callback is still inside the report
 // — at most one expire is ever in flight per entry, and a slow report stretches
 // the effective window instead of overlapping with itself.
-func (r *Registry) expire(id string, window time.Duration) {
+func (r *Registry) expire(id string, expected *pending, window time.Duration) {
 	r.mu.Lock()
 	p, live := r.pending[id]
 	ask := r.answerable
@@ -454,7 +460,7 @@ func (r *Registry) expire(id string, window time.Duration) {
 
 	// A dead entry is the common negative: it was already resolved, so the report
 	// cannot change the outcome and must not be paid for.
-	if !live {
+	if !live || p != expected {
 		return
 	}
 	// A non-positive window is never extended: Register promises it denies
@@ -492,6 +498,7 @@ func (r *Registry) resolve(id string, expected *pending, v Verdict) bool {
 		return false
 	}
 	delete(r.pending, id)
+	p.observation.terminal(v, expected != nil)
 	r.mu.Unlock()
 
 	p.timer.Stop() // idempotent; harmless when called from the timer's own goroutine

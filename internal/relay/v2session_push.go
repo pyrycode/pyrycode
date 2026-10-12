@@ -51,6 +51,10 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 }
 
 func (m *V2SessionManager) push(ctx context.Context, connID string, env protocol.Envelope, live *LiveState) error {
+	return m.pushSource(ctx, connID, env, live, false)
+}
+
+func (m *V2SessionManager) pushSource(ctx context.Context, connID string, env protocol.Envelope, live *LiveState, ready bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -61,10 +65,7 @@ func (m *V2SessionManager) push(ctx context.Context, connID string, env protocol
 		return ErrConnNotFound
 	}
 	before := q.overflowed
-	dropped := q.enqueue(env)
-	if live != nil && !q.overflowed {
-		q.items[len(q.items)-1].live = live
-	}
+	dropped := q.enqueueSource(env, live, ready)
 	droppedCount := q.dropped
 	// Capture both the LEVEL (still latched ⇒ keep signalling) and the EDGE
 	// (just tripped ⇒ log once) under the same hold, so neither can be read
@@ -167,7 +168,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	// A fresh reading parked behind its clear completes before another clear
 	// can replace the single pending slot. Each call still sends only one frame.
 	for _, s := range m.sessions {
-		if s.livePending != nil {
+		if s.livePending != nil && !m.pushRetired(s.connID) && m.hostedPushAvailable(s) {
 			m.drainLiveOnce(ctx, true)
 			return
 		}
@@ -186,92 +187,55 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	if m.transportDown() {
 		return
 	}
-	// A conn with an in-flight reconnect-replay tail must keep its live push
-	// queue buffered until the replay finishes, so replay ids (<= replayThrough)
-	// reach the wire before live ids (#777, AC #2). Snapshot the gated conn-ids
-	// from m.sessions BEFORE taking pushMu: m.sessions and replayQueue are
-	// Run-owned and drainOnce runs on Run, so this read needs no lock, and
-	// keeping it outside pushMu preserves pushMu's "guards only m.queues, taken
-	// alone" invariant. drainReplayOnce re-signals drainCh when a tail empties,
-	// so a gated conn's buffered live events are never stranded.
-	var replayPending map[string]struct{}
-	for id, s := range m.sessions {
-		if len(s.replayQueue) > 0 {
-			if replayPending == nil {
-				replayPending = make(map[string]struct{})
-			}
-			replayPending[id] = struct{}{}
-		}
-	}
-
+	// Snapshot candidates with pushMu alone. Producers may shed a delta before
+	// the second queue read; only Run removes heads and changes session identity.
 	m.pushMu.Lock()
-	var (
-		connID  string
-		env     protocol.Envelope
-		found   bool
-		barrier chan struct{}
-		live    *LiveState
-	)
-	// Go randomises map-range order, giving rough fairness across the
-	// realistically-tiny open-conn count.
+	candidates := make([]string, 0, len(m.queues))
 	for id, q := range m.queues {
-		if len(q.items) == 0 {
-			continue
-		}
-		if _, gated := replayPending[id]; gated {
-			continue // replay in flight for this conn; hold its live events (#777).
-		}
-		connID = id
-		barrier = q.items[0].barrier
-		live = q.items[0].live
-		env = q.popHead()
-		found = true
-		break
-	}
-	// After the pop, note whether any UNGATED queue still has work to re-signal.
-	// Gated queues are excluded: their re-signal comes from drainReplayOnce when
-	// the replay tail empties, not from the push pump.
-	more := false
-	if found {
-		for id, q := range m.queues {
-			if len(q.items) == 0 {
-				continue
-			}
-			if _, gated := replayPending[id]; gated {
-				continue
-			}
-			more = true
-			break
+		if !q.overflowed && len(q.items) > 0 {
+			candidates = append(candidates, id)
 		}
 	}
 	m.pushMu.Unlock()
-
-	if !found {
-		m.drainLiveOnce(ctx, false)
+	for _, connID := range candidates {
+		s := m.sessions[connID]
+		if s != nil && (len(s.replayQueue) > 0 || s.livePending != nil) {
+			continue
+		}
+		m.pushMu.Lock()
+		q := m.queues[connID]
+		marker := q.items[0].barrier != nil
+		m.pushMu.Unlock()
+		if !marker && !m.reserveHostedPush(s) {
+			continue
+		}
+		m.pushMu.Lock()
+		q = m.queues[connID]
+		// Retirement may latch while hosted admission runs off pushMu.
+		if q.overflowed {
+			m.pushMu.Unlock()
+			m.releaseHostedPush(s)
+			continue
+		}
+		head := q.items[0]
+		env := q.popHead()
+		m.pushMu.Unlock()
+		if head.barrier != nil {
+			close(head.barrier)
+		} else if head.ready {
+			m.hostedEnvelope(ctx, s, env)
+		} else if head.live != nil {
+			if err := m.forwardLiveState(ctx, s, *head.live); err != nil {
+				m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", connID)
+			}
+		} else if err := m.forwardEnvelope(ctx, connID, env); err != nil {
+			m.cfg.Logger.Debug("relay: v2 push drain drop", "event", "v2.push.drain_drop", "conn_id", connID, "err", err)
+		}
+		m.releaseHostedPush(s)
+		m.signalLiveDrain()
 		return
 	}
-	if barrier != nil {
-		close(barrier)
-	} else if live != nil {
-		if err := m.forwardLiveState(ctx, m.sessions[connID], *live); err != nil {
-			m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", connID)
-		}
-	} else if err := m.forwardEnvelope(ctx, connID, env); err != nil {
-		// Session vanished / not open / seal failure: drop with no app content
-		// in the log (the package's outbound-drop posture). The V2StateOpen
-		// security gate lives in forwardEnvelope.
-		m.cfg.Logger.Debug("relay: v2 push drain drop",
-			"event", "v2.push.drain_drop",
-			"conn_id", connID,
-			"err", err)
-	}
-	m.signalLiveDrain()
-	if more {
-		select {
-		case m.drainCh <- struct{}{}:
-		default:
-		}
-	}
+	m.drainLiveOnce(ctx, false)
 }
 
 // forwardEnvelope runs on Run's dispatch goroutine. It looks up the session,
@@ -292,10 +256,11 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 // log level); they MUST NOT echo env, plaintext, ciphertext, or key
 // bytes, matching the package's no-AEAD-bytes-in-logs discipline.
 func (m *V2SessionManager) forwardEnvelope(ctx context.Context, connID string, env protocol.Envelope) error {
-	return m.forwardEnvelopeSource(ctx, connID, env, false)
+	return m.forwardEnvelopeSource(ctx, connID, env, nil)
 }
 
-func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID string, env protocol.Envelope, supplied bool) error {
+func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID string, env protocol.Envelope, reading *LiveState) error {
+	supplied := reading != nil
 	s, ok := m.sessions[connID]
 	if !ok {
 		// A torn-down session was already deleted from the map by
@@ -304,6 +269,9 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	}
 	if s.state != V2StateOpen {
 		return ErrSessionNotOpen
+	}
+	if s.hosted != nil {
+		s.hosted.pushDeferred = false
 	}
 	// A frame about a Codex conversation, for a conn without multi_agent (#2644).
 	// Nil, not an error: drainReplayOnce abandons a conn's replay tail on an error
@@ -340,7 +308,7 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	if stale && !supplied {
 		return nil
 	}
-	env = m.mergedForConn(s, env)
+	env = m.mergedForConn(s, env, supplied && reading.ModelListUnprojected)
 	env = m.agentTaggedForConn(s, env)
 	env = m.threadProjected(s, env)
 	envJSON, err := json.Marshal(env)
@@ -353,7 +321,7 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 		return errInvalidLiveState
 	}
 	if s.hosted != nil {
-		m.hostedEnvelope(ctx, s, env)
+		s.hosted.pushDeferred = m.hostedEnvelope(ctx, s, env)
 		if suggestionRev > 0 && !supplied {
 			recordReplySuggestion(s, suggestionConv, suggestionRev)
 		}
@@ -376,27 +344,13 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	return nil
 }
 
-// mergedForConn returns env as s is to be sent it: for a conn that negotiated
-// protocol.CapabilityMultiAgent, a pushed model_list whose Claude entries are
-// replaced by MergedModelOptions' merged, tagged list (#2652); every other frame,
-// and every frame to any other conn, unchanged. conversation_id and
-// dropped_models are the pushed frame's.
-//
-// A pushed model_list is told apart by its EventID: the turn lane stamps one on
-// every live push and drainReplayOnce on every replay. #2651's two paths leave it
-// nil — the request_model_list reply and reconcileModelLists' connect-time
-// snapshot — and both already carry the merged list, so merging them here would
-// re-tag Codex's entries as Claude's and append them twice. InReplyTo alone does
-// not separate them: the reconcile snapshot has none either.
-//
-// The pushed envelope is shared by every conn and the replay ring, so this builds
-// the capable conn's copy per call and never writes through env.Payload: env is a
-// by-value copy and only its Payload field is reassigned to fresh bytes. A payload
-// that does not decode, or a merged one that does not marshal, is delivered
-// unchanged. Nothing is logged: the payload is claude-authored (#833).
-// Run-goroutine only, like its caller: s.multiAgent is Run-owned.
-func (m *V2SessionManager) mergedForConn(s *V2Session, env protocol.Envelope) protocol.Envelope {
-	if !s.multiAgent || m.cfg.MergedModelOptions == nil || env.Type != protocol.TypeModelList || env.EventID == nil {
+// mergedForConn projects canonical model rows for a multi_agent recipient.
+// Legacy events are canonical when EventID is present; supplied readings mark
+// their projection explicitly. Legacy replies already carry their projection.
+// Clears stay empty. Shared payload bytes are never mutated, and conversation
+// and dropped-model fields are preserved. Runs only on the Run goroutine.
+func (m *V2SessionManager) mergedForConn(s *V2Session, env protocol.Envelope, unprojected bool) protocol.Envelope {
+	if !s.multiAgent || m.cfg.MergedModelOptions == nil || env.Type != protocol.TypeModelList || env.SessionStateCleared || (env.EventID == nil && !unprojected) {
 		return env
 	}
 	var p protocol.ModelListPayload

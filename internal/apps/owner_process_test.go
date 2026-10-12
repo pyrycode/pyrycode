@@ -33,6 +33,15 @@ func writeNodeDouble(t *testing.T, version string, failSpawn bool) string {
 	return path
 }
 
+// PID markers become visible only after their complete contents are written.
+func publishOwnerPID(path string) error {
+	pending := path + ".tmp"
+	if err := os.WriteFile(pending, []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		return err
+	}
+	return os.Rename(pending, path)
+}
+
 func TestOwnerHelperProcess(t *testing.T) {
 	index := -1
 	for i, v := range os.Args {
@@ -63,7 +72,7 @@ func TestOwnerHelperProcess(t *testing.T) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM)
 	if descendant {
-		if e := os.WriteFile(filepath.Join(data, "descendant"), []byte(strconv.Itoa(os.Getpid())), 0600); e != nil {
+		if e := publishOwnerPID(filepath.Join(data, "descendant")); e != nil {
 			os.Exit(3)
 		}
 	} else {
@@ -99,7 +108,7 @@ func TestOwnerHelperProcess(t *testing.T) {
 		if e = os.WriteFile(filepath.Join(data, fmt.Sprintf("launch-%d", os.Getpid())), nil, 0600); e != nil {
 			os.Exit(10)
 		}
-		if e = os.WriteFile(filepath.Join(data, "ready"), []byte(strconv.Itoa(os.Getpid())), 0600); e != nil {
+		if e = publishOwnerPID(filepath.Join(data, "ready")); e != nil {
 			os.Exit(8)
 		}
 	}

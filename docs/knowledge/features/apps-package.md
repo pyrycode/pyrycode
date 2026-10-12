@@ -1,14 +1,16 @@
 # `internal/apps` — durable host-app registrations
 
 This package owns strict manifest validation, durable registrations and callable
-committed-release process ownership independent of conversations. The
-[hosted-app reference](../../hosted-apps.md#manifest-and-identity)
+health-confirmed committed-release process ownership independent of conversations.
+The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
 owns the field tables and registration behavior; the
 [v1 contract](../../specs/architecture/3120-hosted-app-contract.md) owns the broader
 hosting design. Registration and stored `running` prove neither publication nor
 readiness. The registry commits lifecycle observations and normalizes restart
-state. Process spawn proves only starting; daemon wiring (#3204), health/readiness
-(#3206), automatic recovery (#3207), publication (#3125) and encrypted resource
+state. Process spawn proves only starting; the owner confirms health before
+exposing private targets; owner construction reconciles registrations and recovers
+failed generations automatically. The daemon owns one owner for its discovery
+registry, independently of channels; publication (#3125) and encrypted resource
 activation (#3123) remain separate responsibilities.
 
 ## Validation and stored identity
@@ -50,8 +52,8 @@ explicit `declare module '*.css'` in `assets.d.ts` for the frontend stylesheet
 import; removing it breaks frontend typechecking.
 
 `scaffold` copies an explicit `files` inventory rather than the whole source
-tree. New shared service modules, migration SQL and tests must enter that
-inventory; testing the maintained source tree alone can pass while generated
+tree. New shared service modules, migration SQL, browser scripts and tests must
+enter that inventory; testing the maintained source tree alone can pass while generated
 apps lack dependencies or service coverage. Verify a fresh generated app through
 install, frontend/service typecheck, tests and build. `npm test` compiles its
 service dependencies itself, so a prior build cannot mask missing test setup.
@@ -100,6 +102,28 @@ discarding them to bound storage would permit removed identities to be reused.
 
 ## Lifecycle and restart state
 
+`runSupervisor` constructs one `apps.Owner` through `newDaemonAppsOwner` from
+discovery's registry, persisted host identity and
+`~/.pyry/<sanitized-instance>/apps` root, including with relay disabled. Its
+reconciliation waits for neither spawn nor health before control/conversation
+readiness. No channel, client or relay context owns it: client closure, relay
+reconnect, channel stop, `/clear` and idle eviction leave app services running.
+Committed owner observations feed the existing discovery subscription. Unusable
+storage, missing/unsupported Node and app-specific start/health failures leave
+normal daemon/channel operation available without cancelling the session pool;
+composition logs only static reason codes.
+
+Claim the instance with `ctrl.Listen` before `openDaemonApps` or owner
+construction, and retain it until `Owner.Shutdown` has joined workers/descendants
+and finished durable observations on every exit. `Open` can persist normalized
+state and `NewOwner` immediately admits launches: an unsuccessful second daemon
+could otherwise launch a competing generation and overwrite an incumbent's
+observations. The detached control context and defer ordering in `runSupervisor`
+hold this boundary through normal shutdown and post-owner startup failures.
+`TestDaemonAppsRejectedDuplicateStartup` and
+`TestDaemonAppsShutdownRetainsOwnership` cover both rejected claims and a child
+cleanup barrier before final observations/claim release.
+
 `Registry.UpdateLifecycle(serverID, appID, Lifecycle)` replaces committed title,
 desired/state, active/pending releases and optional `LastError` atomically. Empty
 release strings and nil errors mean unset; identity, manifest and revision remain
@@ -131,10 +155,22 @@ conditional path. Unconditional callers retain their complete replacement and
 persistence-before-notification behavior.
 
 Use one `Owner` per registry. `NewOwner` resolves one selected Node executable
-to an absolute path without fallback. `Owner.Start` durably resumes available
-intent, clears old errors and sets starting for a published record; an unpublished
-record remains stopped and launches nothing. It runs only `Record.ActiveRelease`,
-not the candidate `Record.Manifest`: `prepareRelease` finds exactly one matching
+to an absolute path without fallback and starts background reconciliation without
+waiting for spawn or health. It subscribes before the initial `Registry.List`;
+the callback only sends a nonblocking coalesced wake, calling neither registry
+nor owner methods, including unsubscribe. `reconcileRecords` checks the listed
+host revision under registry-then-owner locks and discards stale snapshots before
+applying them. This closes the baseline/subscription race without replaying an
+older record over a stop, release change or removal. Each wake reads current
+committed state; the owner's own observations cannot duplicate launches.
+
+Initial reconciliation and committed registry changes automatically launch only
+available registrations with an active release. Admission rechecks that intent
+and release; automatic attempts conditionally observe starting without resuming
+stopped intent. `Owner.Start` durably resumes available intent when stopped or
+locally suppressed, clears old errors and sets starting for a published record;
+an unpublished record remains stopped and launches nothing. It runs only
+`Record.ActiveRelease`, not the candidate `Record.Manifest`: `prepareRelease` finds exactly one matching
 validated local manifest under `builds/<build_id>/app.json`, with lowercase
 64-hex directory names. Missing/ambiguous matches, invalid or foreign identities,
 nonregular manifests/entries and symlink components/path escapes reject execution.
@@ -154,39 +190,121 @@ not migrate its schema. The environment contains exactly `PYRY_APP_ID`,
 check also inherits nothing. See [runtime and layout](../../hosted-apps.md#runtime-and-layout)
 for the complete allowlist and paths.
 
-`Owner.Start` coalesces concurrent calls and reuses the current owned generation
-without another child. For an already spawned generation, an explicit start after
-committed release/intent changes retires the old generation before replacement. Each new launch has fresh private
-cancellation, process-group and port ownership. The loopback listener reserves an
-ephemeral port unique across the owner's live/in-flight generations; it closes
+Explicit starts, reconciliation and retries coalesce per app and reuse compatible
+current ownership without another child. Committed stop/removal or active-release
+changes cancel incompatible generations before replacement. Healthy metadata-only
+updates, including candidate manifest edits, retain the current generation and
+cannot activate a release or trigger migrations/cutover. Each new launch has fresh
+private cancellation, process-group and port ownership. The loopback listener
+reserves an ephemeral port unique across the owner's live/in-flight generations; it closes
 before spawn for service binding, while private port ownership lasts until
-retirement. Failed launch releases it and the next explicit attempt excludes
+retirement. Failed launch releases it and the next attempt excludes
 the app's immediately previous reservation. This cannot exclude unrelated OS
-processes during handoff; collision detection and automatic retries remain
-downstream. Ports and generations never enter registry/discovery.
+processes during handoff; a bind failure or failed health confirmation retires
+ownership and cleans up the group. Ports and generations never enter registry/discovery.
 
-Start returns after spawn/failure, never health confirmation or running. Failed
+Failed launch, unexpected exit, bind collision and sustained health failure retry
+after 1, 2, 4, 8, 16, then 30 seconds, continuing at 30 seconds. `completed`
+schedules the delay only after retirement, reservation release, group cleanup and
+direct-child wait. A reconciler-owned timer wakes at the earliest deadline;
+per-app workers do preparation, probing and cleanup independently, so a failed or
+stopping app cannot hold up a sibling's launch or recovery. Duplicate starts and
+metadata/observation notifications neither reset nor bypass backoff; an explicit
+start during a scheduled delay returns the last launch failure or `ErrUnavailable`.
+Sixty seconds of uninterrupted health-confirmed running under the existing
+three-failure policy resets the next delay to one second. Check that duration at
+retirement too: an exit at the boundary can precede the next successful probe.
+Late timers, probes, exits and retained targets cannot affect replacements.
+
+Failure cleanup owns retry scheduling. A duplicate start waiting for cleanup must
+not mark a cancelled failed generation explicitly retired: that would suppress its
+backoff. Likewise, retain the admitted release record when a conditional starting
+write fails; the failed write returns no record, and storing that empty result
+would look like a release replacement and skip the delay. Admission-write failures
+enter backoff without spawning or spinning.
+
+Start returns after spawn/failure without waiting for health confirmation. Failed
 intent/starting writes launch nothing; a final revision/cancellation check and
 spawn share the registry lock, preventing a newer commit from slipping between
-them. Late exits cannot overwrite newer records or retire replacements. Current
-validation/spawn failures persist `app.unavailable` / `Service could not start`;
-unexpected exits persist `app.unavailable` / `Service exited unexpectedly`.
+them. The launch worker starts health supervision after spawn: immediately probe
+`GET /_pyry/health`, then every 250 ms for at most 15 seconds from spawn. Each
+request, including reply reads, has a one-second timeout bounded by the remaining
+startup deadline and a 4096-byte reply cap. `probeHealth` requires HTTP 200 and
+JSON with `ready:true`, exact `app_id` and the committed `ActiveRelease` as
+`release_version`. Missing/foreign identity, false or malformed readiness,
+duplicate/trailing JSON, oversized replies, non-200 status and timeouts never
+confirm health. Proxies, redirects and connection reuse are disabled.
+
+`confirmRunning` checks generation/context/liveness under registry-then-owner
+locks and durably commits running with a cleared error through the shared
+`Registry.CommitObservation` implementation before marking the generation healthy.
+Title, desired intent and active/pending releases remain committed values.
+A newer app revision, even a title or pending-release change during startup,
+rejects confirmation; stale generation results cannot publish readiness either.
+Rejected or failed running persistence retires the generation and cleans up its
+group. Save the returned running record for shutdown observations. Failure/exit
+observations cannot rely on its revision after metadata changes: `observeFailure`
+rechecks generation, available intent and active release, then conditionally
+updates the latest matching record; newer title, manifest and pending-release
+commits survive. Metadata-only commits after
+confirmation retain target validity; old-release failures cannot alter replacements.
+
+While running, probes occur every five seconds. Success resets consecutive
+failures; one or two failures alone preserve established readiness. The third
+retires it, conditionally commits failed if still current, and stops the owned
+group. `supervise` measures intervals from probe start rather than adding request
+duration to the polling delay, which would stretch the specified cadence. The
+absolute 15-second startup bound covers the readiness decision; cleanup retains
+its separate five-second grace. Startup failure/timeout, unexpected exit and bind
+collision also retire targets and reservations; each retry gets a
+fresh endpoint. Late probes/exits cannot affect a replacement.
+
+`Owner.Lookup(serverID, appID)` returns an opaque `Target` only for a local,
+still-registered app committed available/running with a matching active release
+and a live, health-confirmed owned generation. Persisted running alone supplies
+no target. `Target.Do` preserves the caller's path/query but replaces its authority
+with the private endpoint. Validity is checked on use, again at connection
+admission, after response headers and before/after body reads. A retained handle
+checked only at lookup could reach a replacement when app/release/port recur;
+private generation ownership, not endpoint equality, prevents that. Post-read
+validation prevents newly read bytes being returned after retirement. Removal,
+stopped intent/state, active-release changes and retirement reject use. Requests
+and response-body reads share caller and generation cancellation; callers must
+close response bodies. Proxies, redirects and connection reuse remain disabled;
+resource authorization and transfer limits belong to consumers (#3123).
+
+Current validation/spawn failures persist `app.unavailable` / `Service could not start`;
+health failures use `Service health check failed`, and unexpected exits
+use `Service exited unexpectedly`, only while generation, available intent and
+active release still match the latest record.
 Child output is discarded. Local diagnostics carry operation context and preserve
 `errors.Is`, but no output, paths or endpoints enter metadata. Cleanup still runs
 when lifecycle persistence fails; `Stop` returns synchronous failures and
 `Shutdown` also surfaces retained asynchronous observation/cleanup failures.
 
-`Owner.Stop` cancels in-flight starts, durably sets stopped intent, retires only
-its owned group, then conditionally commits observed stopped. SIGTERM allows up
+`Owner.Stop` cancels in-flight starts/backoff, durably sets stopped intent, retires
+only its owned group, then conditionally commits observed stopped. SIGTERM allows up
 to five seconds before SIGKILL of surviving group members and direct-child wait,
 including when descendants outlive the leader. Repeated stop is harmless; a failed
-intent write still cancels/cleans up and returns failure without claiming changed
-intent. A final observation persistence failure leaves durable intent intact
-without claiming observed stopped. `Owner.Shutdown` closes launch admission, cancels all generations
-and joins workers, conditionally observing stopped without changing desired intent.
+intent write still cancels/cleans up, locally suppresses retries until explicit
+start, and returns failure without claiming changed intent. Targets are retired
+before further use even when persistence fails. Committed stopped intent or removal
+wakes reconciliation and cancels startup/backoff without waiting for a probe or
+retry deadline; removal retains source/build/data and cannot resurrect ownership.
+A final observation persistence failure leaves durable intent intact
+without claiming observed stopped. `Owner.Shutdown` closes launch admission,
+detaches its subscription outside owner locks, cancels reconciliation, retries and
+all generations, and joins every worker and owned process, conditionally observing
+stopped without changing desired intent.
 Cancelling the initiating start context retires its generation; a coalesced caller
-can cancel its own wait independently. No startup scan, subscriptions, probes,
-automatic retries or publisher cutover policy run in the owner. See
+can cancel its own wait independently. The daemon invokes joined shutdown on
+normal exit and every startup failure after owner construction. Local stop
+preserves sibling services and the session pool; daemon shutdown preserves
+available intent for restart. Publication/migration/activation/rollback
+(#3125/#3133) and encrypted resource capability activation (#3123) remain
+downstream; exclusive cutover is publisher-owned. Production `HostedAppsReady`
+remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes
+the attestation. Daemon startup installs no dependencies and runs no migrations. See
 [startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
 
 `Open` validates storage before `normalizeSnapshot`. Every available record with
@@ -197,6 +315,26 @@ order. The total revision budget is checked before one snapshot write; exhaustio
 or persistence failure returns no registry and preserves the committed bytes.
 An unchanged reopen neither writes nor advances revisions, even at the ceiling.
 Opening exposes this committed normalized baseline, not earlier-process events.
+`Open` alone launches nothing. After shutdown, transfer exclusive root ownership
+to a reopened registry and construct a new owner: available committed releases get
+fresh processes/generations and must pass fresh matching health and conditional
+running persistence. Stopped/unpublished records stay unlaunched and existing data
+bytes survive; stored running never establishes readiness.
+
+The [final #3204 verifier review](https://github.com/pyrycode/pyrycode/pull/3237#issuecomment-6117617232)
+records `TestHostedAppsRecoverySQL` on actual **Node v24.15.0** with **1 executed,
+1 passed, 0 failed, 0 skipped**, using a race-built daemon and the freshly compiled
+maintained template service. Migration/SQL seeding happened while stopped.
+HTTP save returned 204 for
+`{"version":1,"selected_tab":"preferences","period":"7d"}`; service readback
+and direct `node:sqlite` queries retained it after app crash/recovery and daemon
+restart, with unchanged host/app identity, committed release selection and
+monotonic revisions. The proof also observed failed → retry delay → starting →
+fresh health-confirmed running, a healthy sibling, an unrelated fake-Claude turn,
+unlaunched stopped/unpublished apps and clean shutdown descendant cleanup.
+Backoff is a delay, never another registry state. No live Claude was used or
+required; seeded persistence supplies no resource-routing or publisher
+migration/rollback acceptance. See the [runtime reference](../../hosted-apps.md#runtime-and-layout).
 
 ## Concurrency and persistence
 
@@ -271,12 +409,52 @@ accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-man
 
 ## Testing
 
+Prepare a fixture's committed build before making its release available.
+Construction-time reconciliation can execute immediately after the lifecycle
+commit; writing the build afterward creates a real missing-release failure and
+backoff instead of the intended test setup. `TestOwnerRetryTimings` advances a
+private clock while asserting production delays; `TestOwnerRecoveryCleanupBackoff`
+blocks actual cleanup so duplicate starts cannot conceal premature scheduling.
+`TestOwnerReopenRecovery` checks fresh health, subscription detachment, preserved
+intent/data and unlaunched stopped/unpublished registrations after ownership transfer.
+
+Retained-handle rejection before a request does not exercise retirement during
+an in-flight response-body read. `TestOwnerTargetRetirement` covers the former;
+the stalled-body cancellation and before/after-read guards in `targetBody.Read`
+need a separate controlled-response regression. Likewise, endpoint reuse in
+`TestOwnerTargetReuse` does not force a delayed target dial across retirement;
+connection-admission validation remains essential even when those tests pass.
+
+The template's `React renders caller title as literal text` test calls
+`App({title})` directly before server rendering. Keep `App` hook-free and put
+state in its rendered `DisplayPreferences` child; hooks in the directly invoked
+wrapper would run outside React's renderer. The test bundle uses
+`packages: 'external'` so the component and `react-dom/server` share React.
+Bundling another React copy breaks hook rendering even when the browser bundle
+works. See the [display settings reference](../../hosted-apps.md#display-settings).
+
+`startup and readiness failures` must derive a mismatched release from the
+generated manifest. A fixed `1.0.1` rejection value becomes valid when the
+[replacement-release browser proof](../../hosted-apps.md#built-ui-smoke-check)
+generates 1.0.1 with the same identities/data. Run the deterministic suite for
+both generated releases to verify the rejection case remains invalid for each
+build.
+
 Controlled-child tests must wait for child-owned signals written after signal
 handlers and descendants are initialized. Spawn success alone cannot prove those
 exist. `TestOwnerGroupCleanup` checks descendants independently of leader wait;
 on Linux, killed orphan zombies retained by container init are distinguished from
 live processes. The owner joins its direct child and cleanup targets only its
 group; `TestOwnerDuplicateAndIsolation` verifies a sibling remains alive.
+
+PID-bearing readiness markers must publish complete contents atomically.
+`publishOwnerPID` writes a temporary file before renaming it into view for the
+controlled child's ready/descendant signals. Polling file existence after a
+direct `os.WriteFile` can observe its empty create-before-write window and fail
+PID parsing before cleanup assertions run. Requiring nonempty bytes in shared
+`waitFile` would instead break intentional empty existence-only handshake
+markers. `TestOwnerCleanupErrorContext` and `TestOwnerGroupCleanup` consume the
+published PIDs; delaying the temporary write must leave no partial PID visible.
 
 Inspect ownership immediately after the original concurrent start/stop operations.
 A second cleanup stop can conceal the child missed by a successful first stop.

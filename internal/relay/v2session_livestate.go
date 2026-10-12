@@ -22,6 +22,12 @@ type LiveState struct {
 	SessionGeneration uint64
 	ReadingID         string
 	Revision          uint64
+	// Answerable is captured prompt eligibility. False withholds prompt shows;
+	// nil leaves supplied eligibility unspecified.
+	Answerable *bool
+	// ModelListUnprojected marks canonical Claude model rows for per-recipient
+	// MergedModelOptions projection. False preserves provider-projected replies.
+	ModelListUnprojected bool
 }
 
 type liveReadingKey struct{ family, id string }
@@ -74,11 +80,28 @@ func validateLiveState(r LiveState) error {
 	if !liveStateFamily(e.Type) || r.ConversationID == "" || r.SessionGeneration == 0 || r.Revision == 0 || !validLiveTag(e.SessionID) || !json.Valid(e.Payload) {
 		return errInvalidLiveState
 	}
+	var payload struct {
+		ConversationID json.RawMessage `json:"conversation_id"`
+	}
+	_ = json.Unmarshal(e.Payload, &payload) // Non-object payloads supply no identity.
+	for _, identity := range []json.RawMessage{e.ConversationID, payload.ConversationID} {
+		if len(identity) == 0 {
+			continue
+		}
+		var id string
+		if json.Unmarshal(identity, &id) != nil || id == "" || id != r.ConversationID {
+			return errInvalidLiveState
+		}
+	}
+	if len(e.ConversationID) == 0 {
+		e.ConversationID, _ = json.Marshal(r.ConversationID)
+	}
 	if e.SessionStateCleared {
 		var p map[string]json.RawMessage
 		if json.Unmarshal(e.Payload, &p) != nil || p == nil || len(p) != 0 {
 			return errInvalidLiveState
 		}
+		e = liveStateClear(e)
 	}
 	// Both the supplied reading and its generated clear must fit before admission.
 	e.EventID = nil
@@ -102,8 +125,13 @@ func (m *V2SessionManager) PushLiveState(ctx context.Context, connID string, r L
 	if err := validateLiveState(r); err != nil {
 		return err
 	}
+	if r.Answerable != nil {
+		v := *r.Answerable
+		r.Answerable = &v
+	}
 	r.Envelope.Payload = bytes.Clone(r.Envelope.Payload)
 	r.Envelope.SessionID = bytes.Clone(r.Envelope.SessionID)
+	r.Envelope.ConversationID = bytes.Clone(r.Envelope.ConversationID)
 	if r.Envelope.InReplyTo != nil {
 		id := *r.Envelope.InReplyTo
 		r.Envelope.InReplyTo = &id
@@ -128,13 +156,26 @@ func (m *V2SessionManager) liveWithheld(s *V2Session, conversation string) bool 
 // reading for another Run pass, preserving transport hold and single-writer crypto.
 func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r LiveState) error {
 	if !s.thread {
+		r.Envelope.ConversationID = nil
 		return m.forwardEnvelope(ctx, s.connID, r.Envelope)
+	}
+	if !r.Envelope.SessionStateCleared && (r.Envelope.Type == protocol.TypeModalShown || r.Envelope.Type == protocol.TypeQuestionShown) && r.Answerable != nil && !*r.Answerable {
+		return nil
 	}
 	if s.state != V2StateOpen || m.liveWithheld(s, r.ConversationID) {
 		return nil
 	}
 	if err := validateLiveState(r); err != nil {
 		return err
+	}
+	if r.ModelListUnprojected && !r.Envelope.SessionStateCleared && !s.multiAgent {
+		var inventory protocol.ModelListPayload
+		if json.Unmarshal(r.Envelope.Payload, &inventory) == nil && len(inventory.Models) == 0 {
+			return nil // Codex-only fallback is unavailable to this recipient.
+		}
+	}
+	if r.Envelope.InReplyTo == nil && m.cfg.LiveStateCurrent != nil && !m.cfg.LiveStateCurrent(r) {
+		return nil
 	}
 	w := s.liveWatermarks[r.ConversationID]
 	if w != nil && r.SessionGeneration < w.generation {
@@ -152,6 +193,9 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 		return nil
 	}
 	e := r.Envelope
+	if len(e.ConversationID) == 0 {
+		e.ConversationID, _ = json.Marshal(r.ConversationID)
+	}
 	e.EventID = nil
 	e.HistoryEntryID = nil
 	needsClear := !e.SessionStateCleared && !w.cleared[key.family]
@@ -159,14 +203,20 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 		e = liveStateClear(e)
 	}
 	if e.SessionStateCleared {
-		e.Payload = json.RawMessage(`{}`)
+		e = liveStateClear(e)
 	}
-	if err := m.forwardEnvelopeSource(ctx, s.connID, e, true); err != nil {
+	if err := m.forwardEnvelopeSource(ctx, s.connID, e, &r); err != nil {
 		return err
 	}
 	if needsClear {
 		fresh := r
-		s.livePending = &fresh
+		if s.hosted != nil && s.hosted.pushDeferred {
+			if err := m.PushLiveState(ctx, s.connID, fresh); err != nil {
+				return err
+			}
+		} else {
+			s.livePending = &fresh
+		}
 	}
 	if s.liveWatermarks == nil {
 		s.liveWatermarks = make(map[string]*liveWatermark)
@@ -181,10 +231,14 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 }
 
 func (m *V2SessionManager) signalLiveDrain() {
+	held := make(map[string]bool)
+	for id, s := range m.sessions {
+		held[id] = !m.hostedPushAvailable(s)
+	}
 	m.pushMu.Lock()
 	queued := false
 	for id, q := range m.queues {
-		if s := m.sessions[id]; len(q.items) > 0 && s != nil && len(s.replayQueue) == 0 {
+		if s := m.sessions[id]; !q.overflowed && len(q.items) > 0 && s != nil && len(s.replayQueue) == 0 && s.livePending == nil && (!held[id] || q.items[0].barrier != nil) {
 			queued = true
 			break
 		}
@@ -198,7 +252,7 @@ func (m *V2SessionManager) signalLiveDrain() {
 		return
 	}
 	for _, s := range m.sessions {
-		if s.livePending != nil || s.liveSnapshot != nil {
+		if !held[s.connID] && (s.livePending != nil || s.liveSnapshot != nil) && !m.pushRetired(s.connID) {
 			select {
 			case m.drainCh <- struct{}{}:
 			default:
@@ -215,6 +269,12 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 		return
 	}
 	for _, s := range m.sessions {
+		if m.pushRetired(s.connID) {
+			continue
+		}
+		if (s.livePending == nil && (s.liveSnapshot == nil || pendingOnly)) || !m.reserveHostedPush(s) {
+			continue
+		}
 		var r LiveState
 		if s.livePending != nil {
 			r = *s.livePending
@@ -224,6 +284,7 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 			r, ok = s.liveSnapshot()
 			if !ok {
 				s.liveSnapshot = nil
+				m.releaseHostedPush(s)
 				m.signalLiveDrain()
 				return
 			}
@@ -233,7 +294,39 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 		if err := m.forwardLiveState(ctx, s, r); err != nil {
 			m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", s.connID)
 		}
+		m.releaseHostedPush(s)
 		m.signalLiveDrain()
 		return
 	}
+}
+
+// RetireLiveState forces reconnect reconciliation after a producer handoff gap.
+// The queue latch quarantines pending output until Run handles gap teardown.
+func (m *V2SessionManager) RetireLiveState(ctx context.Context, connID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.pushMu.Lock()
+	q, ok := m.queues[connID]
+	if ok {
+		q.overflowed = true
+	}
+	m.pushMu.Unlock()
+	if !ok {
+		return ErrConnNotFound
+	}
+	select {
+	case m.pushOverflow <- connID:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+// pushRetired checks the queue latch without accessing Run-owned session state.
+func (m *V2SessionManager) pushRetired(connID string) bool {
+	m.pushMu.Lock()
+	defer m.pushMu.Unlock()
+	q := m.queues[connID]
+	return q != nil && q.overflowed
 }
