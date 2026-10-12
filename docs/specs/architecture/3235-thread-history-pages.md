@@ -64,3 +64,9 @@ Pending documentation stage: `docs/knowledge/features/v2-session-manager-state-m
 - Concurrency: both query kinds share the generation-owned slot, cancellation and atomic final-marker cut under `hostedMu`; serial delivery stops at the first failed part.
 - Threat model: Noise protects relay confidentiality; current pairing/registry/agent checks prevent unauthorized query disclosure. Agent content stays inert data for client rendering; queries execute no content. Production provider/storage responsibility remains #3236.
 **Reviewer:** builder self-review. **Date:** 2026-10-12.
+
+## Revisions
+- 2026-10-12: Generalized names are `admitThreadQuery`, `runThreadQuery` and `appFrameThreadQuery`; the existing completion fence is unchanged. Page providers returning catch-up-only reset state fail explicitly.
+- 2026-10-12: Authenticated malformed-ID tests exposed that a full-envelope dispatch probe bypassed query admission for wrong-type IDs. Probe the type independently so query admission applies its connection-close policy; other malformed types retain dispatch fallback. Current device revocation already closes at the authenticated inbound gate before query admission.
+- 2026-10-12: Reuse catch-up requested-scope and lifecycle scenarios for both query kinds, retaining original assertions and adding explicit failure-code checks. Additional coverage: `TestThreadPageContinuation`, `TestThreadPageLargeReply`, `TestThreadPageLegacyRefusal` and `TestThreadPageRequestedScope`. Final written work remains below 800 lines with no exported types or migrating consumers.
+- 2026-10-12: The shared interrupted-send fixture must record its accepted prefix before signaling the cancellation gate, and signal callback exit on every return. Otherwise cancellation can beat the recording callback and strand the test's completion wait; this changes test synchronization only.
