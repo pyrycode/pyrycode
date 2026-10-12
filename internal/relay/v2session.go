@@ -195,14 +195,12 @@ type wakeSignal struct {
 	kind wakeKind
 }
 
-// snapshotReq is enqueued by (*V2SessionManager).ActiveConns and dequeued
-// by Run on the snapshot channel arm. reply is per-request (cap=1) so Run's
-// reply send is non-blocking even if the caller's ctx fires between enqueue
-// and reply. Mirrors manualRekeyReq minus the per-conn inputs — a snapshot
-// takes no addressed-conn argument. The reply carries the capability-aware
-// enumeration ([]ActiveConn).
+// snapshotReq serializes connection enumeration on Run. The optional conversation
+// restricts the snapshot to its eligible thread consumers. A buffered reply lets
+// Run complete even when the requesting context is cancelled.
 type snapshotReq struct {
-	reply chan []ActiveConn
+	reply              chan []ActiveConn
+	threadConversation *string
 }
 
 // appReplyMsg carries one handler reply from a per-conn worker goroutine
@@ -492,6 +490,11 @@ func (s *V2Session) State() V2SessionState { return s.state }
 // responder and hosted delivery lane change CipherStates only on this
 // goroutine, with noise_resp ordering the old-key and new-key output.
 type V2SessionManager struct {
+	hostedMu           sync.Mutex
+	hostedInboxes      map[string]*hostedInbox
+	hostedCloses       map[string]*hostedClose
+	hostedChanges      chan struct{}
+	hostedStopped      bool
 	hostedCtx          context.Context
 	hostedDeliveryDone chan struct{}
 	hostedDone         chan hostedResult
@@ -688,6 +691,7 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 	}
 	return &V2SessionManager{
 		cfg:                cfg,
+		hostedChanges:      make(chan struct{}, 1),
 		hostedDeliveryDone: make(chan struct{}, 1),
 		hostedDone:         make(chan hostedResult),
 		sessions:           make(map[string]*V2Session),
@@ -721,6 +725,7 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	m.hostedCtx = runCtx
 	defer cancelRun()
+	defer m.stopHosted()
 	defer func() {
 		for _, s := range m.sessions {
 			if s.hosted != nil {
@@ -739,6 +744,8 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 				return nil
 			}
 			m.handleFrame(runCtx, env)
+		case <-m.hostedChanges:
+			m.drainHostedChanges(runCtx)
 		case res := <-m.hostedDone:
 			m.handleHostedDone(runCtx, res)
 		case <-m.hostedDeliveryDone:
@@ -797,7 +804,7 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 		case <-m.replayCh:
 			m.drainReplayOnce(runCtx)
 		case req := <-m.snapshot:
-			req.reply <- m.handleActiveConns()
+			req.reply <- m.handleConnSnapshot(req)
 		case rep := <-m.appReply:
 			// A per-conn worker (routeAppFrame) produced a handler reply
 			// off-Run; seal it here so every s.send.Encrypt stays on the
@@ -914,6 +921,7 @@ func (m *V2SessionManager) handleFrame(ctx context.Context, env protocol.Routing
 	}
 	s, ok := m.sessions[env.ConnID]
 	if !ok {
+		m.cancelHostedClose(env.ConnID)
 		s = &V2Session{connID: env.ConnID, state: V2StateAwaitingInit}
 		m.sessions[env.ConnID] = s
 	}
@@ -1254,9 +1262,9 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 			m.cfg.Logger.Error("relay: hosted delivery unavailable; session retired", "event", "v2.hosted.delivery_unavailable", "conn_id", s.connID)
 			return
 		}
+		deliveryCtx, finish := m.hostedCloseContext(ctx, s)
 		go func() {
-			deliveryCtx, cancel := context.WithTimeout(ctx, hostedDeliveryTimeout)
-			defer cancel()
+			defer finish()
 			if err := send(deliveryCtx, env); err != nil {
 				m.cfg.Logger.Debug("relay: hosted terminal delivery failed", "event", "v2.hosted.close_failed", "conn_id", s.connID)
 			}

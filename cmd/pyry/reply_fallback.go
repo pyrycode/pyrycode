@@ -395,13 +395,14 @@ func replyFallbackEnv(env []string) []string {
 		if strings.HasPrefix(key, "CLAUDE_CODE_") && key != "CLAUDE_CODE_OAUTH_TOKEN" {
 			continue
 		}
-		if strings.HasPrefix(key, "ANTHROPIC_") && strings.Contains(key, "MODEL") || key == "FALLBACK_FOR_ALL_PRIMARY_MODELS" {
+		if strings.HasPrefix(key, "ANTHROPIC_") && strings.Contains(key, "MODEL") || key == "FALLBACK_FOR_ALL_PRIMARY_MODELS" || key == "MAX_THINKING_TOKENS" {
 			continue
 		}
 		out = append(out, e)
 	}
+	// A short final reply does not bound the thinking work preceding it.
 	return append(out, "CLAUDE_CODE_SAFE_MODE=1", "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1", "CLAUDE_CODE_DISABLE_ATTACHMENTS=1",
-		"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0", "CLAUDE_CODE_AUTO_CONNECT_IDE=0", "CLAUDE_CODE_MAX_RETRIES=0", "CLAUDE_CODE_NO_MODEL_FALLBACK=1")
+		"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0", "CLAUDE_CODE_AUTO_CONNECT_IDE=0", "CLAUDE_CODE_MAX_RETRIES=0", "CLAUDE_CODE_NO_MODEL_FALLBACK=1", "MAX_THINKING_TOKENS=0")
 }
 
 // replyFallbackStderrTail retains the end in bounded storage, independent of

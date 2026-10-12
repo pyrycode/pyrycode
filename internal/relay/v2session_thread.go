@@ -21,12 +21,15 @@ func threadItemUpdate(typ string) bool {
 func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) bool {
 	if threadItemUpdate(env.Type) {
 		id := pushedConversationID(env)
-		return !s.thread || !s.interactive || id == "" || (!s.multiAgent && m.cfg.CodexConversation != nil && m.cfg.CodexConversation(id))
+		return !s.thread || m.liveWithheld(s, id)
 	}
 	if !s.thread {
 		return env.SessionStateCleared
 	}
 	if liveStateFamily(env.Type) {
+		if m.cfg.ThreadLiveState != nil && env.InReplyTo == nil {
+			return true
+		}
 		if !s.interactive || !validLiveTag(env.SessionID) || env.EventID != nil {
 			return true
 		}

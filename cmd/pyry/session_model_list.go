@@ -467,49 +467,15 @@ func sessionRetainedModelList(sess *sessions.Session) (turnevent.ModelList, bool
 	return lister.ModelList()
 }
 
-// modelListFor adapts the conversation-keyed resolver above to the relay's
-// on-demand request seam (#2125 fills V2SessionConfig.ModelListFor): the menu for
-// the ONE conversation an inbound request_model_list names.
-//
-// It is retainedModelLists' twin below in construction — dependencies in, a closure
-// out, a pure read — and its OPPOSITE in shape, deliberately. That one enumerates
-// because a relay V2Session carries no conversation id, so a connect-time reconcile
-// has nothing to key on; this one is handed an id by the request, so it must not
-// walk the registry to answer about a single row. The two exist together because
-// the two triggers differ, not because the answer does.
-//
-// IT ADDS NOTHING TO THE RESOLVER AND MUST NOT. No filter, no second lookup, no
-// re-derivation of which vocabulary answers — retainedModelLists' rule, and the
-// same reason: the resolver decides WHICH SOURCE answers (the bound session's own
-// retained list, else the daemon-wide copy since #2124), and a second decision here
-// would be a second place that rule could be stated and disagree. The comma-ok
-// crosses untouched, which is what lets the relay handler turn "no menu" into a
-// coded error frame rather than an empty models array — the shape
-// turnevent.ModelList.Models' never-empty contract forbids. The one choice it does
-// pass on is the conn's multi_agent decision (#2651), and modelListResolver makes it,
-// the same helper the reconcile enumerator uses.
-//
-// A NAMED FUNCTION RATHER THAN AN INLINE CLOSURE AT THE CALL SITE, unlike its
-// neighbour runSettings and like retainedModelLists below. Two reasons, and the
-// second is the deciding one: it matches the twin it will always be read beside,
-// and cmd/pyry's composition root does not import internal/protocol, so an inline
-// closure would drag that import in for one type annotation.
-//
-// SECURITY: convID is untrusted network input that has ALREADY passed the relay's
-// KnownConversation membership gate before it reaches here, and this function spends
-// it on nothing but resolveBoundModelList's registry lookup. It takes NO logger and
-// MUST NOT grow one — resolveBoundModelList's #833 rule inherited for its reason:
-// the only thing a "why did this not resolve" line could carry is a conversation id
-// or the model values themselves.
-//
-// Concurrency: synchronous on the caller's goroutine — the relay manager's Run
-// dispatch goroutine, which is new for this resolver and is why the body must stay
-// what it is. It spawns nothing, mints nothing and mutates nothing, and the locks it
-// takes are resolveBoundModelList's, acquired sequentially and never nested.
-func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary, attachments ...*daemonLiveBindings) func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
-	return func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
+// modelListResultFor supplies the inventory and detached source result from one
+// bounded memory resolution. Retention is unprojected; only the legacy payload
+// return uses the requested capability projection. Valid cached results remain
+// available when their captured source cannot replace retention.
+func modelListResultFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary, attachments ...*daemonLiveBindings) func(convID string, multiAgent bool) (protocol.ModelListPayload, bool, daemonLiveReading) {
+	return func(convID string, multiAgent bool) (protocol.ModelListPayload, bool, daemonLiveReading) {
 		b := liveAttachment(attachments)
-		payload, ok, _ := liveInventoryResult(b, convID, protocol.TypeModelList, protocol.Envelope{}, func(src daemonLiveSource) (protocol.ModelListPayload, daemonLiveSource, bool) {
+		var projected []protocol.ModelOption
+		payload, ok, reading := liveInventoryResult(b, convID, protocol.TypeModelList, protocol.Envelope{}, func(src daemonLiveSource) (protocol.ModelListPayload, daemonLiveSource, bool) {
 			if b == nil {
 				payload, ok := modelListResolver(multiAgent)(convReg, pool, saved, convID)
 				return payload, daemonLiveSource{}, ok
@@ -519,12 +485,15 @@ func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved sa
 			payload.ConversationID = src.ConversationID
 			ok = ok && have
 			if multiAgent {
-				payload.Models = append(claudeModelOptions(payload.Models), codexModelOptions(saved)...)
-				ok = len(payload.Models) > 0
+				projected = append(claudeModelOptions(payload.Models), codexModelOptions(saved)...)
+				ok = len(projected) > 0
 			}
 			return payload, source, ok
 		})
-		return payload, ok
+		if projected != nil {
+			payload.Models = projected
+		}
+		return payload, ok, reading
 	}
 }
 
@@ -645,5 +614,14 @@ func retainedModelLists(convReg *conversations.Registry, pool *sessions.Pool, sa
 			out = append(out, payload)
 		}
 		return out
+	}
+}
+
+// modelListFor keeps the payload-only provider contract.
+func modelListFor(reg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary, attachments ...*daemonLiveBindings) func(string, bool) (protocol.ModelListPayload, bool) {
+	result := modelListResultFor(reg, pool, saved, attachments...)
+	return func(conv string, multi bool) (protocol.ModelListPayload, bool) {
+		payload, ok, _ := result(conv, multi)
+		return payload, ok
 	}
 }

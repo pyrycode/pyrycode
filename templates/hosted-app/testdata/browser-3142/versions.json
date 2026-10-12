@@ -1,0 +1,50 @@
+{
+  "node": "v24.15.0",
+  "npm": "11.11.0",
+  "browserExecutable": "/opt/ms-playwright/chromium-1228/chrome-linux64/chrome",
+  "browserVersion": "Google Chrome for Testing 149.0.7827.55",
+  "tests": [
+    {
+      "cwd": "/tmp/hosted-app-smoke-yCFqe8/example-1.0.0",
+      "executed": 17,
+      "passed": 17,
+      "skipped": 0
+    },
+    {
+      "cwd": "/tmp/hosted-app-smoke-yCFqe8/example-1.0.1",
+      "executed": 17,
+      "passed": 17,
+      "skipped": 0
+    }
+  ],
+  "browser": {
+    "version": "149.0.7827.55",
+    "executed": 59,
+    "passed": 59,
+    "skipped": 0
+  },
+  "artifacts": [
+    "browser.json",
+    "commands.json",
+    "fail-1280.png",
+    "fail-320.png",
+    "focus-1280.png",
+    "focus-320.png",
+    "invalid-read.png",
+    "layout-1280.png",
+    "layout-320.png",
+    "read-fail.png",
+    "replacement-1280.png",
+    "replacement-320.png",
+    "restart-1280.png",
+    "restart-320.png",
+    "saved-1280.png",
+    "saved-320.png",
+    "saving-1280.png",
+    "saving-320.png",
+    "uncertain-1280.png",
+    "uncertain-320.png",
+    "wrong-status-1280.png",
+    "wrong-status-320.png"
+  ]
+}

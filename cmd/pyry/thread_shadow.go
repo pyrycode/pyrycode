@@ -20,18 +20,23 @@ type shadowStore interface {
 	Shutdown() error
 }
 type shadowConversation struct {
-	cancel   context.CancelFunc
-	done     chan struct{}
-	version  uint64
-	complete bool
+	cancel        context.CancelFunc
+	done          chan struct{}
+	version       uint64
+	complete      bool
+	publisher     *daemonThreadPublisher
+	threadEpoch   string
+	threadVersion uint64
+	threadPeers   map[string]bool
 }
 
-// threadShadow has no publication capability. Discovery includes all history
+// threadShadow coordinates optional publication. Discovery includes all history
 // writers without adding replay or cache I/O to their commit paths.
 type threadShadow struct {
 	history      *history.Store
 	registry     *conversations.Registry
 	store        shadowStore
+	publisher    *daemonThreadPublisher
 	log          *slog.Logger
 	mu           sync.Mutex
 	workers      map[conversations.ConversationID]*shadowConversation
@@ -59,7 +64,7 @@ func (s *threadShadow) start() {
 	s.once.Do(func() {
 		go func() {
 			defer close(s.done)
-			tick := time.NewTicker(250 * time.Millisecond)
+			tick := time.NewTicker(50 * time.Millisecond)
 			defer tick.Stop()
 			for {
 				s.discover()
@@ -119,7 +124,7 @@ func (s *threadShadow) consumed(id conversations.ConversationID) uint64 {
 }
 func (s *threadShadow) follow(ctx context.Context, id conversations.ConversationID, w *shadowConversation) {
 	defer close(w.done)
-	tick := time.NewTicker(100 * time.Millisecond)
+	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		if ctx.Err() != nil {
@@ -139,6 +144,7 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 			}
 		} else {
 			snapshot := s.store.Snapshot(id)
+			s.publish(ctx, id, w)
 			switch snapshot.State {
 			case thread.StateNotLoaded:
 				if version > s.consumed(id) {

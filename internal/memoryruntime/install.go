@@ -59,6 +59,7 @@ type artifact struct{ Name, Version, File, URL, SHA256 string }
 type lock struct {
 	Target       string     `json:"target"`
 	MinimumGLIBC string     `json:"minimum_glibc"`
+	MinimumMacOS string     `json:"minimum_macos,omitempty"`
 	Python       string     `json:"python"`
 	Bootstrap    string     `json:"bootstrap_pip"`
 	Runtime      artifact   `json:"runtime"`
@@ -74,15 +75,13 @@ type engine struct {
 
 const managed = ".pyry/memory/runtime"
 
-// Install supports OpenAI mode on Ubuntu 24.04 amd64 with glibc >=2.39.
+// Install supports OpenAI mode on Ubuntu 24.04 amd64 with glibc >=2.39
+// and macOS arm64 >=26.6.2.
 // It requires no credentials, starts no service and never resolves dependencies.
 func Install(ctx context.Context, o Options) (Runtime, error) {
-	if o.Mode != "openai" || runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		return Runtime{}, &Failure{"target", ErrUnsupported}
-	}
-	var p lock
-	if err := json.Unmarshal(lockData, &p); err != nil {
-		return Runtime{}, &Failure{"pins", err}
+	p, err := selectPins(runtime.GOOS, runtime.GOARCH, o.Mode)
+	if err != nil {
+		return Runtime{}, &Failure{"target", err}
 	}
 	if err := supportedHost(ctx, p); err != nil {
 		return Runtime{}, &Failure{"target", err}

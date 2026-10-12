@@ -106,14 +106,12 @@ func cachedModelVocabularySource(pool *sessions.Pool, saved savedModelVocabulary
 	return list, src, ok
 }
 
+// inventoryResultSource leaves cached evidence in its producing conversation.
+// The inventory reply adapter assigns target ordering without retaining a borrow.
 func inventoryResultSource(target, cached daemonLiveSource) daemonLiveSource {
 	if cached.SessionGeneration == 0 {
 		target.provenance = history.SessionProvenance{}
 		return target
-	}
-	if cached.ConversationID != target.ConversationID {
-		cached.ConversationID = target.ConversationID
-		cached.SessionGeneration = 0 // foreign cache cannot claim this conversation's generation
 	}
 	return cached
 }

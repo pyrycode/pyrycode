@@ -26,10 +26,11 @@ turn an old reading into successor state. Capture, activation, transitions
 `streamTurnSink.offerMu`, then the owner mutex. Conversation resolution runs
 outside the owner mutex; fan-in, history and delivery run after releasing
 `offerMu`. Inventory ingress maps and admits its bounded reading under that
-boundary before forwarding. The owner has no broadcaster or history dependency
-and adds no goroutine. Retaining in the legacy emitter would leave readings
-waiting behind connection enumeration: source admission progresses even while
-legacy delivery is held or the bounded fan-in refuses an event.
+boundary before forwarding. The owner has no broadcaster or history dependency;
+the relay composition installs one bounded publisher described below. Retaining
+in the legacy emitter would leave readings waiting behind connection enumeration:
+source admission progresses even while legacy delivery is held or the bounded
+fan-in refuses an event.
 
 **Ordering belongs to the conversation and reading.** A detached
 `daemonLiveReading` contains `Envelope`, `ConversationID`, `SessionGeneration`,
@@ -67,7 +68,8 @@ revision maps. Conversation removal cleans the owner in both compositions. Keepi
 retired maps for stale suppression would accumulate memory across activations:
 generation/incarnation checks and detached records permit their release instead.
 A generation high-water counter seeds recreated conversations without accumulating
-deletion tombstones, and old cursors survive cleanup.
+deletion tombstones. Old cursors keep detached records after cleanup, but relay
+delivery checks current ownership before sending unsolicited state.
 
 **Snapshots are finite and detached.** `snapshot` pins immutable record references,
 without eagerly copying payload batches; `daemonLiveCursor.Next` returns at most
@@ -115,23 +117,50 @@ fields and the same omitted/null/nonempty-string provenance distinction as strea
 | Requested/stream `context_usage`, `mcp_status`, `slash_command_list`, `model_list` | One shared singleton per family and conversation. |
 | `session_settings`, `session_settings_updated` | One settings singleton; update retention follows successful writes only. |
 
-Prompt snapshots hold only outstanding prompts with their existing answer IDs.
+Relay prompt snapshots hold only outstanding eligible prompts with their
+existing answer IDs; missing or false captured eligibility withholds shows.
 `Answerable` is separate from the unchanged payload: permission eligibility is
 `!RequiresUserInteraction`, matching `RemoteAnswerable`; interaction-required
 permissions remain fail-closed. Question batches keep their existing remotely
 answerable contract. Answer, timeout or dismissal removes only that identity,
 preserving concurrent prompts and existing answered-prompt history.
+`daemonLiveBindings.dismiss` receives the original dismissal payload at the
+producer boundary: permission `modal_id`, `outcome` and `source`, or the question
+batch's original ID. The winning terminal path publishes that source-bearing
+dismissal, which is never retained in snapshots.
+
+Capture prompt ownership and correlation before the registry one-shot, then
+release `streamApprovalBridge.mu` before consuming. Only the registry winner
+uses that detached capture for actuation, history and dismissal. Capturing after
+consumption loses the source if concurrent retirement removes the bridge maps;
+holding the bridge lock across consumption blocks eligibility and source writers
+behind registry latency. `TestDaemonLiveRelayPermissionRetirementGap` covers
+allow, reject and cancel, and
+`TestStreamApprovalBridge_InteractionRequiredRefusalSurvivesConcurrentRetire`
+checks that eligibility remains independent of a held consume. Captured
+`Answerable` controls delivery, while existing device and resolver gates still
+authorize answers.
 
 Optional daemon-local results such as `GetLive`, `runSettingsReading` and
 `liveSettingsUpdater.UpdateLive` expose detached source-bearing envelopes while
 preserving legacy provider signatures, refusal/fallback behavior and model
-capability filtering. Supplied correlation fields belong to the reply, never to
-retained identity; equal-state requests still receive their own correlated result.
+capability filtering. `installDaemonLiveRelay` installs
+`ContextUsageReadingFor`, `MCPStatusReadingFor`, `ModelListReadingFor`,
+`SessionSettingsReadingFor` and `UpdateSettingsReading` from those results.
+Shared implementations preserve a single query or mutation and the settings
+read's single binding/usage lookup; relay settings enrichment keeps captured
+evidence. A selected live provider never retries through the legacy provider.
+Supplied correlation fields belong to the reply, never to retained identity;
+equal-state requests still receive their own correlated result.
 `daemonLiveOperation` reserves the family revision before queries or reset tails
 start. An overtaken completion can still answer the legacy request but cannot
-replace a newer stream/update reading. Reset phases advance their reservation
-only while they still own that family; bound emitters share the parent counter
-and broadcaster, since copying the counter would restart legacy envelope IDs.
+replace a newer stream/update reading. `daemonLiveOperation.complete`'s boolean
+reports retention acceptance, not provider availability: a valid equal or stale
+result remains a reply candidate under relay ordering. Treating that boolean as
+unavailability would discard a valid correlated answer. Reset phases advance
+their reservation only while they still own that family; bound emitters share
+the parent counter and broadcaster, since copying the counter would restart
+legacy envelope IDs.
 
 `contextUsageResolver.prepare` reserves before idle deferral or querying, and
 collapsed requests reuse the original flight's reservation, including fallback.
@@ -145,11 +174,30 @@ Cached payload and source evidence are one snapshot: `contextUsageRecorder.snaps
 `sessionModelHold.ModelListLive` and `sessionSlashCommandHold.SlashCommandListLive`
 return matching bytes/source pairs. Byte equality with current retained state
 cannot establish cache ownership after clears or capability projection. Model
-projection carries the unprojected inventory's source. Producer evidence survives
-transition clears with the cache and is removed with the conversation; previously
-stored readings without evidence remain unresolved, never assigned the current
-producer. Returning cached evidence cannot change the operation's reserved
+retention holds the unprojected Claude inventory and its source. The adapter's
+`ModelListUnprojected` metadata makes relay projection apply separately to
+snapshots, pushes and replies for each recipient's negotiated capability.
+Retaining the requester's merged menu would leak agent rows to basic clients;
+requiring a legacy `EventID` would omit Codex options from detached snapshots.
+Basic clients keep the existing Codex-only fallback refusal, and model clears
+stay `{}`. Producer evidence survives transition clears with the cache and is
+removed with the conversation; previously stored readings without evidence
+remain unresolved, never assigned the current producer. Returning cached evidence
+cannot change the operation's reserved
 generation or promote predecessor bytes into successor retention.
+
+Borrowed bootstrap vocabulary is a distinct reply-only case.
+`inventoryResultSource` preserves the foreign cache's original evidence;
+`liveInventoryResult` combines its producer session tag with the target request's
+captured positive generation/revision and sets `daemonLiveOperation.replyOnly`.
+Generation zero would silently fail `PushLiveState` admission, while copying a
+foreign generation could accidentally match the target and grant retention
+authority. Explicit reply-only completion prevents retention/publication even
+when counters coincide. Target clears still suppress delayed replies; cached
+predecessor evidence from the same conversation keeps its producing generation.
+`TestDaemonLiveRelayBorrowedBootstrapVocabulary` exercises actual parser/hold
+ingress, both recipient capabilities, unchanged legacy payloads and reused-ID
+clears on authenticated decrypted wire.
 
 `daemonInventoryIngress.prepare` captures source, incarnation and generation
 once, atomically stores the hold's payload/source pair and admits the inventory
@@ -173,17 +221,68 @@ locks may acquire the owner mutex but never `offerMu`; no lock waits on a query,
 worker or relay push. Both compositions attach retention to their existing
 producers without starting absent prompt/query paths.
 
-The actual supported question boundary remains a producer limitation:
-`TestControlLiveQuestionEnvelopeBound` is skipped pending
-[#3109](https://github.com/pyrycode/pyrycode/issues/3109). Valid input near the
-16384-byte raw cap can expand to a 98081-byte JSON payload; admission rejects it.
-A raw input cap does not prove that an encoded envelope fits, especially with
-worst-case escaping and source/correlation metadata. See
+`TestControlLiveQuestionEnvelopeBound` is enabled after
+[#3109](https://github.com/pyrycode/pyrycode/issues/3109). The producer now applies
+both raw-input and encoded-payload bounds, reserving envelope metadata space;
+see [question producer bounds](questionbridge-package.md#bounds). The regression
+finds the supported parser boundary, checks owner admission and complete reading/
+clear envelopes with hostile escaping and maximum metadata, and resolves answer
+and refusal through the original batch ID. A raw cap alone would admit input
+whose encoded envelope cannot fit. See
 [protocol boundary testing](development-verification.md#protocol-boundaries).
 MCP's enabled `TestDaemonLiveMappedInventoryBounds` assertion is separate evidence.
 
-Relay provider installation, production activation and the final producer-to-relay
-proof remain pending [#3077](https://github.com/pyrycode/pyrycode/issues/3077),
-including the adapter, `PushLiveState`, `ThreadLiveState` installation and correlated
-wire replies. These daemon-local attachments do not enable production thread
-negotiation or change relay handlers.
+## Relay delivery
+
+`startRelayV2` installs `ThreadLiveState` through `daemonRelaySnapshot`, a finite
+cursor across owner conversations returning one detached eligible reading per
+call. `daemonRelayReading` preserves conversation, positive generation/revision,
+reading identity, captured eligibility, payload session fields and the original
+omitted/null/string envelope session tag. Snapshot and push delivery include
+explicit inactive retry/compaction values; slash-command inventories use the same
+retained snapshot/publication path. Correlated replies use the five installed
+providers above. Source evidence is never reconstructed from legacy pushes.
+
+Accepted stream/control admissions, clears and prompt dismissals hand immutable
+records to `startDaemonLivePublisher` independently of legacy enumeration, fan-in
+acceptance or delivery success. Its one cancellation-owned worker and 256-reading
+handoff keep admission nonblocking. Selection of each reading precedes recipient
+enumeration; a connection admitted later snapshots it or receives a subsequent
+replacement. Reusing one recipient list across an unbounded drain leaves a new
+connection with neither its overtaken snapshot nor the replacement push.
+`TestDaemonLiveRelayPublisherConnectGap` holds delivery across that admission.
+
+Recipient lookup and `PushLiveState` run outside source/owner locks, so held
+publication cannot block stream/history writers. Handoff overflow retires thread
+consumers with relay's existing overflow teardown, forcing fresh handshake
+reconciliation. Shutdown cancels and joins the worker before releasing the
+installation slot, then discards buffered records; freeing the slot first would
+allow duplicate publishers. `TestDaemonLivePublicationRetirement` and
+`TestDaemonLivePublicationShutdownInstallation` cover these boundaries.
+
+`daemonLiveCurrent`, installed as `LiveStateCurrent`, checks unsolicited snapshots
+and queued pushes again on relay Run. Removal/recreation or an overtaking update
+can invalidate a detached cursor after capture. Ordinary readings compare the
+retained revision, not an unfinished query reservation: a failed/refused query
+must leave prior accepted state available. Dismissals compare terminal ordering;
+clears compare current generation. Correlated replies keep captured source and
+use relay watermarks rather than this retention check. See
+[relay ordering and access gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#supplied-live-state-ordering).
+
+Hermetic `TestDaemonLiveRelayPublication`, `TestDaemonLiveRelayPrompts`,
+`TestDaemonLiveRelayReplies` and the ordering/retirement regressions exercise
+actual producers through authenticated decrypted wire, with explicit test-only
+readiness and legacy-byte comparisons. Production `startRelayV2` now installs
+`installDaemonThreadRelay` and starts `startDaemonThreadPublisher`, activating
+`ThreadReady` only with the real fold/watermark and retained live-state providers.
+`TestDaemonThreadPublication` exercises that installation with simultaneous
+authenticated thread/legacy peers, complete item reconstruction and current
+readings. Fold publication remains coordinator-owned and independent of source
+admission and history writers; held peer delivery cannot block either producer.
+Both publishers cancel and join before releasing their installation slots.
+See [fold publication and gap recovery](thread-package.md#shadow-lifecycle-and-evidence)
+and [relay quarantine](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+Production live thread publication and supplied-state reconciliation are active;
+connect/reconnect snapshots still initialize only transient readings. Client
+thread history initialization, catch-up/pages and replay replacement remain
+[#2963](https://github.com/pyrycode/pyrycode/issues/2963).

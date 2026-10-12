@@ -33,6 +33,7 @@ type hostedPage struct {
 	cursor  *hostedWalk
 }
 type hostedOutput struct {
+	unsolicited  bool
 	typ          string
 	payload      any
 	reply        uint64
@@ -43,14 +44,17 @@ type hostedOutput struct {
 	deliveryDone <-chan error
 }
 type hostedState struct {
-	deliveryCtx context.Context
-	pending     *hostedPage
-	reading     bool
-	walk        *hostedWalk
-	queue       []*hostedOutput
-	active      *hostedOutput
-	cancel      context.CancelFunc
-	rekey       bool
+	inbox        *hostedInbox
+	deliveryCtx  context.Context
+	pending      *hostedPage
+	reading      bool
+	walk         *hostedWalk
+	queue        []*hostedOutput
+	active       *hostedOutput
+	cancel       context.CancelFunc
+	rekey        bool
+	pushDeferred bool // Run observes an ordinary envelope queued upstream.
+	pushReserved bool // Run owns the temporary ordinary-drain reservation.
 }
 type hostedResult struct {
 	s        *V2Session
@@ -75,7 +79,7 @@ func (m *V2SessionManager) routeHosted(ctx context.Context, s *V2Session, raw []
 		return true
 	}
 	if s.hosted == nil {
-		s.hosted = &hostedState{}
+		m.initHosted(ctx, s)
 	}
 	if !correlated {
 		m.closeWith(ctx, s, StatusProtocolMismatch, nil)
@@ -108,6 +112,8 @@ func (m *V2SessionManager) routeHosted(ctx context.Context, s *V2Session, raw []
 					kept = append(kept, o)
 				}
 			}
+			m.releaseHosted(s, len(h.queue)-len(kept))
+			clear(h.queue[len(kept):])
 			h.queue = kept
 			if !h.reading {
 				h.pending = nil
@@ -180,11 +186,20 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 	if s.state != V2StateOpen {
 		return
 	}
-	count := len(h.queue)
-	if h.active != nil {
-		count++
+	m.takeHostedChanges(ctx, s)
+	m.hostedMu.Lock()
+	in := h.inbox
+	reserved := h.pushReserved && o.env != nil
+	full := in.retired || in.overflow || (!reserved && in.used >= hostedQueueLimit)
+	if !full {
+		if reserved {
+			h.pushReserved = false
+		} else {
+			in.used++
+		}
 	}
-	if count >= hostedQueueLimit {
+	m.hostedMu.Unlock()
+	if full {
 		m.closeWith(ctx, s, StatusQueueOverflow, nil)
 		return
 	}
@@ -194,6 +209,10 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 }
 func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 	h := s.hosted
+	if s.state != V2StateOpen {
+		return
+	}
+	m.takeHostedChanges(ctx, s)
 	if h.active != nil || len(h.queue) == 0 || s.state != V2StateOpen {
 		return
 	}
@@ -211,6 +230,7 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		return
 	}
 	o := h.queue[0]
+	h.queue[0] = nil
 	h.queue = h.queue[1:]
 	wire := protocol.RoutingEnvelope{ConnID: s.connID}
 	if o.wire != nil {
@@ -232,7 +252,10 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 				m.closeWith(ctx, s, StatusProtocolMismatch, nil)
 				return
 			}
-			env = protocol.Envelope{Type: o.typ, TS: time.Now().UTC(), Payload: payload, InReplyTo: &o.reply}
+			env = protocol.Envelope{Type: o.typ, TS: time.Now().UTC(), Payload: payload}
+			if !o.unsolicited {
+				env.InReplyTo = &o.reply
+			}
 		}
 		if s.nextID < 2 {
 			s.nextID = 2
@@ -256,7 +279,7 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		}
 	}
 	h.active = o
-	deliveryCtx, cancel := context.WithTimeout(ctx, hostedDeliveryTimeout)
+	deliveryCtx, cancel := context.WithTimeout(h.inbox.ctx, hostedDeliveryTimeout)
 	h.cancel = cancel
 	h.deliveryCtx = deliveryCtx
 	deliveryDone := make(chan error, 1)
@@ -313,6 +336,7 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 		h.cancel = nil
 		h.deliveryCtx = nil
 		h.active = nil
+		m.releaseHosted(s, 1)
 		if res.err != nil {
 			m.closeWith(ctx, s, StatusSessionGone, nil)
 			return
@@ -360,21 +384,7 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 			more = true
 			break
 		}
-		item := protocol.HostedAppRecord{AppID: r.AppID, Title: r.Title, Desired: r.Desired, State: r.State, Revision: r.Revision}
-		if r.ActiveRelease != "" {
-			v := r.ActiveRelease
-			item.ActiveRelease = &v
-		}
-		if r.PendingRelease != "" {
-			v := r.PendingRelease
-			item.PendingRelease = &v
-		}
-		if r.LastError != nil {
-			item.LastError = &struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			}{r.LastError.Code, r.LastError.Message}
-		}
+		item := hostedRecord(r)
 		payload.Items = append(payload.Items, item)
 		last = r.AppID
 	}
@@ -402,14 +412,34 @@ func (m *V2SessionManager) hostedNow() time.Time {
 
 // hostedEnvelope admits plaintext before sealing. IDs and Noise nonces are
 // allocated only when the ordered lane selects this envelope for delivery.
-func (m *V2SessionManager) hostedEnvelope(ctx context.Context, s *V2Session, env protocol.Envelope) {
+func (m *V2SessionManager) hostedEnvelope(ctx context.Context, s *V2Session, env protocol.Envelope) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if !s.hosted.pushReserved && env.Type != protocol.TypeRekeyRequest {
+		if !m.reserveHostedPush(s) {
+			if err := m.pushSource(ctx, s.connID, env, nil, true); err != nil {
+				m.cfg.Logger.Debug("relay: ordinary output handoff dropped", "event", "v2.push.drain_drop", "conn_id", s.connID, "err", err)
+			}
+			return true
+		}
+		defer m.releaseHostedPush(s)
+	}
 	m.hostedEnqueue(ctx, s, &hostedOutput{env: &env})
+	return false
 }
 func (m *V2SessionManager) retireHosted(s *V2Session) {
 	if h := s.hosted; h != nil {
+		m.hostedMu.Lock()
+		if in := h.inbox; in != nil {
+			in.retired = true
+			in.pending = nil
+			in.cancel()
+			if m.hostedInboxes[s.connID] == in {
+				delete(m.hostedInboxes, s.connID)
+			}
+		}
+		m.hostedMu.Unlock()
 		h.walk = nil
 		if h.pending != nil {
 			h.pending.retired = true

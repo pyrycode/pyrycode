@@ -2,15 +2,19 @@
 
 The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 defines the hosting design. Strict manifest validation, durable registration,
-lifecycle mutations and restart normalization are implemented in the standalone
-`internal/apps` package. The relay implements authenticated paged discovery and
-list cancellation; production capability activation still requires complete
-supervision/resource integration and cancellable transport wiring. Lifecycle
-notification producers remain #3158; resource-scoped cancellation remains #3123.
-A buildable React/TypeScript scaffold is maintained under
-`templates/hosted-app/`; SQL service behavior, preference UI, daemon integration,
-publication and native viewers remain later work. This reference
-preserves the contract's fields, limits and guarantees. The spec owns the
+lifecycle mutations, restart normalization and callable committed-release
+process ownership, health supervision, automatic reconciliation/recovery and
+guarded private targets are implemented in the `internal/apps` package. The relay
+implements authenticated paged discovery, committed lifecycle notifications and
+list cancellation. The daemon owns storage, service reconciliation/recovery,
+discovery subscriptions and cancellable delivery independently of channels.
+Encrypted resource routing (#3123) remains required before production capability
+activation.
+A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
+migrations, service health and built-browser proof is maintained under
+`templates/hosted-app/`; publication and native
+viewers remain later work. This reference preserves the contract's fields,
+limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
 used by daemon, desktop and mobile consumers. Runtime and isolation choices are
 recorded in [ADR 043](knowledge/decisions/043-hosted-app-runtime-and-isolation.md).
@@ -28,6 +32,12 @@ Three versions answer different questions:
 | Transport `v2` | Existing Noise-encrypted transport; neither an app release nor a runtime version. |
 
 The existing persisted `server_id` is the host identity (`ParseServerID`). An app's daemon-minted `app_id` is a canonical lowercase UUIDv4, distinct from channel/session IDs. The key is `(server_id, app_id)`. Neither field is a credential. Titles, source directories, service ports, releases and channel membership may change without changing this key. Copying an app to another host creates a new registration/app ID; importing a foreign manifest requires explicit restamping by local tools. Deleted app IDs are never reassigned.
+
+Daemon storage uses `identity.LoadOrCreate` on the same per-instance
+`~/.pyry/<sanitized-instance>/server-id` used by pairing and relay. Restart reuses
+that identity rather than minting a separate app-host ID. Independent homes with
+distinct persisted host IDs retain their own metadata, saved data and revisions,
+even when their registries contain the same `app_id`.
 
 The stable link is exactly `pyrycode://hosts/<server_id>/apps/<app_id>` (no credentials, release, service address, query or fragment). Clients resolve it through their paired host records and fresh discovery. A missing pairing shows the existing host-pairing entry point; a missing app shows unavailable. A link never pairs a host, changes keys, registers an app or grants access. The host and app label remain in native chrome outside web content.
 
@@ -78,9 +88,12 @@ These fixed paths are release-relative, not native service addresses. Publicatio
 
 ### Durable registration
 
-`internal/apps.Open` accepts an absolute `APPS_ROOT` and canonical local host ID;
-daemon root selection remains #3139. Registrations are independent of
-conversations and keyed by `(server_id, app_id)`. Separate roots for different
+`internal/apps.Open` accepts an absolute `APPS_ROOT` and canonical local host ID.
+Daemon startup selects `~/.pyry/<sanitized-instance>/apps` through the existing
+per-instance path resolver and opens storage even with relay disabled.
+Registrations and saved data survive channel stop, `/clear`, idle eviction and
+daemon restart; channel lifetimes neither own storage nor detach discovery.
+Registrations are keyed by `(server_id, app_id)`. Separate roots for different
 hosts may hold the same `app_id` independently. `Registry.List` returns detached
 records in stable `app_id` order together with their committed host revision,
 captured atomically under the same registry lock. Discovery maps committed record
@@ -98,6 +111,28 @@ host, captured revision and last app ID in connection-owned state, expires
 cursors fail with nonretryable `app.invalid_request`. See
 [discovery paging and cancellation](protocol-mobile.md#paging-cancellation-and-validation)
 for pending-page capacity, retirement and wire errors.
+
+The relay's `V2SessionManager.HostedAppsChanged` consumes committed registry
+changes for its authenticated host. Negotiated, authenticated, nonrevoked paired
+peers receive whole committed `app_updated` records or `app_removed`
+`{app_id, revision}` tombstones in increasing host revision order, including
+before their first list. No interactive/thread capability or active channel is
+required. Candidate manifest metadata never replaces committed display fields;
+rejected/no-op mutations and failed persistence emit nothing. Notifications omit
+reply correlation and conversation/session/replay metadata. Equal app IDs on
+different hosts do not grant cross-host access.
+
+Lifecycle handoff, discovery/control replies and active delivery share a total
+bound of 16 envelopes per connection. Overflow retires/closes the affected
+generation so clients can reconnect and refresh discovery, rather than miss an
+update while remaining connected. No lifecycle history or replay is retained;
+reconnect always starts a fresh list walk, and predecessor work cannot reach a
+replacement even when connection/request IDs are reused. Wired discovery and
+cancellable delivery do not activate `hosted_apps_v1`: `HostedAppsReady` must
+attest registration, supervision and resource routing together. Production
+withholds the capability pending #3123; an offering paired phone sees its
+omission from `hello_ack`, and `list_apps` returns `protocol.unsupported`.
+No test environment variable bypasses this readiness gate.
 
 There are at most 256 live registrations; admission of a 257th fails unchanged.
 
@@ -119,7 +154,8 @@ revisions remain registry-assigned. Foreign, unknown or tombstoned identities
 cannot be updated. `Lifecycle` is a complete replacement, with empty release strings and
 nil `LastError` meaning unset. Title/release bounds and record validation apply,
 including an active release for `running`. Callers supply confirmed observations
-and static safe errors; the package starts no processes and checks no health.
+and static safe errors. The registry starts no processes and checks no health;
+the package's separate `Owner` supplies explicit process ownership.
 
 Missing `APPS_ROOT/registry.json` opens empty at host revision 0. Each changed
 registration, manifest update, lifecycle mutation or removal advances the durable
@@ -155,8 +191,10 @@ write. Opening exposes the fully committed normalized baseline through
 changes, and store no durable events or conversation history. Callbacks run
 synchronously under the registry mutex and must return promptly without calling
 any registry method, including unsubscribe. The returned unsubscribe is
-idempotent. Discovery wire mapping is implemented in the relay; lifecycle
-notification producers remain #3158 and daemon installation remains #3139.
+idempotent. `newDaemonAppsManager` installs the initialized registry as discovery
+and subscribes `V2SessionManager.HostedAppsChanged` only after successful manager
+construction, before `Run`. Failed construction attaches nothing; relay cleanup
+unsubscribes before draining the manager. Channel cleanup does not unsubscribe.
 
 `Registry.Remove` deletes only the registration and durably tombstones its
 identity. Source, build and data files remain byte-for-byte intact. Registration
@@ -170,7 +208,19 @@ for storage, concurrency and regression-test constraints.
 
 ### Registration and observed state
 
-A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists caller-supplied observations; health checks and process/retry reconciliation remain separate work (#3122). New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
+A durable registration survives a stopped or broken process. `desired` is exactly `available` or `stopped` and persists user intent independently of observed `state`. `available` asks the supervisor to reconcile to a running ready service; `stopped` suppresses starts. Registration and stored `running` prove neither publication nor readiness. The registry persists observations; the daemon's single `apps.Owner` implements automatic local reconciliation/recovery with asynchronous health confirmation and guarded private targets. New create registers the identity with no active release; initial publish confirms readiness before exposing an openable link. Management/create/validate/publish/stop actions belong to local publishing tools (#3125/#3126), not web content or a generic relay execution verb.
+
+The owner uses discovery's successfully opened registry; its committed
+observations feed the existing discovery subscription. Client closure, relay
+disconnect/reconnect, channel stop, `/clear`
+and idle eviction leave services running. Explicit local `Owner.Stop` durably
+sets stopped intent and joins that app's workers and owned process group,
+including descendants, without stopping sibling apps or the session pool.
+Daemon shutdown and any startup failure after owner construction detach
+subscriptions and join owned workers/children; shutdown observations preserve
+desired intent. Restart reuses host/app identity, committed release selection and
+file-backed SQL data, with monotonic revisions and fresh health confirmation for
+available releases. Stopped and unpublished apps remain unlaunched.
 
 The implemented discovery mapping has these exact fields. Unknown wire fields are ignored for additive compatibility. Required nulls carry absence explicitly. Manifest optionality and the package's unset storage values do not change record nullability.
 
@@ -189,15 +239,130 @@ The implemented discovery mapping has these exact fields. Unknown wire fields ar
 
 The registry validates `running`'s active release; confirmed health is the caller's obligation. A successful cutover supplies the new title/active release, `state: running`, unset pending release and unset error together in one `UpdateLifecycle`. `LastError` accepts only the [contract error codes](#errors) and a static message of 1–160 UTF-8 bytes with no controls or leading/trailing whitespace. Callers must choose safe metadata: validation cannot establish that text is safe by its provenance. Raw parser, process or I/O diagnostics never become `last_error`; package errors are returned separately from transport codes.
 
+`Registry.CommitObservation(serverID, appID, expectedRevision, Observation)`
+checks the app record's revision under the registry lock, then commits state/error
+and optional explicit desired intent while preserving identity, manifest, title
+and active/pending releases. Empty `Desired` preserves intent; empty `State`
+preserves state/error, while a supplied state replaces `LastError` (nil clears it).
+It returns a detached current record and a change flag on success, including
+no-ops. A zero or obsolete expected revision returns `ErrStale` without writing,
+advancing revisions or notifying. Another app's commit does not invalidate this
+app's observation. Existing unconditional `UpdateLifecycle` retains its complete
+replacement behavior; both paths persist before exposing records or notifications.
+
+Explicit start durably resumes `available` intent when stopped or locally
+suppressed, clears the previous error and sets `starting` when an active release
+exists; an unpublished registration stays `stopped` and launches nothing.
+Failed intent/starting persistence launches
+nothing. Spawn alone establishes `starting`; `Start` returns on spawn/failure,
+without waiting for readiness. A final locked revision and cancellation check
+prevents obsolete preparation from spawning. The launch worker then confirms
+[health](#startup-and-health) and durably commits `running` with a cleared prior
+error through the same conditional implementation as `Registry.CommitObservation`
+before exposing a target. Title, active/pending releases and desired intent are
+preserved. App-revision and private generation checks reject obsolete results,
+including newer title, intent or active/pending-release commits during startup.
+Rejected/failed running persistence retires that generation and cleans up its
+group. Failure/exit observations recheck current generation, available intent and
+active release, then conditionally update the latest matching record, preserving
+newer title, manifest and pending-release commits. Shutdown observations use the
+returned running revision; neither old probes nor exits can overwrite newer
+commits or retire replacement ownership.
+Validation/spawn failure records `app.unavailable` / `Service could not start`;
+startup/runtime health failure records `app.unavailable` / `Service health check failed`;
+unexpected exit records `app.unavailable` / `Service exited unexpectedly`, only
+while generation, available intent and active release still match. Child output
+is discarded; persisted errors contain no output, paths or endpoints. Local
+preparation and cleanup errors carry operation context and preserve `errors.Is`;
+persistence failures are returned, with
+asynchronous observation/cleanup failures retained for `Shutdown` to surface.
+
 The host change sequence advances for registration, manifest/title/desired/state/release/error changes and removal, including restart state normalization; persist before announcing. It never resets on reconnect/restart or wraps; exhaustion refuses changes rather than reusing revisions. Semantic no-ops advance nothing. Committed package updates are ordered detached whole records, and removals are identity/revision tombstones as described above. The wire contract's `app_removed` carries a tombstone revision and removes only the registration; deletion does not silently erase data, and explicit data deletion is outside v1. No event-ring or conversation-history replay is used for apps.
 
-`Open` durably normalizes observed state before any launch/probe or reader exposure: available apps with active releases become starting; unpublished or intentionally stopped apps become stopped. Only changed states receive new revisions; unchanged reopen adds none. Health checks and process reconciliation (#3122) must then establish fresh readiness. The remaining reconciliation contract uses exponential retry delays of 1, 2, 4, 8, 16, then 30 seconds, resets after 60 seconds healthy, and stops immediately when desired becomes stopped. Every launched process has a new private generation even when app ID/release/port are reused.
+`Open` durably normalizes observed state before any launch/probe or reader exposure:
+available apps with active releases become starting; unpublished or intentionally
+stopped apps become stopped. Only changed states receive new revisions; unchanged
+reopen adds none. Opening the registry launches nothing. Successful `NewOwner`
+construction subscribes before its initial `Registry.List` and starts background
+reconciliation without waiting for services to spawn or become healthy. Callbacks
+only send a nonblocking coalesced wake and call neither registry nor owner methods,
+including unsubscribe. The reconciler lists current state and validates the host
+revision under the registry lock before applying it, discarding stale snapshots
+so concurrent stop/removal or publication cannot be missed or overwritten.
+
+Initially and after committed changes, available registrations with active
+releases launch automatically; stopped/unpublished registrations launch nothing.
+Every automatic attempt rechecks committed intent/release and conditionally
+observes starting without changing intent. Explicit starts and automatic work
+coalesce; lifecycle notifications do not cause duplicate launches or restart loops.
+Healthy metadata-only changes retain their generation, and duplicate starts or
+metadata/observation notifications cannot bypass scheduled backoff. Candidate
+manifest edits never activate a release or trigger migrations/cutover. After
+shutdown, reopen the same root with exclusive registry ownership and construct a
+new owner: available committed releases receive fresh processes and matching
+health, stopped/unpublished records remain unlaunched and existing data survives.
+See [Startup and health](#startup-and-health) for retry and cancellation timing.
 
 ## Runtime and layout
 
 Use Node.js 24 LTS, version 24.15.0 or newer in the 24.x line, on Linux/macOS. Check the actual executable before install/build/migration/start; an unavailable or mismatched runtime is a validation/start error, never an automatic fallback to another major or SQLite package. The exact Node patch, npm version, lockfile digest and build digest are recorded with the release for reproducibility. The runtime selection follows [Node's release policy](https://nodejs.org/en/about/previous-releases). `node:sqlite` has **stability 1.2, release candidate**, from 24.15.0; this is an explicit dependency, not a stable-API promise. See the [Node 24 SQLite API](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html). Use `DatabaseSync` with parameter binding, foreign keys, defensive mode and extension loading disabled. SQL runs on the app-service side, never through a native-client SQL API.
 
-The daemon selects an absolute `APPS_ROOT` below its private state directory; it is not a field supplied by app content. Directory modes are 0700, registry/database/backup files 0600. Platform state-directory resolution follows the daemon's existing configuration. Stable structure below this root:
+`runSupervisor` claims the instance with `ctrl.Listen` before opening/normalizing
+app storage or constructing its owner. It retains that claim through joined
+owner shutdown and final durable observations on normal exit and subsequent
+startup failure. Opening a registry can write normalized state and constructing
+an owner immediately admits reconciliation: doing either before the claim, or
+releasing it before cleanup, could launch a competing service generation and
+overwrite the incumbent's observations.
+
+The daemon resolves an absolute `APPS_ROOT` at
+`~/.pyry/<sanitized-instance>/apps` using `resolveInstanceDirPath` and
+`sanitizeName`; app content cannot select it. The existing resolver's fallback
+when HOME is unavailable is made absolute before opening. Startup creates or
+enforces a 0700 root and rejects a symlink or non-directory root. Registry writes
+retain the package's atomic 0600 contract; database/backup files also require
+0600 under the hosting contract.
+
+Missing registry storage starts empty. Corrupt, unreadable or foreign-host
+storage disables app availability while ordinary daemon/channel operation
+continues. Startup logs only a fixed local reason, without paths, storage
+contents or secrets; rejected registry/data bytes remain intact and no partially
+initialized registry reaches relay wiring.
+
+One daemon-owned `apps.Owner` uses that same registry, persisted host identity
+and root, including with relay disabled. Reconciliation is asynchronous: control
+and conversation readiness wait for neither service spawn nor health. Missing or
+unsupported Node, owner construction failure and app-specific start/health
+failures leave normal daemon/channel operation available and do not cancel the
+session pool. Daemon startup performs no dependency installation or migration.
+
+Opening storage durably normalizes observed state before exposing discovery:
+`available` apps with an active release become `starting`; unpublished or
+intentionally stopped apps become `stopped`. Identity, manifest/display metadata,
+desired intent, releases and saved data survive. Only changed states advance
+monotonic host/record revisions; an unchanged restart adds none. Stored `running`
+does not establish a live process or an openable readiness link. See
+[durable registration](#durable-registration) for atomic normalization and
+revision limits. Storage, discovery and supervision leave production
+`HostedAppsReady` unsatisfied and `hosted_apps_v1` withheld until #3123 supplies
+resource routing as part of the complete readiness attestation. Publication,
+migration serialization, activation and rollback remain publisher-owned
+(#3125/#3133).
+
+The [final verifier review for #3204](https://github.com/pyrycode/pyrycode/pull/3237#issuecomment-6117617232)
+records `TestHostedAppsRecoverySQL` on actual **Node v24.15.0**: **1 executed,
+1 passed, 0 failed, 0 skipped**, against a race-built daemon and the maintained
+template's freshly compiled service. Preparation migrated/seeded file-backed
+`node:sqlite` while the daemon was stopped. Saving
+`{"version":1,"selected_tab":"preferences","period":"7d"}` returned HTTP 204;
+service readback and direct SQL queries retained it after app crash/recovery and
+daemon restart with unchanged host/app identity and release selection. Sibling
+health, an unrelated fake-Claude turn during recovery and clean shutdown with
+descendant cleanup also passed. This seeded proof establishes persistence and
+lifetime isolation; live Claude was neither used nor required. It supplies no
+encrypted resource-routing or publisher migration/rollback acceptance.
+
+Stable structure below this root:
 
 ```text
 APPS_ROOT/
@@ -223,14 +388,14 @@ APPS_ROOT/
   <app_id>/backups/<publish_id>/       consistent pre-update data snapshot
 ```
 
-`build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The registry maps app/release identities to validated roots and digests; network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; activation/data restoration have a recoverable journal. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
+`build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The publication contract (#3125) associates app/release identities with validated roots and digests; callable start resolves the committed release from build manifests without a persisted build index. Network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; recoverable activation/data-restoration journals belong to #3125. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
 The template owns `npm run typecheck` (TypeScript checks both frontend and service
 without emitting), `npm test` (noninteractive, deterministic tests), and
 `npm run build` (frontend bundle and compiled service/migration JS). The current
-scaffold tests runtime bounds and literal React title rendering; temporary-SQL
-tests and migration SQL follow in #3141. The build leaves `sql/migrations` at
-the source/release root rather than copying it into `dist`. See
+scaffold tests runtime bounds, literal React title rendering and the generated
+SQLite service with isolated temporary databases. The build leaves
+`sql/migrations` at the source/release root rather than copying it into `dist`. See
 [Template and saved preferences](#template-and-saved-preferences) for the
 implemented layout and commands. No runtime TS loader, Node type stripping or
 dev server is part of publication. Install/build scripts execute as trusted app
@@ -238,29 +403,106 @@ code; publishing from a channel uses the existing assistant/operator authorizati
 boundary. These commands are argv arrays executed in the selected source/staging
 tree, not shell text assembled from wire fields.
 
-The daemon starts `node dist/service/main.js` with cwd equal to the immutable build directory. It supplies only a documented minimal environment plus explicitly configured app-service integrations; client tokens, Noise keys and daemon-control credentials are never supplied. The mandatory values are:
+`NewOwner(registry, nodeExecutable)` selects one executable and resolves its
+absolute path without runtime fallback and starts automatic reconciliation.
+Explicit starts and automatic attempts execute only the committed
+`Record.ActiveRelease`, even when `Record.Manifest` describes another candidate.
+It resolves exactly one matching validated
+`APPS_ROOT/<app_id>/builds/<build_id>/app.json`. Build directory names must be 64
+lowercase hexadecimal characters; scanned manifests must have the local host/app
+identity. Missing or ambiguous matches, invalid manifests, nonregular manifests
+or service entries, and symlink components/path escapes are rejected before
+service execution. Directory/file access uses no-follow descriptors. Inventory
+verification and keeping the published build immutable throughout execution
+remain the publisher's responsibility (#3125); start adds no persisted build index.
+
+Before spawn, the owner checks the actual selected executable with `--version`
+against `>=24.15.0 <25.0.0`, then runs `node dist/service/main.js` with cwd at the
+selected immutable build. Ordinary start runs no source/staging code, dev server,
+dependency install or migration. It creates or enforces
+`APPS_ROOT/<app_id>/data` at 0700 and `data/app.sqlite` at 0600, preserving existing
+database bytes. A missing database is created without truncation; symlink components,
+path escapes and a nonregular database are rejected. Creating the file does not
+initialize or migrate its SQL schema.
+
+The service environment is exactly these eight variables. There are no additional
+allowed or inherited variables, including `PATH`, `NODE_OPTIONS`, integration
+configuration, client tokens, Noise keys, control credentials or other secrets.
+The Node version check also inherits no environment.
 
 | Environment variable | Meaning |
 |---|---|
-| `PYRY_APP_ID`, `PYRY_SERVER_ID` | Registered identity. |
-| `PYRY_APP_RELEASE` | Candidate/active release version. |
+| `PYRY_APP_ID` | Registered local app identity. |
+| `PYRY_SERVER_ID` | Persisted local host identity. |
+| `PYRY_APP_RELEASE` | Committed `ActiveRelease` version. |
 | `PYRY_APP_DATA_DIR` | Absolute persistent data directory. |
 | `PYRY_APP_DB_PATH` | Absolute `data/app.sqlite` path. |
 | `PYRY_APP_BIND_HOST` | Exactly `127.0.0.1`. |
-| `PYRY_APP_PORT` | Daemon-reserved ephemeral loopback TCP port, never from a manifest/request. |
+| `PYRY_APP_PORT` | Owner-reserved ephemeral loopback TCP port, never from a manifest/request. |
 | `NODE_ENV` | Exactly `production`. |
 
-The reservation must prevent port reuse by another app during launch; bind collision fails startup and gets a fresh endpoint on retry. The service binds only that host/port and exposes `/api/…` plus `/_pyry/health`. Neither endpoint nor environment paths are returned to a client. The daemon resolves API targets from its private live-process record; it disables HTTP redirects, proxies and connection reuse across process generations. Loopback privacy is a routing boundary, not authentication against other processes under the same OS account.
+The owner reserves an ephemeral loopback listener and keeps ports unique across
+its live/in-flight generations. It closes the listening socket immediately before
+spawn so the service can bind, retaining private ownership of the port until
+generation retirement. Failed launch releases the reservation; the next
+attempt excludes that app's previous reserved port. Listener handoff cannot prevent
+another OS process taking the port; bind failure, process exit or failed health
+confirmation retires ownership and cleans up the group. Automatic recovery waits
+until retirement, reservation release, group cleanup and child wait complete,
+then applies the [retry delay](#startup-and-health). Every attempt uses a fresh
+private generation and endpoint reservation while retaining the same app data;
+restart requires fresh matching health rather than stored running state.
+Endpoints and generation records stay private and never enter discovery.
 
-Migrations run first using `node dist/service/migrate.js` with the same identity/data environment, exit 0 only on completed schema validation. Ordered SQL files match `^[0-9]{4}_[a-z0-9_]+\.sql$`, have unique increasing prefixes, and are immutable once applied. The SQL `pyry_schema_migrations` table records `version INTEGER PRIMARY KEY` and `sha256 TEXT NOT NULL`; an applied checksum mismatch fails validation. Missing new migrations are applied in one explicit SQLite transaction; failures roll back the transaction. Nontransactional SQL and external side effects are forbidden in migrations. The migration process has a 60-second deadline.
+The service binds only that host/port and exposes `/api/…` plus `/_pyry/health`.
+Package consumers use `Owner.Lookup(serverID, appID)` and opaque `Target.Do`
+handles for private HTTP service access. Lookup and every use require local
+registration, committed `desired: available` / `state: running`, matching active
+release and a live health-confirmed owned generation. A persisted running record
+alone supplies no target. `Target.Do` keeps the caller's path/query and replaces
+its authority with the private endpoint; no raw endpoint accessor is exposed.
+It rechecks ownership at connection admission, after response headers and around
+body reads, and couples request/body lifetime to caller and generation
+cancellation. Callers must close response bodies. Retained targets reject removed,
+stopped, release-changed or retired ownership and cannot address replacements,
+even when app/release/port recur. Metadata-only commits after confirmation do not
+invalidate an otherwise valid target. Proxies, redirects and connection reuse
+are disabled. Neither endpoint, generation nor environment paths enter discovery
+or client metadata. Encrypted resource authorization/routing and transfer limits
+remain #3123. Loopback privacy is a routing boundary, not authentication against
+other processes under the same OS account.
 
-A service is ready only when `GET /_pyry/health` returns HTTP 200 and JSON `{ "ready": true, "app_id": "…", "release_version": "…" }` matching the launched identity, and the process remains alive. Probe every 250 ms, each with a 1-second timeout, for at most 15 seconds after service spawn. Health is checked every 5 seconds while running; three consecutive failures transition to failed and stop that process. SIGTERM allows 5 seconds to close HTTP/SQL and children; then the daemon kills the owned process group and waits. Startup/stop are independent of session supervision. Read-header timeout 5 seconds, request read/write timeout 30 seconds, idle timeout 30 seconds and private health reply cap 4096 bytes are required service conventions.
+The publication contract (#3125) runs migrations before candidate startup using `node dist/service/migrate.js` with the same identity/data environment, exiting 0 only on completed schema validation. Ordinary `Owner.Start` never invokes this command. Ordered SQL files match `^[0-9]{4}_[a-z0-9_]+\.sql$`, have unique increasing prefixes, and are immutable once applied. The SQL `pyry_schema_migrations` table records `version INTEGER PRIMARY KEY` and `sha256 TEXT NOT NULL`; an applied checksum mismatch fails validation. Missing new migrations are applied in one explicit SQLite transaction; failures roll back the transaction. Nontransactional SQL and external side effects are forbidden in migrations. The migration process has a 60-second deadline.
+
+The owner requires `GET /_pyry/health` to return HTTP 200 and JSON
+`{ "ready": true, "app_id": "…", "release_version": "…" }` with the exact
+launched app and committed active release, while its owned process is still live.
+Startup probes run every 250 ms for at most 15 seconds from spawn; request/body
+timeout is one second bounded by the remaining startup time, with a 4096-byte
+reply cap. Running probes occur every five seconds; success resets consecutive
+failures, and the third failure retires readiness and stops the group. See
+[Startup and health](#startup-and-health) for persistence and cleanup behavior.
+Service-side read-header timeout 5 seconds, request read/write timeout 30 seconds
+and idle timeout 30 seconds remain required conventions.
 
 ### Responsive React shell
 
-The responsive shell and browser proof follow in #3142; the current scaffold
-renders only a title and an editable-source message. The intended reusable React
-shell has native-independent page header/title, wrapping tab navigation, responsive main content, labeled filters, cards/tables and a polite status/error region. Use the [approved prototype](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272) as layout/behavior reference: Computers, Projects, Boards, Runs, Performance, Allowances. Match theme using local CSS variables; readable contrast, keyboard focus, accessible controls and safe-area padding work at desktop widths and a 320-pixel phone viewport. Computer cards use three columns above 760 px and one below; boards use four columns above 760 px, two below and one below 420 px. Charts/trends stack below 650 px; wide tables scroll horizontally. Coarse-pointer controls have at least 44-pixel touch height. No global horizontal page overflow or hover-only chart interaction.
+The template implements a native-independent header with literal title,
+wrapping Overview/Preferences navigation, labeled period controls, illustrative
+cards/table and a polite status region. Its local light-theme CSS provides
+safe-area padding, visible keyboard focus and controls at least 44 px high.
+Cards use three columns above 760 px and one at 760 px or narrower; the wide
+table scrolls inside its own focusable container without page overflow. The
+[built-browser proof](#built-ui-smoke-check) exercises 320×800 and 1280×800
+CSS-pixel viewports.
+
+The [approved interactive dashboard reference](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272)
+supplies responsive conventions, not production fleet data or controls. The
+broader shell's Computers, Projects, Boards, Runs, Performance and Allowances
+views remain #3127–#3132. Boards use four columns above 760 px, two below and one
+below 420 px; charts/trends stack below 650 px. Wide tables scroll locally, with
+readable contrast, keyboard focus, safe-area padding, at least 44-pixel
+coarse-pointer controls and no hover-only chart interaction.
 
 The orchestrator's combined CPU/memory graphs have independent per-computer selectors defaulting to 24 hours. Runs puts active work above history in one tab with common project/computer filters. Performance keeps averages and model-combined trends beneath each agent role in one view. Boards show ticket labels. Ticket drain finishes all remaining stages of already-owned tickets; agent drain finishes current runs then pauses. Fleet service owns claims, runs, telemetry, participation, capacity limits, drain state and allowances. The app service adapts configured fleet APIs; it does not duplicate fleet ownership in app SQL or let browser content select integration URLs.
 
@@ -299,15 +541,18 @@ Generated source includes:
   package.json, package-lock.json      pinned dependencies and consistent lock
   .npmrc, .gitignore                   install policy and generated-file exclusions
   tsconfig.web.json, tsconfig.service.json
-  scripts/build.mjs
+  scripts/{build,browser-smoke}.mjs
   src/web/{main.tsx,App.tsx,style.css,assets.d.ts,title.json}
-  src/service/{main.ts,migrate.ts,runtime.mjs}
-  sql/migrations/                     initially empty
-  test/app.test.mjs
+  src/service/{main.ts,migrate.ts,health.ts,runtime.mjs}
+  src/service/{environment.ts,database.ts,migrations.ts}
+  sql/migrations/0001_preferences.sql  singleton preference schema
+  test/{app,service}.test.mjs
 ```
 
-React/React DOM, their type definitions, Node type definitions, TypeScript and
-`esbuild-wasm` are pinned; the portable bundler is a development dependency.
+React/React DOM, their type definitions, Node type definitions, TypeScript,
+`esbuild-wasm` and Playwright Core 1.61.1 are pinned. The portable bundler and
+browser driver are development dependencies; installing the driver does not
+install a browser executable.
 From the generated destination, run:
 
 ```sh
@@ -319,31 +564,314 @@ npm run build
 ```
 
 `npm ci` uses the committed lockfile. `typecheck` covers both frontend and service;
-`test` runs offline without prompts. npm `devEngines`, `engines` and
+`test` compiles the service before running offline tests without prompts, so it
+needs no prior build. npm `devEngines`, `engines` and
 `.npmrc`'s `engine-strict=true` reject a mismatched actual Node executable before
 installation. Runtime checks also guard scaffold generation, typecheck, tests,
-build and the compiled start/migration entries; they never select another runtime.
+build and the compiled start/migration/health entries; they never select another
+runtime.
 
 Build output is compiled ESM at `dist/service/main.js`,
-`dist/service/migrate.js` and `dist/service/runtime.mjs`, plus public-only
-`dist/web/index.html` and `dist/web/assets/main.js`/`main.css`.
+`dist/service/migrate.js`, `dist/service/health.js` and their shared modules, plus
+public-only `dist/web/index.html` and `dist/web/assets/main.js`/`main.css`.
 The external script and stylesheet use `/assets/…` URLs relative to the app root,
 compatible with the [viewer CSP](#electron-and-android-isolation).
 Source secrets, environment files, SQL data, service code, lockfiles and
 `node_modules` stay outside `dist/web`. `sql/migrations` remains release-relative
 beside `dist`; publication needs no runtime TypeScript loader or development server.
 
-This slice supplies buildable source. `npm start` and `npm run migrate` execute
-the compiled entries, which deliberately exit nonzero with `unfinished-service`
-diagnostics. They bind no port, create no database and claim neither health nor
-schema readiness. SQL service/migrations and saved-preference persistence follow
-in [#3141](https://github.com/pyrycode/pyrycode/issues/3141); the responsive
-preference UI and browser persistence proof follow in
-[#3142](https://github.com/pyrycode/pyrycode/issues/3142). The eventual
-[orchestrator walkthrough](#orchestrator-walkthrough) describes app-scoped saved
-preferences shared by authorized viewers.
+### Display settings
 
-Generation alone does not register, publish or return a ready app link.
+The small example follows the
+[approved responsive dashboard reference](https://github.com/pyrycode/pyrycode/issues/3120#issuecomment-6100756272)
+with illustrative cards/table; see [Responsive React shell](#responsive-react-shell)
+for layout and accessibility rules.
+
+Each initial/fresh client loads and validates `GET /api/preferences`. Until that
+read finishes, editing is disabled. The unsaved-database defaults are Overview
+and Last 24 hours. Choose Overview or Preferences and Last hour, Last 24 hours
+or Last 7 days, then explicitly Save. The UI posts the complete
+`{version: 1, selected_tab, period}` record; both requests use app-root-relative
+`/api/preferences` with `credentials: 'omit'`.
+
+While saving, controls are disabled and the polite, atomic status region says
+“Saving…”. Only HTTP 204 changes it to “Preferences saved.”; edits clear prior
+success. Read failures or invalid records show defaults with visible load-error
+feedback. Failed, timed-out or uncertain writes retain local changes, report
+“Save not confirmed” and are never automatically replayed. Check the saved
+settings before explicitly saving again: a lost acknowledgment can follow a
+committed write. Reads/writes have 10-second deadlines. Browser storage is not
+the durable store; all viewers share the app's SQLite record.
+
+### Built-UI smoke check
+
+Install [Node.js 24 with npm](https://nodejs.org/en/download), selecting
+`>=24.15.0 <25.0.0`, and ensure both `node` and `npm` are on PATH. Install a
+Chromium executable compatible with the pinned Playwright Core 1.61.1 driver
+and its required OS libraries before running the smoke command. One installation
+option uses the [pinned Core CLI](https://github.com/microsoft/playwright/blob/v1.61.1/packages/playwright-core/package.json):
+
+```sh
+npx --yes --package=playwright-core@1.61.1 playwright-core install chromium
+```
+
+On Linux, install the browser's system libraries as described in
+[Playwright's browser setup](https://playwright.dev/docs/browsers#install-system-dependencies)
+(the CLI also supports `install --with-deps chromium`). Set `HOSTED_APP_BROWSER`
+to the absolute executable path from that installation, not its containing
+directory. Browser cache paths vary by OS and installation; the recorded
+`/opt/ms-playwright/...` evidence path is specific to that run.
+
+From the repository root, select a persistent artifact directory outside the
+temporary fixture and run the committed, noninteractive command:
+
+```sh
+node --version
+npm --version
+HOSTED_APP_BROWSER=/absolute/path/to/chromium \
+  node templates/hosted-app/smoke.mjs /tmp/hosted-app-proof
+```
+
+[`smoke.mjs`](../templates/hosted-app/smoke.mjs) calls `scaffold` for fresh named
+1.0.0 and 1.0.1 releases with the same synthetic host/app IDs. For each it runs
+`npm ci --no-audit --no-fund`, frontend/service `npm run typecheck`, deterministic
+`npm test` against temporary SQLite and `npm run build`, in that order. It then
+invokes generated `npm run smoke:browser` with the replacement release, one
+unchanged external data directory and the artifact directory. No generated
+runtime settings need editing; the script supplies the entire
+[startup environment](#startup-and-health), including `NODE_ENV=production`,
+and runs compiled migration/service/health entries.
+
+The loopback-only fixture serves the fixed `dist/web` asset inventory and
+forwards API requests to the compiled service, enforcing the exact
+[contract CSP and nosniff](#electron-and-android-isolation) on responses. The
+production service remains API/health only; `npm start` does not serve the UI.
+The browser checks defaults, explicit saves, delayed acknowledgment without
+premature success, read failures, rejected writes, uncertain committed writes
+and absence of automatic retries. Fresh browser contexts recover acknowledged
+Preferences/7d after service restart and again from the separately built 1.0.1
+replacement using unchanged identities/data, with matching health at both
+transitions. It checks CSP violations, page overflow, contrast, card columns,
+table scrolling, keyboard focus, polite feedback and coarse-pointer control
+sizes at both viewports. Waits are bounded; fixture, service and browser are
+closed and temporary generated releases/data removed on success or failure.
+Missing/unsupported Node, missing npm/browser or failed checks exit nonzero
+with diagnostics, never a successful skip.
+
+A completed run writes `commands.json` (actual commands/results),
+`browser.json` (checks, executed/passed/skipped counts, requests, startup
+environment and measurements), `versions.json` (Node/npm/browser versions and
+artifact inventory) and screenshots to the chosen output directory. Failed runs
+retain whatever evidence was produced; fixture removal leaves artifacts intact.
+Retain or commit
+that directory to make a new run reviewable after worktree cleanup. The
+[committed evidence index](../templates/hosted-app/testdata/browser-3142/README.md)
+links both layouts, focus/save/error feedback and restart/replacement images.
+That recorded run used Node 24.15.0, npm 11.11.0, Chromium 149.0.7827.55 and
+Playwright Core 1.61.1: 59/59 browser checks and 17/17 deterministic tests per
+release, zero skipped; minimum measured text contrast 5.60:1 and controls 44 px.
+
+This is synthetic fixture proof using built assets. Publication/registration
+and readiness links remain [#3125](https://github.com/pyrycode/pyrycode/issues/3125)
+and [#3126](https://github.com/pyrycode/pyrycode/issues/3126); generation alone
+does not register, publish or return a ready app link. Native isolation/chrome
+and real channel acceptance remain
+[#3133](https://github.com/pyrycode/pyrycode/issues/3133) and client tickets.
+The fixture establishes no live-Claude, native or live-channel acceptance.
+
+### Preference API
+
+`GET /api/preferences` returns HTTP 200 JSON. With no saved record, it returns:
+
+```json
+{ "version": 1, "selected_tab": "overview", "period": "24h" }
+```
+
+`POST /api/preferences` accepts one JSON object with required numeric `version: 1`.
+`selected_tab` accepts `overview` or `preferences`; `period` accepts `1h`, `24h`
+or `7d`. Each committed save replaces the whole record. Omitted tab/period values
+use `overview`/`24h`, even if a previous save chose different values. Unknown
+fields are ignored. HTTP 204 acknowledges only a committed transaction.
+
+Malformed JSON or invalid UTF-8, non-object input (including arrays/null),
+missing/invalid version, or a supplied tab/period with an invalid type or enum
+(including null) returns HTTP 400. The request body limit is **16384 bytes**,
+inclusive; larger bodies return HTTP 413, including streamed bodies without
+Content-Length. Rejected writes leave the saved record unchanged. SQL failures
+return HTTP 503 without acknowledging a save.
+
+All viewers share one app-scoped SQL record, rather than per-client preferences.
+Opening a fresh client after process restart or replacement of the compiled
+release reads the same saved values when the app uses the same persistent
+database. SQL data stays outside replaceable source/staging/build trees and
+`dist/web`. The [built-UI smoke check](#built-ui-smoke-check) proves fresh-client
+readback across service restart and replacement builds; see the
+[orchestrator walkthrough](#orchestrator-walkthrough) for that intended workflow.
+
+### Migrations
+
+`npm run migrate` runs `node dist/service/migrate.js` once. Both migration and
+service entries use file-backed `DatabaseSync` at `PYRY_APP_DB_PATH`, foreign
+keys, defensive mode and disabled extension loading; values use parameter binding.
+Migration creates private data storage (0700 directory, 0600 database).
+
+The runner reads regular SQL files from release-relative `sql/migrations` beside
+`dist`, independently of the current working directory. Every filename must
+match `^[0-9]{4}_[a-z0-9_]+\.sql$`; numeric prefixes must be unique and pending
+files run in numeric order. `main.pyry_schema_migrations` records
+`version INTEGER PRIMARY KEY` and `sha256 TEXT NOT NULL`, hashing the raw SQL
+file bytes. Applied files are immutable: a missing file or changed checksum fails
+before any pending migration runs. Reruns with unchanged applied files are
+idempotent.
+
+All pending schema changes and ledger entries share one transaction. The runner
+validates the preference schema, record and database integrity before commit;
+any failure rolls back all pending work and exits nonzero with a diagnostic.
+Exit 0 means schema validation and commit completed. Migration SQL cannot control
+transactions/savepoints, attach/detach databases, change connection settings,
+write external files, create triggers or temporary-schema objects, or access the
+reserved migration ledger (including case variants). The publisher owns
+serialization against service writers and the 60-second migration deadline.
+
+### Startup and health
+
+The callable process owner is independent of channel sessions and supplies local
+`Start`, `Stop` and `Shutdown` for daemon/publisher consumers. Successful
+construction begins snapshot/subscription reconciliation asynchronously. Explicit
+starts, reconciliation and retries coalesce per app; compatible current ownership
+creates no duplicate child. Committed stopped intent, removal or active-release
+changes cancel incompatible ownership before any replacement. Healthy
+metadata-only updates retain the current generation.
+Each new launch has private cancellation, process-group and port ownership.
+Cancelling the initiating start context retires that generation; a coalesced caller
+can cancel its own wait independently. Start returns after spawn or failure and
+does not claim readiness, even if the service has already bound its socket.
+
+The launch worker probes `GET /_pyry/health` immediately after spawn, then every
+250 ms, with an absolute startup deadline of 15 seconds from spawn. Every probe
+has a one-second timeout covering both the request and reply reads, shortened to
+the remaining startup time, and a 4096-byte reply cap. Readiness requires HTTP
+200 JSON with `ready:true`, exact `app_id` and committed `release_version`, plus
+a still-live owned process. Wrong/missing identity, false or malformed readiness,
+duplicate/trailing JSON, oversized replies, non-200 status and timeouts cannot
+establish readiness. Proxies, redirects and connection reuse are disabled.
+Only successful durable running persistence exposes a private target, as described
+under [Registration and observed state](#registration-and-observed-state).
+
+While running, probes occur every five seconds. Success resets the consecutive
+failure count; one or two failures alone preserve established readiness. The
+third retires readiness, conditionally commits failed while still current and
+stops the owned group. Intervals are measured from probe start, accounting for
+request duration. Startup timeout/failure, unexpected exit and bind collision
+also retire targets/reservations and clean up the group; every retry
+uses a fresh endpoint. The 15-second bound covers the readiness decision;
+cleanup retains its separate five-second grace.
+
+Failed launches, unexpected exits, bind collisions and sustained health failures
+retry after 1, 2, 4, 8, 16, then 30 seconds, continuing at 30 seconds. Each delay
+begins after completed retirement, reservation release, process-group cleanup and
+direct-child wait. Sixty seconds of uninterrupted health-confirmed running under
+the existing three-failure policy resets the next delay to one second, including
+an exit at that boundary before the next successful probe. Duplicate starts and
+metadata/observation notifications neither reset nor bypass backoff; an explicit
+start during a scheduled delay returns the last launch failure or `ErrUnavailable`.
+Automatic admission-write failures also back off, exposing no target and spawning
+nothing. Failed running persistence cleans up owned candidates and is retained
+through owner error paths. Each attempt rechecks available intent and the active
+release and uses secure committed-release execution and fresh matching health.
+Late probes, exits, timers and retired targets cannot affect replacement generations.
+Independent per-app workers keep startup, failure, stop and recovery of one app
+from interrupting another app or a conversation.
+
+Committed stopped intent or removal promptly retires readiness and wakes
+reconciliation to cancel startup/backoff without waiting for a retry/probe deadline.
+`Owner.Stop` suppresses retries, cancels in-flight work and serializes ownership
+capture/cancellation with the durable stopped-intent write and launch admission.
+After releasing both locks, it retires the owned group: send SIGTERM only to that group, allow up to
+5 seconds, SIGKILL surviving members, and wait for the direct child. Cleanup
+tracks the group even if the leader exits before descendants; it never signals a
+sibling app's group. Only after cleanup does stop conditionally commit observed
+`stopped`. Repeated stop is harmless. Concurrent stops accept a stale final
+observation only when the latest record already has stopped intent and state;
+newer available intent still returns `ErrStale`. Failed intent persistence still
+cancels and cleans up ownership, locally suppresses retries until explicit start,
+returns failure and leaves committed intent unchanged. A failed final observation
+returns failure without claiming it committed. Removal retains source/build/data.
+Stop, shutdown and initiating-context cancellation retire readiness before further
+target use, including when lifecycle persistence fails.
+
+`Owner.Shutdown` prevents further launches (`ErrClosed`), detaches its registry
+subscription outside owner locks, cancels reconciliation/retry/launch/health work
+and all owned generations, and joins workers and processes. It conditionally
+observes stopped without changing desired intent and surfaces retained asynchronous
+persistence/cleanup errors. Reopening after shutdown requires exclusive root
+ownership, fresh processes and fresh matching health; existing data bytes survive,
+and stopped/unpublished registrations stay unlaunched.
+Daemon-owned reconciliation/recovery and the
+[Node/SQLite/unrelated-channel proof](#runtime-and-layout) are complete.
+Publication/migrations/activation and rollback remain #3125/#3133, and encrypted
+resource capability activation remains #3123.
+
+The maintained standalone template supplies its own migration/startup validation
+and health endpoint. The commands below exercise that template directly; they do
+not invoke the callable owner or establish daemon readiness.
+
+Migration, startup and the health command validate the actual Node runtime and
+the same mandatory environment before proceeding:
+
+| Variable | Required value / validation |
+|---|---|
+| `PYRY_APP_ID` | Canonical lowercase UUIDv4 matching release-root `app.json`'s `app_id`. |
+| `PYRY_SERVER_ID` | Canonical lowercase UUIDv4 matching `app.json`'s `server_id`. |
+| `PYRY_APP_RELEASE` | Matching `app.json`'s `release_version`; `MAJOR.MINOR.PATCH`, components 0–2147483647, no leading zeros except `0`, suffixes or `v`, at most 32 bytes. |
+| `PYRY_APP_DATA_DIR` | Absolute persistent directory outside the release/source/staging/build trees. |
+| `PYRY_APP_DB_PATH` | Exactly `PYRY_APP_DATA_DIR/app.sqlite`, absolute, with no database symlink/redirection. |
+| `PYRY_APP_BIND_HOST` | Exactly `127.0.0.1`. |
+| `PYRY_APP_PORT` | Decimal integer in 1–65535; the hosted supervisor supplies the reserved port. |
+| `NODE_ENV` | Exactly `production`. |
+
+Data validation resolves existing ancestors even when the data directory is not
+yet created, so symlink escapes into source/staging/build storage are rejected.
+For the standalone scaffold example above, choose an available local port and
+set these values in the generated destination:
+
+```sh
+export PYRY_APP_ID=22222222-2222-4222-8222-222222222222
+export PYRY_SERVER_ID=11111111-1111-4111-8111-111111111111
+export PYRY_APP_RELEASE=1.0.0
+export PYRY_APP_DATA_DIR=/tmp/my-hosted-app-data
+export PYRY_APP_DB_PATH=/tmp/my-hosted-app-data/app.sqlite
+export PYRY_APP_BIND_HOST=127.0.0.1
+export PYRY_APP_PORT=43141
+export NODE_ENV=production
+npm run migrate
+npm start
+```
+
+`npm start` executes `node dist/service/main.js`. Migration must precede startup;
+startup requires an existing migrated database and never migrates implicitly.
+Missing/invalid environment, runtime mismatch, unsafe paths, unavailable or
+unmigrated schema and bind collisions fail with a diagnostic and nonzero exit,
+without choosing a fallback endpoint or creating data inside builds. A release
+copy needs `package.json` with `type: module`, `app.json`, compiled `dist/service`
+and `sql/migrations` at the same release root.
+
+`GET /_pyry/health` revalidates SQL/schema and the migration ledger. Healthy
+storage returns HTTP 200 with at most 4096 bytes of JSON
+`{ "ready": true, "app_id": "…", "release_version": "…" }`; SQL/schema failure
+returns HTTP 503 and never reports ready. The service configures a 5-second
+read-header timeout, 30-second request read/write and idle timeouts. SIGTERM
+closes HTTP connections and SQL within 5 seconds, including an outstanding client.
+
+From another shell in the same destination with the same environment,
+`npm run health` executes `node dist/service/health.js`. It probes the supplied
+loopback endpoint once with an absolute 1-second deadline and 4096-byte response
+cap, follows no redirects, and exits 0 only for HTTP 200, `ready: true` and
+matching app/release identity. The supervisor owns repeated probes and restart
+policy; this command supplies only the one-shot service check.
+
+Scaffold generation and service health alone do not register, publish or return
+a ready app link.
 [#3125](https://github.com/pyrycode/pyrycode/issues/3125) owns identity minting,
 daemon-selected destinations and registration/publication tools;
 [#3126](https://github.com/pyrycode/pyrycode/issues/3126) owns the channel workflow
@@ -354,7 +882,7 @@ and readiness-confirmed links described in
 
 ### Capability and envelope vocabulary
 
-`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production supplies a general cancellable transport adapter but no discovery/readiness providers, so activation remains disabled until complete integration. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
+`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery, a daemon-owned service supervisor and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3123. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
 
 Without the negotiated capability, clients show that host's Apps feature as unsupported and send no app requests; hosts emit no app list/state/resource pushes to that peer. An old host may return existing `protocol.unknown_type`; a supporting host receiving an app request without negotiation returns `error` with `protocol.unsupported`. Other host connections/conversations continue normally. A new contract version uses a new capability and vocabulary for incompatible semantics, never reinterprets these enums.
 
@@ -381,7 +909,7 @@ For every hosted wire table, fields are required unless explicitly optional; nul
 
 Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the atomic host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID in connection-owned state; it expires 30 seconds after issuance. Empty/null request cursors are invalid. The daemon validates it without using it as a path or host selector. If revision changed or cursor expired, return retryable `apps.changed` and require a fresh walk; do not combine pages from different revisions. One page request is pending per connection through read and delivery; a delivered page's cursor holds no worker. Further pending lists return `app.busy` with `retry_after_s: 1`. A fresh `{}` after completion replaces the previous walk. List cancellation retires only that connection's pending target; a blocked read retains capacity until it exits. The ordered discovery/control lane holds at most 16 envelopes including active delivery and cancel acknowledgements. Reconnect always starts a new list walk. See the [implemented wire behavior](protocol-mobile.md#paging-cancellation-and-validation).
 
-Lifecycle notification producers remain pending #3158. Their contract makes a fresh list authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts must emit updates in revision order to negotiated peers. Resource/credit handling and resource-scoped cancellation remain #3123, including their independent worker bounds.
+Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. The daemon owns subscription wiring and relay-lifetime cleanup. Resource/credit handling and resource-scoped cancellation remain #3123, including their independent worker bounds.
 
 ### Asset/API fields and HTTP semantics
 
