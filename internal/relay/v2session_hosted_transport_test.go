@@ -59,29 +59,33 @@ func (g *testHostedPumpGate) Handle(ctx context.Context, r slog.Record) error {
 }
 
 type testHostedTransport struct {
-	t         *testing.T
-	mgr       *V2SessionManager
-	conn      *Connection
-	socket    *websocket.Conn
-	wires     chan protocol.RoutingEnvelope
-	gate      *testHostedPumpGate
-	entered   chan struct{}
-	delivered chan error
-	pub       []byte
-	stop      func()
+	t          *testing.T
+	mgr        *V2SessionManager
+	conn       *Connection
+	socket     *websocket.Conn
+	socketDone chan struct{}
+	wires      chan protocol.RoutingEnvelope
+	gate       *testHostedPumpGate
+	entered    chan struct{}
+	delivered  chan error
+	pub        []byte
+	stop       func()
 }
 
 func testHostedRealTransport(t *testing.T, enabled bool) *testHostedTransport {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	p := &testHostedTransport{t: t, wires: make(chan protocol.RoutingEnvelope, 128), entered: make(chan struct{}, 128), delivered: make(chan error, 128)}
+	p := &testHostedTransport{socketDone: make(chan struct{}), t: t, wires: make(chan protocol.RoutingEnvelope, 128), entered: make(chan struct{}, 128), delivered: make(chan error, 128)}
 	connected := make(chan *websocket.Conn, 1)
+	var socketExit sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
+		ws.SetReadLimit(131072) // A hosted chunk includes inner and outer base64 framing.
 		defer ws.CloseNow()
+		defer socketExit.Do(func() { close(p.socketDone) })
 		connected <- ws
 		for {
 			_, raw, err := ws.Read(ctx)

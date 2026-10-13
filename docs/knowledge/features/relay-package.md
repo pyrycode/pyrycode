@@ -112,17 +112,23 @@ Source: [protocol reference](../../protocol-mobile.md#binary--relay). Current ad
 
 The [authoritative admission contract](../../protocol-mobile.md#daemon-admission-declared)
 is implemented at the relay library boundary by
-[Core #3216](https://github.com/pyrycode/pyrycode/issues/3216): `Connect` validates
+[Core #3216](https://github.com/pyrycode/pyrycode/issues/3216) and in the daemon by
+[Core #3217](https://github.com/pyrycode/pyrycode/issues/3217). `Connect` validates
 and sends an optional selected credential, and the first HTTP 401 terminates
 the relay connection with `ErrAdmissionFailed`, even without a credential.
-This library contract does not activate identity admission. The production
-`startRelay` caller still omits `AdmissionToken`; private daemon configuration,
-identity selection and credential wiring remain with
-[Core #3217](https://github.com/pyrycode/pyrycode/issues/3217).
+`runSupervisor` loads the [private credential map](config-package.md#relay-admission-credentials)
+once at startup and passes it through `relayWiring`. `startRelay` selects only
+its loaded instance server-id's exact entry into `AdmissionToken`. Named
+instances select independently, with no fallback; missing configuration or a
+missing selected entry omits the header. File edits leave the selected credential
+unchanged on reconnect; rotation requires daemon restart. The daemon emits static
+correction/restart guidance on admission rejection and retains local service.
+Configured delivery does not activate identity admission.
 [Relay #167](https://github.com/pyrycode/pyrycode-relay/issues/167) owns enforcement
 and its repository's threat-model update. Production enforcement remains disabled
-until both implementations ship and the operator explicitly enables enforce;
-no live rollout is proved by the library's loopback tests.
+until both implementations ship and the operator explicitly enables enforce.
+Hermetic config and daemon loopback tests prove delivery, rotation and local
+service after rejection; they do not prove enforcement or live rollout.
 
 Noise authenticates the daemon to paired phones but cannot prevent anonymous
 reservation of its public server-id or anonymous daemon-originated push requests.
@@ -194,9 +200,22 @@ whether `AdmissionToken` is set. `classifyTransportErr` maps only the numeric 40
 in `transport.UpgradeRejectionError` to the static `ErrAdmissionFailed` sentinel,
 retaining no transport cause or peer diagnostic. It is distinct from
 `ErrServerIDConflict`, cancellation and ordinary connection errors through
-`errors.Is`. The existing `startRelay` terminal-error handler leaves local daemon
-service running on admission failure; correcting configuration and restarting
-the daemon retries. Credential configuration and wiring remain pending #3217.
+`errors.Is`. `startRelay` handles `ErrAdmissionFailed` in its own classifier arm
+with the static diagnostic “relay: admission failed; correct relay admission configuration
+and restart the daemon”, without logging the error or raw peer text. It leaves
+local control `status` and `stop` responsive and never invokes `w.shutdown` or
+the persistent-4409 service-manager restart path. Correcting configuration and
+restarting the daemon retries with a freshly loaded credential; editing the file
+alone does not resume attempts.
+
+`TestDaemonAdmissionRejection` checks initial/reconnect 401 with and without a
+selected credential, counted attempts and responsive local status.
+`TestDaemonAdmissionSelectionAndRotation` checks independent named identities,
+exactly one unchanged header per attempt, retained startup selection after file
+edits, simulated old/new overlap and revocation, and recovery after correction
+and restart. Both inspect local logs/status and reject credential or peer-text
+exposure; rotation also checks pairing output. The existing library and transport
+proofs retain frame hygiene, network/5xx recovery and the 4409 threshold.
 
 ### Reconnect-state accessors for the v2 push drain (#874 `Connected`, #875 `Reconnected`)
 

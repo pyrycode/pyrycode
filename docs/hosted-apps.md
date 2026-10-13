@@ -4,15 +4,16 @@ The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contrac
 defines the hosting design. Strict manifest validation, bundled registered source
 creation and identity-based inspection, durable registration,
 lifecycle mutations, restart normalization and callable committed-release
-process ownership, persistent-data snapshots with restart verification,
-health supervision, automatic reconciliation/recovery and
+process ownership, persistent-data snapshots with restart verification and
+repeatable restoration, health supervision, automatic reconciliation/recovery and
 guarded private targets, generation-bound stable response preparation and confined
 callable active-release assets are implemented in the `internal/apps` package. The relay
-implements authenticated paged discovery, committed lifecycle notifications and
-list cancellation. The daemon owns storage, service reconciliation/recovery,
+implements authenticated paged discovery, committed lifecycle notifications,
+bounded credit-paced asset transfers and scoped cancellation (#3315).
+The daemon owns storage, service reconciliation/recovery,
 discovery subscriptions and cancellable delivery independently of channels.
-Encrypted resource routing (#3123) remains required before production capability
-activation.
+Encrypted API routing remains #3316; production capability activation and
+real-daemon/relay acceptance remain #3248.
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
 `templates/hosted-app/`; publication and native
@@ -423,6 +424,41 @@ unchanged without creating SQLite sidecars. Evidence detects mismatch; it is
 not an authenticity signature against someone rewriting both evidence and data
 under the daemon's OS account. See [persistent-data snapshots](knowledge/features/apps-package.md#persistent-data-snapshots)
 for the package's sealing and failure rules.
+
+`apps.RestoreData(ctx, root, serverID, appID, ref, node)` restores the complete
+snapshot tree and database schema to the selected app's `data` location. Every
+attempt calls `apps.VerifyBackup` on the persisted reference and freshly loaded
+disk evidence before changing current data, including after restart or an earlier
+successful verification. The reference must bind the selected local host/app,
+canonical UUIDv4 publish ID and exact backup root under the daemon-selected clean
+absolute `APPS_ROOT`. Invalid evidence, changed backup contents or unsafe entries
+fail before replacement. Current data also receives a complete preflight;
+traversal and replacement reject symlinks, nonregular entries and multiply linked
+files without following them into another app or outside storage.
+
+Restoration replaces the whole tree, preserving nested files and empty
+directories while removing candidate-only files, directories and schema changes,
+plus obsolete `app.sqlite-wal`, `app.sqlite-shm` and `app.sqlite-journal` files.
+Absent snapshot data restores no `data` directory; empty data restores an empty
+directory; a zero-byte uninitialized database stays zero-byte. No schema or SQL
+checksum ledger is invented. Existing `main.pyry_schema_migrations` version and
+checksum rows are preserved. Success requires matching restored inventory and
+contents, initialized SQLite integrity/foreign-key checks using the selected
+supported Node, 0700 directories/0600 files, and synced restored files,
+directories and replacement metadata, including the app parent directory.
+Validation runs no migrations and assumes no template-specific preference schema.
+
+Callers serialize operations and quiesce **all** app writers throughout
+restoration, including non-SQL writers. Copy, replacement, restored verification,
+sync failures and cancellation return errors; interruption after replacement
+begins can leave partial current data. A fresh caller retries with only the
+persisted reference and disk evidence to converge to the same snapshot, even
+after a previous success. Restoration leaves backup contents, permissions and
+evidence untouched and never deletes the backup. Retain it until caller-owned
+durable recovery completion, then let the caller delete it. Service retirement,
+migrations, journals, release selection and old-release health remain caller-owned;
+restored data alone does not prove rollback readiness or undo arbitrary OS/fleet
+effects. See [publication and recovery](#publication-and-recovery).
 
 `build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The publication contract (#3125) associates app/release identities with validated roots and digests; callable start resolves the committed release from build manifests without a persisted build index. Network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; recoverable activation/data-restoration journals belong to #3125. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
@@ -941,7 +977,7 @@ and readiness-confirmed links described in
 
 ### Capability and envelope vocabulary
 
-`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery, a daemon-owned service supervisor and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3123. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
+`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery, a daemon-owned service supervisor and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3248. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
 
 Without the negotiated capability, clients show that host's Apps feature as unsupported and send no app requests; hosts emit no app list/state/resource pushes to that peer. An old host may return existing `protocol.unknown_type`; a supporting host receiving an app request without negotiation returns `error` with `protocol.unsupported`. Other host connections/conversations continue normally. A new contract version uses a new capability and vocabulary for incompatible semantics, never reinterprets these enums.
 
@@ -964,11 +1000,11 @@ For every hosted wire table, fields are required unless explicitly optional; nul
 | `app_cancelled` | daemon → client | Reply to cancel ID, `{request_id, app_id?}`; echoes cancel scope, no assertion that a mutation was rolled back. |
 | `error` | daemon → client | Existing `ErrorPayload`, reply to failing request ID; terminal for that request. |
 
-`Route`/the v2 routing boundary must recognize the vocabulary and enforce direction before dispatch. A client-sent response/notification is invalid. App work is performed by bounded cancellable workers; a stalled disk/service/credit wait cannot block that connection's cancellation or unrelated message handling. No relay changes or hosted-app parsing occur on the relay.
+The authenticated v2 `routeHosted` boundary recognizes the vocabulary and enforces direction before dispatch; hosted routing stays outside generic `dispatch.Route`. A client-sent response/notification is invalid. App work is performed by bounded cancellable workers; a stalled disk/service/credit wait cannot block that connection's cancellation or unrelated message handling. The relay server remains content-blind and parses no hosted-app payloads.
 
 Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the atomic host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID in connection-owned state; it expires 30 seconds after issuance. Empty/null request cursors are invalid. The daemon validates it without using it as a path or host selector. If revision changed or cursor expired, return retryable `apps.changed` and require a fresh walk; do not combine pages from different revisions. One page request is pending per connection through read and delivery; a delivered page's cursor holds no worker. Further pending lists return `app.busy` with `retry_after_s: 1`. A fresh `{}` after completion replaces the previous walk. List cancellation retires only that connection's pending target; a blocked read retains capacity until it exits. The ordered discovery/control lane holds at most 16 envelopes including active delivery and cancel acknowledgements. Reconnect always starts a new list walk. See the [implemented wire behavior](protocol-mobile.md#paging-cancellation-and-validation).
 
-Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. The daemon owns subscription wiring and relay-lifetime cleanup. Resource/credit handling and resource-scoped cancellation remain #3123, including their independent worker bounds.
+Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. The daemon owns subscription wiring and relay-lifetime cleanup. Asset responses/chunks, credit and app-scoped cancellation are implemented with independent resource bounds (#3315); API forwarding remains #3316. See the [implemented asset wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
 
 ### Asset/API fields and HTTP semantics
 
@@ -1052,6 +1088,70 @@ capacity. Preparation failure, caller cancellation, generation retirement and
 disposal release reservations exactly once, including retained unconsumed results;
 `Close` is idempotent and may race consumption/cancellation. The transport must
 enforce its own cancellation boundary for copied metadata and bytes.
+
+#### Callable private API forwarding
+
+`Owner.ForwardAPI(ctx, serverID, appID, release, APIRequest)` implements bounded
+backend reads/writes and returns `PreparedResponse` under the stable-response
+ownership contract above. The caller supplies authenticated host identity, a
+cancellable context and required `Reserve`/`Release` callbacks; this method does
+not authenticate a connection. `APIRequest` carries `Method`, escaped `Path`,
+optional raw `Query`, lowercase `Headers` and decoded `Body` bytes. Do not mutate
+the request during forwarding. Registration, exact active release and live,
+health-confirmed ownership are resolved before backend I/O, with `ErrNotFound`,
+`ErrReleaseChanged` and `ErrUnavailable` precedence as described above. Only the
+opaque private target selects the service; callers cannot select a URL, port or
+another service. Proxies and redirect following are disabled.
+
+Methods are exactly GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS. GET/HEAD
+bodies must be empty; all bodies are opaque bytes, at most 32768 bytes, preserving
+binary, form and JSON content. Paths begin `/api/` and are at most 2048 ASCII
+bytes; queries are at most 1024 ASCII bytes without a leading `?`. The URL rules
+above apply, including rejection of raw spaces/backslashes and invalid escaped
+path spellings. Validation decodes the path once for containment, then verifies
+that its escaped spelling can be forwarded exactly. Validated path/query bytes
+are preserved, including percent-escape case, parameter order, duplicates and
+empty values. Request headers accept only lowercase `accept`, `content-type`
+and `if-none-match`, with at most 8 entries, 4096 serialized JSON UTF-8 bytes and
+1024 bytes per valid, control-free UTF-8 value; `{}` is valid. Invalid requests
+or missing callbacks return `ErrAPIRequest`; oversized bodies return
+`ErrAPILimit`. Both fail before service I/O. No credentials or cookies are added.
+
+HTTP 200–599, including errors and redirects, are ordinary prepared responses;
+upgrades and unsupported statuses fail with `ErrResponseMetadata`. Backend
+projection keeps only lowercase `content-type`, `cache-control`, `etag` and
+`last-modified`, joining repeated values with `, ` and dropping all other headers.
+The projected object obeys the same entry/serialized/value bounds as requests.
+Compression negotiation and automatic decompression are disabled. Absent or
+identity `Content-Encoding` is accepted; any non-identity encoding is rejected
+as `ErrResponseMetadata`, never relabeled as identity bytes. HEAD and HTTP
+204/205/304 discard the backend body and yield zero size, no bytes and the SHA-256
+of the empty body. Other bodies are staged completely through `ResponseInput`
+with a 1048576-byte limit, exact size and SHA-256; overflow never yields partial
+success. Backend bodies are closed on every outcome. Metadata, response-limit,
+capacity and backend I/O failures remain distinct static package errors
+(`ErrResponseMetadata`, `ErrResponseLimit`, `ErrResponseCapacity`, `ErrResponseIO`),
+without endpoint or request diagnostics.
+
+The selected process generation remains pinned through preparation and checked
+consumption, including empty results. Removal, stop, exit, release replacement or
+same-release restart invalidates in-flight and retained responses without
+rebinding to a replacement. Caller cancellation/deadlines cover waiting for
+headers and stalled body reads and retain standard context errors. Reservations
+precede staging reads/allocation and may include a temporary EOF probe byte;
+the exact body size remains reserved after EOF until the caller uses
+`Complete(nil)`, `Complete(deliveryErr)` or `Close`. Failure, cancellation,
+retirement and disposal release capacity exactly once, including unconsumed
+results. Earlier copied metadata/bytes require cancellation enforcement at the
+delivery boundary. Forwarding sends once, with no automatic retries. A cancelled
+or failed mutation may already have changed service state; cancellation never
+replays it or asserts rollback.
+
+This callable backend does not activate encrypted API routing. Wire base64
+parsing and API integration with the relay's resource budgets, credit, deadlines
+and wire error mapping remain
+[#3316](https://github.com/pyrycode/pyrycode/issues/3316); the caller supplies
+context deadlines and capacity policy here.
 
 #### Callable confined assets
 
@@ -1139,12 +1239,12 @@ retained results. Consumers must use checked `Metadata`/`Read`, then
 stat/read/close failures use `ErrResponseIO`; ordinary HTTP 404 remains successful
 preparation. Package failures expose no native paths or request contents.
 
-API forwarding, backend header projection and HEAD/204/205/304 no-body handling remain
-[#3246](https://github.com/pyrycode/pyrycode/issues/3246). Admission, connection
-ceilings, credit, deadlines, wire serialization and transport error mapping remain
-[#3247](https://github.com/pyrycode/pyrycode/issues/3247). Paired resource routing
-and capability activation remain pending under
-[#3123](https://github.com/pyrycode/pyrycode/issues/3123). See the
+Paired asset routing, resource budgets, credit, deadlines, wire serialization
+and transport error mapping are implemented in the relay
+([#3315](https://github.com/pyrycode/pyrycode/issues/3315)); see the
+[asset wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
+Encrypted API routing remains #3316, and production capability activation and
+real-daemon/relay acceptance remain #3248. See the
 [apps resource-serving overview](knowledge/features/apps-package-resource-serving.md#resource-serving)
 for ownership, concurrency and regression details.
 
@@ -1262,22 +1362,31 @@ surfaces are connected.
 
 ### Publication and recovery
 
-The callable snapshot/verification primitives are implemented independently of
-publication. Callers serialize operations and quiesce **all** app writers for
-the entire snapshot, including writers of non-SQL files. They own request
-retirement, service drain/stop, journaling, migrations and release decisions.
+The callable snapshot, verification and restoration primitives are implemented
+independently of publication. Callers serialize operations and quiesce **all** app
+writers for the entire snapshot and restoration, including writers of non-SQL
+files. They own request retirement, service drain/stop, journaling, migrations
+and release decisions.
 A verified backup is immutable: another snapshot with the same publish ID
 returns `ErrConflict` without overwriting it. Existing incomplete destinations
-also conflict; a retry uses a new publish ID. Copy, SQLite, verification, sync
-failures and cancellation return errors, preserving recoverable source data;
-an unsuccessful attempt must never authorize mutation.
+also conflict; a snapshot retry uses a new publish ID. Snapshot copy, SQLite,
+verification, sync failures and cancellation return errors, preserving
+recoverable source data; an unsuccessful snapshot must never authorize mutation.
 
 Publication (#3262) and interrupted-publication recovery (#3263) consume these
-primitives; restoration is supplied by #3285. Persist the selected reference
-and independently verify it after restart before restoration. Durable recovery
-completion, old-release health and admission of API requests remain caller-owned.
+primitives. Persist the selected `BackupReference`; `apps.RestoreData` freshly
+verifies its complete disk evidence on every call, including after restart.
+It restores the whole tree/schema, removes candidate-only content and transient
+SQLite sidecars, and preserves distinct absent/empty/uninitialized states as
+specified in [runtime and layout](#runtime-and-layout). A failed or interrupted
+replacement can leave partial data; retry the same reference with a fresh caller
+before claiming recovery. Backup contents/evidence remain independently
+verifiable after successful, failed or interrupted restoration. Retain the
+backup until durable recovery completion; deletion belongs to the caller.
+Durable recovery completion, old-release health and admission of API requests
+remain caller-owned.
 The following paragraphs describe that publication/recovery contract, beyond
-the snapshot primitive. These data guarantees cannot undo arbitrary OS or
+the data primitives. These data guarantees cannot undo arbitrary OS or
 fleet-service effects.
 
 Publication is serialized per app, with at most one candidate and one writer to its SQL data. Build/typecheck/tests happen in private staging while the old service remains available. Before any migration, stop accepting that app's API work, cancel/retire pending reads/writes without replay, drain or stop the old service, and take a consistent recoverable snapshot of **all** app data including a SQLite backup that incorporates WAL state. Do not copy a live database file alone. Verify the snapshot before mutation. No fleet-side mutation may run as a startup/health side effect.
