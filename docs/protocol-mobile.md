@@ -462,13 +462,14 @@ Encoding: line-delimited JSON over WS text frames. One outer envelope per frame.
 
 ### Binary → relay
 
-**Current behaviour (unchanged from v1).** The binary opens `wss://<relay>/v1/server` with these request headers:
+**Current daemon upgrade headers.** The binary opens `wss://<relay>/v1/server` with these request headers:
 
 | Header | Required | Notes |
 |---|---|---|
 | `x-pyrycode-server` | yes | The server-id this binary is claiming. |
 | `x-pyrycode-version` | yes | Binary's pyry version, e.g. `0.11.0`. |
 | `user-agent` | yes | `pyry/<version>` for ops debugging. |
+| `x-pyrycode-admission-token` | when configured | Exactly one unchanged credential selected for the loaded server-id; see [daemon admission](#daemon-admission-declared). |
 
 First-claim-wins. Conflict → `4409` close. 30-second grace period on disconnect. The binary treats a `4409` as **fatal only when it persists**: it retries through the standard backoff ladder and unwinds only after 8 consecutive `4409` closes (≥ ~73s of backoff even at minimum jitter — longer than the relay's 60s worst-case dead-connection detection plus grace reclaim). A transient self-conflict — the binary reconnecting after a drop before the relay has noticed its old connection is dead — clears within that window; a genuine duplicate binary keeps conflicting and the loser shuts down (#1072).
 
@@ -478,12 +479,19 @@ The route path label carries no protocol meaning. The relay registers the binary
 
 #### Daemon admission (declared)
 
-**Declared ahead of implementation and production activation.** Current daemon
-admission stays unchanged until [Core #3197](https://github.com/pyrycode/pyrycode/issues/3197)
-and [Relay #167](https://github.com/pyrycode/pyrycode-relay/issues/167) ship and the
-operator explicitly enables **enforce**. This is the authoritative shared
+**Daemon companion implemented; production enforcement remains off by default.**
+[Core #3215](https://github.com/pyrycode/pyrycode/issues/3215) and
+[Core #3216](https://github.com/pyrycode/pyrycode/issues/3216) implement library
+header delivery and terminal HTTP 401 classification.
+[Core #3217](https://github.com/pyrycode/pyrycode/issues/3217), split from
+[Core #3197](https://github.com/pyrycode/pyrycode/issues/3197), completes private
+startup configuration, exact-instance credential selection and a static rejection
+diagnostic that preserves local daemon service. Identity enforcement still
+requires [Relay #167](https://github.com/pyrycode/pyrycode-relay/issues/167) and
+explicit operator activation of **enforce**. This is the authoritative shared
 admission reference, published from the [build-time contract](specs/architecture/3196-daemon-relay-admission.md).
-No enforcement or live rollout verification is claimed by #3196.
+Hermetic proofs establish daemon behavior; no production enforcement or live
+rollout verification is claimed.
 
 The binary does not authenticate to Relay through Noise; Relay is not a Noise
 peer. The following identity-bound admission credential is separate from phone
@@ -571,14 +579,26 @@ force for requests that pass admission.
 
 ##### Startup configuration
 
-The daemon's existing private `~/.pyry/config.json` gains optional
+The daemon's private `~/.pyry/config.json` accepts optional
 `relay_admission_tokens`, an object mapping exact server-id to one token. Each
-instance selects the entry for its own loaded server-id. An absent object or
-absent selected entry omits the header. A present map requires owner-only storage:
-the file is `0600`, its parent is `0700`, and ownership is the daemon user's.
-Malformed supplied configuration or insecure storage fails startup with static,
-value-free validation errors. Never include an offending value or parser excerpt.
-No flag or environment override is introduced for this secret.
+instance selects the entry for its own loaded server-id, without fallback. A
+missing file, absent key or absent selected entry omits the header; `{}` is valid.
+Null/non-object maps or malformed supplied values fail startup, including entries
+for unselected identities. Keys and tokens are neither trimmed nor normalized.
+The field uses canonical spelling; alternate case-folded spellings, repeated
+admission fields and duplicate exact identity keys are rejected, including escaped
+names that decode to the same key.
+
+A present map, including `{}`, requires a regular `0600` file and a `0700` parent
+directory, both owned by the daemon user's effective UID. Metadata checks use the
+same open file and parent handles as the read, including followed targets. Insecure
+storage fails with static, value-free errors and no permission repair; files
+without the map retain legacy storage compatibility. `Load` and `UpdateMemory`
+discard supplied-JSON decoder causes and excerpts, including errors elsewhere in
+the document. Memory updates preserve the complete map and unrelated settings.
+No flag or environment override is introduced for this secret. Daemon selection
+is a startup snapshot: editing or rotating the file applies only after restart.
+See [config validation and storage](knowledge/features/config-package.md#relay-admission-credentials).
 
 Relay retains its startup environment registry:
 
@@ -695,10 +715,11 @@ outcomes rather than tokens or claimed identities. Protect private daemon files
 and Relay environment provisioning; TLS protects the admission header on the
 network, while Relay and any trusted TLS-terminating proxy can see it.
 
-##### Operator rollout checklist (pending both implementations)
+##### Operator rollout checklist (pending operator activation)
 
-1. Ship Core #3197 and Relay #167 with Relay **off**; confirm both implementations
-   are present before proceeding. This contract is not activation evidence.
+1. Ship the daemon companion (Core #3215/#3216/#3217) and Relay #167 with Relay
+   **off**; confirm both implementations are present before proceeding. The
+   completed daemon companion and this contract are not activation evidence.
 2. Privately provision independently random, distinct tokens bound to each exact
    identity; configure owner-only daemon storage and Relay's startup registry.
 3. Configure Relay **observe** and restart configured daemons and Relay so both
@@ -790,7 +811,7 @@ See pyrycode-relay#132, #133 (relay-side send) and #2564 (daemon-side trigger).
    fail startup; absence is the first-run generation case.
 2. **Connect** WSS to `/v1/server` with headers above. The [declared admission
    contract](#daemon-admission-declared) requires the selected startup credential
-   on the initial connection and every reconnect once Core #3197 ships.
+   on the initial connection and every reconnect, implemented by Core #3217.
 3. **Hold open** for inbound phone connections. The binary itself does not initiate a Noise handshake — it is always the Noise responder.
 4. **For each phone WS forwarded by the relay**, expect a `noise_init` as the first frame within 10 seconds; otherwise close with `4421`. This is the missing-first-frame timeout; a `noise_msg` arriving instead of `noise_init` on a conn the daemon holds no session for is a different case and closes with the retryable `4410` (see [Error codes](#error-codes)), not this timeout path.
 5. **On disconnect from relay**, reconnect with exponential backoff, subject to
@@ -7550,9 +7571,9 @@ to that identity and allow abuse of daemon-originated push requests.
 
 **Declared admission boundary:** [Identity-bound daemon admission](#daemon-admission-declared)
 prevents anonymous identity reservation and anonymous daemon-originated push
-requests only in enforce. Current admission stays unchanged until Core #3197 and
-Relay #167 ship and the operator enables enforce; off/observe provide no such
-protection. A stolen admission token permits claiming its exact bound identity
+requests only in enforce. The daemon companion is implemented by Core #3217;
+production enforcement remains off pending Relay #167 and explicit operator
+activation of enforce. Off/observe provide no such protection. A stolen admission token permits claiming its exact bound identity
 and abusing push, but supplies neither the daemon's Noise private key nor phone
 authorization. Revocation takes effect on Relay restart, which closes existing
 connections and discards their claims/grace state; revoked holders then have no
