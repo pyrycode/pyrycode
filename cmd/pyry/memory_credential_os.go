@@ -21,7 +21,8 @@ func (s memoryCredentialStore) platform() string {
 func memoryOSName(generation string) string { return "pyry.memory.openai." + generation }
 
 // memoryOSCommand never returns tool diagnostics. Only successful read stdout
-// crosses the boundary, bounded and locally validated by memoryOSRead.
+// crosses the boundary, bounded and locally validated by memoryOSRead. Started
+// commands and their pipe workers are joined before returning, even on cancellation.
 func memoryOSCommand(ctx context.Context, tool string, args []string, input io.Reader, read bool) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, memoryCredentialDeadline)
 	defer cancel()
@@ -41,18 +42,12 @@ func memoryOSCommand(ctx context.Context, tool string, args []string, input io.R
 	if err := cmd.Start(); err != nil {
 		return nil, errMemoryStorage
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if err != nil {
-			return nil, errMemoryStorage
-		}
-	case <-ctx.Done():
+	err := cmd.Wait()
+	if ctx.Err() != nil {
 		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, errMemoryStorage
 	}
 	return output.Bytes(), nil
 }
