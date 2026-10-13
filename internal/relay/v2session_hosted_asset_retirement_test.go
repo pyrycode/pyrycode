@@ -250,7 +250,7 @@ func TestHostedAssetRealTransportBlockedWriter(t *testing.T) {
 	select {
 	case e := <-p.wires:
 		if len(e.Frame) != 0 {
-			t.Fatalf("late metadata: %+v", e)
+			t.Fatal("late sealed asset metadata")
 		}
 	default:
 	}

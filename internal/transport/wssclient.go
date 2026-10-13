@@ -445,6 +445,7 @@ func (c *Client) Send(frame []byte) error {
 // SendContext shares Send's ordered pump and waits for socket write completion.
 // Cancellation and WriteTimeout bound admission and I/O. A returned call leaves
 // no queued or active write, and a request cannot migrate to a reconnected socket.
+// Cancellation after admission retires that socket generation before completion.
 func (c *Client) SendContext(ctx context.Context, frame []byte) error {
 	writeCtx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
@@ -698,23 +699,30 @@ func (c *Client) sendPump(ctx context.Context, conn *websocket.Conn) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case req := <-c.sendCh:
-			err := req.ctx.Err()
 			if req.conn != conn {
-				err = ErrDisconnected
-			}
-			if err != nil {
 				if req.done != nil {
-					req.done <- err
+					req.done <- ErrDisconnected
 				}
 				continue
 			}
 			writeCtx, cancel := context.WithTimeout(req.ctx, c.cfg.WriteTimeout)
 			stop := context.AfterFunc(ctx, cancel)
 			c.cfg.Logger.DebugContext(writeCtx, "transport: frame accepted", "event", "transport.send.accepted")
-			err = conn.Write(writeCtx, websocket.MessageText, req.frame)
+			// Check both contexts synchronously: the pump cancellation callback
+			// may not have run, and Write can publish with an already cancelled ctx.
+			err := writeCtx.Err()
+			if err == nil {
+				err = ctx.Err()
+			}
+			if err == nil {
+				err = conn.Write(writeCtx, websocket.MessageText, req.frame)
+			}
 			stop()
 			cancel()
 			if err != nil {
+				// Discarding a sealed frame retires its stream. Close this exact
+				// socket before acknowledging so no write survives completion.
+				_ = conn.CloseNow() // Best-effort retirement; serve joins all pumps.
 				err = safeTransportError("send", err)
 			}
 			if req.done != nil {
