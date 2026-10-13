@@ -14,6 +14,7 @@ type hostedInbox struct {
 	threadJoins                   map[string]threadJoin
 	pending                       []*hostedOutput
 	used                          int
+	resourceUsed                  int
 	subscribed, retired, overflow bool
 	ctx                           context.Context
 	cancel                        context.CancelFunc

@@ -4,14 +4,17 @@ The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contrac
 defines the hosting design. Strict manifest validation, bundled registered source
 creation and identity-based inspection, durable registration,
 lifecycle mutations, restart normalization and callable committed-release
-process ownership, health supervision, automatic reconciliation/recovery and
-guarded private targets and generation-bound stable response preparation are
-implemented in the `internal/apps` package. The relay
-implements authenticated paged discovery, committed lifecycle notifications and
-list cancellation. The daemon owns storage, service reconciliation/recovery,
+process ownership, retained-artifact validation and immutable installation with
+independent verification, persistent-data snapshots with restart verification and
+repeatable restoration, health supervision, automatic reconciliation/recovery and
+guarded private targets, generation-bound stable response preparation and confined
+callable active-release assets are implemented in the `internal/apps` package. The relay
+implements authenticated paged discovery, committed lifecycle notifications,
+bounded credit-paced asset transfers and scoped cancellation (#3315).
+The daemon owns storage, service reconciliation/recovery,
 discovery subscriptions and cancellable delivery independently of channels.
-Encrypted resource routing (#3123) remains required before production capability
-activation.
+Encrypted API routing remains #3316; production capability activation and
+real-daemon/relay acceptance remain #3248.
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
 `templates/hosted-app/`; publication and native
@@ -378,7 +381,10 @@ APPS_ROOT/
   <app_id>/source/sql/migrations/0001_preferences.sql
   <app_id>/source/test/                unit/service/frontend contract tests
   <app_id>/staging/<build_id>/          private candidate tree; never client-visible
-  <app_id>/builds/<build_id>/app.json   immutable published manifest
+  <app_id>/builds/<build_id>/app.json   immutable retained manifest
+  <app_id>/builds/<build_id>/package.json
+  <app_id>/builds/<build_id>/package-lock.json
+  <app_id>/builds/<build_id>/inventory.json  canonical retained-byte inventory
   <app_id>/builds/<build_id>/dist/web/index.html
   <app_id>/builds/<build_id>/dist/web/assets/
   <app_id>/builds/<build_id>/dist/service/main.js
@@ -388,9 +394,145 @@ APPS_ROOT/
   <app_id>/data/app.sqlite             persistent SQL file, never inside a build
   <app_id>/data/                       WAL/SHM and app-owned durable files
   <app_id>/backups/<publish_id>/       consistent pre-update data snapshot
+  <app_id>/backups/<publish_id>/data/  preserved data tree when source data exists
+  <app_id>/backups/<publish_id>/verification.json  persisted verification evidence
 ```
 
-`build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The publication contract (#3125) associates app/release identities with validated roots and digests; callable start resolves the committed release from build manifests without a persisted build index. Network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; recoverable activation/data-restoration journals belong to #3125. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
+`apps.SnapshotData` snapshots the complete app-owned `data` tree, including
+nested regular files and empty directories, into the selected app's private
+`backups/<publish_id>`. Directories are 0700 and files are 0600; copying also
+enforces those modes on source data without changing its contents. The root must
+be the daemon-selected clean absolute `APPS_ROOT`, with the selected local
+host/app identity and a canonical UUIDv4 publish ID. No-follow traversal rejects
+symlink components, hard-linked files and nonregular entries.
+
+An initialized top-level `data/app.sqlite` is backed up with the selected
+supported Node executable's `node:sqlite` backup API, incorporating committed
+WAL contents. The sealed database uses DELETE journal mode and passes integrity
+and foreign-key checks. WAL/SHM/journal sidecars are transient and are removed
+from the snapshot; source sidecars without an initialized main database are
+rejected. Existing `main.pyry_schema_migrations` version/checksum rows are
+preserved without running migrations or requiring the template's preference
+schema. An absent `data` tree, an empty `data` directory and an uninitialized
+zero-byte `app.sqlite` remain three distinct states; snapshotting creates no
+schema or SQL checksum ledger.
+
+Success requires content/completeness verification and syncing snapshot files,
+directories, the destination parent and persisted evidence. After restart,
+`apps.VerifyBackup` uses the persisted `BackupReference` and `verification.json`
+to independently check the exact tree and file hashes, selected host/app/publish
+identity and initialized SQLite integrity, even if the source tree is gone.
+Missing/incomplete evidence or missing, changed, added or corrupt entries fail
+verification. It runs no migrations, repairs nothing and leaves sealed contents
+unchanged without creating SQLite sidecars. Evidence detects mismatch; it is
+not an authenticity signature against someone rewriting both evidence and data
+under the daemon's OS account. See [persistent-data snapshots](knowledge/features/apps-package.md#persistent-data-snapshots)
+for the package's sealing and failure rules.
+
+`apps.RestoreData(ctx, root, serverID, appID, ref, node)` restores the complete
+snapshot tree and database schema to the selected app's `data` location. Every
+attempt calls `apps.VerifyBackup` on the persisted reference and freshly loaded
+disk evidence before changing current data, including after restart or an earlier
+successful verification. The reference must bind the selected local host/app,
+canonical UUIDv4 publish ID and exact backup root under the daemon-selected clean
+absolute `APPS_ROOT`. Invalid evidence, changed backup contents or unsafe entries
+fail before replacement. Current data also receives a complete preflight;
+traversal and replacement reject symlinks, nonregular entries and multiply linked
+files without following them into another app or outside storage.
+
+Restoration replaces the whole tree, preserving nested files and empty
+directories while removing candidate-only files, directories and schema changes,
+plus obsolete `app.sqlite-wal`, `app.sqlite-shm` and `app.sqlite-journal` files.
+Absent snapshot data restores no `data` directory; empty data restores an empty
+directory; a zero-byte uninitialized database stays zero-byte. No schema or SQL
+checksum ledger is invented. Existing `main.pyry_schema_migrations` version and
+checksum rows are preserved. Success requires matching restored inventory and
+contents, initialized SQLite integrity/foreign-key checks using the selected
+supported Node, 0700 directories/0600 files, and synced restored files,
+directories and replacement metadata, including the app parent directory.
+Validation runs no migrations and assumes no template-specific preference schema.
+
+Callers serialize operations and quiesce **all** app writers throughout
+restoration, including non-SQL writers. Copy, replacement, restored verification,
+sync failures and cancellation return errors; interruption after replacement
+begins can leave partial current data. A fresh caller retries with only the
+persisted reference and disk evidence to converge to the same snapshot, even
+after a previous success. Restoration leaves backup contents, permissions and
+evidence untouched and never deletes the backup. Retain it until caller-owned
+durable recovery completion, then let the caller delete it. Service retirement,
+migrations, journals, release selection and old-release health remain caller-owned;
+restored data alone does not prove rollback readiness or undo arbitrary OS/fleet
+effects. See [publication and recovery](#publication-and-recovery).
+
+Retained builds contain only regular `app.json`, `package.json` and
+`package-lock.json`, plus the trees `dist/web`, `dist/service`, `sql/migrations`
+and installed locked `node_modules`. Editable source, tests, build tooling and
+caches outside that dependency tree are excluded from staging copies. All four
+tree roots must exist. The manifest must match both expected local identities;
+`dist/web/index.html`, `dist/service/main.js` and `dist/service/migrate.js` must
+be regular compiled entries. Migration files are flat regular files matching
+`^[0-9]{4}_[a-z0-9_]+\.sql$`, with unique four-digit prefixes returned in
+numerical order.
+
+`dist/web` is public-only. Validation rejects recognizable environment/secret
+and key files, databases/SQL, service/SQL/dependency subtrees and package/lock
+metadata there. It also rejects recognized SQLite/private-key signatures and
+byte-identical copies of retained service or migration output, even when renamed.
+These checks do not establish that arbitrary frontend code contains no secrets.
+
+Daemon-selected staging and storage roots must be clean absolute paths. Access
+pins directories with no-follow descriptors for every component and rejects
+nonregular retained entries. Symlinks are permitted only beneath this build's
+`node_modules`: each target must be relative, valid UTF-8 and resolve completely
+to an existing regular file or directory within that same dependency tree.
+Containment applies at every traversal step, including chained links and linked
+directory components before `..`; dangling links, cycles and escaping chains
+fail. Retained paths must also be valid UTF-8.
+
+The exact canonical inventory is stored as `inventory.json` at the build root:
+
+- It is a UTF-8 JSON array with no insignificant whitespace or trailing newline,
+  sorted by relative-path UTF-8 bytes. Each regular file and permitted link has
+  one entry at its own slash-separated relative path. Directories and
+  `inventory.json` have no entry.
+- File keys are exactly `path`, `kind`, `size_bytes`, `sha256`, in that order.
+  `kind` is `"file"`, size is an integer byte length, and `sha256` is lowercase
+  SHA-256 of the exact file bytes, including the original manifest bytes.
+- Link keys are exactly `path`, `kind`, `target`, in that order. `kind` is
+  `"symlink"`; `target` preserves the exact relative spelling, even when another
+  spelling would resolve to the same destination.
+- Strings escape only quotes, backslashes and C0 controls. Controls use lowercase
+  `\u00xx`; other UTF-8 stays literal, including non-ASCII characters, HTML-sensitive
+  characters and Unicode line/paragraph separators.
+
+`build_id` is lowercase SHA-256 of those exact inventory bytes. The daemon-side
+artifact operations compute it; the browser cannot assign it. `apps.InstallBuild`
+validates its own completed staging input, copies files without hardlinks into a
+fresh private temporary tree, writes the inventory and seals the tree before
+atomic no-replace installation at `APPS_ROOT/<app_id>/builds/<build_id>`.
+Directories are 0500; regular files are 0400, or 0500 when preserving owner
+execute permission. Files and directories are synced, and both the sealed
+temporary tree and installed destination must independently verify before
+success. Later staging edits cannot change retained bytes.
+
+An existing destination is reused only after independent verification against
+the same build digest. Empty, partial, changed or writable destinations fail
+without overwrite or repair. `apps.VerifyBuild` takes the expected local host/app
+identity and build digest and freshly checks the required layout, exact retained
+file/link set, link validity, read-only modes, canonical inventory bytes and
+digest. Missing builds, missing or added files/links, changed bytes or target
+spellings, unexpected retained paths, invalid inventory or digest mismatch fail
+without creating or repairing anything. A verification failure after installation
+leaves the destination for diagnosis.
+
+Edits occur only in source/new staging. Runtime output belongs in data or
+daemon-managed logs, never a build. The publication contract (#3125) associates
+app/release identities with validated roots and digests; callable start resolves
+the committed release from build manifests without a persisted build index.
+Network fields are never joined to arbitrary host paths. Registry writes use
+same-directory temporary file, sync, close and atomic rename; recoverable
+activation/data-restoration journals belong to #3125. Builds and app data persist
+across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
 The template owns `npm run typecheck` (TypeScript checks both frontend and service
 without emitting), `npm test` (noninteractive, deterministic tests), and
@@ -907,7 +1049,7 @@ and readiness-confirmed links described in
 
 ### Capability and envelope vocabulary
 
-`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery, a daemon-owned service supervisor and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3123. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
+`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery, a daemon-owned service supervisor and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3248. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
 
 Without the negotiated capability, clients show that host's Apps feature as unsupported and send no app requests; hosts emit no app list/state/resource pushes to that peer. An old host may return existing `protocol.unknown_type`; a supporting host receiving an app request without negotiation returns `error` with `protocol.unsupported`. Other host connections/conversations continue normally. A new contract version uses a new capability and vocabulary for incompatible semantics, never reinterprets these enums.
 
@@ -930,11 +1072,11 @@ For every hosted wire table, fields are required unless explicitly optional; nul
 | `app_cancelled` | daemon → client | Reply to cancel ID, `{request_id, app_id?}`; echoes cancel scope, no assertion that a mutation was rolled back. |
 | `error` | daemon → client | Existing `ErrorPayload`, reply to failing request ID; terminal for that request. |
 
-`Route`/the v2 routing boundary must recognize the vocabulary and enforce direction before dispatch. A client-sent response/notification is invalid. App work is performed by bounded cancellable workers; a stalled disk/service/credit wait cannot block that connection's cancellation or unrelated message handling. No relay changes or hosted-app parsing occur on the relay.
+The authenticated v2 `routeHosted` boundary recognizes the vocabulary and enforces direction before dispatch; hosted routing stays outside generic `dispatch.Route`. A client-sent response/notification is invalid. App work is performed by bounded cancellable workers; a stalled disk/service/credit wait cannot block that connection's cancellation or unrelated message handling. The relay server remains content-blind and parses no hosted-app payloads.
 
 Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the atomic host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID in connection-owned state; it expires 30 seconds after issuance. Empty/null request cursors are invalid. The daemon validates it without using it as a path or host selector. If revision changed or cursor expired, return retryable `apps.changed` and require a fresh walk; do not combine pages from different revisions. One page request is pending per connection through read and delivery; a delivered page's cursor holds no worker. Further pending lists return `app.busy` with `retry_after_s: 1`. A fresh `{}` after completion replaces the previous walk. List cancellation retires only that connection's pending target; a blocked read retains capacity until it exits. The ordered discovery/control lane holds at most 16 envelopes including active delivery and cancel acknowledgements. Reconnect always starts a new list walk. See the [implemented wire behavior](protocol-mobile.md#paging-cancellation-and-validation).
 
-Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. The daemon owns subscription wiring and relay-lifetime cleanup. Resource/credit handling and resource-scoped cancellation remain #3123, including their independent worker bounds.
+Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. The daemon owns subscription wiring and relay-lifetime cleanup. Asset responses/chunks, credit and app-scoped cancellation are implemented with independent resource bounds (#3315); API forwarding remains #3316. See the [implemented asset wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
 
 ### Asset/API fields and HTTP semantics
 
@@ -1019,16 +1161,163 @@ disposal release reservations exactly once, including retained unconsumed result
 `Close` is idempotent and may race consumption/cancellation. The transport must
 enforce its own cancellation boundary for copied metadata and bytes.
 
-Confined callable assets and navigation/SPA fallback remain pending in
-[#3258](https://github.com/pyrycode/pyrycode/issues/3258). Asset status restrictions
-and MIME/path handling belong to that consumer; API forwarding, backend header
-projection and HEAD/204/205/304 no-body handling remain
-[#3246](https://github.com/pyrycode/pyrycode/issues/3246). Admission, connection
-ceilings, credit, deadlines, wire serialization and transport error mapping remain
-[#3247](https://github.com/pyrycode/pyrycode/issues/3247). Paired resource routing
-and capability activation remain pending under
-[#3123](https://github.com/pyrycode/pyrycode/issues/3123). See the
-[apps resource-serving overview](knowledge/features/apps-package.md#resource-serving)
+#### Callable private API forwarding
+
+`Owner.ForwardAPI(ctx, serverID, appID, release, APIRequest)` implements bounded
+backend reads/writes and returns `PreparedResponse` under the stable-response
+ownership contract above. The caller supplies authenticated host identity, a
+cancellable context and required `Reserve`/`Release` callbacks; this method does
+not authenticate a connection. `APIRequest` carries `Method`, escaped `Path`,
+optional raw `Query`, lowercase `Headers` and decoded `Body` bytes. Do not mutate
+the request during forwarding. Registration, exact active release and live,
+health-confirmed ownership are resolved before backend I/O, with `ErrNotFound`,
+`ErrReleaseChanged` and `ErrUnavailable` precedence as described above. Only the
+opaque private target selects the service; callers cannot select a URL, port or
+another service. Proxies and redirect following are disabled.
+
+Methods are exactly GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS. GET/HEAD
+bodies must be empty; all bodies are opaque bytes, at most 32768 bytes, preserving
+binary, form and JSON content. Paths begin `/api/` and are at most 2048 ASCII
+bytes; queries are at most 1024 ASCII bytes without a leading `?`. The URL rules
+above apply, including rejection of raw spaces/backslashes and invalid escaped
+path spellings. Validation decodes the path once for containment, then verifies
+that its escaped spelling can be forwarded exactly. Validated path/query bytes
+are preserved, including percent-escape case, parameter order, duplicates and
+empty values. Request headers accept only lowercase `accept`, `content-type`
+and `if-none-match`, with at most 8 entries, 4096 serialized JSON UTF-8 bytes and
+1024 bytes per valid, control-free UTF-8 value; `{}` is valid. Invalid requests
+or missing callbacks return `ErrAPIRequest`; oversized bodies return
+`ErrAPILimit`. Both fail before service I/O. No credentials or cookies are added.
+
+HTTP 200–599, including errors and redirects, are ordinary prepared responses;
+upgrades and unsupported statuses fail with `ErrResponseMetadata`. Backend
+projection keeps only lowercase `content-type`, `cache-control`, `etag` and
+`last-modified`, joining repeated values with `, ` and dropping all other headers.
+The projected object obeys the same entry/serialized/value bounds as requests.
+Compression negotiation and automatic decompression are disabled. Absent or
+identity `Content-Encoding` is accepted; any non-identity encoding is rejected
+as `ErrResponseMetadata`, never relabeled as identity bytes. HEAD and HTTP
+204/205/304 discard the backend body and yield zero size, no bytes and the SHA-256
+of the empty body. Other bodies are staged completely through `ResponseInput`
+with a 1048576-byte limit, exact size and SHA-256; overflow never yields partial
+success. Backend bodies are closed on every outcome. Metadata, response-limit,
+capacity and backend I/O failures remain distinct static package errors
+(`ErrResponseMetadata`, `ErrResponseLimit`, `ErrResponseCapacity`, `ErrResponseIO`),
+without endpoint or request diagnostics.
+
+The selected process generation remains pinned through preparation and checked
+consumption, including empty results. Removal, stop, exit, release replacement or
+same-release restart invalidates in-flight and retained responses without
+rebinding to a replacement. Caller cancellation/deadlines cover waiting for
+headers and stalled body reads and retain standard context errors. Reservations
+precede staging reads/allocation and may include a temporary EOF probe byte;
+the exact body size remains reserved after EOF until the caller uses
+`Complete(nil)`, `Complete(deliveryErr)` or `Close`. Failure, cancellation,
+retirement and disposal release capacity exactly once, including unconsumed
+results. Earlier copied metadata/bytes require cancellation enforcement at the
+delivery boundary. Forwarding sends once, with no automatic retries. A cancelled
+or failed mutation may already have changed service state; cancellation never
+replays it or asserts rollback.
+
+This callable backend does not activate encrypted API routing. Wire base64
+parsing and API integration with the relay's resource budgets, credit, deadlines
+and wire error mapping remain
+[#3316](https://github.com/pyrycode/pyrycode/issues/3316); the caller supplies
+context deadlines and capacity policy here.
+
+#### Callable confined assets
+
+`Owner.PrepareAsset(ctx, serverID, appID, release, AssetRequest)` implements
+active-release asset lookup and returns the same `PreparedResponse` described
+above. `AssetRequest` carries escaped `Path`, optional `Query`, native-stamped
+`Navigation` and required `Reserve`/`Release` callbacks. The caller supplies
+authenticated host/app identity and the navigation flag; the method authenticates
+no connection. Committed identity/release/readiness resolution happens before
+asset access and preserves `ErrNotFound`, `ErrReleaseChanged`, `ErrUnavailable`
+precedence. Lookup captures a generation, and preparation checks that exact
+generation again before staging: a same-release restart cannot rebind an opened
+asset to its replacement. Checked consumption and metadata-only commits follow
+the stable-response lifecycle above.
+
+`selectBuild` shares runtime selection without executing Node or preparing app
+data. It requires exactly one validated local build manifest matching
+`Record.ActiveRelease`, irrespective of the candidate `Record.Manifest` release.
+The selected directory descriptor stays pinned while opening only its `dist/web`
+root. Missing, ambiguous or unsafe builds return static `ErrInvalidStorage`;
+selection does not verify the publication inventory or establish continued build
+immutability. Descriptor-relative no-follow opens protect every directory
+component and the final regular file on Linux/macOS, avoiding a check/open gap.
+Symlinks, directories, devices and other unsafe existing entries fail as package
+errors. Only genuine absence permits an HTTP 404 or navigation fallback; other
+open failures never do. Existing entries with trailing slashes also fail
+confinement: treating an empty final component as missing could otherwise serve
+the SPA entry for an existing directory.
+
+The escaped path must begin `/` and contain at most 2048 ASCII bytes. Ordinary
+single `/` separators are valid; schemes/authority, `//`, raw backslashes,
+controls/NUL, raw `?`/`#`, malformed escapes, encoded separators/percent signs
+and raw or decoded `.`/`..` segments are rejected. Decode once for lookup, then
+require valid UTF-8 and reject decoded controls/backslashes. A nonempty query is
+at most 1024 ASCII bytes, has no leading `?`, raw fragment/control bytes or invalid
+escapes, and remains opaque: preserve its bytes without decoding or normalization;
+it never selects a file. Invalid URL syntax or a reserved path returns static
+`ErrAssetPath`. Reserved roots are `/api`, `/_pyry`, `/service`, `/dist/service`,
+`/data`, `/registry.json`, `/source`, `/staging`, `/builds`, `/backups`, `/sql` and
+`/node_modules`, each as an exact decoded path or descendant, including escaped
+spellings. They reject before file access and never fall back.
+
+`/` selects `index.html`. A genuinely missing asset falls back to that entry only
+with native-stamped `Navigation:true` and no extension in the final decoded path
+segment. Existing regular assets take precedence. Missing subresources and paths
+with an extension, such as `/missing%2Ejs`, return empty HTTP 404 with
+`text/plain; charset=utf-8`; a missing entry also yields 404. Successful assets
+return HTTP 200 with exact file bytes. These results fit the asset status subset
+200–299/400–599, with no redirects or conditional 304.
+
+`assetMIME` uses a deterministic, case-insensitive extension table; it emits only
+the bounded permitted `content-type` header:
+
+| Extension | Content type |
+|---|---|
+| `.html`, `.htm` | `text/html; charset=utf-8` |
+| `.js`, `.mjs` | `text/javascript` |
+| `.css` | `text/css; charset=utf-8` |
+| `.json`, `.map` | `application/json` |
+| `.png` | `image/png` |
+| `.jpg`, `.jpeg` | `image/jpeg` |
+| `.svg` | `image/svg+xml` |
+| `.gif` | `image/gif` |
+| `.webp` | `image/webp` |
+| `.avif` | `image/avif` |
+| `.ico` | `image/x-icon` |
+| `.woff` | `font/woff` |
+| `.woff2` | `font/woff2` |
+| `.ttf` | `font/ttf` |
+| `.otf` | `font/otf` |
+| `.wasm` | `application/wasm` |
+| Other extensions or no extension | `application/octet-stream` |
+
+File stat supplies a size hint; shared preparation enforces the 8 MiB decoded
+limit before body allocation/read and through EOF, including file growth.
+Success and 404 both receive exact size and lowercase SHA-256 of staged bytes,
+including the empty digest. Reservations precede body I/O and include the
+reserved EOF probe; EOF retains exactly the body's capacity through delivery.
+The asset path closes its temporary directory handles on every return and
+transfers the opened file to preparation, which closes it before successful
+return or on failure. Refusal, I/O failure, caller cancellation and retirement
+use the same idempotent disposal and exactly-once reservation release, including
+retained results. Consumers must use checked `Metadata`/`Read`, then
+`Complete(nil)`, `Complete(deliveryErr)` or `Close` as described above. File
+stat/read/close failures use `ErrResponseIO`; ordinary HTTP 404 remains successful
+preparation. Package failures expose no native paths or request contents.
+
+Paired asset routing, resource budgets, credit, deadlines, wire serialization
+and transport error mapping are implemented in the relay
+([#3315](https://github.com/pyrycode/pyrycode/issues/3315)); see the
+[asset wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
+Encrypted API routing remains #3316, and production capability activation and
+real-daemon/relay acceptance remain #3248. See the
+[apps resource-serving overview](knowledge/features/apps-package-resource-serving.md#resource-serving)
 for ownership, concurrency and regression details.
 
 ### Bounded transfers and retirement
@@ -1143,7 +1432,62 @@ Local-control dispatch (#3265), daemon composition for creation/inspection
 The walkthrough below describes the intended end-to-end workflow once those
 surfaces are connected.
 
+### Retained candidate artifacts
+
+The callable package APIs are `apps.ValidateArtifacts(ctx, staging, serverID,
+appID)`, `apps.InstallBuild(ctx, appsRoot, staging, serverID, appID)` and
+`apps.VerifyBuild(ctx, appsRoot, serverID, appID, buildID)`. They return
+`RetainedBuild`: a validated manifest, computed build ID, detached canonical
+inventory bytes and ordered migration paths. The caller supplies a completed
+private staging tree after all build children have finished. Installation always
+validates that input itself; a previously returned inventory is no installation
+permit. See [runtime and layout](#runtime-and-layout) for retained contents,
+canonical serialization, read-only installation and rejection without repair.
+
+Artifact validation alone establishes neither recorded candidate success nor
+health-confirmed activation/readiness. These operations execute no app code,
+dependency installation, migrations or service activation; they preserve source,
+registry/release history, active processes and persistent data. Package/lock
+metadata consistency, checked build commands and candidate-success recording
+belong to preparation (#3289); publication (#3262) separately owns migration,
+health confirmation and activation. These APIs have no production consumers yet
+and do not change ordinary service startup.
+
+Preparation/publication must coordinate installation with ordinary startup and
+recovery scans, including cleanup after interruption. Temporary `.install-*`
+children live under `builds` so a fully read-only directory can be published by
+same-parent rename; ordinary `prepareRelease` rejects nondigest children there.
+An interrupted installation can leave a temporary child. Installing an artifact
+does not itself select a release or coordinate those scans.
+
 ### Publication and recovery
+
+The callable snapshot, verification and restoration primitives are implemented
+independently of publication. Callers serialize operations and quiesce **all** app
+writers for the entire snapshot and restoration, including writers of non-SQL
+files. They own request retirement, service drain/stop, journaling, migrations
+and release decisions.
+A verified backup is immutable: another snapshot with the same publish ID
+returns `ErrConflict` without overwriting it. Existing incomplete destinations
+also conflict; a snapshot retry uses a new publish ID. Snapshot copy, SQLite,
+verification, sync failures and cancellation return errors, preserving
+recoverable source data; an unsuccessful snapshot must never authorize mutation.
+
+Publication (#3262) and interrupted-publication recovery (#3263) consume these
+primitives. Persist the selected `BackupReference`; `apps.RestoreData` freshly
+verifies its complete disk evidence on every call, including after restart.
+It restores the whole tree/schema, removes candidate-only content and transient
+SQLite sidecars, and preserves distinct absent/empty/uninitialized states as
+specified in [runtime and layout](#runtime-and-layout). A failed or interrupted
+replacement can leave partial data; retry the same reference with a fresh caller
+before claiming recovery. Backup contents/evidence remain independently
+verifiable after successful, failed or interrupted restoration. Retain the
+backup until durable recovery completion; deletion belongs to the caller.
+Durable recovery completion, old-release health and admission of API requests
+remain caller-owned.
+The following paragraphs describe that publication/recovery contract, beyond
+the data primitives. These data guarantees cannot undo arbitrary OS or
+fleet-service effects.
 
 Publication is serialized per app, with at most one candidate and one writer to its SQL data. Build/typecheck/tests happen in private staging while the old service remains available. Before any migration, stop accepting that app's API work, cancel/retire pending reads/writes without replay, drain or stop the old service, and take a consistent recoverable snapshot of **all** app data including a SQLite backup that incorporates WAL state. Do not copy a live database file alone. Verify the snapshot before mutation. No fleet-side mutation may run as a startup/health side effect.
 

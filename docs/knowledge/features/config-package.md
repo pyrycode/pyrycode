@@ -2,14 +2,17 @@
 
 User-configurable values for pyry, loaded from `~/.pyry/config.json`. Fields land additively in the same struct.
 
-This package is leaf-level and uses only the standard library. `Load` parses the file
-and `UpdateMemory` persists managed memory settings; consumers own semantic validation.
+This package is leaf-level. It uses `golang.org/x/sys/unix` for descriptor-relative
+config reads. `Load` parses the file and `UpdateMemory` persists managed memory
+settings; both enforce the relay admission boundary. Consumers own semantic
+validation of the other settings.
 
 ## Surface
 
 ```go
 type Config struct {
     RelayURL              string                 `json:"relay_url"`
+    RelayAdmissionTokens  map[string]string      `json:"relay_admission_tokens,omitempty"`
     MemorySearchProviders []MemorySearchProvider `json:"memory_search_providers"`
     Memory                *MemorySettings        `json:"memory,omitempty"`
     DebugCapture          bool                   `json:"debug_capture"`
@@ -68,7 +71,7 @@ hosted-session cwd. These callable operations add no daemon startup wiring.
 
 `debug_capture` (#802) used to switch on a `.cast` recorder attached to the terminal spawn path. #1348 deleted that path and the recorder with it, but the config key and its plumbing (a `SessionConfig.RecordDir` field nothing read) survived as a silent no-op: an operator who set the flag, reproduced a bug and pulled a debug bundle got nothing recorded, with no error or log line.
 
-`Load` still decodes the field verbatim and does not validate it — `config` stays parse-only, and `internal/config/config_test.go`'s three `debug_capture` cases are unchanged. Validation moved to the composition root instead: `cmd/pyry/main.go`'s `checkDebugCapture` runs in `runSupervisor` immediately after `config.Load` succeeds, before the pool, the runner factory or the control socket exist. `true` returns an error naming `debug_capture`, saying #1348 removed the recorder, and telling the operator to remove the key or set it to `false`; the daemon exits non-zero before any session or socket is built. `false` and an absent key return `nil` and log nothing — startup is byte-identical to before this ticket. This is the same shape as the `"pty"` rejection arm below, one section down.
+`Load` still decodes the field verbatim and does not validate it — this setting stays parse-only, and `internal/config/config_test.go`'s three `debug_capture` cases are unchanged. Validation moved to the composition root instead: `cmd/pyry/main.go`'s `checkDebugCapture` runs in `runSupervisor` immediately after `config.Load` succeeds, before the pool, the runner factory or the control socket exist. `true` returns an error naming `debug_capture`, saying #1348 removed the recorder, and telling the operator to remove the key or set it to `false`; the daemon exits non-zero before any session or socket is built. `false` and an absent key return `nil` and log nothing — startup is byte-identical to before this ticket. This is the same shape as the `"pty"` rejection arm below, one section down.
 
 The debug-bundle **read** path is untouched: `resolveRecordingsDir` and its independent feed into `debugbundle.Assemble` still resolve `~/.local/share/pyry-recordings`, so a `.cast` left over from before an operator upgraded still ships in a bundle. See [debugbundle-package.md](debugbundle-package.md).
 
@@ -118,6 +121,7 @@ deny response, and proved that the requested command did not execute.
 |-------|---------|
 | `RelayURL` | `wss://relay.pyrycode.dev` (placeholder; real domain TBD) |
 | `Memory` | `nil` (managed memory unconfigured) |
+| `RelayAdmissionTokens` | `nil` (no admission credential configured) |
 
 `DefaultConfig` enables no managed memory. Legacy files without `memory` and files
 with `"memory": null` retain that unconfigured state. In a present memory object,
@@ -131,21 +135,23 @@ When the real relay is provisioned, that ticket changes the constant. Existing u
 | Condition | Returns |
 |-----------|---------|
 | File doesn't exist | `DefaultConfig(), nil` |
-| File exists, valid JSON `{...}` | merged config, `nil` |
+| File exists, valid JSON `{...}` with valid admission configuration/storage if supplied | merged config, `nil` |
 | File exists, valid JSON `{}` | `DefaultConfig(), nil` (overlay no-op) |
-| File exists, malformed JSON | `Config{}, fmt.Errorf("config: parse %s: %w", ...)` |
-| File exists, empty (0 bytes) | `Config{}, fmt.Errorf("config: parse %s: %w", ...)` |
+| File exists, malformed JSON or typed decoding fails | `Config{}`, static parse error without decoder cause |
+| File exists, empty (0 bytes) | `Config{}`, static parse error without decoder cause |
+| Admission field/map/token or private storage invalid | `Config{}`, static admission validation error |
 | File exists, read fails (perms etc.) | `Config{}, fmt.Errorf("config: read %s: %w", ...)` |
 
 The load-bearing trick: `cfg` is initialized to `DefaultConfig()` *before* `json.Unmarshal`. `encoding/json` only writes fields present in the JSON document — absent fields keep their pre-decode value. So `{}` returns `DefaultConfig()`, and `{"relay_url": "wss://my-relay.example/"}` returns defaults with only `RelayURL` overridden. See [ADR 018](../decisions/018-config-overlay-decode.md).
 
 The zero `Config{}` on the error paths is deliberate: callers who ignore the error see an empty `RelayURL` rather than the placeholder default, forcing them to handle the error. Returning `DefaultConfig()` on error would mask real problems.
 
-Empty file (0 bytes) is **not** treated as "fresh install" — that signal is "no file exists at all." An empty file is operator error and falls out as a wrapped JSON-parse error naturally. (The asymmetry vs. `loadRegistry`, which treats empty-as-missing, is correct: the registry is pyry-owned, the config is user-owned.)
+Empty file (0 bytes) is **not** treated as "fresh install" — that signal is "no file exists at all." An empty file is operator error and returns a static parse error without a decoder cause. (The asymmetry vs. `loadRegistry`, which treats empty-as-missing, is correct: the registry is pyry-owned, the config is user-owned.)
 
 Wrap prefix is `config:` — matches the convention `loadRegistry` established with `registry:`.
 
-`Load` and `UpdateMemory` remain parse-only. Unsupported mode/provider/agent strings,
+`Load` and `UpdateMemory` enforce [relay admission validation](#relay-admission-credentials).
+Other settings remain parse-only here. Unsupported mode/provider/agent strings,
 blank models, unresolved paths and unverified credential references are accepted
 without host, credential or service checks. Consumers validate choices, model names,
 host paths and references before using them. `Load` ignores unknown fields in the typed
@@ -158,8 +164,8 @@ fields, so presence alone does not establish usable settings.
 models, canonical directory access and reserved-path exclusions, plus fresh
 `resolveMemoryCredential` validation for OpenAI. Local embeddings reject a
 reference and require no credential selection. Status rejects malformed/non-object
-config and invalid saved settings with static diagnostics; it does not expose
-`Load`'s parser details or serialize `credential_reference`. Missing/null memory
+config and invalid saved settings with static diagnostics; it serializes neither
+relay admission credentials nor `credential_reference`. Missing/null memory
 reports unconfigured, and empty additional roots project as `[]`.
 
 A default vault stores only its mode. Configure and status defer the default
@@ -175,13 +181,58 @@ See [reserved-root and filesystem-identity reasoning](cli-verb-dispatch.md#memor
 Saving settings enables no runtime, and future daemon application requires restart;
 configured status supplies no [search-readiness evidence](memorysearch-package.md#effective-evidence).
 
+## Relay admission credentials
+
+`relay_admission_tokens` is an optional object mapping exact server-id strings to
+one token each. Every supplied token must be a string of exactly 64 lowercase
+ASCII hexadecimal characters. Missing file/key leaves `RelayAdmissionTokens`
+nil; a present `{}` produces an empty map and is valid. Null/non-object maps and
+empty, null, non-string, wrong-length, uppercase, whitespace or non-hex tokens
+are rejected, including entries for identities the daemon will not select.
+Keys and token values are never trimmed or normalized; case-distinct identities
+remain distinct. See the [authoritative admission contract](../../protocol-mobile.md#daemon-admission-declared).
+
+The field must use canonical `relay_admission_tokens` spelling. `validateAdmission`
+rejects alternate case-folded spellings; `decodeObject` checks original JSON key
+occurrences and rejects duplicate admission fields and duplicate exact identity
+keys, even when values agree or escaped names decode to the same key. Validating
+only a collapsed map would hide malformed earlier values, while a later struct
+decode could accept case variants or merge repeated objects. `Load` therefore
+consumes only the validated map. Both read paths share this boundary; unrelated
+fields retain their existing decoding compatibility.
+
+A present map, including `{}`, requires a regular file with mode exactly 0600
+and a parent directory with mode exactly 0700, both owned by `os.Geteuid()`.
+`readConfig` opens the parent, opens the file relative to that handle and checks
+metadata from those same handles against the bytes read. Followed symlink targets
+must satisfy these checks. Rejection returns static, value-free errors and
+performs no permission repair. Files without the map retain legacy storage
+compatibility: opening a searchable but unreadable parent must not add a read
+permission requirement. On parent-open permission errors, the legacy file-read
+fallback carries no trusted metadata, so it cannot admit a present credential map.
+
+`Load` and `UpdateMemory` discard supplied-JSON decoder causes, including malformed
+JSON or type errors elsewhere in the document. Errors contain no credential,
+identity, map value or parser excerpt; ordinary filesystem read errors keep their
+classification. `UpdateMemory` validates admission before writing and preserves
+the complete map and unrelated raw settings across repeated memory replacements.
+A rejected update preserves the original config bytes.
+
+`runSupervisor` loads configuration once and passes the map through `relayWiring`.
+`startRelay` selects only the loaded instance server-id's exact entry into
+`relay.Config.AdmissionToken`; a missing selected entry omits the header with no
+cross-identity fallback. Named instances select independently. There is no secret
+flag or environment override. Editing or rotating the file while running leaves
+that startup selection unchanged across reconnects; restart loads the new value.
+See [relay rejection and operator recovery](relay-package.md#reconnect-semantics).
+
 ## Memory replacement and persistence
 
 `UpdateMemory(path, settings)` accepts an explicit config-file path and a complete
 `MemorySettings` replacement. It creates a missing config and replaces every known
 memory field on later calls while preserving unrelated top-level settings, including
-search-provider declarations, and unknown values inside `memory`, `vault`, `embedding`
-and `capture`.
+search-provider declarations and the complete `relay_admission_tokens` map, and
+unknown values inside `memory`, `vault`, `embedding` and `capture`.
 
 | Replacement input | Persisted effect |
 |-------------------|------------------|
@@ -205,13 +256,18 @@ Absent/null `memory`, `vault`, `embedding` and `capture` objects may be populate
 An existing config must be a non-null JSON object: empty, malformed and non-object
 documents are rejected unchanged. Non-null non-object values at any of those four
 memory-object locations are also rejected unchanged. These structural checks apply
-to `UpdateMemory`; `Load` retains its overlay-decode and error behavior.
+to `UpdateMemory`; `Load` retains its overlay-decode behavior. Both read paths
+return static decoding errors for supplied JSON, including nested memory objects,
+without retaining parser causes or excerpts. Unrelated raw settings preserved by
+`UpdateMemory` are not subject to `Load`'s typed-field checks.
 
 The writer finishes encoding before filesystem mutation, creates newly needed parent
 directories at 0700, and stages a 0600 temporary file in the destination directory.
 It writes, syncs, closes and atomically renames that file over the config. Committed
 files are 0600, including replacements of files with broader permissions; existing
-parent-directory modes are left as they are. Read, parse/structure, encode, mkdir,
+parent-directory modes are left as they are. A supplied admission map must pass
+the existing-file ownership/mode checks before staging; `UpdateMemory` cannot
+repair insecure admission storage. Read, parse/structure, encode, mkdir,
 create, chmod, write (including short write), sync, close and rename failures return
 errors and preserve the previous config bytes, or leave a missing config absent.
 Cleanup closes any remaining handle and removes staging, surfacing cleanup errors too.
@@ -223,7 +279,7 @@ The operation writes no vault contents or credential storage and starts no servi
 - **General `Save`.** `UpdateMemory` provides atomic replacement for managed memory settings. Writing other config fields remains outside this API.
 - **Watcher / hot reload.** Daemon reads once at startup. If hot reload becomes necessary, that's a separate seam (file watcher, signal handler) — most likely a `sync/atomic.Pointer[Config]` swapped on file events. Not bolted onto `Load`.
 - **Schema versioning.** Per the ticket: "if `Config` ever grows incompatibly, version it at that point." `encoding/json`'s default lenient handling (unknown JSON fields ignored, missing struct fields → zero) covers backward-additive changes for free.
-- **URL validation.** `RelayURL` is a `string`. Validation (scheme, parseability) is the consumer's job — `pyry pair` will validate before connecting. The config package's contract is "decode JSON into a struct"; semantic validation layers above.
+- **URL validation.** `RelayURL` is a `string`. Validation (scheme, parseability) is the consumer's job — `pyry pair` will validate before connecting. The config package validates admission credentials/storage; URL semantics remain with consumers.
 
 ## Concurrency
 
@@ -238,11 +294,11 @@ The daemon reads config once at startup.
 `internal/config/config_test.go` uses same-package, table-driven fixtures:
 
 - `TestDefaultConfig` — pins `DefaultConfig().RelayURL == "wss://relay.pyrycode.dev"`. Fails loudly when the real relay domain lands — that's the right signal.
-- `TestLoad` (table) — missing file → defaults; valid full file → override; partial file `{}` → defaults preserved (regression guard for the overlay property when more fields land); malformed JSON → wrapped error containing `"config: parse"`.
+- `TestLoad` (table) — missing file → defaults; valid full file → override; partial file `{}` → defaults preserved (regression guard for the overlay property when more fields land); malformed JSON → static error containing `"config: parse"` without a decoder cause.
 - `TestLoadMemorySearchProviders` — decodes a scoped declaration and preserves an explicit `enabled: false`.
 
 Each row writes its fixture to `t.TempDir()` (no checked-in golden files).
-`Config` contains a slice and is compared with `reflect.DeepEqual`.
+`Config` contains a slice and a map and is compared with `reflect.DeepEqual`.
 
 `internal/config/memory_test.go` covers the managed memory contract:
 
@@ -263,6 +319,16 @@ only the decoded roots' length would pass both an omitted key and a supplied emp
 array, missing a writer that persisted the wrong form. Numeric preservation checks
 compact raw JSON rather than decoding through float64, which would hide the precision
 loss the test is meant to catch.
+
+Admission regressions in `internal/config/admission_test.go` cover malformed and
+unselected values (`TestRelayAdmissionConfig`), exact storage modes and legacy
+compatibility (`TestRelayAdmissionStorage`), effective ownership through metadata
+injection (`TestRelayAdmissionOwnership`), and repeated complete-map/raw-number
+preservation (`TestRelayAdmissionUpdateMemory`). `TestRelayAdmissionFieldBoundaries`
+checks alternate field spellings and duplicate fields/identities, including
+escaped equivalents, through both read paths. Rejection checks inspect error
+chains for decoder causes and private input, zero partial configs and unchanged
+update bytes; valid final-map checks alone would miss the occurrence defects.
 
 ## Related
 

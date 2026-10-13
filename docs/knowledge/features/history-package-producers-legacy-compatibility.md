@@ -109,13 +109,22 @@ history-only: valid `send_lost` entries appear as paged receipts without startup
 live traffic or replay backfill.
 
 Prompt answers also bypass `emit`. `recordPromptAnswer` serializes its single
-append and synchronous receipt publication using `promptAnswerPublisher`,
-without holding bridge/registry locks across delivery. A bounded notification
-mailbox could silently lose successfully appended answers. Its shared ring is
-installed before answer workers start, records even without recipients and
-retains the captured conversation. Page/live/replay bytes, durable ID and
+append and replay admission under `promptAnswerPublisher`'s mutex, outside
+bridge/registry locks. Its bounded mailbox admits at most 256 pending live
+receipts; one ordered worker delivers outside the recording lock, so held
+connection discovery or peer delivery cannot block later answers. Overflow drops
+only live delivery after history/replay admission, with a content-free warning.
+Cancellation frees blocked delivery and clears pending live work while retaining
+history/replay. Synchronous fan-out would make `ActiveConns` wait on the manager
+dispatch loop that is recording the answer (#3279). Its shared ring is installed
+before answer workers start, records even without recipients and retains the
+captured conversation. Page/live/replay bytes, durable ID and
 timestamp agree; nil/failed storage and losing/duplicate resolutions produce no
 receipt. Child verdicts, dismissal and authoritative thread behavior stay intact.
+The responsive-relay and held-delivery race regressions prove that boundary;
+named real-Claude acceptance requires separate counted full-gate evidence. See
+[prompt-answer serialization and validation](history-package-producers.md#resolved-remote-prompt-answers-2973)
+and [the #3256 live evidence](../../specs/architecture/3256-shared-live-repair-evidence.md#revisions).
 
 Raw visibility and legacy unread targets differ (#3029): the
 [legacy watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)

@@ -54,59 +54,79 @@ func regularAt(dir *os.File, name string, create bool) (*os.File, error) {
 	}
 	return f, nil
 }
-func prepareRelease(ctx context.Context, root string, r Record, node string) (string, string, error) {
+func selectBuild(ctx context.Context, root string, r Record) (_ *os.File, name string, err error) {
 	builds := filepath.Join(root, r.AppID, "builds")
 	parent, err := privateDir(builds)
 	if err != nil {
-		return "", "", fmt.Errorf("apps: open builds directory: %w", err)
+		return nil, "", fmt.Errorf("apps: open builds directory: %w", err)
 	}
 	defer parent.Close()
 	entries, err := parent.ReadDir(-1)
 	if err != nil {
-		return "", "", fmt.Errorf("apps: read builds directory: %w", err)
+		return nil, "", fmt.Errorf("apps: read builds directory: %w", err)
 	}
-	selected := ""
+	var selected *os.File
+	defer func() {
+		if err != nil && selected != nil {
+			_ = selected.Close()
+		}
+	}()
+	selectedName := ""
 	for _, entry := range entries {
 		if err = ctx.Err(); err != nil {
-			return "", "", err
+			return nil, "", err
 		}
 		name := entry.Name()
 		if len(name) != 64 || strings.Trim(name, "0123456789abcdef") != "" || !entry.IsDir() {
-			return "", "", ErrInvalidManifest
+			return nil, "", ErrInvalidManifest
 		}
-		build := filepath.Join(builds, name)
-		dir, e := privateDir(build)
+		dir, e := directoryAt(parent, name)
 		if e != nil {
-			return "", "", fmt.Errorf("apps: open build directory: %w", e)
+			return nil, "", fmt.Errorf("apps: open build directory: %w", e)
 		}
 		file, e := regularAt(dir, "app.json", false)
-		_ = dir.Close()
 		if e != nil {
-			return "", "", fmt.Errorf("apps: open build manifest: %w", e)
+			_ = dir.Close()
+			return nil, "", fmt.Errorf("apps: open build manifest: %w", e)
 		}
 		bytes, e := io.ReadAll(io.LimitReader(file, 16385))
 		_ = file.Close()
 		if e != nil {
-			return "", "", fmt.Errorf("apps: read build manifest: %w", e)
+			_ = dir.Close()
+			return nil, "", fmt.Errorf("apps: read build manifest: %w", e)
 		}
 		manifest, e := ValidateManifest(bytes, r.Manifest.ServerID())
 		if e != nil {
-			return "", "", fmt.Errorf("apps: validate build manifest: %w", e)
+			_ = dir.Close()
+			return nil, "", fmt.Errorf("apps: validate build manifest: %w", e)
 		}
 		if manifest.AppID() != r.AppID {
-			return "", "", ErrInvalidIdentity
+			_ = dir.Close()
+			return nil, "", ErrInvalidIdentity
 		}
 		if manifest.ReleaseVersion() != r.ActiveRelease {
+			_ = dir.Close()
 			continue
 		}
-		if selected != "" {
-			return "", "", errors.New("apps: ambiguous committed release")
+		if selected != nil {
+			_ = dir.Close()
+			return nil, "", errors.New("apps: ambiguous committed release")
 		}
-		selected = build
+		selected, selectedName = dir, name
 	}
-	if selected == "" {
-		return "", "", errors.New("apps: committed release missing")
+	if selected == nil {
+		return nil, "", errors.New("apps: committed release missing")
 	}
+	return selected, selectedName, nil
+}
+
+func prepareRelease(ctx context.Context, root string, r Record, node string) (string, string, error) {
+	build, name, err := selectBuild(ctx, root, r)
+	if err != nil {
+		return "", "", err
+	}
+	_ = build.Close()
+	selected := filepath.Join(root, r.AppID, "builds", name)
 	service, err := privateDir(filepath.Join(selected, "dist/service"))
 	if err != nil {
 		return "", "", fmt.Errorf("apps: open service directory: %w", err)
