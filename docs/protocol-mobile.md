@@ -7005,10 +7005,10 @@ The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, wi
 
 ## Hosted apps (v2)
 
-**Discovery, committed lifecycle delivery and bounded asset transfers with
-credit and scoped cancellation are implemented in the relay (#3315). Encrypted
-API routing remains pending (#3316), as does production capability activation
-(#3248); native response assembly remains client-owned work.** The
+**Discovery, committed lifecycle delivery and bounded asset/API transfers with
+credit and scoped cancellation are implemented in the relay (#3315, #3316).
+Production capability activation remains pending (#3248); native response
+assembly remains client-owned work.** The
 [hosted-app reference](hosted-apps.md) and
 [approved v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 fix manifest fields, runtime/layout, resource/Fetch semantics, limits and safe
@@ -7025,10 +7025,10 @@ lifecycle notifications have a registry-compatible relay consumer (#3158).
 Daemon subscription installation/unsubscribe ownership remains #3139. Five more
 v2-only names have Go-backed payload declarations (#3244): `app_asset_request`,
 `app_api_request`, `app_response`, `app_response_chunk` and `app_response_credit`.
-Asset/credit handlers, asset response/chunk producers, semantic validation and
-app-scoped cancellation are implemented (#3315); the declared `app_api_request`
-has no forwarding handler until #3316. All eleven hosted names remain outside
-the v1 `inboundAppTypeSet`; payload declarations alone do not enable the capability.
+Asset/API handlers, response/chunk producers, semantic validation, credit and
+app-scoped cancellation are implemented (#3315, #3316). All eleven hosted names
+remain outside the v1 `inboundAppTypeSet`; payload declarations alone do not
+enable the capability.
 
 The additive capability constant `CapabilityHostedAppsV1` is exactly
 `hosted_apps_v1`. Clients offer it through `HelloClientPayload.capabilities`;
@@ -7056,11 +7056,11 @@ version `1`, app `release_version` and transport `v2` are distinct.
 | `app_updated` | Daemon → client | Implemented (#3158): committed `HostedAppRecord`, unsolicited whole record, omitting `in_reply_to`. |
 | `app_removed` | Daemon → client | Implemented (#3158): `AppRemovedPayload`, unsolicited `{app_id, revision}` tombstone, omitting `in_reply_to`; saved data is retained. |
 | `app_asset_request` | Client → daemon | Implemented (#3315): `AppAssetRequestPayload`, selected app/release asset GET with native-stamped navigation; no `in_reply_to`. |
-| `app_api_request` | Client → daemon | Declared `AppAPIRequestPayload`; forwarding pending #3316. Selected app/release API method, permitted headers and base64 body; no `in_reply_to`. |
-| `app_response` | Daemon → client | Implemented for assets (#3315): `AppResponsePayload`, once per request; status, headers, byte/chunk counts and digest; `in_reply_to` names that original request. API producer remains #3316. |
-| `app_response_chunk` | Daemon → client | Implemented for assets (#3315): `AppResponseChunkPayload`, ordered base64 body chunks; `in_reply_to` names the original request, never the metadata ID. |
+| `app_api_request` | Client → daemon | Implemented (#3316): `AppAPIRequestPayload`, selected app/release API method, permitted headers and base64 body; no `in_reply_to`. |
+| `app_response` | Daemon → client | Implemented for assets/APIs (#3315, #3316): `AppResponsePayload`, once per request; status, headers, byte/chunk counts and digest; `in_reply_to` names that original request. |
+| `app_response_chunk` | Daemon → client | Implemented for assets/APIs (#3315, #3316): `AppResponseChunkPayload`, ordered base64 body chunks; `in_reply_to` names the original request, never the metadata ID. |
 | `app_response_credit` | Client → daemon | Implemented (#3315): `AppResponseCreditPayload`, grants one next chunk via app/original `request_id`/`next_index`; no `in_reply_to` and no reply. |
-| `app_cancel` | Client → daemon | `AppCancelPayload`: original target `request_id`; omit `app_id` for this connection's pending list page (#3157), or supply the exact app scope for its asset transfer (#3315). |
+| `app_cancel` | Client → daemon | `AppCancelPayload`: original target `request_id`; omit `app_id` for this connection's pending list page (#3157), or supply the exact app scope for its asset/API transfer (#3315, #3316). |
 | `app_cancelled` | Daemon → client | Cancel reply to the cancel ID, echoing target `request_id` and optional `app_id`; duplicate/unknown/finished/mismatched-scope targets are idempotent. |
 | `error` | Daemon → client | Static bridge error replying to the failing ID: required `code`, `message`, `retryable`; optional `retry_after_s` for busy. |
 
@@ -7106,9 +7106,8 @@ Envelope IDs, correlations, cancellation `request_id` and page revisions permit
 0–9007199254740991; record/tombstone revisions permit 1–9007199254740991. Go's
 `uint64` preserves the integers but does not enforce these bounds. Required-key
 presence, safe-integer bounds, cursor validity, direction and forbidden metadata
-are enforced for discovery, asset requests, credit and scoped cancellation at
-the encrypted boundary. API enforcement remains #3316. Ordinary DTO decoding
-validates none of those rules.
+are enforced for discovery, asset/API requests, credit and scoped cancellation at
+the encrypted boundary. Ordinary DTO decoding validates none of those rules.
 
 `V2SessionManager.HostedAppsChanged` accepts current-process committed registry
 changes and delivers notifications in increasing host revision order across
@@ -7166,7 +7165,7 @@ envelope ID and echoes the target ID; duplicate, unknown and finished targets
 are idempotent and do not retire other work or unsubscribe lifecycle
 notifications. A blocked registry read still occupies its slot until it exits,
 so repeated cancellation cannot accumulate replacement readers. An app-scoped
-cancel cannot retire discovery; asset cancellation uses the exact app/request
+cancel cannot retire discovery; asset/API cancellation uses the exact app/request
 scope described below.
 
 Cancellation, disconnect, revocation and shutdown suppress late results and
@@ -7229,18 +7228,19 @@ Body/chunk strings preserve standard padded base64 of opaque bytes. Request IDs,
 sizes, counts and indices use `uint64`, HTTP status uses `int`; decoding these
 DTOs does not enforce required presence, exact JSON types, safe-integer bounds,
 URL/header validity, authorization or transfer limits. The authenticated relay
-boundary and checked asset preparation enforce these for asset transfers
-(#3315); API routing/enforcement remains #3316 and production activation remains #3248.
+boundary and checked asset/API preparation enforce these for resource transfers
+(#3315, #3316); production activation remains #3248.
 
 API bodies decode to at most 32768 bytes. Paths and queries are bounded to
 2048 and 1024 ASCII bytes; permitted header objects are at most 4096 serialized
 UTF-8 bytes, with at most 8 entries and 1024 UTF-8 bytes per value.
-The implemented asset response limit is 8388608 bytes/256 chunks; the pending
-API contract specifies 1048576 bytes/32 chunks. Empty responses require
+The implemented response limits are 8388608 bytes/256 chunks for assets and
+1048576 bytes/32 chunks for APIs. Empty responses require
 `size_bytes: 0`, `total_chunks: 0` and the lowercase SHA-256 of empty bytes;
 they emit no chunks. Nonempty chunks decode to 1–32768 bytes, with consecutive
 indices from 0; credits name the
-same original request and expected next index (0–255 within the active transfer).
+same original request and expected next index within the active transfer
+(0–255 for assets, 0–31 for APIs).
 Responses and chunks correlate to the resource request, while cancellation
 acknowledgements correlate to the distinct cancel ID as described above.
 
@@ -7252,7 +7252,43 @@ indices at 0 and 255, required empty fields and opaque binary bytes.
 requests and chunks, including 32768-byte bodies/chunks and escaped query/header
 values. These declaration tests do not establish runtime transfer behavior.
 
+### API request validation
+
+An API request requires canonical lowercase UUID `app_id`, canonical
+`major.minor.patch` release components bounded to 2147483647, string `path` and
+`method`, object `headers` with string values and string `body`. Empty
+`headers: {}` and `body: ""` are valid and required; neither can be omitted or
+null. Optional `query` is omitted when empty, never null. The shared exact-case,
+safe-integer, UTC timestamp, UTF-8, duplicate/trailing JSON and forbidden envelope
+metadata rules apply; additive unknown fields are ignored. Authenticated,
+nonrevoked paired clients must have negotiated `hosted_apps_v1`; no interactive,
+thread or active channel state is required.
+
+Before allocating decoded bytes or dispatching to the backend, the relay
+validates the complete standard RFC4648 base64 alphabet, required padding and
+zero unused bits, rejecting whitespace/CR/LF, URL-safe spellings and malformed
+padding. It computes the exact decoded length: malformed encoding returns static
+`app.invalid_request`; valid encoding above 32768 bytes returns
+`app.limit_exceeded`. A valid 32768-byte body is accepted. After shared operation
+admission, decoded request bytes are reserved before decoding; capacity refusal
+returns retryable `app.busy` with `retry_after_s: 1`. Rejected encodings, oversized
+bodies and refused reservations never invoke the API provider.
+
+`Owner.ForwardAPI` validates an escaped `/api/` path and raw query within
+2048/1024 ASCII bytes, then forwards their unchanged spelling and the opaque
+decoded body to the captured active process generation. Methods are exactly
+GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS; GET/HEAD bodies must be empty.
+Only lowercase `accept`, `content-type` and `if-none-match` request headers are
+allowed, under the shared header bounds. Unsafe URL syntax, forbidden headers
+and invalid methods fail before service I/O with `app.invalid_request`.
+No caller-selected service address, cookies, credentials, redirect following
+or automatic retries are admitted. See
+[private API forwarding](hosted-apps.md#callable-private-api-forwarding).
+
 ### Asset transfers, credit and cancellation
+
+Assets and APIs use the same ordered encrypted resource lane and the shared
+credit, budget, deadline and cancellation rules in this section.
 
 An asset request requires canonical lowercase UUID `app_id`, canonical
 `major.minor.patch` release components bounded to 2147483647, a nonempty escaped
@@ -7274,9 +7310,16 @@ decoded `size_bytes`, `total_chunks = ceil(size_bytes / 32768)` and lowercase
 `last-modified`, bounded as above. Consecutive `app_response_chunk` envelopes
 follow from index 0, each with matching `app_id` and nonempty standard padded
 base64 of 1–32768 decoded bytes. Metadata and every chunk correlate to the
-original asset request. Empty assets and 404 emit metadata with zero size/chunks
-and the empty-body digest, then no chunks. Native must validate the complete
-declared count, byte length and digest before accepting assembly; SHA-256 checks
+original asset/API request. Empty assets and asset 404 emit metadata with zero
+size/chunks and the empty-body digest, then no chunks. API HTTP 200–599, including
+errors such as 404/409/500 and redirects, remains response data with the exact
+status; redirects are not followed and `location` is not forwarded. Only the
+permitted response headers above survive backend projection. Bodies are identity
+encoded; non-identity `Content-Encoding` is a metadata failure. Empty API results,
+HEAD and HTTP 204/205/304 have zero size/chunks and the empty digest, with no
+chunk frames. No separate success-completion frame is emitted.
+Native must validate the complete declared count, byte length and digest before
+accepting assembly; SHA-256 checks
 the bytes while Noise authenticates the sender. Native assembly remains pending
 client implementation; daemon delivery does not attest that it happened.
 
@@ -7292,21 +7335,24 @@ At most one decoded chunk copy per operation is queued; the worker waits for
 each transport outcome and yields between chunks. Transport acknowledgement
 proves delivery only, never application success.
 
-Pending resource admission is bounded to 8 per connection, 32 per app across
-connections and 128 per daemon. Staged bodies and queued decoded copies reserve
-capacity before allocation/read within 16 MiB per connection and 64 MiB per
-daemon, incrementally through EOF for unknown/growing bodies. The EOF probe
+Assets and APIs share pending admission bounded to 8 per connection, 32 per app
+across connections and 128 per daemon. Decoded API request bodies, staged
+responses and queued decoded copies reserve aggregate capacity before
+allocation/read within 16 MiB per connection and 64 MiB per daemon, incrementally
+through EOF for unknown/growing response bodies. The EOF probe
 needs its own reservation; EOF consumption retains stable-body capacity until
-disposal. Admission stays held until worker disposal finishes. Resource outputs
-have eight separate destination slots while control/ordinary/callback output
-retains its 16-envelope capacity, sharing ordered delivery. API request bodies
-will share the resource budgets in #3316. Current staging is in memory; any
-future spool is subject to the same ceilings.
+disposal. API request bytes remain reserved until worker disposal, including
+cancellation and failed preparation. Response disposal precedes request release;
+admission stays held until backend cleanup finishes. Each reservation releases
+exactly once. Resource outputs have eight separate destination slots while
+control/ordinary/callback output
+retains its independent 16-envelope capacity, sharing ordered delivery.
+Current staging is in memory; any future spool is subject to the same ceilings.
 
 Both preparation and streaming have a fixed 30-second deadline from daemon
 acceptance and a 5-second read/credit inactivity timeout. Positive-byte source
-or response reads and new valid credit reset inactivity; zero-byte reads,
-duplicate credit and reservation activity do not. Preparation lasting more than
+or response reads and new valid credit reset inactivity; zero-byte reads, EOF
+without bytes, duplicate credit and reservation activity do not. Preparation lasting more than
 five seconds stays live while reads progress, but no activity extends the fixed
 deadline or revives expired work. Timeout cancels backend I/O, disposes retained
 bytes and returns correlated `app.timeout` while the connection is usable.
@@ -7325,17 +7371,22 @@ reconnect reuses IDs. Cancelling or failing an already sealed blocked output
 retires the connection to prevent a Noise nonce gap; no later acknowledgement
 or error is promised across that retirement.
 
+An API mutation is forwarded once. Cancellation, timeout or disconnect neither
+replays it nor establishes rollback of a possibly committed write. Retryable
+bridge errors and transport acknowledgements never authorize automatic replay;
+fresh reconciliation reads can determine the saved state after reconnect.
+
 Bridge failures use static correlated errors, exposing no request content or
 backend/storage diagnostics. Ordinary HTTP results, including 404, remain
 `app_response`.
 
-| Asset failure | Code | Retryable |
+| Asset/API failure | Code | Retryable |
 |---|---|---|
-| Invalid request/path or active credit | `app.invalid_request` | No |
+| Invalid request/path/method/headers/base64 or active credit | `app.invalid_request` | No |
 | Inaccessible app | `app.not_found` | No |
 | Different active release | `app.release_changed` | No |
 | Unavailable/retired backend generation | `app.unavailable` | Yes |
-| Body/chunk limit exceeded | `app.limit_exceeded` | No |
+| Request/response body or chunk limit exceeded | `app.limit_exceeded` | No |
 | Admission or reservation exhaustion | `app.busy` | Yes, `retry_after_s: 1` |
 | Fixed deadline or read/credit inactivity | `app.timeout` | Yes |
 | Storage, metadata or backend I/O failure | `app.io_failed` | Yes |
