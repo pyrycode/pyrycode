@@ -62,3 +62,9 @@ Pending documentation stage: `docs/hosted-apps.md`, Client resource bridge / Ass
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-12
+
+## Revisions
+- 2026-10-13 — Verifier finding 1: reran the complete gates on `e18103dbbcdbc8d8de3e26ecc895556e5a409d89`, including merged #3258. No implementation defect or design change was identified.
+  - `make check` exited 0: vet, full unit race suite, staticcheck, substrate-guard and uncached fake-daemon e2e all passed. There were 62 uncached package pass results and one package without tests; `cmd/pyry` passed in 207.531s, `internal/apps` in 43.532s and `internal/e2e` in 181.309s.
+  - Then `make build BIN=/tmp/builder-3246-rework-535f994b/pyry` exited 0. Only the binary destination differs from the default build target.
+  - Complete logs: `/tmp/builder-3246-rework-535f994b/check.log` (SHA-256 `5fb0bf2ba32036cafc638fb4568adcc91394ca48c532012fcc65787bea719282`) and `build.log` (SHA-256 `e93352d226789ed01c0c66f3c1883360cf3de622cffeb93b2354a151a99c79de`). Documentation and encrypted routing remain the handoffs recorded above.
