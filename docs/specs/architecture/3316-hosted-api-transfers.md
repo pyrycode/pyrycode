@@ -83,3 +83,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-13
+
+## Revisions
+
+- 2026-10-13: The blocked-writer proof is the `blocked_true` subtest of `TestHostedAPIRealTransport`, sharing the existing real transport fixture. `TestHostedAPIByteCapacity` adds mixed per-connection and daemon exhaustion at the exact decoded request boundary, including request reservation refusal before provider invocation. Final work is approximately 830 written lines, slightly above the ceiling; the recorded grandchild sizing exception applies. One exported interface, two optional consumer additions, four criteria and fewer than ten added transfer reject branches remain unchanged. The hypothetical split remains API admission/accounting versus transfer/lifecycle proof; build both here as required by the split-depth gate.

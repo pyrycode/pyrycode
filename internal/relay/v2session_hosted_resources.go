@@ -18,6 +18,12 @@ import (
 type HostedAppsAssets interface {
 	PrepareAsset(context.Context, string, string, string, apps.AssetRequest) (*apps.PreparedResponse, error)
 }
+
+// HostedAppsAPI forwards once to the exact generation and prepares a stable response.
+// Calls and disposal run off Run and must honor cancellation without mutation replay.
+type HostedAppsAPI interface {
+	ForwardAPI(context.Context, string, string, string, apps.APIRequest) (*apps.PreparedResponse, error)
+}
 type hostedResponse interface {
 	Metadata() (apps.ResponseMetadata, error)
 	Read([]byte) (int, error)
@@ -158,7 +164,7 @@ func (m *V2SessionManager) resourceDurations() (time.Duration, time.Duration) {
 	}
 	return deadline, inactivity
 }
-func (m *V2SessionManager) startHostedAsset(ctx context.Context, s *V2Session, req hostedRequest) {
+func (m *V2SessionManager) startHostedResource(ctx context.Context, s *V2Session, req hostedRequest) {
 	h := s.hosted
 	if h.resources[req.id] != nil || (h.pending != nil && h.pending.id == req.id) {
 		m.hostedError(ctx, s, req.id, "app.invalid_request", false)
@@ -180,7 +186,7 @@ func (m *V2SessionManager) startHostedAsset(ctx context.Context, s *V2Session, r
 		h.resources = make(map[uint64]*hostedResource)
 	}
 	h.resources[req.id] = op
-	go m.runHostedAsset(op, req.asset)
+	go m.runHostedResource(op, req)
 }
 func (m *V2SessionManager) prepareHostedAsset(op *hostedResource, req protocol.AppAssetRequestPayload) (hostedResponse, error) {
 	in := apps.AssetRequest{Path: req.Path, Query: req.Query, Navigation: req.Navigation, Reserve: func(n int64) bool { return m.resourceBudget.reserve(op, n) }, Release: func(n int64) { m.resourceBudget.release(op, n) }, Progress: op.progressed}
@@ -192,6 +198,17 @@ func (m *V2SessionManager) prepareHostedAsset(op *hostedResource, req protocol.A
 	}
 	return m.cfg.HostedAppsAssets.PrepareAsset(op.ctx, m.cfg.ServerID, op.app, req.ReleaseVersion, in)
 }
+func (m *V2SessionManager) prepareHostedAPI(op *hostedResource, req protocol.AppAPIRequestPayload, body []byte) (hostedResponse, error) {
+	in := apps.APIRequest{Method: req.Method, Path: req.Path, Query: req.Query, Headers: req.Headers, Body: body, Reserve: func(n int64) bool { return m.resourceBudget.reserve(op, n) }, Release: func(n int64) { m.resourceBudget.release(op, n) }, Progress: op.progressed}
+	if m.cfg.hostedForwardAPI != nil {
+		return m.cfg.hostedForwardAPI(op.ctx, m.cfg.ServerID, op.app, req.ReleaseVersion, in)
+	}
+	if m.cfg.HostedAppsAPI == nil {
+		return nil, apps.ErrUnavailable
+	}
+	return m.cfg.HostedAppsAPI.ForwardAPI(op.ctx, m.cfg.ServerID, op.app, req.ReleaseVersion, in)
+}
+
 func (m *V2SessionManager) resourceResult(res hostedResourceResult) bool {
 	select {
 	case m.resourceDone <- res:
@@ -216,21 +233,40 @@ func (m *V2SessionManager) resourceOutput(op *hostedResource, p hostedResponse, 
 		return context.Canceled
 	}
 }
-func (m *V2SessionManager) runHostedAsset(op *hostedResource, req protocol.AppAssetRequestPayload) {
+func (m *V2SessionManager) runHostedResource(op *hostedResource, req hostedRequest) {
 	defer m.resourceBudget.finish(op)
-	defer m.cfg.Logger.Debug("relay: asset worker exited", "event", "v2.hosted.asset_exited", "conn_id", op.s.connID)
-	p, err := m.prepareHostedAsset(op, req)
+	defer m.cfg.Logger.Debug("relay: resource worker exited", "event", "v2.hosted.resource_exited", "conn_id", op.s.connID)
+	var p hostedResponse
+	var err error
+	limit := int64(8 << 20)
+	if req.typ == protocol.TypeAppAPIRequest {
+		limit = 1 << 20
+		if !m.resourceBudget.reserve(op, int64(req.bodySize)) {
+			err = apps.ErrResponseCapacity
+		} else {
+			defer m.resourceBudget.release(op, int64(req.bodySize))
+			body := make([]byte, req.bodySize)
+			_, err = base64.StdEncoding.Strict().Decode(body, []byte(req.api.Body))
+			if err != nil {
+				err = apps.ErrAPIRequest
+			} else {
+				p, err = m.prepareHostedAPI(op, req.api, body)
+			}
+		}
+	} else {
+		p, err = m.prepareHostedAsset(op, req.asset)
+	}
 	if err != nil {
 		m.resourceResult(hostedResourceResult{op: op, err: err})
 		return
 	}
 	defer p.Close()
 	meta, err := p.Metadata()
-	if err == nil && (meta.Size < 0 || meta.Size > 8<<20) {
+	if err == nil && (meta.Size < 0 || meta.Size > limit) {
 		err = apps.ErrResponseLimit
 	}
 	if err == nil {
-		payload := protocol.AppResponsePayload{AppID: op.app, ReleaseVersion: req.ReleaseVersion, Status: meta.Status, Headers: meta.Headers, SizeBytes: uint64(meta.Size), TotalChunks: uint64((meta.Size + 32767) / 32768), SHA256: meta.SHA256}
+		payload := protocol.AppResponsePayload{AppID: op.app, ReleaseVersion: req.asset.ReleaseVersion, Status: meta.Status, Headers: meta.Headers, SizeBytes: uint64(meta.Size), TotalChunks: uint64((meta.Size + 32767) / 32768), SHA256: meta.SHA256}
 		err = m.resourceOutput(op, p, protocol.TypeAppResponse, payload)
 		for i := uint64(0); err == nil && i < payload.TotalChunks; i++ {
 			if i > 0 {
@@ -403,7 +439,7 @@ func (m *V2SessionManager) releaseHostedOutput(s *V2Session, o *hostedOutput) {
 }
 func hostedResourceCode(err error) string {
 	switch {
-	case errors.Is(err, apps.ErrAssetPath):
+	case errors.Is(err, apps.ErrAssetPath), errors.Is(err, apps.ErrAPIRequest):
 		return "app.invalid_request"
 	case errors.Is(err, apps.ErrNotFound):
 		return "app.not_found"
@@ -411,7 +447,7 @@ func hostedResourceCode(err error) string {
 		return "app.release_changed"
 	case errors.Is(err, apps.ErrUnavailable):
 		return "app.unavailable"
-	case errors.Is(err, apps.ErrResponseLimit):
+	case errors.Is(err, apps.ErrResponseLimit), errors.Is(err, apps.ErrAPILimit):
 		return "app.limit_exceeded"
 	case errors.Is(err, apps.ErrResponseCapacity):
 		return "app.busy"
