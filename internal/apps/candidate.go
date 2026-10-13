@@ -113,7 +113,30 @@ func candidateEnvironment(stage, node string) ([]string, error) {
 	if err := os.Symlink(node, filepath.Join(stage, ".tools/node")); err != nil {
 		return nil, err
 	}
-	return []string{"PATH=" + filepath.Join(stage, ".tools") + ":/usr/bin:/bin", "HOME=" + filepath.Join(stage, ".home"), "TMPDIR=" + filepath.Join(stage, ".tmp"), "npm_config_cache=" + filepath.Join(stage, ".cache"), "npm_config_userconfig=/dev/null", "npm_config_globalconfig=/dev/null", "npm_config_update_notifier=false"}, nil
+	userConfig := filepath.Join(stage, ".home/user.npmrc")
+	globalConfig := filepath.Join(stage, ".home/global.npmrc")
+	for _, path := range []string{userConfig, globalConfig} {
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			return nil, err
+		}
+	}
+	// npm prepends dependency bins before invoking its lifecycle shell. Restore
+	// the selected Node's precedence for commands and env-node shebangs, including
+	// dependency install hooks, while retaining lookup of other package binaries.
+	shell := filepath.Join(stage, ".tools/script-shell")
+	if err := os.WriteFile(shell, []byte("#!/bin/sh\nPATH=\"${0%/*}:$PATH\"\nexport PATH\nexec /bin/sh \"$@\"\n"), 0700); err != nil {
+		return nil, err
+	}
+	return []string{
+		"PATH=" + filepath.Join(stage, ".tools") + ":/usr/bin:/bin",
+		"HOME=" + filepath.Join(stage, ".home"),
+		"TMPDIR=" + filepath.Join(stage, ".tmp"),
+		"npm_config_cache=" + filepath.Join(stage, ".cache"),
+		"npm_config_userconfig=" + userConfig,
+		"npm_config_globalconfig=" + globalConfig,
+		"npm_config_script_shell=" + shell,
+		"npm_config_update_notifier=false",
+	}, nil
 }
 func candidateRead(stage, name string) ([]byte, error) {
 	dir, err := privateDir(stage)
