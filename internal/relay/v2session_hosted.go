@@ -261,7 +261,8 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		o := h.queue[0]
 		if o.resource != nil && !o.resource.usable() {
 			m.retireHostedResource(ctx, s, o.resource, hostedResourceCode(o.resource.failure()))
-			if s.state != V2StateOpen {
+			// Retirement can enqueue an error and start the next queued writer.
+			if h.active != nil || s.state != V2StateOpen {
 				return
 			}
 			continue
