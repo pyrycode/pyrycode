@@ -31,6 +31,9 @@ type ResponseInput struct {
 	Headers     map[string]string
 	Reserve     func(int64) bool
 	Release     func(int64)
+	// Progress reports each positive-byte source read. It must return promptly
+	// and must not reenter the response. Nil disables reporting.
+	Progress func()
 }
 
 // ResponseMetadata describes the complete stable body. Headers are detached.
@@ -253,3 +256,7 @@ func (p *PreparedResponse) Complete(deliveryErr error) error {
 
 // Close abandons delivery. Repeated calls join the same cleanup and return nil.
 func (p *PreparedResponse) Close() error { p.dispose(nil); <-p.watched; return nil }
+
+// Done closes when cancellation, backend retirement or disposal invalidates the response.
+// Observing it performs no backend I/O or locking.
+func (p *PreparedResponse) Done() <-chan struct{} { return p.ctx.Done() }

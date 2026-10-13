@@ -33,6 +33,7 @@ type hostedPage struct {
 	cursor  *hostedWalk
 }
 type hostedOutput struct {
+	resource     *hostedResource
 	query        *threadQuery
 	unsolicited  bool
 	typ          string
@@ -47,6 +48,7 @@ type hostedOutput struct {
 	outcome      chan error
 }
 type hostedState struct {
+	resources    map[uint64]*hostedResource
 	inbox        *hostedInbox
 	deliveryCtx  context.Context
 	pending      *hostedPage
@@ -89,6 +91,12 @@ func (m *V2SessionManager) routeHosted(ctx context.Context, s *V2Session, raw []
 		return true
 	}
 	if !valid {
+		if req.typ == protocol.TypeAppResponseCredit {
+			if req.creditTarget && s.hosted.resources[req.credit.RequestID] != nil && !s.hosted.resources[req.credit.RequestID].finalDelivered {
+				m.retireHostedResource(ctx, s, s.hosted.resources[req.credit.RequestID], "app.invalid_request")
+			}
+			return true
+		}
 		m.hostedError(ctx, s, req.id, "app.invalid_request", false)
 		return true
 	}
@@ -97,9 +105,22 @@ func (m *V2SessionManager) routeHosted(ctx context.Context, s *V2Session, raw []
 		return true
 	}
 	h := s.hosted
+	if req.typ == protocol.TypeAppAssetRequest {
+		m.startHostedAsset(ctx, s, req)
+		return true
+	}
+	if req.typ == protocol.TypeAppResponseCredit {
+		m.creditHostedResource(ctx, s, req.credit)
+		return true
+	}
 	if req.typ == protocol.TypeAppCancel {
 		if req.cancel.AppID != "" {
-			m.hostedError(ctx, s, req.id, protocol.CodeProtocolUnsupported, false)
+			if op := h.resources[req.cancel.RequestID]; op != nil && op.app == req.cancel.AppID {
+				m.retireHostedResource(ctx, s, op, "")
+			}
+			if s.state == V2StateOpen {
+				m.hostedEnqueue(ctx, s, &hostedOutput{typ: protocol.TypeAppCancelled, payload: req.cancel, reply: req.id})
+			}
 			return true
 		}
 		if h.pending != nil && h.pending.id == req.cancel.RequestID && !h.pending.retired {
@@ -179,6 +200,18 @@ func (m *V2SessionManager) hostedError(ctx context.Context, s *V2Session, id uin
 	case "app.busy":
 		p.Message = "app request capacity is full"
 		p.RetryAfter = 1
+	case "app.not_found":
+		p.Message = "app is not accessible"
+	case "app.release_changed":
+		p.Message = "app release changed"
+	case "app.unavailable":
+		p.Message = "app is unavailable"
+	case "app.limit_exceeded":
+		p.Message = "app transfer limit exceeded"
+	case "app.timeout":
+		p.Message = "app transfer timed out"
+	case "app.io_failed":
+		p.Message = "app resource I/O failed"
 	case "apps.changed":
 		p.Message = "app discovery changed; restart the list"
 	}
@@ -194,8 +227,13 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 	in := h.inbox
 	reserved := h.pushReserved && o.env != nil
 	full := in.retired || in.overflow || (!reserved && in.used >= hostedQueueLimit)
+	if o.resource != nil {
+		full = in.retired || in.overflow || in.resourceUsed >= 8
+	}
 	if !full {
-		if reserved {
+		if o.resource != nil {
+			in.resourceUsed++
+		} else if reserved {
 			h.pushReserved = false
 		} else {
 			in.used++
@@ -221,6 +259,13 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 	}
 	for len(h.queue) > 0 {
 		o := h.queue[0]
+		if o.resource != nil && !o.resource.usable() {
+			m.retireHostedResource(ctx, s, o.resource, hostedResourceCode(o.resource.failure()))
+			if s.state != V2StateOpen {
+				return
+			}
+			continue
+		}
 		var rejection error
 		if o.callerCtx != nil {
 			rejection = o.callerCtx.Err()
@@ -237,7 +282,7 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		h.queue[0] = nil
 		h.queue = h.queue[1:]
 		o.finish(rejection)
-		m.releaseHosted(s, 1)
+		m.releaseHostedOutput(s, o)
 	}
 	if len(h.queue) == 0 {
 		return
@@ -294,7 +339,7 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		env.ID = s.nextID
 		raw, err := json.Marshal(env)
 		s.nextID++
-		if err != nil || ((threadContent(env.Type) || o.outcome != nil) && len(raw) > protocol.MaxThreadEnvelopeBytes) {
+		if err != nil || (len(raw) > protocol.MaxThreadEnvelopeBytes) {
 			o.finish(ErrThreadDeliveryFailed)
 			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
 			return
@@ -312,7 +357,11 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 			return
 		}
 	}
-	deliveryCtx, cancel := context.WithTimeout(h.inbox.ctx, hostedDeliveryTimeout)
+	parent := h.inbox.ctx
+	if o.resource != nil {
+		parent = o.resource.ctx
+	}
+	deliveryCtx, cancel := context.WithTimeout(parent, hostedDeliveryTimeout)
 	h.cancel = cancel
 	h.deliveryCtx = deliveryCtx
 	deliveryDone := make(chan error, 1)
@@ -378,10 +427,16 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 		h.deliveryCtx = nil
 		h.active = nil
 		res.output.finish(threadDeliveryError(res.err))
-		m.releaseHosted(s, 1)
+		m.releaseHostedOutput(s, res.output)
 		if res.err != nil {
 			m.closeWith(ctx, s, StatusSessionGone, nil)
 			return
+		}
+		if op := res.output.resource; op != nil {
+			if res.output.typ == protocol.TypeAppResponseChunk {
+				op.delivered++
+			}
+			op.finalDelivered = op.delivered == op.totalChunks
 		}
 		if res.output.page != nil && h.pending == res.output.page {
 			h.pending = nil
@@ -472,6 +527,10 @@ func (m *V2SessionManager) hostedEnvelope(ctx context.Context, s *V2Session, env
 }
 func (m *V2SessionManager) retireHosted(s *V2Session) {
 	if h := s.hosted; h != nil {
+		for _, op := range h.resources {
+			op.cancel(context.Canceled)
+		}
+		h.resources = nil
 		m.hostedMu.Lock()
 		if in := h.inbox; in != nil {
 			in.retired = true

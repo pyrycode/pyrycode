@@ -98,7 +98,9 @@ func TestHostedDiscoveryCancellation(t *testing.T) {
 	testHostedAwait(t, d.entered)
 	q.request(41, "app_cancel", `{"request_id":40,"app_id":"22222222-2222-4222-8222-222222222222"}`)
 	e, _ := q.next()
-	testHostedError(t, e, 41, "protocol.unsupported")
+	if e.Type != protocol.TypeAppCancelled || e.InReplyTo == nil || *e.InReplyTo != 41 {
+		t.Fatalf("mismatched scope acknowledgement: %+v", e)
+	}
 	other := q.sibling("other-requester")
 	other.request(42, "app_cancel", `{"request_id":40}`)
 	e, _ = other.next()

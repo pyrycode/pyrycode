@@ -92,3 +92,10 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-13
+
+## Revisions
+
+- 2026-10-13: Track positive progress as monotonic elapsed time, and give backend work and resource writes the fixed acceptance context deadline. Output/credit guards also check expiry before admission; late progress cannot revive inactivity-expired work. This closes the gap between sweep ticks without changing the thirty/five-second contract.
+- 2026-10-13: Successful backend disposal closes `PreparedResponse.Done` too. Track final transport delivery on Run so cleanup cannot create a spurious unavailable error, and make finished-operation credit silent while cleanup completes. Preserve explicit backend completion errors.
+- 2026-10-13: Resource workers wait for output disposal/delivery or original inbox retirement before releasing chunk reservations. A backend Done signal alone cannot release a still-queued copy. The real transport fixture now accepts legal outer chunk framing and exposes socket retirement for a publication fence.
+- 2026-10-13: Lifecycle proof also includes `TestHostedAssetReadProgress`, `TestHostedAssetRealTransportBlockedWriter`, `TestHostedAssetQueuedCancellation`, `TestHostedAssetControlCapacity`, duplicate/malformed credit and backend error tables. Existing `TestResponseRetirement` covers real backend release/process retirement, while encrypted tests cover the returned response's retirement signal. Final written work is approximately 1,650 lines; counting stale/cancelled handoff and delivery guards separately also gives approximately fifteen resource state-machine rejection branches. Both ceilings exceed the earlier grouped sketch; the verified split-depth exception applies.

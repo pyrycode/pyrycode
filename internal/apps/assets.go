@@ -23,6 +23,8 @@ type AssetRequest struct {
 	Navigation  bool
 	Reserve     func(int64) bool
 	Release     func(int64)
+	// Progress has the optional positive-byte ResponseInput reporting contract.
+	Progress func()
 }
 
 // PrepareAsset stages a confined active-release asset or ordinary HTTP 404.
@@ -72,7 +74,7 @@ func (o *Owner) prepareAsset(ctx context.Context, target *Target, record Record,
 		name = "index.html"
 		f, err = assetFile(web, name)
 	}
-	response := ResponseInput{Limit: assetLimit, Status: 200, Headers: map[string]string{"content-type": assetMIME(name)}, Reserve: in.Reserve, Release: in.Release}
+	response := ResponseInput{Limit: assetLimit, Status: 200, Headers: map[string]string{"content-type": assetMIME(name)}, Reserve: in.Reserve, Release: in.Release, Progress: in.Progress}
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		response.Body = io.NopCloser(strings.NewReader(""))
