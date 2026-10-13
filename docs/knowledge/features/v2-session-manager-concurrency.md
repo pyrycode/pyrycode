@@ -257,8 +257,8 @@ rechecks paired authorization before sealing. Handshake installs the inbox
 before any list request; list cancellation retires list work without removing
 lifecycle eligibility. See [registry callback ownership](apps-package-concurrency-and-testing.md#concurrency-and-persistence).
 
-The hosted output lane and callback handoff share at most 16 envelopes per
-connection, including active delivery, queued output, pending lifecycle callbacks
+The control/ordinary output lane and callback handoff share at most 16 envelopes
+per connection, including active delivery, queued output, pending lifecycle callbacks
 and temporary ordinary-push reservations. Separate inbox/queue limits would
 exceed that total; `reserveHostedPush`, `hostedEnqueue` and `HostedAppsChanged`
 use the same counter under `hostedMu`. Lifecycle callback overflow still cancels
@@ -267,6 +267,80 @@ fresh discovery to recover without silently skipping a committed revision.
 Hosted controls and rekey retain terminal admission on overflow. Completed and
 cancelled queue entries are cleared as well as releasing their reservations:
 slice backing arrays would otherwise retain envelopes beyond the logical queue.
+
+Asset metadata/chunks have eight separate destination slots per connection,
+including active delivery, under `hostedInbox.resourceUsed`. They share the same
+FIFO and single writer with control/ordinary output, but cannot consume its
+16-envelope capacity. `TestHostedAssetControlCapacity` holds a control writer,
+queues eight resource envelopes and fills all remaining control slots, then
+decrypts the resumed traffic. Separate capacity keeps control admission runnable;
+it does not let a later envelope pass an already sealed writer.
+
+`startHostedAsset` captures the original session/inbox, request ID and app ID;
+`HostedAppsAssets.PrepareAsset` binds the exact backend process generation through
+`Owner.PrepareAsset`. `runHostedAsset` prepares, checks metadata, reads, waits for
+credit/delivery and disposes off `Run`. `Run` alone owns active operation maps,
+credit indices, sender IDs and Noise. One worker sends metadata, then reserves,
+copies and encodes at most one decoded chunk and waits for its transport outcome
+before producing another. Each chunk yields to other producers. A blocked
+backend, credit wait or writer leaves manager control and other connections
+runnable. Hosted routing stays at `routeHosted`, outside generic `dispatch.Route`;
+the relay server parses no app content. Production readiness remains withheld
+for [#3248](https://github.com/pyrycode/pyrycode/issues/3248), and encrypted API
+routing remains [#3316](https://github.com/pyrycode/pyrycode/issues/3316).
+
+`hostedResourceBudget` uses a leaf mutex for counts (8 per connection generation,
+32 per app across connections, 128 per daemon) and decoded bytes (16 MiB per
+connection, 64 MiB per daemon). Admission precedes preparation; reservations
+precede staging and decoded-copy allocation/read, including incremental growth
+through EOF. Current staging uses memory, with the same budget required for any
+future spool and API request bodies. EOF retains the stable-body reservation
+until disposal, and its temporary probe byte also needs capacity. Two full
+8 MiB staged bodies therefore cannot bypass the connection ceiling just because
+their advertised sizes sum to 16 MiB. Count/reservation exhaustion returns
+retryable `app.busy` with `retry_after_s: 1`; body/chunk overflow is
+`app.limit_exceeded`. Cancellation removes queued output before releasing its
+copy reservation, and workers hold admission until backend disposal returns.
+`resourceOutput` waits for delivery/discard or the original inbox's retirement:
+backend `Done` alone cannot release a copy still queued for transport.
+`TestHostedAssetAdmission` holds cancelled preparation cleanup to prove that
+cancellation cannot accumulate replacement workers; `TestHostedResourceBudgets`
+and `TestHostedAssetByteCapacity` check exact ceilings and recovery.
+
+Initial credit grants chunk 0 only. `creditHostedResource` requires the captured
+connection/request/app identity and exactly the next index after its predecessor
+has delivered. Duplicate granted credit is silent and grants nothing; wrong-app,
+future/skipped or malformed active credit retires the original request with
+`app.invalid_request`. Finished/retired credit is silent, including while final
+cleanup still occupies admission. `Run` tracks `finalDelivered` separately from
+backend `Done`: successful `PreparedResponse.Complete` closes that signal too.
+The trailing control sentinel in `TestHostedAssetTransfer` detects a spurious
+unavailable error after complete bytes, which a digest-only assertion misses.
+
+The fixed deadline is 30 seconds from daemon acceptance, including preparation
+and resource writes. Five-second inactivity measures monotonic elapsed time
+since a positive-byte preparation/response read or new valid credit. Reservation
+activity, zero-byte reads and duplicate credit do not reset it. Optional
+[preparation progress](apps-package-resource-serving.md#stable-response-ownership)
+observes individual reads inside `io.ReadFull`; a five-second preparation timer
+alone would reject a continuously reading source. Nothing extends the acceptance
+deadline or revives already expired work. Sweep, credit and output guards check
+expiry; timeout cancels backend I/O and returns `app.timeout` while the generation
+is usable. `TestHostedAssetTimeouts` and `TestHostedAssetReadProgress` distinguish
+progressive/stalled preparation and reads, held credit and a fixed deadline
+despite progress.
+
+App-scoped cancellation matches the original request and app on that connection;
+unscoped cancellation still addresses list work. Usable-generation acknowledgements
+reply to the cancel ID and echo target/scope, including unknown, duplicate,
+finished and mismatched-scope targets. Disconnect, revocation, release/process
+retirement and shutdown prevent later admission or rebinding. Remove retired
+unsealed output; cancellation/failure of active sealed output retires the
+connection to avoid a nonce gap. Cleanup stays off `Run` and late results check
+original pointers, so reused connection/request IDs cannot revive old work.
+Transport completion establishes delivery, not app success or rollback of an
+uncertain mutation. Native assembly/view retirement remains client-owned; see
+the [wire contract](../../protocol-mobile.md#asset-transfers-credit-and-cancellation).
 
 Ordinary bounded pushes wait unsealed upstream when this lane is full. A legal
 reconnect batch can exceed the destination's 16 slots even for an
@@ -321,6 +395,26 @@ cipher, then new-key output follows. A second rekey during that barrier closes
 the connection. `TestHostedDiscoveryOrderedDelivery` and
 `TestHostedDiscoveryRekeyOrdering` decrypt resumed output and check IDs; merely
 running the race detector would miss ordering defects.
+
+Every fully serialized hosted plaintext envelope is checked against 65519 bytes
+before encryption, including discovery/control and asset output. There remains
+exactly one active writer across queued resource retirement: `retireHostedResource`
+may enqueue a terminal error through `hostedEnqueue`, recursively starting the
+next queued writer. `hostedDeliver` must recheck active delivery and connection
+state after retirement before selecting another head, or the outer call can
+overwrite that writer's output/context/cancellation and reorder sealed frames.
+A pre-selection sweep and exclusive cipher ownership cannot prove this invariant.
+`TestHostedAssetQueuedRetirementSingleWriter` retires the queued head by timeout
+or backend signal, holds the next control writer, and checks both authenticated
+publication order and connection retirement on writer failure.
+
+Encrypted real-transport fixtures must allow legal chunk framing after both
+inner and outer base64 expansion; the default WebSocket read limit can reject a
+valid 32768-byte decoded chunk before the transfer is tested. In
+`TestHostedAssetRealTransportBlockedWriter`, socket retirement fences all prior
+publications before checking for late metadata. A manager snapshot immediately
+after writing cancellation can precede its processing, and session removal alone
+cannot prove that a blocked transport has stopped publishing.
 
 `TestReadinessLegacyReconnectSnapshotCapacity` holds the real transport's
 acknowledgment through handshake completion, proves `FlushPushes` is still

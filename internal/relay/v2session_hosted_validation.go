@@ -16,10 +16,13 @@ import (
 const hostedMaxID = uint64(9007199254740991)
 
 type hostedRequest struct {
-	id     uint64
-	typ    string
-	cursor string
-	cancel protocol.AppCancelPayload
+	id           uint64
+	typ          string
+	cursor       string
+	cancel       protocol.AppCancelPayload
+	asset        protocol.AppAssetRequestPayload
+	credit       protocol.AppResponseCreditPayload
+	creditTarget bool
 }
 
 // hostedJSON preserves exact keys and marks duplicates even inside additive fields.
@@ -91,7 +94,7 @@ func hostedUint(v any) (uint64, bool) {
 }
 func hostedType(typ string) bool {
 	switch typ {
-	case protocol.TypeListApps, protocol.TypeApps, protocol.TypeAppUpdated, protocol.TypeAppRemoved, protocol.TypeAppCancel, protocol.TypeAppCancelled:
+	case protocol.TypeListApps, protocol.TypeApps, protocol.TypeAppUpdated, protocol.TypeAppRemoved, protocol.TypeAppCancel, protocol.TypeAppCancelled, protocol.TypeAppAssetRequest, protocol.TypeAppAPIRequest, protocol.TypeAppResponse, protocol.TypeAppResponseChunk, protocol.TypeAppResponseCredit:
 		return true
 	}
 	return false
@@ -118,6 +121,9 @@ func parseHostedRequest(raw []byte) (req hostedRequest, recognized, correlatable
 				}
 			}
 		}
+	}
+	if payload, ok := obj["payload"].(map[string]any); ok && req.typ == protocol.TypeAppResponseCredit {
+		req.credit.RequestID, req.creditTarget = hostedUint(payload["request_id"])
 	}
 	req.id, correlatable = hostedUint(obj["id"])
 	correlatable = correlatable && !ambiguous && err == nil
@@ -155,6 +161,48 @@ func parseHostedRequest(raw []byte) (req hostedRequest, recognized, correlatable
 			}
 			req.cursor = cursor
 		}
+	case protocol.TypeAppAssetRequest:
+		app, ok := payload["app_id"].(string)
+		if !ok {
+			return
+		}
+		if _, e := identity.ParseServerID(app); e != nil {
+			return
+		}
+		release, ok := payload["release_version"].(string)
+		version, canonical := protocol.ParseVersion(release)
+		if !ok || !canonical || version.Major > 2147483647 || version.Minor > 2147483647 || version.Patch > 2147483647 {
+			return
+		}
+		path, ok := payload["path"].(string)
+		if !ok || !hostedASCII(path, 2048) || !strings.HasPrefix(path, "/") {
+			return
+		}
+		navigation, ok := payload["navigation"].(bool)
+		if !ok {
+			return
+		}
+		req.asset = protocol.AppAssetRequestPayload{AppID: app, ReleaseVersion: release, Path: path, Navigation: navigation}
+		if v, exists := payload["query"]; exists {
+			query, ok := v.(string)
+			if !ok || !hostedASCII(query, 1024) || strings.HasPrefix(query, "?") {
+				return
+			}
+			req.asset.Query = query
+		}
+	case protocol.TypeAppResponseCredit:
+		app, ok := payload["app_id"].(string)
+		if !ok {
+			return
+		}
+		if _, e := identity.ParseServerID(app); e != nil {
+			return
+		}
+		index, ok := hostedUint(payload["next_index"])
+		if !ok || index > 255 || !req.creditTarget {
+			return
+		}
+		req.credit.AppID, req.credit.NextIndex = app, index
 	case protocol.TypeAppCancel:
 		target, ok := hostedUint(payload["request_id"])
 		if !ok {
@@ -210,6 +258,18 @@ func hostedTimestamp(ts string) bool {
 	}
 	for i := 20; i < len(ts)-1; i++ {
 		if ts[i] < '0' || ts[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func hostedASCII(s string, limit int) bool {
+	if len(s) == 0 || len(s) > limit {
+		return false
+	}
+	for _, b := range []byte(s) {
+		if b > 127 {
 			return false
 		}
 	}

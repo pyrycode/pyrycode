@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/apps"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -36,6 +37,11 @@ import (
 // MUST NOT be logged, wrapped into an error or emitted on any wire surface, the
 // same contract internal/keys and internal/noise state for those bytes.
 type V2SessionConfig struct {
+	// HostedAppsAssets supplies generation-bound confined assets off Run.
+	// Nil returns app.unavailable; it does not activate production readiness.
+	HostedAppsAssets                 HostedAppsAssets
+	hostedPrepareAsset               func(context.Context, string, string, string, apps.AssetRequest) (hostedResponse, error)
+	hostedDeadline, hostedInactivity time.Duration
 	// hostedNow is a test clock for cursor lifetime; production uses time.Now.
 	hostedNow func() time.Time
 	// HostedAppsDiscovery supplies committed registrations for this authenticated host.
