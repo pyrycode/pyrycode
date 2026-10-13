@@ -864,7 +864,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `create_conversation` | phone → binary | no | A non-null `cwd` is a request, not a stored value (#2568): the daemon resolves it — tilde-expanded, confined to `$HOME`, symlink-resolved to its realpath — before recording it or spawning the conversation's session there, so `default`, `~/pyry-workspace/default` and its absolute form all bind to the one folder they name rather than three. A `cwd` that cannot be confined (it escapes `$HOME`, or names no resolvable path) is refused with `protocol.malformed`, non-retryable, and no conversation is created. A `null` `cwd` is unaffected — it still records the daemon's own default workdir. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the new conversation's session runs on; absent or `null` means claude, and a request without it behaves exactly as before this ticket, including a byte-identical `conversation_created` for a client without `multi_agent`. `"codex"` is accepted only from a client that negotiated the [`multi_agent`](#capability-negotiation-v2) capability; that value from a client that did not, or any value naming neither agent, is refused before anything is created — see [Error codes](#error-codes) `protocol.unsupported`. **`model`** and **`effort`** (both `omitempty`, #2665) are the settings the new session starts on; absent keeps what a mint gives today — see [`conversation_created`](#conversation_created) below for what that is per agent. A present value is checked against the *resolved* agent's own vocabulary (ADR 039), by the same two-stage check [`set_session_settings`](#set_session_settings) runs against a bound session: shape first (`validModel` / `validEffort`'s own grammar), then membership. An `effort` is checked against the model the session will start on — the request's own `model` if it set one, else the mint's default — read from one snapshot shared with the mint itself, so a concurrent operator-default change cannot validate against one model and mint on another. A shape refusal, and a membership refusal on `effort`, both answer `protocol.malformed`, non-retryable, with this verb's **own** static message — never [`set_session_settings`](#set_session_settings)'s. A `model` absent from the vocabulary answers `protocol.malformed`, non-retryable, `requested model is not offered` — the same message `set_session_settings` gives for that cause. An incomplete or missing vocabulary answers the retryable `model_list.unavailable`. Every refusal creates nothing — no session, no registry entry, no conversation row — before `resolveSpawnDir` or the mint runs, and never echoes the requested value in a reply or a log. A request naming neither field is byte-identical on the wire to one from before this ticket. |
 | `conversation_created` | binary → phone | no | Reply to `create_conversation`, correlated by `in_reply_to`. Its `cwd` is the resolved realpath the conversation's session actually spawns in for a non-null request (#2568), never the string the request sent, and is the same value `list_conversations` reports for that row from then on; a `null` request's `cwd` is the daemon's default. Carries **`workspace_label`** (#2210): the operator-set display name stored for this conversation's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every frame, so a client may treat a missing one as malformed rather than as an unlabelled workspace. A conversation created into an already-named folder is named by it immediately, from this reply, without a `list_conversations` round trip. Same value and same contract as the [`conversations`](#conversations) row's field, including that its 128-byte bound is a size limit and **not** a safety property — rendering it safely is the client's job. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the created conversation's session runs on, set only for a client that negotiated `multi_agent` — the `conversations` row's own rule. `omitempty` is load-bearing here: a request without `agent` from a client without `multi_agent` gets a reply with no `agent` key at all, byte-identical to the frame this document described before Codex conversations existed. **Since #2665, a request's `model` and `effort` become the created session's stored settings from the mint**, field by field — an absent field keeps what a mint gives without them: a Claude conversation still inherits the operator's configured model/effort, a Codex conversation still starts with neither set and runs at Codex's own defaults. A refused `model` or `effort` is answered on `create_conversation` itself (see that row) and never reaches this reply — no conversation is created. |
 | `promote_conversation` | phone → binary | no | |
-| `conversation_updated` | binary → phone | no | Has **two kinds of producer**, and a client MUST accept both. As a **reply** it is correlated by `in_reply_to` and answers `promote_conversation`, `rename_conversation`, `archive_conversation` / `unarchive_conversation`, `change_workspace`, `set_system_prompt`, `set_conversation_muted` or [`mark_conversation_read`](#marking-a-conversation-read). As an **unsolicited push** it carries **no `in_reply_to` at all**, and has **four producers of its own**: when a conversation is created on the host by `pyry channel new` (#2156); when a conversation that has never had a name takes one from the first message sent to it (#2159 — the daemon cuts a short title from that message's text and stores it, so a chat started from a client stops reading as `Untitled`; it fires at most once per conversation, since a name set by create, rename, promote or an earlier message is never overwritten); when a conversation's mute flag is set or cleared by `set_conversation_muted` (#2572); and when `mark_conversation_read` (#2780) actually **advances** the conversation's read mark — not on a no-op request, which still gets its reply but pushes nothing. **Two of the four also answer a correlated reply for the same write** — `set_conversation_muted` always, `mark_conversation_read` only when it advances — so their requester receives both: the correlated `conversation_updated` reply and the uncorrelated push, which does not exclude it. Either way the daemon fans the stored record to every interactive-capable conn, because no client asked and none would otherwise learn of the change until its next `list_conversations` — and on the auto-naming, mute and read-mark pushes in particular the requester is **not** excluded, since `send_message`'s own reply is a bare `ack` carrying no record and the two correlated replies above are separate frames from their pushes. A client that matches this type on correlation alone will drop the pushed frame; correlate on the payload's own `id` instead. The record is the same either way, and it is read back from the registry, so its `cwd` is the daemon's confined, symlink-resolved path. The push is **live-only** — there is no replay, and a client that was disconnected sees the row in its next list. Interactive-capability-gated: a conn without it is skipped. Every frame of both kinds carries **`workspace_label`** (#2210): the operator-set display name stored for that frame's own `cwd`, or `null` when that workspace has none, **nullable but never omitted** — so a client patching a row in place from a push renders the operator's chosen name instead of falling back to the folder name until its next list. After a `change_workspace` it names the **destination** workspace, which is the case a client cannot resolve for itself: `recent_workspaces` rows carry no label, and `workspace_updated` fires when a *label* changes, not when a *conversation moves*. Same value and same contract as the [`conversations`](#conversations) row's field, its 128-byte size-not-safety bound included. It is **not** a precedent for putting `system_prompt` here: the label is already on every `list_conversations` row, so broadcasting it widens no audience, which is exactly what a prompt reachable from no other read path would do. Every frame of both kinds also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, so a client paired with an older daemon keeps notifying. This matters for the push in particular: mobile folds each frame into its list in place (`ConversationListProjection.upsertConversation`), so a record that dropped the key would read as not muted and a plain rename would silently unmute the conversation. Every frame of both kinds also carries **`read_up_to`** (#2779): the same durable, per-conversation, host/operator-scoped read mark the [`conversations`](#conversations) row reports, unsigned 64-bit, **always present including `0`**. Read from the stored conversation at send time by all **nine** producers this frame has — the seven correlated replies (`promote_conversation`, `rename_conversation`, `archive_conversation`/`unarchive_conversation`, `change_workspace`, `set_system_prompt`, `set_conversation_muted`, [`mark_conversation_read`](#marking-a-conversation-read)) and the two unsolicited pushes (`pyry channel new`, the auto-naming push) — so a `rename_conversation` on a conversation with a nonzero mark reports that mark unchanged, exactly as it already does for `is_muted`. Ordinary producers of this frame supply neither `current_session_id` nor `latest_entry_id`: unlike `conversations`, it is about one already-known conversation, and a client's next [`request_history`](#request_history) or [`list_conversations`](#list_conversations) resolves that separately. For a conn that negotiated **`multi_agent`**, every pushed or reply frame about a registry-known conversation also carries **`agent`** (#2669), resolved by the same [`conversations`](#conversations)-row rule at the moment this frame is sent, so replacing a cached row cannot lose the agent and a later agent change is observable. A conn without `multi_agent` receives the pre-#2669 bytes with no `agent` key. A registry miss leaves the frame untagged rather than inventing an agent for a conversation the daemon no longer knows. On a connection that negotiated **`thread`**, every push and reply adds that conversation's authoritative usable **numeric `last_shown_version`**, including `0`; a missing, rebuilding or unavailable reading removes the key, including any supplied stale value. Non-thread connections always omit it. Thread unread is **`last_shown_version > read_up_to`**. Projection preserves all other fields and their presence: `read_up_to` remains the durable read mark, and any supplied `current_session_id`/`latest_entry_id` retain the stored-binding/legacy-watermark meanings of the [`conversations`](#conversations) row; it does not add either when absent. Read-mark storage is unchanged. Production fold/watermark and retained-state providers are installed (#3163/#3164); relay catch-up/page handling and thread-only replay/resync bypass are implemented (#3253/#3235); production query provider installation remains #3236. |
+| `conversation_updated` | binary → phone | no | Has **two kinds of producer**, and a client MUST accept both. As a **reply** it is correlated by `in_reply_to` and answers `promote_conversation`, `rename_conversation`, `archive_conversation` / `unarchive_conversation`, `change_workspace`, `set_system_prompt`, `set_conversation_muted` or [`mark_conversation_read`](#marking-a-conversation-read). As an **unsolicited push** it carries **no `in_reply_to` at all**, and has **four producers of its own**: when a conversation is created on the host by `pyry channel new` (#2156); when a conversation that has never had a name takes one from the first message sent to it (#2159 — the daemon cuts a short title from that message's text and stores it, so a chat started from a client stops reading as `Untitled`; it fires at most once per conversation, since a name set by create, rename, promote or an earlier message is never overwritten); when a conversation's mute flag is set or cleared by `set_conversation_muted` (#2572); and when `mark_conversation_read` (#2780) actually **advances** the conversation's read mark — not on a no-op request, which still gets its reply but pushes nothing. **Two of the four also answer a correlated reply for the same write** — `set_conversation_muted` always, `mark_conversation_read` only when it advances — so their requester receives both: the correlated `conversation_updated` reply and the uncorrelated push, which does not exclude it. Either way the daemon fans the stored record to every interactive-capable conn, because no client asked and none would otherwise learn of the change until its next `list_conversations` — and on the auto-naming, mute and read-mark pushes in particular the requester is **not** excluded, since `send_message`'s own reply is a bare `ack` carrying no record and the two correlated replies above are separate frames from their pushes. A client that matches this type on correlation alone will drop the pushed frame; correlate on the payload's own `id` instead. The record is the same either way, and it is read back from the registry, so its `cwd` is the daemon's confined, symlink-resolved path. The push is **live-only** — there is no replay, and a client that was disconnected sees the row in its next list. Interactive-capability-gated: a conn without it is skipped. Every frame of both kinds carries **`workspace_label`** (#2210): the operator-set display name stored for that frame's own `cwd`, or `null` when that workspace has none, **nullable but never omitted** — so a client patching a row in place from a push renders the operator's chosen name instead of falling back to the folder name until its next list. After a `change_workspace` it names the **destination** workspace, which is the case a client cannot resolve for itself: `recent_workspaces` rows carry no label, and `workspace_updated` fires when a *label* changes, not when a *conversation moves*. Same value and same contract as the [`conversations`](#conversations) row's field, its 128-byte size-not-safety bound included. It is **not** a precedent for putting `system_prompt` here: the label is already on every `list_conversations` row, so broadcasting it widens no audience, which is exactly what a prompt reachable from no other read path would do. Every frame of both kinds also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, so a client paired with an older daemon keeps notifying. This matters for the push in particular: mobile folds each frame into its list in place (`ConversationListProjection.upsertConversation`), so a record that dropped the key would read as not muted and a plain rename would silently unmute the conversation. Every frame of both kinds also carries **`read_up_to`** (#2779): the same durable, per-conversation, host/operator-scoped read mark the [`conversations`](#conversations) row reports, unsigned 64-bit, **always present including `0`**. Read from the stored conversation at send time by all **nine** producers this frame has — the seven correlated replies (`promote_conversation`, `rename_conversation`, `archive_conversation`/`unarchive_conversation`, `change_workspace`, `set_system_prompt`, `set_conversation_muted`, [`mark_conversation_read`](#marking-a-conversation-read)) and the two unsolicited pushes (`pyry channel new`, the auto-naming push) — so a `rename_conversation` on a conversation with a nonzero mark reports that mark unchanged, exactly as it already does for `is_muted`. Ordinary producers of this frame supply neither `current_session_id` nor `latest_entry_id`: unlike `conversations`, it is about one already-known conversation, and a client's next [`request_history`](#request_history) or [`list_conversations`](#list_conversations) resolves that separately. For a conn that negotiated **`multi_agent`**, every pushed or reply frame about a registry-known conversation also carries **`agent`** (#2669), resolved by the same [`conversations`](#conversations)-row rule at the moment this frame is sent, so replacing a cached row cannot lose the agent and a later agent change is observable. A conn without `multi_agent` receives the pre-#2669 bytes with no `agent` key. A registry miss leaves the frame untagged rather than inventing an agent for a conversation the daemon no longer knows. On a connection that negotiated **`thread`**, every push and reply adds that conversation's authoritative usable **numeric `last_shown_version`**, including `0`; a missing, rebuilding or unavailable reading removes the key, including any supplied stale value. Non-thread connections always omit it. Thread unread is **`last_shown_version > read_up_to`**. Projection preserves all other fields and their presence: `read_up_to` remains the durable read mark, and any supplied `current_session_id`/`latest_entry_id` retain the stored-binding/legacy-watermark meanings of the [`conversations`](#conversations) row; it does not add either when absent. Read-mark storage is unchanged. Production fold/watermark, retained-state and bounded query providers are installed (#3163/#3164/#3236), with thread-only replay/resync replacement (#3253/#3235). Each open conversation requires explicit catch-up; only its separate successful final marker certifies completion. |
 | `rename_conversation` | phone → binary | no | Renames an existing conversation; replies with the reused `conversation_updated` record. |
 | `delete_conversation` | phone → binary | no | Permanently removes a conversation (hard delete; the reversible path is `archive_conversation`); replies with `conversation_deleted`. |
 | `conversation_deleted` | binary → phone | no | Acknowledges a `delete_conversation`, correlated by `in_reply_to`; carries only the deleted conversation's `id` (the record no longer exists, so no name/cwd is projected). |
@@ -960,10 +960,10 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`thread_item_added`** | binary → phone | no | **Production emitted (#3164).** Full daemon-built item with `conversation_id`, `epoch`, `version`; oversized updates use bounded assembly parts (#3073). Delivered only to eligible authenticated interactive connections that negotiated `thread`. See [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 | **`thread_item_changed`** | binary → phone | no | **Production emitted (#3164).** In-place field replacements with `item_id`, `base_rev`, `rev`, `changes` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_item_changed`](#thread_item_changed). |
 | **`thread_text_append`** | binary → phone | no | **Production emitted (#3164).** Message text suffix with `item_id`, `base_rev`, `rev`, `text` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_text_append`](#thread_text_append). |
-| **`thread_catch_up`** | phone → binary | no | **Relay handler implemented (#3253).** Request current full items after an unsigned history `version`, or a newest window at zero; carries `conversation_id`, `epoch` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation. Production provider installation remains pending #3236. See [Thread query messages](#thread-query-messages). |
-| **`thread_page`** | phone → binary | no | **Relay handler implemented (#3235).** Request an older ordered window below exclusive unsigned `before_order`, including zero; carries explicit `conversation_id` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation and shares catch-up's unfinished-query slot and completion fence. Production provider installation remains pending #3236. See [Thread query messages](#thread-query-messages). |
-| **`thread_items`** | binary → phone | no | **Declared (#3233).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
-| **`thread_reset`** | binary → phone | no | **Declared (#3233).** Correlated terminal reset carrying current `conversation_id`, `epoch`, `version`, with no items or coverage. See [Thread query messages](#thread-query-messages). |
+| **`thread_catch_up`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3253).** Request current full items after an unsigned history `version`, or a newest window at zero; carries `conversation_id`, `epoch` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
+| **`thread_page`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3235).** Request an older ordered window below exclusive unsigned `before_order`, including zero; carries explicit `conversation_id` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation and shares catch-up's unfinished-query slot and completion fence. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
+| **`thread_items`** | binary → phone | no | **Production emitted (#3236).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
+| **`thread_reset`** | binary → phone | no | **Production emitted (#3236).** Correlated terminal catch-up reset carrying current `conversation_id`, `epoch`, `version`, with no items or coverage; it never advances a completed checkpoint. See [Thread query messages](#thread-query-messages). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -972,16 +972,17 @@ Payload shapes for unchanged types are identical to v1. The relevant per-type sc
 `thread_item_added`, `thread_item_changed` and `thread_text_append` have a
 per-connection relay delivery contract (#3081), including the bounded codec
 and continuations from #3073. **Production emits these fold-owned updates and
-negotiates `thread` when the real publisher, authoritative watermark lookup and
-retained live-state delivery are installed (#3164).** Daemon provenance and
-current-reading snapshots/pushes/replies are installed (#3163); relay-owned
+negotiates `thread` when both bounded query providers, the real publisher,
+authoritative watermark lookup and retained live-state delivery are installed
+(#3164/#3236).** Daemon provenance and current-reading snapshots/pushes/replies
+are installed (#3163); relay-owned
 supplied-state reconciliation and source-conversation routing are implemented
 (#3082/#3195).
 [ADR 042](knowledge/decisions/042-daemon-built-thread.md) defines the migration.
 The [thread query vocabulary and bounded replies](#thread-query-messages)
-include implemented relay catch-up/page handling (#3253/#3235) and thread-only
-replay/resync bypass (#3253); production query provider installation remains
-\#3236.
+are production-installed on the real publisher store (#3236), with authenticated
+relay catch-up/page handling (#3253/#3235) and thread-only replay/resync bypass
+(#3253).
 
 Publication starts from a complete usable `Store.Observe` baseline, sending full
 additions to eligible connected peers, then follows proven `Store.Changes`
@@ -992,8 +993,8 @@ unavailable views publish no partial items or fabricated watermark; usable
 last-shown zero is authoritative. A connection admitted after a conversation's
 baseline is not automatically given its earlier items. This is live publication,
 with no automatic connect-time thread history initializer. Catch-up requires an
-explicit named request; relay catch-up/page handlers are implemented
-(#3253/#3235), while production query provider installation remains #3236.
+explicit named request for each open conversation, served by the installed
+bounded providers. Handshake and conversation listing do not query items.
 
 **Continuity loss retires the connection.** `BaselineRequired`, changed epoch,
 withdrawn usable state or an encoding failure discards the publication cursor
@@ -1004,8 +1005,9 @@ unload/reload does not prove a retained change range, and ordinary additions
 over stale client items cannot repair a suppressed row. No `base_rev` continuity
 is invented. Retirement neither delivers pending dependent deltas while teardown
 waits nor disconnects agent-ineligible peers that never consumed the affected
-conversation. Reconnect reconciles current transient readings; thread history
-recovery remains #2963, so live publication is not a complete reconnect protocol.
+conversation. Reconnect reconciles current transient readings; explicit
+catch-up from the last completed checkpoint initializes thread items. Live
+publication alone does not backfill them.
 
 **Total scheduling/coalescing waiting is at most 250 ms** from a committed fold
 change becoming usable to enqueueing its update. Discovery and following each
@@ -1189,8 +1191,8 @@ update consecutively before the next update; reassembly preserves the entire
 payload, including unknown content and explicit clears. Every final envelope
 fits 65519 bytes after JSON escaping and relay stamps. The separate
 [query contract](#thread-query-messages) reuses this assembly representation;
-relay catch-up/page handlers are implemented (#3253/#3235), while production
-query providers (#3236) and client recovery remain downstream.
+production catch-up/page providers and relay handlers are installed
+(#3236/#3253/#3235). Client assembly and recovery remain app-owned.
 Revision-advancing updates reject duplicates through their old `base_rev`, but
 the same-revision append in a combined change below needs ordered, once-only
 application too: `base_rev` equality alone cannot detect its duplicate.
@@ -1325,9 +1327,16 @@ rejected assembly changes neither message text nor completed `rev`/`version`.
 The relay implements `thread_catch_up` (#3253) and `thread_page` (#3235)
 admission, serial delivery and query/live joining, using the ordered delivery
 outcomes and queued eligibility rechecks from #3252. Thread-only replay/resync
-bypass is implemented (#3253). Production query provider installation and the
-36000-entry storage-to-wire integration proof remain pending #3236. Negotiating
-`thread` does not by itself make a query provider available.
+bypass is production-active for negotiated thread peers (#3253). Production
+`ThreadCatchUp` and `ThreadPage` forward directly to `Store.CatchUp` and
+`Store.HistoryPage` on the real publisher store (#3236), preserving the request
+context, named conversation and complete captured result. Negotiation requires
+both queries plus publisher/live-state/watermark readiness. This attests wiring,
+not completion of every conversation's recovery; nonusable views fail explicitly.
+Installed-query integration covers clean reopen, reset outcomes, live-race retry
+and bounded requests over 36,000 committed entries after recovery becomes usable.
+Request cost includes selected/touched rows, active/parent extras and content
+bytes; recovery and publication preparation are measured separately.
 
 These v2 types stay outside `inboundAppTypeSet`; `thread_catch_up` and
 `thread_page` are intercepted by the authenticated relay dispatch switch.
@@ -1358,7 +1367,11 @@ catch-up. `before_order: 0` is a valid page request; omission is not. A supplied
 `limit` must be a signed integer, not `null`; normalize it before provider access,
 even at nonzero version. Invalid or ineligible requests never call the provider.
 Neither handshake nor conversation listing queries items, and the active
-conversation cursor never substitutes for the requested ID.
+conversation cursor never substitutes for the requested ID. Apps MUST request
+catch-up explicitly for each conversation they open, including after reconnect;
+use the saved epoch/version or a zero-version newest window, then request older
+pages as needed. Queries do not load conversations, read raw history or clone a
+full projection.
 
 #### Reply batches and successful completion
 
@@ -1516,8 +1529,8 @@ Classify sentinel errors with `errors.Is`; a delivery failure may wrap its cause
 The caller MUST deliver a codec sequence serially and stop on any non-success
 before its separate success marker. Enqueue, `forwardToRun` handoff, source-queue
 flush and `continuation.final: true` assembly completion alone cannot certify
-a query. Both catch-up and page handlers enforce this stopping rule; production
-query provider installation remains pending #3236.
+a query. Both production-installed catch-up and page handlers enforce this
+stopping rule.
 
 Immediately before sealing queued thread content, Run rechecks open/authenticated
 state, current paired authorization, negotiated `thread`, interactive access,
@@ -2272,12 +2285,13 @@ Defined capability strings:
 | `context_usage` | The daemon can answer a fresh `detail:"full"` context-window reading on demand — the [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) verb (#2431). **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `context_usage` by itself negotiates as non-interactive, and a client advertising `interactive` without it can still use the verb. |
 | `multi_agent` | The client understands conversations run by more than one agent (#2643). **Not detection-only — this string changes what the daemon sends.** It grants no *interactive* access (every `interactive`-gated surface is unaffected, and a client can negotiate `multi_agent` alone without becoming interactive), but it gates two things on the `conversations` reply: every row carries `agent` (`"claude"` or `"codex"`, the bound session's agent), and a row whose agent is `"codex"` is included at all. A client that does not negotiate it gets today's list, byte-identical, with Codex-run conversations left out. See the `conversations` row below. As of #2644, it also gates every frame the daemon *pushes* about a Codex conversation: live turn events, conversation broadcasts (`conversation_updated`), the connect-time reconciles (model list, slash commands, background-task roster, questions, modals), reconnect replay and the `resync` marker. A client that does not negotiate `multi_agent` receives none of them; frames about a Claude conversation, frames naming no conversation, and ordinary replies to the client's own requests are delivered exactly as before. Thread item updates and continuations remain subject to the independent item authorization gate even when correlated. `modal_dismissed` and `question_dismissed` name no conversation, so such a client can still receive one for a modal or question batch it never saw (the `*_shown` frame that introduced that batch id was itself withheld) — it names nothing the client can act on and should be ignored. As of #2651 it also changes the **content** of every `model_list` frame the daemon answers with — the connect-time reconcile and the `request_model_list` reply alike — whichever agent the named conversation itself runs: a capable client's `models` merges Claude's held entries with Codex's, each tagged `agent` and `family` (see [`model_list`](#model_list) below). A client that does not negotiate `multi_agent` still gets today's Claude-only list, byte-identical, with no `agent`/`family` keys on the wire. |
 | `stop_background_task` | The daemon supports stopping one named background task through the [`stop_background_task`](#stop-background-task-v2) verb (#2797). **Detection only: this string grants no access.** Clients advertise it and draw a per-task stop button only when `hello_ack.payload.capabilities` echoes it. Advertising it alone leaves the connection non-interactive; the verb requires `interactive` alone, and an interactive client can use it without advertising this detection string. |
-| `thread` | Per-connection daemon-built thread delivery (#3081), echoed only when advertised and supplied complete readiness is true. It grants neither `interactive` nor `multi_agent` access. **Production readiness and live publication are installed (#3164)**; see [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
+| `thread` | Per-connection daemon-built thread delivery (#3081), echoed only when advertised and supplied complete readiness is true. It grants neither `interactive` nor `multi_agent` access. **Production live publication and bounded catch-up/pages are installed (#3164/#3236)**; see [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 
-`thread` requires daemon-supplied readiness confirming installation of live
-publication, authoritative watermark lookup and session-state reconciliation
-providers. Absent or false readiness disables support, regardless of the
-client's claims. Duplicate advertisements produce one echo; unsupported values
+`thread` requires daemon-supplied readiness confirming installation of both
+bounded query providers, live publication, authoritative watermark lookup and
+session-state reconciliation providers. Absent or false readiness disables
+support, regardless of the client's claims. Duplicate advertisements produce
+one echo; unsupported values
 grant nothing. The decision is recorded only on successful authenticated
 admission, survives rekey and is exposed as `ActiveConn.Thread` in open-connection
 snapshots. An acknowledgement to a subsequently rejected peer grants no delivery.
@@ -2286,15 +2300,21 @@ requires `interactive`, and Codex conversation content also requires
 `multi_agent`, even for correlated updates and continuations. Other traffic
 retains its existing conversation/agent restrictions.
 
-Production installs the real fold publisher, `ThreadLastShownVersion`,
-`ThreadLiveState` and `LiveStateCurrent` together (#3164). Missing installation,
-publisher stop or cancellation withholds readiness. This attests providers,
-not completion of every conversation's replay: watermark lookup returns false
+Production installs `ThreadCatchUp`, `ThreadPage`, the real fold publisher,
+`ThreadLastShownVersion`, `ThreadLiveState` and `LiveStateCurrent` together
+(#3164/#3236). Either missing query, any other missing provider, a publisher on
+a different store, publisher stop or cancellation withholds readiness. This
+attests providers, not completion of every conversation's replay: watermark lookup returns false
 for missing/not-loaded, rebuilding or unavailable observations and true for a
 registered usable zero. Retained-state snapshot/push/reply delivery remains
-source-bound (#3163/#3195). Relay catch-up/page handling (#3253/#3235) and
-thread-only replay/resync bypass (#3253) are implemented; production query
-providers remain #3236. Handshake does not initialize thread items.
+source-bound (#3163/#3195). Bounded catch-up/pages and thread-only replay/resync
+replacement are production-installed. Handshake does not initialize thread
+items: each open conversation requires explicit catch-up, with completion only
+after all batches assemble and the separate successful final marker arrives.
+Nonusable views fail explicitly; an unfinished query racing live publication
+may fail and must be retried from the last completed checkpoint. Legacy peers
+retain replay/resync and raw history until
+[ADR 042 migration step 6](knowledge/decisions/042-daemon-built-thread.md#migration-order).
 The [envelope session metadata](#message-envelope) is omitted from non-thread
 delivery; existing payload session fields retain their meanings. Summary
 projection and replaced-content filtering follow the
@@ -2318,12 +2338,13 @@ items; their transient progress remains live state.
 **Implementation boundary:** the relay delivery/reconciliation contract is
 implemented (#3082/#3162/#3195). Daemon retained-reading snapshots, publication
 and the relay's five source-bearing on-demand providers are installed (#3163).
-Production `ThreadReady` now attests these providers together with the real fold
-publisher and watermark lookup (#3164), enabling production `thread` negotiation.
+Production `ThreadReady` attests these providers together with both bounded
+queries, the real fold publisher and watermark lookup (#3164/#3236), enabling
+production `thread` negotiation.
 Connect/reconnect initializes the current transient readings below. Thread item
-backfill requires explicit queries. Relay catch-up/page handlers (#3253/#3235)
-and replay/resync bypass (#3253) are implemented; production query provider
-installation remains #3236.
+backfill requires explicit queries for each open conversation. Bounded
+catch-up/page providers and thread-only replay/resync bypass are
+production-installed (#3236/#3253/#3235).
 
 **Supplied on-demand replies.** On a thread connection, an installed optional
 provider is selected once for `request_context_usage`, `mcp_status_request`,
@@ -2414,9 +2435,8 @@ catch-up data, and never advance `last_shown_version` or read watermarks.
 Connections without `thread` retain their existing stream, snapshots and replay/resync, receive no
 envelope conversation/session metadata and receive no explicit clear frames;
 legacy payload and envelope bytes stay unchanged. Thread connections bypass
-event-ring replay/resync and request item catch-up explicitly (#3253);
-relay page handling is implemented (#3235); production query provider
-installation remains #3236.
+event-ring replay/resync and request item catch-up explicitly through the
+installed bounded query providers (#3236/#3253/#3235).
 
 ### Interactive events (v2, capability-gated)
 
@@ -6120,9 +6140,9 @@ reading or generated clear. Neither falls back to a legacy provider or repeats
 the operation. Without `thread` or the relevant optional provider, the legacy
 reply path, bytes, enrichment and `SettingsUpdater` contract remain unchanged.
 Retained live-state provider installation (#3163) and production negotiation
-(#3164) are active. Relay catch-up handling and thread-only replay/resync bypass
-are implemented (#3253); production query providers remain #3236 and history
-pages remain #3235. Handshake initializes transient state without querying items.
+(#3164) are active. Production bounded catch-up/pages and thread-only
+replay/resync bypass are installed (#3236/#3253/#3235). Handshake initializes
+transient state without querying items.
 
 #### `set_session_settings`
 
@@ -7449,17 +7469,25 @@ reconciles supplied current live state through the
 [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
 including inactive retry/compaction and outstanding answerable prompts/questions;
 it skips legacy connect snapshots, all event-ring replay and `resync`, even when
-`hello.last_event_id` would produce a gap. Retained live-state providers and live
-item publication are installed (#3163/#3164). Item backfill requires an explicit
-[`thread_catch_up`](#thread-query-messages) for each conversation the app opens;
+`hello.last_event_id` would produce a gap. Retained live-state providers, live
+item publication and bounded query providers are installed (#3163/#3164/#3236).
+Item backfill requires an explicit [`thread_catch_up`](#thread-query-messages)
+for each conversation the app opens;
 neither handshake nor listing queries items, and an active cursor cannot change
-the named scope. Advance the checkpoint only after the separate successful
-marker; terminal error/reset or disconnect leaves partial results uncertified.
+the named scope. Advance the checkpoint only once every batch assembles and the
+separate successful marker arrives; terminal error/reset, disconnect or
+incomplete fragments leave partial results uncertified.
 The [query/live ordering](#querylive-ordering) contract either joins the capture
-before later updates or fails a racing query explicitly. Relay handling and
-replay bypass are implemented (#3253); production query provider installation
-remains pending #3236; relay page handling is implemented (#3235). Live
-publication alone does not backfill items for connections admitted after the publisher's baseline.
+before later updates or fails a racing query explicitly; retry from the last
+completed checkpoint. Production catch-up/pages and thread-only replay
+replacement are installed (#3236/#3253/#3235). Request older pages explicitly
+using the successful marker's numeric continuation when `older_exists` is true.
+Live publication alone does not backfill items for connections admitted after
+the publisher's baseline. This per-connection replacement preserves simultaneous
+legacy peers; daemon-wide removal of replaced events, the replay buffer, resync
+and raw history pages belongs to
+[ADR 042 migration step 6](knowledge/decisions/042-daemon-built-thread.md#migration-order),
+after raising the minimum app version. The durable log remains.
 
 Every reconnect performs a fresh Noise_IK handshake (there is no session resumption in v2), and on every (re)connection the daemon brings the client back to **current truth**. For legacy connections, reconciliation runs in **two modes, keyed on the kind of data — not on how long the client was away**. The axis of difference is data type, not outage length: the interactive event stream keeps a cursor backfill; control state is always a cheap current-state snapshot.
 

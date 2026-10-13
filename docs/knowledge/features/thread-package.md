@@ -4,8 +4,9 @@
 one conversation. `Store` owns background replay and tailing for independently
 loaded conversations. Both implement the history-backed storage design of
 [ADR 042](../decisions/042-daemon-built-thread.md). The daemon publishes usable
-fold observations to eligible apps that negotiate `thread`; client catch-up,
-pages and reconnect history initialization remain #2963.
+fold observations and serves bounded catch-up/pages to eligible apps that
+negotiate `thread`. Apps initialize each open conversation with an explicit
+named catch-up request; handshake and listing do not query items.
 Use [raw history and its metadata](history-package-shape.md#shape), including
 hidden facts; legacy receipt projections discard facts needed by the fold.
 
@@ -38,12 +39,27 @@ gates. Held peer delivery cannot block history commits.
 
 `startRelayV2` installs `installDaemonThreadRelay` after the retained live-state
 providers and starts `startDaemonThreadPublisher` before connection admission.
-`ThreadReady` attests an installed running fold publisher, the real store's
-watermark lookup and `ThreadLiveState`/`LiveStateCurrent` delivery. Missing
-providers withhold negotiation; individual not-loaded, rebuilding or unavailable
-conversations supply neither items nor a usable watermark. Registered usable
-zero is authoritative. The no-relay composition continues folding without wire
-publication; legacy connections retain their existing stream and access gates.
+`installDaemonThreadRelay` binds `ThreadCatchUp` and `ThreadPage` directly to
+`Store.CatchUp` and `Store.HistoryPage` on the publisher's real store, preserving
+the request context, named conversation and complete captured `QueryResult`.
+`ThreadReady` requires both queries, the authoritative watermark lookup,
+`ThreadLiveState`/`LiveStateCurrent` delivery and a running publisher on that
+same store. Missing providers withhold negotiation; readiness does not promise
+that every conversation has completed replay. Queries on not-loaded, rebuilding
+or unavailable views fail explicitly with `thread.query_failed`, without loading
+the conversation or supplying partial items. Such views have no usable
+watermark; registered usable zero is authoritative. The no-relay composition
+continues folding without wire publication; legacy connections retain their
+existing stream and access gates.
+
+Reconnect skips event-ring replay/resync only for negotiated thread peers.
+Each open conversation requires explicit catch-up from its last completed
+epoch/version, or a zero-version newest window, with explicit older pages as needed.
+Only all assembled batches followed by the separate successful `final: true`
+marker certify completion; reset, error, disconnect and incomplete fragments
+leave the checkpoint unchanged. Live publication racing an unfinished query
+can cancel it; retry from the last completed checkpoint to converge. See
+[query/live ordering](../../protocol-mobile.md#querylive-ordering).
 
 Each existing conversation coordinator owns one publication cursor. It starts
 from a complete usable `Store.Observe` baseline, sending full additions to
@@ -118,9 +134,16 @@ escaping-heavy continuation assembly and retained current readings, while
 legacy traffic keeps its expected shape. Mapper-only assertions would miss
 wire ordering or recipient projection errors. `TestDaemonThreadReadiness`,
 `TestDaemonThreadUnusable` and `TestDaemonThreadContinuity` cover usable zero,
-missing providers/views and lost ranges. Catch-up/pages, replay replacement and
-connect-time thread history initialization remain
-[#2963](https://github.com/pyrycode/pyrycode/issues/2963).
+missing providers/views and lost ranges. `TestDaemonThreadQueriesReadiness`
+checks complete query installation, request cancellation and nonloading reads.
+`TestDaemonThreadQueriesRecovery` checks authenticated clean-reopen catch-up,
+old-revision first appearances, escaped multiframe replies, page metadata and
+simultaneous legacy raw history. `TestDaemonThreadQueriesReset` checks explicit
+nonusable failure, reset evidence and the 1024/1025 gap boundary.
+`TestDaemonThreadQueriesBounded` exercises installed queries over 36,000
+committed entries after recovery, measuring preparation separately from adapter
+allocations. `TestDaemonThreadQueriesJoin` reconstructs full current states
+through race refusal, successful retry and subsequent real publisher updates.
 
 Nil or failed shadow storage leaves legacy traffic operational.
 `TestThreadShadowLegacy` checks an authenticated Noise peer through
