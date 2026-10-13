@@ -35,6 +35,23 @@ release and rejects old partially consumed results. `TestResponseDisposalRace`
 races reading, metadata, delivery-failure completion, close and cancellation,
 checking exactly-once closure and zero retained capacity.
 
+JSON service fixtures cannot prove rejection of malformed UTF-8 header strings:
+encoding replaces invalid bytes, silently turning the negative case into valid
+metadata. `TestResponseMetadata` injects invalid UTF-8 directly into preparation;
+`TestAPIResponses` uses a preserved Unicode control value for the backend rejection
+case. Keep those proofs separate. `TestAPIForwarding` compares exact captured
+RequestURI/body bytes, including mixed-case escapes and duplicate/empty query
+values, rather than comparing parsed URLs that conceal normalization.
+
+An empty backend response has no body read to notice a stale generation.
+`TestAPIEmptyReplacement` stops and restarts the same release between backend
+response and preparation for GET/204 and HEAD, proving the retained target rejects
+rebinding without reservation leaks or replay. `TestAPICancellation` stalls headers
+and bodies under caller cancellation/deadlines and counts mutation requests;
+`TestAPIRetirement` checks both stalled staging and retained partially consumed
+responses. These are backend proofs; they do not establish encrypted routing.
+See [resource ownership](apps-package-resource-serving.md#private-api-forwarding).
+
 Prepare a fixture's committed build before making its release available.
 Construction-time reconciliation can execute immediately after the lifecycle
 commit; writing the build afterward creates a real missing-release failure and

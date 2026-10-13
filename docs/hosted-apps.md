@@ -1053,6 +1053,70 @@ disposal release reservations exactly once, including retained unconsumed result
 `Close` is idempotent and may race consumption/cancellation. The transport must
 enforce its own cancellation boundary for copied metadata and bytes.
 
+#### Callable private API forwarding
+
+`Owner.ForwardAPI(ctx, serverID, appID, release, APIRequest)` implements bounded
+backend reads/writes and returns `PreparedResponse` under the stable-response
+ownership contract above. The caller supplies authenticated host identity, a
+cancellable context and required `Reserve`/`Release` callbacks; this method does
+not authenticate a connection. `APIRequest` carries `Method`, escaped `Path`,
+optional raw `Query`, lowercase `Headers` and decoded `Body` bytes. Do not mutate
+the request during forwarding. Registration, exact active release and live,
+health-confirmed ownership are resolved before backend I/O, with `ErrNotFound`,
+`ErrReleaseChanged` and `ErrUnavailable` precedence as described above. Only the
+opaque private target selects the service; callers cannot select a URL, port or
+another service. Proxies and redirect following are disabled.
+
+Methods are exactly GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS. GET/HEAD
+bodies must be empty; all bodies are opaque bytes, at most 32768 bytes, preserving
+binary, form and JSON content. Paths begin `/api/` and are at most 2048 ASCII
+bytes; queries are at most 1024 ASCII bytes without a leading `?`. The URL rules
+above apply, including rejection of raw spaces/backslashes and invalid escaped
+path spellings. Validation decodes the path once for containment, then verifies
+that its escaped spelling can be forwarded exactly. Validated path/query bytes
+are preserved, including percent-escape case, parameter order, duplicates and
+empty values. Request headers accept only lowercase `accept`, `content-type`
+and `if-none-match`, with at most 8 entries, 4096 serialized JSON UTF-8 bytes and
+1024 bytes per valid, control-free UTF-8 value; `{}` is valid. Invalid requests
+or missing callbacks return `ErrAPIRequest`; oversized bodies return
+`ErrAPILimit`. Both fail before service I/O. No credentials or cookies are added.
+
+HTTP 200–599, including errors and redirects, are ordinary prepared responses;
+upgrades and unsupported statuses fail with `ErrResponseMetadata`. Backend
+projection keeps only lowercase `content-type`, `cache-control`, `etag` and
+`last-modified`, joining repeated values with `, ` and dropping all other headers.
+The projected object obeys the same entry/serialized/value bounds as requests.
+Compression negotiation and automatic decompression are disabled. Absent or
+identity `Content-Encoding` is accepted; any non-identity encoding is rejected
+as `ErrResponseMetadata`, never relabeled as identity bytes. HEAD and HTTP
+204/205/304 discard the backend body and yield zero size, no bytes and the SHA-256
+of the empty body. Other bodies are staged completely through `ResponseInput`
+with a 1048576-byte limit, exact size and SHA-256; overflow never yields partial
+success. Backend bodies are closed on every outcome. Metadata, response-limit,
+capacity and backend I/O failures remain distinct static package errors
+(`ErrResponseMetadata`, `ErrResponseLimit`, `ErrResponseCapacity`, `ErrResponseIO`),
+without endpoint or request diagnostics.
+
+The selected process generation remains pinned through preparation and checked
+consumption, including empty results. Removal, stop, exit, release replacement or
+same-release restart invalidates in-flight and retained responses without
+rebinding to a replacement. Caller cancellation/deadlines cover waiting for
+headers and stalled body reads and retain standard context errors. Reservations
+precede staging reads/allocation and may include a temporary EOF probe byte;
+the exact body size remains reserved after EOF until the caller uses
+`Complete(nil)`, `Complete(deliveryErr)` or `Close`. Failure, cancellation,
+retirement and disposal release capacity exactly once, including unconsumed
+results. Earlier copied metadata/bytes require cancellation enforcement at the
+delivery boundary. Forwarding sends once, with no automatic retries. A cancelled
+or failed mutation may already have changed service state; cancellation never
+replays it or asserts rollback.
+
+This callable backend does not activate encrypted resource routing. Wire base64
+parsing, admission/connection ceilings, credit, 30-second deadlines, 5-second
+inactivity enforcement and wire error mapping remain
+[#3247](https://github.com/pyrycode/pyrycode/issues/3247); the caller supplies
+context deadlines and capacity policy here.
+
 #### Callable confined assets
 
 `Owner.PrepareAsset(ctx, serverID, appID, release, AssetRequest)` implements
@@ -1139,9 +1203,8 @@ retained results. Consumers must use checked `Metadata`/`Read`, then
 stat/read/close failures use `ErrResponseIO`; ordinary HTTP 404 remains successful
 preparation. Package failures expose no native paths or request contents.
 
-API forwarding, backend header projection and HEAD/204/205/304 no-body handling remain
-[#3246](https://github.com/pyrycode/pyrycode/issues/3246). Admission, connection
-ceilings, credit, deadlines, wire serialization and transport error mapping remain
+Admission, connection ceilings, credit, deadlines, wire serialization and
+transport error mapping remain
 [#3247](https://github.com/pyrycode/pyrycode/issues/3247). Paired resource routing
 and capability activation remain pending under
 [#3123](https://github.com/pyrycode/pyrycode/issues/3123). See the
