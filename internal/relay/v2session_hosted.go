@@ -105,8 +105,12 @@ func (m *V2SessionManager) routeHosted(ctx context.Context, s *V2Session, raw []
 		return true
 	}
 	h := s.hosted
-	if req.typ == protocol.TypeAppAssetRequest {
-		m.startHostedAsset(ctx, s, req)
+	if req.typ == protocol.TypeAppAssetRequest || req.typ == protocol.TypeAppAPIRequest {
+		if req.limit {
+			m.hostedError(ctx, s, req.id, "app.limit_exceeded", false)
+			return true
+		}
+		m.startHostedResource(ctx, s, req)
 		return true
 	}
 	if req.typ == protocol.TypeAppResponseCredit {

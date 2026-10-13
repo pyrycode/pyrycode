@@ -1,6 +1,7 @@
 package apps
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"testing"
@@ -40,6 +41,38 @@ func TestResponseProgress(t *testing.T) {
 			t.Fatal("disposed response still live")
 		}
 		responseClean(t, s, budget)
+	}
+}
+
+func TestAPIProgress(t *testing.T) {
+	r, o := apiOwner(t)
+	for _, status := range []int{200, 204, 205, 304, 500} {
+		apiWrite(t, r, apiReply{Status: status, Body: bytes.Repeat([]byte("x"), 40000)})
+		budget := &responseBudget{ceiling: 100000}
+		in := apiRequest(budget)
+		progress := 0
+		in.Progress = func() { progress++ }
+		p, err := o.ForwardAPI(context.Background(), testHost, testApp, "1.0.0", in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		empty := status == 204 || status == 205 || status == 304
+		if (progress > 0) == empty {
+			t.Fatalf("status=%d progress=%d", status, progress)
+		}
+		if !empty && budget.used() != 40000 {
+			t.Fatal("staging ownership missing")
+		}
+		if _, err := io.Copy(io.Discard, p); err != nil {
+			t.Fatal(err)
+		}
+		if !empty && budget.used() != 40000 {
+			t.Fatal("EOF released ownership")
+		}
+		p.Close()
+		if budget.used() != 0 {
+			t.Fatal("retained budget")
+		}
 	}
 }
 

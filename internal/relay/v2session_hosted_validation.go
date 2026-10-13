@@ -21,6 +21,9 @@ type hostedRequest struct {
 	cursor       string
 	cancel       protocol.AppCancelPayload
 	asset        protocol.AppAssetRequestPayload
+	api          protocol.AppAPIRequestPayload
+	bodySize     int
+	limit        bool
 	credit       protocol.AppResponseCreditPayload
 	creditTarget bool
 }
@@ -161,7 +164,7 @@ func parseHostedRequest(raw []byte) (req hostedRequest, recognized, correlatable
 			}
 			req.cursor = cursor
 		}
-	case protocol.TypeAppAssetRequest:
+	case protocol.TypeAppAssetRequest, protocol.TypeAppAPIRequest:
 		app, ok := payload["app_id"].(string)
 		if !ok {
 			return
@@ -178,17 +181,46 @@ func parseHostedRequest(raw []byte) (req hostedRequest, recognized, correlatable
 		if !ok || !hostedASCII(path, 2048) || !strings.HasPrefix(path, "/") {
 			return
 		}
-		navigation, ok := payload["navigation"].(bool)
-		if !ok {
-			return
-		}
-		req.asset = protocol.AppAssetRequestPayload{AppID: app, ReleaseVersion: release, Path: path, Navigation: navigation}
+		req.asset = protocol.AppAssetRequestPayload{AppID: app, ReleaseVersion: release, Path: path}
 		if v, exists := payload["query"]; exists {
 			query, ok := v.(string)
 			if !ok || !hostedASCII(query, 1024) || strings.HasPrefix(query, "?") {
 				return
 			}
 			req.asset.Query = query
+		}
+		if req.typ == protocol.TypeAppAssetRequest {
+			navigation, ok := payload["navigation"].(bool)
+			if !ok {
+				return
+			}
+			req.asset.Navigation = navigation
+		} else {
+			method, ok := payload["method"].(string)
+			if !ok {
+				return
+			}
+			body, ok := payload["body"].(string)
+			if !ok {
+				return
+			}
+			headers, ok := payload["headers"].(map[string]any)
+			if !ok {
+				return
+			}
+			req.api = protocol.AppAPIRequestPayload{AppID: app, ReleaseVersion: release, Path: path, Query: req.asset.Query, Method: method, Body: body, Headers: make(map[string]string, len(headers))}
+			for key, value := range headers {
+				text, ok := value.(string)
+				if !ok {
+					return
+				}
+				req.api.Headers[key] = text
+			}
+			req.bodySize, ok = hostedBodySize(body)
+			if !ok {
+				return
+			}
+			req.limit = req.bodySize > 32768
 		}
 	case protocol.TypeAppResponseCredit:
 		app, ok := payload["app_id"].(string)
@@ -224,6 +256,30 @@ func parseHostedRequest(raw []byte) (req hostedRequest, recognized, correlatable
 	}
 	valid = true
 	return
+}
+
+// hostedBodySize validates canonical padded base64 without allocating decoded bytes.
+func hostedBodySize(body string) (int, bool) {
+	if len(body)%4 != 0 {
+		return 0, false
+	}
+	data := strings.TrimRight(body, "=")
+	padding := len(body) - len(data)
+	if padding > 2 || (padding > 0 && len(data) == 0) {
+		return 0, false
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	last := 0
+	for i := 0; i < len(data); i++ {
+		last = strings.IndexByte(alphabet, data[i])
+		if last < 0 {
+			return 0, false
+		}
+	}
+	if (padding == 1 && last&3 != 0) || (padding == 2 && last&15 != 0) {
+		return 0, false
+	}
+	return len(body)/4*3 - padding, true
 }
 
 // hostedTimestamp enforces RFC3339 UTC syntax before time.Parse checks dates.

@@ -26,6 +26,8 @@ type APIRequest struct {
 	Body                []byte
 	Reserve             func(int64) bool
 	Release             func(int64)
+	// Progress has the optional positive-byte ResponseInput reporting contract.
+	Progress func()
 }
 
 // ForwardAPI sends once to the authenticated host's exact active app generation.
@@ -103,7 +105,7 @@ func (o *Owner) prepareAPI(ctx context.Context, serverID, appID, release string,
 		}
 		body, size = io.NopCloser(bytes.NewReader(nil)), 0
 	}
-	return o.prepare(ctx, serverID, appID, release, ResponseInput{Body: body, Size: size, Limit: 1048576, Status: response.StatusCode, Headers: headers, Reserve: in.Reserve, Release: in.Release}, target)
+	return o.prepare(ctx, serverID, appID, release, ResponseInput{Body: body, Size: size, Limit: 1048576, Status: response.StatusCode, Headers: headers, Reserve: in.Reserve, Release: in.Release, Progress: in.Progress}, target)
 }
 
 func validAPIHeaders(headers map[string]string) bool {

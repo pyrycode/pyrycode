@@ -39,7 +39,10 @@ import (
 type V2SessionConfig struct {
 	// HostedAppsAssets supplies generation-bound confined assets off Run.
 	// Nil returns app.unavailable; it does not activate production readiness.
-	HostedAppsAssets                 HostedAppsAssets
+	HostedAppsAssets HostedAppsAssets
+	// HostedAppsAPI supplies generation-bound once-only API forwarding off Run.
+	HostedAppsAPI                    HostedAppsAPI
+	hostedForwardAPI                 func(context.Context, string, string, string, apps.APIRequest) (hostedResponse, error)
 	hostedPrepareAsset               func(context.Context, string, string, string, apps.AssetRequest) (hostedResponse, error)
 	hostedDeadline, hostedInactivity time.Duration
 	// hostedNow is a test clock for cursor lifetime; production uses time.Now.

@@ -103,8 +103,10 @@ cannot alter the staged bytes, metadata or digest. `ResponseMetadata` contains
 status, detached headers, exact size and lowercase 64-hex SHA-256 of the complete
 body, including empty, binary and HTTP-error bodies.
 
-`ResponseInput.Progress` is optional; `AssetRequest.Progress` passes it through
-`prepareAsset` into staging. It reports every underlying source read returning
+`ResponseInput.Progress` is optional; `AssetRequest.Progress` and
+`APIRequest.Progress` pass it through `prepareAsset` and `prepareAPI` into
+staging. `Owner.ForwardAPI` preserves the callback while preparing the backend
+response. It reports every underlying source read returning
 positive bytes, including individual reads combined by `io.ReadFull`, even when
 the read also returns an error. Zero-byte reads, EOF without bytes and reservation
 activity do not report progress. The callback must return promptly and never
@@ -116,7 +118,10 @@ seconds without another reservation. The relay uses positive reads to enforce
 [read inactivity independently of its fixed deadline](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
 `TestResponseProgress` checks known/unknown sizes, zero-byte reads and multiple
 source reads per staging chunk; `TestAssetProgress` checks asset forwarding and
-the empty 404 path.
+the empty 404 path. `TestAPIProgress` checks API forwarding for ordinary and HTTP
+error bodies, no progress for discarded 204/205/304 bodies, and retained
+reservations after response consumption through EOF. Discarding a HEAD or
+204/205/304 body does not count as a positive source read.
 
 Status must be 200–599; only lowercase `content-type`, `cache-control`, `etag`
 and `last-modified` are accepted. Header objects allow at most 8 entries and
@@ -167,13 +172,15 @@ satisfy this obligation. See [concurrency](apps-package-concurrency-and-testing.
 ordering and [testing](apps-package-concurrency-and-testing.md#testing) for the source-error regression.
 
 Callable assets and backend API forwarding are implemented independently of
-encrypted delivery. The relay implements paired asset routing, admission and
-decoded-byte budgets, credit-paced chunks, fixed 30-second deadlines, 5-second
-read/credit inactivity and transport error mapping; see the
+encrypted delivery. The relay implements paired asset/API routing, shared
+admission and decoded-byte budgets, credit-paced chunks, fixed 30-second deadlines,
+5-second read/credit inactivity and transport error mapping; see the
 [wire behavior](../../protocol-mobile.md#asset-transfers-credit-and-cancellation).
-Encrypted API routing and shared request-body accounting remain
-[#3316](https://github.com/pyrycode/pyrycode/issues/3316). The callable APIs honor
-supplied context deadlines and caller capacity policy. Production
+The relay reserves decoded API request bytes before allocation and retains them
+until response disposal; `APIRequest.Reserve`/`Release` account for response
+staging within that same budget. Request reservation activity does not report
+preparation progress. The callable APIs honor supplied context deadlines and
+caller capacity policy. Production
 `hosted_apps_v1` capability activation and real-daemon/relay acceptance remain
 [#3248](https://github.com/pyrycode/pyrycode/issues/3248); native assembly remains
 client-owned work.
