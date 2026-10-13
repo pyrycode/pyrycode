@@ -251,3 +251,35 @@ passing-after race coverage and actually execute the unchanged focused method
 using the driver's `--focused` option. A non-rejecting or incomplete diagnostic
 cannot complete cause admission. Keep both live labels. Documentation and the
 subsequent dispatcher-owned full live gate remain pending separately.
+
+### 2026-10-13 — shared diagnostic artifact return blocked
+
+Retrieved the exact terminal result for managed task
+`c02a547f02bb3c7548c17198150b7acc5e290ef937d1ef495d8a1651f454d58e`
+through `fleet-task.py await`. It failed on `build-hp-1`, retaining its original
+private recovery directory, but returned **zero files**: the artifact bundle
+exceeded the managed transport's 4 MiB limit. No counted XML, execution records,
+child manifests/stdout or deny-scanned inventory reached this builder. Native
+method counts, rejections and capture-loss/tail counters are therefore unknown.
+The terminal outcome cannot establish either a mobile pass or a parser failure.
+
+The current `fleet-support.py` collector includes all matching recovery files
+and clears the entire returned inventory above that aggregate limit. Repairing
+that dispatcher transport or retrieving its retained native records is outside
+this product ticket's allowed files. Return the existing task's exact bounded
+inventory without dropping child streams or bypassing credential admission;
+another identical standalone mobile capture supplies no missing context.
+
+At clean branch `94bf690651`, the ordinary admitted focused gate reproduced
+`TestRealClaude_StreamEventCapture`'s unresolved-cause refusal: executed/passed/
+failed/skipped **1/0/1/0**. It launched no new Android method or Claude turn.
+Offline race checks for `TestToolThenTextSharedHarnessXML`,
+`TestToolThenTextSharedHarnessChildren` and
+`TestToolThenTextMobileRetainedDiagnostic` passed **3/3/0/0**. Logs remain outside
+the worktree at `/tmp/builder-2939-cause-admission-20261013.log` and
+`/tmp/builder-2939-shared-reader-20261013.jsonl`.
+
+No parser repair or cause proof is claimed. Both live labels, focused proof
+admission, existing fixtures, documentation handoff and subsequent full live
+gate remain unchanged. Builder return work is blocked on the missing required
+native artifacts, rather than deferred as a completed live-artifact handoff.
