@@ -121,6 +121,23 @@ active write when it returns. Each request retains the socket identity captured
 for admission, so it cannot migrate to a reconnect. Pump shutdown cancels active
 I/O even when the caller's context remains live.
 
+Cancellation or deadline expiry before admission is local to the caller and
+does not retire an otherwise healthy socket. After acceptance, `sendPump`
+synchronously checks both the write context and pump context immediately before
+socket writing, including after `transport.send.accepted`. If either is
+cancelled before writing, the pump disposes the request without publication,
+closes that exact socket generation with `CloseNow`, acknowledges completion
+once with a non-nil sanitized error, and exits. A failed socket write likewise
+retires the socket before acknowledgement; `serve` joins all three pumps before
+reconnecting. A request whose captured socket differs from the pump's socket
+completes with `ErrDisconnected` without closing the new socket.
+
+Passing an already-cancelled context to `websocket.Conn.Write` cannot itself
+fence publication. The synchronous checks cover cancellation while acceptance
+is held, and the pump-context check avoids depending on when `context.AfterFunc`
+runs. Retiring the socket after discarding a sealed frame preserves the relay's
+Noise stream boundary; session removal alone cannot stop late transport output.
+
 A separate direct socket writer can overtake a frame already accepted by
 `Send`, even if both writes serialize on the WebSocket writer lock. For Noise,
 that can deliver nonce 1 before nonce 0, or application output before the initial
@@ -279,6 +296,13 @@ later transport marker to prove no abandoned reply remains. Transport's
 `TestClientSendContextPumpShutdown` keeps the caller live to distinguish pump
 shutdown from caller cancellation. These are controlled scheduling proofs,
 not timing-only assertions.
+
+`TestClientSendContextAcceptedCancellation` holds `transport.send.accepted`
+before writing, then cancels the caller, expires its deadline or shuts down the
+pump. It requires completion to wait for disposal, observes peer socket
+retirement before checking for zero publication, and verifies the old request
+cannot resume on reconnect. `TestClientSendContextPreAdmissionCancellation`
+requires the healthy socket to remain usable without reconnecting.
 
 Diagnostic safety tests must inspect every single-error and multi-error unwrap
 branch, plus captured log attributes; checking only `Error()` can miss an
