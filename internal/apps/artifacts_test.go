@@ -28,7 +28,11 @@ func testArtifactWrite(t *testing.T, root, name, content string) {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+	err := os.WriteFile(p, []byte(content), 0600)
+	if skipEILSEQ(t, err) {
+		return
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 }
