@@ -4,8 +4,8 @@ The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contrac
 defines the hosting design. Strict manifest validation, bundled registered source
 creation and identity-based inspection, durable registration,
 lifecycle mutations, restart normalization and callable committed-release
-process ownership, persistent-data snapshots with restart verification,
-health supervision, automatic reconciliation/recovery and
+process ownership, persistent-data snapshots with restart verification and
+repeatable restoration, health supervision, automatic reconciliation/recovery and
 guarded private targets, generation-bound stable response preparation and confined
 callable active-release assets are implemented in the `internal/apps` package. The relay
 implements authenticated paged discovery, committed lifecycle notifications and
@@ -423,6 +423,41 @@ unchanged without creating SQLite sidecars. Evidence detects mismatch; it is
 not an authenticity signature against someone rewriting both evidence and data
 under the daemon's OS account. See [persistent-data snapshots](knowledge/features/apps-package.md#persistent-data-snapshots)
 for the package's sealing and failure rules.
+
+`apps.RestoreData(ctx, root, serverID, appID, ref, node)` restores the complete
+snapshot tree and database schema to the selected app's `data` location. Every
+attempt calls `apps.VerifyBackup` on the persisted reference and freshly loaded
+disk evidence before changing current data, including after restart or an earlier
+successful verification. The reference must bind the selected local host/app,
+canonical UUIDv4 publish ID and exact backup root under the daemon-selected clean
+absolute `APPS_ROOT`. Invalid evidence, changed backup contents or unsafe entries
+fail before replacement. Current data also receives a complete preflight;
+traversal and replacement reject symlinks, nonregular entries and multiply linked
+files without following them into another app or outside storage.
+
+Restoration replaces the whole tree, preserving nested files and empty
+directories while removing candidate-only files, directories and schema changes,
+plus obsolete `app.sqlite-wal`, `app.sqlite-shm` and `app.sqlite-journal` files.
+Absent snapshot data restores no `data` directory; empty data restores an empty
+directory; a zero-byte uninitialized database stays zero-byte. No schema or SQL
+checksum ledger is invented. Existing `main.pyry_schema_migrations` version and
+checksum rows are preserved. Success requires matching restored inventory and
+contents, initialized SQLite integrity/foreign-key checks using the selected
+supported Node, 0700 directories/0600 files, and synced restored files,
+directories and replacement metadata, including the app parent directory.
+Validation runs no migrations and assumes no template-specific preference schema.
+
+Callers serialize operations and quiesce **all** app writers throughout
+restoration, including non-SQL writers. Copy, replacement, restored verification,
+sync failures and cancellation return errors; interruption after replacement
+begins can leave partial current data. A fresh caller retries with only the
+persisted reference and disk evidence to converge to the same snapshot, even
+after a previous success. Restoration leaves backup contents, permissions and
+evidence untouched and never deletes the backup. Retain it until caller-owned
+durable recovery completion, then let the caller delete it. Service retirement,
+migrations, journals, release selection and old-release health remain caller-owned;
+restored data alone does not prove rollback readiness or undo arbitrary OS/fleet
+effects. See [publication and recovery](#publication-and-recovery).
 
 `build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The publication contract (#3125) associates app/release identities with validated roots and digests; callable start resolves the committed release from build manifests without a persisted build index. Network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; recoverable activation/data-restoration journals belong to #3125. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
@@ -1325,22 +1360,31 @@ surfaces are connected.
 
 ### Publication and recovery
 
-The callable snapshot/verification primitives are implemented independently of
-publication. Callers serialize operations and quiesce **all** app writers for
-the entire snapshot, including writers of non-SQL files. They own request
-retirement, service drain/stop, journaling, migrations and release decisions.
+The callable snapshot, verification and restoration primitives are implemented
+independently of publication. Callers serialize operations and quiesce **all** app
+writers for the entire snapshot and restoration, including writers of non-SQL
+files. They own request retirement, service drain/stop, journaling, migrations
+and release decisions.
 A verified backup is immutable: another snapshot with the same publish ID
 returns `ErrConflict` without overwriting it. Existing incomplete destinations
-also conflict; a retry uses a new publish ID. Copy, SQLite, verification, sync
-failures and cancellation return errors, preserving recoverable source data;
-an unsuccessful attempt must never authorize mutation.
+also conflict; a snapshot retry uses a new publish ID. Snapshot copy, SQLite,
+verification, sync failures and cancellation return errors, preserving
+recoverable source data; an unsuccessful snapshot must never authorize mutation.
 
 Publication (#3262) and interrupted-publication recovery (#3263) consume these
-primitives; restoration is supplied by #3285. Persist the selected reference
-and independently verify it after restart before restoration. Durable recovery
-completion, old-release health and admission of API requests remain caller-owned.
+primitives. Persist the selected `BackupReference`; `apps.RestoreData` freshly
+verifies its complete disk evidence on every call, including after restart.
+It restores the whole tree/schema, removes candidate-only content and transient
+SQLite sidecars, and preserves distinct absent/empty/uninitialized states as
+specified in [runtime and layout](#runtime-and-layout). A failed or interrupted
+replacement can leave partial data; retry the same reference with a fresh caller
+before claiming recovery. Backup contents/evidence remain independently
+verifiable after successful, failed or interrupted restoration. Retain the
+backup until durable recovery completion; deletion belongs to the caller.
+Durable recovery completion, old-release health and admission of API requests
+remain caller-owned.
 The following paragraphs describe that publication/recovery contract, beyond
-the snapshot primitive. These data guarantees cannot undo arbitrary OS or
+the data primitives. These data guarantees cannot undo arbitrary OS or
 fleet-service effects.
 
 Publication is serialized per app, with at most one candidate and one writer to its SQL data. Build/typecheck/tests happen in private staging while the old service remains available. Before any migration, stop accepting that app's API work, cancel/retire pending reads/writes without replay, drain or stop the old service, and take a consistent recoverable snapshot of **all** app data including a SQLite backup that incorporates WAL state. Do not copy a live database file alone. Verify the snapshot before mutation. No fleet-side mutation may run as a startup/health side effect.

@@ -2,9 +2,9 @@
 
 This package owns strict manifest validation, bundled registered source creation
 and identity-based inspection, durable registrations, persistent-data snapshots
-with restart verification and callable health-confirmed committed-release
-process ownership and generation-bound stable
-response preparation and confined callable assets independent of conversations.
+with restart verification and repeatable restoration, callable health-confirmed
+committed-release process ownership, generation-bound stable response preparation
+and confined callable assets independent of conversations.
 The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
 owns the field tables and registration behavior; the
 [v1 contract](../../specs/architecture/3120-hosted-app-contract.md) owns the broader
@@ -33,6 +33,7 @@ See [validation and stored identity](apps-package-validation-and-stored-identity
 | Section | Topic |
 |---|---|
 | [Validation and stored identity](apps-package-validation-and-stored-identity.md#validation-and-stored-identity) | Exact manifest/storage schemas and committed identities. |
+| [Persistent-data restoration](#persistent-data-restoration) | Fresh verification, whole-tree replacement, immutable backups and interrupted retry. |
 | [Template toolchain](#template-toolchain) | Runtime rejection, shared inventory and safe embedding. |
 | [Template SQL and readiness](#template-sql-and-readiness) | Durable ledger/schema validation and migration boundaries. |
 | [Manifest updates and retention](#manifest-updates-and-retention) | Candidate metadata, no-op registrations and tombstones. |
@@ -44,11 +45,13 @@ See [validation and stored identity](apps-package-validation-and-stored-identity
 ## Persistent-data snapshots
 
 Registry validation of `BackupReference` proves identity/root shape, not backup
-contents. `SnapshotData` and `VerifyBackup` supply independent data guarantees;
+contents. `SnapshotData`, `VerifyBackup` and `RestoreData` supply independent data
+guarantees;
 [the reference](../../hosted-apps.md#runtime-and-layout) owns their layout and
 [publication contract](../../hosted-apps.md#publication-and-recovery) owns caller
-serialization, writer quiescence and durable recovery. Neither primitive changes
-registry lifecycle, selects releases or restores data (#3285).
+serialization, writer quiescence and durable recovery. These primitives change
+no registry lifecycle and select no releases; restored data alone proves no
+old-release health.
 
 A main-file copy can omit committed SQLite writes still in WAL. `sqliteSnapshot`
 uses the selected supported Node's backup API on the private copied database and
@@ -84,6 +87,40 @@ must treat every snapshot error as failure, retain recoverable source data and
 retry with a new publish ID. Context cancellation joins started Node children
 before return; per-instance hooks avoid shared failure-injection races. See
 [snapshot testing](apps-package-concurrency-and-testing.md#testing).
+
+## Persistent-data restoration
+
+`RestoreData` freshly calls `VerifyBackup` before current-data mutation on every
+attempt, including retry after restart or success. It independently inventories
+the verified source and preflights the complete current tree before deletion.
+Descriptor-relative no-follow replacement rejects symlinks, nonregular entries
+and multiply linked files. Whole-tree copying preserves nested files and empty
+directories, removes candidate-only content/schema and SQLite WAL/SHM/journal
+sidecars, and keeps absent data, empty data and zero-byte `app.sqlite` distinct.
+Restored inventory/content and initialized SQLite integrity/foreign keys must
+pass, with destination modes 0700/0600 and file/directory/replacement metadata
+syncs through the app parent. Validation neither runs migrations nor invents
+schema or a ledger; existing migration version/checksum rows survive. See the
+[layout reference](../../hosted-apps.md#runtime-and-layout).
+
+Snapshot copying hardens source permissions. Reusing that behavior during
+restoration would alter sealed backup metadata even if its bytes stayed intact.
+`backupOps.readOnlySource` disables source chmod in `backupOps.tree` and
+`backupOps.copyFile` while destination modes remain explicit. Restoration must
+leave backup contents, permissions and evidence unchanged for independent
+verification and repeated recovery attempts.
+
+Replacement is not atomic: an error or cancellation after deletion begins can
+leave partial current data. `TestRestoreFailures` forces interruption after an
+actual deletion and retries through a fresh public caller with a JSON-reloaded
+reference; a retry relying on the original caller's memory would not establish
+restart recovery. Each call rebuilds from freshly verified disk evidence; no
+staging tree or recovery journal lives in this primitive. Callers serialize
+operations, quiesce all app writers throughout restoration, retain the backup
+until durable recovery completion and own its deletion. Journals, service
+retirement, release selection and old-release health belong to
+[publication/recovery](../../hosted-apps.md#publication-and-recovery); arbitrary
+OS/fleet effects cannot be restored by this data operation.
 
 ## Template toolchain
 
