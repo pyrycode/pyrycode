@@ -84,6 +84,11 @@ accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-man
 
 ## Testing
 
+See [retained-build fixtures](apps-package-testing.md#retained-build-fixtures)
+for independent canonical-byte and rejection proofs, and
+[health-failure observations](apps-package-testing.md#health-failure-observations)
+for controlled runtime probes that cannot skip transient counts.
+
 `TestBackupSQLiteWAL` keeps a real supported-Node writer open with automatic
 checkpointing disabled and compares an isolated main-file copy first: WAL
 existence alone cannot prove the saved preference still depends on WAL. It then

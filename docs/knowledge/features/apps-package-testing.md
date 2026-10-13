@@ -4,6 +4,42 @@ See the [package overview](apps-package.md) for the topic map.
 
 ## Testing
 
+### Retained-build fixtures
+
+`TestRetainedCanonicalInventory` and `TestRetainedRealInventory` author expected
+inventory bytes independently of the production serializer and any JSON encoder.
+A normal JSON round-trip cannot prove fixed key order, byte sorting, lowercase
+C0 escaping or literal non-ASCII/HTML-sensitive characters and Unicode separators.
+`TestRetainedVerification` changes a valid link from `pkg` to `./pkg`: equivalent
+resolution must still fail because identity includes exact target spelling.
+It reseals changed fixtures before verification so writable-mode rejection cannot
+mask byte, inventory or digest checks, and compares rejected destinations before
+and after verification/reuse to prove no repair occurred.
+
+`TestRetainedLongLinks` distinguishes finite chains from cycles;
+`TestRetainedRepeatedExpansion` exercises repeated acyclic expansion through
+validation, installation and verification. Ordinary short-link fixtures stayed
+green while recursive expansion ignored deadlines. `TestRetainedResolutionCancellation`
+forces cancellation during traversal and after a cached resolution, then checks
+safe retry. `TestRetainedPinnedAccess` replaces the staging pathname after its
+descriptor is acquired: verification must read the pinned original bytes and
+fresh public validation must reject the replacement symlink. These local fixtures
+require neither live Claude nor dependency-network access. See
+[artifact boundaries](apps-package-validation-and-stored-identity.md#retained-artifact-boundaries).
+
+### Health-failure observations
+
+Polling exact transient failure counts against a freely advancing timer can
+permanently miss a count after the third failure retires the generation.
+`TestOwnerHealthFailures` releases each runtime probe only after observing the
+preceding completed result; `TestOwnerHealthFailuresDelayedObserver` pauses beyond
+three ordinary intervals and proves one actual probe per release. Both retain
+the 1/2/0/1/2/3 reset/retirement sequence and target availability checks. The optional
+pre-start `Owner.healthTicks` clock controls only runtime scheduling; production
+and startup retain real timers, and probe transport/deadlines remain real.
+
+### Other package fixtures
+
 Inspect the compiled bundle itself, not only generated output.
 `TestBundleInventory` requires exactly the shared inventory plus the manifest
 and inventory JSON; `TestBundleExcludesWorkingFiles` recompiles the production
