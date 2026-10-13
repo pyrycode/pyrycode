@@ -98,8 +98,9 @@ publisher forgets its cursor and obtains a fresh usable `Observe`. Pending
 dependent deltas are quarantined immediately, rather than drained while gap
 teardown waits on relay Run. No `base_rev` is guessed and no partial recovery
 is published. `Store.CatchUp` proves a separate reconstructed query range;
-its backend does not install client catch-up/pages or a reconnect initializer,
-which remain #2963.
+the [installed daemon providers](thread-package.md#shadow-lifecycle-and-evidence)
+serve catch-up/pages from this same store. Reconnect initialization requires
+explicit requests for each open conversation.
 
 ### Snapshots and retry
 
@@ -252,9 +253,24 @@ independent of conversation length. `HistoryPage`/`NewestWindow` select current
 rows by order; `CatchUp` selects current states by reconstructed touch version.
 `Snapshot`/`Observe` clone full baselines and `Changes` supplies retained
 live change ranges by consumed version. A bounded result is not a complete
-baseline for applying those ranges. These daemon-internal reads implement the
-[ADR 042 update-range contract](../decisions/042-daemon-built-thread.md#update-messages);
-wire handlers/capability activation (#2963) remain downstream.
+baseline for applying those ranges. These reads implement the
+[ADR 042 update-range contract](../decisions/042-daemon-built-thread.md#update-messages).
+Production `installDaemonThreadRelay` forwards `ThreadCatchUp` to `Store.CatchUp`
+and `ThreadPage` to `Store.HistoryPage` on the real publisher store, using the
+supplied request context and named conversation. It returns the captured result
+unchanged: full items, epoch/version, coverage, reset/nonusable state and page
+metadata. The adapters perform no load, raw-history read, full projection clone
+or second selection. Relay owns authorization, mapping, framing and terminal
+delivery under the [wire query contract](../../protocol-mobile.md#thread-query-messages).
+
+Measure the installed request after the store becomes usable:
+`TestDaemonThreadQueriesBounded` separates committed-history/recovery preparation
+from requests over 36,000 entries and bounds adapter allocations by returned
+rows. Its source check constrains the forwarding path; the retained
+`TestCatchUpBoundedRecovery` and `TestStoreQueriesBounded` supply actual backend
+history-read, visit and allocation proofs. An allocation bound alone would not
+detect an allocation-free full scan or history read. These request bounds do
+not include background recovery or publisher baseline preparation.
 
 ### Isolation and lifecycle
 

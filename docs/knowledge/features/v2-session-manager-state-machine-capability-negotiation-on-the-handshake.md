@@ -102,20 +102,21 @@ and [transport admission](transport-package.md#lifecycle-and-goroutines).
 
 ### Thread delivery and summary projection
 
-`ThreadReady` is a daemon-supplied attestation that live publication,
-authoritative watermark lookup and session-state reconciliation providers are
-installed. Nil/false disables `thread`; advertisement alone is insufficient.
+`ThreadReady` is a daemon-supplied attestation that both bounded query providers,
+live publication, authoritative watermark lookup and session-state
+reconciliation providers are installed. Nil/false disables `thread`;
+advertisement alone is insufficient.
 `handleNoiseInit` records `s.thread` only on authenticated admission, and rekey
 preserves it. `ActiveConn.Thread` exposes the decision for open connections.
-Production `startRelayV2` installs the real fold publisher and authoritative
+Production `startRelayV2` installs `ThreadCatchUp`, `ThreadPage` and authoritative
 `ThreadLastShownVersion` through `installDaemonThreadRelay`, after the retained
-`ThreadLiveState` and `LiveStateCurrent` providers. Readiness stays false without
-that live-state installation or a running publisher, and becomes false before
-publisher teardown. Production negotiation and live publication are active.
-Relay catch-up/page handling (#3253/#3235) and thread-only replay/resync bypass
-are implemented; production query provider installation remains #3236. Readiness
-attests live providers, not query availability or that every conversation has
-completed replay. See
+`ThreadLiveState` and `LiveStateCurrent` providers. The queries forward directly
+to `Store.CatchUp`/`Store.HistoryPage` on the real publisher store with the request
+context and named conversation. Readiness stays false without any provider or
+a running publisher on that same store, and becomes false before publisher
+teardown. Production negotiation, live publication, bounded queries and
+thread-only replay/resync bypass are installed. Readiness attests complete
+wiring, not that every conversation has completed replay. See
 [daemon publication and lifecycle](thread-package.md#shadow-lifecycle-and-evidence).
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
@@ -149,9 +150,13 @@ its unsolicited-legacy suppression to supplied `LiveState` would discard
 authorized fresh readings and metadata-only clears after source ordering had
 advanced their watermarks. Supplied state retains `forwardLiveState`'s source
 gate and `forwardEnvelopeSource`'s supplied bypass. Authenticated coverage must
-install both the ordered lane and `ThreadLiveState`:
+install both the ordered lane (`OutboundContext`) and `ThreadLiveState`:
 `TestThreadDeliverySuppliedLiveState` exercises clear/fresh pushes and replies,
 and `TestThreadDeliveryLateEligibility` covers queued thread-content denial.
+An `Outbound`-only fixture can pass provider readiness but still fail query
+admission before the store is called: successful sequences require the
+cancellable ordered transport callback. `testDaemonThreadQueryWire` installs
+that seam for the real-store-to-wire integration.
 
 `DeliverThread` certifies each envelope only after the ordered transport callback
 returns success. Enqueue, Run handoff and batch assembly completion are weaker
@@ -166,14 +171,19 @@ for capacity and detached input.
 presence/types, canonical conversation ID, current pairing, `thread`/interactive
 capability, `KnownConversation` and the Codex/`multi_agent` gate before invoking
 `ThreadCatchUp` or `ThreadPage`. Normalize limits even for nonzero catch-up: the
-backend ignoring its window limit does not authorize a negative wire limit. Only an explicit request selects its named conversation;
-handshake and listing do not query, and the active cursor cannot substitute.
+backend ignoring its window limit does not authorize a negative wire limit.
+Apps must explicitly request catch-up for each open conversation; handshake
+and listing do not query, and the active cursor cannot substitute.
 The worker maps detached full items and authoritative coverage without deriving
 either coverage or reset from item revisions. Missing/nonusable/erroring
 providers and codec failures return a content-free `thread.query_failed` error;
 reset and failure cannot certify partial items. A page result with reset state
-fails instead of emitting catch-up-only `thread_reset`. Production provider
-installation and the 36000-entry integration proof remain #3236. See the
+fails instead of emitting catch-up-only `thread_reset`. Nonusable views fail
+explicitly even with complete production wiring; queries do not load or wait
+for recovery. Installed-provider readiness, clean-reopen queries, reset outcomes
+and requests over 36,000 entries are covered by `TestDaemonThreadQueriesReadiness`,
+`TestDaemonThreadQueriesRecovery`, `TestDaemonThreadQueriesReset` and
+`TestDaemonThreadQueriesBounded`. See the
 [wire query contract](../../protocol-mobile.md#thread-query-messages).
 
 `ThreadPage` receives required unsigned `before_order`, including zero, and the
@@ -225,6 +235,15 @@ carry a join into a reused connection ID. The catch-up and page variants of
 `TestThreadCatchUpJoinedLive` exercise these cuts; `TestThreadPageSharedAdmission`
 pins cross-query slot contention and the join cap. Both requested-scope tests
 pair gap-producing thread and legacy handshakes with named requests.
+
+A racing query may fail explicitly; retry from the last completed checkpoint.
+Only fully assembled batches followed by the separate successful marker advance
+that checkpoint. A terminal refusal can arrive before already queued live
+updates; correlate retry replies by `in_reply_to` while continuing to handle
+unsolicited live frames. A wire test that reads the next frame as its retry
+reply can mistake a late live update for query output. `TestDaemonThreadQueriesJoin`
+awaits both the refusal and queued updates before retry, then reconstructs full
+states through subsequent real publisher changes.
 
 **Project fields without round-tripping a partial DTO.** `conversation_updated`
 has supplied fields that `ConversationUpdatedPayload` does not represent,
@@ -280,9 +299,9 @@ original payload session fields and prompt answer IDs stay intact. This wiring
 now participates in production `ThreadReady` alongside the installed fold
 publisher and watermark provider. Negotiated thread connections receive current
 readings at connect/reconnect and source-bound live updates; these snapshots
-initialize transient state only. Thread item backfill requires explicit catch-up;
-relay catch-up/page handling and replay bypass are implemented, while production
-query provider installation remains #3236.
+initialize transient state only. Thread item backfill requires explicit catch-up
+for each open conversation; production bounded catch-up/page providers and
+thread-only replay bypass are installed.
 
 Carry provenance with the originating reading through `PushLiveState` and
 `ThreadLiveState`, rather than resolving a conversation's current binding when

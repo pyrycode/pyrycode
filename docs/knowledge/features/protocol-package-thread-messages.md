@@ -26,10 +26,9 @@ Consumers own numeric bounds, stable identity/kind and patch applicability.
 `TestThreadItemAddedRoundTrip`, `TestThreadItemOptionalFacts`,
 `TestThreadChangesRoundTrip` and `TestThreadTextAppendRoundTrip` re-encode decoded
 DTOs with distinct item/order/revision/version values and inspect emitted JSON.
-Live negotiation/publication and relay catch-up/page handling are installed;
-production query providers remain #3236. Bounded live encoding is available
-through `EncodeThreadUpdate`. The DTO declarations perform no validation, fold I/O or
-patch application.
+Live negotiation/publication and production bounded catch-up/page providers
+are installed. Bounded live encoding is available through `EncodeThreadUpdate`.
+The DTO declarations perform no validation, fold I/O or patch application.
 
 Split the serialized logical update, not just kind-specific content: a large
 `summary` or other metadata can exceed the cap even when content fits. This
@@ -52,8 +51,8 @@ return a content-free error and no partial sequence. See the
 [`thread_catch_up`, `thread_page`, `thread_items` and `thread_reset`](../../protocol-mobile.md#thread-query-messages)
 are declared v2 vocabulary outside `inboundAppTypeSet`. `TypeThreadCatchUp` and
 `TypeThreadPage` are intercepted by the authenticated relay switch; production
-query provider installation remains #3236. Request limits normalize
-through `NormalizeThreadQueryLimit`: omitted/zero defaults to 50 ordered rows,
+providers forward to the real publisher store's bounded reads. Request limits
+normalize through `NormalizeThreadQueryLimit`: omitted/zero defaults to 50 ordered rows,
 positive clamps to 256, negative rejects even for nonzero catch-up. Nonzero
 catch-up is never truncated; ties, active rows and parents can exceed window
 limits. The [backend](thread-package-background-store.md#bounded-queries) ignores
@@ -80,9 +79,11 @@ cannot certify partial items or advance a completed checkpoint.
 `EncodeThreadReply` preserves request `InReplyTo` and supplies every full item
 across bounded envelopes. An oversized item reuses `ThreadUpdatePart` and
 `ThreadContinuation` under `thread_items`, serializing the whole single-item
-batch with `final: false`. Detect object assembly continuation before decoding
-the numeric page continuation. Fragment `continuation.final` completes only
-validated assembly; an interrupted assembly followed by a request marker cannot
+batch with `final: false`. Inspect `continuation`'s JSON type before DTO decoding:
+decoding every reply as `ThreadUpdatePart` rejects a valid page final, whose
+continuation is numeric rather than an assembly object. Fragment
+`continuation.final` completes only validated assembly; an interrupted assembly
+followed by a request marker cannot
 complete the query. Variable envelope conversation/session metadata must be
 supplied before encoding and preserved, as must request correlation. Errors
 return nil output, including failure after an earlier batch could fit.
