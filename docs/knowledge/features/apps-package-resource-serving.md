@@ -31,6 +31,57 @@ Shared staging enforces 8 MiB through EOF, including growth. See the
 [asset reference](../../hosted-apps.md#callable-confined-assets) for URL bounds,
 the MIME table and safe failures.
 
+### Private API forwarding
+
+`Owner.ForwardAPI(ctx, serverID, appID, release, APIRequest)` resolves authenticated
+host identity, registration, exact active release and health-confirmed ownership
+before service I/O, preserving the identity/readiness errors below. The caller
+supplies context and required `Reserve`/`Release` callbacks. Requests go once
+through the opaque `Target.Do`; no caller-selected service/URL/port, proxies,
+redirect following, credentials, cookies or automatic retries are admitted.
+Cancellation of an uncertain mutation cannot establish rollback or justify replay.
+
+Methods are exactly GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS. Opaque
+decoded bodies preserve binary/form/JSON bytes, are bounded to 32768 bytes and
+must be empty for GET/HEAD. Request headers allow only lowercase `accept`,
+`content-type`, `if-none-match`; `{}` is valid. Both request and projected response
+header objects allow at most 8 entries, 4096 serialized JSON UTF-8 bytes and
+1024 bytes per control-free, valid UTF-8 value. Body overflow is `ErrAPILimit`;
+malformed/forbidden requests or missing callbacks are `ErrAPIRequest`, before I/O.
+
+`apiURL` requires an escaped `/api/` path of at most 2048 ASCII bytes and optional
+raw query of at most 1024 ASCII bytes without leading `?`. It rejects URL/authority
+forms, repeated separators, raw spaces/backslashes/controls/fragments, malformed
+escapes, encoded path separators/percent signs and raw or decoded dot segments.
+Decoded paths must be valid UTF-8 and control-free. Validated path/query bytes
+retain percent-escape case, parameter order, duplicates and empty values.
+Setting `url.URL.RawPath` alone would let Go silently re-escape an invalid spelling;
+`apiURL` requires `EscapedPath()` to equal the supplied path before forwarding.
+Queries are escape-validated but never parsed or normalized. See the
+[API reference](../../hosted-apps.md#callable-private-api-forwarding).
+
+`prepareAPI` projects only lowercase `content-type`, `cache-control`, `etag` and
+`last-modified`, joining repeated values with `, ` and dropping other headers.
+HTTP 200–599, including errors/redirects, is ordinary response data; upgrades and
+unsupported statuses fail metadata validation. Compression negotiation and
+automatic decompression are disabled; absent or identity encoding is accepted,
+and non-identity `Content-Encoding` returns `ErrResponseMetadata`. HEAD/204/205/304
+close/discard the backend body and stage zero bytes with the empty-body SHA-256.
+Other bodies use shared preparation with a 1048576-byte limit, exact size/digest
+and the reservation/disposal contract below. Metadata, response-limit, capacity
+and backend I/O errors remain distinct, sanitized package failures. Backend bodies
+close on every outcome; partial bodies never become successful results.
+
+The pre-I/O target is passed to expected-generation preparation, including empty
+responses: they have no backend body read to detect retirement. Removal, stop,
+exit, release replacement or same-release restart cancels in-flight/retained
+results without rebinding. Caller cancellation/deadlines cover headers and stalled
+body reads and retain context errors. `Metadata`/`Read`, delivery completion and
+exactly-once cleanup follow the shared contract below. See the
+[API fixture and empty-result regressions](apps-package-testing.md#testing).
+
+### Stable response ownership
+
 `Owner.Prepare(ctx, serverID, appID, release, ResponseInput)` resolves committed
 local registration and active release before staging a caller-supplied
 identity-encoded body. The authenticated boundary supplies `serverID`; this
@@ -89,10 +140,10 @@ including on generation retirement. Caller-context cancellation alone cannot
 satisfy this obligation. See [concurrency](apps-package-concurrency-and-testing.md#concurrency-and-persistence) for cleanup
 ordering and [testing](apps-package-concurrency-and-testing.md#testing) for the source-error regression.
 
-API forwarding,
-backend header projection and HEAD/204/205/304 no-body semantics belong to
-[#3246](https://github.com/pyrycode/pyrycode/issues/3246); delivery admission,
-connection ceilings, credit, deadlines, wire serialization and transport error
-mapping belong to [#3247](https://github.com/pyrycode/pyrycode/issues/3247).
+Callable assets and backend API forwarding are implemented independently of
+encrypted delivery. Admission/connection ceilings, wire base64 parsing, credit,
+fixed 30-second deadlines, 5-second inactivity enforcement, wire serialization
+and transport error mapping remain [#3247](https://github.com/pyrycode/pyrycode/issues/3247).
+The callable APIs honor supplied context deadlines and caller capacity policy.
 Paired resource routing and `hosted_apps_v1` capability activation remain pending
 under [#3123](https://github.com/pyrycode/pyrycode/issues/3123).
