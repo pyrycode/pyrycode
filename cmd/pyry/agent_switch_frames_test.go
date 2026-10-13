@@ -29,6 +29,7 @@ type switchWire struct {
 	frames, out chan protocol.RoutingEnvelope
 	phones      map[string]switchPhone
 	pub         []byte
+	pending     []protocol.RoutingEnvelope
 }
 
 func (w *switchWire) wrap(id, typ string, data []byte) protocol.RoutingEnvelope {
@@ -40,6 +41,16 @@ func (w *switchWire) wrap(id, typ string, data []byte) protocol.RoutingEnvelope 
 	return protocol.RoutingEnvelope{ConnID: id, Frame: raw}
 }
 func (w *switchWire) await() protocol.RoutingEnvelope {
+	w.t.Helper()
+	if len(w.pending) > 0 {
+		e := w.pending[0]
+		w.pending[0] = protocol.RoutingEnvelope{}
+		w.pending = w.pending[1:]
+		return e
+	}
+	return w.receive()
+}
+func (w *switchWire) receive() protocol.RoutingEnvelope {
 	w.t.Helper()
 	select {
 	case e := <-w.out:
@@ -83,9 +94,14 @@ func (w *switchWire) open(id string, capable bool, extra ...string) {
 		w.t.Fatal(err)
 	}
 	w.frames <- w.wrap(id, protocol.TypeNoiseInit, data)
-	response := w.await()
-	if response.ConnID != id {
-		w.t.Fatalf("unexpected handshake frame: %+v", response)
+	response := w.receive()
+	for response.ConnID != id {
+		if _, established := w.phones[response.ConnID]; !established {
+			w.t.Fatalf("handshake for %s: unexpected recipient %s (close code %d)", id, response.ConnID, response.CloseCode)
+		}
+		// Existing peers' pushes keep their wire order and cipher nonces for read.
+		w.pending = append(w.pending, response)
+		response = w.receive()
 	}
 	_, send, recv, err := init.ReadResp(w.data(response))
 	if err != nil {

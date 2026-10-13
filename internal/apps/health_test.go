@@ -279,30 +279,7 @@ func TestOwnerHealthPersistence(t *testing.T) {
 	}
 }
 func TestOwnerHealthFailures(t *testing.T) {
-	r, o := healthFixture(t, healthReply{Body: healthyBody()})
-	g := healthStart(t, r, o)
-	target := healthTarget(t, o)
-	for _, n := range []int{1, 2, 0, 1, 2, 3} {
-		body := `{}`
-		if n == 0 {
-			body = healthyBody()
-		}
-		healthWrite(t, r, healthReply{Body: body})
-		healthWait(t, func() bool { o.mu.Lock(); defer o.mu.Unlock(); return g.healthFailures == n })
-		if n < 3 {
-			if e := healthUse(target); e != nil {
-				t.Fatal(n, e)
-			}
-		}
-	}
-	<-g.done
-	if e := healthUse(target); e == nil {
-		t.Fatal("third failure target survived")
-	}
-	if v := ownerRecord(t, r, testApp); v.State != "failed" {
-		t.Fatal(v)
-	}
-	waitGone(t, g.cmd.Process.Pid)
+	testOwnerHealthFailures(t, false)
 }
 func TestOwnerTargetRetirement(t *testing.T) {
 	for _, event := range []string{"stop", "stop write", "shutdown", "cancel", "remove", "release", "intent"} {

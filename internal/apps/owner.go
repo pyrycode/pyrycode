@@ -35,6 +35,7 @@ type Owner struct {
 	startup         time.Duration
 	startInterval   time.Duration
 	runtimeInterval time.Duration
+	healthTicks     <-chan time.Time // Optional runtime probe clock; set before starting generations.
 	requestTimeout  time.Duration
 	wake            chan struct{}
 	reconcileCtx    context.Context

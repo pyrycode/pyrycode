@@ -96,6 +96,18 @@ Every open interactive `multi_agent` peer receives the three reset statuses, one
 
 ### Testing agent-switch handover
 
+Shared relay output can contain established peers' encrypted pushes before a
+new peer's handshake reply. `switchWire.open` waits for the requested connection
+and retains other known peers' frames in FIFO order for later reads, preserving
+ciphertext and receive-nonce order; unknown recipients still fail with
+expected/observed connection diagnostics. Discarding those pushes loses later
+assertions, while assuming the next frame is the handshake produces an intermittent
+`unexpected handshake frame`. `TestDaemonRelayWireQueuedPushDuringHandshake`
+queues interleaved pushes from two established peers before a third handshake,
+checks every decrypted envelope and then checks the new peer's transport.
+Await completion of each queued push before asserting cross-peer order: separately
+scheduled producers provide no shared enqueue order by themselves.
+
 Receiving every switch outcome frame does not join `relayAgentSwitcher`:
 `conversationAgentSwitcher.Switch` releases reset exclusion after publishing
 the outcome. A subsequent switch can still receive a busy refusal in that gap.
