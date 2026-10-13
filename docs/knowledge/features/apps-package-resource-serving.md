@@ -4,6 +4,33 @@ Part of the [apps package overview](apps-package.md).
 
 ## Resource-serving
 
+`Owner.PrepareAsset` takes `AssetRequest` (escaped path/query, native-stamped
+navigation, reservation callbacks) and returns `PreparedResponse` under the
+ownership contract below. `responseTarget` captures committed readiness before
+lookup; expected-generation checking before staging rejects a same-release
+restart. Release equality alone would silently rebind earlier lookup work.
+
+`selectBuild` pins the unique build whose validated manifest matches
+`Record.ActiveRelease`, never the candidate release, without commands or data
+mutation. `assetFile` walks
+only that build's `dist/web` using descriptor-relative no-follow opens. Only
+genuine absence permits fallback; unsafe builds/entries return `ErrInvalidStorage`.
+Opening an empty final component could misclassify an existing directory as
+missing: inspect trailing-slash entries and reject them rather than serving HTML.
+
+`validateAssetURL` bounds escaped path/query to 2048/1024 ASCII bytes, decodes the
+path once, and rejects unsafe syntax or reserved roots with static `ErrAssetPath`:
+`/api`, `/_pyry`, `/service`, `/dist/service`, `/data`, `/registry.json`, `/source`,
+`/staging`, `/builds`, `/backups`, `/sql`, `/node_modules`, including escaped
+spellings and descendants. Queries never select files. `/` selects `index.html`;
+only missing extensionless native navigation falls back. Other misses yield
+empty text/plain HTTP 404. Assets return 200 with exact bytes and deterministic
+HTML/CSS/JSON/image/font/Wasm MIME, including `text/javascript` for `.js`/`.mjs`
+and octet-stream for unknown extensions; no redirects or conditional 304.
+Shared staging enforces 8 MiB through EOF, including growth. See the
+[asset reference](../../hosted-apps.md#callable-confined-assets) for URL bounds,
+the MIME table and safe failures.
+
 `Owner.Prepare(ctx, serverID, appID, release, ResponseInput)` resolves committed
 local registration and active release before staging a caller-supplied
 identity-encoded body. The authenticated boundary supplies `serverID`; this
@@ -62,8 +89,7 @@ including on generation retirement. Caller-context cancellation alone cannot
 satisfy this obligation. See [concurrency](apps-package-concurrency-and-testing.md#concurrency-and-persistence) for cleanup
 ordering and [testing](apps-package-concurrency-and-testing.md#testing) for the source-error regression.
 
-Confined callable assets, MIME/path handling and navigation/SPA fallback remain
-pending in [#3258](https://github.com/pyrycode/pyrycode/issues/3258). API forwarding,
+API forwarding,
 backend header projection and HEAD/204/205/304 no-body semantics belong to
 [#3246](https://github.com/pyrycode/pyrycode/issues/3246); delivery admission,
 connection ceilings, credit, deadlines, wire serialization and transport error
