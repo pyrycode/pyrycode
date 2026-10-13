@@ -443,11 +443,17 @@ publication order and connection retirement on writer failure.
 
 Encrypted real-transport fixtures must allow legal chunk framing after both
 inner and outer base64 expansion; the default WebSocket read limit can reject a
-valid 32768-byte decoded chunk before the transfer is tested. In
-`TestHostedAssetRealTransportBlockedWriter`, socket retirement fences all prior
-publications before checking for late metadata. A manager snapshot immediately
-after writing cancellation can precede its processing, and session removal alone
-cannot prove that a blocked transport has stopped publishing.
+valid 32768-byte decoded chunk before the transfer is tested.
+`TestHostedAssetRealTransportBlockedWriter` and
+`TestHostedAPIRealTransport/blocked_true` hold pump acceptance before writing,
+cancel while the gate is held, and require session retirement and idle resource
+reservations before release. After release, peer socket retirement fences all
+prior publications before checking for late sealed output. A manager snapshot
+immediately after writing cancellation can precede its processing; session
+removal or sender completion alone cannot prove that a blocked transport has
+stopped publishing. An already-cancelled WebSocket write context can still allow
+publication, so the [transport pump](transport-package.md#lifecycle-and-goroutines)
+must check cancellation before writing and retire the affected socket generation.
 
 `TestReadinessLegacyReconnectSnapshotCapacity` holds the real transport's
 acknowledgment through handshake completion, proves `FlushPushes` is still
