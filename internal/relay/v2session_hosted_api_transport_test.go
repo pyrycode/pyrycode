@@ -54,7 +54,7 @@ func TestHostedAPIRealTransport(t *testing.T) {
 				select {
 				case e := <-p.wires:
 					if len(e.Frame) != 0 {
-						t.Fatal("late sealed API output", e)
+						t.Fatal("late sealed API output")
 					}
 				default:
 				}
