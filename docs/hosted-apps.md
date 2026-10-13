@@ -4,9 +4,10 @@ The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contrac
 defines the hosting design. Strict manifest validation, bundled registered source
 creation and identity-based inspection, durable registration,
 lifecycle mutations, restart normalization and callable committed-release
-process ownership, health supervision, automatic reconciliation/recovery and
-guarded private targets and generation-bound stable response preparation are
-implemented in the `internal/apps` package. The relay
+process ownership, persistent-data snapshots with restart verification,
+health supervision, automatic reconciliation/recovery and
+guarded private targets, generation-bound stable response preparation and confined
+callable active-release assets are implemented in the `internal/apps` package. The relay
 implements authenticated paged discovery, committed lifecycle notifications and
 list cancellation. The daemon owns storage, service reconciliation/recovery,
 discovery subscriptions and cancellable delivery independently of channels.
@@ -388,7 +389,40 @@ APPS_ROOT/
   <app_id>/data/app.sqlite             persistent SQL file, never inside a build
   <app_id>/data/                       WAL/SHM and app-owned durable files
   <app_id>/backups/<publish_id>/       consistent pre-update data snapshot
+  <app_id>/backups/<publish_id>/data/  preserved data tree when source data exists
+  <app_id>/backups/<publish_id>/verification.json  persisted verification evidence
 ```
+
+`apps.SnapshotData` snapshots the complete app-owned `data` tree, including
+nested regular files and empty directories, into the selected app's private
+`backups/<publish_id>`. Directories are 0700 and files are 0600; copying also
+enforces those modes on source data without changing its contents. The root must
+be the daemon-selected clean absolute `APPS_ROOT`, with the selected local
+host/app identity and a canonical UUIDv4 publish ID. No-follow traversal rejects
+symlink components, hard-linked files and nonregular entries.
+
+An initialized top-level `data/app.sqlite` is backed up with the selected
+supported Node executable's `node:sqlite` backup API, incorporating committed
+WAL contents. The sealed database uses DELETE journal mode and passes integrity
+and foreign-key checks. WAL/SHM/journal sidecars are transient and are removed
+from the snapshot; source sidecars without an initialized main database are
+rejected. Existing `main.pyry_schema_migrations` version/checksum rows are
+preserved without running migrations or requiring the template's preference
+schema. An absent `data` tree, an empty `data` directory and an uninitialized
+zero-byte `app.sqlite` remain three distinct states; snapshotting creates no
+schema or SQL checksum ledger.
+
+Success requires content/completeness verification and syncing snapshot files,
+directories, the destination parent and persisted evidence. After restart,
+`apps.VerifyBackup` uses the persisted `BackupReference` and `verification.json`
+to independently check the exact tree and file hashes, selected host/app/publish
+identity and initialized SQLite integrity, even if the source tree is gone.
+Missing/incomplete evidence or missing, changed, added or corrupt entries fail
+verification. It runs no migrations, repairs nothing and leaves sealed contents
+unchanged without creating SQLite sidecars. Evidence detects mismatch; it is
+not an authenticity signature against someone rewriting both evidence and data
+under the daemon's OS account. See [persistent-data snapshots](knowledge/features/apps-package.md#persistent-data-snapshots)
+for the package's sealing and failure rules.
 
 `build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The publication contract (#3125) associates app/release identities with validated roots and digests; callable start resolves the committed release from build manifests without a persisted build index. Network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; recoverable activation/data-restoration journals belong to #3125. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
@@ -1019,16 +1053,99 @@ disposal release reservations exactly once, including retained unconsumed result
 `Close` is idempotent and may race consumption/cancellation. The transport must
 enforce its own cancellation boundary for copied metadata and bytes.
 
-Confined callable assets and navigation/SPA fallback remain pending in
-[#3258](https://github.com/pyrycode/pyrycode/issues/3258). Asset status restrictions
-and MIME/path handling belong to that consumer; API forwarding, backend header
-projection and HEAD/204/205/304 no-body handling remain
+#### Callable confined assets
+
+`Owner.PrepareAsset(ctx, serverID, appID, release, AssetRequest)` implements
+active-release asset lookup and returns the same `PreparedResponse` described
+above. `AssetRequest` carries escaped `Path`, optional `Query`, native-stamped
+`Navigation` and required `Reserve`/`Release` callbacks. The caller supplies
+authenticated host/app identity and the navigation flag; the method authenticates
+no connection. Committed identity/release/readiness resolution happens before
+asset access and preserves `ErrNotFound`, `ErrReleaseChanged`, `ErrUnavailable`
+precedence. Lookup captures a generation, and preparation checks that exact
+generation again before staging: a same-release restart cannot rebind an opened
+asset to its replacement. Checked consumption and metadata-only commits follow
+the stable-response lifecycle above.
+
+`selectBuild` shares runtime selection without executing Node or preparing app
+data. It requires exactly one validated local build manifest matching
+`Record.ActiveRelease`, irrespective of the candidate `Record.Manifest` release.
+The selected directory descriptor stays pinned while opening only its `dist/web`
+root. Missing, ambiguous or unsafe builds return static `ErrInvalidStorage`;
+selection does not verify the publication inventory or establish continued build
+immutability. Descriptor-relative no-follow opens protect every directory
+component and the final regular file on Linux/macOS, avoiding a check/open gap.
+Symlinks, directories, devices and other unsafe existing entries fail as package
+errors. Only genuine absence permits an HTTP 404 or navigation fallback; other
+open failures never do. Existing entries with trailing slashes also fail
+confinement: treating an empty final component as missing could otherwise serve
+the SPA entry for an existing directory.
+
+The escaped path must begin `/` and contain at most 2048 ASCII bytes. Ordinary
+single `/` separators are valid; schemes/authority, `//`, raw backslashes,
+controls/NUL, raw `?`/`#`, malformed escapes, encoded separators/percent signs
+and raw or decoded `.`/`..` segments are rejected. Decode once for lookup, then
+require valid UTF-8 and reject decoded controls/backslashes. A nonempty query is
+at most 1024 ASCII bytes, has no leading `?`, raw fragment/control bytes or invalid
+escapes, and remains opaque: preserve its bytes without decoding or normalization;
+it never selects a file. Invalid URL syntax or a reserved path returns static
+`ErrAssetPath`. Reserved roots are `/api`, `/_pyry`, `/service`, `/dist/service`,
+`/data`, `/registry.json`, `/source`, `/staging`, `/builds`, `/backups`, `/sql` and
+`/node_modules`, each as an exact decoded path or descendant, including escaped
+spellings. They reject before file access and never fall back.
+
+`/` selects `index.html`. A genuinely missing asset falls back to that entry only
+with native-stamped `Navigation:true` and no extension in the final decoded path
+segment. Existing regular assets take precedence. Missing subresources and paths
+with an extension, such as `/missing%2Ejs`, return empty HTTP 404 with
+`text/plain; charset=utf-8`; a missing entry also yields 404. Successful assets
+return HTTP 200 with exact file bytes. These results fit the asset status subset
+200–299/400–599, with no redirects or conditional 304.
+
+`assetMIME` uses a deterministic, case-insensitive extension table; it emits only
+the bounded permitted `content-type` header:
+
+| Extension | Content type |
+|---|---|
+| `.html`, `.htm` | `text/html; charset=utf-8` |
+| `.js`, `.mjs` | `text/javascript` |
+| `.css` | `text/css; charset=utf-8` |
+| `.json`, `.map` | `application/json` |
+| `.png` | `image/png` |
+| `.jpg`, `.jpeg` | `image/jpeg` |
+| `.svg` | `image/svg+xml` |
+| `.gif` | `image/gif` |
+| `.webp` | `image/webp` |
+| `.avif` | `image/avif` |
+| `.ico` | `image/x-icon` |
+| `.woff` | `font/woff` |
+| `.woff2` | `font/woff2` |
+| `.ttf` | `font/ttf` |
+| `.otf` | `font/otf` |
+| `.wasm` | `application/wasm` |
+| Other extensions or no extension | `application/octet-stream` |
+
+File stat supplies a size hint; shared preparation enforces the 8 MiB decoded
+limit before body allocation/read and through EOF, including file growth.
+Success and 404 both receive exact size and lowercase SHA-256 of staged bytes,
+including the empty digest. Reservations precede body I/O and include the
+reserved EOF probe; EOF retains exactly the body's capacity through delivery.
+The asset path closes its temporary directory handles on every return and
+transfers the opened file to preparation, which closes it before successful
+return or on failure. Refusal, I/O failure, caller cancellation and retirement
+use the same idempotent disposal and exactly-once reservation release, including
+retained results. Consumers must use checked `Metadata`/`Read`, then
+`Complete(nil)`, `Complete(deliveryErr)` or `Close` as described above. File
+stat/read/close failures use `ErrResponseIO`; ordinary HTTP 404 remains successful
+preparation. Package failures expose no native paths or request contents.
+
+API forwarding, backend header projection and HEAD/204/205/304 no-body handling remain
 [#3246](https://github.com/pyrycode/pyrycode/issues/3246). Admission, connection
 ceilings, credit, deadlines, wire serialization and transport error mapping remain
 [#3247](https://github.com/pyrycode/pyrycode/issues/3247). Paired resource routing
 and capability activation remain pending under
 [#3123](https://github.com/pyrycode/pyrycode/issues/3123). See the
-[apps resource-serving overview](knowledge/features/apps-package.md#resource-serving)
+[apps resource-serving overview](knowledge/features/apps-package-resource-serving.md#resource-serving)
 for ownership, concurrency and regression details.
 
 ### Bounded transfers and retirement
@@ -1144,6 +1261,24 @@ The walkthrough below describes the intended end-to-end workflow once those
 surfaces are connected.
 
 ### Publication and recovery
+
+The callable snapshot/verification primitives are implemented independently of
+publication. Callers serialize operations and quiesce **all** app writers for
+the entire snapshot, including writers of non-SQL files. They own request
+retirement, service drain/stop, journaling, migrations and release decisions.
+A verified backup is immutable: another snapshot with the same publish ID
+returns `ErrConflict` without overwriting it. Existing incomplete destinations
+also conflict; a retry uses a new publish ID. Copy, SQLite, verification, sync
+failures and cancellation return errors, preserving recoverable source data;
+an unsuccessful attempt must never authorize mutation.
+
+Publication (#3262) and interrupted-publication recovery (#3263) consume these
+primitives; restoration is supplied by #3285. Persist the selected reference
+and independently verify it after restart before restoration. Durable recovery
+completion, old-release health and admission of API requests remain caller-owned.
+The following paragraphs describe that publication/recovery contract, beyond
+the snapshot primitive. These data guarantees cannot undo arbitrary OS or
+fleet-service effects.
 
 Publication is serialized per app, with at most one candidate and one writer to its SQL data. Build/typecheck/tests happen in private staging while the old service remains available. Before any migration, stop accepting that app's API work, cancel/retire pending reads/writes without replay, drain or stop the old service, and take a consistent recoverable snapshot of **all** app data including a SQLite backup that incorporates WAL state. Do not copy a live database file alone. Verify the snapshot before mutation. No fleet-side mutation may run as a startup/health side effect.
 

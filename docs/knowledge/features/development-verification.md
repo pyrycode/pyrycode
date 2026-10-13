@@ -228,6 +228,14 @@ file or symlink and fail during setup before exercising the predicate.
 `TestWorkspaceFileReader_SecretNames` uses distinct `-lower-case` and
 `-upper-case` directories while preserving the actual leaf spellings under test.
 
+No-follow filesystem tests need a canonical fixture root before deriving paths
+and exact-root references. `t.TempDir()` can inherit a symlinked `TMPDIR`; then an
+ancestor rejection prevents valid-state checks from reaching the operation and
+can make containment refusals pass for the wrong reason. Resolve only the
+fixture root, retain deliberate unsafe leaves, and exercise successful states
+alongside refusal cases under a controlled alias. See
+[the apps snapshot fixture](apps-package-concurrency-and-testing.md#testing).
+
 A test whose premise is "past a named cap" must build its fixture by computing from
 that constant, not by restating a literal believed to be past it. A hardcoded number
 keeps passing for the wrong reason after the cap changes, or silently stops testing
@@ -386,6 +394,16 @@ control whether agents or the dispatcher run each test tier.
 Before accepting a baseline comparison as attribution, compare suite composition and
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.
+
+Record the source of the daemon actually executed, not only the checkout's ancestry.
+The historical #3071 candidate's `spawnPermissionDaemon` honored
+`PYRY_E2E_READINESS_BIN` and `PYRY_E2E_READINESS_MCP_CONFIG`, changing the binary
+and MCP fixture independently of the tested tree; the current harness builds
+through `ensurePyryBuilt` without those overrides. A merged repair can coexist
+with a stale overridden daemon when comparing historical runs;
+retain the override inputs, actual binary source, Claude version and exact named
+leaf outcomes alongside suite counts. See
+[the prompt-answer recovery evidence](../../specs/architecture/3256-shared-live-repair-evidence.md#context).
 
 A temporary worktree is not durable storage. For an agent-produced artifact, commit it.
 For a gate-produced capture, retain an external recovery copy and use the documented
