@@ -4,7 +4,8 @@ The [approved hosted-app v1 contract](specs/architecture/3120-hosted-app-contrac
 defines the hosting design. Strict manifest validation, bundled registered source
 creation and identity-based inspection, durable registration,
 lifecycle mutations, restart normalization and callable committed-release
-process ownership, persistent-data snapshots with restart verification and
+process ownership, retained-artifact validation and immutable installation with
+independent verification, persistent-data snapshots with restart verification and
 repeatable restoration, health supervision, automatic reconciliation/recovery and
 guarded private targets, generation-bound stable response preparation and confined
 callable active-release assets are implemented in the `internal/apps` package. The relay
@@ -380,7 +381,10 @@ APPS_ROOT/
   <app_id>/source/sql/migrations/0001_preferences.sql
   <app_id>/source/test/                unit/service/frontend contract tests
   <app_id>/staging/<build_id>/          private candidate tree; never client-visible
-  <app_id>/builds/<build_id>/app.json   immutable published manifest
+  <app_id>/builds/<build_id>/app.json   immutable retained manifest
+  <app_id>/builds/<build_id>/package.json
+  <app_id>/builds/<build_id>/package-lock.json
+  <app_id>/builds/<build_id>/inventory.json  canonical retained-byte inventory
   <app_id>/builds/<build_id>/dist/web/index.html
   <app_id>/builds/<build_id>/dist/web/assets/
   <app_id>/builds/<build_id>/dist/service/main.js
@@ -460,7 +464,75 @@ migrations, journals, release selection and old-release health remain caller-own
 restored data alone does not prove rollback readiness or undo arbitrary OS/fleet
 effects. See [publication and recovery](#publication-and-recovery).
 
-`build_id` is the lowercase SHA-256 digest of a UTF-8 JSON inventory array sorted by relative-path UTF-8 bytes, serialized without whitespace and with fixed key order: each file is `{path, kind:"file", size_bytes, sha256}` and each permitted dependency link is `{path, kind:"symlink", target}` (its exact relative target). Strings escape only quotes/backslashes and controls (controls as lowercase `\u00xx`); other UTF-8 bytes stay literal. The inventory excludes itself; directories have no entry. The publisher assigns it, not the browser. Builds become read-only before activation; edits occur only in source/new staging. Runtime output belongs in data or daemon-managed logs, never a build. The publication contract (#3125) associates app/release identities with validated roots and digests; callable start resolves the committed release from build manifests without a persisted build index. Network fields are never joined to arbitrary host paths. Registry writes use same-directory temporary file, sync, close and atomic rename; recoverable activation/data-restoration journals belong to #3125. Builds and app data persist across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
+Retained builds contain only regular `app.json`, `package.json` and
+`package-lock.json`, plus the trees `dist/web`, `dist/service`, `sql/migrations`
+and installed locked `node_modules`. Editable source, tests, build tooling and
+caches outside that dependency tree are excluded from staging copies. All four
+tree roots must exist. The manifest must match both expected local identities;
+`dist/web/index.html`, `dist/service/main.js` and `dist/service/migrate.js` must
+be regular compiled entries. Migration files are flat regular files matching
+`^[0-9]{4}_[a-z0-9_]+\.sql$`, with unique four-digit prefixes returned in
+numerical order.
+
+`dist/web` is public-only. Validation rejects recognizable environment/secret
+and key files, databases/SQL, service/SQL/dependency subtrees and package/lock
+metadata there. It also rejects recognized SQLite/private-key signatures and
+byte-identical copies of retained service or migration output, even when renamed.
+These checks do not establish that arbitrary frontend code contains no secrets.
+
+Daemon-selected staging and storage roots must be clean absolute paths. Access
+pins directories with no-follow descriptors for every component and rejects
+nonregular retained entries. Symlinks are permitted only beneath this build's
+`node_modules`: each target must be relative, valid UTF-8 and resolve completely
+to an existing regular file or directory within that same dependency tree.
+Containment applies at every traversal step, including chained links and linked
+directory components before `..`; dangling links, cycles and escaping chains
+fail. Retained paths must also be valid UTF-8.
+
+The exact canonical inventory is stored as `inventory.json` at the build root:
+
+- It is a UTF-8 JSON array with no insignificant whitespace or trailing newline,
+  sorted by relative-path UTF-8 bytes. Each regular file and permitted link has
+  one entry at its own slash-separated relative path. Directories and
+  `inventory.json` have no entry.
+- File keys are exactly `path`, `kind`, `size_bytes`, `sha256`, in that order.
+  `kind` is `"file"`, size is an integer byte length, and `sha256` is lowercase
+  SHA-256 of the exact file bytes, including the original manifest bytes.
+- Link keys are exactly `path`, `kind`, `target`, in that order. `kind` is
+  `"symlink"`; `target` preserves the exact relative spelling, even when another
+  spelling would resolve to the same destination.
+- Strings escape only quotes, backslashes and C0 controls. Controls use lowercase
+  `\u00xx`; other UTF-8 stays literal, including non-ASCII characters, HTML-sensitive
+  characters and Unicode line/paragraph separators.
+
+`build_id` is lowercase SHA-256 of those exact inventory bytes. The daemon-side
+artifact operations compute it; the browser cannot assign it. `apps.InstallBuild`
+validates its own completed staging input, copies files without hardlinks into a
+fresh private temporary tree, writes the inventory and seals the tree before
+atomic no-replace installation at `APPS_ROOT/<app_id>/builds/<build_id>`.
+Directories are 0500; regular files are 0400, or 0500 when preserving owner
+execute permission. Files and directories are synced, and both the sealed
+temporary tree and installed destination must independently verify before
+success. Later staging edits cannot change retained bytes.
+
+An existing destination is reused only after independent verification against
+the same build digest. Empty, partial, changed or writable destinations fail
+without overwrite or repair. `apps.VerifyBuild` takes the expected local host/app
+identity and build digest and freshly checks the required layout, exact retained
+file/link set, link validity, read-only modes, canonical inventory bytes and
+digest. Missing builds, missing or added files/links, changed bytes or target
+spellings, unexpected retained paths, invalid inventory or digest mismatch fail
+without creating or repairing anything. A verification failure after installation
+leaves the destination for diagnosis.
+
+Edits occur only in source/new staging. Runtime output belongs in data or
+daemon-managed logs, never a build. The publication contract (#3125) associates
+app/release identities with validated roots and digests; callable start resolves
+the committed release from build manifests without a persisted build index.
+Network fields are never joined to arbitrary host paths. Registry writes use
+same-directory temporary file, sync, close and atomic rename; recoverable
+activation/data-restoration journals belong to #3125. Builds and app data persist
+across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
 The template owns `npm run typecheck` (TypeScript checks both frontend and service
 without emitting), `npm test` (noninteractive, deterministic tests), and
@@ -1359,6 +1431,34 @@ Local-control dispatch (#3265), daemon composition for creation/inspection
 (#3266), channel tools (#3126) and publication (#3125) remain downstream work.
 The walkthrough below describes the intended end-to-end workflow once those
 surfaces are connected.
+
+### Retained candidate artifacts
+
+The callable package APIs are `apps.ValidateArtifacts(ctx, staging, serverID,
+appID)`, `apps.InstallBuild(ctx, appsRoot, staging, serverID, appID)` and
+`apps.VerifyBuild(ctx, appsRoot, serverID, appID, buildID)`. They return
+`RetainedBuild`: a validated manifest, computed build ID, detached canonical
+inventory bytes and ordered migration paths. The caller supplies a completed
+private staging tree after all build children have finished. Installation always
+validates that input itself; a previously returned inventory is no installation
+permit. See [runtime and layout](#runtime-and-layout) for retained contents,
+canonical serialization, read-only installation and rejection without repair.
+
+Artifact validation alone establishes neither recorded candidate success nor
+health-confirmed activation/readiness. These operations execute no app code,
+dependency installation, migrations or service activation; they preserve source,
+registry/release history, active processes and persistent data. Package/lock
+metadata consistency, checked build commands and candidate-success recording
+belong to preparation (#3289); publication (#3262) separately owns migration,
+health confirmation and activation. These APIs have no production consumers yet
+and do not change ordinary service startup.
+
+Preparation/publication must coordinate installation with ordinary startup and
+recovery scans, including cleanup after interruption. Temporary `.install-*`
+children live under `builds` so a fully read-only directory can be published by
+same-parent rename; ordinary `prepareRelease` rejects nondigest children there.
+An interrupted installation can leave a temporary child. Installing an artifact
+does not itself select a release or coordinate those scans.
 
 ### Publication and recovery
 

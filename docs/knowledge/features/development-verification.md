@@ -120,6 +120,11 @@ in both directions. Without that ordering, Claude restoration can falsely fail
 and Codex withholding can falsely pass. See
 [agent-switch handover testing](conversation-session-binding.md#testing-agent-switch-handover).
 
+Shared relay output must preserve established peers' frames while awaiting a
+new connection's handshake; consuming or reordering them can lose assertions or
+break receive-nonce order. See the `switchWire.open` regression in
+[agent-switch handover testing](conversation-session-binding.md#testing-agent-switch-handover).
+
 A later frame on `Frames` cannot prove that `V2SessionManager.Run` consumed an
 asynchronous result on a separate buffered channel: either ready select arm can
 win. For a silent completion, await an observation emitted after the completion

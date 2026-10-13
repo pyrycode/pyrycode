@@ -60,3 +60,40 @@ the same identities, a canonical UUIDv4 `publish_id` and `root` exactly equal to
 and escaping or unclean path spellings are rejected. Storage validates these
 references without opening their targets or verifying digest contents; see the
 [runtime/root contract](../../specs/architecture/3120-hosted-app-contract.md#3-runtime-roots-and-service-conventions).
+
+### Retained artifact boundaries
+
+Manifest validity and correctly shaped release metadata cannot prove retained
+bytes. `ValidateArtifacts`, `InstallBuild` and `VerifyBuild` check both expected
+local identities and the retained artifact set; `RetainedBuild` establishes
+neither recorded candidate success nor readiness. Installation revalidates its
+own staging input rather than trusting a prior returned inventory. Package/lock
+consistency and successful build commands belong to checked preparation;
+migration, health and activation belong to publication. The
+[reference](../../hosted-apps.md#retained-candidate-artifacts) owns those caller
+boundaries and the [layout](../../hosted-apps.md#runtime-and-layout) owns exact
+inventory serialization and verified reuse.
+
+Lexically cleaning a dependency target before resolving linked directory
+components can conceal an escape through `..`. `artifactScan.resolveParts`
+interprets each component against the recorded `node_modules` graph before
+processing its parent traversal; file access never follows artifact links.
+Active-link recursion detects cycles without imposing a hop ceiling that would
+reject long finite chains. Cycle detection alone still allows exponential
+re-expansion of repeated acyclic targets: memoize completed resolutions per scan,
+keep cached component slices immutable and check cancellation during traversal,
+including cached resolutions. `scanArtifacts` also checks cancellation after
+canonical inventory/digest creation before returning success. See
+[retained-build fixtures](apps-package-testing.md#retained-build-fixtures).
+
+A sealed directory cannot move between parents on Linux without write permission
+to update its `..` entry. `InstallBuild` therefore seals and verifies a temporary
+tree under the same `builds` parent before exclusive rename. This leaves nondigest
+temporary children visible to `prepareRelease`, which rejects them; preparation
+and publication must coordinate startup/recovery scans and interrupted-install
+cleanup. The callable artifact APIs do not supply that coordination. Copying
+bytes rather than hardlinking keeps retained files independent of later staging
+edits. Read-only modes prevent ordinary writes, and verification detects changed
+artifacts under the trusted-service
+[ADR 043 boundary](../decisions/043-hosted-app-runtime-and-isolation.md); these
+guarantees do not provide OS-account isolation.
