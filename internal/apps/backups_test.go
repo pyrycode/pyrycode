@@ -25,7 +25,24 @@ func backupFixture(t *testing.T) (string, string, BackupReference) {
 func backupWrite(t *testing.T, path, value string) {
 	t.Helper()
 	backupOK(t, os.MkdirAll(filepath.Dir(path), 0700))
-	backupOK(t, os.WriteFile(path, []byte(value), 0600))
+	err := os.WriteFile(path, []byte(value), 0600)
+	if skipEILSEQ(t, err) {
+		return
+	}
+	backupOK(t, err)
+}
+
+// skipEILSEQ skips the current test when err is EILSEQ: some filesystems
+// (APFS) reject a filename containing an invalid UTF-8 byte sequence that
+// others (ext4) accept. It checks the error rather than the OS, so the case
+// still runs wherever the filesystem allows it. It reports whether it skipped.
+func skipEILSEQ(t *testing.T, err error) bool {
+	t.Helper()
+	if !errors.Is(err, unix.EILSEQ) {
+		return false
+	}
+	t.Skip("filesystem rejects invalid UTF-8 filename (EILSEQ)")
+	return true
 }
 func backupCreate(t *testing.T, root string, ref BackupReference, node string) {
 	t.Helper()

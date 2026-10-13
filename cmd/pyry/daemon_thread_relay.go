@@ -33,6 +33,8 @@ type daemonThreadPublisher struct {
 func installDaemonThreadRelay(cfg *relay.V2SessionConfig, s *threadShadow) {
 	cfg.ThreadReady = nil
 	cfg.ThreadLastShownVersion = nil
+	cfg.ThreadCatchUp = nil
+	cfg.ThreadPage = nil
 	if s == nil || s.registry == nil {
 		return
 	}
@@ -47,12 +49,17 @@ func installDaemonThreadRelay(cfg *relay.V2SessionConfig, s *threadShadow) {
 		o := store.Observe(conversations.ConversationID(id))
 		return o.LastShownVersion, o.State == thread.StateUsable
 	}
-	liveInstalled := cfg.ThreadLiveState != nil && cfg.LiveStateCurrent != nil
+	cfg.ThreadCatchUp = func(ctx context.Context, r protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
+		return store.CatchUp(ctx, conversations.ConversationID(r.ConversationID), r.Epoch, r.Version, r.Limit)
+	}
+	cfg.ThreadPage = func(ctx context.Context, r protocol.ThreadPagePayload) (thread.QueryResult, error) {
+		return store.HistoryPage(ctx, conversations.ConversationID(r.ConversationID), r.BeforeOrder, r.Limit)
+	}
 	cfg.ThreadReady = func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		p := s.publisher
-		if !liveInstalled || p == nil {
+		if cfg.ThreadCatchUp == nil || cfg.ThreadPage == nil || cfg.ThreadLiveState == nil || cfg.LiveStateCurrent == nil || cfg.ThreadLastShownVersion == nil || p == nil || p.store != store {
 			return false
 		}
 		p.mu.Lock()
