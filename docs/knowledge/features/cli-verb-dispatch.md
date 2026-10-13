@@ -149,14 +149,38 @@ A replacement reads the old credential before starting its candidate write.
 An early wall timer can expire during that read, leaving a cancellation test
 green without exercising the blocked write. `TestMemoryOSCancellation` waits
 for the controlled tool's target-operation marker before signalling cancellation
-or deadline failure, then releases the backend and checks old resolution or
-absence of initial selection. Race-instrumented tool children disable the race
-runtime's artificial exit delay so that delay cannot consume the test deadline.
-`memoryOSCommand` bounds every helper to ten seconds, kills its process group
-on cancellation, and never lets its Wait goroutine publish selection. Tool
-diagnostics are discarded, and only bounded successful read bytes cross the
-adapter boundary; hostile failure output is covered by the replacement and
-fresh-process tests.
+or deadline failure. Both Darwin and Linux vectors cover probe/read/write:
+cancelled initial probes publish no selection; cancelled replacements preserve
+exact selection bytes and resolution of the prior credential. Race-instrumented
+tool children disable the race runtime's artificial exit delay so that delay
+cannot consume the test deadline.
+
+`memoryOSCommand` retains the ten-second `memoryCredentialDeadline`, process-group
+SIGKILL on cancellation and `opWaitDelay` for bounded pipe shutdown. After a
+successful start it calls `cmd.Wait` synchronously, joining the helper and its
+pipe-copy workers before returning. The context cause takes precedence over
+command failure: cancellation returns `context.Canceled`, expiry returns
+`context.DeadlineExceeded`, and other tool failures return `errMemoryStorage`.
+Cancelled output and tool diagnostics are discarded; only bounded successful
+read bytes cross the adapter boundary. Hostile failure output is covered by
+replacement and fresh-process tests, and cancellation tests check diagnostic,
+metadata and argv suppression.
+
+A started marker and a cancellation result alone do not prove helper completion.
+Releasing synthetic backend work after return could race temporary-root removal.
+The hung helper now records its PID before its started marker, and
+`TestMemoryOSCancellation` requires it to be reaped when the store returns within
+one second of cancellation. Fixtures register idempotent cancellation and worker
+joins before launching work, so LIFO cleanup joins before closing input files,
+restoring environment or removing roots, even after a fatal assertion.
+
+`TestMemoryOSCommandCancellationJoin` gates the stdin copy reader on channels
+for both cancellation causes. The command must remain pending until release and
+observe reader completion before returning; this distinguishes an early return
+independently of child scheduling. `exec.Cmd.WaitDelay` cannot unblock an arbitrary
+reader's `Read`: this fixture cancels, releases the reader, then joins the command
+and reader during cleanup. Production callers supply finite readers. See the
+[regression verification guidance](development-verification.md#prove-that-tests-distinguish-the-change).
 
 See the [command contract](../../guide.md#memory-credentials),
 [service-user storage requirements](../../deployment.md#memory-credentials) and

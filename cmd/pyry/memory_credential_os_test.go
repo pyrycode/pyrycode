@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -91,6 +93,9 @@ func TestMemoryOSTool(t *testing.T) {
 		os.Exit(8)
 	}
 	if string(fault) == "hang-"+op {
+		_, _ = io.WriteString(os.Stdout, memoryOld+memoryNew+token)
+		_, _ = io.WriteString(os.Stderr, memoryOld+memoryNew+token)
+		_ = os.WriteFile(filepath.Join(root, "pid"), []byte(strconv.Itoa(os.Getpid())), 0600)
 		_ = os.WriteFile(filepath.Join(root, "started"), []byte(op), 0600)
 		for {
 			if _, err := os.Stat(filepath.Join(root, "release")); err == nil {
@@ -302,6 +307,85 @@ func (c testMemoryOSContext) Err() error {
 	}
 }
 
+type testMemoryOSJoinReader struct {
+	started  chan struct{}
+	release  chan struct{}
+	finished chan struct{}
+}
+
+func (r testMemoryOSJoinReader) Read([]byte) (int, error) {
+	close(r.started)
+	<-r.release
+	close(r.finished)
+	return 0, io.EOF
+}
+
+func TestMemoryOSCommandCancellationJoin(t *testing.T) {
+	for _, failure := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			_, root := testMemoryOS(t, "linux")
+			testMemoryOSFault(t, root, "hang-read")
+			ctx := testMemoryOSContext{Context: context.Background(), done: make(chan struct{}), failure: failure}
+			input := testMemoryOSJoinReader{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+			done := make(chan struct{})
+			var result error
+			cancel := func() {
+				select {
+				case <-ctx.done:
+				default:
+					close(ctx.done)
+				}
+			}
+			release := func() {
+				select {
+				case <-input.release:
+				default:
+					close(input.release)
+				}
+			}
+			t.Cleanup(func() {
+				cancel()
+				release()
+				<-done
+				select {
+				case <-input.started:
+					<-input.finished
+				default:
+				}
+			})
+			go func() {
+				_, result = memoryOSCommand(ctx, "python3", memoryOSArgs("secret-service", "read", strings.Repeat("a", 32)), input, true)
+				close(done)
+			}()
+			select {
+			case <-input.started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("stdin copy did not start")
+			}
+			cancel()
+			// The blocked reader holds Wait pending independently of child scheduling.
+			select {
+			case <-done:
+				t.Fatal("command returned before joining stdin copy")
+			case <-time.After(100 * time.Millisecond):
+			}
+			release()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("command did not join after stdin release")
+			}
+			select {
+			case <-input.finished:
+			default:
+				t.Fatal("command returned before reader completion")
+			}
+			testMemoryReject(t, result)
+			testMemoryCheck(t, errors.Is(result, failure), "lost cancellation cause after join")
+		})
+	}
+}
+
 func TestMemoryOSCancellation(t *testing.T) {
 	for _, platform := range []string{"darwin", "linux"} {
 		for _, operation := range []string{"probe", "read", "write"} {
@@ -309,8 +393,14 @@ func TestMemoryOSCancellation(t *testing.T) {
 				t.Run(platform+"/"+operation+"/"+map[bool]string{false: "cancel", true: "timeout"}[deadline], func(t *testing.T) {
 					s, root := testMemoryOS(t, platform)
 					ref := ""
+					var path string
+					var before []byte
 					if operation != "probe" {
 						ref = testMemorySet(t, s, memoryOld)
+						path, _ = testMemorySelection(t, s)
+						var err error
+						before, err = os.ReadFile(path)
+						testMemoryMust(t, err)
 					}
 					fault := operation
 					if fault == "probe" {
@@ -324,16 +414,19 @@ func TestMemoryOSCancellation(t *testing.T) {
 					ctx := testMemoryOSContext{Context: context.Background(), done: make(chan struct{}), failure: failure}
 					// Trigger the caller's deadline only after the requested operation starts.
 					// A wall timer could otherwise expire during the prior-credential read.
-					defer func() {
+					cancel := func() {
 						select {
 						case <-ctx.done:
 						default:
 							close(ctx.done)
 						}
-					}()
-					done := make(chan error, 1)
+					}
+					done := make(chan struct{})
+					var result error
 					input := testMemoryInput(t, memoryNew)
-					go func() { _, err := s.set(ctx, input); done <- err }()
+					// Join before input, environment and temporary-root cleanup, even on Fatal.
+					t.Cleanup(func() { cancel(); <-done })
+					go func() { _, result = s.set(ctx, input); close(done) }()
 					limit := time.After(3 * time.Second)
 					for {
 						if _, err := os.Stat(filepath.Join(root, "started")); err == nil {
@@ -346,22 +439,35 @@ func TestMemoryOSCancellation(t *testing.T) {
 							time.Sleep(time.Millisecond)
 						}
 					}
-					close(ctx.done)
+					cancel()
 					select {
-					case err := <-done:
-						testMemoryReject(t, err)
-						testMemoryCheck(t, errors.Is(err, failure), "lost caller cancellation or deadline")
+					case <-done:
+						testMemoryReject(t, result)
+						testMemoryCheck(t, errors.Is(result, failure), "lost caller cancellation or deadline")
 					case <-time.After(time.Second):
 						t.Fatal("operation not bounded")
 					}
-					testMemoryMust(t, os.WriteFile(filepath.Join(root, "release"), nil, 0600))
+					pidBytes, err := os.ReadFile(filepath.Join(root, "pid"))
+					testMemoryMust(t, err)
+					pid, err := strconv.Atoi(string(pidBytes))
+					testMemoryMust(t, err)
+					testMemoryCheck(t, errors.Is(syscall.Kill(pid, 0), syscall.ESRCH), "cancelled helper was not reaped before return")
 					testMemoryOSFault(t, root, "")
 					if ref != "" {
+						after, err := os.ReadFile(path)
+						testMemoryMust(t, err)
+						testMemoryCheck(t, bytes.Equal(before, after), "cancelled replacement changed selection")
 						testMemoryResolve(t, s, ref, memoryOld)
+						testMemoryOSNoLeak(t, s, root)
 					} else {
 						ok, err := s.status(context.Background())
 						testMemoryMust(t, err)
 						testMemoryCheck(t, !ok, "cancelled probe published selection")
+						argv, err := os.ReadFile(filepath.Join(root, "argv"))
+						testMemoryMust(t, err)
+						for _, token := range []string{memoryOld, memoryNew} {
+							testMemoryCheck(t, !bytes.Contains(argv, []byte(token)) && !bytes.Contains(argv, []byte(hex.EncodeToString([]byte(token)))), "secret in cancelled probe argv")
+						}
 					}
 				})
 			}
