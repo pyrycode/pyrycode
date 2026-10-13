@@ -8,11 +8,12 @@ process ownership, persistent-data snapshots with restart verification and
 repeatable restoration, health supervision, automatic reconciliation/recovery and
 guarded private targets, generation-bound stable response preparation and confined
 callable active-release assets are implemented in the `internal/apps` package. The relay
-implements authenticated paged discovery, committed lifecycle notifications and
-list cancellation. The daemon owns storage, service reconciliation/recovery,
+implements authenticated paged discovery, committed lifecycle notifications,
+bounded credit-paced asset transfers and scoped cancellation (#3315).
+The daemon owns storage, service reconciliation/recovery,
 discovery subscriptions and cancellable delivery independently of channels.
-Encrypted resource routing (#3123) remains required before production capability
-activation.
+Encrypted API routing remains #3316; production capability activation and
+real-daemon/relay acceptance remain #3248.
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
 `templates/hosted-app/`; publication and native
@@ -976,7 +977,7 @@ and readiness-confirmed links described in
 
 ### Capability and envelope vocabulary
 
-`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery, a daemon-owned service supervisor and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3123. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
+`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery, a daemon-owned service supervisor and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3248. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
 
 Without the negotiated capability, clients show that host's Apps feature as unsupported and send no app requests; hosts emit no app list/state/resource pushes to that peer. An old host may return existing `protocol.unknown_type`; a supporting host receiving an app request without negotiation returns `error` with `protocol.unsupported`. Other host connections/conversations continue normally. A new contract version uses a new capability and vocabulary for incompatible semantics, never reinterprets these enums.
 
@@ -999,11 +1000,11 @@ For every hosted wire table, fields are required unless explicitly optional; nul
 | `app_cancelled` | daemon → client | Reply to cancel ID, `{request_id, app_id?}`; echoes cancel scope, no assertion that a mutation was rolled back. |
 | `error` | daemon → client | Existing `ErrorPayload`, reply to failing request ID; terminal for that request. |
 
-`Route`/the v2 routing boundary must recognize the vocabulary and enforce direction before dispatch. A client-sent response/notification is invalid. App work is performed by bounded cancellable workers; a stalled disk/service/credit wait cannot block that connection's cancellation or unrelated message handling. No relay changes or hosted-app parsing occur on the relay.
+The authenticated v2 `routeHosted` boundary recognizes the vocabulary and enforces direction before dispatch; hosted routing stays outside generic `dispatch.Route`. A client-sent response/notification is invalid. App work is performed by bounded cancellable workers; a stalled disk/service/credit wait cannot block that connection's cancellation or unrelated message handling. The relay server remains content-blind and parses no hosted-app payloads.
 
 Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the atomic host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID in connection-owned state; it expires 30 seconds after issuance. Empty/null request cursors are invalid. The daemon validates it without using it as a path or host selector. If revision changed or cursor expired, return retryable `apps.changed` and require a fresh walk; do not combine pages from different revisions. One page request is pending per connection through read and delivery; a delivered page's cursor holds no worker. Further pending lists return `app.busy` with `retry_after_s: 1`. A fresh `{}` after completion replaces the previous walk. List cancellation retires only that connection's pending target; a blocked read retains capacity until it exits. The ordered discovery/control lane holds at most 16 envelopes including active delivery and cancel acknowledgements. Reconnect always starts a new list walk. See the [implemented wire behavior](protocol-mobile.md#paging-cancellation-and-validation).
 
-Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. The daemon owns subscription wiring and relay-lifetime cleanup. Resource/credit handling and resource-scoped cancellation remain #3123, including their independent worker bounds.
+Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. The daemon owns subscription wiring and relay-lifetime cleanup. Asset responses/chunks, credit and app-scoped cancellation are implemented with independent resource bounds (#3315); API forwarding remains #3316. See the [implemented asset wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
 
 ### Asset/API fields and HTTP semantics
 
@@ -1146,10 +1147,10 @@ delivery boundary. Forwarding sends once, with no automatic retries. A cancelled
 or failed mutation may already have changed service state; cancellation never
 replays it or asserts rollback.
 
-This callable backend does not activate encrypted resource routing. Wire base64
-parsing, admission/connection ceilings, credit, 30-second deadlines, 5-second
-inactivity enforcement and wire error mapping remain
-[#3247](https://github.com/pyrycode/pyrycode/issues/3247); the caller supplies
+This callable backend does not activate encrypted API routing. Wire base64
+parsing and API integration with the relay's resource budgets, credit, deadlines
+and wire error mapping remain
+[#3316](https://github.com/pyrycode/pyrycode/issues/3316); the caller supplies
 context deadlines and capacity policy here.
 
 #### Callable confined assets
@@ -1238,11 +1239,12 @@ retained results. Consumers must use checked `Metadata`/`Read`, then
 stat/read/close failures use `ErrResponseIO`; ordinary HTTP 404 remains successful
 preparation. Package failures expose no native paths or request contents.
 
-Admission, connection ceilings, credit, deadlines, wire serialization and
-transport error mapping remain
-[#3247](https://github.com/pyrycode/pyrycode/issues/3247). Paired resource routing
-and capability activation remain pending under
-[#3123](https://github.com/pyrycode/pyrycode/issues/3123). See the
+Paired asset routing, resource budgets, credit, deadlines, wire serialization
+and transport error mapping are implemented in the relay
+([#3315](https://github.com/pyrycode/pyrycode/issues/3315)); see the
+[asset wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
+Encrypted API routing remains #3316, and production capability activation and
+real-daemon/relay acceptance remain #3248. See the
 [apps resource-serving overview](knowledge/features/apps-package-resource-serving.md#resource-serving)
 for ownership, concurrency and regression details.
 

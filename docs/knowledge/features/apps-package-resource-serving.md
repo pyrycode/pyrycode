@@ -5,9 +5,9 @@ Part of the [apps package overview](apps-package.md).
 ## Resource-serving
 
 `Owner.PrepareAsset` takes `AssetRequest` (escaped path/query, native-stamped
-navigation, reservation callbacks) and returns `PreparedResponse` under the
-ownership contract below. `responseTarget` captures committed readiness before
-lookup; expected-generation checking before staging rejects a same-release
+navigation, reservation callbacks and optional read progress) and returns
+`PreparedResponse` under the ownership contract below. `responseTarget` captures
+committed readiness before lookup; expected-generation checking before staging rejects a same-release
 restart. Release equality alone would silently rebind earlier lookup work.
 
 `selectBuild` pins the unique build whose validated manifest matches
@@ -103,6 +103,21 @@ cannot alter the staged bytes, metadata or digest. `ResponseMetadata` contains
 status, detached headers, exact size and lowercase 64-hex SHA-256 of the complete
 body, including empty, binary and HTTP-error bodies.
 
+`ResponseInput.Progress` is optional; `AssetRequest.Progress` passes it through
+`prepareAsset` into staging. It reports every underlying source read returning
+positive bytes, including individual reads combined by `io.ReadFull`, even when
+the read also returns an error. Zero-byte reads, EOF without bytes and reservation
+activity do not report progress. The callback must return promptly and never
+reenter the response: staging invokes it while holding the response mutex.
+Leaving it nil preserves existing preparation and cleanup behavior.
+Reservations cannot substitute for this callback: a known-size body is reserved
+before reading, so preparation may continue making progress for more than five
+seconds without another reservation. The relay uses positive reads to enforce
+[read inactivity independently of its fixed deadline](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
+`TestResponseProgress` checks known/unknown sizes, zero-byte reads and multiple
+source reads per staging chunk; `TestAssetProgress` checks asset forwarding and
+the empty 404 path.
+
 Status must be 200–599; only lowercase `content-type`, `cache-control`, `etag`
 and `last-modified` are accepted. Header objects allow at most 8 entries and
 4096 serialized JSON UTF-8 bytes; values must be valid, control-free UTF-8 of at
@@ -135,15 +150,30 @@ generation retirement and disposal close the source and release acquired reserva
 cleanup also reaches retained, unconsumed results. `Close` is idempotent, and
 disposal may race metadata access, consumption and cancellation safely.
 
+`PreparedResponse.Done` exposes the response context's cancellation channel
+without locks or backend I/O. It closes on caller cancellation, backend
+retirement or disposal, including successful `Complete(nil)` and `Close`.
+It is an invalidation signal, not a delivery verdict or a cleanup-completion
+barrier; `Complete` and `Close` join cleanup. A consumer that interprets every
+closed signal as backend failure can emit an unavailable error after a complete
+response. Track final transport delivery separately and preserve explicit
+`Complete` errors. The relay's `TestHostedAssetTransfer` sends a trailing control
+request to detect such terminal output; a bytes/digest-only assertion would
+remain green.
+
 Bodies must support concurrent `Close` that promptly unblocks a pending `Read`,
 including on generation retirement. Caller-context cancellation alone cannot
 satisfy this obligation. See [concurrency](apps-package-concurrency-and-testing.md#concurrency-and-persistence) for cleanup
 ordering and [testing](apps-package-concurrency-and-testing.md#testing) for the source-error regression.
 
 Callable assets and backend API forwarding are implemented independently of
-encrypted delivery. Admission/connection ceilings, wire base64 parsing, credit,
-fixed 30-second deadlines, 5-second inactivity enforcement, wire serialization
-and transport error mapping remain [#3247](https://github.com/pyrycode/pyrycode/issues/3247).
-The callable APIs honor supplied context deadlines and caller capacity policy.
-Paired resource routing and `hosted_apps_v1` capability activation remain pending
-under [#3123](https://github.com/pyrycode/pyrycode/issues/3123).
+encrypted delivery. The relay implements paired asset routing, admission and
+decoded-byte budgets, credit-paced chunks, fixed 30-second deadlines, 5-second
+read/credit inactivity and transport error mapping; see the
+[wire behavior](../../protocol-mobile.md#asset-transfers-credit-and-cancellation).
+Encrypted API routing and shared request-body accounting remain
+[#3316](https://github.com/pyrycode/pyrycode/issues/3316). The callable APIs honor
+supplied context deadlines and caller capacity policy. Production
+`hosted_apps_v1` capability activation and real-daemon/relay acceptance remain
+[#3248](https://github.com/pyrycode/pyrycode/issues/3248); native assembly remains
+client-owned work.
