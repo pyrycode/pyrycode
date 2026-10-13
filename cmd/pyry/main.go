@@ -760,6 +760,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	}
 
 	relayCleanup, approvalSurface, announceAttachment, announceConversation, announcePost, pairingProvider, err := startRelay(ctx, logger, relayWiring{
+		// Private admission configuration is the immutable startup snapshot.
+		admissionTokens:  cfg.RelayAdmissionTokens,
 		instanceName:     *name,
 		appRegistry:      appRegistry,
 		relayURL:         relayURL,

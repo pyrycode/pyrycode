@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 )
 
 // Config is the on-disk schema for ~/.pyry/config.json. Fields are added
@@ -19,6 +18,10 @@ type Config struct {
 	// Memory is nil when managed memory is unconfigured. Search declarations
 	// remain independent; consumers validate these settings before using them.
 	Memory *MemorySettings `json:"memory,omitempty"`
+
+	// RelayAdmissionTokens binds private admission credentials to exact identities.
+	// Nil means absent; a present map requires private effective-user storage.
+	RelayAdmissionTokens map[string]string `json:"relay_admission_tokens,omitempty"`
 
 	// DebugCapture once recorded the daemon's interactive session to a .cast
 	// file (#802). The recorder was removed with the terminal runner in #1348,
@@ -67,20 +70,29 @@ func DefaultConfig() Config {
 
 // Load reads the config file at path and returns a Config with defaults
 // filled in for absent fields. A missing file returns DefaultConfig() with
-// no error. A malformed file returns a wrapped error (no silent fallback —
-// operator must fix or remove the file). On any error the returned Config
+// no error. Malformed JSON and admission configuration return value-free errors
+// without parser causes. On any error the returned Config
 // is the zero value; callers must check err.
 func Load(path string) (Config, error) {
 	cfg := DefaultConfig()
-	data, err := os.ReadFile(path)
+	data, file, parent, err := readConfig(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return cfg, nil
 		}
 		return Config{}, fmt.Errorf("config: read %s: %w", path, err)
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("config: parse %s: %w", path, err)
+	root, err := decodeObject(data, "relay_admission_tokens")
+	if err != nil {
+		return Config{}, err
 	}
+	tokens, err := validateAdmission(root, file, parent)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Config{}, errors.New("config: parse: invalid JSON configuration")
+	}
+	cfg.RelayAdmissionTokens = tokens
 	return cfg, nil
 }

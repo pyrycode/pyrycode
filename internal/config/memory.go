@@ -65,18 +65,22 @@ func UpdateMemory(path string, settings MemorySettings) error {
 }
 
 func updateMemory(path string, settings MemorySettings, ops memoryWriteOps) (retErr error) {
-	data, err := os.ReadFile(path)
+	data, file, parent, err := readConfig(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("config: read %s: %w", path, err)
 	}
 	root := make(map[string]json.RawMessage)
 	if err == nil {
-		if err := json.Unmarshal(data, &root); err != nil {
-			return fmt.Errorf("config: parse %s object: %w", path, err)
+		root, err = decodeObject(data, "relay_admission_tokens")
+		if err != nil {
+			return err
 		}
 		// Unlike nested objects, a null document is not a config object.
 		if root == nil {
 			return fmt.Errorf("config: config must be an object")
+		}
+		if _, err := validateAdmission(root, file, parent); err != nil {
+			return err
 		}
 	}
 	memory, err := memoryObject(root["memory"], "memory")
@@ -176,7 +180,7 @@ func memoryObject(data []byte, location string) (map[string]json.RawMessage, err
 	var object map[string]json.RawMessage
 	if len(data) != 0 {
 		if err := json.Unmarshal(data, &object); err != nil {
-			return nil, fmt.Errorf("config: parse %s object: %w", location, err)
+			return nil, fmt.Errorf("config: parse %s: invalid configuration object", location)
 		}
 	}
 	if object == nil {
