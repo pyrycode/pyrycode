@@ -32,6 +32,9 @@ func (p *PreparedResponse) stage(in ResponseInput) error {
 	readFailed := false
 	reader := responseReadFunc(func(buf []byte) (int, error) {
 		n, err := p.source.Read(buf)
+		if n > 0 && in.Progress != nil {
+			in.Progress()
+		}
 		if n == 0 && err == nil {
 			emptyReads++
 			if emptyReads >= 100 {

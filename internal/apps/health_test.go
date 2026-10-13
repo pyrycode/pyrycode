@@ -20,6 +20,7 @@ import (
 )
 
 type healthReply struct {
+	API              bool
 	Descendant       bool
 	Body             string
 	Status           int
@@ -100,6 +101,10 @@ func TestHealthHelperProcess(t *testing.T) {
 	}
 	server := &http.Server{ReadHeaderTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path != "/_pyry/health" {
+			if config.API {
+				apiHelper(w, req, data)
+				return
+			}
 			w.Write([]byte("resource"))
 			return
 		}

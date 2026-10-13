@@ -490,6 +490,8 @@ func (s *V2Session) State() V2SessionState { return s.state }
 // responder and hosted delivery lane change CipherStates only on this
 // goroutine, with noise_resp ordering the old-key and new-key output.
 type V2SessionManager struct {
+	resourceBudget     hostedResourceBudget
+	resourceDone       chan hostedResourceResult
 	hostedMu           sync.Mutex
 	hostedInboxes      map[string]*hostedInbox
 	hostedCloses       map[string]*hostedClose
@@ -694,6 +696,7 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		hostedChanges:      make(chan struct{}, 1),
 		hostedDeliveryDone: make(chan struct{}, 1),
 		hostedDone:         make(chan hostedResult),
+		resourceDone:       make(chan hostedResourceResult),
 		sessions:           make(map[string]*V2Session),
 		wake:               make(chan wakeSignal, wakeBufferSize),
 		manualRekey:        make(chan manualRekeyReq),
@@ -746,6 +749,8 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			m.handleFrame(runCtx, env)
 		case <-m.hostedChanges:
 			m.drainHostedChanges(runCtx)
+		case res := <-m.resourceDone:
+			m.handleHostedResource(runCtx, res)
 		case res := <-m.hostedDone:
 			m.handleHostedDone(runCtx, res)
 		case <-m.hostedDeliveryDone:
@@ -753,6 +758,7 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 				m.drainHostedDelivery(runCtx, s)
 			}
 		case <-hostedSweep.C:
+			m.sweepHostedResources(runCtx)
 			for _, s := range m.sessions {
 				if s.hosted != nil && !m.hostedAuthorized(s) {
 					m.closeWith(runCtx, s, StatusUnauthorized, nil)
