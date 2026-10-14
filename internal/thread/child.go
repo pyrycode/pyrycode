@@ -167,7 +167,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 		if state != nil {
 			parentID := uint64(0)
 			if g := f.agentGroups[state.group]; g != nil {
-				if c := g.calls[state.parent]; c != nil && c.item >= 0 && f.items[c.item].ID < item.ID {
+				if c := g.calls[state.parent]; c != nil && c.item >= 0 && f.items[c.item].Kind == "agent" && f.items[c.item].ID < item.ID {
 					parentID = f.items[c.item].ID
 				}
 			}
