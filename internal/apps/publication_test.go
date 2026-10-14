@@ -313,7 +313,7 @@ func TestPublishRemovalEvidence(t *testing.T) {
 }
 
 func TestPublishFailures(t *testing.T) {
-	for _, phase := range []string{"journal", "migration", "migration deadline", "health", "activation", "finalization", "restore", "failure finalization"} {
+	for _, phase := range []string{"build", "journal", "migration", "migration deadline", "health", "activation", "finalization", "restore", "failure finalization"} {
 		t.Run(phase, func(t *testing.T) {
 			migration := "ok"
 			if phase == "migration" || phase == "restore" || phase == "failure finalization" {
@@ -326,7 +326,11 @@ func TestPublishFailures(t *testing.T) {
 			if phase == "health" {
 				reply.Body = `{}`
 			}
-			r, o, tools, _, _ := publishFixture(t, reply, migration)
+			r, o, tools, c, config := publishFixture(t, reply, migration)
+			if phase == "build" {
+				c.Fail = "run build"
+				testCandidateConfig(t, config, c)
+			}
 			testArtifactWrite(t, r.root, testApp+"/data/sentinel", "before")
 			o.migrateTimeout = 100 * time.Millisecond
 			r.mu.Lock()
@@ -343,6 +347,7 @@ func TestPublishFailures(t *testing.T) {
 			}
 			r.mu.Unlock()
 			result, e := o.Publish(context.Background(), testHost, testApp, tools)
+			publishErr := e
 			if e == nil || strings.Contains(e.Error(), "SECRET") || strings.Contains(e.Error(), r.root) {
 				t.Fatal(result, e)
 			}
@@ -382,6 +387,20 @@ func TestPublishFailures(t *testing.T) {
 			}
 			if g := recoveryGeneration(o, testApp); g != nil && g.cmd != nil && g.cmd.Process != nil {
 				waitGone(t, g.cmd.Process.Pid)
+			}
+			if phase == "build" {
+				var failure *PublishFailure
+				if !errors.As(publishErr, &failure) || failure.Phase != "build" || result.RecoveryPending || result.ActivationCommitted || result.Healthy || v.PendingRelease != "" || len(v.ReleaseHistory) != 0 || v.LastError == nil || strings.Contains(v.LastError.Message, "SECRET") || strings.Contains(v.LastError.Message, r.root) {
+					t.Fatal("build failure did not finalize safely", result, e, v)
+				}
+				if _, e := os.Stat(filepath.Join(r.root, testApp, "data/app.sqlite")); !os.IsNotExist(e) {
+					t.Fatal("failed build prepared database", e)
+				}
+				c.Fail = ""
+				testCandidateConfig(t, config, c)
+				if retry, e := o.Publish(context.Background(), testHost, testApp, tools); e != nil || !retry.ActivationCommitted || !retry.Healthy || retry.RecoveryPending {
+					t.Fatal("failed build barred healthy retry", retry, e)
+				}
 			}
 		})
 	}

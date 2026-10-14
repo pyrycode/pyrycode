@@ -128,11 +128,11 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 	if e != nil {
 		return result, e
 	}
-	backup, e := SnapshotData(p.ctx, o.registry.root, serverID, appID, id, o.node)
+	backup, e := o.backupOps.snapshot(p.ctx, o.registry.root, serverID, appID, id, o.node)
 	if e != nil {
 		return result, e
 	}
-	if e = VerifyBackup(p.ctx, o.registry.root, serverID, appID, backup, o.node); e != nil {
+	if e = o.backupOps.verify(p.ctx, o.registry.root, serverID, appID, backup, o.node); e != nil {
 		return result, e
 	}
 	phase = "journal"

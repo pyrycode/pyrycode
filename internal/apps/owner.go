@@ -47,6 +47,7 @@ type Owner struct {
 	publishing      map[string]*publication
 	removing        map[string]bool
 	migrateTimeout  time.Duration
+	backupOps       backupOps
 }
 type generation struct {
 	ctx            context.Context

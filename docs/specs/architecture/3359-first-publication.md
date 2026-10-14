@@ -10,6 +10,7 @@
 - `internal/apps/owner.go`, `health.go`, `reconcile.go` → `Start`, `Stop`, `Shutdown`, `supervise`, `confirmRunning`: generation ownership, health and retirement.
 - `internal/apps/runtime.go` → `prepareRelease`: data creation must follow the journal.
 - `internal/apps/registry.go`, `lifecycle.go`, `releases.go` → `changeLocked`, `UpdatePublish`, `Remove`: atomic conditional storage and removal currently discarding journals.
+- `internal/apps/storage.go` → `snapshotOps.write`: file-sync, rename and directory-sync boundary; post-rename uncertainty forbids later writes.
 - `internal/apps/candidate_test.go`, `health_test.go`, `artifacts_test.go`: reuse checked-build and controlled-health fixtures.
 - `internal/apps/releases_test.go` → `TestMetadataFailures`: removal must retain unresolved journals until their explicit completion.
 - `docs/knowledge/features/apps-package.md` and its lifecycle/concurrency/testing topics: lock registry before owner; inspect actual descendants and durable snapshots; skipped Node supplies no evidence.
@@ -42,7 +43,9 @@ One synchronous caller per admitted app owns preparation, snapshot, migration an
 |---|---|
 | First publication / private pending → activation / runtime ownership | `TestPublishSuccess` |
 | Simultaneous same-app publication and Start / independent apps | `TestPublishContention` |
-| Build failure and retry using recorded bytes / completed journal | `TestPublishFailures` |
+| Build failure / unchanged data / healthy retry admission | `TestPublishFailures/build` |
+| Fresh recorded-candidate verification / snapshot / fresh backup verification refusal before mutation | `TestPublishPreparationRefusal` |
+| Health failure and retry using identical recorded bytes / completed journal | `TestPublishRetry` |
 | Migration failure/deadline and whole-group retirement | `TestPublishFailures`, `TestPublishRetirement` |
 | Migration leader exits with a surviving descendant | `TestPublishMigrationGroup` |
 | Health mismatch/deadline / activation-write failure | `TestPublishFailures` |
@@ -85,7 +88,19 @@ Pending for documentation stage: `docs/hosted-apps.md`, “Registration and obse
 
 **Reviewer:** builder self-review. **Date:** 2026-10-14.
 
+### Rework security review (2026-10-14)
+
+**Verdict:** PASS after resolving verifier findings 1 and 2.
+
+- [Subprocesses/recovery] MUST FIX resolved: `candidateRetirementError` distinguishes uncertain migration-group retirement from command failure. `finishPublicationFailure` cannot restore data while a migration writer may live; the backup/journal remains and removal cannot discard it. The EPERM regression inspects the real descendant and persisted evidence.
+- [Files/concurrency] MUST FIX resolved: `snapshotOps.write` syncs the registry directory after rename. `errSnapshotUncertain` quarantines the registry against later writes and target exposure. An uncertain activation never restores previous data; a previously durable activation remains the decision after uncertain finalization. Boundary tests execute actual file sync/rename and inject directory failure.
+- [Errors/trust boundaries] Static feedback excludes raw cleanup/storage diagnostics. Refusal tests tamper only after checked preparation or snapshot sealing, proving fresh verification rather than trusting cached results. Existing minimal subprocess environment, identity validation and retained private storage remain the contract.
+
 ## Revisions
+
+- 2026-10-14 (rework validation): `go test -race -count=1 -json ./internal/apps/...` with real Node v24.15.0/npm 11.12.1 executed 886 named tests: 886 passed, 0 failed, 0 skipped. Publication family: 60 executed/passed; the three findings' regressions: 17 executed/passed; `TestPublishTemplate`: 1 executed/passed, with compiled migration, matching live health, durable activation/finalization and a committed-target preferences API request. `go vet ./...` and `go build -o /tmp/builder-3359/pyry ./cmd/pyry` passed. Documentation and the verifier's full-module gate remain pending later-stage work.
+
+- 2026-10-14 (verifier finding 3): Correct the coverage table: `TestPublishFailures/build` now calls `Owner.Publish` with a failing build, checks failed lifecycle/safe feedback, unchanged sentinel, absent database/target and no journal/history, then proves a healthy retry is admitted. `TestPublishPreparationRefusal` corrupts a newly recorded build, refuses snapshot copying, and corrupts a sealed backup before fresh verification; each path checks persisted failed fields and an unchanged data tree with no candidate service. Owner uses the existing zero-value `backupOps` implementation for scoped fault injection; its public primitive wrappers and production behavior are unchanged.
 
 - 2026-10-14 (verifier finding 2): `snapshotOps.write` syncs the completed file, renames it and syncs the containing directory before reporting success. Post-rename sync failure returns `errSnapshotUncertain`; `Registry.changeLocked` keeps the last durable memory snapshot and bars all later writes, including no-ops, until recovery. Publication reports recovery pending and targets remain unusable. An uncertain activation write retires candidate service writers but never restores pre-publication data or claims committed activation; the renamed on-disk candidate decision and backup are retained for #3263. Uncertain finalization preserves the already committed activation and forbids restoration. `TestSnapshotDurabilityBoundary` proves real file/rename/directory ordering and injected failures, `TestPublishJournalDirectorySyncOrdering` parks the directory sync before any data preparation, and `TestPublishDurabilityUncertain` covers journal, activation and both finalizations. Security reassessment [Files/Concurrency]: rename alone establishes no crash durability; uncertain writes cannot be followed by writes derived from the old snapshot or destructive restoration. The revised design passes; no restart-recovery implementation is added.
 
