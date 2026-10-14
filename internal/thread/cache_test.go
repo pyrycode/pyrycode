@@ -103,7 +103,7 @@ func TestStoreCacheWarmHistoryTruncation(t *testing.T) {
 
 func TestStoreCacheEpochs(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{"clean", "unclean", "unloaded-clean", "missing", "corrupt", "rules", "ahead", "items", "marker", "schema", "partial", "truncated-history"} {
+	for _, mode := range []string{"clean", "unclean", "unloaded-clean", "missing", "corrupt", "rules", "ahead", "checksum", "marker", "schema", "partial", "truncated-history"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			h := history.New(root)
@@ -171,8 +171,8 @@ func TestStoreCacheEpochs(t *testing.T) {
 			case "ahead":
 				c.Version++
 				raw, err = json.Marshal(c)
-			case "items":
-				c.Items[0].Summary = "forged"
+			case "checksum":
+				c.Checksum = strings.Repeat("00", 32)
 				raw, err = json.Marshal(c)
 			case "marker":
 				err = os.Remove(filepath.Join(dir, recoveryName))
@@ -180,7 +180,7 @@ func TestStoreCacheEpochs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mode == "rules" || mode == "ahead" || mode == "items" || mode == "schema" || mode == "partial" {
+			if mode == "rules" || mode == "ahead" || mode == "checksum" || mode == "schema" || mode == "partial" {
 				if err := os.WriteFile(path, raw, 0600); err != nil {
 					t.Fatal(err)
 				}

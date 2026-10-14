@@ -154,6 +154,7 @@ func (s *Store) start(ctx context.Context, id conversations.ConversationID, retr
 func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *conversationWorker) {
 	result := ErrUnavailable
 	var progress Snapshot
+	var checksum, progressChecksum string
 	var recovery recoveryRecord
 	var savedVersion uint64
 	var lastCheckpoint time.Time
@@ -166,7 +167,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		deadline, stopTimer = nil, nil
 	}
 	flush := func() error {
-		if err := s.checkpoint(id, recovery, progress); err != nil {
+		if err := s.checkpoint(id, recovery, progress, progressChecksum); err != nil {
 			return err
 		}
 		savedVersion, lastCheckpoint = progress.Version, s.now()
@@ -192,7 +193,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		}
 		w.err = result
 		if s.workers[id] == w {
-			s.records[id] = progressRecord{Epoch: progress.Epoch, Version: progress.Version, Err: result}
+			s.records[id] = progressRecord{Epoch: progress.Epoch, Version: progress.Version, LastShownVersion: progress.LastShownVersion, Checksum: progressChecksum, Err: result}
 			if !w.retiring && !s.closed {
 				w.snapshot = Snapshot{State: StateUnavailable, Err: ErrUnavailable}
 				w.query = nil
@@ -244,14 +245,20 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 				return err
 			}
 		}
-		return fold.Feed(entries)
+		if err := fold.Feed(entries); err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			checksum = entryChecksum(entries[len(entries)-1])
+		}
+		return nil
 	}
 	epoch := ""
 	if candidate.Epoch != "" {
 		if err := reader.Walk(ctx, candidate.Version, feed); err != nil {
 			return
 		}
-		if fold.Version() == candidate.Version && sameItems(candidate.Items, fold.Items()) {
+		if fold.Version() == candidate.Version && checksum == candidate.Checksum && fold.lastShown == candidate.LastShownVersion {
 			epoch = candidate.Epoch
 		}
 	}
@@ -275,7 +282,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		}
 		initial := progress.State != StateUsable
 		becameIdle := progress.Active && !snapshot.Active
-		progress = snapshot
+		progress, progressChecksum = snapshot, checksum
 		if initial || progress.Version != savedVersion {
 			remaining := lastCheckpoint.Add(30 * time.Second).Sub(s.now())
 			if initial || becameIdle || remaining <= 0 {
@@ -357,8 +364,8 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	}
 }
 
-func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRecord, snapshot Snapshot) error {
-	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, Items: snapshot.Items, Complete: true, Recovery: recovery})
+func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRecord, snapshot Snapshot, checksum string) error {
+	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, LastShownVersion: snapshot.LastShownVersion, Checksum: checksum, Complete: true, Recovery: recovery})
 }
 
 func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, snapshot Snapshot, fold *Fold) {

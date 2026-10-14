@@ -124,3 +124,10 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+
+- 2026-10-14: Empty-history fixtures expose that ordinary JSON scalar decoding
+  conflates missing/null evidence with valid zero progress. `cacheRecord` now
+  detects presence of version, watermark and checksum during decoding; both
+  recovery and final certification reject omitted/null evidence.
