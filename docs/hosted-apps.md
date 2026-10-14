@@ -8,7 +8,8 @@ process ownership, retained-artifact validation and immutable installation with
 independent verification, checked candidate preparation and durable recording,
 persistent-data snapshots with restart verification and
 repeatable restoration, synchronous health-confirmed publication and active-release
-updates with verified rollback, health supervision, automatic service
+updates with verified rollback, before-activation publication restart recovery,
+health supervision, automatic service
 reconciliation/recovery and
 guarded private targets, generation-bound stable response preparation and confined
 callable active-release assets are implemented in the `internal/apps` package. The relay
@@ -20,8 +21,8 @@ Encrypted API routing remains #3316; production capability activation and
 real-daemon/relay acceptance remain #3248.
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
-`templates/hosted-app/`; interrupted-publication
-startup recovery (#3263), publishing control/daemon wiring (#3301/#3266) and native
+`templates/hosted-app/`; after-activation publication recovery (#3404),
+publishing control/daemon wiring (#3301/#3266) and native
 viewers remain later work. This reference preserves the contract's fields,
 limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
@@ -348,8 +349,11 @@ publication journal or `retirement_pending` evidence bars ordinary Start and
 automatic launch, including after reopening. The retirement flag also bars targets,
 Publish and removal even before a verified backup exists. It is replaced atomically
 by the verified-backup journal, or cleared only by safe failure completion or
-health-confirmed recovery after positive retirement. Interrupted-publication
-startup recovery remains #3263; observed-state normalization does not resolve it.
+health-confirmed recovery after positive retirement. `NewOwner` asynchronously
+recovers uncommitted journals before service preparation; observed-state
+normalization alone resolves no journal. Committed journals and retirement-only
+or retirement-uncertain records remain barred on reopen; see the
+[recovery matrix](#update-and-startup-recovery-contract).
 Every automatic attempt rechecks committed intent/release and conditionally
 observes starting without changing intent. Explicit starts and automatic work
 coalesce; lifecycle notifications do not cause duplicate launches or restart loops.
@@ -612,8 +616,9 @@ the committed release from build manifests without a persisted build index.
 Network fields are never joined to arbitrary host paths. Registry writes use
 same-directory temporary file, file sync, close, atomic rename and directory
 sync; post-rename uncertainty bars further writes and targets. Callable first
-publication owns its activation/data-restoration journal; interrupted-publication
-startup recovery remains #3263. Builds and app data persist
+publication owns its activation/data-restoration journal; `NewOwner` implements
+before-activation startup recovery, while after-activation resolution remains
+\#3404. Builds and app data persist
 across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
 The template owns `npm run typecheck` (TypeScript checks both frontend and service
@@ -1085,8 +1090,9 @@ and stopped/unpublished registrations stay unlaunched.
 Daemon-owned reconciliation/recovery and the
 [Node/SQLite/unrelated-channel proof](#runtime-and-layout) are complete.
 Callable publication, migrations, activation and verified update rollback are
-implemented; publishing control/daemon wiring remains #3301/#3266,
-interrupted-publication startup recovery remains #3263 and maintained orchestrator
+implemented, including before-activation publication restart recovery;
+publishing control/daemon wiring remains #3301/#3266, after-activation resolution
+remains #3404 and maintained orchestrator
 acceptance remains #3133. Encrypted resource capability activation remains #3123.
 
 The maintained standalone template supplies its own migration/startup validation
@@ -1650,9 +1656,11 @@ also conflict; a snapshot retry uses a new publish ID. Snapshot copy, SQLite,
 verification, sync failures and cancellation return errors, preserving
 recoverable source data; an unsuccessful snapshot must never authorize mutation.
 
-First publication and active-release updates (`Owner.Publish`, #3359/#3360)
-consume these primitives; interrupted-publication startup recovery remains #3263
-until it lands. Persist the selected `BackupReference`;
+First publication and active-release updates (`Owner.Publish`, #3359/#3360), plus
+before-activation startup recovery (`NewOwner`, #3403), consume these primitives.
+After-activation resolution remains #3404; publishing composition/integration
+remains #3266 and local publishing control remains #3301.
+Persist the selected `BackupReference`;
 `apps.RestoreData` freshly verifies its complete disk evidence on every call, including after restart.
 It restores the whole tree/schema, removes candidate-only content and transient
 SQLite sidecars, and preserves distinct absent/empty/uninitialized states as
@@ -1661,8 +1669,8 @@ replacement can leave partial data; retry the same reference with a fresh caller
 before claiming recovery. Backup contents/evidence remain independently
 verifiable after successful, failed or interrupted restoration. Retain the
 backup until durable recovery completion; deletion belongs to the caller.
-Durable recovery completion, old-release health and admission of API requests
-remain caller-owned.
+The primitives alone establish neither durable recovery completion nor old-release
+health or request admission; `Owner` supplies those publication/recovery decisions.
 
 #### Callable first publication
 
@@ -1779,11 +1787,56 @@ without discarding its registration/evidence. Shutdown preserves desired intent
 and joins restoration or retains evidence. Completed recovered generations record
 stopped on shutdown or stopped intent while preserving the safe update error.
 
-Interrupted-publication startup recovery remains #3263 until it lands. Reopening
-preserves the journal/retirement barrier but does not resolve it or launch beneath
-it. Its contract will restore pre-activation data and the previous release for an
-uncommitted decision, or select the committed candidate without reapplying completed
-migrations, before exposing targets. These guarantees assume trusted service code
+Before-activation startup recovery is implemented. `Open` first preserves legacy
+loading and strict storage validation: malformed storage is rejected without
+rewriting it. After the previous owner has joined and exclusive filesystem
+ownership transfers, `NewOwner` admits independent per-app recovery workers for
+uncommitted journals without retirement uncertainty, before ordinary reconciliation
+or service preparation. It returns without waiting for
+restoration, validation or health. That app's ordinary Start/reconciliation,
+new publication, API and asset targets remain barred until recovery validation
+and conditional durable completion succeed. Parked restoration holds neither
+registry nor owner locks; unrelated apps and registry operations remain usable.
+
+| Durable evidence / intent on reopen | Outcome |
+|---|---|
+| `activation_committed=false`, update, available | Freshly verify and restore the whole pre-publication snapshot, freshly verify the previous immutable build, then privately confirm matching previous-release health before durable completion and target exposure. |
+| `activation_committed=false`, first publication, available | Restore the snapshot; finish failed and unpublished, with no active release or target. |
+| `activation_committed=false`, update, stopped | Restore the snapshot, freshly verify the previous build and validate restored schema/preferences and the complete migration-version/checksum ledger; remain stopped without starting a service or exposing a target. |
+| `activation_committed=false`, first publication, stopped | Restore the snapshot; remain stopped and unpublished with no target. |
+| `activation_committed=true` | The committed candidate remains authoritative; never restore pre-publication data. Reopened targets stay barred; resolution is pending #3404. |
+| `retirement_pending=true`, with or without a journal | Remain barred without positive whole-group writer-retirement proof; a backup is not that proof. |
+
+Recovery runs no migrations. Stopped update validation uses read-only SQLite and
+the freshly verified previous release's schema/ledger helpers, without an HTTP
+service. Invalid schema, saved preferences or missing/changed applied migration
+checksums retain the journal. Successful uncommitted recovery durably clears
+pending release and journal, retains committed title, previous active release
+(if any) and desired intent, and records a safe interrupted-publication error.
+Candidate manifest metadata does not become committed display metadata. A
+health-confirmed live activated publication may still serve with its committed
+journal while finalization is pending; this exception never admits a reopened
+committed journal.
+
+Stop/removal/shutdown and newer incompatible intent invalidate stale recovery;
+Stop/Shutdown join owned workers, validators and services. Conditional completion
+preserves newer fields/intent, never revives tombstones and cannot undo a newer
+stop through late health. Unresolved recovery rejects removal and retains the
+registration/evidence. Keep the journal, previous build and immutable snapshot
+until completion is durable. Partial restoration and interruption after restoration
+but before final commit remain retryable, including repeated interruptions, by
+freshly verifying/restoring the same retained snapshot on a fresh exclusive reopen.
+There is no busy automatic retry loop.
+
+Missing/invalid snapshots, restore I/O failure, damaged previous builds and
+incompatible/unhealthy restored data leave the app unavailable without targets
+or a successful-rollback claim. Restoration failures use safe `app.io_failed`
+where persistence permits; previous-build, compatibility and health failures use
+safe `app.unavailable`. Failed or uncertain finalization retains recovery evidence
+and bars targets. Host/app revisions remain monotonic across reopen/retry;
+exhaustion refuses changes rather than resetting or wrapping.
+Publishing integration remains #3266 and local publishing control remains #3301.
+These guarantees assume trusted service code
 follows data-directory and side-effect conventions; they cannot undo arbitrary OS
 or fleet-service effects. No fleet mutation may run as a startup/health side effect.
 
