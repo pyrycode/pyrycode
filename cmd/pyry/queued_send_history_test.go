@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -82,7 +83,7 @@ func TestSuggestionEnqueuerIdentity(t *testing.T) {
 	}
 	for i, device := range []string{"device-a", "device-b", ""} {
 		p := testSendFact(t, all[i])
-		if p.DeviceID != device || p.ConversationID != testConvID || p.AcceptedAt.IsZero() || all[i].Session.SessionID != "accepted-source" || all[i].Shown == nil || !*all[i].Shown {
+		if p.QueuedMessageID != uint64(i+1) || p.DeviceID != device || p.ConversationID != testConvID || p.AcceptedAt.IsZero() || all[i].Session.SessionID != "accepted-source" || all[i].Shown == nil || !*all[i].Shown {
 			t.Fatalf("acceptance: %+v %+v", p, all[i])
 		}
 		if i < 2 && (p.MessageID != "same-app" || p.Text != "safe" || p.ClientSentAt != formatClientSentAt(sent) || !reflect.DeepEqual(p.AttachmentIDs, []string{"attachment"})) {
@@ -95,6 +96,13 @@ func TestSuggestionEnqueuerIdentity(t *testing.T) {
 	if page := newHistoryPager(store, discardLogger())(testConvID, "", 100); len(page.Entries) != 3 {
 		t.Fatalf("legacy receipts: %+v", page)
 	}
+}
+
+type testQueuedSendRetryWriter struct{}
+
+func (testQueuedSendRetryWriter) Write(p []byte) (int, error) {
+	time.Sleep(5 * time.Millisecond)
+	return len(p), nil
 }
 
 func TestQueuedSendHistoryLifecycle(t *testing.T) {
@@ -116,7 +124,7 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 			cfg := msgqueue.Config{Logger: discardLogger(), OnAccepted: h.accepted, OnDelivered: delivered, OnTerminal: func(c string, m msgqueue.QueuedMessage, o msgqueue.TerminalOutcome) {
 				h.terminal(c, m, o)
 				terminal <- struct{}{}
-			}, RetryInterval: time.Millisecond, GiveUpAfter: time.Millisecond,
+			}, RetryInterval: time.Millisecond,
 				Deliver: func(ctx context.Context, _ string, _ []byte) error {
 					select {
 					case attempts <- struct{}{}:
@@ -143,6 +151,13 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 					}
 					return nil
 				}}
+			if outcome == "give_up" {
+				cfg.GiveUpAfter = time.Millisecond
+			}
+			if outcome == "retry" {
+				// Warning output can consume time before the give-up check.
+				cfg.Logger = slog.New(slog.NewTextHandler(testQueuedSendRetryWriter{}, nil))
+			}
 			var err error
 			q, err = msgqueue.New(cfg)
 			if err != nil {

@@ -14,6 +14,7 @@ type sendRecord struct {
 	ConversationID  string    `json:"conversation_id"`
 	DeviceID        string    `json:"device_id"`
 	MessageID       string    `json:"message_id"`
+	QueuedMessageID uint64    `json:"queued_msg_id"`
 	Text            string    `json:"text"`
 	AttachmentIDs   []string  `json:"attachment_ids"`
 	AcceptedAt      time.Time `json:"accepted_at"`
@@ -43,6 +44,16 @@ func (f *Fold) sendFact(e history.Entry) bool {
 	var p sendRecord
 	if !decode(e.Payload, &p) {
 		return true
+	}
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(e.Payload, &fields) // decode validated the object.
+	for key, value := range fields {
+		if strings.EqualFold(key, "queued_msg_id") {
+			var id uint64
+			if json.Unmarshal(value, &id) != nil || id == 0 || id != p.QueuedMessageID {
+				return true
+			}
+		}
 	}
 	validReason := (status == "queued" && p.Reason == "") ||
 		(status == "delivered" && p.Reason == "delivered") ||
@@ -84,20 +95,30 @@ func (f *Fold) sendFact(e history.Entry) bool {
 }
 
 // deliveredSendContent uses safe receiving content while retaining recorded
-// acceptance sender identity and times. These fields never establish a join.
+// acceptance sender identity, times and queue handle. A terminal handle is
+// historical data; only a queued active item supplies a queue action target.
+// These fields never establish a history join.
 func deliveredSendContent(accepted, delivered json.RawMessage) json.RawMessage {
 	var sender struct {
-		DeviceID     json.RawMessage `json:"device_id"`
-		MessageID    json.RawMessage `json:"message_id"`
-		AcceptedAt   json.RawMessage `json:"accepted_at"`
-		ClientSentAt json.RawMessage `json:"client_sent_at"`
+		DeviceID        json.RawMessage `json:"device_id"`
+		MessageID       json.RawMessage `json:"message_id"`
+		AcceptedAt      json.RawMessage `json:"accepted_at"`
+		ClientSentAt    json.RawMessage `json:"client_sent_at"`
+		QueuedMessageID json.RawMessage `json:"queued_msg_id"`
 	}
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(accepted, &sender) // Both objects were validated on ingestion.
 	_ = json.Unmarshal(delivered, &fields)
+	// A legacy acceptance cannot acquire a handle from its delivered message.
+	for key := range fields {
+		if strings.EqualFold(key, "queued_msg_id") {
+			delete(fields, key)
+		}
+	}
 	for key, value := range map[string]json.RawMessage{
 		"device_id": sender.DeviceID, "message_id": sender.MessageID,
 		"accepted_at": sender.AcceptedAt, "client_sent_at": sender.ClientSentAt,
+		"queued_msg_id": sender.QueuedMessageID,
 	} {
 		if value != nil {
 			for name := range fields {

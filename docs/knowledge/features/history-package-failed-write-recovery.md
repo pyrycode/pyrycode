@@ -57,6 +57,19 @@ the one a first review happened to land on.** This is carried forward
 explicitly for `#2114`/`#2115`, whose append call sites are this package's
 first production callers.
 
+Append-cursor recovery is independent of sync certification. `convLog.loaded`
+only says the append cursor was recovered; `segBytes` can be set to the roll
+threshold after a torn write, so neither proves a segment was synced. Keep
+`syncDone`, `syncPending` and `syncDirPending` across failed appends and `load`
+recovery, including pending earlier segments after a roll. Before the first
+successful sync, `load` also retains every existing segment identity it observes:
+otherwise deleting a read-loaded segment could turn a missing pending target
+into a successful empty-log no-op. Only the full successful
+[`Store.Sync` barrier](history-package-shape.md#shape), including required closes
+and directory sync, clears those obligations. `TestSyncFailedAppendRecovery`
+checks torn-tail recovery with previously pending writes;
+`TestSyncMissingAndUnsafeTargets` covers disappearing read-loaded targets.
+
 **Testing a failure that can't be induced.** Neither the ENOSPC nor the short
 write above could be triggered from a unit test without adding a fault seam to
 production code (`RLIMIT_FSIZE` was tried as an ENOSPC stand-in and measured

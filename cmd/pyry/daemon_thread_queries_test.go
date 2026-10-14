@@ -110,8 +110,12 @@ func testDaemonThreadRequest(t *testing.T, w *switchWire, peer string, id uint64
 	w.frames <- w.wrap(peer, protocol.TypeNoiseMsg, sealed)
 }
 
-func testDaemonThreadReply(t *testing.T, w *switchWire, id uint64) (protocol.ThreadItemsPayload, string) {
+func testDaemonThreadReply(t *testing.T, w *switchWire, id uint64, expectedPeer ...string) (protocol.ThreadItemsPayload, string) {
 	t.Helper()
+	recipient := "phone"
+	if len(expectedPeer) > 0 {
+		recipient = expectedPeer[0]
+	}
 	items := map[uint64]protocol.ThreadItem{}
 	fragments := map[string]string{}
 	var epoch string
@@ -119,7 +123,7 @@ func testDaemonThreadReply(t *testing.T, w *switchWire, id uint64) (protocol.Thr
 	for {
 		peer, e := w.read()
 		raw, err := json.Marshal(e)
-		if err != nil || len(raw) > protocol.MaxThreadEnvelopeBytes || e.TS.IsZero() || peer != "phone" || e.InReplyTo == nil || *e.InReplyTo != id {
+		if err != nil || len(raw) > protocol.MaxThreadEnvelopeBytes || e.TS.IsZero() || peer != recipient || e.InReplyTo == nil || *e.InReplyTo != id {
 			t.Fatalf("invalid correlated envelope: %s %#v %v", peer, e, err)
 		}
 		if e.Type == protocol.TypeError {

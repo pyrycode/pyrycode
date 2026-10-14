@@ -4,8 +4,8 @@ Part of [the history package overview](history-package.md).
 
 ## Shape
 
-Four production files (`log.go`, `segment.go`, `cursor.go`, `forward.go`), a
-leaf importing only `internal/conversations` (for `ValidID`/`ConversationID`)
+Five production files (`log.go`, `segment.go`, `cursor.go`, `forward.go`,
+`sync.go`), a leaf importing only `internal/conversations` (for `ValidID`/`ConversationID`)
 and stdlib —
 never the wire-payload types, never decoding a payload, the same posture
 [`eventring`](eventring-package.md) has. `New(instanceDir)` builds
@@ -27,6 +27,7 @@ type Entry struct {
 type Page struct{ Entries []Entry; Cursor string; AtStart bool }
 func (s *Store) Append(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time) (uint64, error)
 func (s *Store) AppendWithMetadata(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time, metadata Metadata) (uint64, error)
+func (s *Store) Sync(convID conversations.ConversationID) error
 func (s *Store) Page(convID conversations.ConversationID, cursor string, limit int) (Page, error)
 func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, error)
 func (s *Store) LatestDisplayableEntryID(convID conversations.ConversationID) (uint64, error)
@@ -36,6 +37,36 @@ func (r *ForwardReader) Walk(ctx context.Context, throughID uint64, consume func
 func (r *ForwardReader) Tail(ctx context.Context, consume func([]Entry) error) error
 func (r *ForwardReader) LastEntryID() uint64
 ```
+
+`Store.Sync` is an explicit conversation-scoped durability barrier. Success
+covers successful appends ordered before its captured store-mutex boundary,
+including writes in earlier segments after multiple rolls; appends ordered
+afterwards remain pending. Required segments are opened read-only and synced
+with ordinary `os.File.Sync` on Linux and macOS. After all required file syncs
+and closes succeed, the history directory is synced and closed if a segment
+was created since the previous successful sync, or on the first sync of an
+existing log. This includes new segment directory entries in the durability
+guarantee, assuming the filesystem honors successful file and directory syncs
+([ADR 045](../decisions/045-thread-index-over-history.md#reliability)).
+
+The first successful sync conservatively covers all existing segments, even on
+a reopened Store or one already loaded by reads or appends. Later syncs cover
+this Store's pending writes; a repeat without writes performs no file or
+directory sync. Missing logs and directories without segments are successful
+no-ops that create nothing only when no pending writes are known; they do not
+suppress a later conservative first sync. Every call validates ID shape and
+rechecks exact directory containment, including calls with no pending work.
+Segment-named symlinks and nonregular leaves, or missing segments/directories
+known to hold pending writes, return errors rather than being omitted.
+
+Any required open, file sync, directory sync or close failure propagates without
+advancing the certified sync boundary; retry covers the entire pending batch.
+Sync decodes no payloads and changes no segment bytes, entry IDs, read counters
+or follower notifications. `Append` and `AppendWithMetadata` still write and
+close without fsync: their machine-crash durability improves only when `Sync`
+is explicitly called. The API has no production caller yet; checkpoint
+integration belongs to [#3336](https://github.com/pyrycode/pyrycode/issues/3336).
+Sync shares the authenticated-conversation precondition below.
 
 `Store.LogDir` (#2673) returns the absolute, symlink-resolved, existing log
 directory for a conversation. It validates the ID and uses
@@ -169,10 +200,11 @@ that disappears returns a read error. `decodeSegment` retains its trailing-write
 tolerance, including an incomplete header or final entry; complete corruption is
 never skipped to report successful completion.
 
-Committed/durable retains the append contract: completed writes and recovered
-complete entries survive process restart. There is no new fsync or machine-crash
-guarantee, and the storage version, backward pages and opaque cursors are unchanged
-([failed-write recovery](history-package-failed-write-recovery.md)).
+Committed/durable in the reader retains the append contract: completed writes
+and recovered complete entries survive process restart. Reading performs no
+fsync; machine-crash durability requires the explicit `Store.Sync` barrier
+described under [Shape](#shape). The storage version, backward pages and opaque
+cursors are unchanged ([failed-write recovery](history-package-failed-write-recovery.md)).
 
 ### Ordering validation and verification
 

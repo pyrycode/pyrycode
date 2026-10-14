@@ -29,7 +29,7 @@ var (
 	mappedMethods = []string{
 		"item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
 		"thread/tokenUsage/updated", "turn/completed", "item/started", "item/completed",
-		"model/rerouted",
+		"model/rerouted", "warning", "configWarning",
 	}
 	// ignoredMethods carry no turn meaning, following streamsup's
 	// ignoredLineTypes precedent.
@@ -67,8 +67,8 @@ var (
 		"externalAgentConfig/import/progress", "externalAgentConfig/import/completed",
 		"fs/changed", "model/verification",
 		"modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted",
-		"turn/moderationMetadata", "model/safetyBuffering/updated", "warning",
-		"guardianWarning", "deprecationNotice", "configWarning",
+		"turn/moderationMetadata", "model/safetyBuffering/updated",
+		"guardianWarning", "deprecationNotice",
 		"fuzzyFileSearch/sessionUpdated", "fuzzyFileSearch/sessionCompleted",
 		"thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
 		"thread/realtime/item/transcript/delta", "thread/realtime/item/completed",
@@ -190,11 +190,43 @@ func (t *Translator) Translate(method string, params json.RawMessage) []turneven
 		return t.item(method, params)
 	case "model/rerouted":
 		return t.reroute(params)
+	case "warning", "configWarning":
+		return warningBanner(method, params)
 	}
 	if ignoredSet[method] {
 		return nil
 	}
 	return []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexMethod, method, params)}
+}
+
+// warningBanner carries prose only: targeting and location metadata have no
+// routing, filesystem or turn-state meaning here. Empty required strings are
+// valid; missing or null required strings are not.
+func warningBanner(method string, params json.RawMessage) []turnevent.Event {
+	var text string
+	if method == "warning" {
+		var p struct {
+			Message *string `json:"message"`
+		}
+		if json.Unmarshal(params, &p) != nil || p.Message == nil {
+			return undecodable(params)
+		}
+		text = *p.Message
+	} else {
+		var p struct {
+			Summary *string `json:"summary"`
+			Details *string `json:"details"`
+		}
+		if json.Unmarshal(params, &p) != nil || p.Summary == nil {
+			return undecodable(params)
+		}
+		text = *p.Summary
+		if p.Details != nil && *p.Details != "" {
+			text += "\n" + *p.Details
+		}
+	}
+	text, truncated := truncate(text, maxBannerText)
+	return []turnevent.Event{turnevent.Banner{Level: "warning", Text: text, Truncated: truncated}}
 }
 
 // holdUsage keeps the turn's usage until its turn/completed. Codex sends one

@@ -141,7 +141,7 @@ func TestThreadShadowLegacy(t *testing.T) {
 		transitions.hist = h
 		transitions.broadcast(ctx, sessions.SessionTransition{ConversationID: testConvID, PreviousID: "saved-source", NewID: "successor", PreviousAgent: "claude", NextAgent: "codex", Reason: sessions.ReasonClear, OccurredAt: occurred})
 		sends := testSendHistory(h)
-		msg := msgqueue.QueuedMessage{MessageID: "send", Text: "operator"}
+		msg := msgqueue.QueuedMessage{ID: 1, MessageID: "send", Text: "operator", TS: occurred}
 		sends.accepted(testConvID, msg)
 		operator := newOperatorMessageEmitterV2(nil, discardLogger())
 		operatorMessageHistory(h, func(m operatorMessage) { operator.broadcast(ctx, mgr, e.ring, m) }, nil, discardLogger(), sends)(testConvID, msg)
