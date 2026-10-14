@@ -198,8 +198,18 @@ false. Selection and parent closure belong to
 [`Store.HistoryPage`](thread-package-background-store.md#bounded-queries),
 not another relay query engine. `TestThreadPageResults` and
 `TestThreadPageContinuation` pin forwarding and successive ranges, while
-`TestThreadPageLargeReply` checks assembly beyond 16 escaped, stamped envelopes
-without dropping supplied content or request correlation.
+`TestThreadPageLargeReply` checks assembly beyond `hostedQueueLimit` escaped,
+stamped envelopes without dropping supplied content or request correlation.
+
+The large-reply wait includes complete `EncodeThreadReply` work before first delivery;
+provider readiness alone cannot distinguish a stalled sender from expensive escaped
+JSON and race scheduling. `testHostedPeer.nextBefore` shares one 15-second absolute
+deadline across reconstruction and the separate coverage marker, checks expiry before
+consuming buffered replies, and does not renew the budget per fragment. Ordinary
+`next` waits remain three seconds. Keep the oversized-item identity/order and
+byte-for-byte reconstruction assertions when adjusting timing; see
+[reply-timeout diagnosis](development-verification.md#diagnosing-reply-timeouts)
+for the contention evidence and bounded missing-reply/final-marker checks.
 
 **Dispatch probing must reach the owning validator.** Decoding a full `Envelope`
 just to identify a query type rejects wrong-type IDs before `admitThreadQuery`
