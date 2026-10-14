@@ -3,6 +3,7 @@ package thread
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -24,6 +25,18 @@ type childState struct {
 	group          agentKey
 	parent         string
 	base, previous Item
+	restored       bool
+}
+
+type childParentKey struct {
+	group agentKey
+	call  string
+}
+
+// childWorkCounts measures inspected candidates, including unchanged items.
+// It is enabled only by package tests on their own serialized fold.
+type childWorkCounts struct {
+	registered, restored, baseCopies, expanded, edges, resolved int
 }
 
 // childGroup pins mapped evidence to the saved producer lifetime or legacy scope.
@@ -130,49 +143,118 @@ func (f *Fold) childWork(e history.Entry) bool {
 	return true
 }
 func (f *Fold) saveChild(index int, group agentKey, parent string) {
+	if f.childCounts != nil {
+		f.childCounts.registered++
+	}
 	state := f.children[index]
 	if state == nil {
-		state = &childState{base: f.items[index], previous: f.items[index]}
+		if f.childCounts != nil {
+			f.childCounts.baseCopies++
+		}
+		// A first registration is already intrinsic, including mutations made
+		// later in this entry before its first derived resolution.
+		state = &childState{base: f.items[index], previous: f.items[index], restored: true}
 		f.children[index] = state
+	} else {
+		f.restoreChild(index)
+		delete(f.childEdges[childParentKey{state.group, state.parent}], index)
 	}
 	state.group, state.parent = group, parent
+	key := childParentKey{group, parent}
+	if f.childEdges[key] == nil {
+		f.childEdges[key] = make(map[int]struct{})
+	}
+	f.childEdges[key][index] = struct{}{}
+	f.childDirty[index] = struct{}{}
 }
 
 // Intrinsic state survives provisional ancestor endings. Reports received while
 // inactive still update that state, so a later launch link can undo only closure.
-func (f *Fold) restoreChildren() {
-	for index, state := range f.children {
-		state.previous = f.items[index]
-		f.items[index] = state.base
-		f.items[index].Parent = state.previous.Parent
-		f.items[index].Rev = state.previous.Rev
+func (f *Fold) restoreChild(index int) {
+	state := f.children[index]
+	if state == nil || state.restored {
+		return
+	}
+	if f.childCounts != nil {
+		f.childCounts.restored++
+	}
+	state.previous = f.items[index]
+	f.items[index] = state.base
+	f.items[index].Parent = state.previous.Parent
+	f.items[index].Rev = state.previous.Rev
+	state.restored = true
+	f.childDirty[index] = struct{}{}
+}
+
+// Agent recomputation may run for an entire group; only actual changes enqueue
+// that agent's own dependents. Intrinsic finals need no cached derived ending.
+func (f *Fold) scheduleAgentChildren(index int) {
+	for child := range f.childEdges[f.childAgents[index]] {
+		if f.childCounts != nil {
+			f.childCounts.edges++
+		}
+		f.childDirty[child] = struct{}{}
 	}
 }
+
 func (f *Fold) resolveChildren(rev uint64) {
-	for key, g := range f.agentGroups {
-		for _, c := range g.calls {
-			if c.item >= 0 && c.parent != "" && c.ordinary == nil {
-				f.saveChild(c.item, key, c.parent)
+	if len(f.childDirty) == 0 {
+		return
+	}
+	indices := make([]int, 0, len(f.childDirty))
+	for index := range f.childDirty {
+		indices = append(indices, index)
+	}
+	for i := 0; i < len(indices); i++ {
+		if f.childCounts != nil {
+			f.childCounts.expanded++
+		}
+		key, agent := f.childAgents[indices[i]]
+		if !agent {
+			continue
+		}
+		for index := range f.childEdges[key] {
+			if f.childCounts != nil {
+				f.childCounts.edges++
+			}
+			if _, exists := f.childDirty[index]; !exists {
+				f.childDirty[index] = struct{}{}
+				indices = append(indices, index)
 			}
 		}
 	}
-	for index, state := range f.children {
-		state.base = f.items[index]
-	}
-	endings := make(map[uint64]json.RawMessage)
 	// Storage is creating-ID ordered. Older-only edges make this a topological walk.
-	for index := range f.items {
-		item := &f.items[index]
+	slices.Sort(indices)
+	for _, index := range indices {
+		if f.childCounts != nil {
+			f.childCounts.resolved++
+		}
 		state := f.children[index]
+		var ending json.RawMessage
+		if state != nil {
+			f.restoreChild(index)
+			if f.childCounts != nil {
+				f.childCounts.baseCopies++
+			}
+			state.base = f.items[index]
+		}
+		item := &f.items[index]
 		if state != nil {
 			parentID := uint64(0)
+			if f.childCounts != nil {
+				f.childCounts.edges++
+			}
 			if g := f.agentGroups[state.group]; g != nil {
 				if c := g.calls[state.parent]; c != nil && c.item >= 0 && f.items[c.item].ID < item.ID {
 					parentID = f.items[c.item].ID
+					ending = f.childEndings[c.item]
+					if f.items[c.item].EndedOrder != 0 {
+						ending = f.items[c.item].Content
+					}
 				}
 			}
 			item.Parent = parentID
-			if ending := endings[parentID]; ending != nil && item.Active {
+			if ending != nil && item.Active {
 				item.Active = false
 				if item.Kind != "agent" {
 					item.Status = "interrupted"
@@ -188,13 +270,15 @@ func (f *Fold) resolveChildren(rev uint64) {
 			}
 			state.base.Parent, state.base.Rev = item.Parent, item.Rev
 			state.previous = *item
+			state.restored = false
 		}
 		if item.Kind == "agent" {
-			if item.EndedOrder != 0 {
-				endings[item.ID] = item.Content
-			} else if state != nil && !item.Active {
-				endings[item.ID] = endings[item.Parent]
+			if item.EndedOrder == 0 && state != nil && !item.Active {
+				f.childEndings[index] = ending
+			} else {
+				delete(f.childEndings, index)
 			}
 		}
 	}
+	clear(f.childDirty)
 }

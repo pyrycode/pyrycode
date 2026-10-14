@@ -29,15 +29,21 @@ resets both retained text and nonblank eligibility. Earlier assistant messages
 and subagent chunks cannot supply missing final prose. `noteDelivered` retains
 only the producing message's client-safe `QueuedMessage.Text`, never composed
 stdin, full history or attachment-file contents. `replyExchangePrefix` retains
-and sends at most the first 8192 UTF-8 bytes per side, backing up to a complete
-code point. Invalid UTF-8 has no retained prefix. A clipped prefix is cloned:
+and sends at most the first 8192 UTF-8 bytes of the user side, backing up to a
+complete code point. The assistant side also keeps a rolling
+`assistantTail` of its last 8192 bytes and its full length.
+`replyExchangeAssistant` sends a reply that fits whole; a longer one is its
+first 4096 bytes, the marker `[middle of the reply omitted]` and as much of the
+end as fits the same 8192-byte budget, so a closing question to the user
+reaches the fallback. Head-only input made Haiku answer the opening of a long
+report and miss the question it ended on. Invalid UTF-8 has no retained prefix. A clipped prefix is cloned:
 a short Go substring otherwise keeps the original exchange's entire backing
 allocation alive despite passing length assertions.
 
 **Full-text eligibility is separate from retained prefixes.** Nonblank prose
 after 8192 whitespace bytes still qualifies either side, even when it arrives
 in later chunks after retention fills. Keep only the eligibility boolean beyond
-the prefix; inference still receives the bounded prefix. Checking `TrimSpace`
+the prefix; inference still receives the bounded head and tail. Checking `TrimSpace`
 on retained text alone would suppress even valid native output. Conversely,
 an earlier nonblank message cannot make a blank final message eligible.
 `TestReplySuggestionEligibilityBeyondPrefix` covers native and fallback sources,
@@ -98,7 +104,10 @@ preserves another conversation's ring and suggestion. See
 Claude binary and `claudeAccount.provider()` with the `haiku` alias, no
 more-expensive model fallback and one fresh print-mode turn with
 `--output-format stream-json --verbose`. Fixed system
-instructions ask for a short next reply; the two bounded exchange sides are
+instructions name the role: predict the human user's next message to the
+assistant, in the user's voice, answering a closing question the way the user
+would. The earlier one-sentence "suggest one short next reply" prompt left the
+speaker open, and Haiku often continued as the assistant; the two bounded exchange sides are
 JSON-encoded stdin, never argv or shell text. The private temporary cwd,
 empty setting sources, safe mode and explicit discovery exclusions disable
 tools, skills, MCP, hooks, approval dialogs, session persistence, session
@@ -156,7 +165,18 @@ reject valid results after ordinary progress. Oversized results are never
 truncated. A complete final envelope without newline is examined only after
 Wait receipt. Successful result text is trimmed, then `validReplyFallback` requires
 nonblank single-line valid UTF-8, no remaining control characters or U+2028/
-U+2029 separators, at most 240 Unicode code points and 1024 UTF-8 bytes.
+U+2029 separators, at most 240 Unicode code points and 1024 UTF-8 bytes. It
+then applies the shape of Claude Code's own suggestions: at most 12 words, one
+sentence (a `.`, `!` or `?` followed by space and a capital or digit starts a
+second), or a short lead-in from `replyFallbackLeadIns` such as "Yes." or
+"Thanks!" followed by one more sentence. No sentence may open in a way only the
+assistant would: apologies, "I'd be happy", "I can help", "Would you like", "Do
+you want me", "Great question" (`replyFallbackAssistantOpeners`). Openers a
+user also writes, such as "Sure, go ahead", "Let me know", "I'll test it
+tonight", "You're right" or "Here's the log", are allowed: rejecting them threw
+away the very answers the prompt asks for. A rejected suggestion shows nothing.
+`TestValidReplyFallbackVoice` and `TestReplyExchangeAssistantKeepsTail` cover
+both.
 Oversized or otherwise invalid output is rejected rather than truncated.
 Result receipt alone is insufficient: `replyFallback.run` requires successful
 Wait receipt and an unexpired context before returning validated text. A killed

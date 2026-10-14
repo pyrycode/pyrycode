@@ -617,7 +617,8 @@ func (r *Runner) Run(ctx context.Context) error {
 // until it exits. It reports started — whether cmd.Start actually launched
 // claude — alongside the child's exit error (nil on clean exit, an
 // *exec.ExitError on a crash, or a wrapped spawn-setup failure). started is
-// false when admission or spawn setup fails (token read / StdinPipe / cmd.Start).
+// false when admission or spawn setup fails (settings composition / token read /
+// StdinPipe / cmd.Start).
 // Claude never launched, so the session was never established; the caller must NOT advance
 // firstRun — the next attempt has to retry with --session-id, not --resume
 // against an id that --session-id never created. The Run loop distinguishes
@@ -643,6 +644,14 @@ func (r *Runner) Run(ctx context.Context) error {
 // The check has to sit here, before Run's cancel() and drainRestart, because a
 // deliberate kill also produces a non-nil waitErr.
 func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir string, freshSeq uint64, spawnMode string) (started bool, stderrTail string, waitErr error) {
+	if r.cfg.SettingsComposer != nil {
+		composed, err := composeSettingsArgs(args, r.cfg.SettingsComposer)
+		if err != nil {
+			r.log.Warn("claude launch refused", "err", err)
+			return false, "", err
+		}
+		args = composed
+	}
 	childEnv, err := r.accountTokenEnv(ctx, append(os.Environ(), env...))
 	if err != nil {
 		return false, "", err

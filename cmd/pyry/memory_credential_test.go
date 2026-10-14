@@ -159,6 +159,9 @@ func TestMemoryCredentialRefusals(t *testing.T) {
 						testMemoryMust(t, err)
 						testMemoryMust(t, os.WriteFile(path, b, mode))
 					}
+					// Mkdir and WriteFile filter mode through the umask, which
+					// would strip the group bit under umask 077. Set it explicitly.
+					testMemoryMust(t, os.Chmod(path, mode))
 					if fault == "owner" {
 						f, err := os.Open(path)
 						testMemoryMust(t, err)
