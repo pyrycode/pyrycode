@@ -82,3 +82,62 @@ the aggregate offline follow-up. No live-Claude check is required.
   non-stalling activity? Resolve through the experiment before handoff.
 - Historical attribution remains limited unless that exact gate failure is
   reproduced; a passing rerun cannot resolve it.
+
+## Experiment and validation results
+
+Executed on Linux with the production source at starting revision `96b56597`,
+after the separate plan commit `226b90f0`. The fixture retains the experiment as
+two subtests. Real ticks remain 7.5 ms; fake idle is 60 ms. All following times
+are fake elapsed times from construction:
+
+| Sequence | Missed window | Observed window |
+| --- | --- | --- |
+| Arm at 0; evaluate first poll at 120 ms | One callback | One callback |
+| Complete three more polls at 120 ms | Zero further callbacks | Zero further callbacks |
+| Write system activity at 120 ms while poll holds old snapshot | Owed turn remains set | Owed turn remains set |
+| Process held old snapshot | At 240 ms: still stalling | At 120 ms: still stalling |
+| Process snapshot containing activity | At 240 ms: still stalling | At 120 ms: non-stalling; re-arms |
+| Poll at 240 ms and three subsequent polls | Zero new callbacks | One callback, then zero further callbacks |
+
+The initial red experiment expected a second callback even in the missed-window
+arm: `go test -race -count=1 -run '^TestWatchdog_LatchReArms$' -v ./internal/streamsup`
+failed there with `callbacks=0, want 1` in 0.05 s; the observed-window arm passed.
+The final fixture instead asserts the predicted absence in the missed-window
+control. This resolves the first open question: delaying the poll can reproduce
+the symptom, while observing non-stalling activity distinguishes the successful
+schedule. It does **not** establish what the historical gate's scheduler did at
+`220ed01d`; that exact historical failure was not reproduced.
+
+For repeatable negative controls, temporary Go overlays mapped the absolute
+original file path to a modified copy under `/tmp/builder-3398/`, with JSON shape
+`{"Replace": {"<original absolute path>": "<modified absolute path>"}}`.
+Each overlay changes only the following item, leaving the worktree untouched:
+
+| Overlay name | Modification | Observed failure |
+| --- | --- | --- |
+| `missed-expects-second` | In the test, initialize `want` to 1 rather than 0 before `if observeActivity` | Missed-window arm: second idle callbacks 0, want 1; 0.05 s |
+| `suppress-second-callback` | Add a subtest-local counter; increment in `OnStall` and return when it equals 2 | Observed-window arm: second idle callbacks 0, want 1; 0.08 s |
+| `stuck-latch` | In a copy of `watchdog.go`, remove `fired = false` from `Watchdog.Start` | Observed-window arm: second idle callbacks 0, want 1; 0.08 s |
+| `per-tick` | In a copy of `watchdog.go`, change `if fired` to `if false && fired` | Both arms: first continuous stall callbacks 1, want 0; 0.02 s each |
+
+Command for each control (substitute its name for `<name>`):
+`go test -race -count=1 -timeout=15s -overlay=/tmp/builder-3398/<name>.json -run '^TestWatchdog_LatchReArms$' -json ./internal/streamsup`.
+All exited 1 due to the expected assertions, with no race reports or skips.
+Each ran three test/subtest records: one pass/two failures including the parent
+for the first three controls; zero passes/three failures for per-tick emission.
+Callback suppression failed after the poll-completion barrier, within the
+declared two-second bound on each synchronization wait (at most four seconds
+across release and acknowledgement). Fatal cleanup cancelled and joined the
+watchdog even though its next poll was held at the clock gate.
+
+| Validation command | RUN / PASS / FAIL / SKIP records |
+| --- | --- |
+| `go test -race -count=20 -run '^TestWatchdog_LatchReArms$' -json ./internal/streamsup` | Target: 20 / 20 / 0 / 0; including both subtests: 60 / 60 / 0 / 0 |
+| `go test -race -count=1 -json ./internal/streamsup/...` | Including subtests: 1708 / 1707 / 0 / 1; top-level: 510 / 509 / 0 / 1; package passed in 19.130 s |
+
+The sole suite skip was `TestAccountTokenReadDeadline`: “full production token
+deadline: run make test-slow”. The target and both schedules passed without skips
+in the complete suite. `go vet ./...`,
+`go build -o /tmp/builder-3398/pyry ./cmd/pyry`, and `git diff --check` passed.
+The verifier's full-module gate and #3399's aggregate offline gate remain pending
+for their owning stages. No live check or documentation change is required.
