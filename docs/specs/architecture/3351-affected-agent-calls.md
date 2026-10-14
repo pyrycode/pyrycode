@@ -62,3 +62,6 @@ Pending for documentation stage: update `docs/knowledge/features/thread-package-
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+- 2026-10-14: Increase the work controls from 4/16 to 16/64 unrelated scenarios, each including a created and an uncreated call. This keeps affected entries fixed while making even one filtered group scan exceed the 2x ceiling despite the fixed serialization work. Add ownership-index invariants after reassociation, repeated roster rows and first-lifetime promotion. Production design is unchanged.

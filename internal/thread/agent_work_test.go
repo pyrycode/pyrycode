@@ -52,7 +52,7 @@ func testAgentTaskIndex(t *testing.T, f *Fold) {
 func TestAgentAffectedWork(t *testing.T) {
 	t.Parallel()
 	var baseline []int
-	for _, size := range []int{4, 16} {
+	for _, size := range []int{16, 64} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			f := New("a")
 			fixed := testAgentUnrelated(t, f, size)
@@ -136,7 +136,7 @@ func TestAgentOwnershipOrder(t *testing.T) {
 func TestAgentPromotionWork(t *testing.T) {
 	t.Parallel()
 	var baseline int
-	for _, size := range []int{4, 16} {
+	for _, size := range []int{16, 64} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			f := New("a")
 			fixed := testAgentUnrelated(t, f, size)
