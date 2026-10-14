@@ -157,3 +157,16 @@ func TestChildRejectedCandidatesCount(t *testing.T) {
 		t.Fatalf("rejected self edge or omitted descendant was not counted: %+v items=%+v", f.childCounts, f.Items())
 	}
 }
+
+func TestChildRejectsShellParent(t *testing.T) {
+	t.Parallel()
+	t.Skip("blocked on #3345: ordinary shells are accepted as child parents")
+	f := New("a")
+	testFeed(t, f,
+		testMain(1, "tool_use", `,"tool_use_id":"shell","name":"Bash"`),
+		testChild(2, "assistant_delta", "shell", `,"text":"should remain unresolved"`),
+	)
+	if len(f.Items()) != 1 {
+		t.Fatalf("ordinary shell accepted as parent: %+v", f.Items())
+	}
+}
