@@ -123,6 +123,52 @@ the 1/2/0/1/2/3 reset/retirement sequence and target availability checks. The op
 pre-start `Owner.healthTicks` clock controls only runtime scheduling; production
 and startup retain real timers, and probe transport/deadlines remain real.
 
+### Reconciliation cancellation
+
+A child-ready marker proves neither probe entry nor cancellation of a blocked
+body read. Merely widening an elapsed assertion can let natural request/startup
+expiry satisfy broken cancellation. `TestOwnerReconcileCancellation` enables
+`healthReply.HoldHealth`: `TestHealthHelperProcess` flushes headers and publishes
+`health-blocked` before withholding a valid health body until request cancellation
+or `health-release`. Startup stop/removal first require that marker and a live,
+unhealthy generation, then prove generation retirement and child exit while the
+release marker remains absent and natural expiry is still in the future.
+
+The startup arms use one-minute test-only startup/request and helper-write escape
+deadlines, with five-second marker/completion waits. The
+[controlled experiments](https://github.com/pyrycode/pyrycode/pull/3380)
+showed that disabling request cancellation in `Owner.supervise` fails both startup
+completion proofs while the body is withheld; restoring cancellation with a
+two-second event-dispatch delay passes in about 2.14 seconds per arm. The finite
+observation allowance accommodates dispatch and cleanup, including the fixture's
+100 ms termination grace. It defines no production latency policy and changes
+no production health, retry or stop budget.
+
+Generation completion alone does not establish pending backoff if retry time
+keeps advancing. Freeze `Owner.now` under its lock before launch; after failed
+retirement and child exit, require an unsuppressed retry due strictly after that
+time, failed registry state and unchanged generation after reconciliation.
+Both startup and backoff stop/removal arms capture the pre-event snapshot, then
+advance retry time beyond eligibility and replay that stale snapshot through
+`Owner.reconcileRecords` followed by current-state reconciliation. Retaining the
+same completed generation and checking its child is gone proves no resurrection.
+
+Dispatch stop/removal asynchronously so a blocking event cannot prevent the
+bounded completion assertion from running. Join event work and inspect its
+error. Register release/cancel/join cleanup after the owner fixture cleanup so
+reverse `t.Cleanup` order releases blocked work before owner shutdown, even after
+an assertion failure. See
+[cancellation fixture cleanup](development-verification.md#prove-that-tests-distinguish-the-change).
+
+Separate fixture/phase setup, event dispatch, persistence, cancellation observation
+and SIGTERM-to-retirement observation when diagnosing timing. Observer scheduling
+is included in those durations; backoff's context is already cancelled before
+the event, so observing it measures no new cancellation latency. The historical
+1.78-second startup failure remains unattributed: its host log was unavailable
+and ten baseline focused race repetitions passed. The phase and measurement gaps
+justify this proof repair without establishing a historical scheduler cause or
+queue-handle regression.
+
 ### Other package fixtures
 
 Inspect the compiled bundle itself, not only generated output.
