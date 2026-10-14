@@ -547,6 +547,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		}
 		target := &f.items[c.item]
 		target.Content, target.Status, target.Active, target.EndedOrder, target.Rev = raw, status, active, ended, max(item.ID, rev)
+		f.markAffected(c.item)
 		if c.ordinary == nil {
 			f.scheduleAgentChildren(c.item)
 		}

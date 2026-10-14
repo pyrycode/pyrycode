@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -54,35 +55,70 @@ func messageText(item Item) string {
 	return content.Text
 }
 
-// recordShown observes public touches and shown appearances after private joins.
-func (f *Fold) recordShown(first, appended int) {
-	var visible map[uint64]bool
-	if len(f.children) > 0 {
-		visible = make(map[uint64]bool)
+// publicWorkCounts counts candidate discovery, ordering, lookups and updates.
+// Only package tests enable it on their own serialized fold.
+type publicWorkCounts struct{ work int }
+
+func (f *Fold) countPublicWork(n int) {
+	if f.publicCounts != nil {
+		f.publicCounts.work += n
 	}
-	for index, item := range f.items {
-		if visible == nil && index < first && index != appended && item.Rev != f.version {
-			continue
-		}
+}
+
+// markAffected retains stable indexes once per entry for post-join consumers.
+func (f *Fold) markAffected(index int) {
+	f.countPublicWork(2) // registration and set maintenance, including duplicates
+	f.affected[index] = struct{}{}
+}
+
+// recordShown observes public touches and shown appearances after private joins.
+// Child repair includes affected descendants. Older-only parent edges let this
+// walk use retained reachability for unrelated parents without visiting them.
+func (f *Fold) recordShown() {
+	indices := make([]int, 0, len(f.affected))
+	for index := range f.affected {
+		f.countPublicWork(1)
+		indices = append(indices, index)
+	}
+	slices.SortFunc(indices, func(a, b int) int {
+		f.countPublicWork(2)
+		return a - b
+	})
+	for _, index := range indices {
+		f.countPublicWork(3) // item, delivery claim and child-state lookup
+		item := f.items[index]
 		claimed, exists := f.messages[item.ID]
-		if (f.children[index] != nil && (item.Parent == 0 || !visible[item.Parent])) || (exists && claimed < 0) {
+		visible := true
+		if f.children[index] != nil {
+			f.countPublicWork(1) // parent dependency, including unresolved parents
+			visible = item.Parent != 0 && f.publicVisible[item.Parent]
+		}
+		f.countPublicWork(2) // reachability update and retained-touch lookup
+		if !visible || (exists && claimed < 0) {
+			delete(f.publicVisible, item.ID)
 			if f.touches[item.ID] != 0 {
+				f.countPublicWork(1)
 				delete(f.touches, item.ID)
 				f.suppressed = f.version
 			}
 			continue
 		}
-		if visible != nil {
-			visible[item.ID] = true
-		}
+		f.publicVisible[item.ID] = true
 		if f.touches[item.ID] == 0 || item.Rev == f.version {
+			f.countPublicWork(1)
 			f.touches[item.ID] = f.version
 		}
-		if item.Shown && (!f.published[item.ID] || index == appended) {
+		if item.Shown {
+			f.countPublicWork(1)
+		}
+		if item.Shown && (!f.published[item.ID] || index == f.appendedText) {
 			f.lastShown = f.version
 		}
 		f.published[item.ID] = true
+		f.countPublicWork(1)
 	}
+	f.countPublicWork(len(f.affected))
+	clear(f.affected)
 }
 
 func difference(before, after Snapshot) Observation {

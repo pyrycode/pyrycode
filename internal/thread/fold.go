@@ -39,6 +39,9 @@ type Fold struct {
 	suppressed                uint64
 	unprovenThrough           uint64
 	appendedText              int
+	publicCounts              *publicWorkCounts
+	affected                  map[int]struct{}
+	publicVisible             map[uint64]bool
 	items                     []Item
 	successor                 history.SessionProvenance
 	lastBoundary, legacyScope uint64
@@ -66,6 +69,8 @@ func New(conversationID string) *Fold {
 		conversationID:    conversationID,
 		published:         make(map[uint64]bool),
 		touches:           make(map[uint64]uint64),
+		affected:          make(map[int]struct{}),
+		publicVisible:     make(map[uint64]bool),
 		childTurns:        make(map[childKey]*mainTurn),
 		childCalls:        make(map[childCallKey]*childCall),
 		childReports:      make(map[childCallKey]*mainOutcome),
@@ -103,11 +108,10 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		if !decode(e.Payload, &owner) || (owner.ConversationID != "" && owner.ConversationID != f.conversationID) {
 			continue
 		}
-		first := len(f.items)
 		f.appendedText = -1
 		f.feedEntry(e)
 		f.resolveChildren(e.ID)
-		f.recordShown(first, f.appendedText)
+		f.recordShown()
 	}
 	return nil
 }
@@ -167,7 +171,9 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 	}
 	item.Content = append(json.RawMessage(nil), e.Payload...)
 	f.items = append(f.items, item)
-	return len(f.items) - 1
+	index := len(f.items) - 1
+	f.markAffected(index)
+	return index
 }
 
 // Version is the newest consumed valid history entry ID.
