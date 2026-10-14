@@ -250,6 +250,23 @@ fixture root, retain deliberate unsafe leaves, and exercise successful states
 alongside refusal cases under a controlled alias. See
 [the apps snapshot fixture](apps-package-concurrency-and-testing.md#testing).
 
+Unix-socket fixtures also need a short, test-owned root independent of inherited
+`TMPDIR` length. Canonicalize the allocated root before deriving the socket path,
+then assert the complete path is fewer than 104 bytes to leave room for termination
+in macOS's `sun_path`. A real missing-socket classification fixture must require
+`errors.Is(err, syscall.ENOENT)` from `net.Dial` before testing the classifier:
+an oversized address can produce `EINVAL` instead, exercising path rejection
+rather than the intended missing-socket case. Keep the real dial; a synthetic
+ENOENT would bypass this fixture precondition. See
+[control socket paths and cleanup](control-plane-testing.md#socket-paths-and-cleanup).
+
+For a socket-path regression, run the named test in separate processes with a
+deliberately long physical `TMPDIR` and a symlink alias to it, using `-race -count=1`.
+Both roots must make the old fixture's canonical socket path exceed the bound;
+an alias alone is not evidence of an overlong canonical path. Record both roots,
+canonical old-fixture paths, commands and results, including the old allocation's
+failure under the new bound assertion.
+
 A test whose premise is "past a named cap" must build its fixture by computing from
 that constant, not by restating a literal believed to be past it. A hardcoded number
 keeps passing for the wrong reason after the cap changes, or silently stops testing
