@@ -89,6 +89,37 @@ counts support the specified arms; host power-loss and startup recovery were not
 exercised. Make retained builds writable only for fixture cleanup after owner
 shutdown; changing permissions earlier weakens the immutable-build proof.
 
+An unconditional template failure injection runs during the candidate's own
+service tests and rejects preparation, proving no publication rollback.
+`TestUpdateTemplateRollback` scopes migration/startup effects to the real
+publication data directory and keeps baseline migrations inside template unit
+fixtures while checked publication still builds and executes the new candidate
+SQL. External SQL evidence distinguishes transactional failure after an earlier
+pending statement from successful schema migration followed by startup failure.
+Compare the complete restored schema/preferences/version-checksum ledger, remove
+candidate-only SQL and non-SQL data, and probe matching old-release health; a saved
+preference or migration exit code alone misses incomplete restoration.
+
+The [final update verifier review](https://github.com/pyrycode/pyrycode/pull/3381#issuecomment-6178367014)
+inspected supported Node v24.15.0 builder evidence: 944 named apps checks executed,
+944 passed, 0 failed, 0 skipped. Both `TestUpdateTemplateRollback/transaction` and
+`/startup` executed and passed: 2 arms executed, 2 passed, 0 failed, 0 skipped.
+It independently ran 12 retirement/storage/recovered-completion checks and the
+three original verifier regressions: all passed, none failed/skipped. No live
+Claude was required; startup recovery and physical crash/power-loss remain
+unproven by these runs. Skipped real Node/SQL arms supply no rollback evidence.
+
+`TestUpdatePredecessorRetirementUncertain` must cover ordinary and published
+predecessors before any verified-backup journal exists. Inject denied group
+retirement with a joined ordinary leader and a still-live descendant; inspect
+durable `retirement_pending` before signalling and barred Start/Publish,
+reconciliation, targets and removal after reopening. Candidate-migrator-only
+uncertainty coverage would leave this earlier writer gap untested.
+`TestUpdateExclusiveRetirement` parks both headers and body reads and inspects
+their cancellation and old-group completion at snapshot time, rather than only
+after Publish returns. `TestUpdateCancellationRecovery` includes stopped →
+available intent reuse; final available intent alone would hide obsolete recovery.
+
 ### Retained-build fixtures
 
 `TestRetainedCanonicalInventory` and `TestRetainedRealInventory` author expected

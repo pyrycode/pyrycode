@@ -150,7 +150,11 @@ func (o *Owner) confirmRunning(ctx context.Context, id string, g *generation) er
 	var r Record
 	var err error
 	if g.publication != nil {
-		r, err = o.activatePublicationLocked(id, g)
+		if g.publication.recovering {
+			r, err = o.confirmRecoveryLocked(id, g)
+		} else {
+			r, err = o.activatePublicationLocked(id, g)
+		}
 	} else {
 		r, _, err = o.registry.commitObservationLocked(g.record.Manifest.ServerID(), id, g.record.Revision, Observation{State: "running"})
 	}
@@ -207,7 +211,7 @@ func (o *Owner) usableLocked(g *generation) bool {
 	}
 	for _, r := range o.registry.snapshot.Records {
 		if r.AppID == g.record.AppID {
-			return r.Manifest.ServerID() == o.registry.snapshot.ServerID && r.Desired == "available" && r.State == "running" && r.ActiveRelease == g.record.ActiveRelease
+			return !r.RetirementPending && r.Manifest.ServerID() == o.registry.snapshot.ServerID && r.Desired == "available" && r.State == "running" && r.ActiveRelease == g.record.ActiveRelease
 		}
 	}
 	return false

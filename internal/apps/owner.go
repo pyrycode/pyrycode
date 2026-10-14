@@ -119,7 +119,7 @@ func (o *Owner) Start(ctx context.Context, appID string) error {
 		return ErrClosed
 	}
 	current := o.currentLocked(appID)
-	if o.publishing[appID] != nil || o.removing[appID] || current.PublishJournal != nil {
+	if o.publishing[appID] != nil || o.removing[appID] || current.recoveryPending() {
 		o.mu.Unlock()
 		o.registry.mu.Unlock()
 		return ErrConflict
@@ -376,8 +376,12 @@ func (o *Owner) Shutdown() error {
 	var result error
 	for _, g := range all {
 		<-g.done
-		if g.record.Revision != 0 && (g.publication == nil || g.publication.activated) {
-			_, _, err := o.registry.CommitObservation(g.record.Manifest.ServerID(), g.record.AppID, g.record.Revision, Observation{State: "stopped"})
+		if g.record.Revision != 0 && (g.publication == nil || g.publication.activated || g.publication.recovered) {
+			observation := Observation{State: "stopped"}
+			if g.publication != nil && g.publication.recovered {
+				observation.LastError = g.record.LastError
+			}
+			_, _, err := o.registry.CommitObservation(g.record.Manifest.ServerID(), g.record.AppID, g.record.Revision, observation)
 			if !errors.Is(err, ErrStale) && !errors.Is(err, ErrRemoved) {
 				result = errors.Join(result, err)
 			}

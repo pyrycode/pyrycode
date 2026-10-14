@@ -42,7 +42,12 @@ type Record struct {
 	Revision       uint64          `json:"revision"`
 	ReleaseHistory []Release       `json:"release_history,omitempty"`
 	PublishJournal *PublishJournal `json:"publish_journal,omitempty"`
+	// RetirementPending bars writers until predecessor retirement is confirmed.
+	// It precedes the verified-backup journal and survives owner replacement.
+	RetirementPending bool `json:"retirement_pending,omitempty"`
 }
+
+func (r Record) recoveryPending() bool { return r.RetirementPending || r.PublishJournal != nil }
 
 // Registry serializes durable mutations and readers. Open one owner per root;
 // concurrent independent owners or processes writing the same root are unsupported.
@@ -73,7 +78,7 @@ func (r *Registry) UpdateManifest(appID string, data []byte) (bool, error) {
 }
 
 // Remove tombstones the identity permanently, retaining all source/build/data files.
-// An owner joins writers/recovery first; unresolved journals reject removal.
+// An owner joins writers/recovery first; unresolved recovery rejects removal.
 // Removing an existing tombstone again is a no-op.
 func (r *Registry) Remove(appID string) (bool, error) {
 	r.mu.Lock()
@@ -85,7 +90,7 @@ func (r *Registry) Remove(appID string) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, record := range r.snapshot.Records {
-		if record.AppID == appID && record.PublishJournal != nil {
+		if record.AppID == appID && record.recoveryPending() {
 			return false, ErrConflict
 		}
 	}
