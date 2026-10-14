@@ -577,6 +577,12 @@ func TestLoadOrCreate_InsecureFileModeErrorDoesNotLeakPrivateKey(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("seed fixture: %v", err)
 	}
+	// WriteFile's mode is filtered by the process umask, so under a strict
+	// umask such as 077 the fixture would land as 0600 and stop being
+	// insecure. Set the mode explicitly so the test is umask independent.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod fixture: %v", err)
+	}
 
 	sk, err := LoadOrCreate(base, daemon)
 	if !errors.Is(err, ErrInsecureKeyFileMode) {
