@@ -137,7 +137,7 @@ func TestStreamModalReaderOrdering(t *testing.T) {
 			} else if tc.found {
 				frames = append(frames, dismissed)
 			}
-			deadline := time.Now().Add(20 * time.Millisecond)
+			deadline := time.Now().Add(3 * time.Second)
 			reads := 0
 			r := streamModalReader{t: t, started: time.Now(), phase: "ack"}
 			r.read = func(got time.Time) (protocol.Envelope, bool) {
@@ -146,9 +146,6 @@ func TestStreamModalReaderOrdering(t *testing.T) {
 					t.Fatalf("receive deadline changed: got %v want %v", got, deadline)
 				}
 				if len(frames) == 0 {
-					timer := time.NewTimer(time.Until(got))
-					defer timer.Stop()
-					<-timer.C
 					return protocol.Envelope{}, false
 				}
 				env := frames[0]

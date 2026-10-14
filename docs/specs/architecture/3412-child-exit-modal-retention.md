@@ -123,3 +123,14 @@ Diagnostics skip quoted slog values atomically before selecting metadata fields:
 splitting on whitespace could mistake `modal_id=...` inside a quoted message for
 a real field and disclose content. The sentinel test covers that case and trace
 eviction independently of retained dismissal identity. Design and scope unchanged.
+
+A scratch overlay also forced the actual child-exit daemon test to consume its
+dismissal during the ack phase, without reordering or replaying ciphertext. With
+the phase-local wait restored it failed after 10.016525s, despite a matching
+retirement audit and dismissal already received at 9.228ms. The same controlled
+phase ordering with retention passed: dismissal at 10.283ms, replacement
+synchronized at 1.027929s. This reproduces a concrete false failure, not attribution
+of the historical gate failure. The permanent scripted regression exercises actual
+shown → dismissed → ack order; source exhaustion is immediate with a three-second
+safety budget, while `TestStreamModalReaderDeadline` checks real absolute expiry
+against an always-buffered unrelated stream.
