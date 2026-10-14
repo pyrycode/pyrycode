@@ -73,6 +73,8 @@ type replySuggestionConv struct {
 	pending                            *string
 	pendingSID                         string
 	userText, assistantText, messageID string
+	assistantTail                      string // last replyExchangeBytes of the final message
+	assistantBytes                     int    // full length of the final message
 	assistantFull                      bool
 	generation                         uint64
 	cancel                             context.CancelFunc
@@ -217,7 +219,7 @@ func (s *replySuggestions) noteAssistantText(convID string, ev turnevent.TextChu
 			return
 		}
 		if c.messageID != ev.MessageID {
-			c.messageID, c.assistantText, c.assistantFull = ev.MessageID, "", false
+			c.messageID, c.assistantText, c.assistantTail, c.assistantBytes, c.assistantFull = ev.MessageID, "", "", 0, false
 			c.assistant = false
 		}
 		if !c.assistantFull {
@@ -225,6 +227,10 @@ func (s *replySuggestions) noteAssistantText(convID string, ev turnevent.TextChu
 			c.assistantText = replyExchangePrefix(combined)
 			c.assistantFull = len(combined) > replyExchangeBytes
 		}
+		// The tail rolls for the whole message, so the end of a long reply
+		// reaches the fallback alongside its retained opening.
+		c.assistantTail = replyExchangeTail(c.assistantTail+ev.Text, replyExchangeBytes)
+		c.assistantBytes += len(ev.Text)
 		// Eligibility considers all chunks, even after bounded retention fills.
 		c.assistant = c.assistant || strings.TrimSpace(ev.Text) != ""
 	}
@@ -652,8 +658,8 @@ func (s *replySuggestions) cancelLocked(c *replySuggestionConv) {
 func (s *replySuggestions) resetFallbackLocked(c *replySuggestionConv) {
 	s.cancelLocked(c)
 	c.generation++
-	c.userText, c.assistantText, c.messageID = "", "", ""
-	c.assistantFull, c.attempt, c.windowDone = false, false, false
+	c.userText, c.assistantText, c.assistantTail, c.messageID = "", "", "", ""
+	c.assistantBytes, c.assistantFull, c.attempt, c.windowDone = 0, false, false, false
 }
 
 func (s *replySuggestions) startFallbackLocked(convID string, c *replySuggestionConv) {
@@ -664,7 +670,8 @@ func (s *replySuggestions) startFallbackLocked(convID string, c *replySuggestion
 	ctx, cancel := context.WithCancel(s.parent)
 	s.cancelLocked(c)
 	c.cancel = cancel
-	generation, user, assistant, sid, source := c.generation, c.userText, c.assistantText, c.turnSID, c.live
+	generation, user, sid, source := c.generation, c.userText, c.turnSID, c.live
+	assistant := replyExchangeAssistant(c.assistantText, c.assistantTail, c.assistantBytes)
 	s.workers.Add(1)
 	go func() {
 		defer s.workers.Done()
