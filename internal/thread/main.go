@@ -161,6 +161,9 @@ func (f *Fold) mainWork(e history.Entry) bool {
 
 func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string, shown bool, st *mainTurn, child bool) bool {
 	ending := e.Type == protocol.TypeTurnEnd || e.Type == "main_turn_interrupted"
+	if child && st != nil && st.text >= 0 && (ending || e.Type == protocol.TypeAssistantDelta || e.Type == protocol.TypeToolUse) {
+		f.restoreChild(st.text)
+	}
 	if ending {
 		item := Item{ID: e.ID, Order: e.ID, Rev: e.ID, Kind: "turn_end", Turn: id.TurnID, Status: status, Summary: summary, Shown: shown}
 		if !child {
@@ -258,6 +261,7 @@ func (f *Fold) closeText(st *mainTurn, rev uint64) {
 	if st.text < 0 {
 		return
 	}
+	f.restoreChild(st.text)
 	item := &f.items[st.text]
 	if item.Active {
 		item.Status, item.Active, item.Rev = "done", false, max(item.ID, rev)
@@ -268,6 +272,7 @@ func (f *Fold) applyTerminal(call *mainCall) {
 	if call.item < 0 || call.terminal == nil || call.launcher || (call.shell != nil && call.shell.linked) {
 		return
 	}
+	f.restoreChild(call.item)
 	item := &f.items[call.item]
 	item.Status, item.Active, item.Rev = call.terminal.status, false, max(item.ID, call.terminal.id)
 	f.setContent(call.item, call.terminal.field, call.terminal.raw)
