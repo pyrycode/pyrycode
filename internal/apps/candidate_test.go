@@ -73,6 +73,9 @@ func TestCandidateHelperProcess(t *testing.T) {
 	}
 	fmt.Fprintln(f, phase)
 	f.Close()
+	if os.WriteFile(c.Log+".tmp", []byte(os.Getenv("TMPDIR")), 0600) != nil {
+		os.Exit(92)
+	}
 	for _, k := range []string{"NOISE_SECRET", "NODE_OPTIONS", "PYRY_APP_DATA_DIR", "PYRY_APP_DB_PATH", "ANTHROPIC_API_KEY"} {
 		if os.Getenv(k) != "" {
 			os.Exit(93)

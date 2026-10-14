@@ -27,6 +27,19 @@ real Node and does not establish a complete supported-Node candidate run;
 `TestCandidateValidation` separately covers runtime admission with controlled
 Node versions. See [input/runtime boundaries](apps-package-validation-and-stored-identity.md#checked-preparation-inputs).
 
+Temporary-data cleanup alone cannot prove safe placement: staging cleanup removed
+the old TMPDIR even while the template rejected its service data there.
+`TestCandidateTemporaryRejectsAppTrees` rejects lexical and symlink-resolved app
+trees; `TestCandidateTemporaryCleanup` checks private storage during commands and
+removal after success, failure and cancellation. `TestCandidateSupportedTemplate`
+creates a fresh maintained app through `Registry.Create` and runs the actual
+`PrepareCandidate` environment with supported Node and its npm CLI, selected with
+`HOSTED_APP_NODE` and `HOSTED_APP_NPM_CLI`. It requires nonzero maintained test
+counts, all passed with zero failures/skips, before build and recording, then
+checks `VerifyBuild`, matching history after reopen and unchanged source/persistent
+data. An ordinary-shell template run or a skipped supported-Node arm misses this
+environment boundary; record executed/pass/fail/skip counts from the acceptance run.
+
 `TestCandidateDamagedRetry` reseals partial/changed builds so permission failure
 cannot mask fresh integrity checks, then compares retained snapshots and registry
 bytes to prove refusal without repair. `TestCandidatePreservesCommittedFields`
