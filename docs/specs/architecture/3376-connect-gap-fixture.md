@@ -8,7 +8,7 @@
 - `internal/relay/v2session_handshake.go` → `handleNoiseInit`: sends the response before opening and capturing supplied live state.
 - `internal/protocol/interactive_session.go` → `ModelAnnouncedPayload`: exact model and conversation assertion surface.
 - `docs/knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md` § Relay delivery: a later connection needs the replacement after its overtaken snapshot.
-- `docs/knowledge/features/development-verification.md` § Lifecycle and asynchronous boundaries: synchronization must observe the operation being ordered.
+- `docs/knowledge/features/development-verification.md` § Prove that tests distinguish the change: synchronization must observe the operation being ordered.
 - `CODING-STYLE.md`: channel coordination, bounded test waits, cleanup.
 
 ## Context
