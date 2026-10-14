@@ -67,6 +67,12 @@ therefore bars Start, Publish, reconciliation and removal on either retirement
 evidence or a journal, including after reopen; `usableLocked` also rejects the
 retirement flag. Clear it only after positive retirement and safe failure
 completion or health-confirmed recovery. No flag claims a verified backup.
+Conversely, a verified backup does not prove retired writers: persist this flag
+alongside the journal when service or stopped-validator cleanup is uncertain.
+Cancellation can race a newer stop, so preserve uncertainty against the latest
+matching journal without replacing its newer lifecycle fields. Otherwise a fresh
+owner could restore beneath a surviving writer. Stop/Shutdown must surface the
+cleanup error; `NewOwner` skips recovery while the flag remains set.
 
 ### Registry durability
 
@@ -78,7 +84,8 @@ later write derived from the old memory snapshot could overwrite the new on-disk
 decision. Keep the last durable memory snapshot, retain journal/backup evidence,
 bar target exposure and forbid destructive restoration. An uncertain activation
 cannot claim committed activation; uncertain finalization retains the previously
-durable committed decision. Startup recovery remains #3263. See
+durable committed decision. Before-activation startup recovery is implemented;
+reopened committed-journal resolution remains #3404. See
 [durability fixtures](apps-package-testing.md#publication-fixtures).
 
 ### Registry and process ownership

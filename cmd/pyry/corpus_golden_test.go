@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/thread"
 )
@@ -141,6 +143,30 @@ func testFoldGoldenCheck(t *testing.T, path, conv, identity string, input []byte
 			}
 			if digest != expected {
 				t.Fatalf("%s version %d mode %d: got %+v want %+v", path, version, mode, digest, expected)
+			}
+			if !*testWriteFoldBaselines {
+				h := history.New(t.TempDir())
+				id := conversations.ConversationID(conv)
+				for _, e := range entries[:version] {
+					if _, err := h.AppendWithMetadata(id, e.Type, e.Payload, e.TS, history.Metadata{Session: e.Session, Shown: e.Shown}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				s := thread.NewStore(h)
+				t.Cleanup(func() { _ = s.Shutdown() })
+				if err := s.Load(context.Background(), id); err != nil {
+					t.Fatal(err)
+				}
+				testShadowWait(t, func() bool {
+					return s.Snapshot(id).State == thread.StateUsable && s.Snapshot(id).Version == uint64(version)
+				})
+				snapshot := s.Snapshot(id)
+				if !reflect.DeepEqual(snapshot.Items, f.Items()) || snapshot.LastShownVersion != f.Observe().LastShownVersion {
+					t.Fatal("production reference publication differs from recorded baseline")
+				}
+				if err := s.Shutdown(); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 	}

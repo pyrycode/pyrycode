@@ -30,6 +30,9 @@ func (o *Owner) retirePrevious(p *publication) error {
 // Recovery ignores cancellation of the candidate, but never newer intent,
 // ownership, removal or shutdown. All callers hold registry then owner locks.
 func (o *Owner) recoveryCurrentLocked(app string, p *publication) error {
+	if p.startupRecovery {
+		return o.startupRecoveryCurrentLocked(app, p)
+	}
 	r := o.currentLocked(app)
 	if o.closed || p.invalidated || o.removing[app] || o.publishing[app] != p || r.AppID == "" || r.Desired != "available" || r.ActiveRelease != p.previous.ActiveRelease || r.Manifest != p.record.Manifest || r.Revision != p.record.Revision || o.registry.uncertain != nil {
 		return ErrStale
@@ -48,7 +51,7 @@ func (o *Owner) confirmRecoveryLocked(app string, g *generation) (Record, error)
 		}
 		r.State, r.PendingRelease, r.PublishJournal = "running", "", nil
 		r.RetirementPending = false
-		r.LastError = &LastError{"app.unavailable", "Update failed; previous release recovered"}
+		r.LastError = recoveryError(p)
 		return nil
 	}); e != nil {
 		return Record{}, e
@@ -59,15 +62,19 @@ func (o *Owner) confirmRecoveryLocked(app string, g *generation) (Record, error)
 }
 
 func (o *Owner) restartPrevious(app string, p *publication) error {
+	ctx := context.Background()
+	if p.startupRecovery {
+		ctx = p.ctx
+	}
 	private := p.record
 	private.ActiveRelease = p.previous.ActiveRelease
 	// Select the existing predecessor, then independently verify its sealed bytes.
-	dir, name, e := selectBuild(context.Background(), o.registry.root, private)
+	dir, name, e := selectBuild(ctx, o.registry.root, private)
 	if e != nil {
 		return e
 	}
 	_ = dir.Close()
-	build, e := VerifyBuild(context.Background(), o.registry.root, private.Manifest.ServerID(), app, name)
+	build, e := VerifyBuild(ctx, o.registry.root, private.Manifest.ServerID(), app, name)
 	if e != nil {
 		return e
 	}
@@ -100,6 +107,10 @@ func (o *Owner) restartPrevious(app string, p *publication) error {
 		p.g.cancel()
 		<-p.g.done
 		return ErrClosed
+	case <-ctx.Done():
+		p.g.cancel()
+		<-p.g.done
+		return ErrStale
 	}
 }
 
@@ -185,6 +196,9 @@ func (o *Owner) finishUpdateFailure(app string, p *publication, mutated bool, ph
 	}
 	clear := recoveryErr == nil && !restart
 	e := o.changePublicationLocked(app, p, context.Background(), func(r *Record) error {
+		if p.retirementErr != nil || g != nil && g.cleanupErr != nil {
+			r.RetirementPending = true
+		}
 		r.State, r.LastError = state, &LastError{code, message}
 		if clear {
 			r.PublishJournal, r.PendingRelease = nil, ""

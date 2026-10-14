@@ -65,6 +65,7 @@ type Store struct {
 	mu           sync.Mutex
 	history      *history.Store
 	forward      func(conversations.ConversationID) (storeReader, error)
+	lookup       func(context.Context, conversations.ConversationID, []uint64) ([]history.Entry, error)
 	beforeFold   func(context.Context, conversations.ConversationID) error
 	queryWork    func(bool) // optional work counter: true for preparation, false for requests
 	workers      map[conversations.ConversationID]*conversationWorker
@@ -100,6 +101,12 @@ func NewStore(h *history.Store, beforeFold ...func(context.Context, conversation
 		},
 		workers: make(map[conversations.ConversationID]*conversationWorker),
 		forward: func(id conversations.ConversationID) (storeReader, error) { return h.Forward(id, 0) },
+		lookup: func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return h.Lookup(id, ids)
+		},
 	}
 }
 
@@ -237,21 +244,29 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	if err != nil {
 		return
 	}
-	fold := New(string(id))
+	source := newRecentSource(func(ids []uint64) ([]history.Entry, error) { return s.lookup(ctx, id, ids) })
+	fold := newReferenceFold(string(id), source)
 	feed := func(entries []history.Entry) error {
 		if s.beforeFold != nil {
 			if err := s.beforeFold(ctx, id); err != nil {
 				return err
 			}
 		}
-		return fold.Feed(entries)
+		source.chunk = entries
+		err := fold.Feed(entries)
+		source.remember(entries)
+		return err
 	}
 	epoch := ""
 	if candidate.Epoch != "" {
 		if err := reader.Walk(ctx, candidate.Version, feed); err != nil {
 			return
 		}
-		if fold.Version() == candidate.Version && sameItems(candidate.Items, fold.Items()) {
+		items, err := fold.Render()
+		if err != nil {
+			return
+		}
+		if fold.Version() == candidate.Version && sameItems(candidate.Items, items) {
 			epoch = candidate.Epoch
 		}
 	}
@@ -269,7 +284,12 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		snapshot := Snapshot{State: StateUsable, Items: fold.Items(), Version: fold.Version(), LastShownVersion: fold.lastShown, Epoch: epoch}
+		items, err := fold.Render()
+		source.chunk = nil
+		if err != nil {
+			return err
+		}
+		snapshot := Snapshot{State: StateUsable, Items: items, Version: fold.Version(), LastShownVersion: fold.lastShown, Epoch: epoch}
 		for _, item := range fold.items {
 			snapshot.Active = snapshot.Active || item.Active
 		}
