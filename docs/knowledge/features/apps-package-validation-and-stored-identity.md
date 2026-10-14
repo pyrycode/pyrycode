@@ -88,9 +88,20 @@ Node alias first, covering ordinary `node` commands and env-node shebangs while
 preserving other dependency binaries. npm's configuration loader keys sources
 by pathname and rejects using one path for user and global config, even
 `/dev/null`; distinct empty private files avoid this and inherited global/user
-configuration. Staging-only HOME/cache/temp and an explicit environment exclude
-daemon credentials and persistent-data paths. App scripts remain trusted and can
-explicitly alter lookup or choose another executable; these guarantees provide
+configuration. HOME, npm cache/config and tool aliases remain private to staging;
+the explicit minimal environment excludes inherited daemon credentials and
+configuration, and supplies no app persistent-data paths.
+
+`candidateTemporary` allocates a fresh 0700 directory under fixed `/tmp`, independent
+of inherited daemon TMPDIR. It rejects `source`, `staging`, `builds` and `dist`
+components in both the allocated and symlink-resolved paths before exposing the
+resolved directory as TMPDIR. Template test data therefore stays outside
+source/staging/build/dist trees while the service's lexical and canonical
+unsafe-data-path rejection remains enforced. `PrepareCandidate` removes owned
+temporary data after success, failure or cancellation, once command/process-group
+cleanup has joined. Failed resolution or unsafe placement also removes owned
+storage; cleanup errors become sanitized preparation failures. App scripts remain
+trusted and can explicitly alter lookup or choose another executable; these guarantees provide
 no [OS sandbox](../decisions/043-hosted-app-runtime-and-isolation.md).
 See [candidate fixtures](apps-package-testing.md#checked-candidate-fixtures).
 
