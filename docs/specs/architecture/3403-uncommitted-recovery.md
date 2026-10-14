@@ -31,6 +31,8 @@ Registry-then-owner lock order covers admission/currentness/persistence only. Re
 | First publication, available/stopped | TestStartupPublicationRecovery |
 | Partial restore or restored-before-finalization; repeated reopen | TestStartupRecoveryRetry |
 | Stop, stopped→available reuse, removal or shutdown during parked restoration | TestStartupRecoveryInvalidation |
+| Newer stop during private health; validator-retirement uncertainty during cancellation | TestStartupRecoveryLateHealth, TestStartupRecoveryValidatorRetirement |
+| Revision ceiling across recovery/reopen | TestStartupRecoveryExhaustion |
 | Failed previous build/health/snapshot/finalization | TestStartupRecoveryFailures |
 | Stopped schema/preferences/checksum compatibility and real SQL restart | TestStartupTemplateRecovery |
 
@@ -56,3 +58,8 @@ Pending documentation stage: update `docs/knowledge/features/apps-package-lifecy
 - Threat model: trusted local service code and exclusive filesystem ownership remain required by the contract; after-activation decisions are out of scope (#3404).
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-14
+
+## Revisions
+- 2026-10-14: construction-time recovery needs fault hooks installed before any worker runs. Public NewOwner delegates to a private constructor accepting existing backupOps; no public API changes. Tests use that constructor only to park restoration and otherwise exercise the same Open/NewOwner path.
+- 2026-10-14: code review found live publication retirement uncertainty was retained only as a generic journal/error. Persist RetirementPending alongside the journal on group-retirement failure, including stopped validation cleanup, so a fresh owner cannot mistake a snapshot for proof of retired writers. Tighten usableLocked to accept a committed journal only for its live activated publication generation; opened committed journals remain barred for #3404.
+- 2026-10-14: cancellation can race validator cleanup. Preserve retirement uncertainty against the latest matching journal even after a newer stop, without replacing its lifecycle fields; Stop and Shutdown surface the cleanup error. Invalid saved preferences cannot be inserted into the maintained schema without violating SQL integrity, so the rejected snapshot fixture uses a permissive schema with invalid saved data; schema/readiness validation rejects it before finalization.
