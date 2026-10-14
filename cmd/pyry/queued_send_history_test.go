@@ -82,7 +82,7 @@ func TestSuggestionEnqueuerIdentity(t *testing.T) {
 	}
 	for i, device := range []string{"device-a", "device-b", ""} {
 		p := testSendFact(t, all[i])
-		if p.DeviceID != device || p.ConversationID != testConvID || p.AcceptedAt.IsZero() || all[i].Session.SessionID != "accepted-source" || all[i].Shown == nil || !*all[i].Shown {
+		if p.QueuedMessageID != uint64(i+1) || p.DeviceID != device || p.ConversationID != testConvID || p.AcceptedAt.IsZero() || all[i].Session.SessionID != "accepted-source" || all[i].Shown == nil || !*all[i].Shown {
 			t.Fatalf("acceptance: %+v %+v", p, all[i])
 		}
 		if i < 2 && (p.MessageID != "same-app" || p.Text != "safe" || p.ClientSentAt != formatClientSentAt(sent) || !reflect.DeepEqual(p.AttachmentIDs, []string{"attachment"})) {

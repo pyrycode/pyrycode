@@ -2,7 +2,10 @@ package realclaude
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,9 +57,50 @@ func shadowReplay(t *testing.T, h shadowHistory, e shadowExpected, generate bool
 		}
 		if generate {
 			e.Checkpoints[i].Items = snapshot.Items
-		} else if !reflect.DeepEqual(snapshot.Items, cp.Items) {
-			t.Fatal("retained expected rows or revisions differ")
+		} else {
+			current := shadowCurrentSendHandles(t, h, cp)
+			if !reflect.DeepEqual(snapshot.Items, current.Items) {
+				t.Fatal("retained expected rows or revisions differ")
+			}
 		}
 	}
 	return e
+}
+
+// shadowCurrentSendHandles projects historical rows to the acceptance-owned
+// handle contract without rewriting the captured observations or provenance.
+func shadowCurrentSendHandles(t *testing.T, h shadowHistory, cp shadowCheckpoint) shadowCheckpoint {
+	t.Helper()
+	cp.Items = slices.Clone(cp.Items)
+	for i, item := range cp.Items {
+		if item.ID == 0 || item.ID > uint64(len(h.Entries)) {
+			continue
+		}
+		source := h.Entries[item.ID-1]
+		if source.Type != "send_accepted" {
+			continue
+		}
+		var accepted, content map[string]json.RawMessage
+		if json.Unmarshal(source.Payload, &accepted) != nil || json.Unmarshal(item.Content, &content) != nil {
+			t.Fatal("invalid captured send content")
+		}
+		hasHandle := false
+		for key := range accepted {
+			hasHandle = hasHandle || strings.EqualFold(key, "queued_msg_id")
+		}
+		if hasHandle {
+			continue
+		}
+		for key := range content {
+			if strings.EqualFold(key, "queued_msg_id") {
+				delete(content, key)
+				var err error
+				cp.Items[i].Content, err = json.Marshal(content)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	return cp
 }

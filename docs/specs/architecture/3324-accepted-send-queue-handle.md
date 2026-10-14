@@ -82,3 +82,8 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+
+- 2026-10-14: The retained shadow capture predates acceptance handles and its delivered acceptance row inherited the message handle under the old fold rules. `TestThreadShadowRetainedEvidence` fails under the required legacy-absence contract. Preserve captured bytes/provenance and independently validated historical rows; project only legacy acceptance handles out of expected rows in `shadowReplay` before comparison with current fold/store output. Add an offline projection regression in `internal/e2e/realclaude/thread_shadow_retained_test.go`; read `thread_shadow_replay_test.go`, `thread_shadow_schema_test.go` → `shadowRawRows`, and `docs/knowledge/features/e2e-realclaude.md` § Retained shadow history evidence. Compile the tagged live package without running live tests. This changes test expectations only, with no extra production surface; total written work remains below 800 lines.
+- 2026-10-14: `TestQueuedSendHandleActions` proves missed acceptance acknowledgement recovery and live queued additions/terminal changes; `TestQueuedSendHandleQueries` proves restart loss/reuse catch-up. Live additions must precede completed same-version catch-up, which can suppress duplicate publication.

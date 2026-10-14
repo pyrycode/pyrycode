@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ type queuedSendFact struct {
 	ConversationID  string    `json:"conversation_id"`
 	DeviceID        string    `json:"device_id,omitempty"`
 	MessageID       string    `json:"message_id,omitempty"`
+	QueuedMessageID uint64    `json:"queued_msg_id,omitempty"`
 	Text            string    `json:"text,omitempty"`
 	AttachmentIDs   []string  `json:"attachment_ids,omitempty"`
 	AcceptedAt      time.Time `json:"accepted_at,omitzero"`
@@ -46,6 +48,18 @@ func validQueuedSendFact(convID, typ string, raw json.RawMessage) bool {
 	var p queuedSendFact
 	if json.Unmarshal(raw, &p) != nil || p.ConversationID != convID {
 		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	for key, value := range fields {
+		if strings.EqualFold(key, "queued_msg_id") {
+			var id uint64
+			if json.Unmarshal(value, &id) != nil || id == 0 {
+				return false
+			}
+		}
 	}
 	if typ == historySendAccepted {
 		return !p.AcceptedAt.IsZero()
@@ -120,9 +134,13 @@ func (h *queuedSendHistory) append(typ string, p queuedSendFact, at time.Time, s
 }
 
 func (h *queuedSendHistory) accepted(c string, m msgqueue.QueuedMessage) {
+	if m.ID == 0 {
+		h.logger.Warn("history: invalid queue ID", "event", "send_history.invalid_queue_id")
+		return
+	}
 	source := h.observedSource(c)
 	ref := h.reference(c, m.ID)
-	p := queuedSendFact{ConversationID: c, DeviceID: m.DeviceID, MessageID: m.MessageID, Text: m.Text, AttachmentIDs: m.AttachmentIDs, AcceptedAt: m.TS, ClientSentAt: formatClientSentAt(m.ClientSentAt)}
+	p := queuedSendFact{ConversationID: c, DeviceID: m.DeviceID, MessageID: m.MessageID, QueuedMessageID: m.ID, Text: m.Text, AttachmentIDs: m.AttachmentIDs, AcceptedAt: m.TS, ClientSentAt: formatClientSentAt(m.ClientSentAt)}
 	ref.id = h.append(historySendAccepted, p, m.TS, source)
 	h.notify(h.receipt(historySendAccepted, p, m.TS, ref.id))
 	close(ref.ready)
