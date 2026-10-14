@@ -1,8 +1,9 @@
 # `internal/apps` — durable host-app registrations
 
 This package owns strict manifest and retained-artifact validation, immutable
-build installation with independent verification, bundled registered source
-creation and identity-based inspection, durable registrations, persistent-data snapshots
+build installation with independent verification, checked candidate preparation
+and recording, bundled registered source creation and identity-based inspection,
+durable registrations, persistent-data snapshots
 with restart verification and repeatable restoration, callable health-confirmed
 committed-release process ownership, generation-bound stable response preparation
 and confined callable assets independent of conversations.
