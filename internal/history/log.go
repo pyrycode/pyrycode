@@ -238,6 +238,7 @@ type convLog struct {
 
 	latestDisplayableID     uint64
 	latestDisplayableLoaded bool
+	lookupBounds            map[uint64]lookupBound
 
 	syncDone       bool
 	syncPending    map[uint64]bool
@@ -253,12 +254,11 @@ type Store struct {
 	maxSegmentBytes int64
 	convs           map[conversations.ConversationID]*convLog
 	followers       map[conversations.ConversationID]map[chan struct{}]struct{}
+	lookupCache     segmentCache
 	syncIO          syncIO
 
-	// AC-4 instrumentation: the two numbers "serving the newest page does work
-	// bounded by the requested page size, not by the log size" is stated in.
-	// Bumped at the single place a segment file is read, and read back by
-	// in-package tests through readStats.
+	// Actual segment opens and bytes, including lookup-prefix discovery.
+	// Cache hits do no segment I/O. Tests observe these through readStats.
 	readBytes      int64
 	segmentsOpened int
 }
@@ -282,6 +282,7 @@ func newStore(instanceDir string, maxSegmentBytes int64) *Store {
 		instanceDir:     instanceDir,
 		maxSegmentBytes: maxSegmentBytes,
 		convs:           make(map[conversations.ConversationID]*convLog),
+		lookupCache:     segmentCache{limit: 8 * 1024 * 1024},
 		syncIO:          syncIO{open: os.OpenFile, sync: (*os.File).Sync, close: (*os.File).Close},
 	}
 }
@@ -403,9 +404,17 @@ func (s *Store) AppendWithMetadata(convID conversations.ConversationID, typ stri
 		c.latestDisplayableID, c.latestDisplayableLoaded = id, true
 	}
 	if seg != c.seg {
+		c.rememberLookupBound(seg, written, id)
 		c.seg, c.segBytes = seg, written
 	} else {
 		c.segBytes += written
+		if bound, ok := c.lookupBounds[seg]; ok {
+			first := bound.firstID
+			if first == 0 {
+				first = id
+			}
+			c.rememberLookupBound(seg, c.segBytes, first)
+		}
 	}
 	s.notifyCommitted(convID)
 	return id, nil
@@ -715,6 +724,11 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 		if err != nil {
 			return nil, err
 		}
+		first := uint64(0)
+		if len(entries) > 0 {
+			first = entries[0].entry.ID
+		}
+		c.rememberLookupBound(segs[i].num, size, first)
 		if i == len(segs)-1 {
 			c.seg, c.segBytes = segs[i].num, size
 			if !complete {
