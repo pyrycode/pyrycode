@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -40,10 +41,10 @@ const (
 // Claude honours only the LAST --settings it is given, and every pool session
 // already carries its own --settings file (the MCP enablement booleans, #943).
 // A second flag would silently drop one of the two, so the operator file is
-// merged into the session's file instead: the top-level keys of both, the
-// session's winning on a clash, written to a daemon-owned file that the
-// launch's argv then names. A launch with no --settings gets the operator file
-// itself.
+// merged into the session's file instead (see mergeSettings: hooks from both
+// sides, any other shared key the session's), written to a daemon-owned file
+// that the launch's argv then names. A launch with no --settings gets the
+// operator file itself.
 //
 // The file is re-read on every launch attempt, so an edit applies to the next
 // Claude start with no daemon restart, and a file that has gone missing or
@@ -130,14 +131,12 @@ func (s *claudeSettings) compose(current string) (string, error) {
 			return "", fmt.Errorf("session settings: %w", err)
 		}
 	}
-	merged := make(map[string]json.RawMessage, len(operator)+len(session))
-	for k, v := range operator {
-		merged[k] = v
+	merged, overridden, err := mergeSettings(operator, session)
+	if err != nil {
+		return "", err
 	}
-	// The session's keys win: they are what keeps the child from stopping on a
-	// startup modal no client can answer.
-	for k, v := range session {
-		merged[k] = v
+	if len(overridden) > 0 {
+		s.logger.Warn("claude settings: session settings override the daemon settings file", "keys", overridden, "path", s.path)
 	}
 	data, err := json.Marshal(merged)
 	if err != nil {
@@ -149,6 +148,63 @@ func (s *claudeSettings) compose(current string) (string, error) {
 		return "", fmt.Errorf("write merged settings: %w", err)
 	}
 	return out, nil
+}
+
+// mergeSettings combines the operator file with a session's own settings.
+// hooks merge per event: each event's matcher groups are the operator's
+// followed by the session's, so both sides' hooks run. Any other key present
+// on both sides takes the session's value, because the session's keys are what
+// keep the child from stopping on a startup modal no client can answer; those
+// keys are returned, sorted, so the caller can report them.
+func mergeSettings(operator, session map[string]json.RawMessage) (map[string]json.RawMessage, []string, error) {
+	merged := make(map[string]json.RawMessage, len(operator)+len(session))
+	for k, v := range operator {
+		merged[k] = v
+	}
+	var overridden []string
+	for k, v := range session {
+		prev, clash := merged[k]
+		switch {
+		case !clash:
+			merged[k] = v
+		case k == "hooks":
+			hooks, err := mergeHooks(prev, v)
+			if err != nil {
+				return nil, nil, err
+			}
+			merged[k] = hooks
+		default:
+			merged[k] = v
+			overridden = append(overridden, k)
+		}
+	}
+	slices.Sort(overridden)
+	return merged, overridden, nil
+}
+
+// mergeHooks appends the session's matcher groups after the operator's for
+// every hook event either side names. Both must be objects of arrays, the
+// shape Claude reads; anything else is refused rather than guessed at.
+func mergeHooks(operator, session json.RawMessage) (json.RawMessage, error) {
+	var a, b map[string][]json.RawMessage
+	if json.Unmarshal(operator, &a) != nil {
+		return nil, errors.New("settings file hooks: want an object of arrays")
+	}
+	if json.Unmarshal(session, &b) != nil {
+		return nil, errors.New("session settings hooks: want an object of arrays")
+	}
+	out := make(map[string][]json.RawMessage, len(a)+len(b))
+	for event, groups := range a {
+		out[event] = append(out[event], groups...)
+	}
+	for event, groups := range b {
+		out[event] = append(out[event], groups...)
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("encode merged hooks: %w", err)
+	}
+	return data, nil
 }
 
 // readSettingsObject reads one settings file and returns its top-level keys. A

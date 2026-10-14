@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -196,9 +198,9 @@ func TestClaudeSettingsCompose_Refusals(t *testing.T) {
 	}
 }
 
-// fakeArgvClaude is a claude stand-in that records each launch's argv as one
-// JSON line, together with the content of its --settings file, then crashes on
-// its first launch and stays up on every later one.
+// fakeArgvClaude is a claude stand-in that appends one record per launch to
+// log: an ARGS line, a SETTINGS line with its --settings file's content, and an
+// END line. It crashes on its first launch and stays up on every later one.
 func fakeArgvClaude(t *testing.T) (bin, log string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -210,7 +212,7 @@ for a in "$@"; do
   if [ "$prev" = "--settings" ]; then settings="$a"; fi
   prev="$a"
 done
-{ printf 'ARGS'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; printf 'SETTINGS '; cat "$settings"; printf '\n'; } >> "` + log + `"
+{ printf 'ARGS'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; printf 'SETTINGS '; cat "$settings"; printf '\nEND\n'; } >> "` + log + `"
 if [ ! -e "` + dir + `/crashed" ]; then : > "` + dir + `/crashed"; exit 1; fi
 exec sleep 3600
 `
@@ -249,25 +251,23 @@ func TestStreamRunnerFactory_AppliesDaemonSettingsOnEveryLaunch(t *testing.T) {
 	go func() { done <- runner.Run(ctx) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	var lines []string
+	var records []argvRecord
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		data, _ := os.ReadFile(log)
-		lines = strings.Split(strings.TrimSpace(string(data)), "\n")
-		if len(lines) >= 4 {
+		if records = readArgvRecords(t, log); len(records) >= 2 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(lines) < 4 {
-		t.Fatalf("want two launches, log: %q", lines)
+	if len(records) < 2 {
+		t.Fatalf("want two launches, got %d", len(records))
 	}
 	// The relaunch after the crash goes through the same composition. Its id
 	// flag form is the transcript probe's choice, which reads the real
 	// ~/.claude/projects here, so the --resume form is asserted one layer down
 	// in internal/streamsup's TestSettingsComposerEveryLaunch instead.
 	for i := 0; i < 2; i++ {
-		args, content := strings.Fields(lines[2*i])[1:], strings.TrimPrefix(lines[2*i+1], "SETTINGS ")
+		args, content := records[i].args, records[i].settings
 		if n := countFlag(args, "--settings"); n != 1 {
 			t.Fatalf("launch %d carries %d --settings flags: %q", i, n, args)
 		}
@@ -306,9 +306,8 @@ func TestStreamRunnerFactory_NoDaemonSettingsLeavesArgvAlone(t *testing.T) {
 	t.Cleanup(func() { cancel(); <-done })
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		data, _ := os.ReadFile(log)
-		if line, _, ok := strings.Cut(string(data), "\n"); ok {
-			args := strings.Fields(line)[1:]
+		if records := readArgvRecords(t, log); len(records) > 0 {
+			args := records[0].args
 			want := []string{"--settings", session}
 			for i := 0; i+1 < len(args); i++ {
 				if args[i] == "--settings" && !reflect.DeepEqual(args[i:i+2], want) {
@@ -323,6 +322,39 @@ func TestStreamRunnerFactory_NoDaemonSettingsLeavesArgvAlone(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("child never launched")
+}
+
+type argvRecord struct {
+	args     []string
+	settings string
+}
+
+// readArgvRecords parses only the complete records in fakeArgvClaude's log: a
+// record counts once its END line is written, so a launch still mid-write is
+// never read half-finished.
+func readArgvRecords(t *testing.T, log string) []argvRecord {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if err != nil {
+		return nil
+	}
+	var out []argvRecord
+	var cur []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		if line != "END" {
+			cur = append(cur, line)
+			continue
+		}
+		if len(cur) != 2 || !strings.HasPrefix(cur[0], "ARGS") || !strings.HasPrefix(cur[1], "SETTINGS ") {
+			t.Fatalf("malformed launch record: %q", cur)
+		}
+		out = append(out, argvRecord{args: strings.Fields(cur[0])[1:], settings: strings.TrimPrefix(cur[1], "SETTINGS ")})
+		cur = nil
+	}
+	return out
 }
 
 func countFlag(args []string, flag string) int {
@@ -348,5 +380,100 @@ func TestRunSupervisor_RefusesRelativeClaudeSettings(t *testing.T) {
 	}
 	if _, statErr := os.Stat(socket); statErr == nil {
 		t.Fatal("control socket opened despite a malformed settings value")
+	}
+}
+
+func TestClaudeSettingsCompose_MergesHooksPerEvent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	operator := filepath.Join(dir, "daemon-settings.json")
+	writeSettingsFixture(t, operator, `{
+		"hooks": {
+			"Stop": [{"hooks": [{"type": "command", "command": "operator-stop"}]}],
+			"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "operator-prompt"}]}]
+		},
+		"model": "operator-model",
+		"env": {"A": "1"}
+	}`, 0o600)
+	session := filepath.Join(dir, "session.json")
+	writeSettingsFixture(t, session, `{
+		"hooks": {
+			"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "session-stop"}]}],
+			"SessionStart": [{"hooks": [{"type": "command", "command": "session-start"}]}]
+		},
+		"model": "session-model",
+		"enableAllProjectMcpServers": true
+	}`, 0o600)
+	var logs bytes.Buffer
+	s, err := newClaudeSettings(operator, "", filepath.Join(dir, "instance"), slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.compose(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Hooks map[string][]struct {
+			Hooks []struct{ Command string }
+		}
+		Model                      string
+		Env                        map[string]string
+		EnableAllProjectMcpServers bool
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	commands := func(event string) []string {
+		var cs []string
+		for _, group := range got.Hooks[event] {
+			for _, h := range group.Hooks {
+				cs = append(cs, h.Command)
+			}
+		}
+		return cs
+	}
+	for event, want := range map[string][]string{
+		"Stop":             {"operator-stop", "session-stop"},
+		"UserPromptSubmit": {"operator-prompt"},
+		"SessionStart":     {"session-start"},
+	} {
+		if got := commands(event); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s hooks = %q, want %q", event, got, want)
+		}
+	}
+	if got.Model != "session-model" || got.Env["A"] != "1" || !got.EnableAllProjectMcpServers {
+		t.Errorf("merged = %s", data)
+	}
+	if n := strings.Count(logs.String(), "level=WARN"); n != 1 || !strings.Contains(logs.String(), `msg="claude settings: session settings override the daemon settings file" keys=[model]`) {
+		t.Fatalf("override warning = %q", logs.String())
+	}
+}
+
+func TestClaudeSettingsCompose_RefusesMalformedHooks(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, operator, session, wantErr string }{
+		{name: "operator hooks not an object", operator: `{"hooks":[]}`, session: `{"hooks":{}}`, wantErr: "settings file hooks"},
+		{name: "operator event not an array", operator: `{"hooks":{"Stop":{}}}`, session: `{"hooks":{}}`, wantErr: "settings file hooks"},
+		{name: "session hooks not an object", operator: `{"hooks":{}}`, session: `{"hooks":"x"}`, wantErr: "session settings hooks"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			operator := filepath.Join(dir, "daemon-settings.json")
+			writeSettingsFixture(t, operator, tc.operator, 0o600)
+			session := filepath.Join(dir, "session.json")
+			writeSettingsFixture(t, session, tc.session, 0o600)
+			s, err := newClaudeSettings(operator, "", filepath.Join(dir, "instance"), discardLogger())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.compose(session); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+		})
 	}
 }
