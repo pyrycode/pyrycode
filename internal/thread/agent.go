@@ -19,10 +19,23 @@ type agentKey struct {
 	scope    uint64
 }
 type agentGroup struct {
-	key   agentKey
-	calls map[string]*agentCall
-	tasks map[string]*agentTask
+	key     agentKey
+	calls   map[string]*agentCall
+	tasks   map[string]*agentTask
+	counts  *agentWorkCounts
+	taskIDs map[string][]string
 }
+
+// agentWorkCounts counts inspected candidates, lookups and index maintenance.
+// Only package tests enable it on their own serialized fold.
+type agentWorkCounts struct{ work, promotions int }
+
+func (g *agentGroup) count(n int) {
+	if g.counts != nil {
+		g.counts.work += n
+	}
+}
+
 type agentCall struct {
 	ordinary *mainCall
 	linked   bool
@@ -112,6 +125,9 @@ func (f *Fold) agentWork(e history.Entry) bool {
 	if !durable && !mapped {
 		return false
 	}
+	if f.agentCounts != nil {
+		f.agentCounts.work += 2
+	}
 	if e.Session != nil && e.Session.Kind != "claude" {
 		return durable
 	}
@@ -180,7 +196,13 @@ func (f *Fold) agentWork(e history.Entry) bool {
 			return true
 		}
 		var match *agentGroup
+		if f.agentCounts != nil {
+			f.agentCounts.work++
+		}
 		for _, obs := range f.agentObservations[*ref.value] {
+			if f.agentCounts != nil {
+				f.agentCounts.work++
+			}
 			identity := obs.call
 			if ref.task {
 				identity = obs.task
@@ -287,6 +309,9 @@ func (f *Fold) agentWork(e history.Entry) bool {
 		}
 		usable := roster.Tasks[:0]
 		for _, row := range roster.Tasks {
+			if f.agentCounts != nil {
+				f.agentCounts.work++
+			}
 			id := agentFact{Truncated: row.Truncated, Dropped: row.Dropped}
 			if id.usable(row.Task, "task_id") {
 				usable = append(usable, row)
@@ -307,12 +332,16 @@ func (f *Fold) agentWork(e history.Entry) bool {
 		g = f.agentGroups[original]
 	}
 	if typ == "agent_ended_with_session" && g != nil && p.Task != "" && call != "" {
+		if f.agentCounts != nil {
+			f.agentCounts.work++
+		}
 		if task := g.tasks[p.Task]; task != nil && task.call != "" && task.call != call {
 			return true
 		}
 	}
+	var promoted []string
 	if promote {
-		f.promoteShellEvidence(key)
+		promoted = f.promoteShellEvidence(key)
 		g = f.agentGroups[key]
 	}
 	if durable && !referenced {
@@ -321,6 +350,18 @@ func (f *Fold) agentWork(e history.Entry) bool {
 	if g == nil {
 		g = &agentGroup{key: key, calls: map[string]*agentCall{}, tasks: map[string]*agentTask{}}
 		f.agentGroups[key] = g
+	}
+	g.counts = f.agentCounts
+	affected := make(map[string]struct{})
+	mark := func(id string) {
+		g.count(1)
+		if id != "" {
+			affected[id] = struct{}{}
+		}
+	}
+	mark(call)
+	for _, id := range promoted {
+		mark(id)
 	}
 	if call != "" && (durable || toolReport) {
 		parent, field := p.ParentCall, "parent_tool_call_id"
@@ -369,14 +410,16 @@ func (f *Fold) agentWork(e history.Entry) bool {
 		if p.Status == "denied" {
 			field = "denial"
 		}
-		agentAddReport(&g.call(call).reports, e, p.Status, field, durable)
+		g.addReport(&g.call(call).reports, e, p.Status, field, durable)
 	case protocol.TypeBackgroundTaskRoster:
 		for _, row := range roster.Tasks {
 			task := g.task(row.Task)
+			mark(task.call)
 			observe("", row.Task)
 			id := agentFact{Truncated: row.Truncated, Dropped: row.Dropped}
 			if id.usable(row.Call, "tool_call_id") {
-				task.call = row.Call
+				g.associate(row.Task, task, row.Call)
+				mark(row.Call)
 				if task.link == nil || (!durable && !task.linkMapped) {
 					task.linkMapped = !durable
 					task.link = append(json.RawMessage(nil), e.Payload...)
@@ -386,11 +429,13 @@ func (f *Fold) agentWork(e history.Entry) bool {
 	default:
 		if p.Task != "" {
 			task := g.task(p.Task)
+			mark(task.call)
 			if typ == "background_task_observed" || !durable {
 				observe("", p.Task)
 			}
 			if call != "" && (typ == "background_task_linked" || typ == protocol.TypeBackgroundTaskStarted || typ == "background_task_gone") {
-				task.call = call
+				g.associate(p.Task, task, call)
+				mark(call)
 				if task.link == nil || (!durable && !task.linkMapped) {
 					task.linkMapped = !durable
 					task.link = append(json.RawMessage(nil), e.Payload...)
@@ -401,19 +446,23 @@ func (f *Fold) agentWork(e history.Entry) bool {
 				if typ == "agent_ended_with_session" || typ == "background_task_gone" {
 					field = "ending"
 				}
-				agentAddReport(&task.reports, e, p.Status, field, durable)
+				g.addReport(&task.reports, e, p.Status, field, durable)
 			}
 		}
 		if typ == "agent_ended_with_session" && call != "" {
-			agentAddReport(&g.call(call).reports, e, p.Status, "ending", true)
+			g.addReport(&g.call(call).reports, e, p.Status, "ending", true)
 		}
 	}
-	for id, c := range g.calls {
-		f.applyAgent(g, id, c, e.ID)
+	for id := range affected {
+		g.count(2)
+		if c := g.calls[id]; c != nil {
+			f.applyAgent(g, id, c, e.ID)
+		}
 	}
 	return durable || (typ == protocol.TypeToolUse && (p.Name == "Agent" || p.Name == "Task"))
 }
 func (g *agentGroup) call(id string) *agentCall {
+	g.count(1)
 	c := g.calls[id]
 	if c == nil {
 		c = &agentCall{item: -1}
@@ -422,6 +471,7 @@ func (g *agentGroup) call(id string) *agentCall {
 	return c
 }
 func (g *agentGroup) task(id string) *agentTask {
+	g.count(1)
 	t := g.tasks[id]
 	if t == nil {
 		t = &agentTask{}
@@ -430,10 +480,60 @@ func (g *agentGroup) task(id string) *agentTask {
 	return t
 }
 
+// associate maintains lexical task order within one scoped call ownership.
+func (g *agentGroup) associate(id string, task *agentTask, call string) {
+	if task.call == call {
+		return
+	}
+	g.removeTaskID(task.call, id)
+	task.call = call
+	g.insertTaskID(call, id)
+}
+
+func (g *agentGroup) taskPosition(ids []string, id string) (int, bool) {
+	return slices.BinarySearchFunc(ids, id, func(a, b string) int {
+		g.count(1)
+		return strings.Compare(a, b)
+	})
+}
+
+func (g *agentGroup) removeTaskID(call, id string) {
+	if call == "" {
+		return
+	}
+	g.count(1)
+	ids := g.taskIDs[call]
+	if i, found := g.taskPosition(ids, id); found {
+		g.count(len(ids) - i)
+		ids = slices.Delete(ids, i, i+1)
+		if len(ids) == 0 {
+			delete(g.taskIDs, call)
+		} else {
+			g.taskIDs[call] = ids
+		}
+	}
+}
+
+func (g *agentGroup) insertTaskID(call, id string) {
+	if call == "" {
+		return
+	}
+	if g.taskIDs == nil {
+		g.taskIDs = make(map[string][]string)
+	}
+	g.count(1)
+	ids := g.taskIDs[call]
+	if i, found := g.taskPosition(ids, id); !found {
+		g.count(len(ids) - i + 1)
+		g.taskIDs[call] = slices.Insert(ids, i, id)
+	}
+}
+
 // Companion evidence counts once; the earliest entry owns terminal order while
 // the mapped report supplies content. Equal later reports do not replace it.
-func agentAddReport(reports *[]*agentReport, e history.Entry, status, field string, durable bool) {
+func (g *agentGroup) addReport(reports *[]*agentReport, e history.Entry, status, field string, durable bool) {
 	for _, r := range *reports {
+		g.count(1)
 		if r.status == status && r.field == field && ((durable && r.mapped && !r.durable) || (!durable && r.durable && !r.mapped)) {
 			r.id = min(r.id, e.ID)
 			r.durable, r.mapped = true, true
@@ -449,6 +549,7 @@ func agentTerminal(status string) bool {
 	return status != "" && status != "stopping"
 }
 func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
+	g.count(1)
 	if c.item < 0 {
 		return
 	}
@@ -466,19 +567,15 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	}
 	linked := false
 	var reports []*agentReport
-	taskIDs := make([]string, 0, len(g.tasks))
-	for taskID := range g.tasks {
-		taskIDs = append(taskIDs, taskID)
-	}
-	slices.Sort(taskIDs)
-	for _, taskID := range taskIDs {
+	g.count(1)
+	for _, taskID := range g.taskIDs[id] {
+		g.count(2)
 		task := g.tasks[taskID]
-		if task.call == id {
-			linked = true
-			put("task_id", taskID)
-			put("task_link", task.link)
-			reports = append(reports, task.reports...)
-		}
+		linked = true
+		put("task_id", taskID)
+		put("task_link", task.link)
+		reports = append(reports, task.reports...)
+		g.count(len(task.reports))
 	}
 	c.linked = linked
 	if c.ordinary != nil && !linked {
@@ -487,7 +584,9 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	}
 	// Entry ordering, rather than map iteration, decides both enrichment and finals.
 	reports = append(reports, c.reports...)
+	g.count(len(c.reports))
 	slices.SortStableFunc(reports, func(a, b *agentReport) int {
+		g.count(2)
 		if a.id < b.id {
 			return -1
 		}
@@ -499,6 +598,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	status, active, ended := "running", true, uint64(0)
 	var final *agentReport
 	for _, r := range reports {
+		g.count(1)
 		if c.ordinary != nil && r.mapped && !shellReportMatches(r, item.Turn) {
 			continue
 		}
@@ -531,6 +631,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		put(final.field, final.raw)
 		// Status-empty reports can enrich content after an ending without ending anew.
 		for _, r := range reports {
+			g.count(1)
 			if r.field == "task_report" && r.status == "" && r.mapped {
 				put("task_update", r.raw)
 			}
