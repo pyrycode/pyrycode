@@ -37,6 +37,8 @@ Registry then owner is the sole nested lock order. Disk/build/process work and w
 | Activation durability uncertainty or committed journal-clear failure | `TestUpdatePersistence` |
 | Historical recorded version retry | `TestUpdateSuccessAndRetry` |
 | Transactional SQL failure and post-migration startup failure | `TestUpdateTemplateRollback` |
+| Live migration descendant with denied retirement | `TestUpdateWriterRetirementUncertain` |
+| Caller cancellation recovery and stopped → available intent reuse | `TestUpdateCancellationRecovery` |
 
 ## Error handling
 All failed candidates return static `PublishFailure` feedback distinguishing retained predecessor, confirmed restoration, failed restoration and unconfirmed recovery. Restore I/O errors use `app.io_failed`. Do not leak paths, child output or secrets. Preserve previous builds/backups and journals until durable completion; no destructive cleanup is added.
@@ -63,3 +65,8 @@ Pending documentation stage: `docs/hosted-apps.md`, “Registration and observed
 - Threat model: trusted service code may affect OS/fleet state outside app data; that remains outside the hosted-app rollback contract. Interrupted-startup recovery is OUT OF SCOPE, owned by #3263.
 
 **Reviewer:** builder self-review. **Date:** 2026-10-14.
+
+## Revisions
+- 2026-10-14: `intentLocked` normalizes observed state on available intent, including healthy updates. Admission instead uses a conditional `commitObservationLocked` intent mutation, preserving running state and avoiding an activation revision on identical retry.
+- 2026-10-14: maintained-template unit fixtures execute their own migrated services and would reject an unconditional injected failure during checks. Rollback tests scope injected subprocess effects to the real publication data directory and retain baseline migrations inside template unit fixtures; actual publication still builds/checks and executes the new candidate SQL. External SQL evidence proves transactional rollback or successful schema migration before publication restoration.
+- 2026-10-14: recovery ignores candidate-context cancellation but remembers incompatible registry notifications under the registry mutex. This prevents stopped → available identity reuse from restarting an obsolete recovery generation.

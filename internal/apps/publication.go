@@ -33,6 +33,13 @@ type publication struct {
 	failurePhase        string
 	retirementErr       error
 	activationUncertain bool
+	previous            Record
+	old                 *generation
+	retiredOld          bool
+	recovering          bool
+	recovered           bool
+	recoveryFeedback    string
+	invalidated         bool // Protected by the registry mutex, including callbacks.
 }
 
 func publicPublication(server, app string, p *publication, r Record) PublishResult {
@@ -41,12 +48,12 @@ func publicPublication(server, app string, p *publication, r Record) PublishResu
 		Revision:  r.Revision, Healthy: p.activated, ActivationCommitted: p.activated, RecoveryPending: r.PublishJournal != nil}
 }
 
-// Publish performs a checked first publication. Tools are selected by the daemon;
+// Publish performs checked publication or update. Tools are selected by the daemon;
 // Node must be the owner's executable. Success includes durable finalization.
 func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolchain) (result PublishResult, err error) {
 	p, err := o.admitPublication(ctx, serverID, appID, tools)
 	if err != nil {
-		return result, &PublishFailure{"admission", "Use an idle local unpublished registration without recovery work."}
+		return result, &PublishFailure{"admission", "Use a local registration without competing publication or recovery work."}
 	}
 	phase, mutated := "preparation", false
 	detachShutdown := context.AfterFunc(o.reconcileCtx, p.cancel)
@@ -84,6 +91,9 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 			if p.activationUncertain {
 				recovery = "Activation durability is uncertain; recovery is pending."
 			}
+			if p.recoveryFeedback != "" && !result.ActivationCommitted && !p.activationUncertain {
+				recovery = p.recoveryFeedback
+			}
 			err = &PublishFailure{phase, recovery}
 		}
 	}()
@@ -111,6 +121,17 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 	}
 	if e == nil {
 		p.record = r
+		if p.previous.ActiveRelease != "" && p.release.ReleaseVersion == r.ActiveRelease && o.usableLocked(p.old) {
+			p.activated, p.g = true, p.old
+			o.mu.Unlock()
+			o.registry.mu.Unlock()
+			return result, nil
+		}
+		if p.previous.ActiveRelease != "" && !newerCandidate(p.release.ReleaseVersion, r.ActiveRelease) {
+			e = ErrConflict
+		}
+	}
+	if e == nil {
 		e = o.changePublicationLocked(appID, p, p.ctx, func(r *Record) error {
 			r.PendingRelease = p.release.ReleaseVersion
 			r.State = "starting"
@@ -121,6 +142,10 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 	o.mu.Unlock()
 	o.registry.mu.Unlock()
 	if e != nil {
+		return result, e
+	}
+	phase = "retirement"
+	if e = o.retirePrevious(p); e != nil {
 		return result, e
 	}
 	phase = "snapshot"
@@ -137,6 +162,9 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 	}
 	phase = "journal"
 	p.journal = &PublishJournal{Candidate: ReleaseReference{serverID, appID, p.release.ReleaseVersion}, VerifiedBackup: backup}
+	if p.previous.ActiveRelease != "" {
+		p.journal.Previous = &ReleaseReference{serverID, appID, p.previous.ActiveRelease}
+	}
 	if e = o.changePublication(appID, p, func(r *Record) error { r.PublishJournal = p.journal; return nil }); e != nil {
 		return result, e
 	}
@@ -179,7 +207,7 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 		return result, e
 	}
 	phase = "health"
-	if e = o.launchPublication(appID, p, private, data, listener, port); e != nil {
+	if e = o.launchPublication(appID, p, private, selected, data, listener, port); e != nil {
 		return result, e
 	}
 	select {
@@ -225,23 +253,25 @@ func (o *Owner) admitPublication(ctx context.Context, server, app string, tools 
 	if tools.Node != o.node || !filepath.IsAbs(tools.NPM) {
 		return nil, ErrInvalidStorage
 	}
-	if o.publishing[app] != nil || o.removing[app] || r.ActiveRelease != "" || r.PublishJournal != nil {
+	if o.publishing[app] != nil || o.removing[app] || r.PublishJournal != nil {
 		return nil, ErrConflict
 	}
-	if g := o.generations[app]; g != nil && !generationDone(g) {
+	if g := o.generations[app]; r.ActiveRelease == "" && g != nil && !generationDone(g) {
 		return nil, ErrConflict
 	}
-	r, e := o.registry.intentLocked(ctx, app, "available")
+	r, _, e := o.registry.commitObservationLocked(server, app, r.Revision, Observation{Desired: "available"})
 	if e != nil {
 		return nil, e
 	}
 	work, cancel := context.WithCancel(ctx)
 	p := &publication{ctx: work, cancel: cancel, done: make(chan struct{}), health: make(chan struct{}), record: r}
+	p.previous, p.old = r, o.generations[app]
 	// Register cancellation with admission held: even stop then available under
 	// the same identity cannot pass unobserved before preparation starts.
 	manifest := r.Manifest
 	p.unsubscribe = o.registry.subscribeLocked(func(c Change) {
 		if c.AppID == app && (c.Record == nil || c.Record.Desired != "available" || c.Record.Manifest != manifest) {
+			p.invalidated = true
 			cancel()
 		}
 	})
@@ -285,6 +315,10 @@ func (o *Owner) changePublicationLocked(app string, p *publication, ctx context.
 }
 
 func (o *Owner) finishPublicationFailure(app string, p *publication, mutated bool, phase string) {
+	if p.previous.ActiveRelease != "" {
+		o.finishUpdateFailure(app, p, mutated, phase)
+		return
+	}
 	o.mu.Lock()
 	activated := p.activated
 	g := p.g

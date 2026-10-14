@@ -14,15 +14,18 @@ func serviceEnvironment(r Record, data string, port int) []string {
 	return []string{"PYRY_APP_ID=" + r.AppID, "PYRY_SERVER_ID=" + r.Manifest.ServerID(), "PYRY_APP_RELEASE=" + r.ActiveRelease, "PYRY_APP_DATA_DIR=" + data, "PYRY_APP_DB_PATH=" + data + "/app.sqlite", "PYRY_APP_BIND_HOST=127.0.0.1", "PYRY_APP_PORT=" + strconv.Itoa(port), "NODE_ENV=production"}
 }
 
-func (o *Owner) launchPublication(app string, p *publication, private Record, data string, listener net.Listener, port int) error {
+func (o *Owner) launchPublication(app string, p *publication, private Record, build, data string, listener net.Listener, port int) error {
 	o.registry.mu.Lock()
 	o.mu.Lock()
 	e := o.publicationCurrentLocked(app, p, true)
+	if p.recovering {
+		e = o.recoveryCurrentLocked(app, p)
+	}
 	if e == nil {
 		work, cancel := context.WithCancel(o.reconcileCtx)
 		g := &generation{ctx: work, cancel: cancel, record: private, port: port, exited: make(chan struct{}), ready: make(chan struct{}), done: make(chan struct{}), publication: p}
 		g.cmd = exec.Command(o.node, "dist/service/main.js")
-		g.cmd.Dir = p.release.BuildRoot
+		g.cmd.Dir = build
 		g.cmd.Env = serviceEnvironment(private, data, port)
 		g.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		e = listener.Close()
@@ -48,20 +51,23 @@ func (o *Owner) launchPublication(app string, p *publication, private Record, da
 func (o *Owner) supervisePublication(app string, p *publication, g *generation, spawned time.Time) {
 	defer o.completed(app, g)
 	defer func() { o.mu.Lock(); delete(o.ports, g.port); o.mu.Unlock() }()
-	detach := context.AfterFunc(p.ctx, func() {
-		o.mu.Lock()
-		if !p.activated {
-			g.cancel()
-		}
-		o.mu.Unlock()
-	})
+	detach := func() bool { return false }
+	if !p.recovering {
+		detach = context.AfterFunc(p.ctx, func() {
+			o.mu.Lock()
+			if !p.activated {
+				g.cancel()
+			}
+			o.mu.Unlock()
+		})
+	}
 	defer detach()
 	go func() { _ = g.cmd.Wait(); close(g.exited) }()
 	close(g.ready)
 	reason := o.supervise(g.ctx, app, g, spawned)
 	o.mu.Lock()
 	g.healthy = false
-	activated := p.activated
+	activated := p.activated || p.recovered
 	cancelled := g.ctx.Err() != nil
 	g.cancel()
 	o.mu.Unlock()

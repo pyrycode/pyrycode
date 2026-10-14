@@ -150,7 +150,11 @@ func (o *Owner) confirmRunning(ctx context.Context, id string, g *generation) er
 	var r Record
 	var err error
 	if g.publication != nil {
-		r, err = o.activatePublicationLocked(id, g)
+		if g.publication.recovering {
+			r, err = o.confirmRecoveryLocked(id, g)
+		} else {
+			r, err = o.activatePublicationLocked(id, g)
+		}
 	} else {
 		r, _, err = o.registry.commitObservationLocked(g.record.Manifest.ServerID(), id, g.record.Revision, Observation{State: "running"})
 	}
