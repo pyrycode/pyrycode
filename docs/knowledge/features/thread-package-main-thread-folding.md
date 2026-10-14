@@ -28,10 +28,11 @@ Full replay and incremental feeds produce the same items and version, including
 chunks split between companion boundaries, early reports, creations and endings.
 Different conversation owners can
 consume the same IDs without sharing items, successor attribution, pending
-pairs, send claims or main-work state. The owner serializes `Feed`, `Items` and
-`Version`; `Fold` itself has no locks or goroutines. Payloads are copied on ingestion,
-and `Items` returns detached items with copied content, so input or snapshot
-mutation cannot change fold state.
+pairs, send claims or main-work state. The owner serializes `Feed`, `Render`,
+`Items` and `Version`; `Fold` itself has no locks or goroutines. Folds constructed
+with `New` copy payloads on ingestion. Production Store folds use the history
+references described below for converted kinds. Both rendering paths return
+detached items with copied content, so snapshot mutation cannot change fold state.
 
 Each item also has recorded `Session`/`Agent`, `NoChild`, optional `Turn`/`Parent`,
 `Status`, `Active`, `Shown`, a plain one-line `Summary` and kind-specific
@@ -51,7 +52,33 @@ unknown fields, as inert display data; summary normalization does not rewrite it
 
 ### Standalone source entries
 
-| Raw source type | Item kind | Saved content and status |
+Production Store folds use `newReferenceFold` and private creating-entry-ID
+recipes for plain `user_message`, `turn_end`, `notice`, `compaction` and
+`session_divider` items, following
+[ADR 045](../decisions/045-thread-index-over-history.md#decision). This covers
+every notice and boundary source in the table, plus both ending sources handled
+by `foldWork`: protocol `turn_end` and `main_turn_interrupted`. The fold keeps
+their attribution, order, revision and visibility, but no `Item.Content` payload
+copy behind the recipe. `Fold.Render` restores the public `Content` bytes from
+history without re-encoding JSON, preserving unknown fields and original
+formatting. The public item and wire shapes are unchanged.
+
+Plain user messages retain neither text nor summary in the reference fold.
+Rendering derives `Summary` through `plainSummary`, collapsing whitespace and
+removing control characters; an empty result falls back to `user message`.
+Skip normalization at creation rather than normalizing and then clearing the
+summary: clearing it releases retained bytes but still pays for discarded
+allocations. `TestReferenceSummaryDeferred` guards that creation cost.
+
+`New`, `Items`, `Observe` and `FeedChanges` remain source compatible for legacy
+inline folds. Accepted sends remain inline through delivery merging. Other
+kinds use the renderer's inline-content fallback; assistant/tool conversion is
+deferred to [#3385](https://github.com/pyrycode/pyrycode/issues/3385), including
+private continuation payloads such as `mainOutcome.raw`. See
+[snapshot rendering and retry](thread-package-background-store.md#snapshots-and-retry)
+for source resolution and the remaining Store content retention.
+
+| Raw source type | Item kind | Rendered content and status |
 | --- | --- | --- |
 | `message` with `role: user` | `user_message` | Text, attachment IDs and recorded client/device/send metadata; `Status: delivered`. |
 | `session_divider` or unmatched `session_transition` | `session_divider` | Recorded boundary cause/reason, session IDs, agents and reset handoff outcome; `Status: done`. |
@@ -145,6 +172,12 @@ conversation/run-local; reuse cannot reactivate an old item or establish a
 history join. See the
 [queue wire contract](../../protocol-mobile.md#queue-v2) and
 [queue durability boundary](msgqueue-package.md#durability-boundary-in-scope-vs-out).
+
+For a reference-backed delivery, `sendFact` resolves the linked message through
+the renderer before merging acceptance content or suppressing the delivery row.
+A missing or unreadable source fails the feed without changing either item.
+The join also works when message and outcome arrive in separate chunks after
+recent-cache eviction; the permanent acceptance retains its merged inline bytes.
 
 The linked message supplies the summary and receiving `Session`/`Agent`/`NoChild`
 already resolved under the existing attribution rules, including any successor
@@ -419,6 +452,16 @@ and eviction. `TestMalformedRecordedFields` asserts version-only consumption and
 unchanged pending pairs, scope and attribution before later matching and replay;
 `TestNullableRecordedFields` protects legitimate nullable content.
 
+`TestReferenceRendering` compares reference and legacy items across feed sizes,
+including exact JSON formatting, unknown fields, detached content and the empty
+user-summary fallback. The unchanged
+[generated/shadow and recorded corpus checkpoints](thread-package.md#reusable-fold-regression-corpus)
+constrain rendered items, revisions, consumed version and last-shown watermark.
+`TestReferenceRetainedBytes` compares the same generated input in both modes,
+reporting converted content and plain-user summary bytes separately from recipe
+ID storage, the bounded recent cache and deferred inline content; this is not a
+measurement of total Store memory.
+
 `TestMainTextRuns`, `TestMainToolTerminals` and `TestMainEndings` cover text
 splits, retained evidence, early and conflicting outcomes, activity and visibility
 with Claude, Codex and metadata-free fixtures. `TestMainScopeAndRecovery`,
@@ -466,3 +509,10 @@ attribution even when rows appear unchanged; wrongly typed/null scalars or links
 and unsupported reasons change version only. These scenarios use `testMainReplay`
 to compare full replay with every two-chunk partition, including the gap between
 message and outcome.
+
+`TestReferenceDeliveryEvicted` proves the delivery left both the current chunk
+and recent cache and asserts its authoritative lookup before comparing merged
+acceptance bytes, provenance, suppression, revisions, touches and watermarks with
+legacy folding. Separate message/outcome chunks alone can remain cache hits and
+leave the eviction path untested. `TestReferenceDeliveryFailure` checks that
+failed resolution neither mutates acceptance nor suppresses the message.

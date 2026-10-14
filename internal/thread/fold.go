@@ -44,6 +44,8 @@ type Fold struct {
 	affectedSet               map[int]struct{}
 	publicVisible             map[uint64]bool
 	items                     []Item
+	source                    entrySource
+	recipes                   map[uint64]uint64
 	successor                 history.SessionProvenance
 	lastBoundary, legacyScope uint64
 	pending                   map[boundaryKey][]uint64
@@ -97,6 +99,7 @@ func New(conversationID string) *Fold {
 // Feed consumes increasing IDs. Unsupported or malformed facts still advance
 // version, but cannot affect items, attribution or joins. An invalid ID returns
 // an error before consuming that entry; earlier entries remain consumed.
+// Reference folds can also fail when resolving a claimed delivery's content.
 func (f *Fold) Feed(entries []history.Entry) error {
 	for _, e := range entries {
 		if e.ID == 0 || e.ID > history.MaxEntryID || e.ID <= f.version {
@@ -113,36 +116,38 @@ func (f *Fold) Feed(entries []history.Entry) error {
 			continue
 		}
 		f.appendedText = -1
-		f.feedEntry(e)
+		if err := f.feedEntry(e); err != nil {
+			return err
+		}
 		f.resolveChildren(e.ID)
 		f.recordShown()
 	}
 	return nil
 }
 
-func (f *Fold) feedEntry(e history.Entry) {
+func (f *Fold) feedEntry(e history.Entry) error {
 	child := f.childWork(e)
 	main := false
 	if !child {
 		main = f.mainWork(e)
 	}
 	if f.agentWork(e) || main || child {
-		return
+		return nil
 	}
-	if f.sendFact(e) {
-		return
+	if handled, err := f.sendFact(e); handled || err != nil {
+		return err
 	}
 	item := Item{ID: e.ID, Order: e.ID, Rev: e.ID, Status: "done", Shown: true}
 	if e.Type == "session_divider" || e.Type == protocol.TypeSessionTransition {
 		scope := f.legacyScope
 		if !f.boundary(e, &item) {
-			return
+			return nil
 		}
 		if f.legacyScope != scope {
 			clear(f.agentLifetimes)
 		}
 	} else if !standalone(e, &item) {
-		return
+		return nil
 	}
 	if item.Kind == "user_message" {
 		for len(f.openTexts) > 0 {
@@ -155,6 +160,7 @@ func (f *Fold) feedEntry(e history.Entry) {
 	if item.Kind == "user_message" {
 		f.messages[e.ID] = index
 	}
+	return nil
 }
 
 func (f *Fold) addItem(e history.Entry, item Item) int {
@@ -171,11 +177,20 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 	if e.Shown != nil {
 		item.Shown = *e.Shown
 	}
-	item.Summary = plainSummary(item.Summary)
-	if item.Summary == "" {
-		item.Summary = strings.ReplaceAll(item.Kind, "_", " ")
+	reference := f.source != nil && referencedKind(item.Kind) && e.Type != "send_accepted"
+	if reference && item.Kind == "user_message" {
+		item.Summary = ""
+	} else {
+		item.Summary = plainSummary(item.Summary)
+		if item.Summary == "" {
+			item.Summary = strings.ReplaceAll(item.Kind, "_", " ")
+		}
 	}
-	item.Content = append(json.RawMessage(nil), e.Payload...)
+	if reference {
+		f.recipes[item.ID] = e.ID
+	} else {
+		item.Content = append(json.RawMessage(nil), e.Payload...)
+	}
 	f.items = append(f.items, item)
 	index := len(f.items) - 1
 	f.markAffected(index)
@@ -188,19 +203,7 @@ func (f *Fold) Version() uint64 { return f.version }
 // Items returns a creation-ID-ordered snapshot that callers may mutate independently.
 // Claimed delivery rows are represented by their permanent acceptance item.
 func (f *Fold) Items() []Item {
-	var result []Item
-	visible := make(map[uint64]bool)
-	for index, item := range f.items {
-		if f.children[index] != nil && (item.Parent == 0 || !visible[item.Parent]) {
-			continue
-		}
-		if index, ok := f.messages[item.ID]; ok && index < 0 {
-			continue
-		}
-		item.Content = append(json.RawMessage(nil), item.Content...)
-		result = append(result, item)
-		visible[item.ID] = true
-	}
+	result, _ := f.Render() // New folds are inline and cannot fail rendering.
 	return result
 }
 
