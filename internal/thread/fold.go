@@ -42,6 +42,8 @@ type Fold struct {
 	publicCounts              *publicWorkCounts
 	affected                  []int
 	affectedSet               map[int]struct{}
+	captureSet                map[int]struct{} // optional Store-owned post-join candidates
+	captureAffected           []int
 	publicVisible             map[uint64]bool
 	items                     []Item
 	source                    entrySource
