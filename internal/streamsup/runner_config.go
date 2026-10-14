@@ -26,6 +26,14 @@ const (
 // An empty category accompanying an error means AccountTokenReadFailure.
 type AccountTokenProvider func(ctx context.Context) (token string, failure AccountTokenFailure, privateErr error)
 
+// SettingsComposer chooses the --settings value of one launch attempt. current
+// is the value the attempt's argv already carries, the last --settings in it
+// since claude keeps only the last one, or "" when it carries none. The returned
+// value replaces current, or is appended when there was none. A non-nil error
+// refuses the launch, which the Run loop treats as a failed spawn: backoff,
+// retry, and a crash-loop report once the failures repeat.
+type SettingsComposer func(current string) (settings string, err error)
+
 // Config configures a Runner. Required fields are validated in New; zero values
 // for optional fields fall through to the documented defaults.
 type Config struct {
@@ -97,6 +105,13 @@ type Config struct {
 	// preserves inherited credentials. Success replaces inherited and Env token
 	// entries without changing either source. Rejection never launches a child.
 	AccountTokenProvider AccountTokenProvider
+
+	// SettingsComposer optionally composes every launch attempt's --settings
+	// value, including retries, restarts and fresh rotations. Nil leaves the argv
+	// exactly as built. Claude honours only the last --settings it is given, so
+	// a composer that adds settings must merge them with current rather than add
+	// a second flag.
+	SettingsComposer SettingsComposer
 
 	// SessionIDEnvVar names an environment variable each spawn binds to THAT
 	// spawn's live session id — the same id its argv carries as --session-id /

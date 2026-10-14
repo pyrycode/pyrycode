@@ -610,6 +610,39 @@ func spawnEnv(base []string, name, sessionID string) []string {
 	return append(out, name+"="+sessionID)
 }
 
+// composeSettingsArgs returns a copy of args whose last --settings value, in the
+// two-token or the joined form, is replaced by compose's answer, or with
+// "--settings <value>" appended when args carry none. Only the last occurrence
+// is read and replaced because it is the only one claude honours. It never
+// mutates args, which is beginSpawn's snapshot for this attempt.
+func composeSettingsArgs(args []string, compose SettingsComposer) ([]string, error) {
+	at, joined := -1, false
+	current := ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--settings" && i+1 < len(args):
+			at, joined, current = i+1, false, args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--settings="):
+			at, joined, current = i, true, strings.TrimPrefix(args[i], "--settings=")
+		}
+	}
+	settings, err := compose(current)
+	if err != nil {
+		return nil, fmt.Errorf("streamsup: claude settings: %w", err)
+	}
+	out := slices.Clone(args)
+	switch {
+	case at < 0:
+		out = append(out, "--settings", settings)
+	case joined:
+		out[at] = "--settings=" + settings
+	default:
+		out[at] = settings
+	}
+	return out, nil
+}
+
 // accountTokenEnv admits one attempt outside runner locks. The short-lived read
 // context is separate from the iteration context used by the admitted child.
 func (r *Runner) accountTokenEnv(ctx context.Context, env []string) ([]string, error) {

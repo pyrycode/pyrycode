@@ -250,6 +250,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	autoUpdate := fs.Bool("pyry-auto-update", false, "install a new release by itself once the daemon is idle, then restart the managed unit")
 	accountSource := fs.String(claudeAccountFlagName, "", "Claude account token source for this instance: an absolute path to an owner-only token file, or an op:// 1Password reference (default: $"+claudeAccountSourceEnv+" or ~/.pyry/<name>/"+claudeAccountFileName+")")
 	accountOpCLI := fs.String(claudeAccountOpCLIFlagName, "", "1Password CLI an op:// account source runs: one executable name on PATH or one absolute path (default: $"+claudeAccountOpCLIEnv+", the op_cli key of ~/.pyry/<name>/"+claudeAccountFileName+", or op)")
+	settingsFile := fs.String(claudeSettingsFlagName, "", "absolute path to a Claude settings JSON file applied to every Claude session this instance starts, whatever its folder (default: $"+claudeSettingsEnv+" or ~/.pyry/<name>/"+claudeSettingsFileName+" when it exists)")
 	var readFolderEntries folderList
 	fs.Var(&readFolderEntries, "pyry-read-folder", "absolute folder the file reader may also open; repeatable")
 	if err := fs.Parse(pyryArgs); err != nil {
@@ -359,6 +360,17 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		return err
 	}
 	account.prime(ctx)
+	// The instance's daemon-wide Claude settings file: where it comes from is
+	// fixed until restart, and its content is re-read on every Claude launch
+	// attempt. A malformed setting stops startup; a missing or broken file only
+	// refuses Claude launches, as a failed account token read does. The one-shot
+	// reply-suggestion fallback never gets it: that call runs with every setting
+	// source and hook switched off on purpose (replyFallbackArgs).
+	claudeSettingsFile, err := newClaudeSettings(*settingsFile, os.Getenv(claudeSettingsEnv), resolveInstanceDirPath(*name), logger)
+	if err != nil {
+		return err
+	}
+	claudeSettingsFile.check()
 	// Approval-tool wiring (#1168): on the stream-json interactive path, write the
 	// per-daemon --mcp-config file that points claude's approval-prompt tool at
 	// THIS daemon's control socket, so a non-yolo permission-bearing turn surfaces
@@ -401,6 +413,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		timeout:  approvalWindow,
 		surface:  approvalSurfaces,
 		account:  account.provider(),
+		settings: claudeSettingsFile.composer(),
 	}, codex)
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)

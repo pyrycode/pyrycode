@@ -28,6 +28,7 @@ var pyryFlagValues = map[string]bool{
 	"pyry-read-folder":         true,
 	claudeAccountFlagName:      true,
 	claudeAccountOpCLIFlagName: true,
+	claudeSettingsFlagName:     true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own

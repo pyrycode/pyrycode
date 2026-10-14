@@ -129,6 +129,7 @@ These configure pyry itself and must come **before** any claude args (or after a
 | `-pyry-socket <path>` | (unset) | Explicit socket path; overrides `-pyry-name` |
 | `-pyry-claude-account-source <source>` | (unset) | This instance's Claude account token source — an absolute path to an owner-only token file, an `op://vault/item/field` 1Password reference, or `keychain:<name>` for the macOS Keychain or Linux Secret Service. See [Claude account source](#claude-account-source) below. |
 | `-pyry-claude-account-op-cli <name-or-path>` | `op` | The 1Password CLI an `op://` account source runs. One bare executable name on `PATH`, or one absolute path. See [Claude account source](#claude-account-source) below. |
+| `-pyry-claude-settings <path>` | (unset) | Absolute path to a Claude settings JSON file applied to every Claude session this instance starts, whatever folder the conversation runs in. See [Daemon-wide Claude settings](#daemon-wide-claude-settings) below. |
 
 If a claude flag happens to start with `-pyry-`, separate the two with `--`:
 
@@ -168,6 +169,7 @@ A few runtime settings are read from the environment rather than from flags, so 
 | `PYRY_APPROVAL_TIMEOUT` | `10m` | How long an approval waits for a human before the daemon denies it |
 | `PYRY_CLAUDE_ACCOUNT_SOURCE` | (unset) | Same as `-pyry-claude-account-source`; the flag wins when both are set. See [Claude account source](#claude-account-source) below. |
 | `PYRY_CLAUDE_ACCOUNT_OP_CLI` | (unset) | Same as `-pyry-claude-account-op-cli`; the flag wins when both are set. See [Claude account source](#claude-account-source) below. |
+| `PYRY_CLAUDE_SETTINGS` | (unset) | Same as `-pyry-claude-settings`; the flag wins when both are set. See [Daemon-wide Claude settings](#daemon-wide-claude-settings) below. |
 
 `PYRY_APPROVAL_TIMEOUT` is the one worth setting deliberately. When claude asks permission to use a tool, the request is parked until a client answers it, and this is how long the daemon waits before answering "no" on your behalf. Waiting is not the risky state, because the tool does not run while the request is outstanding, so the value is about how long you might reasonably take to reach your phone rather than about safety. The default is sized for answering from a phone. Shorten it if you sit at the machine and want a faster fail-closed:
 
@@ -392,6 +394,26 @@ The read is bounded to ten seconds at startup, matching the per-attempt deadline
 **A successful read doesn't prove the token works.** It means the daemon handed claude a syntactically acceptable token, not that Claude has accepted it — `claude` itself still decides. Other, higher-priority Claude authentication settings (an API key, a different credential helper) can still override the subscription OAuth token this feature sets. See [Claude Code's authentication documentation](https://code.claude.com/docs/en/authentication) for how Claude resolves credentials.
 
 Only the claude child's environment is affected. The daemon's own environment, any Codex child, and other subprocesses never see this token.
+
+### Daemon-wide Claude settings
+
+Claude reads project settings from the folder it runs in, so hooks wired in one workspace's `.claude/settings.json` do not run in a conversation started in another folder. To apply settings to every Claude session an instance starts, whatever its folder, give the instance a settings file. It is resolved once per instance, and the first one set wins:
+
+1. `-pyry-claude-settings <path>`
+2. `$PYRY_CLAUDE_SETTINGS`
+3. `~/.pyry/<name>/claude-settings.json`, when that file exists
+
+The flag and the variable take an absolute path; anything else is a startup error. With none of the three set, nothing changes.
+
+**What gets it.** Every interactive Claude child: the bootstrap session, every conversation's session, resumed sessions, crash restarts, settings restarts and the fresh session a `/clear` starts. The daemon's one-shot reply-suggestion helper does not: it runs `claude --print` with every setting source and hook switched off on purpose, and stays that way. Codex sessions are unaffected.
+
+**How it is applied.** Claude honours only the last `--settings` flag it is given, and each daemon session already carries its own settings file (the MCP enablement switches that keep a session from stopping on a startup prompt). So the daemon merges the two instead of adding a second flag, writes the result owner-only to `~/.pyry/<name>/claude-settings-composed/` and passes it as that launch's `--settings`. `hooks` merge per event: your file's hooks for an event run, followed by any the session's file defines for it. Any other key both files set, such as `enableAllProjectMcpServers`, takes the session's value, and the daemon logs a warning naming the key. User and project settings still load as usual, and Claude runs an identical hook command only once even when two sources define it.
+
+**When it's read.** On every Claude launch attempt, so an edit takes effect on the next launch with no restart. Which file is used is fixed until restart. That includes the default `~/.pyry/<name>/claude-settings.json`: once the daemon has started with it, deleting it does not switch the option off. Every launch is refused as "missing" until you restore the file or restart the daemon.
+
+**Failure.** The file must be a regular file owned by the daemon's user that no group or other user can write, because its hooks run commands as that user, and it must hold one JSON object. When it is missing or fails any of those checks, the daemon logs `claude launch refused` with the reason and does not start Claude without it. The launch is retried with backoff like any failed start, and a client sees `session.child_crashing` once the refusals repeat. The daemon itself keeps running, and the next launch after the file is fixed proceeds. A broken file at startup is also logged once as a warning.
+
+**Watch the mode on systems with umask 0002.** On many Linux setups (Ubuntu's per-user groups among them) the default umask is 0002, so a file an editor or `cat >` creates is mode 0664, group writable, and the daemon refuses it with "group or other writable". Run `chmod 600` (or `644`) on the file after creating it. Some editors save by writing a new file and renaming it over the old one, which can reset the mode, so check it again after editing.
 
 ## Memory credentials
 
