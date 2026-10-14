@@ -51,6 +51,7 @@ type Registry struct {
 	root      string
 	snapshot  snapshot
 	persist   func(string, snapshot) error
+	uncertain error // Post-rename durability failure bars writes until recovery.
 	consumers map[*func(Change)]struct{}
 	owner     *Owner
 }
@@ -98,6 +99,9 @@ func (r *Registry) change(action, appID string, data []byte, update *lifecycleUp
 
 // changeLocked validates, persists and notifies with the registry mutex held.
 func (r *Registry) changeLocked(action, appID string, data []byte, update *lifecycleUpdate) (bool, error) {
+	if r.uncertain != nil {
+		return false, r.uncertain
+	}
 	if update != nil {
 		if update.ctx != nil && update.ctx.Err() != nil {
 			return false, update.ctx.Err()
@@ -210,6 +214,9 @@ func (r *Registry) changeLocked(action, appID string, data []byte, update *lifec
 	}
 	sortSnapshot(&next)
 	if e := r.persist(r.root, next); e != nil {
+		if errors.Is(e, errSnapshotUncertain) {
+			r.uncertain = e
+		}
 		return false, e
 	}
 	r.snapshot = next

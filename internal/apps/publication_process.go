@@ -94,6 +94,7 @@ func (o *Owner) activatePublicationLocked(app string, g *generation) (Record, er
 	})
 	if e != nil {
 		p.failurePhase = "activation"
+		p.activationUncertain = errors.Is(e, errSnapshotUncertain)
 		return Record{}, e
 	}
 	p.activated = true

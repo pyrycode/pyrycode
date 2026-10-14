@@ -21,17 +21,18 @@ type PublishFailure struct{ Phase, Recovery string }
 func (f *PublishFailure) Error() string { return "apps: publication " + f.Phase + ": " + f.Recovery }
 
 type publication struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
-	unsubscribe   func()
-	done, health  chan struct{}
-	record        Record
-	release       Release
-	journal       *PublishJournal
-	g             *generation
-	activated     bool
-	failurePhase  string
-	retirementErr error
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	unsubscribe         func()
+	done, health        chan struct{}
+	record              Record
+	release             Release
+	journal             *PublishJournal
+	g                   *generation
+	activated           bool
+	failurePhase        string
+	retirementErr       error
+	activationUncertain bool
 }
 
 func publicPublication(server, app string, p *publication, r Record) PublishResult {
@@ -68,6 +69,7 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 		o.mu.Lock()
 		r := o.currentLocked(appID)
 		result = publicPublication(serverID, appID, p, r)
+		result.RecoveryPending = result.RecoveryPending || o.registry.uncertain != nil
 		result.Healthy = p.activated && o.usableLocked(p.g)
 		o.mu.Unlock()
 		o.registry.mu.Unlock()
@@ -78,6 +80,9 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 			}
 			if result.ActivationCommitted {
 				recovery = "Activation committed; journal finalization is pending."
+			}
+			if p.activationUncertain {
+				recovery = "Activation durability is uncertain; recovery is pending."
 			}
 			err = &PublishFailure{phase, recovery}
 		}
@@ -210,6 +215,9 @@ func (o *Owner) admitPublication(ctx context.Context, server, app string, tools 
 	if o.closed || ctx.Err() != nil {
 		return nil, ErrClosed
 	}
+	if o.registry.uncertain != nil {
+		return nil, o.registry.uncertain
+	}
 	r := o.currentLocked(app)
 	if r.AppID == "" {
 		return nil, ErrNotFound
@@ -293,6 +301,9 @@ func (o *Owner) finishPublicationFailure(app string, p *publication, mutated boo
 		<-g.done
 		recoveryErr = errors.Join(recoveryErr, g.cleanupErr)
 	}
+	o.registry.mu.Lock()
+	recoveryErr = errors.Join(recoveryErr, o.registry.uncertain)
+	o.registry.mu.Unlock()
 	if mutated && recoveryErr == nil {
 		recoveryErr = RestoreData(context.Background(), o.registry.root, p.record.Manifest.ServerID(), app, p.journal.VerifiedBackup, o.node)
 	}

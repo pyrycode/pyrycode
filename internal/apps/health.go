@@ -197,7 +197,7 @@ func (o *Owner) Lookup(serverID, appID string) (*Target, error) {
 // usableLocked requires registry then owner locks. Record revisions may change for
 // metadata, but identity, release, intent, observed state and ownership must match.
 func (o *Owner) usableLocked(g *generation) bool {
-	if g == nil || o.closed || !g.healthy || g.ctx.Err() != nil || o.generations[g.record.AppID] != g {
+	if g == nil || o.closed || o.registry.uncertain != nil || !g.healthy || g.ctx.Err() != nil || o.generations[g.record.AppID] != g {
 		return false
 	}
 	select {
