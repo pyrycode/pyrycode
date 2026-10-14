@@ -145,6 +145,14 @@ committed entries after recovery, measuring preparation separately from adapter
 allocations. `TestDaemonThreadQueriesJoin` reconstructs full current states
 through race refusal, successful retry and subsequent real publisher updates.
 
+Wire lifecycle tests must read the live acceptance before completing same-version
+catch-up, which can suppress duplicate publication. A delivered message and its
+outcome can reach separate fold batches; suppressing the earlier public message
+then requires a baseline and retires the peer. `TestQueuedSendHandleActions`
+checks retained-range continuity, asserting the live terminal patch when usable
+or authenticated replacement-peer catch-up when retirement is required. Waiting
+only for a terminal patch would mistake valid retirement for missing content.
+
 Nil or failed shadow storage leaves legacy traffic operational.
 `TestThreadShadowLegacy` checks an authenticated Noise peer through
 the production session manager, comparing live frames, reconnect replay, history
@@ -263,6 +271,14 @@ surviving history require a new epoch. Before replay/publication, the store
 establishes an incomplete run certificate and replaces the conversation's
 recovery marker, invalidating its previous clean claim. Failure leaves the view
 unavailable. Folding semantics changes must increment `foldingRules`.
+
+Choose the revision against the current merged rules: concurrent semantic changes
+can otherwise select the same revision. A missing-field cache regression can
+still pass because replayed content differs, concealing that collision.
+`TestStoreQueueHandleCacheRules` also supplies old-rule caches with matching
+rows and requires a new epoch, proving rule incompatibility independently of
+content mismatch. Accepted-send handle semantics use rules revision 3; caches
+from revisions 1 or 2 rebuild from raw history and cannot hide recorded handles.
 
 Recovery remains `StateRebuilding` until replay and a complete checkpoint
 succeed. Missing or unusable cache data rebuilds from history; genuinely missing

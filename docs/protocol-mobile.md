@@ -1104,6 +1104,27 @@ The eight current kinds are:
 | `turn_end` | Turn stop reason and usage. |
 | `notice` | Banner, refusal, reroute, unrecognized output, attachment offer or answered prompt; `subtype` distinguishes it. |
 
+An accepted `user_message` exposes `content.queued_msg_id` immediately (#3324):
+the daemon-assigned queue handle as a JSON integer in
+`1..18446744073709551615` (positive uint64). Preserve its exact integer value
+when decoding and sending it; floating-point conversion can lose precision.
+It is distinct from the permanent acceptance history entry `item.id`:
+item `100` can carry queue handle `7`. The same identity and handle appear in
+live additions/changes, catch-up, pages and reopened history. Legacy acceptances
+omit the handle, including after delivery; clients must not infer one from text,
+order, `message_id`, item ID or the linked delivered message.
+
+Drop and Send now require `kind: user_message`, `status: queued`, `active: true`
+and a valid handle. Target the existing [queue commands](#queue-v2) with the
+thread conversation's `conversation_id` plus `content.queued_msg_id`, never
+`item.id`.
+Delivery, drop and restart loss retain the acceptance-owned handle as historical
+data while setting `active: false`; delivery stays `delivered` with acceptance
+visibility, drop becomes hidden `dropped`, and loss becomes shown `lost`.
+Queue handles are scoped to a conversation and daemon run, so a later run can
+reuse the number for another entry. A terminal item's retained handle supplies
+no action target, even if that number is currently queued again.
+
 Unknown kinds, status words and content fields remain inert display data with
 their summary. Clients use `active` directly rather than deriving activity
 from a known status list. Content can contain untrusted user or subprocess
@@ -5043,6 +5064,31 @@ The operator declined to choose, so the batch resolves with no selection. It is 
 
 A phone that types while claude is busy has its turn buffered in the daemon's queued-message backlog (#597 Phase 3, `internal/msgqueue`). `queue_state` (view) lets the phone see that backlog, `dequeue_message` (cancel) lets it drop an entry it no longer wants, and `send_queued_now` (#2729, accelerate) lets it write an entry into the running turn instead of waiting for idle. Like answering in the [Modal](#modal-v2) cluster since **#2605**, **viewing, dequeuing and sending-now are all ungated for any paired (authenticated) phone** (ADR 025 [Security model](#security-model)): there is no privileged per-device gate and no nonce; `queued_msg_id` is a plain per-conversation counter. All fields on the queue control frames below are always present (no omitempty); the delivered [`message`](#application-message-types) field described below is optional. This section is wire vocabulary only; *when* the daemon emits `queue_state` and *how* the handlers apply `dequeue_message` / `send_queued_now` is the producer's (#722) / handlers' (#723, #2729) runtime, documented there.
 
+Accepted thread `user_message` items also expose the genuine handle before
+delivery as `content.queued_msg_id` (#3324), a JSON integer in
+`1..18446744073709551615` (positive uint64). Preserve the full integer exactly.
+Use the thread conversation's `conversation_id` plus that handle for Drop
+(`dequeue_message`) or Send now (`send_queued_now`), only while `status: queued`
+and `active: true`.
+The acceptance history entry remains `item.id` and never targets a queue
+command. Legacy acceptances omit the handle; do not guess it from text, order,
+app `message_id` or history ID, or import it from a linked delivered message.
+
+Delivery, drop and restart loss retain the acceptance's handle as historical
+data with `active: false`, retaining the existing terminal status and visibility
+rules described under [Full thread item](#full-thread-item). Handles are scoped
+to a conversation and daemon run; restart does not restore the queue and a new
+run can reuse a number. A terminal item's handle must never target that later
+entry. Item identity and handle agree across live updates, catch-up, pages and
+reopened history, so catch-up can recover a missed send acknowledgement.
+Command payloads, capability gates, no-op and rejection behavior are unchanged.
+
+On connections that negotiated `thread`, unsolicited `queue_state`, including
+connect-time reconciliation, remains withheld. The legacy change-driven and
+connect-time snapshots below apply to interactive connections without `thread`.
+Thread clients recover accepted items through explicit catch-up and observe
+their subsequent thread updates.
+
 #### `queue_state`
 
 Direction **binary → phone** (outbound v2 queued-backlog snapshot; not in `v1TypeSet` — an old phone never receives it).
@@ -5080,7 +5126,7 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | The conversation to dequeue from. Untrusted phone input — the handler (#723) resolves it to an authorized conversation. |
-| `queued_msg_id` | integer | The id to remove (the `queued_msg_id` from a `queue_state` entry). |
+| `queued_msg_id` | integer | Positive uint64 id to remove, from a `queue_state` entry or a queued active thread item's `content.queued_msg_id`. |
 
 #### `send_queued_now`
 
@@ -5089,7 +5135,7 @@ Direction **phone → binary** (inbound v2 control; #2729). Intercepted by the v
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | The conversation holding the message. Untrusted phone input — the handler resolves it to an authorized conversation. |
-| `queued_msg_id` | integer | The id to write now (the `queued_msg_id` from a `queue_state` entry). |
+| `queued_msg_id` | integer | Positive uint64 id to write now, from a `queue_state` entry or a queued active thread item's `content.queued_msg_id`. |
 
 It asks the daemon to write the named queued message into that conversation's **currently running** turn instead of waiting for the ordinary drain to reach idle. There is no dedicated reply: the client observes the effect the same way it observes a `dequeue_message` — the entry drops out of the next [`queue_state`](#queue_state) push, and, when the message is the operator's own, the live `message` push the daemon makes for every delivered queued message (#2699) fires too.
 

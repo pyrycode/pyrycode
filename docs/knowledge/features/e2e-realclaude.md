@@ -96,6 +96,20 @@ GitHub comment URL. Independent raw/legacy scenario, content and ownership check
 precede fresh Store/full replay comparisons at every checkpoint. Synthetic
 rejection controls exercise those readers without becoming retained records.
 
+Retained bytes and provenance describe the capture's original folding rules;
+rewriting expected rows to match a later fold would misrepresent that evidence.
+The pinned capture predates acceptance-owned queue handles: its delivered
+acceptance row inherited `queued_msg_id` from the linked message. Original
+raw/legacy rows remain intact and independently validated by `shadowValidatePair`.
+For current Store/full-fold comparison only, `shadowReplay` uses
+`shadowCurrentSendHandles` to copy checkpoint items and remove queue-handle
+case variants from acceptance rows whose raw `send_accepted` omitted the field.
+It leaves recorded acceptance handles and unrelated rows unchanged.
+`TestThreadShadowQueueHandleProjection` checks legacy omission, preservation
+when present and that projection does not mutate the original checkpoint.
+This reconciles [current acceptance semantics](thread-package-main-thread-folding.md#accepted-sends-and-durable-outcomes)
+without claiming a new live capture.
+
 Generation leaves `GateReport` empty until builder recovery pins both usable
 sanitized files to the dispatcher's actual counted report. Recovery must commit
 both exact artifacts with any matching reader/schema repairs, restore the retained
