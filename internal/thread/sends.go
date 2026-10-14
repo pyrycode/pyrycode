@@ -27,7 +27,7 @@ type sendRecord struct {
 
 // sendFact consumes supported sends even when malformed, so they never enter
 // standalone or main-work processing. Only valid earlier entries can be linked.
-func (f *Fold) sendFact(e history.Entry) bool {
+func (f *Fold) sendFact(e history.Entry) (bool, error) {
 	decode := f.decode
 	status := ""
 	switch e.Type {
@@ -40,11 +40,11 @@ func (f *Fold) sendFact(e history.Entry) bool {
 	case "send_lost":
 		status = "lost"
 	default:
-		return false
+		return false, nil
 	}
 	var p sendRecord
 	if !decode(e.Payload, &p) {
-		return true
+		return true, nil
 	}
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(e.Payload, &fields) // decode validated the object.
@@ -55,7 +55,7 @@ func (f *Fold) sendFact(e history.Entry) bool {
 			var id uint64
 			f.countIngestion(len(value))
 			if json.Unmarshal(value, &id) != nil || id == 0 || id != p.QueuedMessageID {
-				return true
+				return true, nil
 			}
 		}
 	}
@@ -64,16 +64,16 @@ func (f *Fold) sendFact(e history.Entry) bool {
 		(status == "dropped" && (p.Reason == "removed" || p.Reason == "give_up")) ||
 		(status == "lost" && p.Reason == "daemon_restart")
 	if !validReason {
-		return true
+		return true, nil
 	}
 	if status == "queued" {
 		f.accepted[e.ID] = f.addItem(e, Item{ID: e.ID, Rev: e.ID, Kind: "user_message", Status: status, Active: true, Shown: true, Summary: p.Text})
-		return true
+		return true, nil
 	}
 	index, ok := f.accepted[p.AcceptedEntryID]
 	f.countPublicWork(1) // acceptance lookup, including rejected outcomes
 	if !ok || p.AcceptedEntryID >= e.ID || f.items[index].Status != "queued" {
-		return true
+		return true, nil
 	}
 	item := &f.items[index]
 	f.countPublicWork(1)
@@ -81,9 +81,13 @@ func (f *Fold) sendFact(e history.Entry) bool {
 		delivery, ok := f.messages[p.DeliveryEntryID]
 		f.countPublicWork(1)
 		if !ok || delivery < 0 || p.DeliveryEntryID >= e.ID {
-			return true
+			return true, nil
 		}
-		message := f.items[delivery]
+		rendered, err := f.render([]Item{f.items[delivery]})
+		if err != nil {
+			return true, err
+		}
+		message := rendered[0]
 		f.countPublicWork(1)
 		f.countIngestion(len(item.Content) + len(message.Content))
 		item.Content = deliveredSendContent(item.Content, message.Content)
@@ -98,7 +102,7 @@ func (f *Fold) sendFact(e history.Entry) bool {
 	}
 	item.Status, item.Active, item.Rev = status, false, e.ID
 	f.setContent(index, "outcome", e.Payload)
-	return true
+	return true, nil
 }
 
 // deliveredSendContent uses safe receiving content while retaining recorded

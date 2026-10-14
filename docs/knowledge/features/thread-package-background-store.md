@@ -114,6 +114,39 @@ explicit requests for each open conversation.
 
 ### Snapshots and retry
 
+Production workers use `Fold.Render() ([]Item, error)` for recovery comparisons
+and before constructing a complete checkpoint/publication. It resolves the
+[converted standalone recipes](thread-package-main-thread-folding.md#standalone-source-entries)
+after excluding suppressed delivery rows and children without public parents,
+copies exact source payload bytes into detached public `Item.Content`, and uses
+inline content for deferred kinds. Any missing reference or source error returns
+no items, including when another reference in the same batch resolved. Legacy
+folds created by `New` remain inline, and existing `Items`, `Observe` and
+`FeedChanges` callers keep their APIs.
+
+The worker-owned `recentSource` resolves IDs from the current feed chunk, then
+its recent-entry FIFO, then `history.Store.Lookup` for remaining IDs only, bound
+to the worker's conversation. Requests are sorted and deduplicated before
+resolution, so authoritative Lookup receives ascending unique misses and no
+feed/recent hits. An all-hit batch performs no authoritative Lookup or segment
+reads. The sorted requests and increasing chunk are swept together: rescanning
+the chunk for each ID makes even an all-hit batch quadratic. The chunk is
+borrowed through folding/rendering and released after publication; production
+folds retain no unbounded entry map.
+
+The recent FIFO holds at most 256 entries within an inclusive 1 MiB retained
+storage budget per loaded conversation. Accounting includes the source and
+fixed entry backing storage, detached payload capacity, copied strings and
+pointed session/visibility metadata. Entries that cannot fit are skipped before
+copying. Retained payloads have exact-size backing allocations; strings and
+metadata are detached, and timestamps are normalized to UTC to avoid retaining
+arbitrary location graphs. Counting payload length alone would let a small
+slice or substring pin a much larger feed allocation outside the budget.
+
+Store snapshots and query rows still retain rendered content until
+[#3386](https://github.com/pyrycode/pyrycode/issues/3386); the recent-entry budget
+does not bound that content or deferred inline/private fold payloads.
+
 `Snapshot(conversationID) Snapshot` performs no history I/O. Its fields are
 `Active`, `State`, `Items`, `Version`, `LastShownVersion`, `Epoch` and `Err`:
 
@@ -135,7 +168,11 @@ checks an invisible active child and its later closure; daemon retirement also
 requires [producer quiescence](thread-package.md#shadow-lifecycle-and-evidence).
 Lookup copies an immutable publication's items and content outside the store
 lock, so mutation of a returned snapshot
-cannot affect later snapshots. A history/cache read or write failure, unsafe
+cannot affect later snapshots. A missing/unreadable reference during rendering
+or a delivery join withholds the entire candidate publication, withdraws any
+prior usable view and clears query/change state. Only `StateUnavailable` with
+generic `ErrUnavailable` remains, with no items, version, last-shown watermark
+or epoch. A history/cache read or write failure, unsafe
 cache leaf, failed fold, incomplete replay through H or worker-context
 cancellation withdraws any usable publication and leaves the conversation
 unavailable. `Snapshot.Err` remains `ErrUnavailable`; `Unload` reports
@@ -144,7 +181,9 @@ incomplete recovery. Raw errors are neither exposed, retained nor logged:
 diagnostics contain no conversation content, raw payloads or host paths.
 
 `Retry(ctx, conversationID) error` replaces only an unavailable worker with fresh
-replay under the new context. An absent conversation returns `ErrNotLoaded`;
+replay under the new context after the source is repaired. It creates a new
+reader, reference fold and recent source rather than reusing partial progress.
+An absent conversation returns `ErrNotLoaded`;
 rebuilding or usable workers return `ErrNotUnavailable`. **Recreate both reader
 and fold after failure:** `Fold.Feed` can consume earlier entries in a failing
 chunk while the reader leaves its position unchanged. Redelivering into that
@@ -374,6 +413,17 @@ cancels workers; callers must finish producer draining and tail catch-up before
 invoking it to preserve final commits.
 
 ### Store verification
+
+`TestReferenceSourceOrder` checks feed/recent/Lookup precedence, deduplicated
+miss-only requests and the all-hit no-I/O path. `TestReferenceSourceBatch` uses
+36,000 all-hit IDs with duplicate/unordered requests and stale recent data to
+exercise the batch sweep and feed precedence. `TestReferenceSourceBound` checks
+detached payload capacity and pointed metadata, eviction and oversized-entry
+bypass. `TestReferenceMissingAtomic` requires no partial render for incomplete
+or unreadable lookup results. `TestStoreReferenceRetry` forces creating-entry
+eviction before missing/unreadable authoritative reads during replay and tail;
+it verifies withdrawal of all usable state and equality with fresh legacy replay
+after repair and `Retry`.
 
 Restart fixtures must rebuild the thread store when reopening its history
 provider. Changing only the daemon's history field leaves the old `thread.Store`
