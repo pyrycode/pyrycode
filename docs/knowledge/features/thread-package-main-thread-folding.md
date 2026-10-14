@@ -134,11 +134,15 @@ through every terminal revision. Live additions/changes, catch-up, pages and
 reopened history expose the same permanent item ID and recorded handle.
 
 Only a queued, active `user_message` with a valid handle supplies a Drop/Send now
-target: `conversation_id` plus `content.queued_msg_id`. An acceptance item `100`
-can target queue entry `7`; its item ID never targets a queue command. Terminal
-items remain inactive and keep the handle only as historical data. Queue IDs
-are conversation/run-local and can repeat after restart; reuse cannot reactivate
-an old item or establish a history join. See the
+target: `conversation_id` plus `content.queued_msg_id`, guarded by the accepted
+`item.id` as optional `accepted_item_id`. Clients should always include the guard:
+an acceptance item `100` with queue handle `7` must not act on item `205` when a
+new daemon run reuses `7`. The daemon matches only its current-run acceptance
+binding on a live queue entry, never a historical fold join, text or app ID.
+Valid omission keeps legacy behavior and the reuse risk. Terminal items remain
+inactive and keep the handle only as historical data. Queue IDs are
+conversation/run-local; reuse cannot reactivate an old item or establish a
+history join. See the
 [queue wire contract](../../protocol-mobile.md#queue-v2) and
 [queue durability boundary](msgqueue-package.md#durability-boundary-in-scope-vs-out).
 

@@ -375,6 +375,15 @@ invoking it to preserve final commits.
 
 ### Store verification
 
+Restart fixtures must rebuild the thread store when reopening its history
+provider. Changing only the daemon's history field leaves the old `thread.Store`
+attached to the former provider, whose cached high-water mark can remain behind
+new acceptances and stall recovery. `TestBoundQueueActionsRestart` shuts down
+the old store and constructs `thread.NewStore` with the reopened history before
+loading item 205. This proves queue-handle reuse against the new run's acceptance
+rather than against stale provider state; see
+[current-run queue binding](msgqueue-package-api.md#exported-surface).
+
 Checkpoint cadence proofs use private `Store.now`/`Store.newTimer` hooks and count
 successful actual cache replacements through `Store.replace`. Synchronize on
 publication, timer installation and write completion rather than sleeping to

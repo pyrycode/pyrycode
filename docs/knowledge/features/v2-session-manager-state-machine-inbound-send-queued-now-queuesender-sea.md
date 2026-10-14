@@ -2,9 +2,11 @@
 
 `send_queued_now` is `dequeue_message`'s twin in authority and shape — a v2
 **control** envelope (phone → binary, payload `{conversation_id,
-queued_msg_id}`), ungated beyond the `interactive` capability, no reply, its
-acknowledgement the `queue_state` change and (for the operator's own message)
-the live `message` push #2699 built — but it writes the named queued message
+queued_msg_id, accepted_item_id?}`), ungated beyond paired authentication and the
+`interactive` capability, no reply. Connections without `thread` observe the
+`queue_state` change and live delivered `message`; thread connections observe
+accepted-item updates, with unsolicited and connect-time `queue_state` withheld.
+It writes the named queued message
 into the conversation's **running** turn instead of dropping it. See
 [`docs/protocol-mobile.md` § `send_queued_now`](../../protocol-mobile.md#send_queued_now)
 for the wire contract and
@@ -16,27 +18,35 @@ the handler this one mirrors.
   `QueueSender interface{ SendNow(conversationID string, queuedMsgID uint64)
   bool }`. `*msgqueue.Queue` satisfies both, so `internal/relay` still imports
   neither `internal/msgqueue` nor `cmd/pyry`. Wired in `cmd/pyry/relay.go`'s
-  `startRelayV2` as `QueueSender: w.queue`, right beside the pre-existing
-  `QueueRemover: w.queue`.
+  `startRelayV2` through `suggestionQueueSender`, which forwards `SendNowItem`
+  as well as legacy `SendNow` and invalidates suggestions only on success.
+  `QueueRemover` still receives the queue directly. A decorator must forward
+  the bound capability: relay never falls back to unbound sending when it is absent.
 - **`handleSendQueuedNow(s, plaintext)`** decodes the envelope itself (unlike
   `handleDequeueMessage`, which receives an already-decoded `env` — see §
-  Runs off `Run` below for why), then decodes `protocol.SendQueuedNowPayload`
-  tolerantly (`_ = json.Unmarshal`, so a malformed frame leaves zero-value
-  fields that `SendNow("", 0)` no-ops on — never echoed back or logged) and
-  calls `m.cfg.QueueSender.SendNow(p.ConversationID, p.QueuedMsgID)`. `true` →
+  Runs off `Run` below for why), then decodes `protocol.SendQueuedNowPayload`.
+  Every envelope/payload decode error returns before action or logging: failed
+  decoding can leave valid target fields populated, so tolerating it could send
+  a real message. `queueItemBinding` distinguishes valid omission (legacy
+  `SendNow`) from a supplied JSON integer in `1..9007199254740991` (additive
+  `SendNowItem(string, uint64, uint64) bool` capability). Present-invalid bindings
+  and missing bound capability never fall back. Current-run acceptance matching
+  follows [Drop's guard](v2-session-manager-state-machine-inbound-dequeue-message-queueremover-sea.md):
+  no waiting or historical lookup, and no mutation, write, cancellation, observers
+  or wire output on missing/pending/failed/mismatched/retired bindings. `true` →
   `Info "v2.send_now.delivered"`; `false` → `Debug "v2.send_now.noop"`. Both
   log only `conn_id`/`conversation_id`/`queued_msg_id` — the `dequeue_message`
-  field set exactly, never the queued text or the client's message id. A nil
-  `QueueSender` is `Debug "v2.send_now.inert"` and returns before decoding
-  anything.
+  field set exactly, never supplied bindings, raw payloads, queued text or the
+  client's message id. A nil `QueueSender` is `Debug "v2.send_now.inert"` and
+  returns before decoding anything.
 - **`false` is success of a valid request, not an error** — identical posture
   to `Remove`'s `false`: the turn is idle (the ordinary drain will deliver it
   in FIFO order), the id is unknown or already delivered, the head is
   `committing`, the session is Codex (whose write path starts a new turn
   rather than feeding the running one), or the write itself failed and
   `msgqueue` put the message back where it was. None of these is
-  distinguished on the wire or in the log — `queue_state` is the only signal a
-  client gets, exactly as for `dequeue_message`.
+  distinguished on the wire or in the log. A refusal produces no state change
+  to observe, exactly as for `dequeue_message`.
 
 ## Runs off `Run`, on the conn's `appFrameWorker` — the one structural departure from `dequeue_message` (security review, 2026-10-03)
 
