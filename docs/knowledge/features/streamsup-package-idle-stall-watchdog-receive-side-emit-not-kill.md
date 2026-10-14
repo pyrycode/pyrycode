@@ -71,3 +71,32 @@ changing the type's shape. The one-shot runner's KILL machinery (`idleStallResul
 Deferred: the pending-permission signal's **producer** (the approval flow — mcp-approve stdio tool,
 control-socket verb, spawn-arg injection) lands in #1079/#1080 with its own security review; this hook is
 a local, content-free `func() bool` only, which is why this slice is not `security-sensitive`.
+
+## Poll observation and latch-rearm testing
+
+`Watchdog.Start` clears its local latch only when a poll evaluates `shouldFire`
+as false. A system line updates activity while leaving the turn owed, but a
+delayed poll can miss the entire recent-activity window and keep the latch set.
+Extending a callback receive timeout or inspecting `stallTracker.snapshot` from
+the test cannot prove that the polling goroutine re-armed.
+
+The poll calls `stallTracker.snapshot` **before** `WatchdogConfig.now`.
+`TestWatchdog_LatchReArms` gates only the poll's clock after construction, keeping
+tracker writes on the same fake clock without blocking them. When activity is
+written while a poll is held there, that poll already has the old snapshot.
+Complete it, then complete a poll containing recent activity while a turn remains
+owed, before advancing fake time past idle. Arrival at the next clock gate proves
+the previous predicate, latch update and synchronous `OnStall` callback finished;
+only then count callbacks or assert their absence. Repeated completed polls in
+each stall episode distinguish once-per-episode emission from per-tick emission,
+and the second callback distinguishes rearming from a stuck latch. Gate waits
+are bounded; goroutine-side gates and callback delivery release on cancellation,
+with cleanup cancelling before `Wait` even after fatal assertions. See
+[test completion barriers](development-verification.md#prove-that-tests-distinguish-the-change).
+
+Retain the missed-window schedule as a control: advancing past idle before the
+poll observes activity must produce no second signal. The
+[controlled experiment](../../specs/architecture/3398-watchdog-latch-rearm.md#experiment-and-validation-results)
+demonstrates this mechanism and distinguishes it from observed activity; it does
+not establish the scheduler sequence behind the historical failure at `220ed01d`,
+which was not reproduced.
