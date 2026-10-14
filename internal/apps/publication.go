@@ -21,16 +21,17 @@ type PublishFailure struct{ Phase, Recovery string }
 func (f *PublishFailure) Error() string { return "apps: publication " + f.Phase + ": " + f.Recovery }
 
 type publication struct {
-	ctx          context.Context
-	cancel       context.CancelFunc
-	unsubscribe  func()
-	done, health chan struct{}
-	record       Record
-	release      Release
-	journal      *PublishJournal
-	g            *generation
-	activated    bool
-	failurePhase string
+	ctx           context.Context
+	cancel        context.CancelFunc
+	unsubscribe   func()
+	done, health  chan struct{}
+	record        Record
+	release       Release
+	journal       *PublishJournal
+	g             *generation
+	activated     bool
+	failurePhase  string
+	retirementErr error
 }
 
 func publicPublication(server, app string, p *publication, r Record) PublishResult {
@@ -160,9 +161,16 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 		o.mu.Unlock()
 	}()
 	migration, cancel := context.WithTimeout(p.ctx, o.migrateTimeout)
-	_, e = candidateCommand(migration, selected, serviceEnvironment(private, data, port), o.node, []string{"dist/service/migrate.js"}, false)
+	_, e = candidateCommandWithCleanup(migration, selected, serviceEnvironment(private, data, port), o.node, []string{"dist/service/migrate.js"}, false, func(pid int) error {
+		return candidateCleanupWithKill(pid, o.kill)
+	})
 	cancel()
 	if e != nil {
+		var retirement *candidateRetirementError
+		if errors.As(e, &retirement) {
+			p.retirementErr = retirement
+			o.remember(retirement)
+		}
 		return result, e
 	}
 	phase = "health"
@@ -280,10 +288,10 @@ func (o *Owner) finishPublicationFailure(app string, p *publication, mutated boo
 	if activated {
 		return
 	} // The durable decision forbids restoring old data.
-	var recoveryErr error
+	recoveryErr := p.retirementErr
 	if g != nil {
 		<-g.done
-		recoveryErr = g.cleanupErr
+		recoveryErr = errors.Join(recoveryErr, g.cleanupErr)
 	}
 	if mutated && recoveryErr == nil {
 		recoveryErr = RestoreData(context.Background(), o.registry.root, p.record.Manifest.ServerID(), app, p.journal.VerifiedBackup, o.node)
