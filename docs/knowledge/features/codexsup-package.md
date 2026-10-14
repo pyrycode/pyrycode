@@ -40,6 +40,35 @@ emits `RateLimited{Status: "rejected"}` first. `model/rerouted` becomes a
 warning `Banner` and keys that turn's `ModelWindows` by the model it moved
 to — a silent downgrade would otherwise pass for the requested model.
 
+`warning` and `configWarning` occupy only `mappedMethods` (#3354).
+`warningBanner` emits exactly one `turnevent.Banner{Level: "warning"}` with
+`StopsTurn: false`: `warning.message` supplies its text; `configWarning.summary`
+supplies its text with a newline and `details` appended only when details
+is a nonempty string. Absent, null or empty details add nothing. The combined
+text is capped at `maxBannerText` (4096 bytes) by `truncate`, which removes
+any partial multibyte character at the cut so the result remains valid UTF-8.
+`Truncated` is true when the text exceeded the cap, false at or below it.
+
+Required prose is decoded into `*string`: plain Go strings would turn both
+missing and null fields into the same value as a schema-valid empty string,
+silently accepting malformed warnings. Empty `message` or `summary` is valid;
+missing, null or wrong-type required prose, wrong-type `configWarning.details`,
+invalid JSON and non-object params instead use `undecodable`'s existing bounded,
+UTF-8-safe `UnrecognizedUndecodable` fallback. `threadId`, `path` and `range`
+are omitted from decoding and banner output. Warning prose stays untrusted
+[display text](../../protocol-mobile.md#security-model); the helper performs
+no routing, filesystem action or payload logging. It holds no state and leaves
+pending usage, reroute targets, the selected model and turn lifecycle unchanged.
+
+Completed replies alone do not prove notification coverage: [Mobile
+\#2052](https://github.com/pyrycode/pyrycode-mobile/issues/2052) finalized its
+replies before `UnrecognizedRowSentinel` caught these known warning methods
+in the unknown lane. Mapping them preserves both visible warnings and that
+parser-gap guard; genuinely unknown methods still emit
+`UnrecognizedCodexMethod`. `TestWarningMethodLanes` pins that distinction,
+and `TestTranslateWarningsPreserveTurn` compares repeated warnings against a
+control translator's state and completed-turn output.
+
 `commandExecution` and `fileChange` items (#2609) become tool events instead
 of `Unrecognized`, so a Codex tool row renders like a Claude one with no
 client change: `item/started` is one `ToolStart` whose `Title` is always the
