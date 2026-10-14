@@ -78,3 +78,8 @@ Run `go test -race -json -count=10 -run '^TestOwnerReconcileCancellation$' ./int
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-14
+
+## Revisions
+
+- 2026-10-14: both open questions resolved by controlled experiments. With helper gating absent, startup phase entry fails at five seconds. Stripping request cancellation with `context.WithoutCancel(request)` makes both startup arms fail their five-second completion/retirement waits; releasing the fixture joins cleanup and the test process exits after 10.297 seconds. Restoring cancellation and injecting two seconds before event dispatch makes both arms pass at about 2.14 seconds each while health remains withheld. These changes were temporary and are excluded from the candidate. This supports a finite five-second observation bound over the reported 1.78-second arm and the controlled 2.1-second scheduling-plus-cleanup path; it is not a production latency contract or a reconstruction of the historical host load.
+- Measurements separate roughly 28–30 ms fixture/startup request entry, 0.81 s natural failure/retirement setup for backoff, sub-millisecond intent persistence and approximately 104 ms SIGTERM-to-retirement (fixture grace is 100 ms). Healthy cancellation already works without production changes. Diagnostic observation durations include observer scheduling, not exact internal execution intervals. The absent historical log still prevents assigning its root cause; no queue-handle regression is established.
