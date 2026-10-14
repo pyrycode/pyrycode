@@ -1,0 +1,14 @@
+{"Commit":"a920b90cc6bfd2f1fb8461e9f85ce6f19934afa6","Identity":"recorded-normalization-v1/synthetic-shell-context-v1","Input":"2fc5adb3b8314af4bfa15de29a31b85cb0d039696805f48b55854716610a423d","History":"3a601141e54d7cdcf42435095ceb88765bb22f084e18d70929067a8c6d348552","Count":12,"Checkpoints":[
+{"Version":1,"LastShownVersion":0,"Items":0,"JSON":"74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b","Content":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+{"Version":2,"LastShownVersion":0,"Items":0,"JSON":"74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b","Content":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+{"Version":3,"LastShownVersion":3,"Items":1,"JSON":"c4f2f344e330897c7f5f9af3009667a0c30e8da6e5cbb07a7636da68a3e8f596","Content":"f8ee8a88a0e9e6376717da5ad6d4002b8e6b1093175ca199d4394b4a9eeace88"},
+{"Version":4,"LastShownVersion":3,"Items":1,"JSON":"35664c7cbd7cfaebc8e07d80271875df032bd0f7311a0bf475514ce7d3dbae13","Content":"03ed9489aced2e98b3b3f051fdc5d00fe46d0a93a363371146c868b484504a4d"},
+{"Version":5,"LastShownVersion":3,"Items":2,"JSON":"ce5f8f0d37ed357d84025ef1a08448cbbc1a7771630c28d844c961cba9c60d59","Content":"41ba974f34169693cbf38eccd7251cb3f31ef324fa320edef19313702c9e7136"},
+{"Version":6,"LastShownVersion":3,"Items":2,"JSON":"ce5f8f0d37ed357d84025ef1a08448cbbc1a7771630c28d844c961cba9c60d59","Content":"41ba974f34169693cbf38eccd7251cb3f31ef324fa320edef19313702c9e7136"},
+{"Version":7,"LastShownVersion":3,"Items":2,"JSON":"ce5f8f0d37ed357d84025ef1a08448cbbc1a7771630c28d844c961cba9c60d59","Content":"41ba974f34169693cbf38eccd7251cb3f31ef324fa320edef19313702c9e7136"},
+{"Version":8,"LastShownVersion":3,"Items":2,"JSON":"5ef3f1464f7d566b2594be3ef1f1e1d66e9bb97a3ad2290a1bb037433477365f","Content":"2bf9beab9f4127cc537a47200b6529a31083a68b076c924f22e4d01aa1e07293"},
+{"Version":9,"LastShownVersion":3,"Items":2,"JSON":"7a77e1ee19247665e2dfd41d350fb093802e6fdc0a2783a74c3c8c842e8163fe","Content":"2ddb334bf8cda2a7ef8ce1f6ed81472e8d4c70c54a929fbc70950025baf24b56"},
+{"Version":10,"LastShownVersion":3,"Items":2,"JSON":"7a77e1ee19247665e2dfd41d350fb093802e6fdc0a2783a74c3c8c842e8163fe","Content":"2ddb334bf8cda2a7ef8ce1f6ed81472e8d4c70c54a929fbc70950025baf24b56"},
+{"Version":11,"LastShownVersion":3,"Items":2,"JSON":"55512b97f6650fd0f6f4d52cee0d22c7c9fd7ab054e27e144712b1b247cfe1f2","Content":"b322616fa5d06aba554c66c85b5411927e3f2ae0acf5b7ddf6f1d06ff890cb4c"},
+{"Version":12,"LastShownVersion":3,"Items":2,"JSON":"c52078b36ec8c9d3b031a44a658844a46e0cfe3697d475af2ae432e446f0730f","Content":"9f61579292fcf976515e8c296c5abc65ffd6c1242cd0acd9f45d4a2a073dea74"}
+]}

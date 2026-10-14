@@ -67,3 +67,6 @@ timer; report elapsed time, allocated bytes, item count, machine, Go and source 
 None. Expected work approximately 760 added/changed lines including plan and manifests;
 zero exported types/interfaces, two existing replay consumers, four acceptance criteria,
 and no production state-machine reject branches.
+
+## Revisions
+- 2026-10-14: preliminary long folds exposed unbounded cross-scenario agent groups. Each fixed-size scenario now has its own producer lifetime, with multiple calls/tasks inside that group; turn/call/task/lifetime identities remain count-independent. This keeps the reusable baseline practical without changing production folding.

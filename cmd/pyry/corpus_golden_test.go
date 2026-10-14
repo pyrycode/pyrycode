@@ -1,0 +1,154 @@
+package main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"reflect"
+	"testing"
+
+	"github.com/pyrycode/pyrycode/internal/history"
+	"github.com/pyrycode/pyrycode/internal/thread"
+)
+
+const testFoldBaselineCommit = "a920b90cc6bfd2f1fb8461e9f85ce6f19934afa6"
+
+// Explicit generation: go test ./cmd/pyry -run '^TestThreadRecordedBaselines$'
+// -args -write-fold-baselines. Ordinary tests only read committed expectations.
+// Canonical JSON uses sorted encoding/json map keys, UseNumber (no float64
+// rounding), and default JSON string escaping. Every Item field is included.
+// Raw Content hashes concatenate uint64 big-endian ID, uint64 byte length,
+// then exact Content bytes, in Items creation order. No output is normalized.
+var testWriteFoldBaselines = flag.Bool("write-fold-baselines", false, "explicitly replace fold digest expectations")
+
+type testFoldCheckpoint struct {
+	Version, LastShownVersion uint64
+	Items                     int
+	JSON, Content             string
+}
+type testFoldGolden struct {
+	Commit, Identity, Input, History string
+	Count                            int
+	Checkpoints                      []testFoldCheckpoint
+}
+
+func testJSON(t testing.TB, v any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value any
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	if err := d.Decode(&value); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+func testSHA(raw []byte) string { return fmt.Sprintf("%x", sha256.Sum256(raw)) }
+
+func testFoldDigest(t testing.TB, f *thread.Fold) testFoldCheckpoint {
+	t.Helper()
+	o := f.Observe()
+	h := sha256.New()
+	for _, item := range o.Items {
+		var frame [16]byte
+		binary.BigEndian.PutUint64(frame[:8], item.ID)
+		binary.BigEndian.PutUint64(frame[8:], uint64(len(item.Content)))
+		h.Write(frame[:])
+		h.Write(item.Content)
+	}
+	return testFoldCheckpoint{o.Version, o.LastShownVersion, len(o.Items), testSHA(testJSON(t, o.Items)), fmt.Sprintf("%x", h.Sum(nil))}
+}
+
+func testFoldGoldenCheck(t *testing.T, path, conv, identity string, input []byte, entries []history.Entry, versions []int) {
+	t.Helper()
+	got := testFoldGolden{Commit: testFoldBaselineCommit, Identity: identity, Input: testSHA(input), History: testSHA(testJSON(t, entries)), Count: len(entries)}
+	var want testFoldGolden
+	if !*testWriteFoldBaselines {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &want); err != nil {
+			t.Fatal(err)
+		}
+		header := want
+		header.Checkpoints = nil
+		if !reflect.DeepEqual(header, got) || len(want.Checkpoints) != len(versions) {
+			t.Fatal("incomplete or changed baseline metadata", path)
+		}
+	}
+	for i, version := range versions {
+		if version < 1 || version > len(entries) {
+			t.Fatal("invalid checkpoint", version)
+		}
+		var expected testFoldCheckpoint
+		if !*testWriteFoldBaselines {
+			expected = want.Checkpoints[i]
+		}
+		modes := 3
+		if *testWriteFoldBaselines {
+			modes = 1
+		}
+		for mode := 0; mode < modes; mode++ {
+			f := thread.New(conv)
+			for start, step := 0, 0; start < version; step++ {
+				size := version
+				if mode == 1 {
+					size = []int{7, 31, 113}[step%3]
+				}
+				if mode == 2 {
+					size = 1
+				}
+				end := min(start+size, version)
+				if err := f.Feed(entries[start:end]); err != nil {
+					t.Fatal(err)
+				}
+				start = end
+			}
+			digest := testFoldDigest(t, f)
+			if *testWriteFoldBaselines {
+				expected = digest
+				got.Checkpoints = append(got.Checkpoints, digest)
+			}
+			if digest != expected {
+				t.Fatalf("%s version %d mode %d: got %+v want %+v", path, version, mode, digest, expected)
+			}
+		}
+	}
+	if *testWriteFoldBaselines {
+		var out bytes.Buffer
+		header := got
+		header.Checkpoints = nil
+		raw, err := json.Marshal(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out.Write(raw[:len(raw)-len(`"Checkpoints":null}`)])
+		out.WriteString("\"Checkpoints\":[\n")
+		for i, row := range got.Checkpoints {
+			raw, err := json.Marshal(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if i > 0 {
+				out.WriteString(",\n")
+			}
+			out.Write(raw)
+		}
+		out.WriteString("\n]}\n")
+		if err := os.WriteFile(path, out.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

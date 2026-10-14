@@ -1,16 +1,13 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"reflect"
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/thread"
-	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // These captures establish shell completion, not agent disappearance. Ordinary
@@ -42,28 +39,17 @@ func TestThreadShellRecordedReplay(t *testing.T) {
 			if json.Unmarshal(raw, &capture) != nil || capture.Ticket != tc.ticket || capture.Version != tc.version || capture.Captured != tc.captured || !capture.Capture || len(capture.Frames) != tc.count {
 				t.Fatal("capture provenance changed")
 			}
-			store := history.New(t.TempDir())
-			e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
-			e.hist, e.runtimeFacts = store, true
 			source := history.SessionProvenance{Kind: "claude", SessionID: "recorded-shell"}
-			parser, _ := newSessionParser(func(ev turnevent.Event) { e.HandleFor(context.Background(), testConvID, ev, source) }, discardLogger())
-			write := func(frame string) {
-				t.Helper()
-				if _, err := parser.Write([]byte(frame + "\n")); err != nil {
-					t.Fatal(err)
-				}
+			var frames []string
+			for _, frame := range capture.Frames {
+				frames = append(frames, frame.Payload)
 			}
-			// Explicit synthetic context, using the recording's exact call identity.
-			write(fmt.Sprintf(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":%q,"name":"Bash","input":{"command":"synthetic shell context"}}]}}`, tc.call))
-			write(fmt.Sprintf(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"synthetic launch result","is_error":false}]}}`, tc.call))
-			write(`{"type":"result","subtype":"success","is_error":false,"result":"synthetic turn end"}`)
+			entries, boundaries := testRecordedFrames(t, frames, tc.call)
 			var omissionVersion uint64
-			for i, frame := range capture.Frames {
-				write(frame.Payload)
+			for i := range capture.Frames {
 				if tc.ticket == "2525" && i == 2 {
-					entries := historyEntries(t, store, testConvID)
 					f := thread.New(testConvID)
-					if err := f.Feed(entries); err != nil {
+					if err := f.Feed(entries[:boundaries[i]]); err != nil {
 						t.Fatal(err)
 					}
 					for _, item := range f.Items() {
@@ -76,7 +62,6 @@ func TestThreadShellRecordedReplay(t *testing.T) {
 					}
 				}
 			}
-			entries := historyEntries(t, store, testConvID)
 			full := thread.New(testConvID)
 			if err := full.Feed(entries); err != nil {
 				t.Fatal(err)
