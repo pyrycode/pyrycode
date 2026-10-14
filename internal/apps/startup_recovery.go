@@ -29,7 +29,13 @@ func (o *Owner) admitStartupRecoveryLocked(r Record) {
 		p.previous.ActiveRelease = p.journal.Candidate.ReleaseVersion
 	}
 	p.unsubscribe = o.registry.subscribeLocked(func(c Change) {
-		if c.AppID == r.AppID && (c.Record == nil || c.Record.Desired != r.Desired || c.Record.Manifest != r.Manifest || c.Record.ActiveRelease != r.ActiveRelease) {
+		if c.AppID != r.AppID {
+			return
+		}
+		// Completion may correct an old active pointer to the journal's candidate.
+		// Its synchronous notification must not cancel the newly confirmed service.
+		completed := c.Record != nil && p.journal.ActivationCommitted && c.Record.PublishJournal == nil && c.Record.ActiveRelease == p.journal.Candidate.ReleaseVersion
+		if c.Record == nil || c.Record.Desired != r.Desired || c.Record.Manifest != r.Manifest || c.Record.ActiveRelease != r.ActiveRelease && !completed {
 			p.invalidated = true
 			cancel()
 		}
