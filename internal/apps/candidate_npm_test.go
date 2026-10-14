@@ -22,10 +22,59 @@ func testCandidateEnvValue(env []string, name string) string {
 }
 
 func TestCandidateNPMEnvironment(t *testing.T) {
+	inheritedTmp := filepath.Join(testRoot(t), "source", "staging", "builds", "dist")
+	if err := os.MkdirAll(inheritedTmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", inheritedTmp)
+	t.Setenv("ANTHROPIC_API_KEY", "daemon-secret")
+	t.Setenv("NODE_OPTIONS", "daemon-options")
 	stage := testRoot(t)
-	env, err := candidateEnvironment(stage, "/selected/node")
+	env, cleanup, err := candidateEnvironment(stage, "/selected/node")
 	if err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	tmp := testCandidateEnvValue(env, "TMPDIR")
+	resolved, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{tmp, resolved} {
+		if rel, err := filepath.Rel(stage, path); err != nil || filepath.IsLocal(rel) {
+			t.Fatalf("temporary data is inside staging: %q", path)
+		}
+		for _, part := range strings.Split(path, string(filepath.Separator)) {
+			if part == "source" || part == "staging" || part == "builds" || part == "dist" {
+				t.Fatalf("unsafe temporary data: %q", path)
+			}
+		}
+	}
+	info, err := os.Stat(tmp)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		t.Fatalf("temporary data is not private: %v, %v", info, err)
+	}
+	if len(env) != 8 || testCandidateEnvValue(env, "ANTHROPIC_API_KEY") != "" || testCandidateEnvValue(env, "NODE_OPTIONS") != "" {
+		t.Fatal("inherited daemon environment", env)
+	}
+	second, cleanupSecond, err := candidateEnvironment(testRoot(t), "/selected/node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := cleanupSecond(); err != nil {
+			t.Error(err)
+		}
+	})
+	if testCandidateEnvValue(second, "TMPDIR") == tmp {
+		t.Fatal("reused temporary storage")
+	}
+	if entries, err := os.ReadDir(tmp); err != nil || len(entries) != 0 {
+		t.Fatal("temporary storage is not fresh", entries, err)
 	}
 	// npm's config loader keys sources by pathname and rejects double loading.
 	loaded := make(map[string]bool)
@@ -58,10 +107,15 @@ func TestCandidateNPMPinning(t *testing.T) {
 	if err := os.WriteFile(node, []byte("#!/bin/sh\nprintf 'v24.15.0\\n'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	env, err := candidateEnvironment(stage, node)
+	env, cleanup, err := candidateEnvironment(stage, node)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
 	for _, location := range []string{stage, filepath.Dir(stage)} {
 		t.Run(filepath.Base(location), func(t *testing.T) {
 			bin := filepath.Join(location, "node_modules", ".bin")
@@ -121,10 +175,15 @@ func TestCandidateRealNPM(t *testing.T) {
 		t.Fatal(err)
 	}
 	stage := testRoot(t)
-	env, err := candidateEnvironment(stage, node)
+	env, cleanup, err := candidateEnvironment(stage, node)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
 	// Only local tarball installation is allowed, including npm's audit requests.
 	env = append(env, "npm_config_offline=true", "npm_config_audit=false", "npm_config_fund=false")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
