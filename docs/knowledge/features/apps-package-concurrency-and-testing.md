@@ -93,6 +93,9 @@ See [retained-build fixtures](apps-package-testing.md#retained-build-fixtures)
 for independent canonical-byte and rejection proofs, and
 [health-failure observations](apps-package-testing.md#health-failure-observations)
 for controlled runtime probes that cannot skip transient counts.
+See [reconciliation cancellation](apps-package-testing.md#reconciliation-cancellation)
+for withheld-response retirement, frozen-clock retry admission and release-before-join
+cleanup; elapsed time or child readiness alone cannot establish those phases.
 
 `TestBackupSQLiteWAL` keeps a real supported-Node writer open with automatic
 checkpointing disabled and compares an isolated main-file copy first: WAL
