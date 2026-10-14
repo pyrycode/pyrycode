@@ -12,7 +12,11 @@ decision, installation/reverification and `changeLocked` persistence. A read the
 `RecordRelease` would allow competing candidates to decide against obsolete
 history. New versions compare numeric components against all recorded versions
 and any legacy active release; recorded-byte retries bypass progression so an
-older identical candidate still works after newer history exists.
+older identical candidate can be prepared after newer history exists.
+`Owner.Publish` must separately reject a historical downgrade against the active
+release; preparation's retry success does not authorize cutover. Only an identical
+healthy active candidate may return publication success without migration,
+restart or an activation revision.
 
 Verify a recorded build before calling `InstallBuild`: installation can create
 a missing destination, which would silently repair a damaged recorded candidate.
@@ -38,14 +42,31 @@ prove the ordering, not merely the absence of children after return.
 Acquire registry then owner locks before `PrepareCandidate` to reserve one
 publisher per app. Explicitly request available intent, but use operation
 ownership to suppress Start/reconciliation; toggling intent as a lock can erase a
-real stop. Install `subscribeLocked` cancellation during admission: subscribing
-later misses stopped → available reuse during a parked build. Preparation and
-pending commits legitimately advance this operation's expected app revision;
+real stop. Admission uses conditional `commitObservationLocked` to request
+available intent without normalizing observed state: `intentLocked` would turn a
+healthy old service into starting during checks and add a revision on an identical
+active retry. Install `subscribeLocked` cancellation during admission: subscribing
+later misses stopped → available reuse during a parked build. Remember incompatible
+notifications in `publication.invalidated`: checking only the final available
+intent lets an obsolete recovery generation restart after stop → available reuse,
+even though recovery deliberately ignores candidate-context cancellation.
+Preparation and pending commits legitimately advance this operation's expected
+app revision;
 other-app commits do not invalidate it. Guard activation/finalization against
 current ownership, manifest, intent and revision. Join work outside both locks.
 Removal blocks admission, calls Stop outside registry locks and tombstones only
-after joined recovery with no outstanding journal. See
-[first publication](../../hosted-apps.md#callable-first-publication).
+after joined recovery with no outstanding recovery evidence. See
+[publication and recovery](../../hosted-apps.md#publication-and-recovery).
+
+Persist `Record.RetirementPending` with exclusive starting/pending state before
+signalling the predecessor, then atomically replace it with the freshly verified
+backup journal. A joined leader can leave a live descendant when group retirement
+fails, before any backup exists. In-memory retry suppression is insufficient:
+Start can reset it and owner replacement loses it. `Record.recoveryPending`
+therefore bars Start, Publish, reconciliation and removal on either retirement
+evidence or a journal, including after reopen; `usableLocked` also rejects the
+retirement flag. Clear it only after positive retirement and safe failure
+completion or health-confirmed recovery. No flag claims a verified backup.
 
 ### Registry durability
 

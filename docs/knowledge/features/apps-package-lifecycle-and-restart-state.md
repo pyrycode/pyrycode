@@ -60,10 +60,10 @@ Unconditional `UpdatePublish` alone cannot reject obsolete health/finalization.
 Recovery callers clear the journal together with their resulting lifecycle
 fields. The registry validates and persists caller-supplied results; it neither
 derives those fields from the journal nor performs recovery itself. Callable first
-publication is implemented; updates (#3360) and interrupted-publication startup
-recovery (#3263) remain downstream. Stored references and decisions alone prove
-neither readiness nor verified or restored data. See
-[first publication](../../hosted-apps.md#callable-first-publication).
+publication and active-release updates are implemented; interrupted-publication
+startup recovery (#3263) remains downstream. Stored references and decisions alone
+prove neither readiness nor verified or restored data. See
+[publication and recovery](../../hosted-apps.md#publication-and-recovery).
 
 Both metadata mutations use `changeLocked`: validation, persistence, snapshot
 swap and ordered notifications share the registry mutex. Failed validation or
@@ -233,8 +233,8 @@ Cancelling the initiating start context retires its generation; a coalesced call
 can cancel its own wait independently. The daemon invokes joined shutdown on
 normal exit and every startup failure after owner construction. Local stop
 preserves sibling services and the session pool; daemon shutdown preserves
-available intent for restart. First publication owns migration/private health and
-atomic activation; updates (#3360), interrupted-publication startup recovery
+available intent for restart. Publication owns migration/private health, atomic
+activation and verified update recovery; interrupted-publication startup recovery
 (#3263), publishing control/daemon wiring (#3301/#3266) and encrypted resource
 capability activation (#3123) remain downstream. Production `HostedAppsReady`
 remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes
@@ -280,6 +280,27 @@ positive whole-group retirement. Leader exit leaves descendants able to write;
 and forbids restoration/removal. Cancellation-independent restoration is joined
 by Stop/Shutdown. A committed or uncertain activation also forbids destructive
 restoration; see [durability](apps-package-concurrency-and-persistence.md#registry-durability).
+
+Previous-release health is a recovery decision, not candidate activation.
+`confirmRunning` dispatches recovery to `confirmRecoveryLocked`, which clears
+evidence and exposes the previous release only after verified restoration (when
+mutation was possible), fresh previous-build verification and matching live
+health, with current available intent/ownership. Reusing ordinary running
+confirmation would clear the update error; reusing candidate activation would
+announce a failed release as successful. `Owner.Publish` always returns candidate
+failure when `finishUpdateFailure` runs, distinguishing healthy retention, unchanged-data restart,
+confirmed restored health and failed/unconfirmed recovery. A restored database
+alone cannot prove an older service accepts its schema. Failed restoration,
+previous-build/health or recovery-finalization checks retain evidence and suppress
+automatic reconciliation. See [update feedback](../../hosted-apps.md#update-and-startup-recovery-contract).
+
+Recovered generations set `publication.recovered`, not `publication.activated`.
+`completed` and `Owner.Shutdown` must recognize both when observing stopped, and
+retain the safe update error for recovered generations. Otherwise successful
+shutdown joins the process but leaves durable running state. Checking only
+shutdown's return value misses that mismatch;
+`TestUpdateRecoveredCompletion` inspects disk state/intent/release/error and
+actual retirement for shutdown and stopped intent.
 
 A generation-local `cleanupErr` alone loses failures when ownership is replaced
 and lets Shutdown report success. Both ordinary and publication supervisors must

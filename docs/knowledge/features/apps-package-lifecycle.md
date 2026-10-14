@@ -60,10 +60,10 @@ Unconditional `UpdatePublish` alone cannot reject obsolete health/finalization.
 Recovery callers clear the journal together with their resulting lifecycle
 fields. The registry validates and persists caller-supplied results; it neither
 derives those fields from the journal nor performs recovery itself. Callable first
-publication is implemented; updates (#3360) and interrupted-publication startup
-recovery (#3263) remain downstream. Stored references and decisions alone prove
-neither readiness nor verified or restored data. See
-[first publication](../../hosted-apps.md#callable-first-publication).
+publication and active-release updates are implemented; interrupted-publication
+startup recovery (#3263) remains downstream. Stored references and decisions alone
+prove neither readiness nor verified or restored data. See
+[publication and recovery](../../hosted-apps.md#publication-and-recovery).
 
 Both metadata mutations use `changeLocked`: validation, persistence, snapshot
 swap and ordered notifications share the registry mutex. Failed validation or
@@ -233,8 +233,8 @@ Cancelling the initiating start context retires its generation; a coalesced call
 can cancel its own wait independently. The daemon invokes joined shutdown on
 normal exit and every startup failure after owner construction. Local stop
 preserves sibling services and the session pool; daemon shutdown preserves
-available intent for restart. First publication owns migration/private health and
-atomic activation; updates (#3360), interrupted-publication startup recovery
+available intent for restart. Publication owns migration/private health, atomic
+activation and verified update recovery; interrupted-publication startup recovery
 (#3263), publishing control/daemon wiring (#3301/#3266) and encrypted resource
 capability activation (#3123) remain downstream. Production `HostedAppsReady`
 remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes

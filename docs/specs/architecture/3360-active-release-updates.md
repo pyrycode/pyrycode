@@ -50,7 +50,17 @@ Write update tests first and confirm the active admission rejection fails them. 
 None: recovery health is distinct from candidate activation, and uncertain durability forbids restoration.
 
 ## Documentation handoff
-Pending documentation stage: `docs/hosted-apps.md`, “Registration and observed state”, “Migrations” and “Create, publish and update”: old-service availability during checks, exclusive mutation, health-before-activation, confirmed rollback requirements, restore/unhealthy-old-release failure outcomes, identical-active no-op and cancellation evidence. Explain committed-activation versus unconfirmed-recovery feedback. State startup recovery remains #3263 until it lands.
+Satisfied in [Registration and observed state](../../hosted-apps.md#registration-and-observed-state),
+[Migrations](../../hosted-apps.md#migrations) and
+[Create, publish and update](../../hosted-apps.md#create-publish-and-update):
+old-service availability during checks, exclusive request/body/process retirement,
+health-before-activation, confirmed rollback requirements, restore/unhealthy-old-release
+failure outcomes, identical-active no-op and historical downgrade rejection,
+cancellation evidence, and committed-activation versus unconfirmed-recovery feedback.
+The reference also documents the durable pre-backup retirement barrier and leaves
+interrupted-publication startup recovery assigned to #3263 until it lands.
+Durable admission, recovery/completion and fixture lessons are folded into the
+[apps package topics](../../knowledge/features/apps-package.md#package-topics).
 
 ## Security review
 **Verdict:** PASS
