@@ -2,6 +2,7 @@ package apps
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -56,10 +57,11 @@ func (r *Registry) PrepareCandidate(ctx context.Context, serverID, appID string,
 	if !filepath.IsAbs(tools.Node) || !filepath.IsAbs(tools.NPM) {
 		return release, ErrInvalidStorage
 	}
-	env, err := candidateEnvironment(stage, tools.Node)
+	env, cleanupEnvironment, err := candidateEnvironment(stage, tools.Node)
 	if err != nil {
 		return release, err
 	}
+	defer func() { err = errors.Join(err, cleanupEnvironment()) }()
 	versionCtx, cancel := context.WithTimeout(ctx, candidateVersionTimeout)
 	defer cancel()
 	node, err := candidateCommand(versionCtx, stage, env, tools.Node, []string{"--version"}, true)
@@ -104,20 +106,20 @@ func (r *Registry) PrepareCandidate(ctx context.Context, serverID, appID string,
 	return r.recordCandidate(ctx, serverID, appID, stage, build, strings.TrimPrefix(node, "v"), npm)
 }
 
-func candidateEnvironment(stage, node string) ([]string, error) {
-	for _, n := range []string{".tools", ".home", ".cache", ".tmp"} {
+func candidateEnvironment(stage, node string) ([]string, func() error, error) {
+	for _, n := range []string{".tools", ".home", ".cache"} {
 		if err := os.Mkdir(filepath.Join(stage, n), 0700); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if err := os.Symlink(node, filepath.Join(stage, ".tools/node")); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	userConfig := filepath.Join(stage, ".home/user.npmrc")
 	globalConfig := filepath.Join(stage, ".home/global.npmrc")
 	for _, path := range []string{userConfig, globalConfig} {
 		if err := os.WriteFile(path, nil, 0600); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	// npm prepends dependency bins before invoking its lifecycle shell. Restore
@@ -125,18 +127,45 @@ func candidateEnvironment(stage, node string) ([]string, error) {
 	// dependency install hooks, while retaining lookup of other package binaries.
 	shell := filepath.Join(stage, ".tools/script-shell")
 	if err := os.WriteFile(shell, []byte("#!/bin/sh\nPATH=\"${0%/*}:$PATH\"\nexport PATH\nexec /bin/sh \"$@\"\n"), 0700); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	// Independent service test data must remain outside app trees, even when the
+	// daemon's TMPDIR points into one. /tmp is available on supported Linux/macOS.
+	tmp, err := candidateTemporary("/tmp")
+	if err != nil {
+		return nil, nil, err
 	}
 	return []string{
 		"PATH=" + filepath.Join(stage, ".tools") + ":/usr/bin:/bin",
 		"HOME=" + filepath.Join(stage, ".home"),
-		"TMPDIR=" + filepath.Join(stage, ".tmp"),
+		"TMPDIR=" + tmp,
 		"npm_config_cache=" + filepath.Join(stage, ".cache"),
 		"npm_config_userconfig=" + userConfig,
 		"npm_config_globalconfig=" + globalConfig,
 		"npm_config_script_shell=" + shell,
 		"npm_config_update_notifier=false",
-	}, nil
+	}, func() error { return os.RemoveAll(tmp) }, nil
+}
+
+func candidateTemporary(parent string) (string, error) {
+	path, err := os.MkdirTemp(parent, "pyry-app-check-")
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		for _, location := range []string{path, resolved} {
+			for _, part := range strings.Split(location, string(filepath.Separator)) {
+				if part == "source" || part == "staging" || part == "builds" || part == "dist" {
+					err = ErrInvalidStorage
+				}
+			}
+		}
+	}
+	if err != nil {
+		return "", errors.Join(err, os.RemoveAll(path))
+	}
+	return resolved, nil
 }
 func candidateRead(stage, name string) ([]byte, error) {
 	dir, err := privateDir(stage)
