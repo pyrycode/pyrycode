@@ -17,11 +17,12 @@ type mainKey struct {
 	turn   string
 }
 type mainTurn struct {
-	key     mainKey
-	opening uint64
-	text    int
-	calls   map[string]*mainCall
-	end     *mainOutcome
+	key      mainKey
+	opening  uint64
+	text     int
+	textSlot int // one-based slot in Fold.openTexts; zero for untracked/child text
+	calls    map[string]*mainCall
+	end      *mainOutcome
 }
 type mainCall struct {
 	shell    *agentCall
@@ -34,6 +35,16 @@ type mainOutcome struct {
 	id            uint64
 	status, field string
 	raw           json.RawMessage
+}
+
+// closureWorkCounts measures closure discovery and tracking maintenance.
+// Only package tests enable it on their own serialized fold.
+type closureWorkCounts struct{ work int }
+
+func (f *Fold) countClosureWork(n int) {
+	if f.closureCounts != nil {
+		f.closureCounts.work += n
+	}
 }
 
 // mainIdentity also validates optional identity-loss markers on recorded facts.
@@ -189,6 +200,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 	}
 	if e.Type == protocol.TypeAssistantDelta {
 		if st.text >= 0 {
+			f.countPublicWork(1) // inspected append candidate, including empty deltas
 			item := &f.items[st.text]
 			var old, delta protocol.AssistantDeltaPayload
 			// Both payloads were validated before storage.
@@ -209,6 +221,9 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 			}
 			index := f.addItem(e, Item{ID: e.ID, Order: e.ID, Rev: e.ID, Kind: "assistant_message", Turn: id.TurnID, Status: status, Active: active, Shown: shown, Summary: summary})
 			st.text = index
+			if !child {
+				f.trackText(st)
+			}
 		}
 		return true
 	}
@@ -257,15 +272,43 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 	return true
 }
 
+// trackText registers a newly created main coalescing run, even if inactive.
+func (f *Fold) trackText(st *mainTurn) {
+	f.countClosureWork(3) // capacity check, append and slot assignment
+	oldLen, oldCap := len(f.openTexts), cap(f.openTexts)
+	f.openTexts = append(f.openTexts, st)
+	if cap(f.openTexts) != oldCap {
+		f.countClosureWork(oldLen + cap(f.openTexts)) // copying and initializing new storage
+	}
+	st.textSlot = len(f.openTexts)
+}
+
 func (f *Fold) closeText(st *mainTurn, rev uint64) {
+	f.countClosureWork(1) // text lookup, including already closed scoped candidates
 	if st.text < 0 {
 		return
 	}
+	f.countClosureWork(1) // tracking-slot lookup, including child text
+	if st.textSlot != 0 {
+		f.countClosureWork(6) // slot/last indexes, comparison, pointer cleanup, truncation and slot reset
+		index, last := st.textSlot-1, len(f.openTexts)-1
+		if index != last {
+			f.countClosureWork(3) // moved candidate lookup and both membership updates
+			moved := f.openTexts[last]
+			f.openTexts[index], moved.textSlot = moved, index+1
+		}
+		f.openTexts[last] = nil
+		f.openTexts = f.openTexts[:last]
+		st.textSlot = 0
+	}
 	f.restoreChild(st.text)
+	f.countPublicWork(1) // inspected closure candidate, including inactive rows
 	item := &f.items[st.text]
 	if item.Active {
 		item.Status, item.Active, item.Rev = "done", false, max(item.ID, rev)
+		f.markAffected(st.text)
 	}
+	f.countClosureWork(1) // release the coalescing row reference, including inactive text
 	st.text = -1
 }
 func (f *Fold) applyTerminal(call *mainCall) {
@@ -273,11 +316,13 @@ func (f *Fold) applyTerminal(call *mainCall) {
 		return
 	}
 	f.restoreChild(call.item)
+	f.countPublicWork(1)
 	item := &f.items[call.item]
 	item.Status, item.Active, item.Rev = call.terminal.status, false, max(item.ID, call.terminal.id)
 	f.setContent(call.item, call.terminal.field, call.terminal.raw)
 }
 func (f *Fold) setContent(index int, key string, value any) {
+	f.markAffected(index)
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(f.items[index].Content, &fields)
 	fields[key], _ = json.Marshal(value) // Values are strings or already-valid recorded JSON.

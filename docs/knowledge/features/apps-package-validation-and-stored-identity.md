@@ -34,9 +34,14 @@ without reading source; edited bytes cannot mint another identity or establish
 activation. See [creation and inspection](../../hosted-apps.md#registered-creation-and-inspection).
 
 `registry.json` records optionally store `release_history` (`Record.ReleaseHistory`)
-and `publish_journal` (`Record.PublishJournal`). Absence means empty history and
-no outstanding publish. Legacy active/pending release pointers remain valid
-without invented history; reopen preserves identities, intent, releases,
+and `publish_journal` (`Record.PublishJournal`), plus the optional exact-key boolean
+`retirement_pending` (`Record.RetirementPending`). Absence of the boolean means
+false; null, strings, numbers and case variants are invalid. It preserves a writer
+retirement barrier before a verified backup journal exists, rather than inventing
+backup metadata; see [publication admission](apps-package-concurrency-and-persistence.md#publication-admission).
+Absent history/journal means empty history/no journal, but a true retirement flag
+still bars publication, starts and removal after reopen. Legacy active/pending
+release pointers remain valid without invented history; reopen preserves identities, intent, releases,
 tombstones and metadata apart from existing observed-state/revision normalization.
 `validateSnapshot` checks supplied metadata before normalization or persistence;
 invalid metadata returns `ErrInvalidStorage` and leaves stored bytes untouched.

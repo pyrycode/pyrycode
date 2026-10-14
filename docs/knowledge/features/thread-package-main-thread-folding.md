@@ -220,6 +220,25 @@ even when successor fallback gives them the same displayed session and agent.
 Other sources, turns and conversation owners remain independent. Empty or
 explicitly truncated/dropped join identities cannot create joins.
 
+Delivered user `message` entries discover only open main text runs throughout
+the conversation, including older generations retained after turn-ID reuse and
+earlier legacy scopes. Open means still eligible for text coalescing, including
+inactive late text; filtering on `Item.Active` would let that text coalesce across
+a delivered message. Closure clears its coalescing reference without changing an
+inactive row's settled revision, visibility or the shown watermark. Subsequent
+text starts a new row and remains inactive if its turn already ended. Main tool
+launches and matching turn endings retain their scoped closure rules; queued
+acceptance, child traffic and tool reports alone do not split main text.
+
+`Fold.openTexts` tracks only main coalescing runs in a dense slice, independently
+of retained recovery openings. `trackText` registers newly created main rows;
+`closeText` removes membership by swapping the final entry into the released
+slot. Traversal uses current length, so unrelated closed openings and a former
+peak in open runs add no closure discovery work. Closed explicit and implicit
+openings remain available to their original recovery references after closure,
+generation reuse and legacy scope changes; coalescing still uses the source and
+scope rules above.
+
 Tool reports can precede creation and remain pending across feed chunks. The
 first valid foreground terminal outcome in entry-ID order wins; later duplicate or
 conflicting outcomes change neither content, state nor revision. The creating
@@ -283,6 +302,17 @@ visibility. `main_turn_opened` remains row-free even with explicit shown true.
 Send outcomes update the acceptance rather than adding a row: delivery retains
 acceptance visibility, while drop forces hidden and loss forces shown, regardless
 of explicit visibility on the outcome.
+
+Public reachability is independent of `Shown`: hidden rows remain in
+`Fold.Items` and can supply reachable parents. Unresolved children and claimed
+delivery rows are omitted; an omitted ancestor omits its descendants.
+`resolveChildren` includes affected descendants when joins or reparenting change
+reachability, even when a descendant's final fields and `Rev` stay unchanged.
+After joins settle, `recordShown` visits affected indexes in creation order,
+requiring each child's older parent to be publicly reachable and reusing cached
+reachability for unrelated parents. This captures late first appearances and
+descendant withdrawal without scanning independent trees. See
+[public touches and read marks](thread-package.md#cache-and-epochs).
 
 Hidden supported facts still create items. Visibility cannot admit an excluded
 source type: open permission/question prompts and live readings never create
@@ -402,6 +432,24 @@ look unchanged. `testMainReplay` checks every two-chunk partition against full
 replay; `TestMainReplayAndOwnership` checks copied pending reports, detached
 content and independent owners. Run the offline package checks with
 `go test -race ./internal/thread`.
+
+`TestMainTextClosureTracking` checks retained generations, legacy scopes,
+inactive late text, original-opening recovery and child isolation, including
+unchanged settled revisions and `LastShownVersion`. `TestMainTextClosureWork`
+compares fixed ingestion after fourfold growth in closed openings and historical
+open-run peaks. Counting only successful closures or yielded map keys would miss
+historical-capacity scans. Measure registration/removal, skipped inspections,
+tracking growth/copying and public ordering/cleanup too, including repeated
+open/close cycles and empty closure. See the related
+[public-touch capacity regression](thread-package.md#cache-and-epochs).
+
+`TestPublicTouchesReference` compares entry-scoped bookkeeping with an independent
+full-walk oracle. `TestPublicTouchAffectedWork` grows unrelated items and trees
+fourfold while keeping affected entries fixed. A foreground launch result can
+close descendants and advance their revisions, concealing revision-only
+appearance tracking. Its late-appearance fixture first links the parent to
+background work, leaving a descendant's revision unchanged when its ancestor
+becomes public; omission and reappearance also preserve the earlier watermark.
 
 `TestSendDelivery`, `TestSendTerminalStates` and `TestSendLinksAndTerminals`
 cover permanent identity, delivered content/order, supported reasons,

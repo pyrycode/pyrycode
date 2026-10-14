@@ -39,6 +39,10 @@ type Fold struct {
 	suppressed                uint64
 	unprovenThrough           uint64
 	appendedText              int
+	publicCounts              *publicWorkCounts
+	affected                  []int
+	affectedSet               map[int]struct{}
+	publicVisible             map[uint64]bool
 	items                     []Item
 	source                    entrySource
 	recipes                   map[uint64]uint64
@@ -47,6 +51,8 @@ type Fold struct {
 	pending                   map[boundaryKey][]uint64
 	turns                     map[mainKey]*mainTurn
 	openings                  map[uint64]*mainTurn
+	openTexts                 []*mainTurn
+	closureCounts             *closureWorkCounts
 	accepted, messages        map[uint64]int
 	childTurns                map[childKey]*mainTurn
 	childCalls                map[childCallKey]*childCall
@@ -58,6 +64,7 @@ type Fold struct {
 	childDirty                map[int]struct{}
 	childEndings              map[int]json.RawMessage
 	agentGroups               map[agentKey]*agentGroup
+	agentCounts               *agentWorkCounts
 	agentLifetimes            map[agentKey]string
 	agentObservations         map[uint64][]agentObservation
 }
@@ -68,6 +75,8 @@ func New(conversationID string) *Fold {
 		conversationID:    conversationID,
 		published:         make(map[uint64]bool),
 		touches:           make(map[uint64]uint64),
+		affectedSet:       make(map[int]struct{}),
+		publicVisible:     make(map[uint64]bool),
 		childTurns:        make(map[childKey]*mainTurn),
 		childCalls:        make(map[childCallKey]*childCall),
 		childReports:      make(map[childCallKey]*mainOutcome),
@@ -106,13 +115,12 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		if !decode(e.Payload, &owner) || (owner.ConversationID != "" && owner.ConversationID != f.conversationID) {
 			continue
 		}
-		first := len(f.items)
 		f.appendedText = -1
 		if err := f.feedEntry(e); err != nil {
 			return err
 		}
 		f.resolveChildren(e.ID)
-		f.recordShown(first, f.appendedText)
+		f.recordShown()
 	}
 	return nil
 }
@@ -142,9 +150,11 @@ func (f *Fold) feedEntry(e history.Entry) error {
 		return nil
 	}
 	if item.Kind == "user_message" {
-		for _, st := range f.openings {
-			f.closeText(st, e.ID)
+		for len(f.openTexts) > 0 {
+			f.countClosureWork(2) // traversal and candidate lookup
+			f.closeText(f.openTexts[len(f.openTexts)-1], e.ID)
 		}
+		f.countClosureWork(1) // final empty check, including messages with no open text
 	}
 	index := f.addItem(e, item)
 	if item.Kind == "user_message" {
@@ -180,7 +190,9 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 		item.Content = append(json.RawMessage(nil), e.Payload...)
 	}
 	f.items = append(f.items, item)
-	return len(f.items) - 1
+	index := len(f.items) - 1
+	f.markAffected(index)
+	return index
 }
 
 // Version is the newest consumed valid history entry ID.

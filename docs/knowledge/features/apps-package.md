@@ -7,7 +7,7 @@ durable registrations, persistent-data snapshots
 with restart verification and repeatable restoration, callable health-confirmed
 committed-release process ownership, generation-bound stable response preparation
 and confined callable assets independent of conversations, plus synchronous
-health-confirmed first publication.
+health-confirmed publication and active-release updates with verified rollback.
 The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
 owns the field tables and registration behavior; the
 [v1 contract](../../specs/architecture/3120-hosted-app-contract.md) owns the broader
@@ -16,9 +16,9 @@ readiness. The registry commits lifecycle observations and normalizes restart
 state. Process spawn proves only starting; the owner confirms health before
 exposing private targets; owner construction reconciles registrations and recovers
 failed generations automatically. The daemon owns one owner for its discovery
-registry, independently of channels. Callable first publication is implemented;
-active-release updates (#3360), interrupted-publication startup recovery (#3263)
-and publishing control/daemon wiring (#3301/#3266) remain separate slices.
+registry, independently of channels. Callable first publication and active-release
+updates are implemented; interrupted-publication startup recovery (#3263) and
+publishing control/daemon wiring (#3301/#3266) remain separate slices.
 Encrypted resource activation (#3123) remains a separate responsibility.
 
 ## Package topics

@@ -67,12 +67,15 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 		return true, nil
 	}
 	index, ok := f.accepted[p.AcceptedEntryID]
+	f.countPublicWork(1) // acceptance lookup, including rejected outcomes
 	if !ok || p.AcceptedEntryID >= e.ID || f.items[index].Status != "queued" {
 		return true, nil
 	}
 	item := &f.items[index]
+	f.countPublicWork(1)
 	if status == "delivered" {
 		delivery, ok := f.messages[p.DeliveryEntryID]
+		f.countPublicWork(1)
 		if !ok || delivery < 0 || p.DeliveryEntryID >= e.ID {
 			return true, nil
 		}
@@ -81,15 +84,13 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 			return true, err
 		}
 		message := rendered[0]
+		f.countPublicWork(1)
 		item.Content = deliveredSendContent(item.Content, message.Content)
 		item.Summary, item.Order = message.Summary, message.ID
 		item.Session, item.Agent, item.NoChild = message.Session, message.Agent, message.NoChild
 		// Preserve internal indexes held by main work; suppress only the public row.
 		f.messages[p.DeliveryEntryID] = -1
-		if f.touches[p.DeliveryEntryID] != 0 {
-			delete(f.touches, p.DeliveryEntryID)
-			f.suppressed = e.ID
-		}
+		f.markAffected(delivery)
 	} else {
 		item.Shown = status == "lost"
 	}
