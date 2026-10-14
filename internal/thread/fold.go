@@ -40,7 +40,8 @@ type Fold struct {
 	unprovenThrough           uint64
 	appendedText              int
 	publicCounts              *publicWorkCounts
-	affected                  map[int]struct{}
+	affected                  []int
+	affectedSet               map[int]struct{}
 	publicVisible             map[uint64]bool
 	items                     []Item
 	successor                 history.SessionProvenance
@@ -69,7 +70,7 @@ func New(conversationID string) *Fold {
 		conversationID:    conversationID,
 		published:         make(map[uint64]bool),
 		touches:           make(map[uint64]uint64),
-		affected:          make(map[int]struct{}),
+		affectedSet:       make(map[int]struct{}),
 		publicVisible:     make(map[uint64]bool),
 		childTurns:        make(map[childKey]*mainTurn),
 		childCalls:        make(map[childCallKey]*childCall),

@@ -39,7 +39,7 @@ func (r *testPublicTouches) check(t *testing.T, f *Fold) {
 		}
 		r.published[item.ID] = true
 	}
-	if !reflect.DeepEqual(visible, f.publicVisible) || len(f.affected) != 0 {
+	if !reflect.DeepEqual(visible, f.publicVisible) || len(f.affected) != 0 || len(f.affectedSet) != 0 {
 		t.Fatalf("entry %d: retained public membership diverged or candidates leaked across entries", f.version)
 	}
 	if !reflect.DeepEqual(r.touches, f.touches) || !reflect.DeepEqual(r.published, f.published) || r.shown != f.lastShown || r.suppressed != f.suppressed {
@@ -163,6 +163,72 @@ func TestPublicTouchAffectedWork(t *testing.T) {
 			}
 			t.Logf("visibility and discovery work: %v", counts)
 			testMainReplay(t, entries)
+		})
+	}
+}
+
+func TestPublicTouchHistoricalPeakWork(t *testing.T) {
+	t.Parallel()
+	var baseline []int
+	for _, size := range []int{4096, 16384} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			f := New("a")
+			testFeed(t, f, testMain(1, "tool_use", `,"tool_use_id":"old-root","name":"Agent"`))
+			for i := 0; i < size; i++ {
+				testFeed(t, f, testChild(f.version+1, "tool_use", "old-root", fmt.Sprintf(`,"tool_use_id":"old-read-%d","name":"Read"`, i)))
+			}
+			f.publicCounts = &publicWorkCounts{}
+			testFeed(t, f, testMain(f.version+1, "tool_result", `,"tool_use_id":"old-root","is_error":false`))
+			if f.publicCounts.work < size || f.items[size].Active || f.items[size].Rev != f.version {
+				t.Fatal("setup did not repair the large unrelated child tree")
+			}
+			// A map's yielded keys omit retained table scans during range/clear.
+			// Dense candidate storage makes its traversal length countable.
+			storage := reflect.ValueOf(f.affected)
+			if storage.Kind() != reflect.Slice {
+				t.Fatal("candidate traversal retains sparse map storage after the historical peak")
+			}
+			if storage.Len() != 0 || storage.Cap() < size {
+				t.Fatal("setup did not retain a historical candidate-storage peak")
+			}
+			f.publicCounts = nil
+			testFeed(t, f, testMain(f.version+1, "assistant_delta", `,"text":"fixed"`))
+			index := len(f.items) - 1
+			fixed := f.Items()[:index]
+			var counts []int
+			for i := 0; i < 4; i++ {
+				f.publicCounts = &publicWorkCounts{}
+				testFeed(t, f, testMain(f.version+1, "assistant_delta", `,"text":" append"`))
+				counts = append(counts, f.publicCounts.work)
+				if f.lastShown != f.version || f.touches[f.items[index].ID] != f.version || len(f.affected) != 0 {
+					t.Fatal("fixed append lost its public touch or leaked candidates")
+				}
+			}
+			// Isolate duplicate registration and post-join collection/cleanup.
+			f.publicCounts = &publicWorkCounts{}
+			f.version++
+			f.items[index].Rev = f.version
+			for i := 0; i < 3; i++ {
+				f.markAffected(index)
+			}
+			if len(f.affected) != 1 {
+				t.Fatal("repeated mutation hooks did not deduplicate the fixed item")
+			}
+			f.recordShown()
+			counts = append(counts, f.publicCounts.work)
+			if f.lastShown != f.version || f.touches[f.items[index].ID] != f.version || len(f.affected) != 0 || len(f.affectedSet) != 0 {
+				t.Fatal("post-join processing lost the touch or retained candidates")
+			}
+			if !reflect.DeepEqual(fixed, f.Items()[:index]) {
+				t.Fatal("fixed entry changed the unrelated repaired tree")
+			}
+			for i, count := range counts {
+				if count == 0 || (baseline != nil && count >= 2*baseline[i]) {
+					t.Fatalf("entry %d visibility work grew >=2x with a 4x historical peak: %v -> %v", i, baseline, counts)
+				}
+			}
+			baseline = counts
+			t.Logf("visibility work after %d repaired children: %v", size, counts)
 		})
 	}
 }

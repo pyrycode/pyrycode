@@ -67,24 +67,27 @@ func (f *Fold) countPublicWork(n int) {
 
 // markAffected retains stable indexes once per entry for post-join consumers.
 func (f *Fold) markAffected(index int) {
-	f.countPublicWork(2) // registration and set maintenance, including duplicates
-	f.affected[index] = struct{}{}
+	f.countPublicWork(2) // registration and deduplication lookup, including duplicates
+	if _, exists := f.affectedSet[index]; exists {
+		return
+	}
+	f.countPublicWork(2) // membership insertion and dense candidate append
+	f.affectedSet[index] = struct{}{}
+	if len(f.affected) == cap(f.affected) {
+		f.countPublicWork(len(f.affected)) // copying candidates when slice storage grows
+	}
+	f.affected = append(f.affected, index)
 }
 
 // recordShown observes public touches and shown appearances after private joins.
 // Child repair includes affected descendants. Older-only parent edges let this
 // walk use retained reachability for unrelated parents without visiting them.
 func (f *Fold) recordShown() {
-	indices := make([]int, 0, len(f.affected))
-	for index := range f.affected {
-		f.countPublicWork(1)
-		indices = append(indices, index)
-	}
-	slices.SortFunc(indices, func(a, b int) int {
+	slices.SortFunc(f.affected, func(a, b int) int {
 		f.countPublicWork(2)
 		return a - b
 	})
-	for _, index := range indices {
+	for _, index := range f.affected {
 		f.countPublicWork(3) // item, delivery claim and child-state lookup
 		item := f.items[index]
 		claimed, exists := f.messages[item.ID]
@@ -117,8 +120,13 @@ func (f *Fold) recordShown() {
 		f.published[item.ID] = true
 		f.countPublicWork(1)
 	}
-	f.countPublicWork(len(f.affected))
-	clear(f.affected)
+	// Visit only current candidates; ranging or clearing the membership map
+	// would also scan storage retained from previously affected large trees.
+	for _, index := range f.affected {
+		f.countPublicWork(2) // candidate inspection and membership removal
+		delete(f.affectedSet, index)
+	}
+	f.affected = f.affected[:0]
 }
 
 func difference(before, after Snapshot) Observation {

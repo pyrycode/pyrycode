@@ -71,3 +71,22 @@ None. Parent reachability is creation-ordered, not display-order based; delivery
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+
+- 2026-10-14, verifier finding 1: map iteration and `clear` traverse retained
+  storage from the largest previous candidate set, so counting yielded keys
+  missed historical-size work. `affected` is now a dense reusable index slice
+  with a separate membership map used only for point lookup/insertion/deletion.
+  `recordShown` sorts and visits the current slice, deletes membership for just
+  those indexes, then resets the slice length without traversing its capacity.
+  Registration counts duplicate lookups, insertions, appends and candidate copies
+  when storage grows; cleanup counts each current candidate and deletion.
+  `TestPublicTouchHistoricalPeakWork` closes unrelated trees of 4,096 and 16,384
+  children before measuring fixed appends and duplicate registration. It requires
+  dense traversal storage to prevent uncounted retained map scans and less than
+  2x work after a 4x historical peak. Existing semantic/reference/corpus proofs
+  still cover appearance, watermark and suppression. Security re-review: PASS;
+  the container change preserves serialized ownership, stable-index validation
+  and creation-ordered reachability, adds no I/O or payload exposure, and has no
+  new security findings.
