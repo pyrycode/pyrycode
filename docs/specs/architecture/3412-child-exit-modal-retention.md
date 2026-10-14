@@ -105,3 +105,21 @@ results and diagnostic examples in the PR, without depending on scratch paths.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+
+### 2026-10-14 — Baseline and controlled ordering proof
+
+The unchanged complete fake-daemon baseline passed in 230.851s, including the
+named child-exit case (1.20s); the historical failure did not recur. The controlled
+`TestStreamModalReaderOrdering/early` failed with the original phase-local wait:
+it observed shown → dismissed → ack in the ack phase, then expired after 20ms
+waiting for the consumed dismissal. Retention makes this case pass, including a
+repeated observation without another read. Missing and unrelated dismissals still
+fail at the original absolute deadline. These resolve both open questions without
+claiming the unavailable historical logs establish the same cause.
+
+Diagnostics skip quoted slog values atomically before selecting metadata fields:
+splitting on whitespace could mistake `modal_id=...` inside a quoted message for
+a real field and disclose content. The sentinel test covers that case and trace
+eviction independently of retained dismissal identity. Design and scope unchanged.

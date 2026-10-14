@@ -370,10 +370,17 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			var shown protocol.ModalShownPayload
 			var questionShown protocol.QuestionShownPayload
 
-			// nextEnv decrypts the next binary→phone application envelope, skipping
+			reader := streamModalReader{t: t, started: time.Now(), phase: "ack"}
+			t.Cleanup(func() {
+				if t.Failed() {
+					t.Log(reader.diagnostics(h.Stderr.String()))
+				}
+			})
+
+			// The decoder reads the next binary→phone application envelope, skipping
 			// non-noise_msg frames in capture order so the receive nonce stays in sequence.
-			// One recvCS for the whole case (the single reader). ok=false on deadline.
-			nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
+			// nextEnv retains dismissal observations across all receive phases.
+			reader.read = func(deadline time.Time) (protocol.Envelope, bool) {
 				t.Helper()
 				for {
 					remaining := time.Until(deadline)
@@ -414,6 +421,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					return env, true
 				}
 			}
+			nextEnv := reader.next
 
 			// --- Drive one send_message and await its sealed ack. The ack proves the turn
 			// was accepted and the active cursor stamped to knownConvID. It does NOT
@@ -451,6 +459,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			// only dials once the child is live). This precedes the answer, so a later
 			// assertion cannot pass vacuously over a modal that never surfaced. It may
 			// already be recorded — nextEnv caught it during the ack wait.
+			reader.phase = "permission-surface"
 			modalDeadline := time.Now().Add(20 * time.Second)
 			for shown.ModalID == "" && questionShown.QuestionBatchID == "" {
 				env, ok := nextEnv(modalDeadline)
@@ -504,24 +513,13 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			}
 
 			if tc.childExit {
+				reader.phase = "child-exit-dismissal"
 				dismissDeadline := time.Now().Add(10 * time.Second)
-				for {
-					env, ok := nextEnv(dismissDeadline)
-					if !ok {
-						t.Fatal("origin child exit did not retire its permission modal")
-					}
-					if env.Type != protocol.TypeModalDismissed {
-						continue
-					}
-					var dismissed protocol.ModalDismissedPayload
-					if err := json.Unmarshal(env.Payload, &dismissed); err != nil {
-						t.Fatalf("decode child-exit modal_dismissed: %v", err)
-					}
-					if dismissed.ModalID == shown.ModalID {
-						break
-					}
+				if !reader.waitDismissed(dismissDeadline, shown.ModalID) {
+					t.Fatal("origin child exit did not retire its permission modal")
 				}
 
+				reader.phase = "replacement-stdin-ready"
 				replacementLog := childStdinLog(stdinLog, initialUUID)
 				childReadyDeadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(childReadyDeadline) {
@@ -534,6 +532,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					t.Fatalf("replacement child did not become stdin-ready: %v", err)
 				}
 
+				reader.phase = "late-answer-and-sync"
 				sealSend(protocol.Envelope{
 					ID:   answerReqID,
 					Type: protocol.TypeModalAnswer,
@@ -574,12 +573,15 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				if bytes.Contains(data, []byte(`"request_id":"permission-1"`)) {
 					t.Fatalf("late answer wrote the origin request's response to the replacement child: %s", data)
 				}
+				reader.phase = "replacement-synchronized"
+				t.Log(reader.diagnostics(h.Stderr.String()))
 				return
 			}
 
 			// --- Post-modal_shown arms. The approval is now parked AND answerable —
 			// the state the extension protects, and the "was answerable at the window"
 			// half of the fail-closed proof.
+			reader.phase = "answer-or-timeout"
 			if tc.question {
 				sealSend(protocol.Envelope{
 					ID:   answerReqID,
@@ -702,6 +704,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			// needle is what step 3's re-dial exists for: only it separates a genuine
 			// daemon deny from a masked client-side approve-error, which would have
 			// written a byte-identical audit record.
+			reader.phase = "verdict-drain"
 			sawNeedle := false
 			sawDismissal := tc.loseAnswerer
 			drainDeadline := time.Now().Add(25 * time.Second)
