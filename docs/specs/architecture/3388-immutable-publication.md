@@ -58,3 +58,6 @@ None. Preserve reference-backed rendering already present in the implementation 
 - Threat model: authorization stays at existing conversation-facing callers; this change adds no external endpoint or permission.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-14
+
+## Revisions
+- 2026-10-14: `TestStoreReferenceRetry` previously required unrelated no-op tails to reread unchanged source content. Tail failure now uses a delivery join to an evicted reference, proving a required read failure rejects partial progress and fresh retry recovers. Internal additions share immutable Content; the public `difference` wrapper continues detaching additions. Each captured item has its own allocation so retaining one unchanged pointer cannot pin all replaced content from an earlier chunk.

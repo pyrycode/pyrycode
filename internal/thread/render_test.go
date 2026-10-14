@@ -254,7 +254,14 @@ func TestStoreReferenceRetry(t *testing.T) {
 		for _, failure := range []string{"missing", "unreadable"} {
 			t.Run(phase+"/"+failure, func(t *testing.T) {
 				s, h := testThreadStore(t)
-				entries := testStoreAppend(t, h, testStoreA, testMessage(1))
+				first := testMessage(1)
+				if phase == "tail" {
+					first = testAcceptance(1, "phone")
+				}
+				entries := testStoreAppend(t, h, testStoreA, first)
+				if phase == "tail" {
+					entries = append(entries, testStoreAppend(t, h, testStoreA, testMessage(0))...)
+				}
 				var armed atomic.Bool
 				armed.Store(phase == "replay")
 				base := s.lookup
@@ -271,13 +278,18 @@ func TestStoreReferenceRetry(t *testing.T) {
 					if err := s.Load(context.Background(), testStoreA); err != nil {
 						t.Fatal(err)
 					}
-					testStoreWait(t, s, testStoreA, StateUsable, 1)
+					testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries)))
 					armed.Store(true)
 				}
 				// Later facts evict the creating message; neither the current feed
 				// chunk nor the recent cache can mask the failed authoritative read.
 				for range history.MaxPageEntries {
 					entries = append(entries, testStoreAppend(t, h, testStoreA, testEntry(0, "ignored", `{}`))...)
+				}
+				if phase == "tail" {
+					// Unchanged publications need no source reread. A delivery join
+					// must resolve its evicted message before publishing progress.
+					entries = append(entries, testStoreAppend(t, h, testStoreA, testSendOutcome(0, "send_delivered", `,"accepted_entry_id":1,"delivery_entry_id":2`, "delivered"))...)
 				}
 				if err := s.Load(context.Background(), testStoreA); err != nil {
 					t.Fatal(err)
