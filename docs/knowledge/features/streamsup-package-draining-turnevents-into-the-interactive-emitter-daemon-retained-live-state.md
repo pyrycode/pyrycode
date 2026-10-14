@@ -250,7 +250,19 @@ handoff keep admission nonblocking. Selection of each reading precedes recipient
 enumeration; a connection admitted later snapshots it or receives a subsequent
 replacement. Reusing one recipient list across an unbounded drain leaves a new
 connection with neither its overtaken snapshot nor the replacement push.
-`TestDaemonLiveRelayPublisherConnectGap` holds delivery across that admission.
+
+`TestDaemonLiveRelayPublisherConnectGap` holds publisher delivery across that
+admission and observes two signals from its `ThreadLiveState` wrapper, each with
+a three-second deadline. It waits for `phone` to capture an empty snapshot before
+admitting `old`; `again` then captures `old` and synchronously admits `fresh`
+before signaling that held delivery may resume. Both peers must receive a decoded
+`ModelAnnouncedPayload` exactly equal to model `fresh` for conversation `conv`,
+with envelope session `a`. Stale or wrong-source/conversation readings fail
+immediately; a missing replacement fails the bounded wire read. The publisher
+hold escapes on release or cancellation, and deferred idempotent release precedes
+fixture cleanup joining the publisher. Awaiting only the Noise response would
+allow the first snapshot to capture valid `old` and falsely fail this proof; see
+[snapshot synchronization](development-verification.md#prove-that-tests-distinguish-the-change).
 
 Recipient lookup and `PushLiveState` run outside source/owner locks, so held
 publication cannot block stream/history writers. Handoff overflow retires thread

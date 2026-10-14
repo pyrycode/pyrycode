@@ -125,6 +125,15 @@ new connection's handshake; consuming or reordering them can lose assertions or
 break receive-nonce order. See the `switchWire.open` regression in
 [agent-switch handover testing](conversation-session-binding.md#testing-agent-switch-handover).
 
+Receiving the Noise handshake response does not establish supplied live-state
+snapshot capture: `V2SessionManager.handleNoiseInit` sends the response before
+calling `ThreadLiveState`, while `switchWire.open` returns after `ReadResp`.
+Synchronize admission and held delivery on bounded signals from the snapshot
+callback itself. Otherwise a valid initial reading can arrive before the
+replacement and falsely fail a fresh-only assertion. Sleeping or discarding stale
+frames would obscure the delivery proof. See the
+[connect-gap regression](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery).
+
 A later frame on `Frames` cannot prove that `V2SessionManager.Run` consumed an
 asynchronous result on a separate buffered channel: either ready select arm can
 win. For a silent completion, await an observation emitted after the completion
