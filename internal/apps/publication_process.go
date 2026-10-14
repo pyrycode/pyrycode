@@ -129,7 +129,7 @@ func (o *Owner) removeRegistration(app string) (bool, error) {
 	o.registry.mu.Lock()
 	defer o.registry.mu.Unlock()
 	r := o.currentLocked(app)
-	if r.PublishJournal != nil {
+	if r.recoveryPending() {
 		return false, ErrConflict
 	}
 	return o.registry.changeLocked("remove", app, nil, nil)

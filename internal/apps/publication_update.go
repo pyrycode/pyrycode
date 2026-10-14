@@ -47,6 +47,7 @@ func (o *Owner) confirmRecoveryLocked(app string, g *generation) (Record, error)
 			return ErrStale
 		}
 		r.State, r.PendingRelease, r.PublishJournal = "running", "", nil
+		r.RetirementPending = false
 		r.LastError = &LastError{"app.unavailable", "Update failed; previous release recovered"}
 		return nil
 	}); e != nil {
@@ -187,6 +188,7 @@ func (o *Owner) finishUpdateFailure(app string, p *publication, mutated bool, ph
 		r.State, r.LastError = state, &LastError{code, message}
 		if clear {
 			r.PublishJournal, r.PendingRelease = nil, ""
+			r.RetirementPending = false
 		}
 		return nil
 	})

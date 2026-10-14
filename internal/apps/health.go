@@ -211,7 +211,7 @@ func (o *Owner) usableLocked(g *generation) bool {
 	}
 	for _, r := range o.registry.snapshot.Records {
 		if r.AppID == g.record.AppID {
-			return r.Manifest.ServerID() == o.registry.snapshot.ServerID && r.Desired == "available" && r.State == "running" && r.ActiveRelease == g.record.ActiveRelease
+			return !r.RetirementPending && r.Manifest.ServerID() == o.registry.snapshot.ServerID && r.Desired == "available" && r.State == "running" && r.ActiveRelease == g.record.ActiveRelease
 		}
 	}
 	return false

@@ -45,7 +45,7 @@ type publication struct {
 func publicPublication(server, app string, p *publication, r Record) PublishResult {
 	return PublishResult{ServerID: server, AppID: app, CandidateRelease: p.release.ReleaseVersion,
 		Lifecycle: Lifecycle{Title: r.Title, Desired: r.Desired, State: r.State, ActiveRelease: r.ActiveRelease, PendingRelease: r.PendingRelease, LastError: r.LastError},
-		Revision:  r.Revision, Healthy: p.activated, ActivationCommitted: p.activated, RecoveryPending: r.PublishJournal != nil}
+		Revision:  r.Revision, Healthy: p.activated, ActivationCommitted: p.activated, RecoveryPending: r.recoveryPending()}
 }
 
 // Publish performs checked publication or update. Tools are selected by the daemon;
@@ -136,6 +136,7 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 			r.PendingRelease = p.release.ReleaseVersion
 			r.State = "starting"
 			r.LastError = nil
+			r.RetirementPending = p.previous.ActiveRelease != ""
 			return nil
 		})
 	}
@@ -165,7 +166,10 @@ func (o *Owner) Publish(ctx context.Context, serverID, appID string, tools Toolc
 	if p.previous.ActiveRelease != "" {
 		p.journal.Previous = &ReleaseReference{serverID, appID, p.previous.ActiveRelease}
 	}
-	if e = o.changePublication(appID, p, func(r *Record) error { r.PublishJournal = p.journal; return nil }); e != nil {
+	if e = o.changePublication(appID, p, func(r *Record) error {
+		r.PublishJournal, r.RetirementPending = p.journal, false
+		return nil
+	}); e != nil {
 		return result, e
 	}
 	phase = "migration"
@@ -253,7 +257,7 @@ func (o *Owner) admitPublication(ctx context.Context, server, app string, tools 
 	if tools.Node != o.node || !filepath.IsAbs(tools.NPM) {
 		return nil, ErrInvalidStorage
 	}
-	if o.publishing[app] != nil || o.removing[app] || r.PublishJournal != nil {
+	if o.publishing[app] != nil || o.removing[app] || r.recoveryPending() {
 		return nil, ErrConflict
 	}
 	if g := o.generations[app]; r.ActiveRelease == "" && g != nil && !generationDone(g) {
