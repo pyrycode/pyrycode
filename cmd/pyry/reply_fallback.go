@@ -376,17 +376,28 @@ func replyFallbackOutput(stdout *replyFallbackStream, waited bool, waitErr error
 // a composer draft the user can send or edit, not a paragraph.
 const replyFallbackMaxWords = 12
 
-// replyFallbackAssistantOpeners begin a message in the assistant's voice. A
-// suggestion opening with one would be the assistant talking, shown to the
-// user as their own next message. Compared lowercased with straight quotes.
+// replyFallbackAssistantOpeners begin a message only the assistant would
+// write: apologies, offers of help and questions put to the user. Openers a
+// user also writes ("Sure, go ahead", "Let me know", "I'll test it tonight",
+// "Here's the log") are deliberately absent. Compared lowercased with straight
+// quotes, at the start of each sentence.
 var replyFallbackAssistantOpeners = []string{
-	"i'll", "i will", "i'd be happy", "i would be happy", "i can help", "i apologize", "i apologise", "i'm sorry", "i am sorry",
-	"let me", "you're right", "you are right", "you're absolutely right", "sure", "certainly", "absolutely", "of course",
-	"great question", "good question", "here's", "here is", "happy to", "would you like", "do you want me",
+	"i apologize", "i apologise", "i'm sorry", "i am sorry", "my apologies", "apologies for",
+	"i'd be happy", "i would be happy", "happy to help", "i can help", "how can i help",
+	"would you like", "do you want me", "great question", "good question",
 }
 
-// validReplyFallback accepts only a short single sentence in the user's voice.
-// A rejected suggestion shows nothing, which beats a draft the user must delete.
+// replyFallbackLeadIns may stand as a short first sentence before the real
+// reply: "Yes. Go ahead and merge", "Thanks! Can you add tests too?".
+var replyFallbackLeadIns = []string{
+	"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "no", "nope", "right", "agreed", "fine", "alright", "all right",
+	"thanks", "thank you", "thanks a lot", "great", "perfect", "nice", "cool", "awesome", "excellent", "good", "lovely",
+	"sounds good", "looks good", "got it", "of course", "absolutely", "certainly", "exactly", "oh", "hmm", "wow",
+}
+
+// validReplyFallback accepts only a short reply in the user's voice: one
+// sentence, or a short lead-in such as "Thanks!" and one more sentence. A
+// rejected suggestion shows nothing, which beats a draft the user must delete.
 func validReplyFallback(text string) bool {
 	if text == "" || len(text) > 1024 || !utf8.ValidString(text) || utf8.RuneCountInString(text) > 240 {
 		return false
@@ -396,21 +407,33 @@ func validReplyFallback(text string) bool {
 			return false
 		}
 	}
-	if len(strings.Fields(text)) > replyFallbackMaxWords || replyFallbackSentences(text) > 1 {
+	if len(strings.Fields(text)) > replyFallbackMaxWords {
 		return false
 	}
-	return !replyFallbackAssistantVoice(text)
+	sentences := replyFallbackSentences(text)
+	if len(sentences) > 2 || len(sentences) == 2 && !slices.Contains(replyFallbackLeadIns, replyFallbackNormalize(strings.TrimRight(sentences[0], ".!? "))) {
+		return false
+	}
+	for _, sentence := range sentences {
+		if replyFallbackAssistantVoice(sentence) {
+			return false
+		}
+	}
+	return true
 }
 
-func replyFallbackAssistantVoice(text string) bool {
+func replyFallbackNormalize(text string) string {
 	lower := strings.ToLower(strings.TrimLeft(text, "\"'\u201c\u2018 "))
-	lower = strings.NewReplacer("\u2019", "'", "\u2018", "'").Replace(lower)
+	return strings.NewReplacer("\u2019", "'", "\u2018", "'").Replace(lower)
+}
+
+func replyFallbackAssistantVoice(sentence string) bool {
+	lower := replyFallbackNormalize(sentence)
 	for _, opener := range replyFallbackAssistantOpeners {
 		rest, ok := strings.CutPrefix(lower, opener)
 		if !ok {
 			continue
 		}
-		// "Surely" and "Heresy" are not "Sure" and "Here".
 		if next, _ := utf8.DecodeRuneInString(rest); rest == "" || !unicode.IsLetter(next) && next != '\'' {
 			return true
 		}
@@ -418,12 +441,13 @@ func replyFallbackAssistantVoice(text string) bool {
 	return false
 }
 
-// replyFallbackSentences counts sentence ends followed by more text. Terminal
-// punctuation at the very end, or inside a token like "v1.2" or "e.g.x", does
-// not start a second sentence.
-func replyFallbackSentences(text string) int {
-	sentences := 1
+// replyFallbackSentences splits text at a ".", "!" or "?" followed by space
+// and a capital or digit. Punctuation at the very end, or inside a token like
+// "v1.2" or "e.g. tonight", does not start a new sentence.
+func replyFallbackSentences(text string) []string {
+	var sentences []string
 	runes := []rune(strings.TrimSpace(text))
+	start := 0
 	for i := 0; i+1 < len(runes); i++ {
 		if !strings.ContainsRune(".!?", runes[i]) || !unicode.IsSpace(runes[i+1]) {
 			continue
@@ -433,10 +457,11 @@ func replyFallbackSentences(text string) int {
 			j++
 		}
 		if j < len(runes) && (unicode.IsUpper(runes[j]) || unicode.IsDigit(runes[j])) {
-			sentences++
+			sentences = append(sentences, string(runes[start:i+1]))
+			start, i = j, j-1
 		}
 	}
-	return sentences
+	return append(sentences, string(runes[start:]))
 }
 
 func replyExchangePrefix(text string) string {

@@ -168,9 +168,13 @@ nonblank single-line valid UTF-8, no remaining control characters or U+2028/
 U+2029 separators, at most 240 Unicode code points and 1024 UTF-8 bytes. It
 then applies the shape of Claude Code's own suggestions: at most 12 words, one
 sentence (a `.`, `!` or `?` followed by space and a capital or digit starts a
-second), and no assistant-voice opener such as "I'll", "Let me", "You're
-right", "Sure" or "Here's" (`replyFallbackAssistantOpeners`). A rejected
-suggestion shows nothing; an empty composer beats a draft in the wrong voice.
+second), or a short lead-in from `replyFallbackLeadIns` such as "Yes." or
+"Thanks!" followed by one more sentence. No sentence may open in a way only the
+assistant would: apologies, "I'd be happy", "I can help", "Would you like", "Do
+you want me", "Great question" (`replyFallbackAssistantOpeners`). Openers a
+user also writes, such as "Sure, go ahead", "Let me know", "I'll test it
+tonight", "You're right" or "Here's the log", are allowed: rejecting them threw
+away the very answers the prompt asks for. A rejected suggestion shows nothing.
 `TestValidReplyFallbackVoice` and `TestReplyExchangeAssistantKeepsTail` cover
 both.
 Oversized or otherwise invalid output is rejected rather than truncated.
