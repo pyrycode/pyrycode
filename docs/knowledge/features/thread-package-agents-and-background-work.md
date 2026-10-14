@@ -148,16 +148,18 @@ including parent evidence saved before a mapped launch or supplied only on a
 report. Main Agent/Task launches still split main text; queued sends do not,
 and delivered user messages retain their main-text closure behavior.
 
-`resolveChildren` requires a parent's creating ID to be strictly less
-than the child's, in this conversation and the same recorded source/lifetime or
-legacy scope. `childGroup` pins pending evidence to that original group; reused
-call IDs cannot steal predecessor children. Tagged and metadata-free evidence
-remain distinct regardless of displayed successor attribution. Self, newer or
-mismatched-source/lifetime/scope parents cannot join. The item model requires
-an `agent` parent; registered ordinary shells are a known validation exception
-tracked by [#3345](https://github.com/pyrycode/pyrycode/issues/3345), with
-`TestChildRejectsShellParent` deliberately skipped pending that repair. Current
-bindings, timestamps and tool names provide no fallback. See
+`resolveChildren` requires the parent item's immutable `Kind` to be `agent`
+and its creating ID to be strictly less than the child's, in this conversation
+and the same recorded source/lifetime or legacy scope. Registration in
+`agentGroup.calls` alone cannot establish ownership: `registerShell` shares that
+registry for [ordinary shell lifecycles](#background-shells), so `Bash` and
+`local_bash` remain `tool_call` items and cannot own children. Testing rejection
+with `Read` alone would miss this shared-registry boundary.
+`childGroup` pins pending evidence to that original group; reused call IDs
+cannot steal predecessor children. Tagged and metadata-free evidence remain
+distinct regardless of displayed successor attribution. Self, newer or
+mismatched-source/lifetime/scope parents cannot join. Current bindings,
+timestamps and tool names provide no fallback. See
 [durable producer lifetimes](history-package-producers-runtime-lifecycle.md#join-within-a-durable-producer-lifetime)
 and [ADR 042's item model](../decisions/042-daemon-built-thread.md#item-model).
 
@@ -171,6 +173,14 @@ ID. Ancestors resolve before descendants, and snapshots remain detached and
 creation-ID ordered. A repaired ordinary call leaves its old lane's call map,
 so a later ending there cannot interrupt it. Saved agent enrichment takes
 precedence over stale lane evidence.
+
+`TestChildRejectsShellParent` checks both shell names with metadata-free and
+recorded Claude sources. After every feed, only the ordinary shell is returned:
+attributed text, completed tools, nested Agent/Task rows and their active or
+completed descendants stay omitted, including after shell completion.
+`TestChildAgentParents` checks genuine Agent/Task ownership and ancestor closure.
+Both tests use `testMainReplay` to compare every two-chunk partition with full
+replay.
 
 **Keep a shell's original parent lane separate from promoted lifecycle evidence.**
 `resolveChildren` retains ordinary child parenting when the first lifetime
