@@ -120,6 +120,28 @@ their cancellation and old-group completion at snapshot time, rather than only
 after Publish returns. `TestUpdateCancellationRecovery` includes stopped →
 available intent reuse; final available intent alone would hide obsolete recovery.
 
+A same-owner rollback does not prove restart recovery. Startup fixtures must
+join the old owner, transfer exclusive filesystem ownership and exercise real
+`Open`/`NewOwner` with retained evidence. `TestStartupRecoveryRetry` interrupts
+partial replacement, restored-before-finalization and final persistence twice
+before successful reopen; clearing the journal after restoration alone would lose
+that retry path. `TestStartupRecoveryInvalidation` checks absent API/asset targets
+while parked, a usable sibling and stale completion after stop/intent reuse,
+metadata changes, removal and shutdown. Constructor-time backup hooks must be
+installed before workers start; mutating hooks after `NewOwner` races admission.
+
+`TestStartupTemplateRecovery` compares complete restored schema/preferences/ledger
+and removes candidate-only SQL/files before previous-release health; its previous
+service guard rejects either leftover before health can pass. It also checks stopped
+validation without a service. An invalid-preferences snapshot cannot simply insert
+values violating the maintained schema's CHECK constraints: SQLite integrity rejects
+that fixture before release validation runs. Use a permissive schema with invalid
+saved data so snapshot verification succeeds and restored-release validation must
+reject it before journal completion. SQLite integrity alone proves neither schema
+nor saved-preference/complete migration-checksum compatibility. Supported Node/npm
+arms must execute and pass; skips supply no restart evidence. See the
+[startup recovery matrix](apps-package-lifecycle-and-restart-state.md#startup-publication-recovery).
+
 ### Retained-build fixtures
 
 `TestRetainedCanonicalInventory` and `TestRetainedRealInventory` author expected

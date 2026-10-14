@@ -59,9 +59,9 @@ which guards the operation's current revision/ownership before `changeLocked`.
 Unconditional `UpdatePublish` alone cannot reject obsolete health/finalization.
 Recovery callers clear the journal together with their resulting lifecycle
 fields. The registry validates and persists caller-supplied results; it neither
-derives those fields from the journal nor performs recovery itself. Callable first
-publication and active-release updates are implemented; interrupted-publication
-startup recovery (#3263) remains downstream. Stored references and decisions alone
+derives those fields from the journal nor performs recovery itself. `NewOwner`
+implements [before-activation startup recovery](#startup-publication-recovery);
+after-activation resolution remains #3404. Stored references and decisions alone
 prove neither readiness nor verified or restored data. See
 [publication and recovery](../../hosted-apps.md#publication-and-recovery).
 
@@ -234,10 +234,10 @@ can cancel its own wait independently. The daemon invokes joined shutdown on
 normal exit and every startup failure after owner construction. Local stop
 preserves sibling services and the session pool; daemon shutdown preserves
 available intent for restart. Publication owns migration/private health, atomic
-activation and verified update recovery; interrupted-publication startup recovery
-(#3263), publishing control/daemon wiring (#3301/#3266) and encrypted resource
-capability activation (#3123) remain downstream. Production `HostedAppsReady`
-remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes
+activation, verified update recovery and before-activation startup recovery.
+After-activation resolution (#3404), publishing control/daemon wiring
+(#3301/#3266) and encrypted resource capability activation (#3123) remain downstream.
+Production `HostedAppsReady` remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes
 the attestation. Daemon startup installs no dependencies and runs no migrations. See
 [startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
 
@@ -269,6 +269,56 @@ unlaunched stopped/unpublished apps and clean shutdown descendant cleanup.
 Backoff is a delay, never another registry state. No live Claude was used or
 required; seeded persistence supplies no resource-routing or publisher
 migration/rollback acceptance. See the [runtime reference](../../hosted-apps.md#runtime-and-layout).
+
+### Startup publication recovery
+
+`Open` preserves legacy loading and strict storage validation before recovery;
+malformed storage is rejected without rewriting it. After exclusive ownership
+transfers from a joined previous owner, `NewOwner` admits one asynchronous worker
+per uncommitted journal without `RetirementPending`, before ordinary reconciliation
+or `prepareRelease` can write data. Construction waits for neither restoration nor validation/health.
+Until conditional durable completion, that app's Start, reconciliation, Publish,
+API and asset targets remain barred. Restoration and validation waits hold neither
+registry nor owner locks, so another app's reconciliation, targets and registry
+operations remain usable.
+
+| Restart evidence / intent | Recovery and admission outcome |
+|---|---|
+| Uncommitted update, available | Freshly verify/restore the entire snapshot, freshly `VerifyBuild` the previous release, then privately confirm matching previous-release health before exposing targets. |
+| Uncommitted first publication, available | Restore data; durably finish failed and unpublished, without a target. |
+| Uncommitted update, stopped | Restore data, freshly verify the previous build and validate its restored schema, saved preferences and complete migration-version/checksum ledger; remain stopped without a service or target. |
+| Uncommitted first publication, stopped | Restore data; durably remain stopped and unpublished, without a target. |
+| Committed activation journal | Keep the candidate decision; never restore pre-publication data. Reopened targets remain barred pending #3404. |
+| `RetirementPending`, with or without a journal | Remain barred; retained backup evidence does not establish positive writer retirement. |
+
+Recovery runs no migrations. Stopped validation uses the verified release's
+`schema`, `ledger` and `migrationFiles` helpers against read-only SQLite, without
+starting its HTTP service. Successful before-activation completion clears pending
+release/journal atomically with the resulting state and safe interrupted-publication
+error; it retains committed title, previous active release (if any), manifest and
+intent. Candidate manifest metadata never becomes committed display metadata.
+`usableLocked` permits a committed journal only for its still-live health-confirmed
+activated publication generation; that exception supplies no readiness on reopen.
+
+Stop/removal/shutdown and incompatible newer commits cancel stale recovery.
+Completion checks exact app revision, journal and ownership, preserving newer
+fields/intent and never reviving a tombstone; even stopped → available reuse cannot
+validate old work. Stop/Shutdown join workers and private processes. Unresolved
+recovery rejects removal without discarding registration/evidence. A newer stop
+cannot be undone by late health or finalization.
+
+Keep the journal, previous build and immutable backup until completion is durable.
+Partial replacement, interruption after restoration and failed/uncertain finalization
+remain retryable from the retained snapshot on a fresh exclusive reopen, with fresh
+verification each time; failures do not trigger a busy automatic retry loop.
+Missing/invalid snapshots, restoration I/O, damaged previous builds and incompatible
+or unhealthy restored data leave no target or successful-rollback claim. Safe errors
+use `app.io_failed` for restoration failures where persistence permits and
+`app.unavailable` for previous-build/compatibility/health failures. Evidence remains
+when persistence fails. Host/app revisions never reset, decrease or wrap; exhaustion
+refuses completion. Publishing composition/integration remains #3266 and local
+publishing control remains #3301. See the
+[reference matrix](../../hosted-apps.md#update-and-startup-recovery-contract).
 
 ### Publication writers and completion
 
