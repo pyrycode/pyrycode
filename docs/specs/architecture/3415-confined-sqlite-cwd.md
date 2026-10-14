@@ -64,3 +64,25 @@ Write launch identity tests first and observe their failure against the old path
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-14
+
+## Validation evidence
+
+Linux amd64, Linux 7.0.0-38-generic, Go 1.26.9; real Node 24.15.0 and npm 11.12.1 from the official Node distribution. Counts include named subtests.
+
+At code revision `9e88a3a743b8e7a224733cb0622ce3b493482c66`:
+`HOSTED_APP_NODE=/tmp/builder-3415/node-v24.15.0-linux-x64/bin/node go test -race -count=1 -json -run '^(TestCommittedTemplateUpdateSnapshot|TestBackupSQLiteWAL|TestBackupNodeDirectoryIdentity)$' ./internal/apps`
+executed 7, passed 7, failed 0, skipped 0. The retained assertion has no platform skip. The two bootstrap-rejection arms and retained assertion also executed 4/passed 4/failed 0/skipped 0 after the test-file move.
+
+At implementation revision `60d55f6f3d4155ada166aa6b806144ec916f0ba7` (identical production code):
+`HOSTED_APP_NODE=/tmp/builder-3415/node-v24.15.0-linux-x64/bin/node HOSTED_APP_NPM_CLI=/tmp/builder-3415/node-v24.15.0-linux-x64/lib/node_modules/npm/bin/npm-cli.js go test -race -run '^TestUpdateTemplateSnapshot$' -count=1 -v ./internal/apps`
+executed 1, passed 1, failed 0, skipped 0, test elapsed 97.13 seconds. It proves initialized-data healthy candidate activation, saved preferences, candidate migration and a freshly verified pre-migration schema/preferences/ledger backup. Runtime output reports Node v24.15.0/npm 11.12.1.
+
+`go vet ./...`, `go build -o /tmp/builder-3415/pyry ./cmd/pyry`, and `GOOS=darwin GOARCH=arm64 go test -c -o /tmp/builder-3415/apps-darwin.test ./internal/apps` passed. Cross-compilation supplies no native execution proof.
+
+The complete touched-package run against the implementation source, `HOSTED_APP_NODE=/tmp/builder-3415/node-v24.15.0-linux-x64/bin/node HOSTED_APP_NPM_CLI=/tmp/builder-3415/node-v24.15.0-linux-x64/lib/node_modules/npm/bin/npm-cli.js go test -race -count=1 -json ./internal/apps/...`, finished in 487.415 seconds: executed 999, passed 999, failed 0, skipped 0. Required parent assertions all passed: directory identity 1.54 seconds, retained initialized snapshot 0.75 seconds, WAL 0.61 seconds, maintained-template update 70.06 seconds. Production code is unchanged between the implementation and assertion-relocation commits. The full-module race gate remains the verifier's responsibility.
+
+Native route task `f4108002713f4bbdad100532cfb3908f8a231d1570b884e0dafb456d4c9821c1` was requested with `platform-probe`, `macos-arm64` and pushed revision `60d55f6f3d4155ada166aa6b806144ec916f0ba7`, using `fleet-task.py request /tmp/builder-3415/native-request.json`. Artifacts were retrieved with `fleet-task.py await <task-id> --out /tmp/builder-3415/native-probe --timeout 55`. The completed result says the route is available and is not candidate test evidence. Exact returned `platform.json` bytes are retained at `internal/apps/testdata/3415-native-platform.json`, SHA-256 `0c89293ba92560bb4eec2e1e159fa36b833f1262ed876df45c48062b2f61ad0c`: Darwin/arm64, `candidate_tests_executed: false`.
+
+**Native acceptance remains blocked on an apps-capable execution recipe.** Required macOS command, with supported real tools selected through `HOSTED_APP_NODE`/`HOSTED_APP_NPM_CLI`:
+`go test -race -count=1 -v -run '^(TestCommittedTemplateUpdateSnapshot|TestBackupSQLiteWAL|TestUpdateTemplateSnapshot|TestBackupNodeDirectoryIdentity)$' ./internal/apps`.
+Native candidate tests executed 0; no runtime versions or passing SQL/update counts can be claimed from the route probe. This is incomplete builder proof, not a documentation or live-Claude handoff.
