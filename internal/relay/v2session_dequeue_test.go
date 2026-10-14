@@ -182,21 +182,16 @@ func TestV2Session_DequeueMessage_NilRemoverInert(t *testing.T) {
 	openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
 }
 
-// TestV2Session_DequeueMessage_DecodeTolerant proves a malformed payload is
-// tolerated: the handler does not panic, it still reaches Remove with zero-value
-// fields (the engine's safe no-op), and the raw payload bytes never appear in any
-// log line (the never-echo discipline — encoding/json can quote attacker bytes
-// into its error). The payload is valid JSON (so the envelope decodes and the
-// type switch routes to handleDequeueMessage) but malformed as a
-// DequeueMessagePayload: queued_msg_id is a string where a uint64 is expected, so
-// json.Unmarshal fails and leaves the struct zero — Remove("", 0).
-func TestV2Session_DequeueMessage_DecodeTolerant(t *testing.T) {
+// TestV2Session_DequeueMessage_DecodeFailureIsInert proves malformed payloads
+// cannot reach Remove through partially populated fields on an authenticated
+// connection, emit wire output, or leak raw payload bytes into logs.
+func TestV2Session_DequeueMessage_DecodeFailureIsInert(t *testing.T) {
 	t.Parallel()
 
 	const marker = "dequeue-marker-d3adb33f"
 
 	respPriv, respPub := genV2Keypair(t)
-	fake := &fakeQueueRemover{removed: false}
+	fake := &fakeQueueRemover{removed: true}
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
 	logBuf := &lockedBuffer{}
@@ -216,14 +211,17 @@ func TestV2Session_DequeueMessage_DecodeTolerant(t *testing.T) {
 	frames <- sealAppFrameConn(t, send, "c-int", protocol.Envelope{
 		Type:    protocol.TypeDequeueMessage,
 		TS:      time.Now().UTC(),
-		Payload: json.RawMessage(`{"queued_msg_id":"` + marker + `"}`),
+		Payload: json.RawMessage(`{"conversation_id":"conv","queued_msg_id":7,"queued_msg_id":"` + marker + `"}`),
 	})
 
 	// Barrier guarantees the dequeue (incl. its logging) completed.
 	openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
 
-	if got := fake.snapshot(); !reflect.DeepEqual(got, []dequeueCall{{convID: "", id: 0}}) {
-		t.Errorf("Remove calls = %+v, want one call with zero-value fields", got)
+	if got := fake.snapshot(); len(got) != 0 {
+		t.Errorf("Remove calls = %+v, want none", got)
+	}
+	if got := noiseMsgsForConn(t, rec, "c-int"); len(got) != 0 {
+		t.Errorf("malformed payload emitted %d app frame(s), want 0", len(got))
 	}
 	if logs := logBuf.String(); strings.Contains(logs, marker) {
 		t.Errorf("log output leaked raw payload bytes (marker %q present):\n%s", marker, logs)

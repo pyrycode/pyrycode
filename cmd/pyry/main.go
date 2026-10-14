@@ -711,6 +711,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	if err != nil {
 		return fmt.Errorf("msgqueue init: %w", err)
 	}
+	sends.bindItem = queue.BindAcceptedItem
 	shadow.quiet = func(id conversations.ConversationID) bool {
 		return shadowQuiescent(postDelivery, queue, streamSink, id)
 	}

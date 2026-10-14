@@ -32,13 +32,25 @@ type QueueStatePayload struct { // binary → phone; wire form of msgqueue.Snaps
 type DequeueMessagePayload struct { // phone → binary, inbound control (intercepted pre-dispatch.Route, no handler)
     ConversationID string `json:"conversation_id"` // untrusted phone input; #723 resolves to an authorized conversation
     QueuedMsgID    uint64 `json:"queued_msg_id"`   // the id to remove (msgqueue.Remove(convID, id))
+    AcceptedItemID json.RawMessage `json:"accepted_item_id,omitempty"` // optional durable acceptance guard
+}
+
+type SendQueuedNowPayload struct { // phone → binary; writes into the running turn
+    ConversationID string `json:"conversation_id"`
+    QueuedMsgID    uint64 `json:"queued_msg_id"`
+    AcceptedItemID json.RawMessage `json:"accepted_item_id,omitempty"`
 }
 ```
 
-- **No `omitempty` on any field** — the same deliberate inverse as the #607
-  interactive / #617 snapshot / #701 modal payloads. Every field is always present
-  so the fixtures pin the full shape. `package protocol` already imports `time`
-  (for `Envelope.TS`) — **no new import**.
+- **Required fields remain always present; only `accepted_item_id` is omitted
+  when unset.** Both command DTOs use `json.RawMessage` so omission and explicit
+  `null` remain distinct: nil permits the legacy operation, while present-invalid
+  input must never fall back to it. A nullable numeric pointer would collapse
+  those cases. Relay validation accepts only JSON integers in
+  `1..9007199254740991`, sourced from accepted thread `item.id`, and rejects every
+  payload decode error before acting. `TestQueueActionItemBindingWire` pins the
+  literal wire key and omission/null preservation for both DTOs; see
+  [protocol boundary tests](development-verification.md#protocol-boundaries).
 - **`queued_msg_id` is a plain `uint64` per-conversation counter (≥ 1), NOT a
   nonce.** It matches `msgqueue.QueuedMessage.ID` exactly so the producer maps
   `QueuedMessage.ID → QueuedMsgID` with no translation. The mobile client (#429)
@@ -54,8 +66,9 @@ type DequeueMessagePayload struct { // phone → binary, inbound control (interc
   log line already prints the two ids in, and because `roundTripEnvelope`
   re-marshals the payload struct while `canonical` (`messaging_test.go`) is
   `json.Compact` with no key sorting, struct-field order **is** the wire byte
-  order the fixture pins — not just field presence. `dequeue_message` still
-  resolves only `conversation_id` + `queued_msg_id`; `message_id` addresses,
+  order the fixture pins — not just field presence. Both commands resolve
+  `conversation_id` + `queued_msg_id`, optionally guarded by the daemon's
+  current-run acceptance `accepted_item_id`; `message_id` addresses,
   authorizes, matches and dedupes nothing.
 - **`queued` ordering + empty-backlog `[]` vs `null`.** Array order is canonical
   FIFO/enqueue order (the `Options []ModalOption` precedent). `[]QueuedItem(nil)`
