@@ -832,41 +832,16 @@ func (m *V2SessionManager) newSessionReplyWorkspaceRefused(ctx context.Context, 
 	}
 }
 
-// handleDequeueMessage removes a not-yet-drained queued message named by an
-// inbound dequeue_message control frame (#723), letting a phone cancel a turn it
-// queued before it drains. Intercepted in dispatchAppFrame before dispatch.Route,
-// like handleInterrupt / handleModalCancel, and runs on the manager's single Run
-// dispatch goroutine — so the s.interactive read is lock-free under the package's
-// single-owner invariant.
-//
-// The signature takes (s, env) — no ctx — mirroring handleInterrupt's deviation
-// from the (ctx, s, env) siblings: Remove takes no context, there is no
-// forwardEnvelope, and queue_state convergence is decoupled onto the #722 emitter
-// goroutine (the OnChange seam Remove fires), so the handler has no cancellable
-// work.
-//
-// Order is load-bearing — the capability gate comes first:
-//  1. A non-interactive conn's dequeue_message is inert: no Remove call, no
-//     mutation, no panic (AC-3). This is the new inbound capability gate; like
-//     handleInterrupt it is the bare interactive check, read on the Run goroutine
-//     lock-free.
-//  2. A nil QueueRemover (foreground / pre-wire) makes the frame inert, mirroring
-//     handleInterrupt's nil-Interrupter guard.
-//  3. The payload is decoded tolerantly: a decode failure leaves zero-value
-//     fields, which Remove("", 0) no-ops on. The decode error and the payload
-//     bytes are NEVER echoed back to the phone or into a log (encoding/json can
-//     quote attacker bytes into its error string) — the never-echo discipline of
-//     handleRequestSnapshot / handleModalCancel.
-//  4. Remove returning false (unknown/already-delivered/in-flight-head id, or an
-//     unknown/foreign conversation_id) is success of a valid request, not an error
-//     (AC-2): no reply, no broadcast. The convID arg confines the effect to that
-//     one FIFO — a hostile id cannot touch another conversation's backlog.
-//  5. There is no reply and no broadcast. AC-4's queue_state convergence is the
-//     automatic OnChange → #722-producer path that Remove's notify fires on a
-//     successful removal; the handler MUST NOT push or re-emit queue_state itself.
+// handleDequeueMessage removes a queued entry on the manager's Run goroutine,
+// where s.interactive is owned. Non-interactive connections and unwired queues
+// are inert. An optional item_id must match the daemon-held acceptance atomically
+// with removal; invalid or unsupported bindings never fall back to Remove.
+// No request receives a reply or broadcast here. Successful removal drives the
+// existing queue/history observers. Payload bytes, bindings and decode errors
+// are never logged or echoed.
 func (m *V2SessionManager) handleDequeueMessage(s *V2Session, env protocol.Envelope) {
 	if !s.interactive {
-		return // non-interactive conn: inert, no Remove (the AC-3 negative path)
+		return
 	}
 	if m.cfg.QueueRemover == nil {
 		m.cfg.Logger.Debug("relay: v2 dequeue_message inert; no queue remover wired",
@@ -875,11 +850,22 @@ func (m *V2SessionManager) handleDequeueMessage(s *V2Session, env protocol.Envel
 		return
 	}
 	var p protocol.DequeueMessagePayload
-	// A decode failure is tolerated: it leaves zero-value fields, which
-	// Remove("", 0) no-ops on. Never echoed back to the phone or into a log.
-	_ = json.Unmarshal(env.Payload, &p)
-
-	if m.cfg.QueueRemover.Remove(p.ConversationID, p.QueuedMsgID) {
+	// Legacy decoding remains tolerant. A supplied binding must decode cleanly;
+	// invalid bindings and decode errors are never echoed or logged.
+	decodeErr := json.Unmarshal(env.Payload, &p)
+	itemID, valid := queueItemBinding(p.ItemID)
+	if !valid || (len(p.ItemID) != 0 && decodeErr != nil) {
+		return
+	}
+	var removed bool
+	if itemID == 0 {
+		removed = m.cfg.QueueRemover.Remove(p.ConversationID, p.QueuedMsgID)
+	} else if bound, ok := m.cfg.QueueRemover.(interface {
+		RemoveItem(string, uint64, uint64) bool
+	}); ok {
+		removed = bound.RemoveItem(p.ConversationID, p.QueuedMsgID, itemID)
+	}
+	if removed {
 		m.cfg.Logger.Info("relay: v2 dequeue_message removed",
 			"event", "v2.dequeue.removed",
 			"conn_id", s.connID,
@@ -897,24 +883,12 @@ func (m *V2SessionManager) handleDequeueMessage(s *V2Session, env protocol.Envel
 		"queued_msg_id", p.QueuedMsgID)
 }
 
-// handleSendQueuedNow writes a queued message named by an inbound send_queued_now
-// control frame into the conversation's running claude turn (#2729). It is
-// handleDequeueMessage's twin in every respect but the queue operation and where it
-// runs: the same interactive gate first, the same nil-seam inertness, the same
-// tolerant decode whose error and bytes are never echoed, and no reply — the
-// acknowledgement is the queue_state change and the operator message push
-// SendNow's own seams fire. The log fields are dequeue's too: never the queued
-// text, never the client's message id.
-//
-// It runs on the conn's appFrameWorker, not on Run, because SendNow ends in a
-// stdin pipe write with no deadline (streamsup.WriteTurn). The interactive gate
-// is therefore Run's, checked in dispatchAppFrame before the job is queued:
-// s.interactive is Run-owned and is not read here.
-//
-// SendNow returning false is success of a valid request, as Remove's false is: the
-// turn was idle (the ordinary drain delivers the message), the id is unknown or
-// already delivered, the head is committing, the session is Codex, or the write
-// failed and the message stayed queued.
+// handleSendQueuedNow writes a queued entry into its conversation's running turn.
+// It runs on appFrameWorker because SendNow can block in a stdin write; Run checks
+// the interactive capability in dispatchAppFrame before queuing the job.
+// Optional item_id follows handleDequeueMessage's binding and never-log contract.
+// Refusals emit no reply or broadcast; successful writes drive queue/history
+// observers, and failed writes retain the original entry and binding.
 func (m *V2SessionManager) handleSendQueuedNow(s *V2Session, plaintext []byte) {
 	if m.cfg.QueueSender == nil {
 		m.cfg.Logger.Debug("relay: v2 send_queued_now inert; no queue sender wired",
@@ -922,14 +896,25 @@ func (m *V2SessionManager) handleSendQueuedNow(s *V2Session, plaintext []byte) {
 			"conn_id", s.connID)
 		return
 	}
-	// Both decodes are tolerated: a failure leaves zero-value fields, which
-	// SendNow("", 0) no-ops on. Never echoed back or into a log.
+	// Legacy decoding remains tolerant. A supplied binding must decode cleanly;
+	// invalid bindings and decode errors are never echoed or logged.
 	var env protocol.Envelope
 	_ = json.Unmarshal(plaintext, &env)
 	var p protocol.SendQueuedNowPayload
-	_ = json.Unmarshal(env.Payload, &p)
-
-	if m.cfg.QueueSender.SendNow(p.ConversationID, p.QueuedMsgID) {
+	decodeErr := json.Unmarshal(env.Payload, &p)
+	itemID, valid := queueItemBinding(p.ItemID)
+	if !valid || (len(p.ItemID) != 0 && decodeErr != nil) {
+		return
+	}
+	var sent bool
+	if itemID == 0 {
+		sent = m.cfg.QueueSender.SendNow(p.ConversationID, p.QueuedMsgID)
+	} else if bound, ok := m.cfg.QueueSender.(interface {
+		SendNowItem(string, uint64, uint64) bool
+	}); ok {
+		sent = bound.SendNowItem(p.ConversationID, p.QueuedMsgID, itemID)
+	}
+	if sent {
 		m.cfg.Logger.Info("relay: v2 send_queued_now delivered",
 			"event", "v2.send_now.delivered",
 			"conn_id", s.connID,

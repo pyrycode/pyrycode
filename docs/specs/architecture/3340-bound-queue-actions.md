@@ -76,3 +76,8 @@ Pending documentation stage: `docs/protocol-mobile.md`, **Queue (v2)**: document
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+
+- 2026-10-14: `TestQueueBindingDuringSendNow` exposed acceptance racing a legacy send-now take and failed reinsertion. A FIFO-only binder cannot find that entry. Retain each accepting lifecycle in `convQueue.accepting` until its callback returns, then release the map entry (and empty map). The binder can therefore update the same lifecycle while it is temporarily outside the FIFO. Guarded actions still match only live FIFO entries, and no retired binding is retained after acceptance completes.
+- Final sizing remains below 800 written lines (approximately 750 including plan, tests and replaced comments), with no new exported types/interfaces or changed legacy signatures. All five limits still hold.

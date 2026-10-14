@@ -434,6 +434,9 @@ type QueueStatePayload struct {
 type DequeueMessagePayload struct {
 	ConversationID string `json:"conversation_id"`
 	QueuedMsgID    uint64 `json:"queued_msg_id"`
+	// ItemID binds the command to the accepted thread item. RawMessage preserves
+	// supplied null and wrong types so handlers reject them instead of going unbound.
+	ItemID json.RawMessage `json:"item_id,omitempty"`
 }
 
 // SendQueuedNowPayload is the body of an Envelope whose Type ==
@@ -445,6 +448,8 @@ type DequeueMessagePayload struct {
 type SendQueuedNowPayload struct {
 	ConversationID string `json:"conversation_id"`
 	QueuedMsgID    uint64 `json:"queued_msg_id"`
+	// ItemID has the same optional binding contract as DequeueMessagePayload.ItemID.
+	ItemID json.RawMessage `json:"item_id,omitempty"`
 }
 
 // NewSessionPayload is the body of an Envelope whose Type == TypeNewSession
