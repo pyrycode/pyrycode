@@ -261,6 +261,9 @@ func TestMemoryCredentialCancellation(t *testing.T) {
 
 func TestMemoryCredentialProcess(t *testing.T) {
 	if os.Getenv("PYRY_MEMORY_HELPER") == "1" {
+		// Pin the file backend so the real CLI path never probes or writes an
+		// OS keyring. The empty PATH below is a second, independent guard.
+		memoryCredentialGOOS = "unsupported"
 		mode := os.Getenv("PYRY_MEMORY_MODE")
 		if mode == "resolve" {
 			token, err := resolveMemoryCredential(context.Background(), os.Getenv("PYRY_MEMORY_REF"))
