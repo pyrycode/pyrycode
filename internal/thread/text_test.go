@@ -3,7 +3,6 @@ package thread
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"reflect"
 	"testing"
 
@@ -184,7 +183,7 @@ func TestFoldIngestionScaling(t *testing.T) {
 		work := testIngestionWork(f)
 		t.Logf("entries=%d work=%d per entry=%d", n, work, work/n)
 		if small != 0 && work >= small*8 {
-			t.Fatal(fmt.Sprintf("4x corpus cost >=8x: %d -> %d", small, work))
+			t.Fatalf("4x corpus cost >=8x: %d -> %d", small, work)
 		}
 		small = work
 	}
