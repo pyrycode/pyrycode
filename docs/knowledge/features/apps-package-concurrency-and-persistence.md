@@ -4,6 +4,37 @@ See the [package overview](apps-package.md) for the topic map.
 
 ## Concurrency and persistence
 
+### Checked candidate recording
+
+`Registry.PrepareCandidate` builds outside the registry mutex, then
+`recordCandidate` holds it across the current live-registration check, byte/version
+decision, installation/reverification and `changeLocked` persistence. A read then
+`RecordRelease` would allow competing candidates to decide against obsolete
+history. New versions compare numeric components against all recorded versions
+and any legacy active release; recorded-byte retries bypass progression so an
+older identical candidate still works after newer history exists.
+
+Verify a recorded build before calling `InstallBuild`: installation can create
+a missing destination, which would silently repair a damaged recorded candidate.
+Retries freshly verify retained contents and the recorded lockfile digest,
+returning original metadata without revision/history changes. Missing, partial
+or changed recorded builds fail unchanged. A failed durable write leaves no
+history entry or revision, although an unrecorded sealed build can remain and
+be verified/reused on retry. Preparation preserves the latest committed
+manifest/display/lifecycle/journal fields and acquires no Owner lock; build
+success establishes no activation or persistent-data mutation. See
+[checked preparation](../../hosted-apps.md#checked-candidate-preparation).
+
+`candidateCommand` joins each leader and confirms no live owned process-group
+members remain before the next phase or artifact validation. Leader exit alone
+does not establish cleanup: descendants can continue changing build output.
+Cancellation stops the whole group and later phases; cleanup failure also
+stops preparation. Linux orphan zombies are inert bookkeeping rather than live
+build work. The [controlled fixtures](apps-package-testing.md#checked-candidate-fixtures)
+prove the ordering, not merely the absence of children after return.
+
+### Registry and process ownership
+
 Stable preparation subscribes before committed identity resolution to close the
 registration race. Registry callbacks only cancel incompatible work; taking a
 result lock there would invert the result → registry → owner checks. Its watcher

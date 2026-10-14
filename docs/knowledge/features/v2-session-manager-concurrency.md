@@ -496,6 +496,15 @@ return so failed/cancelled prefix sends cannot strand the observer. The shared
 catch-up/page fixture in `testThreadQueryInterrupted` applies these two barriers
 before interrupting and awaiting sender completion.
 
+`pushSource` cancels an active thread query before looking up its push queue.
+Cancellation of a sealed page can retire the connection before that lookup, so
+the interrupting live push may return `ErrConnNotFound`. Requiring successful
+admission races the required retirement. `TestThreadCatchUpInterrupted` and
+`TestThreadPageInterrupted` accept only success or that error for live interruption;
+their `live-retired` arms await retirement first and require the error. Keep prefix,
+sender-exit, teardown and no-successful-final-marker assertions, and continue
+requiring successful admission in ordinary live-delivery tests.
+
 `hostedSender` selects `HostedAppsSend` or `OutboundContext`, never context-free
 `Outbound`. A thread handshake initializes this lane only with `OutboundContext`
 (or the existing hosted configuration); installing it on an outbound-only legacy
