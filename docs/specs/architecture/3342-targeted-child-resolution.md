@@ -58,3 +58,7 @@ Pending documentation stage: update `docs/knowledge/features/thread-package-agen
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+- 2026-10-14: Read intrinsic agent state directly for lifecycle comparison; copying it for every recomputed agent would retain unrelated base-copy work. Cache derived endings only and read intrinsic finals from the parent item. Root lifecycle updates enqueue indexed dependents directly, allowing main-only Agent launches/finals to do zero child-resolution work. Mutation hooks live in `main.go`, including the existing shell foreground path; no `shell.go` edit is needed.
+- 2026-10-14: First registration marks the live item intrinsic until resolution, preserving a same-entry final during late parenting. `TestChildTargetedRepair` asserts the intermediate terminal order as well as replay equality and old-edge removal. `TestChildRejectedCandidatesCount` counts rejected self-parent candidates and omitted descendants; counters also include expansion-pass candidates and parent lookups before rejection.
