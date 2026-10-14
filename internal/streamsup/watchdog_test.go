@@ -529,35 +529,113 @@ func TestWatchdog_PendingPermission_EmitNotKill(t *testing.T) {
 	wd.Wait()
 }
 
-// The latch re-arms per stall episode: after a fire, activity clears it, and a
-// subsequent idle span fires again.
+// The latch re-arms only after a poll observes non-stalling activity. A delayed
+// poll that misses that window still belongs to the same continuous episode.
 func TestWatchdog_LatchReArms(t *testing.T) {
 	t.Parallel()
-	stalls := make(chan bool, 8)
-	wd := NewWatchdog(WatchdogConfig{
-		Idle:    60 * time.Millisecond,
-		OnStall: func(pending bool) { stalls <- pending },
-		Logger:  discardLogger(),
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	for _, observeActivity := range []bool{false, true} {
+		name := "poll_misses_activity_window"
+		if observeActivity {
+			name = "poll_observes_activity_window"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			const idle = 60 * time.Millisecond
+			const waitBound = 2 * time.Second
+			clk := &fakeClock{t: time.Unix(1_000, 0)}
+			ctx, cancel := context.WithCancel(context.Background())
+			stalls := make(chan bool, 8)
+			wd := NewWatchdog(WatchdogConfig{
+				Idle: idle,
+				OnStall: func(pending bool) {
+					select {
+					case stalls <- pending:
+					case <-ctx.Done():
+					}
+				},
+				Logger: discardLogger(),
+				now:    clk.now,
+			})
+			// Gate only the poll's clock; tracker writes keep the same fake time
+			// source without blocking. Start snapshots before calling this hook.
+			polls := make(chan struct{})
+			resume := make(chan time.Time)
+			wd.cfg.now = func() time.Time {
+				select {
+				case polls <- struct{}{}:
+				case <-ctx.Done():
+					return clk.now()
+				}
+				select {
+				case now := <-resume:
+					return now
+				case <-ctx.Done():
+					return clk.now()
+				}
+			}
+			wd.UserTurnSent()
+			wd.Start(ctx)
+			t.Cleanup(func() {
+				cancel()
+				wd.Wait()
+			})
+			awaitPoll := func() {
+				t.Helper()
+				select {
+				case <-polls:
+				case <-time.After(waitBound):
+					t.Fatal("watchdog did not reach poll clock gate")
+				}
+			}
+			poll := func(phase string, want int) {
+				t.Helper()
+				select {
+				case resume <- clk.now():
+				case <-time.After(waitBound):
+					t.Fatalf("%s: watchdog did not accept poll time", phase)
+				}
+				// The next snapshot/clock call follows the entire prior iteration,
+				// including OnStall. Absence is checked only after that barrier.
+				awaitPoll()
+				got := len(stalls)
+				for range got {
+					if pending := <-stalls; pending {
+						t.Error("unexpected pending permission")
+					}
+				}
+				t.Logf("%s: poll time=%v, callbacks=%d", phase, clk.now(), got)
+				if got != want {
+					t.Fatalf("%s: callbacks=%d, want %d", phase, got, want)
+				}
+			}
+			awaitPoll()
+			clk.advance(2 * idle)
+			poll("first stall", 1)
+			for range 3 {
+				poll("first continuous stall", 0)
+			}
 
-	wd.Start(ctx)
-	wd.UserTurnSent()
-
-	if _, fired := recvStall(t, stalls, 2*time.Second); !fired {
-		t.Fatal("first stall did not fire")
+			// This held poll already captured the old lastEvent. The system line
+			// advances activity without clearing the turn that is still owed.
+			if _, err := wd.Writer().Write([]byte(`{"type":"system"}` + "\n")); err != nil {
+				t.Fatalf("Write (reset activity): %v", err)
+			}
+			t.Logf("system activity at %v; poll holds pre-activity snapshot", clk.now())
+			if observeActivity {
+				poll("pre-activity snapshot", 0)
+				poll("activity observed while turn owed", 0)
+			}
+			clk.advance(2 * idle)
+			want := 0
+			if observeActivity {
+				want = 1
+			}
+			poll("second idle episode", want)
+			for range 3 {
+				poll("continued idle", 0)
+			}
+		})
 	}
-	// Activity advances lastEvent → the next non-firing tick clears the latch.
-	// awaiting stays true across this system line, so the next window re-fires.
-	if _, err := wd.Writer().Write([]byte(`{"type":"system"}` + "\n")); err != nil {
-		t.Fatalf("Write (reset activity): %v", err)
-	}
-	if _, refired := recvStall(t, stalls, 2*time.Second); !refired {
-		t.Fatal("watchdog did not re-fire after a new idle episode (latch stuck)")
-	}
-	cancel()
-	wd.Wait()
 }
 
 // Clean shutdown: cancelling ctx exits the poll goroutine and Wait returns. No
