@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -97,6 +98,13 @@ func TestSuggestionEnqueuerIdentity(t *testing.T) {
 	}
 }
 
+type testQueuedSendRetryWriter struct{}
+
+func (testQueuedSendRetryWriter) Write(p []byte) (int, error) {
+	time.Sleep(5 * time.Millisecond)
+	return len(p), nil
+}
+
 func TestQueuedSendHistoryLifecycle(t *testing.T) {
 	t.Parallel()
 	for _, outcome := range []string{"delivered", "send_now", "removed", "give_up", "retry", "refused", "shutdown"} {
@@ -116,7 +124,7 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 			cfg := msgqueue.Config{Logger: discardLogger(), OnAccepted: h.accepted, OnDelivered: delivered, OnTerminal: func(c string, m msgqueue.QueuedMessage, o msgqueue.TerminalOutcome) {
 				h.terminal(c, m, o)
 				terminal <- struct{}{}
-			}, RetryInterval: time.Millisecond, GiveUpAfter: time.Millisecond,
+			}, RetryInterval: time.Millisecond,
 				Deliver: func(ctx context.Context, _ string, _ []byte) error {
 					select {
 					case attempts <- struct{}{}:
@@ -143,6 +151,13 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 					}
 					return nil
 				}}
+			if outcome == "give_up" {
+				cfg.GiveUpAfter = time.Millisecond
+			}
+			if outcome == "retry" {
+				// Warning output can consume time before the give-up check.
+				cfg.Logger = slog.New(slog.NewTextHandler(testQueuedSendRetryWriter{}, nil))
+			}
 			var err error
 			q, err = msgqueue.New(cfg)
 			if err != nil {
