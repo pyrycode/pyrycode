@@ -43,7 +43,7 @@ func testBoundQueue(t *testing.T, h *queuedSendHistory, first uint64) *msgqueue.
 
 func testBoundAction(t *testing.T, w *switchWire, typ string, queueID, itemID uint64) {
 	t.Helper()
-	p := map[string]any{"conversation_id": testConvID, "queued_msg_id": queueID, "item_id": itemID}
+	p := map[string]any{"conversation_id": testConvID, "queued_msg_id": queueID, "accepted_item_id": itemID}
 	testDaemonThreadRequest(t, w, "phone", 40, typ, p)
 	// A subsequent query on the same connection is the command completion barrier;
 	// any unsolicited queue_state or command reply also fails the reply assertion.

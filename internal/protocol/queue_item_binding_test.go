@@ -9,8 +9,8 @@ func TestQueueActionItemBindingWire(t *testing.T) {
 	t.Parallel()
 	for _, item := range []json.RawMessage{nil, json.RawMessage("205"), json.RawMessage("null")} {
 		for _, payload := range []any{
-			DequeueMessagePayload{ConversationID: "conv", QueuedMsgID: 7, ItemID: item},
-			SendQueuedNowPayload{ConversationID: "conv", QueuedMsgID: 7, ItemID: item},
+			DequeueMessagePayload{ConversationID: "conv", QueuedMsgID: 7, AcceptedItemID: item},
+			SendQueuedNowPayload{ConversationID: "conv", QueuedMsgID: 7, AcceptedItemID: item},
 		} {
 			raw, err := json.Marshal(payload)
 			if err != nil {
@@ -18,7 +18,7 @@ func TestQueueActionItemBindingWire(t *testing.T) {
 			}
 			want := `{"conversation_id":"conv","queued_msg_id":7`
 			if item != nil {
-				want += `,"item_id":` + string(item)
+				want += `,"accepted_item_id":` + string(item)
 			}
 			want += `}`
 			if string(raw) != want {
@@ -26,7 +26,7 @@ func TestQueueActionItemBindingWire(t *testing.T) {
 			}
 			var drop DequeueMessagePayload
 			var send SendQueuedNowPayload
-			if json.Unmarshal(raw, &drop) != nil || json.Unmarshal(raw, &send) != nil || string(drop.ItemID) != string(item) || string(send.ItemID) != string(item) {
+			if json.Unmarshal(raw, &drop) != nil || json.Unmarshal(raw, &send) != nil || string(drop.AcceptedItemID) != string(item) || string(send.AcceptedItemID) != string(item) {
 				t.Fatal("binding presence changed on decode")
 			}
 		}

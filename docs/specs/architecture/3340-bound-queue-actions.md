@@ -9,6 +9,7 @@
 - `cmd/pyry/reply_suggestion.go` → `suggestionQueueSender.SendNow`: preserve invalidation only on success.
 - `internal/protocol/messaging.go` → `DequeueMessagePayload`, `SendQueuedNowPayload`: additive wire fields.
 - `internal/relay/v2session_modal.go` → queue command handlers: silent control operations.
+- `internal/relay/v2session_dequeue_test.go` → `TestV2Session_DequeueMessage_DecodeFailureIsInert`: authenticated malformed-input rejection replaces the old tolerant-decode expectation during verifier rework.
 - `cmd/pyry/queued_send_handle_test.go` → `TestQueuedSendHandleActions`, `TestQueuedSendHandleQueries`: encrypted fake-daemon queue/history seams.
 - `cmd/pyry/daemon_thread_queries_test.go` → `testDaemonThreadQueryWire`: thread-capable transport harness.
 - `docs/knowledge/features/msgqueue-package-lifecycle.md`: acceptance observers run off-lock; terminal outcomes wait for acceptance.
@@ -59,9 +60,13 @@ None. Wire name is `item_id`, matching the accepted thread item ID. It is a sele
 
 Pending documentation stage: `docs/protocol-mobile.md`, **Queue (v2)**: document optional `item_id` on `dequeue_message` and `send_queued_now`, why clients should always send it, mismatch as a silent no-op, and legacy behavior when omitted.
 
+Corrected handoff (2026-10-14, pending documentation stage; supersedes the preceding paragraph): `docs/protocol-mobile.md`, **Queue (v2)** and both command field tables must define optional `accepted_item_id`, range `1..9007199254740991`, source `item.id`, current-run matching, and silent no-ops for missing/pending/failed/mismatched/invalid bindings and malformed payloads. Explain why clients should always supply it, valid omission's legacy behavior and restart-reuse risk, and that it guards rather than replaces `conversation_id` plus `queued_msg_id`. Correct the claims that all command fields are required and item identity never participates. Retain unsolicited and connect-time thread `queue_state` withholding. Client adoption remains Mobile #1986 and Desktop #1906.
+
 ## Security review
 
 **Verdict:** PASS
+
+Superseded by the security reassessment in the dated verifier rework under **Revisions**.
 
 **Findings:**
 
@@ -81,3 +86,23 @@ Pending documentation stage: `docs/protocol-mobile.md`, **Queue (v2)**: document
 
 - 2026-10-14: `TestQueueBindingDuringSendNow` exposed acceptance racing a legacy send-now take and failed reinsertion. A FIFO-only binder cannot find that entry. Retain each accepting lifecycle in `convQueue.accepting` until its callback returns, then release the map entry (and empty map). The binder can therefore update the same lifecycle while it is temporarily outside the FIFO. Guarded actions still match only live FIFO entries, and no retired binding is retained after acceptance completes.
 - Final sizing remains below 800 written lines (approximately 750 including plan, tests and replaced comments), with no new exported types/interfaces or changed legacy signatures. All five limits still hold.
+
+- 2026-10-14, verifier rework (findings 1–3): the initial wire name, positive-uint64 range and tolerant legacy decoding above were incorrect. Both payloads now expose optional `accepted_item_id` (Go field `AcceptedItemID`), sourced from accepted `item.id`, as a JSON integer in `1..9007199254740991`. Both handlers reject every payload decoding error before acting; `handleSendQueuedNow` also rejects envelope decoding errors. Valid omission retains the existing unbound operation. `TestQueueCommandItemBinding`, `TestQueueBindingDecodeFailure` and `TestQueueActionItemBindingWire` cover the required key, null/invalid no-fallback, independent malformed unbound targets, maximum valid identity and first invalid identity for both commands. Existing encrypted restart/device tests now send the required wire key.
+- Documentation handoff above now carries the full corrected pending contract; the initial `item_id` handoff is superseded.
+- The scoped relay suite exposed `TestV2Session_DequeueMessage_DecodeTolerant`'s obsolete assertion that malformed input reaches `Remove`. Replace it with `TestV2Session_DequeueMessage_DecodeFailureIsInert`, checking partially populated unbound targets through the authenticated relay seam without remover calls or wire output.
+- Rework sizing: approximately 770 written lines across the full branch, no new exported types/interfaces, three additive production consumers, four acceptance criteria and fewer than ten new reject branches; all five limits hold.
+
+### Security review — verifier rework
+
+**Verdict:** PASS for the revised contract; supersedes the wire validation claims in the initial security review.
+
+- Trust boundaries: MUST FIX findings 1–3 are addressed by decoding `accepted_item_id` with presence preserved, rejecting every payload decode error, and bounding supplied integers at `9007199254740991` before either queue action. Only successful current-run acceptance establishes the daemon-held identity; the comparison and mutation remain atomic.
+- Errors/logs/telemetry: malformed envelopes/payloads and invalid bindings return before actions or logging. No supplied binding or raw payload is echoed; partially populated targets cannot reach an unbound operation. Tests assert no writes, queue changes, terminal callbacks or logs for malformed targets.
+- Tokens/secrets and cryptography: public item identity supplies no credential or per-device permission; existing paired Noise and interactive admission remain authoritative.
+- File operations and subprocesses: no new paths, persistence, process arguments or execution seams; reuse history append and existing Send now delivery.
+- Network/I/O: retain encrypted frame admission bounds and the 20-byte binding parse cap, with the narrower thread integer ceiling enforced after parsing.
+- Concurrency: no new state or goroutines; guarded actions keep comparison and mutation under `q.mu`, and acceptance remains nonblocking for relay lookup.
+- Threat model: addresses stale selectors and malformed-input action bypass under the existing authenticated protocol. Device-wide control rights and client adoption remain unchanged.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-10-14

@@ -850,11 +850,11 @@ func (m *V2SessionManager) handleDequeueMessage(s *V2Session, env protocol.Envel
 		return
 	}
 	var p protocol.DequeueMessagePayload
-	// Legacy decoding remains tolerant. A supplied binding must decode cleanly;
-	// invalid bindings and decode errors are never echoed or logged.
-	decodeErr := json.Unmarshal(env.Payload, &p)
-	itemID, valid := queueItemBinding(p.ItemID)
-	if !valid || (len(p.ItemID) != 0 && decodeErr != nil) {
+	if json.Unmarshal(env.Payload, &p) != nil {
+		return
+	}
+	itemID, valid := queueItemBinding(p.AcceptedItemID)
+	if !valid {
 		return
 	}
 	var removed bool
@@ -886,7 +886,7 @@ func (m *V2SessionManager) handleDequeueMessage(s *V2Session, env protocol.Envel
 // handleSendQueuedNow writes a queued entry into its conversation's running turn.
 // It runs on appFrameWorker because SendNow can block in a stdin write; Run checks
 // the interactive capability in dispatchAppFrame before queuing the job.
-// Optional item_id follows handleDequeueMessage's binding and never-log contract.
+// Optional accepted_item_id follows handleDequeueMessage's binding and never-log contract.
 // Refusals emit no reply or broadcast; successful writes drive queue/history
 // observers, and failed writes retain the original entry and binding.
 func (m *V2SessionManager) handleSendQueuedNow(s *V2Session, plaintext []byte) {
@@ -896,14 +896,16 @@ func (m *V2SessionManager) handleSendQueuedNow(s *V2Session, plaintext []byte) {
 			"conn_id", s.connID)
 		return
 	}
-	// Legacy decoding remains tolerant. A supplied binding must decode cleanly;
-	// invalid bindings and decode errors are never echoed or logged.
 	var env protocol.Envelope
-	_ = json.Unmarshal(plaintext, &env)
+	if json.Unmarshal(plaintext, &env) != nil {
+		return
+	}
 	var p protocol.SendQueuedNowPayload
-	decodeErr := json.Unmarshal(env.Payload, &p)
-	itemID, valid := queueItemBinding(p.ItemID)
-	if !valid || (len(p.ItemID) != 0 && decodeErr != nil) {
+	if json.Unmarshal(env.Payload, &p) != nil {
+		return
+	}
+	itemID, valid := queueItemBinding(p.AcceptedItemID)
+	if !valid {
 		return
 	}
 	var sent bool
