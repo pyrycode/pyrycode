@@ -17,7 +17,7 @@ wire-serving consumer,
 
 | Document | Topics |
 | --- | --- |
-| [Shape](history-package-shape.md) | Entry and metadata contracts, paging bounds, durable ID allocation and forward replay/tailing. |
+| [Shape](history-package-shape.md) | Entry and metadata contracts, explicit conversation sync, paging bounds, durable ID allocation and forward replay/tailing. |
 | [A cleanup on a failed write is not the guarantee it looks like](history-package-failed-write-recovery.md) | Write rollback and read tolerance after fresh or active segment failures. |
 | [Producers (#2114, #2115)](history-package-producers.md) | Map of captured provenance, runtime/startup closure, agent/task attribution and reported endings, visibility, receipts and producer verification. |
 | [`LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)](history-package-watermarks.md) | Raw durable cursors, displayable unread watermarks and lazy recovery. |
@@ -92,8 +92,8 @@ process lifetime. A symlink planted after the first resolve would redirect
 every later append and read for as long as the daemon runs. Re-resolving costs
 a handful of `lstat`s and is cheaper than the argument for keeping the cache
 would have to be. `convLog` therefore caches only the append cursor (active
-segment number, its size, the last durable entry id) and the filtered watermark
-— never the path.
+segment number, its size, the last durable entry id), the filtered watermark
+and independent sync obligations — never the path.
 
 Containment is a full-path **equality** check against the resolved instance
 directory, not a `filepath.Rel`-style "is it under the root" test — equality
@@ -105,12 +105,24 @@ the directory is not containment of the files in it: the append open carries
 `darwin`, so the `os.Lstat` fallback named in the spec was never needed), and
 the reader skips any non-regular directory entry rather than following it.
 
+`Store.Sync` cannot reuse that reader filtering: silently skipping a replaced
+pending segment would certify data it never synced. It checks every
+segment-named leaf, rejects symlinks/nonregular targets and refuses missing
+pending targets. Sync opens read-only with `O_NOFOLLOW` and `O_NONBLOCK`, then
+checks the descriptor's type; directory opens additionally require
+`O_DIRECTORY`. Re-resolution and leaf validation still run on repeated calls
+that have no sync work.
+
 ## Concurrency
 
 No goroutine is spawned and there is no `Close` — the store is passive, like
 `Ring`. One `sync.Mutex` guards the per-conversation state map, read counters,
-tail registrations, both append paths and `Page`'s storage work. Forward walks
-release it after listing and after each bounded segment read/decode, before
+tail registrations, both append paths, `Sync` and `Page`'s storage work. `Sync`
+holds it through target capture, validation, file/directory syncs and closes,
+so concurrent appends ordered after that boundary remain pending for the next
+call. The mutex is store-wide: syncing one conversation can delay another's
+append. Forward walks release it after listing and after each bounded segment
+read/decode, before
 callbacks, delivery or waiting; they never hold it across the whole replay.
 Reads take the lock rather than racing appends: the alternative (lock-free reads plus a
 torn-trailing-line tolerance on the read path) buys a shorter hold at the cost
@@ -230,7 +242,8 @@ internal/history/
 ├── log.go       Store, New, Append, AppendWithMetadata, Page, metadata types, sentinels, per-conversation cache, directory resolution
 ├── segment.go   segment naming/ordering, versioned header, entry-line codec, whole-segment read
 ├── cursor.go    cursor mint + parse + validation
-└── forward.go   chronological snapshot walks, progress and committed-append tail wakeups
+├── forward.go   chronological snapshot walks, progress and committed-append tail wakeups
+└── sync.go      explicit conversation durability barrier, pending-target validation and file-before-directory sync
 ```
 
 ## Related
