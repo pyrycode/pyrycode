@@ -51,7 +51,9 @@ type Registry struct {
 	root      string
 	snapshot  snapshot
 	persist   func(string, snapshot) error
+	uncertain error // Post-rename durability failure bars writes until recovery.
 	consumers map[*func(Change)]struct{}
+	owner     *Owner
 }
 
 // List returns detached records in app_id order and their committed host revision.
@@ -71,8 +73,24 @@ func (r *Registry) UpdateManifest(appID string, data []byte) (bool, error) {
 }
 
 // Remove tombstones the identity permanently, retaining all source/build/data files.
+// An owner joins writers/recovery first; unresolved journals reject removal.
 // Removing an existing tombstone again is a no-op.
-func (r *Registry) Remove(appID string) (bool, error) { return r.change("remove", appID, nil, nil) }
+func (r *Registry) Remove(appID string) (bool, error) {
+	r.mu.Lock()
+	o := r.owner
+	r.mu.Unlock()
+	if o != nil {
+		return o.removeRegistration(appID)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, record := range r.snapshot.Records {
+		if record.AppID == appID && record.PublishJournal != nil {
+			return false, ErrConflict
+		}
+	}
+	return r.changeLocked("remove", appID, nil, nil)
+}
 func (r *Registry) change(action, appID string, data []byte, update *lifecycleUpdate) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -81,6 +99,9 @@ func (r *Registry) change(action, appID string, data []byte, update *lifecycleUp
 
 // changeLocked validates, persists and notifies with the registry mutex held.
 func (r *Registry) changeLocked(action, appID string, data []byte, update *lifecycleUpdate) (bool, error) {
+	if r.uncertain != nil {
+		return false, r.uncertain
+	}
 	if update != nil {
 		if update.ctx != nil && update.ctx.Err() != nil {
 			return false, update.ctx.Err()
@@ -193,6 +214,9 @@ func (r *Registry) changeLocked(action, appID string, data []byte, update *lifec
 	}
 	sortSnapshot(&next)
 	if e := r.persist(r.root, next); e != nil {
+		if errors.Is(e, errSnapshotUncertain) {
+			r.uncertain = e
+		}
 		return false, e
 	}
 	r.snapshot = next
