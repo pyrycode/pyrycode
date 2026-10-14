@@ -16,10 +16,12 @@ func TestStorePrivateActiveWork(t *testing.T) {
 	if len(snapshot.Items) != 0 || !snapshot.Active {
 		t.Fatalf("private activity lost: %#v", snapshot)
 	}
+	testStoreStatusEqual(t, s, testStoreA)
 	entries = append(entries, testStoreAppend(t, h, testStoreA, testChild(2, "turn_end", "unresolved-parent", `,"stop_reason":"end_turn"`))...)
 	snapshot = testStoreWait(t, s, testStoreA, StateUsable, 2)
 	if snapshot.Active {
 		t.Fatal("ended private work remains active")
 	}
+	testStoreStatusEqual(t, s, testStoreA)
 	testStoreEqual(t, snapshot, testStoreA, entries)
 }

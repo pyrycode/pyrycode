@@ -398,6 +398,19 @@ func (s *Store) Snapshot(id conversations.ConversationID) Snapshot {
 	return snapshot
 }
 
+// Status returns Snapshot's metadata and readiness from one publication, with
+// nil Items. It performs no I/O, worker load, item traversal or allocation.
+func (s *Store) Status(id conversations.ConversationID) Snapshot {
+	s.mu.Lock()
+	var snapshot Snapshot
+	if w := s.workers[id]; w != nil && !w.retiring {
+		snapshot = w.snapshot
+	}
+	s.mu.Unlock()
+	snapshot.Items = nil
+	return snapshot
+}
+
 // Unload checkpoints dirty complete progress, cancels and joins one worker, and
 // releases all items/private fold state. It does not certify a clean lifetime.
 // Persistence or incomplete recovery failures are returned without source data.
