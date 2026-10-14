@@ -138,24 +138,46 @@ func TestQueuedSendHandleActions(t *testing.T) {
 			if action == "send_now" && snap.Items[0].Order != 101 {
 				t.Fatal("delivery changed placement")
 			}
+			changes, err := store.Changes(t.Context(), testConvID, cursor.threadEpoch, cursor.threadVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
 			s.publisher.publish(t.Context(), testConvID, cursor)
 			if err := mgr.FlushPushes(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			_, env = w.read()
-			var changed protocol.ThreadItemChangedPayload
-			if env.Type != protocol.TypeThreadItemChanged || json.Unmarshal(env.Payload, &changed) != nil || changed.ItemID != 100 {
-				t.Fatal("live terminal revision", env)
+			peer := "phone"
+			if changes.BaselineRequired {
+				closed := w.await()
+				if action != "send_now" || closed.ConnID != "phone" || closed.CloseCode != uint16(relay.StatusQueueOverflow) {
+					t.Fatal("unexpected retirement", closed)
+				}
+				w.open("again", false, protocol.CapabilityThread)
+				peer = "again"
+				testDaemonThreadRequest(t, w, peer, 43, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 10})
+				recovered, typ := testDaemonThreadReply(t, w, 43, peer)
+				if typ != protocol.TypeThreadItems || len(recovered.Items) != 1 {
+					t.Fatal("retirement catch-up", recovered, typ)
+				}
+				testQueuedHandle(t, recovered.Items[0], 100, status)
+			} else {
+				_, env = w.read()
+				var changed protocol.ThreadItemChangedPayload
+				if env.Type != protocol.TypeThreadItemChanged || json.Unmarshal(env.Payload, &changed) != nil || changed.ItemID != 100 {
+					t.Fatal("live terminal revision", env)
+				}
+				if string(changed.Changes["active"]) != "false" || string(changed.Changes["status"]) != `"`+status+`"` {
+					t.Fatal("terminal action remained active", changed)
+				}
+				if content, present := changed.Changes["content"]; present {
+					added.Item.Content = content
+				}
+				added.Item.Status, added.Item.Active = status, false
+				testQueuedHandle(t, added.Item, 100, status)
 			}
-			if string(changed.Changes["active"]) != "false" || string(changed.Changes["status"]) != `"`+status+`"` {
-				t.Fatal("terminal action remained active", changed)
-			}
-			added.Item.Content = changed.Changes["content"]
-			added.Item.Status, added.Item.Active = status, false
-			testQueuedHandle(t, added.Item, 100, status)
 			if action == "send_now" {
-				testDaemonThreadRequest(t, w, "phone", 42, protocol.TypeThreadPage, protocol.ThreadPagePayload{ConversationID: testConvID, BeforeOrder: 103, Limit: 10})
-				page, typ := testDaemonThreadReply(t, w, 42)
+				testDaemonThreadRequest(t, w, peer, 42, protocol.TypeThreadPage, protocol.ThreadPagePayload{ConversationID: testConvID, BeforeOrder: 103, Limit: 10})
+				page, typ := testDaemonThreadReply(t, w, 42, peer)
 				if typ != protocol.TypeThreadItems || len(page.Items) != 1 {
 					t.Fatal("page", typ, page)
 				}
