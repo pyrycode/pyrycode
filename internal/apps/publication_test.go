@@ -32,9 +32,7 @@ func publishFixture(t *testing.T, reply healthReply, migration string) (*Registr
 		t.Fatal(e)
 	}
 	o.grace = 30 * time.Millisecond
-	o.startup = 250 * time.Millisecond
 	o.startInterval = 10 * time.Millisecond
-	o.requestTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { o.Shutdown() })
 	return r, o, tools, c, config
 }
@@ -156,6 +154,7 @@ func TestPublishAdmission(t *testing.T) {
 
 func TestPublishRetry(t *testing.T) {
 	r, o, tools, c, _ := publishFixture(t, healthReply{Body: `{}`}, "ok")
+	o.startup = 250 * time.Millisecond
 	if _, e := o.Publish(context.Background(), testHost, testApp, tools); e == nil {
 		t.Fatal("bad health accepted")
 	}
@@ -163,7 +162,7 @@ func TestPublishRetry(t *testing.T) {
 	if first.PublishJournal != nil || first.State != "failed" {
 		t.Fatal(first)
 	}
-	o.startup = 3 * time.Second
+	o.startup = startupDeadline
 	done := make(chan error, 1)
 	go func() { _, e := o.Publish(context.Background(), testHost, testApp, tools); done <- e }()
 	waitFile(t, filepath.Join(r.root, testApp, "data/ready"))
@@ -197,7 +196,6 @@ func TestPublishMigrationGroup(t *testing.T) {
 
 func TestPublishContention(t *testing.T) {
 	r, o, tools, c, _ := publishFixture(t, healthReply{Body: `{}`}, "ok")
-	o.startup = 3 * time.Second
 	// Source metadata belongs only to the candidate until activation.
 	m := testMap(t)
 	m["title"] = "Candidate"
@@ -285,7 +283,6 @@ func TestPublishOrdering(t *testing.T) {
 
 func TestPublishRemovalEvidence(t *testing.T) {
 	r, o, tools, _, _ := publishFixture(t, healthReply{Body: `{}`, Descendant: true}, "ok")
-	o.startup = 3 * time.Second
 	done := make(chan error, 1)
 	go func() { _, e := o.Publish(context.Background(), testHost, testApp, tools); done <- e }()
 	data := filepath.Join(r.root, testApp, "data")
@@ -327,16 +324,30 @@ func TestPublishFailures(t *testing.T) {
 				reply.Body = `{}`
 			}
 			r, o, tools, c, config := publishFixture(t, reply, migration)
+			if phase == "finalization" {
+				// Finalization must follow delayed migration and service startup.
+				script := strings.Replace(string(testBytes(t, tools.Node)), "#!/bin/sh\n", "#!/bin/sh\ncase \"$1\" in\ndist/service/main.js|dist/service/migrate.js) sleep 0.3;;\nesac\n", 1)
+				if e := os.WriteFile(tools.Node, []byte(script), 0700); e != nil {
+					t.Fatal(e)
+				}
+			}
 			if phase == "build" {
 				c.Fail = "run build"
 				testCandidateConfig(t, config, c)
 			}
 			testArtifactWrite(t, r.root, testApp+"/data/sentinel", "before")
-			o.migrateTimeout = 100 * time.Millisecond
+			if phase == "migration deadline" {
+				o.migrateTimeout = 100 * time.Millisecond
+			}
+			if phase == "health" {
+				o.startup = 250 * time.Millisecond
+			}
+			injected := false
 			r.mu.Lock()
 			r.persist = func(root string, s snapshot) error {
 				v := s.Records[0]
 				if phase == "journal" && v.PublishJournal != nil || phase == "activation" && v.ActiveRelease != "" || phase == "finalization" && v.ActiveRelease != "" && v.PublishJournal == nil || phase == "failure finalization" && v.State == "failed" && v.PublishJournal == nil {
+					injected = true
 					return fmt.Errorf("SECRET %s", root)
 				}
 				if phase == "restore" && v.PublishJournal != nil {
@@ -353,6 +364,13 @@ func TestPublishFailures(t *testing.T) {
 			}
 			v := publishDisk(t, r).Records[0]
 			if phase == "finalization" {
+				r.mu.Lock()
+				reached := injected
+				r.mu.Unlock()
+				var failure *PublishFailure
+				if !reached || !errors.As(publishErr, &failure) || failure.Phase != "finalization" {
+					t.Fatalf("finalization injection reached=%v: %+v, %v", reached, result, publishErr)
+				}
 				if !result.ActivationCommitted || !result.RecoveryPending || v.ActiveRelease != "1.0.0" || v.PublishJournal == nil || !v.PublishJournal.ActivationCommitted {
 					t.Fatal(result, v)
 				}
@@ -415,7 +433,6 @@ func TestPublishRetirement(t *testing.T) {
 					migration = "hold"
 				}
 				r, o, tools, c, config := publishFixture(t, healthReply{Body: `{}`, Descendant: true}, migration)
-				o.startup = 3 * time.Second
 				if point == "build" {
 					c.Gate = "run build"
 					c.Hold = true
@@ -493,7 +510,6 @@ func TestPublishRetirement(t *testing.T) {
 
 func TestPublishStaleActivation(t *testing.T) {
 	r, o, tools, _, _ := publishFixture(t, healthReply{Body: `{}`}, "ok")
-	o.startup = 3 * time.Second
 	done := make(chan error, 1)
 	go func() { _, e := o.Publish(context.Background(), testHost, testApp, tools); done <- e }()
 	waitFile(t, filepath.Join(r.root, testApp, "data/ready"))
