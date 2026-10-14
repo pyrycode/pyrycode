@@ -17,7 +17,7 @@ wire-serving consumer,
 
 | Document | Topics |
 | --- | --- |
-| [Shape](history-package-shape.md) | Entry and metadata contracts, explicit conversation sync, paging bounds, durable ID allocation and forward replay/tailing. |
+| [Shape](history-package-shape.md) | Entry and metadata contracts, selective lookup and its byte-bounded cache, explicit conversation sync, paging bounds, durable ID allocation and forward replay/tailing. |
 | [A cleanup on a failed write is not the guarantee it looks like](history-package-failed-write-recovery.md) | Write rollback and read tolerance after fresh or active segment failures. |
 | [Producers (#2114, #2115)](history-package-producers.md) | Map of captured provenance, runtime/startup closure, agent/task attribution and reported endings, visibility, receipts and producer verification. |
 | [`LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)](history-package-watermarks.md) | Raw durable cursors, displayable unread watermarks and lazy recovery. |
@@ -92,8 +92,11 @@ process lifetime. A symlink planted after the first resolve would redirect
 every later append and read for as long as the daemon runs. Re-resolving costs
 a handful of `lstat`s and is cheaper than the argument for keeping the cache
 would have to be. `convLog` therefore caches only the append cursor (active
-segment number, its size, the last durable entry id), the filtered watermark
-and independent sync obligations — never the path.
+segment number, its size, the last durable entry id), the filtered watermark,
+lookup first-ID/size bounds and independent sync obligations — never the path.
+The [lookup LRU](history-package-shape.md#selective-entry-lookup) retains decoded
+data, but every lookup still rechecks containment and current regular-file
+membership before consulting it.
 
 Containment is a full-path **equality** check against the resolved instance
 directory, not a `filepath.Rel`-style "is it under the root" test — equality
@@ -117,7 +120,9 @@ that have no sync work.
 
 No goroutine is spawned and there is no `Close` — the store is passive, like
 `Ring`. One `sync.Mutex` guards the per-conversation state map, read counters,
-tail registrations, both append paths, `Sync` and `Page`'s storage work. `Sync`
+tail registrations, the lookup bounds/LRU, both append paths, `Sync`, `Lookup`
+and `Page`'s storage work. `Lookup` holds it through discovery, selected reads,
+cache operations and detaching returned data. `Sync`
 holds it through target capture, validation, file/directory syncs and closes,
 so concurrent appends ordered after that boundary remain pending for the next
 call. The mutex is store-wide: syncing one conversation can delay another's

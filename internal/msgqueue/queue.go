@@ -330,7 +330,8 @@ type queued struct {
 // its idle-gate wait at once; it is nil whenever no delivery is in flight.
 type convQueue struct {
 	items         []queued
-	nextID        uint64 // next id to assign for this conversation; starts at 1
+	accepting     map[uint64]*messageLifecycle // only until the acceptance callback returns
+	nextID        uint64                       // next id to assign for this conversation; starts at 1
 	draining      bool
 	committing    bool               // the head is past the idle-gate wait and is being written; un-droppable
 	deliverCancel context.CancelFunc // cancels the in-flight delivery ctx; nil when no delivery is in flight
@@ -534,6 +535,12 @@ func (q *Queue) EnqueueIdentified(convID, messageID, text, delivery string, atta
 		deviceID: deviceID, deviceName: deviceName, clientVersion: clientVersion, clientSentAt: clientSentAt,
 		lifecycle: &messageLifecycle{accepted: q.onAccepted == nil}}
 	c.items = append(c.items, m)
+	if q.onAccepted != nil {
+		if c.accepting == nil {
+			c.accepting = make(map[uint64]*messageLifecycle)
+		}
+		c.accepting[id] = m.lifecycle
+	}
 
 	q.maybeSpawnDrainLocked(convID, c)
 	q.mu.Unlock()
@@ -626,6 +633,19 @@ func (q *Queue) SnapshotAll() map[string][]QueuedMessage {
 // the id the drain attempted, under this same lock (#1484). Nothing here has to
 // keep the head un-droppable for that to hold.
 func (q *Queue) Remove(convID string, id uint64) bool {
+	return q.remove(convID, id, 0)
+}
+
+// RemoveItem drops only the live entry accepted as itemID in this daemon run.
+// A zero or mismatching binding is a silent no-op.
+func (q *Queue) RemoveItem(convID string, id, itemID uint64) bool {
+	if itemID == 0 {
+		return false
+	}
+	return q.remove(convID, id, itemID)
+}
+
+func (q *Queue) remove(convID string, id, itemID uint64) bool {
 	q.mu.Lock()
 	c := q.convs[convID]
 	if c == nil {
@@ -639,7 +659,7 @@ func (q *Queue) Remove(convID string, id uint64) bool {
 			break
 		}
 	}
-	if idx == -1 || (idx == 0 && c.committing) {
+	if idx == -1 || (idx == 0 && c.committing) || (itemID != 0 && c.items[idx].lifecycle.itemID != itemID) {
 		q.mu.Unlock()
 		return false
 	}
@@ -696,6 +716,19 @@ func (q *Queue) Remove(convID string, id uint64) bool {
 // The write runs with q.mu released, on the caller's goroutine. Nothing here logs
 // the text, the delivery payload or the client's message id.
 func (q *Queue) SendNow(convID string, id uint64) bool {
+	return q.sendNowItem(convID, id, 0)
+}
+
+// SendNowItem sends only the live entry accepted as itemID in this daemon run.
+// Failed writes retain the entry's original binding when reinserted.
+func (q *Queue) SendNowItem(convID string, id, itemID uint64) bool {
+	if itemID == 0 {
+		return false
+	}
+	return q.sendNowItem(convID, id, itemID)
+}
+
+func (q *Queue) sendNowItem(convID string, id, itemID uint64) bool {
 	if q.sendNow == nil {
 		return false
 	}
@@ -706,7 +739,7 @@ func (q *Queue) SendNow(convID string, id uint64) bool {
 		return false
 	}
 	idx := slices.IndexFunc(c.items, func(m queued) bool { return m.id == id })
-	if idx == -1 || (idx == 0 && c.committing) {
+	if idx == -1 || (idx == 0 && c.committing) || (itemID != 0 && c.items[idx].lifecycle.itemID != itemID) {
 		q.mu.Unlock()
 		return false
 	}

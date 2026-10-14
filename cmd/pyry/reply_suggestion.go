@@ -596,6 +596,18 @@ func (q suggestionQueueSender) SendNow(conversationID string, queuedMsgID uint64
 	return ok
 }
 
+// SendNowItem preserves the accepted-item guard through suggestion invalidation.
+func (q suggestionQueueSender) SendNowItem(conversationID string, queuedMsgID, itemID uint64) bool {
+	inner, ok := q.inner.(interface {
+		SendNowItem(string, uint64, uint64) bool
+	})
+	if !ok || !inner.SendNowItem(conversationID, queuedMsgID, itemID) {
+		return false
+	}
+	q.s.invalidate(conversationID)
+	return true
+}
+
 // suggestionResetter invalidates when a client's "/clear" reaches the
 // conversation reset succeeds. A refused reset preserves suggestion state.
 type suggestionResetter struct {

@@ -27,11 +27,36 @@ type TerminalFunc func(convID string, msg QueuedMessage, outcome TerminalOutcome
 // are guarded by q.mu. Once outcome is claimed, outcome and sentNow are immutable.
 // No separate registry retains resolved messages.
 type messageLifecycle struct {
+	itemID   uint64
 	accepted bool
 	outcome  TerminalOutcome
 	sentNow  bool
 	attempt  bool
 	removed  bool
+}
+
+// BindAcceptedItem records the daemon's durable acceptance item on an entry.
+// An accepting entry remains bindable while a send-now attempt has taken it out
+// of the FIFO, so a failed write's reinsertion preserves its acceptance identity.
+// The first nonzero binding wins; clients cannot establish or replace it.
+func (q *Queue) BindAcceptedItem(convID string, id, itemID uint64) {
+	if itemID == 0 {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if c := q.convs[convID]; c != nil {
+		if state := c.accepting[id]; state != nil && state.itemID == 0 {
+			state.itemID = itemID
+			return
+		}
+		for _, m := range c.items {
+			if m.id == id && m.lifecycle.itemID == 0 {
+				m.lifecycle.itemID = itemID
+				return
+			}
+		}
+	}
 }
 
 func (q *Queue) accept(convID string, m queued) {
@@ -40,6 +65,10 @@ func (q *Queue) accept(convID string, m queued) {
 	}
 	q.onAccepted(convID, m.message(false))
 	q.mu.Lock()
+	delete(q.convs[convID].accepting, m.id)
+	if len(q.convs[convID].accepting) == 0 {
+		q.convs[convID].accepting = nil
+	}
 	m.lifecycle.accepted = true
 	observe := m.lifecycle.outcome != ""
 	q.mu.Unlock()
