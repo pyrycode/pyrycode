@@ -284,6 +284,17 @@ Send outcomes update the acceptance rather than adding a row: delivery retains
 acceptance visibility, while drop forces hidden and loss forces shown, regardless
 of explicit visibility on the outcome.
 
+Public reachability is independent of `Shown`: hidden rows remain in
+`Fold.Items` and can supply reachable parents. Unresolved children and claimed
+delivery rows are omitted; an omitted ancestor omits its descendants.
+`resolveChildren` includes affected descendants when joins or reparenting change
+reachability, even when a descendant's final fields and `Rev` stay unchanged.
+After joins settle, `recordShown` visits affected indexes in creation order,
+requiring each child's older parent to be publicly reachable and reusing cached
+reachability for unrelated parents. This captures late first appearances and
+descendant withdrawal without scanning independent trees. See
+[public touches and read marks](thread-package.md#cache-and-epochs).
+
 Hidden supported facts still create items. Visibility cannot admit an excluded
 source type: open permission/question prompts and live readings never create
 items, even with explicit shown true. Turn phase, stalls, retries, compaction in
@@ -402,6 +413,14 @@ look unchanged. `testMainReplay` checks every two-chunk partition against full
 replay; `TestMainReplayAndOwnership` checks copied pending reports, detached
 content and independent owners. Run the offline package checks with
 `go test -race ./internal/thread`.
+
+`TestPublicTouchesReference` compares entry-scoped bookkeeping with an independent
+full-walk oracle. `TestPublicTouchAffectedWork` grows unrelated items and trees
+fourfold while keeping affected entries fixed. A foreground launch result can
+close descendants and advance their revisions, concealing revision-only
+appearance tracking. Its late-appearance fixture first links the parent to
+background work, leaving a descendant's revision unchanged when its ancestor
+becomes public; omission and reappearance also preserve the earlier watermark.
 
 `TestSendDelivery`, `TestSendTerminalStates` and `TestSendLinksAndTerminals`
 cover permanent identity, delivered content/order, supported reasons,
