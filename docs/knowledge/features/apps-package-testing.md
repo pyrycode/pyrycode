@@ -4,6 +4,37 @@ See the [package overview](apps-package.md) for the topic map.
 
 ## Testing
 
+### Checked candidate fixtures
+
+Checking descendants only after preparation returns cannot prove artifact
+validation waited for cleanup. `TestCandidateDescendants` makes the build
+descendant create required output only in its termination handler, so premature
+validation fails. `TestCandidateCancellationDescendants` cancels with both leader
+and descendant live and checks no later phase. `TestCandidateSourceExecutable`
+checks the copied owner-executable bit; ordinary nonexecutable fixtures missed
+the 0600-copy regression. `TestCandidateBuildMutation` changes module metadata
+during compilation, proving input validation must run again before retention.
+
+A controlled child that never loads npm configuration or rewrites lifecycle
+PATH misses real npm failures. `TestCandidateNPMEnvironment` models pathname-keyed
+config loading; `TestCandidateNPMPinning` models stage-to-root binary-path
+insertion with an alternate Node and env-node probe, including spaces/quotes in
+paths. `TestCandidateRealNPM` exercises actual npm with an offline local tarball,
+disabled audit, root/dependency install hooks and all four commands. Without the
+lifecycle shell it picks the fixture's Node 20 even when the incoming PATH starts
+with selected Node. This environment regression can run under an unsupported
+real Node and does not establish a complete supported-Node candidate run;
+`TestCandidateValidation` separately covers runtime admission with controlled
+Node versions. See [input/runtime boundaries](apps-package-validation-and-stored-identity.md#checked-preparation-inputs).
+
+`TestCandidateDamagedRetry` reseals partial/changed builds so permission failure
+cannot mask fresh integrity checks, then compares retained snapshots and registry
+bytes to prove refusal without repair. `TestCandidatePreservesCommittedFields`
+seeds nondefault display/lifecycle/journal values; default-state fixtures could
+miss accidental clearing. `TestCandidateExistingService` checks actual HTTP
+availability, unchanged process generation and saved-data bytes after failure,
+rather than inferring service survival from an unchanged active-release string.
+
 ### Retained-build fixtures
 
 `TestRetainedCanonicalInventory` and `TestRetainedRealInventory` author expected
