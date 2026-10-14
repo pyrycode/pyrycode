@@ -333,7 +333,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 		}
 	}
 	f.countPublicWork(len(f.childDirty))
-	for _, index := range indices {
-		delete(f.childDirty, index)
-	}
+	// The next discovery must not iterate capacity retained from a former peak.
+	f.childDirty = make(map[int]struct{})
+	f.countIngestion(1)
 }
