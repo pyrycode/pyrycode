@@ -320,7 +320,7 @@ func TestThreadCatchUpInterrupted(t *testing.T) {
 }
 
 func testThreadQueryInterrupted(t *testing.T, page bool) {
-	for _, mode := range []string{"live", "failed", "cancelled", "reuse", "down", "withheld"} {
+	for _, mode := range []string{"live", "live-retired", "failed", "cancelled", "reuse", "down", "withheld"} {
 		t.Run(mode, func(t *testing.T) {
 			entered, exited, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			var sends atomic.Int32
@@ -390,8 +390,21 @@ func testThreadQueryInterrupted(t *testing.T, page bool) {
 				close(release)
 			case "failed":
 				close(release)
-			case "live":
-				testCatchUpLive(t, p, 91)
+			case "live", "live-retired":
+				payload, _ := json.Marshal(protocol.ThreadTextAppendPayload{ConversationID: catchUpConversation, Epoch: "epoch", Version: 91, ItemID: 1, BaseRev: 2, Rev: 3, Text: "new"})
+				env := protocol.Envelope{Type: protocol.TypeThreadTextAppend, Payload: payload}
+				if mode == "live-retired" {
+					p.mgr.cancelThreadQuery(p.conn, env)
+					testHostedGone(t, p)
+				}
+				// Cancelling a sealed query can retire its queue before push admission.
+				err := p.mgr.Push(t.Context(), p.conn, env)
+				if err != nil && !errors.Is(err, ErrConnNotFound) {
+					t.Fatal(err)
+				}
+				if mode == "live-retired" && !errors.Is(err, ErrConnNotFound) {
+					t.Fatalf("retired push: %v", err)
+				}
 			case "cancelled", "reuse":
 				p.frames <- protocol.RoutingEnvelope{ConnID: p.conn, CloseCode: 1000}
 			}
