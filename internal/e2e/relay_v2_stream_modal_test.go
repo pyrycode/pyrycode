@@ -516,7 +516,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				reader.phase = "child-exit-dismissal"
 				dismissDeadline := time.Now().Add(10 * time.Second)
 				if !reader.waitDismissed(dismissDeadline, shown.ModalID) {
-					t.Fatal("origin child exit did not retire its permission modal")
+					t.Fatalf("did not observe origin child-exit dismissal for modal_id=%s", shown.ModalID)
 				}
 
 				reader.phase = "replacement-stdin-ready"

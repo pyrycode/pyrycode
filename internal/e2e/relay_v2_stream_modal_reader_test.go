@@ -111,8 +111,8 @@ func (r *streamModalReader) diagnostics(daemon string) string {
 			lines = append(lines, strings.Join(fields, " "))
 		}
 	}
-	return fmt.Sprintf("phase=%s elapsed=%s omitted=%d retained_dismissals=%v\nreceived:\n%s\ndaemon metadata:\n%s",
-		r.phase, time.Since(r.started).Round(time.Microsecond), r.omitted,
+	return fmt.Sprintf("started_at=%s phase=%s elapsed=%s omitted=%d retained_dismissals=%v\nreceived:\n%s\ndaemon metadata:\n%s",
+		r.started.UTC().Format(time.RFC3339Nano), r.phase, time.Since(r.started).Round(time.Microsecond), r.omitted,
 		r.dismissed, strings.Join(r.trace, "\n"), strings.Join(lines, "\n"))
 }
 
@@ -216,7 +216,7 @@ func TestStreamModalReaderDiagnostics(t *testing.T) {
 	daemon := "time=now level=INFO msg=\"prompt modal_id=" + secret + "\" modal_id=target outcome=denied_timeout source=timeout token=" + secret + "\n" +
 		"time=later level=DEBUG event=stream_approval.dismissed_push_err env_id=42 error=" + secret
 	got := r.diagnostics(daemon)
-	for _, want := range []string{"omitted=3", "retained_dismissals=map[target:", "phase=ack", "type=modal_shown", "modal_id=target", "outcome=denied_timeout", "event=stream_approval.dismissed_push_err", "env_id=42"} {
+	for _, want := range []string{"started_at=", "omitted=3", "retained_dismissals=map[target:", "phase=ack", "type=modal_shown", "modal_id=target", "outcome=denied_timeout", "event=stream_approval.dismissed_push_err", "env_id=42"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("diagnostics missing %q: %s", want, got)
 		}
