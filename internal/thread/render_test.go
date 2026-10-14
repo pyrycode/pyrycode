@@ -30,7 +30,7 @@ func testReferenceFold(entries []history.Entry) (*Fold, *recentSource) {
 }
 
 func TestReferenceRetainedBytes(t *testing.T) {
-	entries := testFoldCorpus(30000)
+	entries := testFoldCorpus(6738)
 	legacy := New("a")
 	f, source := testReferenceFold(entries)
 	testFeed(t, legacy, entries...)

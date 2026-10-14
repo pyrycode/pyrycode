@@ -122,41 +122,46 @@ func testFoldGoldenCheck(t *testing.T, path, conv, identity string, input []byte
 			modes = 1
 		}
 		for mode := 0; mode < modes; mode++ {
-			f := New(conv)
-			var source *recentSource
-			if mode >= 3 {
-				f, source = testReferenceFold(entries)
-				f.conversationID = conv
-			}
-			for start, step := 0, 0; start < version; step++ {
-				size := version
-				if mode%3 == 1 {
-					size = []int{7, 31, 113}[step%3]
+			t.Run(fmt.Sprintf("%d/%d", version, mode), func(t *testing.T) {
+				if !*testWriteFoldBaselines {
+					t.Parallel()
 				}
-				if mode%3 == 2 {
-					size = 1
+				f := New(conv)
+				var source *recentSource
+				if mode >= 3 {
+					f, source = testReferenceFold(entries)
+					f.conversationID = conv
 				}
-				end := min(start+size, version)
-				if source != nil {
-					source.chunk = entries[start:end]
+				for start, step := 0, 0; start < version; step++ {
+					size := version
+					if mode%3 == 1 {
+						size = []int{7, 31, 113}[step%3]
+					}
+					if mode%3 == 2 {
+						size = 1
+					}
+					end := min(start+size, version)
+					if source != nil {
+						source.chunk = entries[start:end]
+					}
+					if err := f.Feed(entries[start:end]); err != nil {
+						t.Fatal(err)
+					}
+					if source != nil {
+						source.remember(entries[start:end])
+						source.chunk = nil
+					}
+					start = end
 				}
-				if err := f.Feed(entries[start:end]); err != nil {
-					t.Fatal(err)
+				digest := testFoldDigest(t, f)
+				if *testWriteFoldBaselines {
+					expected = digest
+					got.Checkpoints = append(got.Checkpoints, digest)
 				}
-				if source != nil {
-					source.remember(entries[start:end])
-					source.chunk = nil
+				if digest != expected {
+					t.Fatalf("%s version %d mode %d: got %+v want %+v", path, version, mode, digest, expected)
 				}
-				start = end
-			}
-			digest := testFoldDigest(t, f)
-			if *testWriteFoldBaselines {
-				expected = digest
-				got.Checkpoints = append(got.Checkpoints, digest)
-			}
-			if digest != expected {
-				t.Fatalf("%s version %d mode %d: got %+v want %+v", path, version, mode, digest, expected)
-			}
+			})
 		}
 	}
 	if *testWriteFoldBaselines {

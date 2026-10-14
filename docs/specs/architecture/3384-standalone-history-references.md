@@ -67,3 +67,6 @@ Pending documentation stage:
 - [Threat model] OUT OF SCOPE: assistant/tool payload retention and rendered snapshot retention are deferred explicitly to #3385/#3386; transport authentication and framing remain at existing relay boundaries.
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+- 2026-10-14: The six serial generated golden feeds exceeded the race suite's default ten-minute timeout. Execute independent checkpoint/mode subtests in parallel while keeping explicit golden generation serial. Measure retention on a shared 6738-entry generated input to avoid two additional 30,000-entry folds; the already executed 30,000-entry measurement remains recorded in the PR. Production contracts and golden expectations are unchanged.
