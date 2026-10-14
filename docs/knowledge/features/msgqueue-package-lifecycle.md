@@ -137,7 +137,19 @@ commit point, never from this field).
   alone would miss that regression; `TestQueue_Lifecycle_AcceptanceCompletesBeforeObservers`
   also checks that the delivered id is absent from `Snapshot`. The resolver
   owns publication after completed acceptance; otherwise the enqueue caller
-  owns it when acceptance returns. No registry retains resolved lifecycle state.
+  owns it when acceptance returns. No registry retains resolved lifecycle state
+  beyond an outstanding acceptance callback.
+- **Binding while outside the FIFO (#3340):** a legacy `SendNow` can take an
+  item while its off-lock acceptance callback is still running, then reinsert
+  it after a failed write. A FIFO-only `BindAcceptedItem` would miss that item
+  and leave the retry without its durable identity. `convQueue.accepting`
+  retains the same `messageLifecycle` until `Queue.accept` finishes the callback;
+  binding can therefore reach the temporarily removed item. The map entry is
+  deleted on callback return and the empty map released. Guarded actions still
+  select only live FIFO entries, and reinsertion after a failed send preserves
+  the lifecycle and its immutable binding. `TestQueueBindingDuringSendNow` forces binding
+  while the write holds the entry off-FIFO; `TestQueueBindingDuringAcceptance`
+  proves concurrent matching removals claim only one terminal outcome.
 - **Lazy-spawn / exit-on-empty race** is closed under a single lock hold: the
   empty-check and the `draining = false` write are atomic w.r.t. a concurrent
   `Enqueue`, which either appends before the drain takes the lock (drain sees

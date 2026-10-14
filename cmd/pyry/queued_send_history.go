@@ -91,12 +91,13 @@ type queuedSendReference struct {
 // References exist only for this daemon run. A placement may arrive before the
 // acceptance callback, but cannot append or publish until that append completes.
 type queuedSendHistory struct {
-	store   *history.Store
-	logger  *slog.Logger
-	publish func(operatorMessage)
-	source  func(conversations.ConversationID) *history.SessionProvenance
-	mu      sync.Mutex
-	refs    map[queuedSendKey]*queuedSendReference
+	store    *history.Store
+	logger   *slog.Logger
+	publish  func(operatorMessage)
+	bindItem func(string, uint64, uint64)
+	source   func(conversations.ConversationID) *history.SessionProvenance
+	mu       sync.Mutex
+	refs     map[queuedSendKey]*queuedSendReference
 }
 
 func newQueuedSendHistory(store *history.Store, logger *slog.Logger, source func(conversations.ConversationID) *history.SessionProvenance) *queuedSendHistory {
@@ -142,6 +143,9 @@ func (h *queuedSendHistory) accepted(c string, m msgqueue.QueuedMessage) {
 	ref := h.reference(c, m.ID)
 	p := queuedSendFact{ConversationID: c, DeviceID: m.DeviceID, MessageID: m.MessageID, QueuedMessageID: m.ID, Text: m.Text, AttachmentIDs: m.AttachmentIDs, AcceptedAt: m.TS, ClientSentAt: formatClientSentAt(m.ClientSentAt)}
 	ref.id = h.append(historySendAccepted, p, m.TS, source)
+	if ref.id != nil && h.bindItem != nil {
+		h.bindItem(c, m.ID, *ref.id)
+	}
 	h.notify(h.receipt(historySendAccepted, p, m.TS, ref.id))
 	close(ref.ready)
 }
