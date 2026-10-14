@@ -30,7 +30,8 @@ The worker establishes interrupted-run detection, creates
 private `Fold` using `ForwardReader.Walk`. Each chunk contains at most
 `history.MaxPageEntries`, including hidden facts and continuation evidence.
 Readiness requires successful completion, `Fold.Version() == H` and a persisted
-complete checkpoint; partial replay publishes no usable view. A missing or empty
+complete initial checkpoint; recovery remains `StateRebuilding` until that write
+succeeds, and partial replay publishes no usable view. A missing or empty
 log becomes usable with no items and both `Version` and `LastShownVersion` zero.
 The initial page read is required even at H zero: `ForwardReader.Walk(0)` performs
 no storage read and cannot establish that empty history is readable. Items,
@@ -39,9 +40,18 @@ revisions and version match fresh full replay through the published version.
 The same reader then runs `ForwardReader.Tail`. Registration precedes catch-up,
 so entries committed during replay or the handoff are consumed exactly once in
 ID order; later commits converge through buffered notifications. Successful tail
-chunks checkpoint and publish updated items, consumed version, last-shown
-watermark and epoch together. Notifications cover commits through the supplied
-history store only; another store or external writer supplies no wakeup. See
+chunks publish updated items, consumed version, last-shown watermark and epoch
+together without waiting for the cache deadline. Fully folded progress newer
+than the saved version is dirty, including entries with no public item changes.
+Its deadline is 30 seconds after the conversation's last successful checkpoint;
+later appends cannot postpone it. The worker's timer flushes dirty progress even
+when no further entries arrive; progress first becoming dirty after the deadline
+flushes immediately. Unchanged progress causes no periodic rewrite. Initial or
+scheduled checkpoint failure leaves `StateUnavailable` with generic
+`ErrUnavailable`; `Retry` reconstructs from history. See
+[cache and epochs](thread-package.md#cache-and-epochs) for lifecycle exceptions
+and persistence errors. Notifications cover commits through the supplied history
+store only; another store or external writer supplies no wakeup. See
 [forward consumption](history-package-shape.md#forward-consumption).
 
 `Store.Observe(conversationID)` acquires a consistent complete baseline without
@@ -274,12 +284,25 @@ not include background recovery or publisher baseline preparation.
 
 ### Isolation and lifecycle
 
-One goroutine owns each conversation's reader and fold, serializing `Feed`,
-`Items`, `Version` and fold observations. Items, pending reports, unresolved
-parents and join state are private to that conversation. The store mutex protects
-worker identities, publications and scalar lifecycle records; history/cache I/O,
-folding, snapshot copying and joining happen outside it. Paused replay therefore leaves appends
-and other conversations' processing and snapshot lookup free to progress.
+One worker owns each conversation's fold, completed progress and checkpoint
+timer, serializing `Feed`, `Items`, `Version`, observations and cache writes.
+After replay, a separate goroutine runs the same reader's `Tail`, handing off at
+most one chunk and waiting for worker acknowledgement before its callback
+returns. It never accesses the fold. Both send and acknowledgement waits honor
+cancellation; worker exit cancels and joins the reader and stops the timer before
+retirement bookkeeping. Checking elapsed time only inside the tail callback
+would leave dirty progress unsaved when `Tail` waits for another commit.
+Items, pending reports, unresolved parents and join state are private to that
+conversation. The store mutex protects worker identities, publications and
+scalar lifecycle records; history/cache I/O, folding, snapshot copying and
+joining happen outside it. Paused replay therefore leaves appends and other
+conversations' processing and snapshot lookup free to progress.
+
+`Snapshot.Active` includes all private fold items, including unresolved work
+omitted from public `Items`. Only its true-to-false transition forces an early
+dirty checkpoint; already-inactive publications retain the bounded schedule.
+Successful lifecycle checkpoints restart the 30-second interval independently
+for each conversation.
 
 `Changes` captures the immutable publication, retained ranges and notification
 channel under the same mutex used by publication. Publication closes/replaces
@@ -303,11 +326,11 @@ encoded byte accounting cannot bound a substring that pins an accumulated
 message's backing allocation.
 
 `Unload(conversationID) error` marks the worker retiring, clears its publication,
-cancels and joins it, checkpointing completed progress where available before
-removing its identity. Tail consumption unregisters on exit; items and private
-continuation state are released while scalar lifecycle records remain for final
-shutdown. Other conversations continue independently. `Load`/`Retry` return
-`ErrUnloading` during retirement.
+cancels and joins it, checkpointing completed dirty progress where available
+before removing its identity. Tail consumption unregisters on exit; items and
+private continuation state are released while scalar lifecycle records remain for final
+shutdown. Unchanged progress needs no unload replacement. Other conversations
+continue independently. `Load`/`Retry` return `ErrUnloading` during retirement.
 After unload returns, lookup is not loaded unless explicitly reopened
 concurrently. Reopening with `Load` replays history, including commits made while
 unloaded. **Public items cannot seed a resumed fold:** `Fold.Items` omits
@@ -323,11 +346,20 @@ complete `Observe` baseline. Unload alone never marks the lifetime clean.
 `history.ErrInvalidID` for invalid ones and reports generic persistence/recovery
 errors; repeated calls preserve the recorded result until another load.
 
+Cancellation during `beforeFold` must retain `context.Canceled` internally:
+mapping it to generic fold failure would prevent retirement from flushing the
+preceding complete dirty progress. `TestStoreCheckpointCancelledFold` checks the
+saved version excludes the interrupted chunk; other fold failures remain
+unavailable. Lifecycle persistence failures remain `ErrPersistence`, including
+after the worker has been unloaded.
+
 `Shutdown() error` closes admission, cancels and joins all workers, and clears
-loaded state. It revalidates and atomically rewrites completed checkpoints for
-every conversation opened in the lifetime, including those unloaded earlier,
-then completes the coordinator's run certificate last. Incomplete recovery or
-any final persistence failure returns `ErrPersistence` and leaves the lifetime
+loaded state after flushing their completed dirty progress. It revalidates and
+atomically rewrites completed checkpoints for every conversation opened in the
+lifetime, including those unloaded earlier, even when unchanged, then completes
+the coordinator's run certificate last.
+This final validation does not fold history committed while unloaded. Incomplete
+recovery or any final persistence failure returns `ErrPersistence` and leaves the lifetime
 uncertified; successful checkpoint writes for other conversations cannot certify
 a partial clean exit. New `Load`/`Retry` work is rejected with `ErrClosed` for
 valid IDs. Repeated unloads and repeated/concurrent shutdowns are safe; shutdown
@@ -342,6 +374,19 @@ cancels workers; callers must finish producer draining and tail catch-up before
 invoking it to preserve final commits.
 
 ### Store verification
+
+Checkpoint cadence proofs use private `Store.now`/`Store.newTimer` hooks and count
+successful actual cache replacements through `Store.replace`. Synchronize on
+publication, timer installation and write completion rather than sleeping to
+assert absence: `TestStoreCheckpointSchedule` verifies the deadline without a
+later append, no-item notifications, unchanged progress and overdue dirtiness.
+`TestStoreCheckpointIsolation` and `TestStoreCheckpointLifecycle` check separate
+deadlines and early flushes. `TestStoreCheckpointInitialReadiness` holds the
+initial replacement before usability, while `TestStoreCheckpointFailures`
+checks generic snapshot errors and retained lifecycle persistence failures.
+`TestStoreCheckpointUncleanContinuation` compares reopen and subsequent tailing
+with fresh replay across pending child/report cut points, including revisions,
+consumed version and `LastShownVersion`; epoch rotation is asserted separately.
 
 `TestCatchUpPublications` spans more than 64 separate publications after live
 range eviction, including no-item progress, arbitrary saved versions and an
@@ -434,8 +479,8 @@ cancels the test-owned context and joins that operation before the earlier
 `testThreadStore` cleanup joins store workers through `Store.Shutdown`.
 
 Published Tail progress does not establish completion of test-owned delivery
-bookkeeping: `Store.run` publishes inside the wrapped feed callback, while the
-wrapper records successful IDs after feed returns. A snapshot can already
+bookkeeping: `Store.run` publishes before acknowledging the tail chunk, while
+the wrapper records successful IDs after the feed callback returns. A snapshot can already
 match full replay while the wrapper's count is short. A mutex protects recorded
 data but cannot await bookkeeping that has yet to acquire it. Close/replace a
 notification under the same mutex as the successful-ID count; capture the count
