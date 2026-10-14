@@ -48,6 +48,47 @@ miss accidental clearing. `TestCandidateExistingService` checks actual HTTP
 availability, unchanged process generation and saved-data bytes after failure,
 rather than inferring service survival from an unchanged active-release string.
 
+### Publication fixtures
+
+A shared tiny migration/startup budget makes a finalization test fail before its
+injected write while appearing to cover finalization. Healthy `publishFixture`
+arms retain production migration/startup/request budgets; shorten only the
+specific expiry arm and restore the budget before retry. The finalization arm of
+`TestPublishFailures` delays both compiled-entry launches and requires the
+post-activation injection plus exact phase/recovery feedback before inspecting the
+committed on-disk journal. A generic publication error is insufficient evidence.
+
+`TestPublishOrdering` inspects the persisted decision and absence of data before
+the journal. `TestPublishJournalDirectorySyncOrdering` parks directory sync before
+data preparation. `TestSnapshotDurabilityBoundary` executes real file
+sync/rename/directory ordering with injected failures;
+`TestPublishDurabilityUncertain` inspects retained decisions, unavailable targets
+and unchanged data rather than treating a renamed file as durable activation.
+`TestPublishPreparationRefusal` corrupts recorded/sealed evidence only after
+preparation/snapshot, so it proves fresh verification rather than cached success.
+
+`TestPublishMigrationRetirementUncertain` lets the leader exit and injects EPERM
+with a real descendant still live; it must retain the uncommitted journal and
+refuse restoration/removal. `TestPublishServiceRetirementUncertain` covers
+preactivation Stop/Remove/Shutdown. `TestGenerationRetirementErrors` covers
+ordinary/published completion, replacement, repeated Shutdown and rejected then
+successful removal. Assertions inspect actual leader/descendant retirement,
+retired targets and persisted decisions; an active-release string or leader wait
+alone would miss unsafe restoration and lost cleanup failures.
+
+`TestPublishTemplate` requires actual supported Node/npm through `HOSTED_APP_NODE`
+and `HOSTED_APP_NPM_CLI`, compiles the maintained template via checked preparation,
+runs migration and matching live health, checks durable activation/cleared journal
+and requests migrated preferences through the committed `Target.Do`. A skipped
+arm supplies no publication evidence. The
+[final verifier review](https://github.com/pyrycode/pyrycode/pull/3366#issuecomment-6176315679)
+inspected Node v24.15.0 builder results: 901 named apps checks executed/passed,
+0 failed/skipped, publication family 64/64 and this template arm 1/1. Its independent
+retirement regression run executed/passed 17 checks with 0 failures/skips. These
+counts support the specified arms; host power-loss and startup recovery were not
+exercised. Make retained builds writable only for fixture cleanup after owner
+shutdown; changing permissions earlier weakens the immutable-build proof.
+
 ### Retained-build fixtures
 
 `TestRetainedCanonicalInventory` and `TestRetainedRealInventory` author expected

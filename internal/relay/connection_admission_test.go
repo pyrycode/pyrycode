@@ -216,11 +216,22 @@ func TestAdmissionHeadersAndReconnect(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			c, ctx := testConnectAdmission(t, testAdmissionConfig(srv.URL+"/v1/server?probe=public", token, logger))
+			iteration := 0
+			defer func() {
+				t.Logf("reconnect iteration=%d requests=%d connected=%v", iteration, requests.Load(), c.Connected())
+				logs.mu.Lock()
+				defer logs.mu.Unlock()
+				for _, record := range logs.records {
+					// Lifecycle messages and timestamps contain no peer/header values.
+					t.Logf("transport lifecycle %s %s", record.Time.Format(time.RFC3339Nano), record.Message)
+				}
+			}()
 			for i := 0; i < 2; i++ {
+				iteration = i
 				select {
 				case <-c.Reconnected():
 				case <-ctx.Done():
-					t.Fatal("connection did not recover")
+					t.Fatalf("connection did not recover: iteration=%d requests=%d connected=%v", i, requests.Load(), c.Connected())
 				}
 				if err := c.SendContext(ctx, protocol.RoutingEnvelope{ConnID: "phone-public", Frame: json.RawMessage(`{"probe":"public"}`)}); err != nil {
 					t.Fatalf("SendContext: %v", err)

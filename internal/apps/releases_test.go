@@ -290,6 +290,12 @@ func TestMetadataFailures(t *testing.T) {
 	}
 	r.persist = writeSnapshot
 	c, e = r.Remove(testApp)
+	if c || !errors.Is(e, ErrConflict) || !reflect.DeepEqual(before, r.snapshot) || !bytes.Equal(disk, testBytes(t, path)) {
+		t.Fatal("removal discarded recovery evidence", c, e)
+	}
+	c, e = r.UpdatePublish(testHost, testApp, nil, nil)
+	testChange(t, c, e)
+	c, e = r.Remove(testApp)
 	testChange(t, c, e)
 	c, e = r.RecordRelease(testHost, testApp, testRelease(r, testApp, "1.0.0"))
 	if c || !errors.Is(e, ErrRemoved) {

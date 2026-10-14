@@ -17,6 +17,12 @@ const candidateVersionTimeout = 5 * time.Second
 
 type candidateVersionBuffer struct{ bytes []byte }
 
+// candidateRetirementError means a command's writers may still be live.
+// Callers must preserve recovery evidence and must not replace their data.
+type candidateRetirementError struct{ error }
+
+func (e *candidateRetirementError) Unwrap() error { return e.error }
+
 func (b *candidateVersionBuffer) Write(p []byte) (int, error) {
 	if len(b.bytes) < 128 {
 		b.bytes = append(b.bytes, p[:min(len(p), 128-len(b.bytes))]...)
@@ -27,6 +33,10 @@ func (b *candidateVersionBuffer) Write(p []byte) (int, error) {
 // Each command owns a group even after its leader exits. No artifacts are read
 // until the leader is joined and cleanup confirms that no live group work remains.
 func candidateCommand(ctx context.Context, stage string, env []string, node string, args []string, version bool) (string, error) {
+	return candidateCommandWithCleanup(ctx, stage, env, node, args, version, candidateCleanup)
+}
+
+func candidateCommandWithCleanup(ctx context.Context, stage string, env []string, node string, args []string, version bool, cleanup func(int) error) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -55,7 +65,10 @@ func candidateCommand(ctx context.Context, stage string, env []string, node stri
 			err = errors.Join(err, killErr)
 		}
 	}
-	cleanupErr := candidateCleanup(cmd.Process.Pid)
+	cleanupErr := cleanup(cmd.Process.Pid)
+	if cleanupErr != nil {
+		cleanupErr = &candidateRetirementError{cleanupErr}
+	}
 	if err = errors.Join(err, cleanupErr, ctx.Err()); err != nil {
 		return "", err
 	}
@@ -65,8 +78,12 @@ func candidateCommand(ctx context.Context, stage string, env []string, node stri
 	return strings.TrimSpace(string(output.bytes)), nil
 }
 func candidateCleanup(pid int) error {
+	return candidateCleanupWithKill(pid, syscall.Kill)
+}
+
+func candidateCleanupWithKill(pid int, kill func(int, syscall.Signal) error) error {
 	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
-		if err := syscall.Kill(-pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+		if err := kill(-pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return err
 		}
 		deadline := time.Now().Add(100 * time.Millisecond)
