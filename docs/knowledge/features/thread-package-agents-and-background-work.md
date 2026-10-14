@@ -361,3 +361,61 @@ ending order. Filtering to completion alone would miss that behavior. Full
 replay, every partition and single-entry feeds agree. These recordings prove
 shell completion and omission behavior; they supply no agent-gone proof. See
 [the producer's narrower gone evidence](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
+
+The [reusable long-history corpus](thread-package.md#reusable-fold-regression-corpus)
+adds compact golden checkpoints without replacing these independent semantic
+and provenance assertions. `testFoldGoldenCheck` in each test package pins the
+production baseline commit `a920b90cc6bfd2f1fb8461e9f85ce6f19934afa6`, input
+identity, entry count, input SHA-256, canonical history SHA-256 and ordered
+checkpoint versions. Generated input identity is `fold-scenarios-v1/100-entries`
+with count 30,000; its input hash covers that identity string. Retained inputs
+hash the complete capture file bytes. Raw shadow history uses `raw-shadow-v1`
+without normalization. Recorded replays use
+`recorded-normalization-v1/synthetic-shell-context-v1`, pinning the normalized
+history separately from the unchanged recording.
+
+`testNormalizeRecorded` runs before folding only the three parser-derived
+histories. Nonempty top-level emitter-created `turn_id` and `lifetime_id` values
+map by first occurrence into separate UUID namespaces:
+`00000001-0000-4000-8000-<12-digit ordinal>` for turns and
+`00000002-0000-4000-8000-<12-digit ordinal>` for lifetimes, starting at one.
+Every occurrence of the same identity uses the same mapping, preserving joins.
+Entry `TS` and an existing emitter `occurred_at` become
+`2026-01-01T00:00:00Z` plus entry ID nanoseconds. These recordings supply none
+of those turn/lifetime IDs themselves. Recorded identities, nested content,
+durations and timestamps are retained; no folded output field is normalized.
+`TestThreadRecordedBaselines` derives each history twice and requires equality
+before checking its committed history hash. Shell derivation still supplies the
+explicitly synthetic creation/result/turn-end context described above.
+
+Each checkpoint requires all five fields: consumed `Version`, item count
+`Items`, `LastShownVersion`, canonical item digest `JSON` and raw byte digest
+`Content`. `testFoldDigest` hashes the complete creation-ordered item list,
+including all Item fields and Content. `testJSON` decodes with `UseNumber` and
+re-encodes with `encoding/json`'s sorted object keys and default string escaping,
+preserving numbers such as `9007199254740993` without float64 rounding. The
+separate Content SHA-256 concatenates, for each item in that same order,
+big-endian uint64 item ID, big-endian uint64 Content byte length, then exact
+Content bytes. Canonical JSON erases whitespace differences; the framed raw
+digest detects byte corruption that canonical equality would miss.
+`TestFoldDigestCorruption` checks that distinction and lossless numbers.
+
+**Required-field presence must be checked before scalar equality.** Decoding
+missing/null count or watermark fields directly into scalars can produce zero
+and pass an empty checkpoint. Both `testFoldCheckpoint.UnmarshalJSON` readers
+require typed non-null pointers before constructing expectations; explicit zero
+counts/watermarks remain valid, while omissions, nulls and invalid numeric types
+fail. `TestFoldCheckpointRequiredFields` in both packages exercises these cases
+through full-manifest decoding. Missing inputs/manifests, incomplete metadata or
+checkpoint sets, changed hashes and changed checkpoint values fail ordinary
+assertions; ordinary tests neither skip missing fixtures nor write expectations.
+
+Deliberate golden replacement is a separate operation, documented beside the
+helpers. The thread command writes the generated and raw-shadow manifests;
+the cmd command writes `cmd/pyry/testdata/<recording>.json.golden` for all three
+recorded inputs:
+
+```bash
+go test ./internal/thread -run '^TestFoldBaselines$' -args -write-fold-baselines
+go test ./cmd/pyry -run '^TestThreadRecordedBaselines$' -args -write-fold-baselines
+```

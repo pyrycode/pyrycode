@@ -1,17 +1,13 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/pyrycode/pyrycode/internal/history"
-	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/thread"
-	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // TestThreadAgentRecordedReplay uses #2191's committed Claude v2.1.259 capture;
@@ -35,17 +31,11 @@ func TestThreadAgentRecordedReplay(t *testing.T) {
 	if json.Unmarshal(raw, &capture) != nil || capture.Ticket != "2191" || capture.Version != "2.1.259 (Claude Code)" || !capture.Capture || capture.Captured != "2026-09-09T21:05:29+03:00" || len(capture.Frames) != 17 {
 		t.Fatal("capture provenance changed")
 	}
-	store := history.New(t.TempDir())
-	e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
-	e.hist, e.runtimeFacts = store, true
-	source := history.SessionProvenance{Kind: "claude", SessionID: "recorded"}
-	parser := streamsup.NewParser(func(ev turnevent.Event) { e.HandleFor(context.Background(), testConvID, ev, source) }, discardLogger())
+	var frames []string
 	for _, frame := range capture.Frames {
-		if _, err := parser.Write([]byte(frame.Payload + "\n")); err != nil {
-			t.Fatal(err)
-		}
+		frames = append(frames, frame.Payload)
 	}
-	entries := historyEntries(t, store, testConvID)
+	entries, _ := testRecordedFrames(t, frames, "")
 	full := thread.New(testConvID)
 	if err := full.Feed(entries); err != nil {
 		t.Fatal(err)
