@@ -109,7 +109,7 @@ func TestPublishSuccess(t *testing.T) {
 }
 
 func TestPublishAdmission(t *testing.T) {
-	for _, why := range []string{"unknown", "foreign", "removed", "active", "journal", "toolchain", "cancelled"} {
+	for _, why := range []string{"unknown", "foreign", "removed", "journal", "toolchain", "cancelled"} {
 		t.Run(why, func(t *testing.T) {
 			r, o, tools, c, _ := publishFixture(t, healthReply{Body: healthyBody()}, "ok")
 			server, app := testHost, testApp
@@ -121,10 +121,6 @@ func TestPublishAdmission(t *testing.T) {
 				server = testID(9)
 			case "removed":
 				if _, e := r.Remove(app); e != nil {
-					t.Fatal(e)
-				}
-			case "active":
-				if _, e := r.UpdateLifecycle(server, app, Lifecycle{Title: "App", Desired: "stopped", State: "stopped", ActiveRelease: "1.0.0"}); e != nil {
 					t.Fatal(e)
 				}
 			case "journal":

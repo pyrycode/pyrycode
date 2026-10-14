@@ -21,6 +21,21 @@ Status-empty mapped reports can enrich content without closing work; after a
 final they are retained under `task_update`. Payloads, including patch strings,
 remain inert data. A patch containing a status cannot supply that status.
 
+`agentWork` deduplicates affected call IDs after validation. Creation, call
+reports and supported parent enrichment recompute that call; task reports and
+links recompute the owner. Reassociation recomputes both previous and new
+owners. A roster reaches only owners affected by usable row evidence, including
+previous owners on reassociation; omissions and unusable identities do not
+trigger a group sweep. `applyAgent` reads only the affected call's associated
+tasks and reports. `agentGroup.taskIDs` retains lexicographic task-ID order per
+owner, maintained on ownership changes rather than collected and sorted from
+all group tasks during application.
+
+**Index pending owners as well as created calls.** Restricting the ownership
+index to visible items would lose links received before launch. Pending tasks,
+reports and associations remain available within the scoped group even without
+a created call item; they create no public item by themselves.
+
 | Evidence | Status and activity |
 | --- | --- |
 | Unlinked successful/failed tool result | `finished` / `failed`, inactive. |
@@ -40,8 +55,8 @@ Neither `run_in_background` nor result text establishes the link. See
 [producer launch/result separation](history-package-producers-runtime-lifecycle.md#keep-launch-results-separate-from-task-outcomes).
 
 The first genuine final wins; later conflicting finals cannot replace its
-outcome or order. `agentAddReport` reconciles matching durable/mapped companions
-within the same scoped identity, status and report kind as one logical outcome:
+outcome or order. `agentGroup.addReport` reconciles matching durable/mapped
+companions within the same scoped identity, status and report kind as one logical outcome:
 the earliest evidence ID owns terminal order and the mapped payload supplies
 content. Thus a later mapped companion may enrich the winning report without
 moving its ending. `Item.EndedOrder` is zero before a final; content omits
@@ -94,6 +109,15 @@ only validated saved lifecycle evidence supplies that status. A saved
 `agent_ended_with_session` can end the linked shell with its recorded cause even
 after the main turn ended; a divider by itself supplies no such ending. See
 [independent session endings](history-package-producers-runtime-lifecycle.md#unfinished-agenttask-session-endings-3032).
+
+Shell reports and task ownership changes use the same affected-call
+recomputation and lexicographic associated-task index as agents; reassociation
+recomputes both owners. First-lifetime promotion transfers that index with
+pending call/task/report evidence and recomputes the moved owners, preserving
+companion enrichment and first-terminal order. The transfer runs once when the
+source first acquires a lifetime; subsequent ordinary reports do not scan saved
+promotion evidence again. [Identity and recovery](#identity-and-recovery)
+defines which pre-lifetime evidence can move.
 
 ### Identity and recovery
 
@@ -230,8 +254,10 @@ finals supply their current ending content directly. Parent/link repair,
 closure, reopening and ending enrichment therefore revisit the affected tree
 without inspecting independent trees, even within the same agent group.
 Unrelated standalone/main-only entries perform zero child-resolution work.
-This bounds child bookkeeping, not broader agent recomputation, observation or
-Store publication costs.
+Agent evidence separately recomputes only affected calls and their indexed
+tasks/reports, retaining these targeted descendant-repair hooks for late
+parent/link enrichment and lifecycle changes. These bounds cover agent and
+child bookkeeping; observation and Store publication costs remain separate.
 
 An ancestor ending makes unfinished text/tools `interrupted` and
 inactive, retaining `parent_ending`; unfinished nested agents become inactive
@@ -310,6 +336,22 @@ restoration/base-copy, expansion and resolution counts stay identical across
 ancestor closure, reopening, ending enrichment and child appends; unrelated
 main-only appends have zero counts. `TestChildRejectedCandidatesCount` includes
 self-parent rejection and omitted descendants in inspected work.
+
+`TestAgentAffectedWork` grows unrelated same-group scenarios from sixteen to
+sixty-four while fixing affected calls, tasks/reports and measured entries.
+Each unrelated scenario includes both created and uncreated calls: skipping
+calls without items must still count as inspected work. The control is large
+enough to expose even one filtered group scan despite fixed serialization cost.
+Counts include lookups, report candidates/comparisons and ownership-index
+maintenance, with less than twice the work allowed for a result, task report,
+reassociation and fixed-size roster. `TestAgentOwnershipOrder` checks lexical
+order and absence of stale/duplicate edges after repeated roster reassociation.
+`TestAgentPromotionWork` counts the one-time transfer separately, then checks
+bounded ordinary reports with unrelated saved evidence retained, intact indexes
+and unchanged first-terminal order. Setup, snapshots and `recordShown` are
+outside these agent-lifecycle counters. The long-history corpus uses separate
+scenario lifetimes, so its unchanged digests cannot replace this same-group
+scaling proof.
 
 **An ownership rejection test needs completed children as well.** Ancestor
 interruption can expose a detached unfinished child through a status mismatch,

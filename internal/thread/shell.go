@@ -15,6 +15,7 @@ func (f *Fold) registerShell(e history.Entry, id string, call *mainCall) {
 		g = &agentGroup{key: key, calls: map[string]*agentCall{}, tasks: map[string]*agentTask{}}
 		f.agentGroups[key] = g
 	}
+	g.counts = f.agentCounts
 	c := g.call(id)
 	if c.item >= 0 {
 		return
@@ -37,48 +38,64 @@ func (f *Fold) registerShell(e history.Entry, id string, call *mainCall) {
 // The first saved lifetime may arrive after ordinary shell evidence. Transfer
 // only evidence retained in this source's uninterrupted pre-lifetime scope;
 // established lifetimes and boundary-separated predecessors are never adopted.
-func (f *Fold) promoteShellEvidence(key agentKey) {
+func (f *Fold) promoteShellEvidence(key agentKey) []string {
+	if f.agentCounts != nil {
+		f.agentCounts.promotions++
+		f.agentCounts.work++
+	}
 	oldKey := key
 	oldKey.lifetime = ""
 	oldKey.scope = f.legacyScope
 	old := f.agentGroups[oldKey]
 	if old == nil {
-		return
+		return nil
 	}
+	old.counts = f.agentCounts
 	g := f.agentGroups[key]
 	if g == nil {
 		g = &agentGroup{key: key, calls: map[string]*agentCall{}, tasks: map[string]*agentTask{}}
 		f.agentGroups[key] = g
 	}
+	g.counts = f.agentCounts
 	moved := make(map[string]bool)
+	var affected []string
 	for id, c := range old.calls {
+		g.count(1)
 		if c.ordinary == nil && c.item >= 0 {
 			continue
 		}
+		g.count(1)
 		if g.calls[id] != nil {
 			continue
 		}
 		g.calls[id] = c
 		delete(old.calls, id)
 		moved[id] = true
+		affected = append(affected, id)
 		if c.ordinary != nil {
 			c.ordinary.group = key
 		}
 	}
 	tasks := make(map[string]bool)
 	for id, task := range old.tasks {
+		g.count(2)
 		if task.call != "" && !moved[task.call] {
 			continue
 		}
+		g.count(1)
 		if g.tasks[id] != nil {
 			continue
 		}
 		g.tasks[id] = task
+		old.removeTaskID(task.call, id)
+		g.insertTaskID(task.call, id)
 		delete(old.tasks, id)
 		tasks[id] = true
 	}
 	for id, observations := range f.agentObservations {
+		g.count(1)
 		for i := range observations {
+			g.count(3)
 			obs := &observations[i]
 			if obs.group == old && (moved[obs.call] || tasks[obs.task]) {
 				obs.group = g
@@ -87,12 +104,15 @@ func (f *Fold) promoteShellEvidence(key agentKey) {
 		f.agentObservations[id] = observations
 	}
 	for _, turn := range f.turns {
+		g.count(1)
 		for _, call := range turn.calls {
+			g.count(1)
 			if call.item < 0 && call.group == oldKey {
 				call.group = key
 			}
 		}
 	}
+	return affected
 }
 
 // Ordinary mapped results keep the source turn validation used by mainWork;
@@ -116,6 +136,9 @@ func (f *Fold) applyShellForeground(c *agentCall) {
 	}
 	var first *agentReport
 	for _, r := range c.reports {
+		if f.agentCounts != nil {
+			f.agentCounts.work++
+		}
 		if r.mapped && (r.field == "result" || r.field == "denial") && shellReportMatches(r, f.items[c.item].Turn) && (first == nil || r.id < first.id) {
 			first = r
 		}

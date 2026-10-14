@@ -85,9 +85,14 @@ func validStorageSchema(value any) bool {
 		return false
 	}
 	for _, value := range records {
-		record, ok := storageObject(value, []string{"app_id", "manifest", "title", "desired", "state", "revision"}, "active_release", "pending_release", "last_error", "release_history", "publish_journal")
+		record, ok := storageObject(value, []string{"app_id", "manifest", "title", "desired", "state", "revision"}, "active_release", "pending_release", "last_error", "release_history", "publish_journal", "retirement_pending")
 		if !ok || !validMetadataSchema(record) {
 			return false
+		}
+		if pending, exists := record["retirement_pending"]; exists {
+			if _, ok := pending.(bool); !ok {
+				return false
+			}
 		}
 		if lastError, exists := record["last_error"]; exists {
 			if _, ok := storageObject(lastError, []string{"code", "message"}); !ok {
