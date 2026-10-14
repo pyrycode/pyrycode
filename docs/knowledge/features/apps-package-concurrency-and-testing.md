@@ -123,6 +123,14 @@ wrong reason. `backupFixture` canonicalizes only the test-owned root;
 controlled `TMPDIR` alias. Production still rejects symlink components. See
 [fixture discrimination](development-verification.md#prove-that-tests-distinguish-the-change).
 
+Registry refusal fixtures need the same separation: use `testRoot` for every
+valid root, including invalid-host cases, and leave relative/empty roots raw.
+`TestTwoHosts` matches `ErrInvalidIdentity` for an invalid host with a valid root
+and `ErrInvalidStorage` for invalid roots; accepting any error could let storage
+rejection satisfy host validation. Successful registrations on distinct roots
+and both `ErrForeignHost` refusals (registration and reopening) keep the
+controlled-alias run a proof of host isolation as well as fixture portability.
+
 Inspect the compiled bundle itself, not only generated output.
 `TestBundleInventory` requires exactly the shared inventory plus the manifest
 and inventory JSON; `TestBundleExcludesWorkingFiles` recompiles the production
