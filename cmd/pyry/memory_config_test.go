@@ -41,6 +41,14 @@ func testManagedHome(t *testing.T) string {
 	t.Setenv("HOME", home)
 	return home
 }
+
+// testManagedCredentialStore pins the file backend. With an empty goos the
+// store follows runtime.GOOS and, on a Linux host with a session bus or on
+// macOS, writes the test credential into the developer's real keyring and
+// keeps the token out of the file this test removes.
+func testManagedCredentialStore(home string) memoryCredentialStore {
+	return memoryCredentialStore{home: home, goos: "unsupported"}
+}
 func testManagedCommand(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	var out bytes.Buffer
@@ -156,7 +164,7 @@ func TestMemoryConfigurationCredentials(t *testing.T) {
 			s.Embedding.Provider = provider
 			s.Capture.Agent = agent
 			if provider == "openai" {
-				s.Embedding.CredentialReference = testMemorySet(t, memoryCredentialStore{home: home}, memoryOld)
+				s.Embedding.CredentialReference = testMemorySet(t, testManagedCredentialStore(home), memoryOld)
 			}
 			testMemoryMust(t, configureMemory(context.Background(), s))
 			out, err := testManagedCommand(t, "status")
@@ -177,7 +185,7 @@ func TestMemoryConfigurationCredentials(t *testing.T) {
 		testMemoryReject(t, configureMemory(context.Background(), s))
 	}
 	s.Embedding.CredentialReference = ref
-	selection, sel := testMemorySelection(t, memoryCredentialStore{home: home})
+	selection, sel := testMemorySelection(t, testManagedCredentialStore(home))
 	testMemoryMust(t, os.Remove(filepath.Join(filepath.Dir(selection), sel.Generation+".token")))
 	out, err := testManagedCommand(t, "status")
 	testMemoryCheck(t, err != nil && out == "" && !strings.Contains(err.Error(), ref), "status cached credential")
