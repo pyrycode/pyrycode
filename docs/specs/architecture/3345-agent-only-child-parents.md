@@ -45,3 +45,11 @@ Run `go test -race ./internal/thread/...`, `go vet ./...`, and build `./cmd/pyry
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-14
+
+## Documentation handoff
+
+- Pending for the documentation stage: update `docs/knowledge/features/thread-package-agents-and-background-work.md` § Parent repair to remove the #3345 known shell-parent exception and deliberately-skipped-test claim; describe the enforced agent-only guard and expanded shell/descendant regression coverage.
+
+## Revisions
+
+- 2026-10-14: Verifier review on PR #3349 identified the missing documentation handoff above. The design and implementation are unchanged. The intermittent `TestQueuedSendHistoryLifecycle/retry` failure is tracked separately in #3357; the verifier requires a successful complete dispatcher gate sequence before approval, which remains a later-stage check.
