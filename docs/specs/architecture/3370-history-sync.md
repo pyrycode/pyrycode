@@ -41,6 +41,7 @@ Hold `Store.mu` throughout target capture, validation and sync; appends cannot c
 | Cold/reopened/read-loaded/append-loaded first sync; repeat | `TestSyncFirstAndEmpty` |
 | Any sync/open/close failure and retry | `TestSyncFailuresRetry` |
 | Pending segment/directory disappears then is restored | `TestSyncMissingAndUnsafeTargets` |
+| Segment leaf replaced between listing and open | `TestSyncRechecksOpenedLeaf` |
 | Failed append reload with previous pending writes and torn-tail roll | `TestSyncFailedAppendRecovery` |
 | Concurrent append ordered after captured sync boundary | `TestSyncSerializesAppend` |
 
@@ -77,3 +78,7 @@ Pending for the documentation stage: `docs/knowledge/features/history-package-sh
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+
+- 2026-10-14: Cursor recovery also observes existing segment identities before a Store's first sync. `load` retains those targets as pending, so deleting a read-loaded target cannot turn its first sync into a successful empty-log no-op. Recovery still never resets pending work, and sync itself never decodes entries. Final sizing is about 754 written lines, zero exported types/interfaces, zero consumer updates, four acceptance criteria and ten failure categories, within all limits.
