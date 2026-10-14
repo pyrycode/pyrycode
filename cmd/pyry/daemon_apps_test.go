@@ -31,7 +31,7 @@ func daemonAppManifest(host string) []byte {
 func TestDaemonAppsStorage(t *testing.T) {
 	for _, mode := range []string{"missing", "corrupt", "foreign", "unreadable", "symlink"} {
 		t.Run(mode, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
+			t.Setenv("HOME", testRealTempDir(t))
 			const name = "test/instance"
 			root := filepath.Join(resolveInstanceDirPath(name), "apps")
 			if err := os.MkdirAll(root, 0755); err != nil {
@@ -111,7 +111,7 @@ func TestDaemonAppsComposition(t *testing.T) {
 		t.Run(fmt.Sprint(ready), func(t *testing.T) {
 			t.Parallel()
 			host := string(identity.NewServerID())
-			r, err := apps.Open(filepath.Join(t.TempDir(), "apps"), host)
+			r, err := apps.Open(filepath.Join(testRealTempDir(t), "apps"), host)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -270,7 +270,7 @@ func TestDaemonAppsComposition(t *testing.T) {
 	}
 }
 func TestDaemonAppsCompositionFailure(t *testing.T) {
-	r, err := apps.Open(filepath.Join(t.TempDir(), "apps"), string(identity.NewServerID()))
+	r, err := apps.Open(filepath.Join(testRealTempDir(t), "apps"), string(identity.NewServerID()))
 	if err != nil {
 		t.Fatal(err)
 	}
