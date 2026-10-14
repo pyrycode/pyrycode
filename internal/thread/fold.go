@@ -45,7 +45,7 @@ type Fold struct {
 	publicVisible             map[uint64]bool
 	items                     []Item
 	source                    entrySource
-	recipes                   map[uint64]uint64
+	recipes                   map[uint64]contentRecipe
 	successor                 history.SessionProvenance
 	lastBoundary, legacyScope uint64
 	pending                   map[boundaryKey][]uint64
@@ -178,7 +178,7 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 		item.Shown = *e.Shown
 	}
 	reference := f.source != nil && referencedKind(item.Kind) && e.Type != "send_accepted"
-	if reference && item.Kind == "user_message" {
+	if reference && (item.Kind == "user_message" || item.Kind == "assistant_message") {
 		item.Summary = ""
 	} else {
 		item.Summary = plainSummary(item.Summary)
@@ -187,7 +187,11 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 		}
 	}
 	if reference {
-		f.recipes[item.ID] = e.ID
+		r := contentRecipe{creating: e.ID}
+		if item.Kind == "assistant_message" {
+			r.text = []uint64{e.ID}
+		}
+		f.recipes[item.ID] = r
 	} else {
 		item.Content = append(json.RawMessage(nil), e.Payload...)
 	}

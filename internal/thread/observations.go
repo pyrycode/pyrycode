@@ -33,7 +33,11 @@ type Observation struct {
 
 // Observe returns a detached complete baseline. Fold access must be serialized.
 func (f *Fold) Observe() Observation {
-	return Observation{Snapshot: Snapshot{State: StateUsable, Items: f.Items(), Version: f.version, LastShownVersion: f.lastShown}}
+	items, err := f.Render()
+	if err != nil {
+		return Observation{Snapshot: Snapshot{State: StateUnavailable, Err: ErrUnavailable}}
+	}
+	return Observation{Snapshot: Snapshot{State: StateUsable, Items: items, Version: f.version, LastShownVersion: f.lastShown}}
 }
 
 // FeedChanges consumes entries with Feed's partial-error semantics and returns
@@ -41,7 +45,14 @@ func (f *Fold) Observe() Observation {
 func (f *Fold) FeedChanges(entries []history.Entry) (Observation, error) {
 	before := f.Observe().Snapshot
 	err := f.Feed(entries)
-	return difference(before, f.Observe().Snapshot), err
+	after := f.Observe().Snapshot
+	if after.State != StateUsable {
+		return Observation{Snapshot: after}, ErrUnavailable
+	}
+	if before.State != StateUsable {
+		return Observation{Snapshot: after, BaselineRequired: true}, err
+	}
+	return difference(before, after), err
 }
 
 func messageText(item Item) string {

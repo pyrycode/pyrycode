@@ -2,6 +2,7 @@ package thread
 
 import (
 	"encoding/json"
+	"maps"
 	"slices"
 	"strings"
 	"unsafe"
@@ -13,15 +14,58 @@ type entrySource interface {
 	Lookup([]uint64) ([]history.Entry, error)
 }
 
+// Recipe fields are copy-on-write; text IDs are append-only with snapshot lengths.
+// Only parent_ending may carry a copied payload until its lifecycle conversion.
+type contentRecipe struct {
+	creating uint64
+	text     []uint64
+	fields   map[string]recipeField
+}
+
+type recipeField struct {
+	entry uint64
+	value json.RawMessage
+}
+
+func (f *Fold) referenceItem(index int, e history.Entry) {
+	item := &f.items[index]
+	r := contentRecipe{creating: e.ID}
+	if item.Kind == "assistant_message" {
+		r.text = []uint64{e.ID}
+		item.Summary = ""
+	}
+	f.recipes[item.ID], item.Content = r, nil
+}
+
+func (f *Fold) referenceField(index int, key string, value recipeField) {
+	f.markAffected(index)
+	id := f.items[index].ID
+	r := f.recipes[id]
+	r.fields = maps.Clone(r.fields)
+	if r.fields == nil {
+		r.fields = make(map[string]recipeField)
+	}
+	r.fields[key] = value
+	f.recipes[id] = r
+}
+
+func (f *Fold) setOutcome(index int, outcome *mainOutcome) {
+	if f.recipes[f.items[index].ID].creating != 0 {
+		f.referenceField(index, outcome.field, recipeField{entry: outcome.id})
+	} else {
+		f.setContent(index, outcome.field, outcome.raw)
+	}
+}
+
 func newReferenceFold(conversationID string, source entrySource) *Fold {
 	f := New(conversationID)
-	f.source, f.recipes = source, make(map[uint64]uint64)
+	f.source, f.recipes = source, make(map[uint64]contentRecipe)
 	return f
 }
 
 func referencedKind(kind string) bool {
 	switch kind {
-	case "user_message", "turn_end", "notice", "compaction", "session_divider":
+	case "user_message", "assistant_message", "turn_end", "notice", "compaction", "session_divider":
 		return true
 	}
 	return false
@@ -48,15 +92,21 @@ func (f *Fold) Render() ([]Item, error) {
 func (f *Fold) render(items []Item) ([]Item, error) {
 	var ids []uint64
 	for _, item := range items {
-		if id := f.recipes[item.ID]; id != 0 {
-			ids = append(ids, id)
+		if r := f.recipes[item.ID]; r.creating != 0 {
+			ids = append(ids, r.creating)
+			ids = append(ids, r.text...)
+			for _, field := range r.fields {
+				if field.entry != 0 {
+					ids = append(ids, field.entry)
+				}
+			}
 		}
 	}
 	entries := make(map[uint64]history.Entry, len(ids))
 	if len(ids) > 0 {
 		resolved, err := f.source.Lookup(ids)
 		if err != nil {
-			return nil, err
+			return nil, ErrUnavailable
 		}
 		for _, e := range resolved {
 			entries[e.ID] = e
@@ -64,13 +114,57 @@ func (f *Fold) render(items []Item) ([]Item, error) {
 	}
 	for i := range items {
 		item := &items[i]
-		if id := f.recipes[item.ID]; id != 0 {
-			e, ok := entries[id]
+		if r := f.recipes[item.ID]; r.creating != 0 {
+			e, ok := entries[r.creating]
 			if !ok {
 				return nil, ErrUnavailable
 			}
 			item.Content = e.Payload
-			if item.Kind == "user_message" {
+			var text strings.Builder
+			for _, id := range r.text {
+				e, ok := entries[id]
+				var p struct {
+					Text string `json:"text"`
+				}
+				if !ok || json.Unmarshal(e.Payload, &p) != nil {
+					return nil, ErrUnavailable
+				}
+				text.WriteString(p.Text)
+			}
+			if len(r.text) > 1 || len(r.fields) > 0 {
+				var fields map[string]json.RawMessage
+				if json.Unmarshal(e.Payload, &fields) != nil || fields == nil {
+					return nil, ErrUnavailable
+				}
+				if len(r.text) > 1 {
+					fields["text"], _ = json.Marshal(text.String())
+				}
+				for key, field := range r.fields {
+					raw := field.value
+					if field.entry != 0 {
+						e, ok := entries[field.entry]
+						if !ok {
+							return nil, ErrUnavailable
+						}
+						raw = e.Payload
+					}
+					if !json.Valid(raw) {
+						return nil, ErrUnavailable
+					}
+					fields[key] = raw
+				}
+				var err error
+				item.Content, err = json.Marshal(fields)
+				if err != nil {
+					return nil, ErrUnavailable
+				}
+			}
+			if item.Kind == "assistant_message" {
+				item.Summary = plainSummary(text.String())
+				if item.Summary == "" {
+					item.Summary = "assistant message"
+				}
+			} else if item.Kind == "user_message" {
 				var p struct {
 					Text string `json:"text"`
 				}

@@ -22,10 +22,11 @@ type childCall struct {
 	call   *mainCall
 }
 type childState struct {
-	group          agentKey
-	parent         string
-	base, previous Item
-	restored       bool
+	group                      agentKey
+	parent                     string
+	base, previous             Item
+	baseRecipe, previousRecipe contentRecipe
+	restored                   bool
 }
 
 type childParentKey struct {
@@ -160,7 +161,8 @@ func (f *Fold) saveChild(index int, group agentKey, parent string) {
 		}
 		// A first registration is already intrinsic, including mutations made
 		// later in this entry before its first derived resolution.
-		state = &childState{base: f.items[index], previous: f.items[index], restored: true}
+		r := f.recipes[f.items[index].ID]
+		state = &childState{base: f.items[index], previous: f.items[index], baseRecipe: r, previousRecipe: r, restored: true}
 		f.children[index] = state
 	} else {
 		f.restoreChild(index)
@@ -189,8 +191,12 @@ func (f *Fold) restoreChild(index int) {
 		f.childCounts.restored++
 	}
 	state.previous = f.items[index]
+	state.previousRecipe = f.recipes[state.previous.ID]
 	f.countPublicWork(3) // stored item, intrinsic restoration and dirty maintenance
 	f.items[index] = state.base
+	if state.baseRecipe.creating != 0 {
+		f.recipes[state.base.ID] = state.baseRecipe
+	}
 	f.items[index].Parent = state.previous.Parent
 	f.items[index].Rev = state.previous.Rev
 	state.restored = true
@@ -261,6 +267,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 				f.childCounts.baseCopies++
 			}
 			state.base = f.items[index]
+			state.baseRecipe = f.recipes[state.base.ID]
 		}
 		item := &f.items[index]
 		if state != nil {
@@ -294,13 +301,14 @@ func (f *Fold) resolveChildren(rev uint64) {
 			}
 			previous, current := state.previous, *item
 			previous.Rev, current.Rev = 0, 0
-			if !reflect.DeepEqual(previous, current) {
+			if !reflect.DeepEqual(previous, current) || !reflect.DeepEqual(state.previousRecipe, f.recipes[item.ID]) {
 				item.Rev = max(item.ID, rev)
 			} else {
 				item.Rev = state.previous.Rev
 			}
 			state.base.Parent, state.base.Rev = item.Parent, item.Rev
 			state.previous = *item
+			state.previousRecipe = f.recipes[item.ID]
 			state.restored = false
 		}
 		if item.Kind == "agent" {
