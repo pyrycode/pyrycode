@@ -189,6 +189,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 	}
 	if e.Type == protocol.TypeAssistantDelta {
 		if st.text >= 0 {
+			f.countPublicWork(1) // inspected append candidate, including empty deltas
 			item := &f.items[st.text]
 			var old, delta protocol.AssistantDeltaPayload
 			// Both payloads were validated before storage.
@@ -262,9 +263,11 @@ func (f *Fold) closeText(st *mainTurn, rev uint64) {
 		return
 	}
 	f.restoreChild(st.text)
+	f.countPublicWork(1) // inspected closure candidate, including inactive rows
 	item := &f.items[st.text]
 	if item.Active {
 		item.Status, item.Active, item.Rev = "done", false, max(item.ID, rev)
+		f.markAffected(st.text)
 	}
 	st.text = -1
 }
@@ -273,11 +276,13 @@ func (f *Fold) applyTerminal(call *mainCall) {
 		return
 	}
 	f.restoreChild(call.item)
+	f.countPublicWork(1)
 	item := &f.items[call.item]
 	item.Status, item.Active, item.Rev = call.terminal.status, false, max(item.ID, call.terminal.id)
 	f.setContent(call.item, call.terminal.field, call.terminal.raw)
 }
 func (f *Fold) setContent(index int, key string, value any) {
+	f.markAffected(index)
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(f.items[index].Content, &fields)
 	fields[key], _ = json.Marshal(value) // Values are strings or already-valid recorded JSON.
