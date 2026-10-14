@@ -19,3 +19,7 @@ Reuse #3324 / PR #3326's test-only repair at `9cdd7fad475c0cbee68ed4aeb581006e15
 Run `TestQueuedSendHistoryLifecycle` repeatedly with the race detector, then the complete `cmd/pyry` race package, `go vet ./...` and the daemon build. Existing assertions cover successful retry and independent give-up; no new stimulus or assertion is required.
 
 Upstream full-gate evidence: the final [verifier review of PR #3326](https://github.com/pyrycode/pyrycode/pull/3326#issuecomment-6171911494) reports dispatcher `make check` and `make build` passed on `c13e2533537f1e050e3827090aa939c95666b15e`. This is credited upstream evidence, not execution by this builder, and newer main changes prevent treating it as a full-gate pass on this branch. The dispatcher/verifier must run the full `make check` on the pushed candidate and record its tested commit and result; scoped checks do not replace that acceptance criterion.
+
+## Revisions
+
+- 2026-10-14: Verification on `5028c54b0aca8ebf2a99350fc426adc477a949fc` passed: 25 race-enabled lifecycle repetitions, 175 outcome subtests (25 retry and 25 give-up), complete `go test -race ./cmd/pyry/...` in 283.525 seconds, `go vet ./...` and `go build -o /tmp/builder-3357/pyry ./cmd/pyry`. No code change was needed. Logs are under `/tmp/builder-3357/`; this revision changes only the plan. Full candidate `make check` remains pending with the dispatcher/verifier.
