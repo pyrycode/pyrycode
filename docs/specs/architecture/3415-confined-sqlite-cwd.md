@@ -42,6 +42,10 @@ Write launch identity tests first and observe their failure against the old path
 ## Open questions
 - Native task recipes must provide the required apps tests, rather than just platform availability; inspect actual returned artifacts before claiming proof.
 
+## Revisions
+- 2026-10-14: The retained assertion is carried in `internal/apps/committed_recovery_template_test.go`, its original #3404 file, without importing recovery or the macOS skip. #3404 is an additive overlap for this assertion; its merge must keep one unskipped copy of `TestCommittedTemplateUpdateSnapshot`.
+- 2026-10-14: Inspection of `native_recipe` in the dispatcher's `fleet-support.py` resolves the native recipe question: `platform-probe` explicitly executes no candidate tests, while the executed recipes cover memoryruntime or Android. The required native apps run cannot be supplied by these recipes. The managed route probe is tracked separately and must not be reported as test proof. Native macOS acceptance remains incomplete builder work until an apps-capable route executes the named tests and returns evidence.
+
 ## Documentation handoff
 - Pending documentation stage: `docs/knowledge/features/apps-package.md`, “Persistent-data snapshots”: portable subprocess-directory mechanism and no-follow confinement/failure guarantees.
 - Pending documentation stage: `docs/knowledge/features/apps-package-testing.md`, “Testing”: initialized macOS SQL/update proof; absent-data publications and skipped arms do not establish it.
