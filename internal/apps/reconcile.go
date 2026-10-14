@@ -64,6 +64,9 @@ func (o *Owner) admitLocked(ctx context.Context, r Record) *generation {
 func (o *Owner) completed(id string, g *generation) {
 	o.registry.mu.Lock()
 	o.mu.Lock()
+	// Completion retains retirement errors even after this generation is replaced.
+	// Both supervisors finish group cleanup and join the leader before this call.
+	o.failures = errors.Join(o.failures, g.cleanupErr)
 	r := o.currentLocked(id)
 	if o.generations[id] == g && (g.publication == nil || g.publication.activated) && r.AppID != "" && (r.Desired == "stopped" || r.ActiveRelease == "") {
 		_, _, err := o.registry.commitObservationLocked(r.Manifest.ServerID(), id, r.Revision, Observation{State: "stopped"})

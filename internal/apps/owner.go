@@ -290,7 +290,6 @@ func (o *Owner) launch(ctx context.Context, id string, g *generation) {
 	}
 	g.cleanupErr = o.cleanup(g.cmd.Process.Pid)
 	<-g.exited
-	o.remember(g.cleanupErr)
 }
 
 func (o *Owner) remember(err error) {
