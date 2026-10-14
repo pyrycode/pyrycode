@@ -303,6 +303,22 @@ same reader then tails history, consuming commits during recovery/handoff once
 in order and converging on later commits through the supplied history store's
 notifications. See [loading and replay readiness](thread-package-background-store.md#loading-and-replay-readiness).
 
+Within each entry, `markAffected` deduplicates stable indexes for additions,
+intrinsic changes, reparenting, newly publishable descendants and suppression.
+After `resolveChildren` settles private joins and expands affected descendants,
+`recordShown` visits only those candidates in creation order, using retained
+public reachability for parent dependencies. Unrelated settled items and child
+trees require no visibility walk. Current reachability and ever-public appearance
+are separate: withdrawal removes retained touches, while appearance history
+survives, so reappearance alone cannot raise the shown watermark.
+
+Candidate ordering and cleanup traverse a reusable dense slice; membership is
+deleted only for its current indexes before resetting the slice length. Ranging
+or clearing a membership map can scan storage retained from its largest past
+entry even when few keys remain. Counting yielded keys or `len(map)` misses that
+work. `TestPublicTouchHistoricalPeakWork` checks fixed appends and duplicate
+registration after unrelated repaired trees grow from 4,096 to 16,384 children.
+
 Replay also reconstructs `Snapshot.LastShownVersion` entry by entry, independent
 of replay chunking. It is the history entry ID that most recently made a shown
 item first appear in `Fold.Items`, after private joins resolve, or appended
@@ -406,8 +422,13 @@ disposable, history-derived query data, reconstructed on every load/retry;
 cached items never establish the range or seed continuation.
 
 Recovery records public touches and appearances entry by entry, independently
-of replay chunks. A child's first public appearance may follow its final `Rev`,
-so revision-only selection loses it after restart. Reading all surviving history
+of replay chunks. A public item receives a touch at the current consumed version
+when it has no retained touch or its `Rev` matches that entry. A child's first
+public appearance may follow its final `Rev`, so revision-only selection loses
+it after restart. Withdrawal, including claimed delivery-row suppression, deletes
+the row's retained touch and advances the suppression boundary without lowering
+`LastShownVersion`. Changing `Shown` to false or dropping a queued send retains
+its public row and does not itself require reset. Reading all surviving history
 also cannot establish continuity across missing IDs; the greatest missing ID
 sets a floor for usable nonzero catch-up. Suppression of an earlier public
 projection requires reset because clients cannot remove it, while hidden/dropped
