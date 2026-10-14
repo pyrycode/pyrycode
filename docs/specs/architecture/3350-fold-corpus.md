@@ -70,3 +70,10 @@ and no production state-machine reject branches.
 
 ## Revisions
 - 2026-10-14: preliminary long folds exposed unbounded cross-scenario agent groups. Each fixed-size scenario now has its own producer lifetime, with multiple calls/tasks inside that group; turn/call/task/lifetime identities remain count-independent. This keeps the reusable baseline practical without changing production folding.
+- 2026-10-14: verifier finding 1 showed scalar JSON decoding accepted missing/null checkpoint fields when their expected values were zero. Both readers now require all five checkpoint fields through typed pointers before constructing scalar expectations. Explicit zero counts/watermarks remain valid; omission, null and non-integer numeric fields fail decoding. `TestFoldCheckpointRequiredFields` in each package covers these cases through full-manifest decoding. Existing input hashes, checkpoints and digest values remain unchanged.
+
+## Documentation handoff
+Pending for the documentation stage:
+- `docs/knowledge/features/thread-package.md` § "Shadow lifecycle and evidence": document reuse of the same-package corpus/golden helpers by #3351–#3353 and publication/rendering work, including fixed 100-entry scenarios and sparse long-history checkpoints.
+- `docs/knowledge/features/thread-package-agents-and-background-work.md` § "Agent validation and testing": document both explicit golden-writing commands, deterministic replay normalization, pinned input/history identities, lossless canonical JSON and identity/length-framed raw Content hashing. Checkpoint readers require every field, including explicit zero counts/watermarks.
+- `docs/knowledge/features/thread-package.md` § "Shadow lifecycle and evidence": retain the PR's exact single-iteration benchmark command, measurements, Go/machine/source identities and concurrent-machine-load qualification.

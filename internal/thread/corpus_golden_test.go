@@ -29,6 +29,24 @@ type testFoldCheckpoint struct {
 	Items                     int
 	JSON, Content             string
 }
+
+// Every checkpoint field is required; explicit numeric zeros remain valid.
+func (c *testFoldCheckpoint) UnmarshalJSON(raw []byte) error {
+	var fields struct {
+		Version, LastShownVersion *uint64
+		Items                     *int
+		JSON, Content             *string
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	if fields.Version == nil || fields.LastShownVersion == nil || fields.Items == nil || fields.JSON == nil || fields.Content == nil {
+		return fmt.Errorf("incomplete fold checkpoint")
+	}
+	*c = testFoldCheckpoint{*fields.Version, *fields.LastShownVersion, *fields.Items, *fields.JSON, *fields.Content}
+	return nil
+}
+
 type testFoldGolden struct {
 	Commit, Identity, Input, History string
 	Count                            int
@@ -188,5 +206,42 @@ func TestFoldDigestCorruption(t *testing.T) {
 	}
 	if !bytes.Contains(testJSON(t, json.RawMessage(`{"n":9007199254740993}`)), []byte("9007199254740993")) {
 		t.Fatal("number rounded")
+	}
+}
+
+func TestFoldCheckpointRequiredFields(t *testing.T) {
+	want := testFoldGolden{Checkpoints: []testFoldCheckpoint{{1, 0, 0, "json", "content"}}}
+	var got testFoldGolden
+	if err := json.Unmarshal(testJSON(t, want), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("explicit zero checkpoint fields changed: got %+v want %+v", got, want)
+	}
+	for _, field := range []string{"Version", "LastShownVersion", "Items", "JSON", "Content"} {
+		mutations := map[string]json.RawMessage{"omitted": nil, "null": []byte("null")}
+		if field == "Version" || field == "LastShownVersion" || field == "Items" {
+			mutations["string"] = []byte(`"0"`)
+			mutations["boolean"] = []byte("false")
+			mutations["fraction"] = []byte("0.5")
+			mutations["object"] = []byte("{}")
+		}
+		for name, value := range mutations {
+			t.Run(field+"/"+name, func(t *testing.T) {
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(testJSON(t, want.Checkpoints[0]), &fields); err != nil {
+					t.Fatal(err)
+				}
+				delete(fields, field)
+				if value != nil {
+					fields[field] = value
+				}
+				raw := testJSON(t, map[string]any{"Checkpoints": []any{fields}})
+				var invalid testFoldGolden
+				if err := json.Unmarshal(raw, &invalid); err == nil {
+					t.Fatalf("accepted checkpoint with %s %s: %s", name, field, raw)
+				}
+			})
+		}
 	}
 }
