@@ -5,7 +5,8 @@ defines the hosting design. Strict manifest validation, bundled registered sourc
 creation and identity-based inspection, durable registration,
 lifecycle mutations, restart normalization and callable committed-release
 process ownership, retained-artifact validation and immutable installation with
-independent verification, persistent-data snapshots with restart verification and
+independent verification, checked candidate preparation and durable recording,
+persistent-data snapshots with restart verification and
 repeatable restoration, health supervision, automatic reconciliation/recovery and
 guarded private targets, generation-bound stable response preparation and confined
 callable active-release assets are implemented in the `internal/apps` package. The relay
@@ -380,7 +381,7 @@ APPS_ROOT/
   <app_id>/source/src/service/migrate.ts
   <app_id>/source/sql/migrations/0001_preferences.sql
   <app_id>/source/test/                unit/service/frontend contract tests
-  <app_id>/staging/<build_id>/          private candidate tree; never client-visible
+  <app_id>/staging/<random_name>/       fresh private candidate tree; never client-visible
   <app_id>/builds/<build_id>/app.json   immutable retained manifest
   <app_id>/builds/<build_id>/package.json
   <app_id>/builds/<build_id>/package-lock.json
@@ -397,6 +398,29 @@ APPS_ROOT/
   <app_id>/backups/<publish_id>/data/  preserved data tree when source data exists
   <app_id>/backups/<publish_id>/verification.json  persisted verification evidence
 ```
+
+Checked preparation copies editable source into a fresh 0700 staging directory,
+excluding top-level `node_modules` and `dist`, without changing source. No-follow
+directory access rejects unsafe components, symlinks, nonregular copied entries
+and root escapes. Copied files are 0600, or 0700 when preserving owner execute
+permission so directly invoked scripts remain executable. Staging is temporary
+and removed when the attempt ends; its random name is not a retained build ID.
+
+`Toolchain.Node` is the absolute selected executable; `Toolchain.NPM` is the
+absolute npm CLI JavaScript entry, invoked directly with that checked Node.
+Commands use a minimal explicit environment with staging-only HOME, cache and
+temporary paths, excluding inherited daemon credentials and persistent app-data
+paths. User and global npm configuration use distinct empty private 0600 files;
+sharing one pathname, even `/dev/null`, causes npm to reject double loading.
+npm prepends dependency and ancestor binary directories to lifecycle PATH, so a
+private lifecycle shell restores the selected Node alias ahead of those paths
+for ordinary `node` lookup and env-node shebangs, including root/dependency
+install hooks. Other dependency binaries remain available. App/project scripts
+remain trusted code under [ADR 043](knowledge/decisions/043-hosted-app-runtime-and-isolation.md):
+they can explicitly choose another executable or alter their environment, and
+this environment provides no OS sandbox. See
+[checked candidate preparation](#checked-candidate-preparation) for input checks,
+ordered commands, version decisions and safe feedback.
 
 `apps.SnapshotData` snapshots the complete app-owned `data` tree, including
 nested regular files and empty directories, into the selected app's private
@@ -464,10 +488,12 @@ migrations, journals, release selection and old-release health remain caller-own
 restored data alone does not prove rollback readiness or undo arbitrary OS/fleet
 effects. See [publication and recovery](#publication-and-recovery).
 
+### Retained build contents
+
 Retained builds contain only regular `app.json`, `package.json` and
 `package-lock.json`, plus the trees `dist/web`, `dist/service`, `sql/migrations`
 and installed locked `node_modules`. Editable source, tests, build tooling and
-caches outside that dependency tree are excluded from staging copies. All four
+caches outside that dependency tree are excluded from retained copies. All four
 tree roots must exist. The manifest must match both expected local identities;
 `dist/web/index.html`, `dist/service/main.js` and `dist/service/migrate.js` must
 be regular compiled entries. Migration files are flat regular files matching
@@ -488,6 +514,8 @@ to an existing regular file or directory within that same dependency tree.
 Containment applies at every traversal step, including chained links and linked
 directory components before `..`; dangling links, cycles and escaping chains
 fail. Retained paths must also be valid UTF-8.
+
+### Canonical retained inventory
 
 The exact canonical inventory is stored as `inventory.json` at the build root:
 
@@ -1429,8 +1457,74 @@ contents, raw path or process diagnostics.
 
 Local-control dispatch (#3265), daemon composition for creation/inspection
 (#3266), channel tools (#3126) and publication (#3125) remain downstream work.
-The walkthrough below describes the intended end-to-end workflow once those
-surfaces are connected.
+Candidate control (#3301) and toolchain selection/wiring (#3266) remain separate
+from the callable preparation API below. The walkthrough describes the intended
+end-to-end workflow once those surfaces are connected.
+
+### Checked candidate preparation
+
+`Registry.PrepareCandidate(ctx, serverID, appID, Toolchain) (Release, error)`
+requires a live local registration and rejects foreign, unknown and tombstoned
+identities. It reads owned editable source into
+[checked private staging](#runtime-and-layout), leaving the original source and
+any existing service/data usable. Before installation it checks the actual
+selected Node is `>=24.15.0 <25.0.0`, obtains exact Node/npm versions, validates
+the staged manifest against both identities and requires `package.json`
+`type=module`. Package name/version must match both the lockfile top level and
+`packages[""]`; the root's `dependencies`, `devDependencies`,
+`optionalDependencies` and `peerDependencies` must match the package maps.
+Absent and empty maps are equivalent. Package version need not equal the app's
+`release_version`.
+
+It runs exactly `npm ci`, `npm run typecheck`, `npm test`, then `npm run build`
+in staging, using the selected Node/npm, private configuration and lifecycle
+Node pinning described in [Runtime and layout](#runtime-and-layout). Each phase
+joins its leader and stops remaining owned descendants before the next phase;
+final validation cannot begin while live owned build children remain. Failure
+or cancellation runs no later phase. After commands finish, preparation rechecks
+manifest/package/lock consistency and rejects a changed validated manifest,
+then uses `ValidateArtifacts`, `InstallBuild` and `VerifyBuild` to validate,
+install and independently reverify the complete read-only candidate.
+
+The final version decision, current-registration check, installation/verification
+and history persistence share the registry mutex. A new version must exceed
+every recorded version and any legacy active release, comparing the three
+components numerically: `1.10.0` follows `1.9.0`. Reusing a recorded version with
+different retained bytes fails. Identical retained bytes return the original
+`Release`, even after newer releases have been recorded or the checked toolchain
+has changed. Retries still run the checks/commands and freshly verify the recorded
+build before any installation could recreate it; missing, partial or changed
+recorded builds fail without repair.
+
+New history records contain the build ID/root, exact Node/npm versions and
+SHA-256 of the exact retained lockfile bytes. An identical retry returns those
+original toolchain values and changes neither history nor app/host revisions.
+New recording changes only history and its revisions. Persistence failure
+returns failure with no new history or revision; an unrecorded sealed build may
+remain for a later retry. Every attempt preserves committed manifest/title,
+desired/state/last error, active/pending release and publish journal, and performs
+no service activation, migration or persistent-data preparation/mutation.
+
+Failures return `CandidateFailure` with `Phase` and a static actionable `Reason`,
+without child output, secrets or host paths. Cancellation retains the current
+phase with `Preparation cancelled; retry when ready.`
+
+| Phase | Action indicated by safe feedback |
+|---|---|
+| `admission` | Use a live registration on this host. |
+| `staging` | Remove unsafe source entries and check private staging access. |
+| `validation` | Use supported Node, matching identities and consistent module package/lock metadata. |
+| `install` | Check the lockfile and npm ci dependencies. |
+| `typecheck` | Fix frontend/service type errors. |
+| `test` | Fix app tests. |
+| `build` | Fix compilation. |
+| `artifacts` | Check compiled entries, public assets and retained dependencies. |
+| `record` | Check retained integrity/storage; use a new increasing version for changed bytes. |
+
+Candidate success establishes build validation and durable recording.
+Publication (#3262) owns migration, health-confirmed activation/readiness and
+the resulting openable-link confirmation; preparation alone supplies none of
+those readiness guarantees.
 
 ### Retained candidate artifacts
 
@@ -1441,24 +1535,25 @@ appID)`, `apps.InstallBuild(ctx, appsRoot, staging, serverID, appID)` and
 inventory bytes and ordered migration paths. The caller supplies a completed
 private staging tree after all build children have finished. Installation always
 validates that input itself; a previously returned inventory is no installation
-permit. See [runtime and layout](#runtime-and-layout) for retained contents,
-canonical serialization, read-only installation and rejection without repair.
+permit. See [retained build contents](#retained-build-contents) and
+[canonical retained inventory](#canonical-retained-inventory) for the exact
+retained set, serialization, read-only installation and rejection without repair.
 
 Artifact validation alone establishes neither recorded candidate success nor
 health-confirmed activation/readiness. These operations execute no app code,
 dependency installation, migrations or service activation; they preserve source,
-registry/release history, active processes and persistent data. Package/lock
-metadata consistency, checked build commands and candidate-success recording
-belong to preparation (#3289); publication (#3262) separately owns migration,
-health confirmation and activation. These APIs have no production consumers yet
-and do not change ordinary service startup.
+registry/release history, active processes and persistent data. The implemented
+[checked preparation](#checked-candidate-preparation) consumes these APIs for
+package/lock checks, ordered build commands and candidate-success recording;
+publication (#3262) separately owns migration, health confirmation and activation.
 
-Preparation/publication must coordinate installation with ordinary startup and
-recovery scans, including cleanup after interruption. Temporary `.install-*`
-children live under `builds` so a fully read-only directory can be published by
-same-parent rename; ordinary `prepareRelease` rejects nondigest children there.
-An interrupted installation can leave a temporary child. Installing an artifact
-does not itself select a release or coordinate those scans.
+Temporary `.install-*` children live under `builds` so a fully read-only directory
+can be published by
+same-parent rename. `selectBuild`, used by ordinary startup/reconciliation, ignores
+these private installer directories and never selects them, so installation does
+not break selection of the previous committed release. Other malformed entries
+and partial digest builds still fail. An interrupted installation can leave a
+temporary child; ignoring it neither validates its contents nor selects a release.
 
 ### Publication and recovery
 
@@ -1498,7 +1593,7 @@ Run candidate migrations and startup against persistent data. Commit activation 
 Store display preferences (selected tab, per-computer chart periods, project/computer filters, performance range) in `data/app.sqlite` via bounded `/api/preferences` reads/writes. Keep versioned preferences with defaults for missing/unknown fields. Saved preferences are app-scoped in v1 and shared by its authorized viewers; devices do not silently create competing fleet state. Opening from another client and updating the app must recover those preferences. SQL writes use prepared statements/transactions; fleet controls go through the fleet adapter with its authorization and outcome semantics. Test controls point only at isolated fixture services.
 
 1. **Create:** In a channel, request an orchestrator app. Assistant invokes create through local tools; the daemon mints/stamps this host's stable app ID and creates the editable template. The assistant records originating channel plus returned app identity for follow-up targeting. The registration is unpublished (`available`/`stopped`, no active release) and not yet openable; no success link is returned.
-2. **Validate:** Assistant edits source and runs runtime/manifest/lock checks, install, typecheck, tests and compile. Preference tests use temporary SQLite; frontend output is self-contained and public-only. Validation failure reports safe actionable channel feedback and leaves any existing active release serving.
+2. **Validate:** Assistant edits source and requests checked candidate preparation through local tools. Private staging runs runtime/manifest/lock checks, install, typecheck, tests and compile, then records the verified immutable candidate. Preference tests use temporary SQLite; frontend output is self-contained and public-only. Validation failure reports safe actionable phase feedback and leaves any existing active release serving. Candidate success confirms build validation; publish still owns readiness.
 3. **Publish:** Publisher snapshots/serializes the update, runs migrations and service health, and durably commits the activated release. Tools return structured readiness confirmation with matching `server_id`, `app_id`, active release and current revision. A queued build or a PID alone is not confirmation.
 4. **Open:** Only after that confirmed readiness, assistant returns `pyrycode://hosts/11111111-1111-4111-8111-111111111111/apps/22222222-2222-4222-8222-222222222222` to the originating channel. Apps discovery also lists it under the connected host. Desktop/mobile validate running state, bind the view and load relative modules/API data over encrypted transport. Stop/removal after confirmation may make the link unavailable; the link remains the same identity.
 5. **Update:** A follow-up request targets the same registered app, increments release to `1.0.1`, and repeats checks/publish. Preserve app ID, stable link and SQL preferences. Clients retire the old release view and reopen on confirmation. Failed build/start/migration retains or restores the prior working release/data as specified; channel response reports failure rather than a new readiness claim. Offline clients refresh discovery on reconnect and never replay an uncertain preference/fleet write.

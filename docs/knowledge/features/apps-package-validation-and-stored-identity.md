@@ -50,6 +50,14 @@ the absolute daemon-selected `APPS_ROOT/<app_id>/builds/<build_id>`.
 are unique per app: an identical entry is a no-op, and replacing an existing
 version's metadata returns `ErrConflict`.
 
+`RecordRelease` compares whole metadata entries and does not enforce numeric
+progression or prove a build ran. Checked preparation's byte-identity decision
+must instead return the original recorded `Release` for identical retained bytes,
+including its original Node/npm versions. Comparing newly checked tool versions
+would incorrectly reject an otherwise identical retry. See
+[atomic candidate recording](apps-package-concurrency-and-persistence.md#checked-candidate-recording)
+and the [preparation reference](../../hosted-apps.md#checked-candidate-preparation).
+
 A `PublishJournal` contains `candidate`, optional `previous`, `verified_backup`
 and `activation_committed`. Both `ReleaseReference` values carry `server_id`,
 `app_id` and `release_version` scoped to the containing local registration.
@@ -60,6 +68,42 @@ the same identities, a canonical UUIDv4 `publish_id` and `root` exactly equal to
 and escaping or unclean path spellings are rejected. Storage validates these
 references without opening their targets or verifying digest contents; see the
 [runtime/root contract](../../specs/architecture/3120-hosted-app-contract.md#3-runtime-roots-and-service-conventions).
+
+### Checked preparation inputs
+
+Source-copy privacy must preserve executability: copying every regular file at
+0600 breaks scripts invoked directly by npm. `copyCandidateSource` keeps only the
+owner executable bit (0700 instead of 0600), excludes top-level `dist` and
+`node_modules` and rejects symlink/nonregular copied entries through no-follow
+access. `candidateInputs` checks module type, both manifest identities,
+package/lock name and version, and all four dependency maps before installation
+and again after build commands. Pre-install checks alone would admit a build
+that rewrites its package to CommonJS; the final pass also requires the validated
+manifest to remain unchanged. Package version and app release version are separate.
+
+Incoming PATH precedence cannot pin npm lifecycle Node: npm prepends dependency
+and ancestor `node_modules/.bin` paths, including for install hooks.
+`candidateEnvironment` uses a private lifecycle shell to restore the selected
+Node alias first, covering ordinary `node` commands and env-node shebangs while
+preserving other dependency binaries. npm's configuration loader keys sources
+by pathname and rejects using one path for user and global config, even
+`/dev/null`; distinct empty private files avoid this and inherited global/user
+configuration. HOME, npm cache/config and tool aliases remain private to staging;
+the explicit minimal environment excludes inherited daemon credentials and
+configuration, and supplies no app persistent-data paths.
+
+`candidateTemporary` allocates a fresh 0700 directory under fixed `/tmp`, independent
+of inherited daemon TMPDIR. It rejects `source`, `staging`, `builds` and `dist`
+components in both the allocated and symlink-resolved paths before exposing the
+resolved directory as TMPDIR. Template test data therefore stays outside
+source/staging/build/dist trees while the service's lexical and canonical
+unsafe-data-path rejection remains enforced. `PrepareCandidate` removes owned
+temporary data after success, failure or cancellation, once command/process-group
+cleanup has joined. Failed resolution or unsafe placement also removes owned
+storage; cleanup errors become sanitized preparation failures. App scripts remain
+trusted and can explicitly alter lookup or choose another executable; these guarantees provide
+no [OS sandbox](../decisions/043-hosted-app-runtime-and-isolation.md).
+See [candidate fixtures](apps-package-testing.md#checked-candidate-fixtures).
 
 ### Retained artifact boundaries
 
@@ -88,11 +132,13 @@ canonical inventory/digest creation before returning success. See
 
 A sealed directory cannot move between parents on Linux without write permission
 to update its `..` entry. `InstallBuild` therefore seals and verifies a temporary
-tree under the same `builds` parent before exclusive rename. This leaves nondigest
-temporary children visible to `prepareRelease`, which rejects them; preparation
-and publication must coordinate startup/recovery scans and interrupted-install
-cleanup. The callable artifact APIs do not supply that coordination. Copying
-bytes rather than hardlinking keeps retained files independent of later staging
+tree under the same `builds` parent before exclusive rename. `selectBuild`, used
+by `prepareRelease`, ignores only `.install-*` directories and never selects
+them. Otherwise temporary installation or interrupted-install entries would
+break ordinary startup/reconciliation of the previous release. Other malformed
+entries and partial digest builds remain errors; ignoring installer directories
+does not validate or activate them. Copying bytes rather than hardlinking keeps
+retained files independent of later staging
 edits. Read-only modes prevent ordinary writes, and verification detects changed
 artifacts under the trusted-service
 [ADR 043 boundary](../decisions/043-hosted-app-runtime-and-isolation.md); these
