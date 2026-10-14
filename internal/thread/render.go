@@ -95,8 +95,8 @@ type recentEntry struct {
 	bytes int
 }
 
-// recentSource borrows only the current chunk. Its fixed FIFO and all detached
-// entry storage together fit recentEntryBudget; oversized entries are not copied.
+// recentSource borrows only the current, increasing-ID chunk. Its fixed FIFO
+// and detached entry storage fit recentEntryBudget; oversized entries are not copied.
 type recentSource struct {
 	lookup             func([]uint64) ([]history.Entry, error)
 	chunk              []history.Entry
@@ -114,15 +114,16 @@ func (s *recentSource) Lookup(ids []uint64) ([]history.Entry, error) {
 	ids = slices.Clone(ids)
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
-	var out []history.Entry
+	out := make([]history.Entry, 0, len(ids))
 	var missing []uint64
+	chunkIndex := 0
 	for _, id := range ids {
 		var found history.Entry
-		for _, e := range s.chunk {
-			if e.ID == id {
-				found = e
-				break
-			}
+		for chunkIndex < len(s.chunk) && s.chunk[chunkIndex].ID < id {
+			chunkIndex++
+		}
+		if chunkIndex < len(s.chunk) && s.chunk[chunkIndex].ID == id {
+			found = s.chunk[chunkIndex]
 		}
 		if found.ID == 0 {
 			for i := 0; i < s.count; i++ {

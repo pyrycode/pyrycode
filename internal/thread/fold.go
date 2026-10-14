@@ -177,15 +177,17 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 	if e.Shown != nil {
 		item.Shown = *e.Shown
 	}
-	item.Summary = plainSummary(item.Summary)
-	if item.Summary == "" {
-		item.Summary = strings.ReplaceAll(item.Kind, "_", " ")
-	}
-	if f.source != nil && referencedKind(item.Kind) && e.Type != "send_accepted" {
-		f.recipes[item.ID] = e.ID
-		if item.Kind == "user_message" {
-			item.Summary = ""
+	reference := f.source != nil && referencedKind(item.Kind) && e.Type != "send_accepted"
+	if reference && item.Kind == "user_message" {
+		item.Summary = ""
+	} else {
+		item.Summary = plainSummary(item.Summary)
+		if item.Summary == "" {
+			item.Summary = strings.ReplaceAll(item.Kind, "_", " ")
 		}
+	}
+	if reference {
+		f.recipes[item.ID] = e.ID
 	} else {
 		item.Content = append(json.RawMessage(nil), e.Payload...)
 	}

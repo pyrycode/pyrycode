@@ -38,19 +38,37 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	testFeed(t, f, entries...)
 	source.remember(entries)
 	source.chunk = nil
-	var before, after, deferred int
+	var before, after, summaryBefore, summaryAfter, deferred int
 	for i, item := range f.items {
 		if f.recipes[item.ID] != 0 {
 			before += len(legacy.items[i].Content)
 			after += len(item.Content)
+			if item.Kind == "user_message" {
+				summaryBefore += len(legacy.items[i].Summary)
+				summaryAfter += len(item.Summary)
+			}
 		} else {
 			deferred += len(item.Content)
 		}
 	}
-	if before == 0 || after != 0 || source.bytes > recentEntryBudget {
+	if before == 0 || after != 0 || summaryBefore == 0 || summaryAfter != 0 || source.bytes > recentEntryBudget {
 		t.Fatal("reference retention did not drop", before, after, source.bytes)
 	}
-	t.Logf("generated entries=%d converted Content bytes before=%d after=%d recent cache=%d deferred inline item Content=%d", len(entries), before, after, source.bytes, deferred)
+	t.Logf("generated entries=%d converted Content bytes before=%d after=%d plain-user Summary bytes before=%d after=%d recipes=%d (%d ID bytes excluding map overhead) recent cache=%d deferred inline item Content=%d", len(entries), before, after, summaryBefore, summaryAfter, len(f.recipes), len(f.recipes)*16, source.bytes, deferred)
+}
+
+func TestReferenceSummaryDeferred(t *testing.T) {
+	f, _ := testReferenceFold(nil)
+	e := testMessage(1)
+	item := Item{ID: 1, Kind: "user_message", Summary: strings.Repeat("a\n", 10000)}
+	f.addItem(e, item) // Warm the metadata storage before measuring normalization.
+	allocs := testing.AllocsPerRun(10, func() {
+		f.items = f.items[:0]
+		f.addItem(e, item)
+	})
+	if allocs != 0 {
+		t.Fatalf("reference creation normalized discarded user summary: %g allocations", allocs)
+	}
 }
 
 func TestReferenceRendering(t *testing.T) {
@@ -108,6 +126,23 @@ func TestReferenceSourceOrder(t *testing.T) {
 	s.lookup = func([]uint64) ([]history.Entry, error) { t.Fatal("supplied ID caused segment lookup"); return nil, nil }
 	if _, err := s.Lookup([]uint64{2, 1, 2}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReferenceSourceBatch(t *testing.T) {
+	s := newRecentSource(func([]uint64) ([]history.Entry, error) { t.Fatal("all-hit batch read history"); return nil, nil })
+	const count = 36000
+	s.chunk = make([]history.Entry, count)
+	ids := make([]uint64, count+1)
+	for i := range s.chunk {
+		s.chunk[i] = testMessage(uint64(i + 1))
+		ids[count-i] = uint64(i + 1)
+	}
+	ids[0] = 1
+	s.remember([]history.Entry{testEntry(1, "message", `{"text":"stale"}`)})
+	entries, err := s.Lookup(ids)
+	if err != nil || !reflect.DeepEqual(entries, s.chunk) {
+		t.Fatal("large unordered duplicate request lost feed precedence", err)
 	}
 }
 
@@ -177,6 +212,43 @@ func TestReferenceDeliveryFailure(t *testing.T) {
 	}
 }
 
+func TestReferenceDeliveryEvicted(t *testing.T) {
+	entries := []history.Entry{testAcceptance(1, "phone"), testEntry(2, "message", `{"role":"user","text":"safe\ndelivered","future":[1, 2],"queued_msg_id":90}`)}
+	entries[0].Payload = []byte(strings.TrimSuffix(string(entries[0].Payload), "}") + `,"queued_msg_id":8}`)
+	entries[0].Session, entries[1].Session = testSource("claude", "sender"), testSource("codex", "receiver")
+	for id := uint64(3); id <= 258; id++ {
+		entries = append(entries, testEntry(id, "ignored", `{}`))
+	}
+	entries = append(entries, testSendOutcome(259, "send_delivered", `,"accepted_entry_id":1,"delivery_entry_id":2`, "delivered"))
+	hidden := false
+	entries[len(entries)-1].Shown = &hidden
+	f, source := testReferenceFold(entries)
+	legacy := New("a")
+	lookup := source.lookup
+	var requested []uint64
+	source.lookup = func(ids []uint64) ([]history.Entry, error) {
+		requested = append(requested, ids...)
+		return lookup(ids)
+	}
+	for i, e := range entries {
+		source.chunk = entries[i : i+1]
+		testFeed(t, f, e)
+		testFeed(t, legacy, e)
+		source.remember(source.chunk)
+		source.chunk = nil
+	}
+	if !reflect.DeepEqual(requested, []uint64{2}) {
+		t.Fatal("delivery did not resolve evicted entry", requested)
+	}
+	items, err := f.Render()
+	if err != nil || !reflect.DeepEqual(items, legacy.Items()) || len(items) != 1 || f.messages[2] != -1 || f.lastShown != legacy.lastShown || f.Version() != legacy.Version() || !reflect.DeepEqual(f.touches, legacy.touches) {
+		t.Fatal("evicted delivery changed acceptance, suppression or watermarks", err, items)
+	}
+	if f.items[1].Content != nil || f.items[1].Summary != "" {
+		t.Fatal("delivery acquired retained payload or summary")
+	}
+}
+
 func TestStoreReferenceRetry(t *testing.T) {
 	for _, phase := range []string{"replay", "tail"} {
 		for _, failure := range []string{"missing", "unreadable"} {
@@ -211,7 +283,7 @@ func TestStoreReferenceRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 				snap := testStoreWait(t, s, testStoreA, StateUnavailable, 0)
-				if snap.Err != ErrUnavailable || snap.Items != nil {
+				if snap.Err != ErrUnavailable || snap.Items != nil || snap.Version != 0 || snap.LastShownVersion != 0 || snap.Epoch != "" {
 					t.Fatal("unsafe partial publication", snap)
 				}
 				s.mu.Lock()
