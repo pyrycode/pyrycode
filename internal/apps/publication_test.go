@@ -495,13 +495,17 @@ func TestPublishStaleActivation(t *testing.T) {
 }
 
 func TestPublishTemplate(t *testing.T) {
-	t.Skip("blocked on #3363: checked preparation places template test data inside staging")
 	node, npm := os.Getenv("HOSTED_APP_NODE"), os.Getenv("HOSTED_APP_NPM_CLI")
 	if node == "" || npm == "" {
 		t.Skip("set supported Node/npm; skip proves no template publication")
 	}
 	r := testOpen(t)
 	testRegister(t, r, []byte(testManifest))
+	t.Cleanup(func() {
+		for _, release := range ownerRecord(t, r, testApp).ReleaseHistory {
+			testWritableBuild(t, release.BuildRoot)
+		}
+	})
 	m := ownerRecord(t, r, testApp).Manifest
 	files, e := templateFiles(m)
 	if e != nil {
@@ -519,6 +523,14 @@ func TestPublishTemplate(t *testing.T) {
 	if e != nil {
 		t.Fatal(result, e)
 	}
+	want := Lifecycle{Title: m.Title(), Desired: "available", State: "running", ActiveRelease: m.ReleaseVersion()}
+	if result.ServerID != testHost || result.AppID != testApp || result.CandidateRelease != m.ReleaseVersion() || result.Lifecycle != want || !result.Healthy || !result.ActivationCommitted || result.RecoveryPending {
+		t.Fatal("incomplete template activation", result)
+	}
+	committed := publishDisk(t, r).Records[0]
+	if committed.ActiveRelease != m.ReleaseVersion() || committed.Title != want.Title || committed.Desired != want.Desired || committed.State != want.State || committed.PendingRelease != "" || committed.LastError != nil || committed.PublishJournal != nil || committed.Revision != result.Revision {
+		t.Fatal("template activation not durable", committed, result)
+	}
 	target, e := o.Lookup(testHost, testApp)
 	if e != nil {
 		t.Fatal(e)
@@ -531,6 +543,17 @@ func TestPublishTemplate(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
 		t.Fatal(response.StatusCode)
+	}
+	var preferences struct {
+		Version     int    `json:"version"`
+		SelectedTab string `json:"selected_tab"`
+		Period      string `json:"period"`
+	}
+	if e := json.NewDecoder(response.Body).Decode(&preferences); e != nil {
+		t.Fatal(e)
+	}
+	if preferences.Version != 1 || preferences.SelectedTab != "overview" || preferences.Period != "24h" {
+		t.Fatal("unexpected migrated preferences", preferences)
 	}
 	cmd := exec.Command(node, "--version")
 	version, _ := cmd.Output()
