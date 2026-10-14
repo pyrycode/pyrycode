@@ -358,6 +358,11 @@ func (f *Fold) agentWork(e history.Entry) bool {
 			_ = json.Unmarshal(e.Payload, &dto)
 			c.launch = append(json.RawMessage(nil), e.Payload...)
 			c.item = f.addItem(e, Item{ID: e.ID, Order: e.ID, Rev: e.ID, Kind: "agent", Turn: p.Turn, Status: "running", Active: true, Shown: true, Summary: p.Name + ": " + dto.InputSummary})
+			f.childAgents[c.item] = childParentKey{key, call}
+			f.scheduleAgentChildren(c.item)
+			if c.parent != "" {
+				f.saveChild(c.item, key, c.parent)
+			}
 		}
 	case "agent_call_result", protocol.TypeToolResult, "agent_call_denied", protocol.TypeToolDenied:
 		field := "result"
@@ -447,7 +452,11 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	if c.item < 0 {
 		return
 	}
+	// Recompute intrinsic lifecycle state without disturbing unrelated derived closure.
 	item := &f.items[c.item]
+	if state := f.children[c.item]; state != nil && !state.restored {
+		item = &state.base
+	}
 	var content map[string]json.RawMessage
 	_ = json.Unmarshal(c.launch, &content)
 	delete(content, "ended_order")
@@ -532,6 +541,14 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	}
 	raw, _ := json.Marshal(content)
 	if !bytes.Equal(item.Content, raw) || item.Status != status || item.Active != active || item.EndedOrder != ended {
-		item.Content, item.Status, item.Active, item.EndedOrder, item.Rev = raw, status, active, ended, max(item.ID, rev)
+		f.restoreChild(c.item)
+		if c.ordinary == nil && c.parent != "" {
+			f.saveChild(c.item, g.key, c.parent)
+		}
+		target := &f.items[c.item]
+		target.Content, target.Status, target.Active, target.EndedOrder, target.Rev = raw, status, active, ended, max(item.ID, rev)
+		if c.ordinary == nil {
+			f.scheduleAgentChildren(c.item)
+		}
 	}
 }

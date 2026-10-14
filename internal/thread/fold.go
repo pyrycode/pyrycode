@@ -50,6 +50,11 @@ type Fold struct {
 	childCalls                map[childCallKey]*childCall
 	childReports              map[childCallKey]*mainOutcome
 	children                  map[int]*childState
+	childCounts               *childWorkCounts
+	childEdges                map[childParentKey]map[int]struct{}
+	childAgents               map[int]childParentKey
+	childDirty                map[int]struct{}
+	childEndings              map[int]json.RawMessage
 	agentGroups               map[agentKey]*agentGroup
 	agentLifetimes            map[agentKey]string
 	agentObservations         map[uint64][]agentObservation
@@ -65,6 +70,10 @@ func New(conversationID string) *Fold {
 		childCalls:        make(map[childCallKey]*childCall),
 		childReports:      make(map[childCallKey]*mainOutcome),
 		children:          make(map[int]*childState),
+		childEdges:        make(map[childParentKey]map[int]struct{}),
+		childAgents:       make(map[int]childParentKey),
+		childDirty:        make(map[int]struct{}),
+		childEndings:      make(map[int]json.RawMessage),
 		agentGroups:       make(map[agentKey]*agentGroup),
 		agentLifetimes:    make(map[agentKey]string),
 		agentObservations: make(map[uint64][]agentObservation),
@@ -96,7 +105,6 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		}
 		first := len(f.items)
 		f.appendedText = -1
-		f.restoreChildren()
 		f.feedEntry(e)
 		f.resolveChildren(e.ID)
 		f.recordShown(first, f.appendedText)

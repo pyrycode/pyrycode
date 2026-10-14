@@ -77,6 +77,10 @@ func selectBuild(ctx context.Context, root string, r Record) (_ *os.File, name s
 			return nil, "", err
 		}
 		name := entry.Name()
+		// Private installer entries are never eligible releases.
+		if strings.HasPrefix(name, ".install-") && entry.IsDir() {
+			continue
+		}
 		if len(name) != 64 || strings.Trim(name, "0123456789abcdef") != "" || !entry.IsDir() {
 			return nil, "", ErrInvalidManifest
 		}

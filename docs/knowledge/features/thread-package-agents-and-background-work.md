@@ -148,13 +148,18 @@ including parent evidence saved before a mapped launch or supplied only on a
 report. Main Agent/Task launches still split main text; queued sends do not,
 and delivered user messages retain their main-text closure behavior.
 
-`resolveChildren` joins only to an `agent` whose creating ID is strictly less
-than the child's, in this conversation and the same recorded source/lifetime or
-legacy scope. `childGroup` pins pending evidence to that original group; reused
-call IDs cannot steal predecessor children. Tagged and metadata-free evidence
-remain distinct regardless of displayed successor attribution. Self, newer,
-non-agent or mismatched-source/lifetime/scope parents cannot join. Current
-bindings, timestamps and tool names provide no fallback. See
+`resolveChildren` requires the parent item's immutable `Kind` to be `agent`
+and its creating ID to be strictly less than the child's, in this conversation
+and the same recorded source/lifetime or legacy scope. Registration in
+`agentGroup.calls` alone cannot establish ownership: `registerShell` shares that
+registry for [ordinary shell lifecycles](#background-shells), so `Bash` and
+`local_bash` remain `tool_call` items and cannot own children. Testing rejection
+with `Read` alone would miss this shared-registry boundary.
+`childGroup` pins pending evidence to that original group; reused call IDs
+cannot steal predecessor children. Tagged and metadata-free evidence remain
+distinct regardless of displayed successor attribution. Self, newer or
+mismatched-source/lifetime/scope parents cannot join. Current bindings,
+timestamps and tool names provide no fallback. See
 [durable producer lifetimes](history-package-producers-runtime-lifecycle.md#join-within-a-durable-producer-lifetime)
 and [ADR 042's item model](../decisions/042-daemon-built-thread.md#item-model).
 
@@ -168,6 +173,14 @@ ID. Ancestors resolve before descendants, and snapshots remain detached and
 creation-ID ordered. A repaired ordinary call leaves its old lane's call map,
 so a later ending there cannot interrupt it. Saved agent enrichment takes
 precedence over stale lane evidence.
+
+`TestChildRejectsShellParent` checks both shell names with metadata-free and
+recorded Claude sources. After every feed, only the ordinary shell is returned:
+attributed text, completed tools, nested Agent/Task rows and their active or
+completed descendants stay omitted, including after shell completion.
+`TestChildAgentParents` checks genuine Agent/Task ownership and ancestor closure.
+Both tests use `testMainReplay` to compare every two-chunk partition with full
+replay.
 
 **Keep a shell's original parent lane separate from promoted lifecycle evidence.**
 `resolveChildren` retains ordinary child parenting when the first lifetime
@@ -199,8 +212,28 @@ fixed, and neither this ending nor a main-turn ending completes a nested agent
 or linked background shell.
 
 **Derive ancestor closure from genuine agent finals, keeping intrinsic child
-state separate.** `restoreChildren` and `resolveChildren` recompute the effect
-on each feed. An ancestor ending makes unfinished text/tools `interrupted` and
+state separate.** `restoreChild` restores only the affected child's intrinsic
+state before mutation, once per entry; resolution captures its updated base
+before deriving closure. First registration treats the live item as intrinsic
+through that entry's mutations, so late parenting cannot discard a final
+received in the same entry. Unrelated children retain their derived state.
+`applyAgent` compares recomputed lifecycle state against intrinsic state and
+schedules dependents only on actual changes, including ending-content enrichment.
+Foreground shell results use the same targeted ordinary mutation hooks.
+
+`saveChild` indexes relationships by original `agentKey` and parent call,
+including unresolved links; reparenting removes the old edge. After each entry,
+`resolveChildren` expands the dirty set through indexed agent descendants and
+processes only those children in creation order, resolving ancestors first.
+Cached inherited endings avoid walking unrelated ancestors; intrinsic parent
+finals supply their current ending content directly. Parent/link repair,
+closure, reopening and ending enrichment therefore revisit the affected tree
+without inspecting independent trees, even within the same agent group.
+Unrelated standalone/main-only entries perform zero child-resolution work.
+This bounds child bookkeeping, not broader agent recomputation, observation or
+Store publication costs.
+
+An ancestor ending makes unfinished text/tools `interrupted` and
 inactive, retaining `parent_ending`; unfinished nested agents become inactive
 without changing their intrinsic status or inventing `EndedOrder`. Closure
 propagates through nested agents and preserves already terminal children.
@@ -262,6 +295,21 @@ and identity-loss facts, which change version only. These fixtures use
 already terminal children alone cannot prove reopening. `TestChildReclassification`
 keeps active text and an unfinished ordinary call there, then checks both
 reopen after the late link and close on a genuine task final.
+
+**Assert intermediate finals before later enrichment can conceal their loss.**
+Whole/chunked/single-entry replay equality can agree on the same broken state,
+and a later task link can recompute a final lost during first child registration.
+`TestChildTargetedRepair` asserts the intrinsic `EndedOrder` immediately after
+late parenting, then checks reopening, reparenting and removal of the old edge.
+
+**Count inspected work, including rejected candidates.** A filtered full scan
+can keep successful-mutation counts constant while its cost grows with history.
+`TestChildAffectedWork` grows unrelated history and independent trees in the
+same group from four to sixteen with a fixed affected tree. Registration,
+restoration/base-copy, expansion and resolution counts stay identical across
+ancestor closure, reopening, ending enrichment and child appends; unrelated
+main-only appends have zero counts. `TestChildRejectedCandidatesCount` includes
+self-parent rejection and omitted descendants in inspected work.
 
 **An ownership rejection test needs completed children as well.** Ancestor
 interruption can expose a detached unfinished child through a status mismatch,

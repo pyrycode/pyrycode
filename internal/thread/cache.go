@@ -20,7 +20,7 @@ const (
 	recoveryName = "thread-recovery.json"
 	cacheSchema  = 1
 	// foldingRules must change whenever folded item semantics change.
-	foldingRules = 1
+	foldingRules = 2
 )
 
 // ErrPersistence reports a recoverable checkpoint or recovery-marker I/O failure.

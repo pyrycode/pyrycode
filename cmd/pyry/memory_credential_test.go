@@ -159,6 +159,9 @@ func TestMemoryCredentialRefusals(t *testing.T) {
 						testMemoryMust(t, err)
 						testMemoryMust(t, os.WriteFile(path, b, mode))
 					}
+					// Mkdir and WriteFile filter mode through the umask, which
+					// would strip the group bit under umask 077. Set it explicitly.
+					testMemoryMust(t, os.Chmod(path, mode))
 					if fault == "owner" {
 						f, err := os.Open(path)
 						testMemoryMust(t, err)
@@ -258,6 +261,9 @@ func TestMemoryCredentialCancellation(t *testing.T) {
 
 func TestMemoryCredentialProcess(t *testing.T) {
 	if os.Getenv("PYRY_MEMORY_HELPER") == "1" {
+		// Pin the file backend so the real CLI path never probes or writes an
+		// OS keyring. The empty PATH below is a second, independent guard.
+		memoryCredentialGOOS = "unsupported"
 		mode := os.Getenv("PYRY_MEMORY_MODE")
 		if mode == "resolve" {
 			token, err := resolveMemoryCredential(context.Background(), os.Getenv("PYRY_MEMORY_REF"))
