@@ -170,13 +170,37 @@ func validErrorCode(code string) bool {
 	}
 	return false
 }
+
+var errSnapshotUncertain = errors.New("apps: registry durability uncertain")
+
+type snapshotOps struct {
+	sync   func(*os.File) error
+	rename func(string, string) error
+}
+
+func (o snapshotOps) syncFile(f *os.File) error {
+	if o.sync != nil {
+		return o.sync(f)
+	}
+	return f.Sync()
+}
+
 func writeSnapshot(root string, s snapshot) error {
+	return (snapshotOps{}).write(root, s)
+}
+
+func (o snapshotOps) write(root string, s snapshot) error {
 	if e := os.MkdirAll(root, 0700); e != nil {
 		return fmt.Errorf("apps: create root: %w", e)
 	}
 	if e := os.Chmod(root, 0700); e != nil {
 		return fmt.Errorf("apps: protect root: %w", e)
 	}
+	dir, e := privateDir(root)
+	if e != nil {
+		return fmt.Errorf("apps: open registry directory: %w", e)
+	}
+	defer dir.Close()
 	f, e := os.CreateTemp(root, ".registry-*.tmp")
 	if e != nil {
 		return fmt.Errorf("apps: create temporary registry: %w", e)
@@ -187,7 +211,7 @@ func writeSnapshot(root string, s snapshot) error {
 		e = json.NewEncoder(f).Encode(s)
 	}
 	if e == nil {
-		e = f.Sync()
+		e = o.syncFile(f)
 	}
 	closeErr := f.Close()
 	if e != nil {
@@ -196,8 +220,17 @@ func writeSnapshot(root string, s snapshot) error {
 	if closeErr != nil {
 		return fmt.Errorf("apps: close registry: %w", closeErr)
 	}
-	if e = os.Rename(f.Name(), filepath.Join(root, "registry.json")); e != nil {
+	rename := o.rename
+	if rename == nil {
+		rename = os.Rename
+	}
+	if e = rename(f.Name(), filepath.Join(root, "registry.json")); e != nil {
 		return fmt.Errorf("apps: commit registry: %w", e)
+	}
+	// A failed directory sync cannot prove whether the rename survives a crash.
+	// The caller must retain recovery evidence and forbid subsequent overwrites.
+	if e = o.syncFile(dir); e != nil {
+		return errors.Join(errSnapshotUncertain, fmt.Errorf("apps: sync registry directory: %w", e))
 	}
 	return nil
 }

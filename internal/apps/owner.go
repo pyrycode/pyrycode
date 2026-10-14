@@ -44,6 +44,10 @@ type Owner struct {
 	unsubscribe     func()
 	retries         map[string]*retryState
 	now             func() time.Time
+	publishing      map[string]*publication
+	removing        map[string]bool
+	migrateTimeout  time.Duration
+	backupOps       backupOps
 }
 type generation struct {
 	ctx            context.Context
@@ -59,6 +63,7 @@ type generation struct {
 	cleanupErr     error
 	healthySince   time.Time
 	retired        bool
+	publication    *publication
 }
 
 // NewOwner selects Node once and starts asynchronous committed-intent reconciliation.
@@ -77,6 +82,9 @@ func NewOwner(registry *Registry, nodeExecutable string) (*Owner, error) {
 	}
 	o := &Owner{registry: registry, node: node, generations: map[string]*generation{}, ports: map[int]bool{}, previous: map[string]int{}, grace: stopGrace, kill: syscall.Kill, startup: startupDeadline, startInterval: startupInterval, runtimeInterval: healthInterval, requestTimeout: healthRequestTimeout, listen: func() (net.Listener, error) { return net.Listen("tcp4", "127.0.0.1:0") }}
 	o.now = time.Now
+	o.publishing = make(map[string]*publication)
+	o.removing = make(map[string]bool)
+	o.migrateTimeout = 60 * time.Second
 	o.retries = make(map[string]*retryState)
 	o.wake = make(chan struct{}, 1)
 	o.reconciled = make(chan struct{})
@@ -87,6 +95,9 @@ func NewOwner(registry *Registry, nodeExecutable string) (*Owner, error) {
 		default:
 		}
 	})
+	registry.mu.Lock()
+	registry.owner = o
+	registry.mu.Unlock()
 	go o.reconcile()
 	o.signal()
 	return o, nil
@@ -108,6 +119,11 @@ func (o *Owner) Start(ctx context.Context, appID string) error {
 		return ErrClosed
 	}
 	current := o.currentLocked(appID)
+	if o.publishing[appID] != nil || o.removing[appID] || current.PublishJournal != nil {
+		o.mu.Unlock()
+		o.registry.mu.Unlock()
+		return ErrConflict
+	}
 	var err error
 	if current.Desired != "available" || o.retryLocked(appID).suppressed {
 		current, err = o.registry.intentLocked(ctx, appID, "available")
@@ -274,7 +290,6 @@ func (o *Owner) launch(ctx context.Context, id string, g *generation) {
 	}
 	g.cleanupErr = o.cleanup(g.cmd.Process.Pid)
 	<-g.exited
-	o.remember(g.cleanupErr)
 }
 
 func (o *Owner) remember(err error) {
@@ -296,6 +311,10 @@ func (o *Owner) Stop(appID string) error {
 	o.registry.mu.Lock()
 	o.mu.Lock()
 	g := o.generations[appID]
+	p := o.publishing[appID]
+	if p != nil {
+		p.cancel()
+	}
 	if g != nil {
 		g.retired = true
 		g.cancel()
@@ -307,6 +326,9 @@ func (o *Owner) Stop(appID string) error {
 	}
 	o.mu.Unlock()
 	o.registry.mu.Unlock()
+	if p != nil {
+		<-p.done
+	}
 	if g != nil {
 		<-g.done
 	}
@@ -335,6 +357,11 @@ func (o *Owner) Shutdown() error {
 	o.mu.Lock()
 	o.closed = true
 	o.reconcileCancel()
+	publications := make([]*publication, 0, len(o.publishing))
+	for _, p := range o.publishing {
+		p.cancel()
+		publications = append(publications, p)
+	}
 	all := make([]*generation, 0, len(o.generations))
 	for _, g := range o.generations {
 		g.cancel()
@@ -343,10 +370,13 @@ func (o *Owner) Shutdown() error {
 	o.mu.Unlock()
 	o.unsubscribe()
 	<-o.reconciled
+	for _, p := range publications {
+		<-p.done
+	}
 	var result error
 	for _, g := range all {
 		<-g.done
-		if g.record.Revision != 0 {
+		if g.record.Revision != 0 && (g.publication == nil || g.publication.activated) {
 			_, _, err := o.registry.CommitObservation(g.record.Manifest.ServerID(), g.record.AppID, g.record.Revision, Observation{State: "stopped"})
 			if !errors.Is(err, ErrStale) && !errors.Is(err, ErrRemoved) {
 				result = errors.Join(result, err)

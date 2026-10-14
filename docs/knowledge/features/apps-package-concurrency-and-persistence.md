@@ -33,6 +33,33 @@ stops preparation. Linux orphan zombies are inert bookkeeping rather than live
 build work. The [controlled fixtures](apps-package-testing.md#checked-candidate-fixtures)
 prove the ordering, not merely the absence of children after return.
 
+### Publication admission
+
+Acquire registry then owner locks before `PrepareCandidate` to reserve one
+publisher per app. Explicitly request available intent, but use operation
+ownership to suppress Start/reconciliation; toggling intent as a lock can erase a
+real stop. Install `subscribeLocked` cancellation during admission: subscribing
+later misses stopped → available reuse during a parked build. Preparation and
+pending commits legitimately advance this operation's expected app revision;
+other-app commits do not invalidate it. Guard activation/finalization against
+current ownership, manifest, intent and revision. Join work outside both locks.
+Removal blocks admission, calls Stop outside registry locks and tombstones only
+after joined recovery with no outstanding journal. See
+[first publication](../../hosted-apps.md#callable-first-publication).
+
+### Registry durability
+
+`snapshotOps.write` must sync the file, rename it and sync the containing directory
+before swapping committed memory or announcing changes. Rename alone does not
+establish crash durability. If directory sync fails after rename,
+`errSnapshotUncertain` quarantines `Registry.changeLocked`, including no-ops: a
+later write derived from the old memory snapshot could overwrite the new on-disk
+decision. Keep the last durable memory snapshot, retain journal/backup evidence,
+bar target exposure and forbid destructive restoration. An uncertain activation
+cannot claim committed activation; uncertain finalization retains the previously
+durable committed decision. Startup recovery remains #3263. See
+[durability fixtures](apps-package-testing.md#publication-fixtures).
+
 ### Registry and process ownership
 
 Stable preparation subscribes before committed identity resolution to close the
@@ -66,7 +93,8 @@ readers, blocks a writer before commit and checks that readers cannot pass it.
 
 Detect semantic no-ops before revision exhaustion. An identical registration,
 manifest or lifecycle update, or repeated removal of a tombstone, still succeeds
-without a write or change at the maximum sequence. Compare lifecycle errors by
+without a write or change at the maximum sequence while registry durability is
+established; an uncertain registry rejects even no-ops. Compare lifecycle errors by
 value, not pointer identity. Each changed mutation advances the durable host
 sequence once and stamps its record or tombstone. A failed write never swaps
 committed memory or notifies consumers.

@@ -109,11 +109,17 @@ func (r *Registry) Subscribe(consumer func(Change)) func() {
 		return func() {}
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.subscribeLocked(consumer)
+}
+
+// subscribeLocked closes admission/notification gaps for registry-owned work.
+// Callbacks keep Subscribe's non-reentry contract.
+func (r *Registry) subscribeLocked(consumer func(Change)) func() {
 	if r.consumers == nil {
 		r.consumers = make(map[*func(Change)]struct{})
 	}
 	r.consumers[&consumer] = struct{}{}
-	r.mu.Unlock()
 	return func() {
 		r.mu.Lock()
 		delete(r.consumers, &consumer)
