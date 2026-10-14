@@ -6,7 +6,8 @@ and recording, bundled registered source creation and identity-based inspection,
 durable registrations, persistent-data snapshots
 with restart verification and repeatable restoration, callable health-confirmed
 committed-release process ownership, generation-bound stable response preparation
-and confined callable assets independent of conversations.
+and confined callable assets independent of conversations, plus synchronous
+health-confirmed first publication.
 The [hosted-app reference](../../hosted-apps.md#manifest-and-identity)
 owns the field tables and registration behavior; the
 [v1 contract](../../specs/architecture/3120-hosted-app-contract.md) owns the broader
@@ -15,16 +16,19 @@ readiness. The registry commits lifecycle observations and normalizes restart
 state. Process spawn proves only starting; the owner confirms health before
 exposing private targets; owner construction reconciles registrations and recovers
 failed generations automatically. The daemon owns one owner for its discovery
-registry, independently of channels; publication (#3125) and encrypted resource
-activation (#3123) remain separate responsibilities.
+registry, independently of channels. Callable first publication is implemented;
+active-release updates (#3360), interrupted-publication startup recovery (#3263)
+and publishing control/daemon wiring (#3301/#3266) remain separate slices.
+Encrypted resource activation (#3123) remains a separate responsibility.
 
 ## Package topics
 
 | Document | Topic |
 |---|---|
-| [Lifecycle and restart state](apps-package-lifecycle.md) | Conditional commits, process ownership, health, reconciliation and restart normalization. |
+| [Lifecycle and restart state](apps-package-lifecycle-and-restart-state.md) | Conditional activation, process ownership, health, reconciliation and restart normalization. |
 | [Resource-serving](apps-package-resource-serving.md) | Private targets, stable responses and generation-bound cancellation. |
-| [Concurrency and testing](apps-package-concurrency-and-testing.md) | Lock ordering, persistence, subscriptions and discriminating fixtures. |
+| [Concurrency and persistence](apps-package-concurrency-and-persistence.md) | Publication admission, lock ordering, durability and subscriptions. |
+| [Testing](apps-package-testing.md) | Discriminating storage, process and publication fixtures. |
 
 ## Validation and stored identity
 

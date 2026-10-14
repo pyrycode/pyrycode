@@ -53,15 +53,17 @@ observation operations preserve release history and journal metadata.
 Before activation, `ActivationCommitted == false` directs recovery to restore
 previous data/release; first publish has no `Previous` and no prior release to
 reactivate. After activation, `ActivationCommitted == true` selects `Candidate`.
-Activation callers commit that decision together with candidate active release,
-title/state and cleared pending release/error in one `UpdatePublish` call.
+`Owner.Publish` commits that decision together with candidate active release,
+title/state and cleared pending release/error through `changePublicationLocked`,
+which guards the operation's current revision/ownership before `changeLocked`.
+Unconditional `UpdatePublish` alone cannot reject obsolete health/finalization.
 Recovery callers clear the journal together with their resulting lifecycle
 fields. The registry validates and persists caller-supplied results; it neither
-derives those fields from the journal nor performs the recovery itself.
-Publishers and recovery remain downstream consumers ([checked builds #3260](https://github.com/pyrycode/pyrycode/issues/3260),
-[cutover #3262](https://github.com/pyrycode/pyrycode/issues/3262),
-[recovery #3263](https://github.com/pyrycode/pyrycode/issues/3263)). Stored references
-and decisions alone prove neither readiness nor verified or restored data.
+derives those fields from the journal nor performs recovery itself. Callable first
+publication is implemented; updates (#3360) and interrupted-publication startup
+recovery (#3263) remain downstream. Stored references and decisions alone prove
+neither readiness nor verified or restored data. See
+[first publication](../../hosted-apps.md#callable-first-publication).
 
 Both metadata mutations use `changeLocked`: validation, persistence, snapshot
 swap and ordered notifications share the registry mutex. Failed validation or
@@ -231,12 +233,16 @@ Cancelling the initiating start context retires its generation; a coalesced call
 can cancel its own wait independently. The daemon invokes joined shutdown on
 normal exit and every startup failure after owner construction. Local stop
 preserves sibling services and the session pool; daemon shutdown preserves
-available intent for restart. Publication/migration/activation/rollback
-(#3125/#3133) and encrypted resource capability activation (#3123) remain
-downstream; exclusive cutover is publisher-owned. Production `HostedAppsReady`
+available intent for restart. First publication owns migration/private health and
+atomic activation; updates (#3360), interrupted-publication startup recovery
+(#3263), publishing control/daemon wiring (#3301/#3266) and encrypted resource
+capability activation (#3123) remain downstream. Production `HostedAppsReady`
 remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes
 the attestation. Daemon startup installs no dependencies and runs no migrations. See
 [startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
+
+See [publication writers and completion](apps-package-lifecycle-and-restart-state.md#publication-writers-and-completion)
+for restoration prerequisites and shared retirement-error retention.
 
 `Open` validates storage before `normalizeSnapshot`. Every available record with
 an active release becomes starting; every unpublished or intentionally stopped

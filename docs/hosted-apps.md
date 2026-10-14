@@ -7,7 +7,8 @@ lifecycle mutations, restart normalization and callable committed-release
 process ownership, retained-artifact validation and immutable installation with
 independent verification, checked candidate preparation and durable recording,
 persistent-data snapshots with restart verification and
-repeatable restoration, health supervision, automatic reconciliation/recovery and
+repeatable restoration, synchronous health-confirmed first publication, health
+supervision, automatic service reconciliation/recovery and
 guarded private targets, generation-bound stable response preparation and confined
 callable active-release assets are implemented in the `internal/apps` package. The relay
 implements authenticated paged discovery, committed lifecycle notifications,
@@ -18,7 +19,8 @@ Encrypted API routing remains #3316; production capability activation and
 real-daemon/relay acceptance remain #3248.
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
-`templates/hosted-app/`; publication and native
+`templates/hosted-app/`; active-release updates (#3360), interrupted-publication
+startup recovery (#3263), publishing control/daemon wiring (#3301/#3266) and native
 viewers remain later work. This reference preserves the contract's fields,
 limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
@@ -90,7 +92,7 @@ neither publication nor readiness. Those checks belong to #3125.
 | `build.test` | array of strings | Exactly `["npm", "test"]`. |
 | `build.compile` | array of strings | Exactly `["npm", "run", "build"]`. |
 
-These fixed paths are release-relative, not native service addresses. Publication validation (#3125) must check that every required entry is a regular file inside its selected root; entry/public-asset/migration paths permit no symlink component, `..`, absolute path or device file. Locked runtime dependencies may contain package-internal symlinks only when their entire resolution remains inside that build's `node_modules`; publication validates and inventories those targets. Frontend output MUST contain only public assets: no source secrets, SQL database, service code, lockfile, environment file or `node_modules`. Publication validation covers runtime version, manifest identity, lockfile, command exit status, compiled entries and migration filenames. A release version is unique per app: a reused version with different bytes is rejected, and publishing identical previously recorded bytes is an idempotent no-op. New updates increase the version numerically; rollback may reactivate an older recorded release.
+These fixed paths are release-relative, not native service addresses. Publication validation (#3125) must check that every required entry is a regular file inside its selected root; entry/public-asset/migration paths permit no symlink component, `..`, absolute path or device file. Locked runtime dependencies may contain package-internal symlinks only when their entire resolution remains inside that build's `node_modules`; publication validates and inventories those targets. Frontend output MUST contain only public assets: no source secrets, SQL database, service code, lockfile, environment file or `node_modules`. Publication validation covers runtime version, manifest identity, lockfile, command exit status, compiled entries and migration filenames. A release version is unique per app: a reused version with different bytes is rejected, and checked preparation reuses identical previously recorded bytes without advancing history. First publication rejects an already active registration; active-release updates remain #3360. New updates increase the version numerically; rollback may reactivate an older recorded release.
 
 ### Durable registration
 
@@ -203,8 +205,11 @@ construction, before `Run`. Failed construction attaches nothing; relay cleanup
 unsubscribes before draining the manager. Channel cleanup does not unsubscribe.
 
 `Registry.Remove` deletes only the registration and durably tombstones its
-identity. Source, build and data files remain byte-for-byte intact. Registration
-and updates cannot revive that identity, including after reopen; removing an
+identity after owner-coordinated writer retirement and publication recovery.
+Unresolved journals or retirement failures reject removal while preserving the
+stopped registration and evidence. Source, build and data files are retained;
+publication restoration can replace candidate-mutated data before removal.
+Registration and updates cannot revive that identity, including after reopen; removing an
 existing tombstone again is a no-op. Removal frees a live-registration slot, and
 tombstones do not count toward the limit. Use one registry owner per root;
 after reopening, stop using the previous owner because its stale snapshot could
@@ -241,9 +246,31 @@ The implemented discovery mapping has these exact fields. Unknown wire fields ar
 | `last_error` | object or null | Null on clean operation; otherwise `code` (error vocabulary below) and static `message` (1–160 UTF-8 bytes). No paths, logs or stacks. |
 | `revision` | integer | Durable host-wide change sequence, 1–9007199254740991; this record's latest change. |
 
-`running` requires an active release and confirmed health. `starting` covers reconciliation when no active process is ready. `stopped` covers intentional stop or a not-yet-published registration. `failed` means desired availability cannot be met. If the old service keeps running during candidate build, state stays `running` with a pending release. During exclusive migration/cutover state becomes `starting`, requests are quiesced, and the active release still denotes the last confirmed release. Successful cutover atomically updates active release/title, clears pending/error and reports running. Failed candidate startup/build restores running on the previous release with `last_error` set; an initially failed publish has null active release and state failed. A stopped registration may retain its active release; opening it shows stopped and does not silently start it.
+`running` requires an active release and confirmed health. `starting` covers
+startup while no process is ready. `stopped` covers intentional stop or an
+unpublished registration; `failed` means desired availability cannot be met.
+Accepted first publication explicitly requests `available`. Once the checked
+candidate is freshly verified, `pending_release` identifies it and state becomes
+`starting`, while the committed title stays unchanged and `active_release` stays
+null. Candidate manifest/title and health readiness remain private; neither API
+nor asset targets are usable before activation. Matching live app/release health
+and current ownership/intent authorize one durable snapshot committing title,
+active release, `available`/`running`, cleared pending/error and the journal's
+activation decision together. Ordinary `Start` still selects only an already
+committed active release and returns after spawn.
 
-The registry validates `running`'s active release; confirmed health is the caller's obligation. A successful cutover supplies the new title/active release, `state: running`, unset pending release and unset error together in one `UpdateLifecycle`. `LastError` accepts only the [contract error codes](#errors) and a static message of 1–160 UTF-8 bytes with no controls or leading/trailing whitespace. Callers must choose safe metadata: validation cannot establish that text is safe by its provenance. Raw parser, process or I/O diagnostics never become `last_error`; package errors are returned separately from transport codes.
+A failed first publication leaves no active release or target and records failed
+state unless newer stopped intent wins. After possible data mutation, failure
+completion requires writer retirement and verified restoration; unresolved
+recovery retains its journal/backup. Stop/removal/shutdown cancel even parked
+publication work, and late results cannot overwrite newer intent or tombstones.
+Removal joins writers, retains files and refuses unresolved recovery evidence.
+A stopped registration may retain its active release; opening it shows stopped
+and does not silently start it. Active-release updates remain #3360: keeping the
+old service available during build, exclusive cutover and restoring/rechecking
+the previous release are that slice's contract, not first-publication behavior.
+
+The registry validates `running`'s active release; confirmed health is the caller's obligation. First publication uses a guarded lifecycle/journal mutation rather than unconditional `UpdateLifecycle`, so health cannot commit over newer intent or expose a release without its activation decision. `LastError` accepts only the [contract error codes](#errors) and a static message of 1–160 UTF-8 bytes with no controls or leading/trailing whitespace. Callers must choose safe metadata: validation cannot establish that text is safe by its provenance. Raw parser, process or I/O diagnostics never become `last_error`; package errors are returned separately from transport codes.
 
 `Registry.CommitObservation(serverID, appID, expectedRevision, Observation)`
 checks the app record's revision under the registry lock, then commits state/error
@@ -297,7 +324,10 @@ revision under the registry lock before applying it, discarding stale snapshots
 so concurrent stop/removal or publication cannot be missed or overwritten.
 
 Initially and after committed changes, available registrations with active
-releases launch automatically; stopped/unpublished registrations launch nothing.
+releases launch automatically when publication ownership/journals do not block
+admission; stopped/unpublished registrations launch nothing. An outstanding
+publication journal bars ordinary Start and automatic launch. Interrupted-publication
+startup recovery remains #3263; observed-state normalization does not resolve it.
 Every automatic attempt rechecks committed intent/release and conditionally
 observes starting without changing intent. Explicit starts and automatic work
 coalesce; lifecycle notifications do not cause duplicate launches or restart loops.
@@ -558,8 +588,10 @@ daemon-managed logs, never a build. The publication contract (#3125) associates
 app/release identities with validated roots and digests; callable start resolves
 the committed release from build manifests without a persisted build index.
 Network fields are never joined to arbitrary host paths. Registry writes use
-same-directory temporary file, sync, close and atomic rename; recoverable
-activation/data-restoration journals belong to #3125. Builds and app data persist
+same-directory temporary file, file sync, close, atomic rename and directory
+sync; post-rename uncertainty bars further writes and targets. Callable first
+publication owns its activation/data-restoration journal; interrupted-publication
+startup recovery remains #3263. Builds and app data persist
 across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
 The template owns `npm run typecheck` (TypeScript checks both frontend and service
@@ -904,6 +936,20 @@ readback across service restart and replacement builds; see the
 [orchestrator walkthrough](#orchestrator-walkthrough) for that intended workflow.
 
 ### Migrations
+
+First publication calls the selected Node executable directly with
+`dist/service/migrate.js` from the freshly verified retained build. Node must be
+>=24.15.0 and <25 and match the owner's selection. Before even preparing candidate
+data/database files, publication syncs an all-data snapshot, freshly verifies it
+and durably journals candidate/backup with no previous release and an uncommitted
+activation decision. Snapshot, verification or journal failure prevents migration
+and service startup. The migrator has a 60-second deadline and only the minimal
+identity/data/bind environment plus `NODE_ENV=production`, without inherited
+credentials. A positive reserved loopback port is supplied to migration and
+subsequent service startup. The entire migration process group must retire before
+the candidate service starts; joining its leader alone is insufficient. Candidate
+health must match the app/release within 15 seconds from service spawn, before
+atomic activation. See [publication and recovery](#publication-and-recovery).
 
 `npm run migrate` runs `node dist/service/migrate.js` once. Both migration and
 service entries use file-backed `DatabaseSync` at `PYRY_APP_DB_PATH`, foreign
@@ -1568,9 +1614,10 @@ also conflict; a snapshot retry uses a new publish ID. Snapshot copy, SQLite,
 verification, sync failures and cancellation return errors, preserving
 recoverable source data; an unsuccessful snapshot must never authorize mutation.
 
-Publication (#3262) and interrupted-publication recovery (#3263) consume these
-primitives. Persist the selected `BackupReference`; `apps.RestoreData` freshly
-verifies its complete disk evidence on every call, including after restart.
+First publication (`Owner.Publish`, #3359) consumes these primitives;
+active-release updates remain #3360 and interrupted-publication startup recovery
+remains #3263 until those slices land. Persist the selected `BackupReference`;
+`apps.RestoreData` freshly verifies its complete disk evidence on every call, including after restart.
 It restores the whole tree/schema, removes candidate-only content and transient
 SQLite sidecars, and preserves distinct absent/empty/uninitialized states as
 specified in [runtime and layout](#runtime-and-layout). A failed or interrupted
@@ -1580,9 +1627,61 @@ verifiable after successful, failed or interrupted restoration. Retain the
 backup until durable recovery completion; deletion belongs to the caller.
 Durable recovery completion, old-release health and admission of API requests
 remain caller-owned.
-The following paragraphs describe that publication/recovery contract, beyond
-the data primitives. These data guarantees cannot undo arbitrary OS or
-fleet-service effects.
+
+#### Callable first publication
+
+`Owner.Publish(ctx, serverID, appID, Toolchain)` synchronously checks and publishes
+one live local registration with no active release. Admission precedes build and
+rejects unknown/foreign/removed identities, an active release, outstanding journal
+or overlapping publisher/removal. Node/npm are selected by the daemon. Ownership
+suppresses competing starts/reconciliation for that app, while other apps and
+status/stop remain available; desired intent is not used as a temporary lock.
+
+Publication performs checked preparation and fresh exact-build verification,
+keeps candidate metadata private and commits pending/starting. A synced all-data
+snapshot and fresh backup verification precede the durable uncommitted journal,
+which precedes data preparation, migration and service launch. Private candidate
+health uses the ordinary startup policy but commits activation separately from
+ordinary startup. Only the atomic health-confirmed activation exposes targets;
+normal runtime health supervision continues after publication returns. Immutable
+builds/backups are retained through durable activation or restoration completion.
+
+Ordinary success requires durable journal clearing and returns `PublishResult`
+with matching host/app, candidate release, committed public `Lifecycle` (including
+active release), revision and health/activation/recovery indicators. Paths,
+release history and internal journal metadata are excluded. `Healthy` describes
+current live usability; `ActivationCommitted` describes the durable decision.
+`PublishFailure` reports static phase/recovery feedback. Raw process output,
+credentials, endpoints and host paths enter neither feedback nor `last_error`.
+
+Build or pre-mutation failure preserves data. Migration, startup/health or a
+failed activation write after possible mutation retires and joins every candidate
+writer, then `RestoreData` freshly verifies the backup and restores all prior
+data before failure/journal clearing becomes durable. First publication has no
+previous service to reactivate. Restoration I/O failure records `app.io_failed`
+where persistence permits and retains the journal/backup; failed failure
+finalization also retains evidence, even if restoration finished. Uncertain
+writer retirement forbids restoration beneath a possible writer. Cancellation
+and shutdown join recovery independently of caller cancellation or leave durable
+uncommitted evidence. Newer stopped intent/removal wins; unresolved recovery bars
+another publish and prevents removal from discarding the record/journal.
+
+If activation committed but journal finalization fails, return an error with
+`ActivationCommitted=true`, `RecoveryPending=true` and static feedback
+“Activation committed; journal finalization is pending.” Preserve the committed
+decision and never restore pre-publication data. Registry durability requires file
+sync, rename and directory sync. A failed post-rename directory sync instead
+reports recovery pending, bars later registry writes and target use, and retains
+evidence. An uncertain activation cannot claim committed activation and must not
+restore potentially activated data; uncertain finalization preserves the already
+durable activation decision.
+
+#### Update and startup recovery contract
+
+The following guarantees belong to active-release updates (#3360) and
+interrupted-publication startup recovery (#3263), which remain unimplemented in
+this slice. These data guarantees cannot undo arbitrary OS or fleet-service
+effects.
 
 Publication is serialized per app, with at most one candidate and one writer to its SQL data. Build/typecheck/tests happen in private staging while the old service remains available. Before any migration, stop accepting that app's API work, cancel/retire pending reads/writes without replay, drain or stop the old service, and take a consistent recoverable snapshot of **all** app data including a SQLite backup that incorporates WAL state. Do not copy a live database file alone. Verify the snapshot before mutation. No fleet-side mutation may run as a startup/health side effect.
 
@@ -1594,9 +1693,9 @@ Store display preferences (selected tab, per-computer chart periods, project/com
 
 1. **Create:** In a channel, request an orchestrator app. Assistant invokes create through local tools; the daemon mints/stamps this host's stable app ID and creates the editable template. The assistant records originating channel plus returned app identity for follow-up targeting. The registration is unpublished (`available`/`stopped`, no active release) and not yet openable; no success link is returned.
 2. **Validate:** Assistant edits source and requests checked candidate preparation through local tools. Private staging runs runtime/manifest/lock checks, install, typecheck, tests and compile, then records the verified immutable candidate. Preference tests use temporary SQLite; frontend output is self-contained and public-only. Validation failure reports safe actionable phase feedback and leaves any existing active release serving. Candidate success confirms build validation; publish still owns readiness.
-3. **Publish:** Publisher snapshots/serializes the update, runs migrations and service health, and durably commits the activated release. Tools return structured readiness confirmation with matching `server_id`, `app_id`, active release and current revision. A queued build or a PID alone is not confirmation.
+3. **Publish:** Callable first publication snapshots/journals before data mutation, runs migrations and private service health, then atomically activates and durably finalizes the journal; local tool/daemon wiring remains #3301/#3266. Tools return structured readiness confirmation with matching `server_id`, `app_id`, active release and current revision. A queued build or a PID alone is not confirmation.
 4. **Open:** Only after that confirmed readiness, assistant returns `pyrycode://hosts/11111111-1111-4111-8111-111111111111/apps/22222222-2222-4222-8222-222222222222` to the originating channel. Apps discovery also lists it under the connected host. Desktop/mobile validate running state, bind the view and load relative modules/API data over encrypted transport. Stop/removal after confirmation may make the link unavailable; the link remains the same identity.
-5. **Update:** A follow-up request targets the same registered app, increments release to `1.0.1`, and repeats checks/publish. Preserve app ID, stable link and SQL preferences. Clients retire the old release view and reopen on confirmation. Failed build/start/migration retains or restores the prior working release/data as specified; channel response reports failure rather than a new readiness claim. Offline clients refresh discovery on reconnect and never replay an uncertain preference/fleet write.
+5. **Update (contract; #3360 pending):** A follow-up request targets the same registered app, increments release to `1.0.1`, and repeats checks/publish. Preserve app ID, stable link and SQL preferences. Clients retire the old release view and reopen on confirmation. Failed build/start/migration retains or restores the prior working release/data as specified; channel response reports failure rather than a new readiness claim. Offline clients refresh discovery on reconnect and never replay an uncertain preference/fleet write.
 
 ### Implementation and validation ownership
 

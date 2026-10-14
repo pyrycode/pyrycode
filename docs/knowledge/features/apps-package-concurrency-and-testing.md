@@ -4,6 +4,10 @@ Part of the [apps package overview](apps-package.md).
 
 ## Concurrency and persistence
 
+See [publication admission and registry durability](apps-package-concurrency-and-persistence.md#publication-admission)
+for operation currentness and post-rename uncertainty, and
+[publication fixtures](apps-package-testing.md#publication-fixtures) for their proofs.
+
 Stable preparation subscribes before committed identity resolution to close the
 registration race. Registry callbacks only cancel incompatible work; taking a
 result lock there would invert the result → registry → owner checks. Its watcher
@@ -35,7 +39,8 @@ readers, blocks a writer before commit and checks that readers cannot pass it.
 
 Detect semantic no-ops before revision exhaustion. An identical registration,
 manifest or lifecycle update, or repeated removal of a tombstone, still succeeds
-without a write or change at the maximum sequence. Compare lifecycle errors by
+without a write or change at the maximum sequence while registry durability is
+established; an uncertain registry rejects even no-ops. Compare lifecycle errors by
 value, not pointer identity. Each changed mutation advances the durable host
 sequence once and stamps its record or tombstone. A failed write never swaps
 committed memory or notifies consumers.
