@@ -4,8 +4,9 @@ Part of [the history package overview](history-package.md).
 
 ## Shape
 
-Five production files (`log.go`, `segment.go`, `cursor.go`, `forward.go`,
-`sync.go`), a leaf importing only `internal/conversations` (for `ValidID`/`ConversationID`)
+Eight production files (`log.go`, `segment.go`, `cursor.go`, `forward.go`,
+`sync.go`, `cache_dir.go`, `lookup.go`, `lookup_cache.go`), a leaf importing only
+`internal/conversations` (for `ValidID`/`ConversationID`)
 and stdlib —
 never the wire-payload types, never decoding a payload, the same posture
 [`eventring`](eventring-package.md) has. `New(instanceDir)` builds
@@ -29,6 +30,7 @@ func (s *Store) Append(convID conversations.ConversationID, typ string, payload 
 func (s *Store) AppendWithMetadata(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time, metadata Metadata) (uint64, error)
 func (s *Store) Sync(convID conversations.ConversationID) error
 func (s *Store) Page(convID conversations.ConversationID, cursor string, limit int) (Page, error)
+func (s *Store) Lookup(convID conversations.ConversationID, ids []uint64) ([]Entry, error)
 func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, error)
 func (s *Store) LatestDisplayableEntryID(convID conversations.ConversationID) (uint64, error)
 func (s *Store) LogDir(convID conversations.ConversationID) (string, error)
@@ -149,6 +151,75 @@ client-supplied id of canonical shape genuinely resolves inside the
 conversation it names and defeats every check beneath it. This is
 `ResolvePath`'s precondition verbatim, and it is `#2116`'s to satisfy by
 reaching the conversation through the session, never off the wire.
+
+### Selective entry lookup
+
+`Store.Lookup` returns exact stored entries in requested order, including opaque
+payloads, timestamps and optional metadata. Input IDs must be strictly ascending
+and unique; duplicates or decreasing IDs return `ErrInvalidEntryIDs`, and invalid
+conversation-ID shape returns `ErrInvalidID`. Empty input returns an empty result
+after directory containment validation. An absent or empty log makes every
+requested ID missing and creates nothing. `MissingEntriesError.IDs` identifies
+all missing requested IDs, including zero, removed-segment IDs, torn-tail IDs and
+IDs beyond the end. Any error returns nil entries, never a usable partial result.
+Returned payload bytes, provenance structs and visibility booleans are detached;
+caller mutation cannot change later answers. Lookup shares the authenticated
+conversation precondition above. It currently has no production caller;
+thread adoption belongs to [#3333](https://github.com/pyrycode/pyrycode/issues/3333)
+under [ADR 045](../decisions/045-thread-index-over-history.md).
+
+Per-conversation `convLog.lookupBounds` retains segment first IDs and sizes,
+never resolved paths. Unknown or resized segments discover their first IDs from
+bounded header/first-entry prefixes through `segmentFirstID`; empty/header-only
+segments and torn first entries have no range until a complete entry exists.
+Successful appends and rolls keep known bounds current. Lookup avoids append-cursor
+recovery through `load`, which would fully decode an unrelated newest segment.
+Lookup groups requested IDs by these ranges and fully reads/decodes only selected
+segments. Those reads
+reuse `readSegment`'s `segmentCeiling` and `decodeSegment`'s version/corruption
+rules; complete entries before a torn final line remain readable. Stored IDs
+must be nonzero and strictly increasing, with no overlap into the next range.
+
+Every call re-runs `resolveDir` containment and lists current regular segments;
+nonempty lookups recheck their regular-file status and size before consulting
+cached data. Removed or symlink-replaced segments cannot supply cached entries,
+and directory redirects fail containment, including on empty requests. These
+checks retain the existing single-call check/use boundary: selected reads use
+ordinary opens, not `O_NOFOLLOW` (see
+[Directory resolution](history-package.md#directory-resolution-re-resolve-every-call-dont-cache-the-answer)).
+
+One Store-wide LRU shares decoded rolled segments across conversations. Identity
+is conversation ID, segment number and current file size. The newest segment
+always reads fresh, including when removal of later segments makes a formerly
+cached segment newest, so successful active-segment appends are visible. The
+default retention limit is **8 MiB (8 × 1024 × 1024 bytes)**; least-recently-used
+segments are evicted before retention would exceed the accounted-byte limit.
+A decoded segment larger than the cache limit is read without retention.
+
+`lookupDecodedBytes` accounts for retained `segEntry` backing-array capacity
+(including each `Entry` and line offset), payload allocation capacity, type-string
+bytes, pointed-to `SessionProvenance` structs and their kind/session-ID strings,
+and pointed-to visibility booleans. It also reserves 256 bytes per timestamp
+whose location is neither `time.UTC` nor `time.Local`, for the decoded fixed-offset
+location and its zone/transition arrays. JSON timestamp decoding can allocate
+these per entry, so counting only payloads and metadata would understate retained
+data; the reservation conservatively includes shared fixed zones too. Allocator
+rounding, cache/index bookkeeping and process-global UTC/Local locations are
+excluded. No encoded segment buffer is retained. This bounds accounted retained
+decoded data, rather than total process memory or temporary reads/results.
+
+### Lookup verification
+
+`readStats` includes successful discovery opens and actual prefix read bytes,
+including buffered read-ahead, as well as selected full reads. A warm lookup
+served entirely from cached segments adds no segment opens or bytes, while
+still checking filesystem membership. `TestLookupSelectiveReads` uses segments
+longer than the discovery buffer and corrupts an unselected segment after its
+first entry: a tiny fixture can be read entirely by buffering without proving
+that full decoding was avoided. `TestLookupRoundTrip` seals the metadata segment
+before mutating returned data, so a later answer proves cache detachment rather
+than merely rereading fresh disk bytes. `TestLookupCacheAccounting` exercises
+unused array/payload capacity, pointed-to metadata and timestamp locations.
 
 ## Forward consumption
 
