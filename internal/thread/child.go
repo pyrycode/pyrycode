@@ -70,6 +70,7 @@ func (f *Fold) childWork(e history.Entry) bool {
 	}
 	ck := childCallKey{group, id.TurnID, id.ToolUseID}
 	saved := f.childCalls[ck]
+	f.countPublicWork(1)
 	// Reports without parent evidence may belong to a later child creation.
 	// Their original group and first terminal survive main-turn replacement.
 	if saved == nil && f.childReports[ck] == nil && (e.Type == protocol.TypeToolResult || e.Type == protocol.TypeToolDenied) {
@@ -80,7 +81,9 @@ func (f *Fold) childWork(e history.Entry) bool {
 		f.childReports[ck] = &mainOutcome{id: e.ID, status: status, field: field, raw: append(json.RawMessage(nil), e.Payload...)}
 	}
 	if parent == "" && id.ToolUseID != "" {
+		f.countPublicWork(1)
 		if g := f.agentGroups[group]; g != nil {
+			f.countPublicWork(1)
 			if c := g.calls[id.ToolUseID]; c != nil {
 				parent = c.parent
 			}
@@ -135,6 +138,7 @@ func (f *Fold) childWork(e history.Entry) bool {
 	before := len(f.items)
 	f.foldWork(e, id, summary, status, shown, st, true)
 	for index := before; index < len(f.items); index++ {
+		f.countPublicWork(1)
 		f.saveChild(index, group, parent)
 	}
 	if id.ToolUseID != "" && saved.call.item >= 0 {
@@ -143,11 +147,14 @@ func (f *Fold) childWork(e history.Entry) bool {
 	return true
 }
 func (f *Fold) saveChild(index int, group agentKey, parent string) {
+	f.markAffected(index)
+	f.countPublicWork(1) // child-state lookup, including first registration
 	if f.childCounts != nil {
 		f.childCounts.registered++
 	}
 	state := f.children[index]
 	if state == nil {
+		f.countPublicWork(3) // intrinsic item, state installation and dirty maintenance
 		if f.childCounts != nil {
 			f.childCounts.baseCopies++
 		}
@@ -157,10 +164,12 @@ func (f *Fold) saveChild(index int, group agentKey, parent string) {
 		f.children[index] = state
 	} else {
 		f.restoreChild(index)
+		f.countPublicWork(2) // old parent edge lookup/removal
 		delete(f.childEdges[childParentKey{state.group, state.parent}], index)
 	}
 	state.group, state.parent = group, parent
 	key := childParentKey{group, parent}
+	f.countPublicWork(4) // parent edge lookup/installation, membership and dirty set
 	if f.childEdges[key] == nil {
 		f.childEdges[key] = make(map[int]struct{})
 	}
@@ -171,6 +180,7 @@ func (f *Fold) saveChild(index int, group agentKey, parent string) {
 // Intrinsic state survives provisional ancestor endings. Reports received while
 // inactive still update that state, so a later launch link can undo only closure.
 func (f *Fold) restoreChild(index int) {
+	f.countPublicWork(1) // include unchanged/non-child skips at mutation hooks
 	state := f.children[index]
 	if state == nil || state.restored {
 		return
@@ -179,6 +189,7 @@ func (f *Fold) restoreChild(index int) {
 		f.childCounts.restored++
 	}
 	state.previous = f.items[index]
+	f.countPublicWork(3) // stored item, intrinsic restoration and dirty maintenance
 	f.items[index] = state.base
 	f.items[index].Parent = state.previous.Parent
 	f.items[index].Rev = state.previous.Rev
@@ -189,7 +200,9 @@ func (f *Fold) restoreChild(index int) {
 // Agent recomputation may run for an entire group; only actual changes enqueue
 // that agent's own dependents. Intrinsic finals need no cached derived ending.
 func (f *Fold) scheduleAgentChildren(index int) {
+	f.countPublicWork(2) // agent identity and direct dependent set
 	for child := range f.childEdges[f.childAgents[index]] {
+		f.countPublicWork(2) // inspected dependent and dirty membership maintenance
 		if f.childCounts != nil {
 			f.childCounts.edges++
 		}
@@ -203,9 +216,11 @@ func (f *Fold) resolveChildren(rev uint64) {
 	}
 	indices := make([]int, 0, len(f.childDirty))
 	for index := range f.childDirty {
+		f.countPublicWork(1)
 		indices = append(indices, index)
 	}
 	for i := 0; i < len(indices); i++ {
+		f.countPublicWork(2) // inspected candidate and agent identity lookup
 		if f.childCounts != nil {
 			f.childCounts.expanded++
 		}
@@ -213,23 +228,32 @@ func (f *Fold) resolveChildren(rev uint64) {
 		if !agent {
 			continue
 		}
+		f.countPublicWork(1) // dependent-set lookup, including empty sets
 		for index := range f.childEdges[key] {
+			f.countPublicWork(2) // inspected edge and deduplication lookup
 			if f.childCounts != nil {
 				f.childCounts.edges++
 			}
 			if _, exists := f.childDirty[index]; !exists {
+				f.countPublicWork(1)
 				f.childDirty[index] = struct{}{}
 				indices = append(indices, index)
 			}
 		}
 	}
 	// Storage is creating-ID ordered. Older-only edges make this a topological walk.
-	slices.Sort(indices)
+	slices.SortFunc(indices, func(a, b int) int {
+		f.countPublicWork(2)
+		return a - b
+	})
 	for _, index := range indices {
+		// Reachability may change even when this row's final fields do not.
+		f.markAffected(index)
 		if f.childCounts != nil {
 			f.childCounts.resolved++
 		}
 		state := f.children[index]
+		f.countPublicWork(2) // child state and stored item
 		var ending json.RawMessage
 		if state != nil {
 			f.restoreChild(index)
@@ -244,12 +268,19 @@ func (f *Fold) resolveChildren(rev uint64) {
 			if f.childCounts != nil {
 				f.childCounts.edges++
 			}
+			f.countPublicWork(1) // scoped parent group, including missing groups
 			if g := f.agentGroups[state.group]; g != nil {
-				if c := g.calls[state.parent]; c != nil && c.item >= 0 && f.items[c.item].Kind == "agent" && f.items[c.item].ID < item.ID {
-					parentID = f.items[c.item].ID
-					ending = f.childEndings[c.item]
-					if f.items[c.item].EndedOrder != 0 {
-						ending = f.items[c.item].Content
+				f.countPublicWork(1) // scoped parent call
+				if c := g.calls[state.parent]; c != nil && c.item >= 0 {
+					f.countPublicWork(1) // parent item, including rejected kind/order
+					parent := &f.items[c.item]
+					if parent.Kind == "agent" && parent.ID < item.ID {
+						parentID = parent.ID
+						f.countPublicWork(1)
+						ending = f.childEndings[c.item]
+						if parent.EndedOrder != 0 {
+							ending = parent.Content
+						}
 					}
 				}
 			}
@@ -280,5 +311,6 @@ func (f *Fold) resolveChildren(rev uint64) {
 			}
 		}
 	}
+	f.countPublicWork(len(f.childDirty))
 	clear(f.childDirty)
 }
