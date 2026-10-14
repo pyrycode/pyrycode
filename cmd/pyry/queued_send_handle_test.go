@@ -48,6 +48,28 @@ func TestQueuedSendHandleValidation(t *testing.T) {
 	}
 }
 
+func TestQueuedSendHandleCaseVariants(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		field string
+		valid bool
+	}{
+		{``, true},
+		{`,"QUEUED_MSG_ID":7`, true},
+		{`,"queued_msg_id":7,"QUEUED_MSG_ID":7`, true},
+		{`,"QUEUED_MSG_ID":7,"queued_msg_id":7`, true},
+		{`,"queued_msg_id":7,"QUEUED_MSG_ID":8`, false},
+		{`,"QUEUED_MSG_ID":8,"queued_msg_id":7`, false},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			raw := json.RawMessage(`{"conversation_id":"` + testConvID + `","accepted_at":"2026-01-01T00:00:00Z"` + tc.field + `}`)
+			if validQueuedSendFact(testConvID, historySendAccepted, raw) != tc.valid {
+				t.Fatalf("case variant validation: %s", raw)
+			}
+		})
+	}
+}
+
 func testQueuedHandle(t *testing.T, item protocol.ThreadItem, id uint64, status string) uint64 {
 	t.Helper()
 	var content struct {

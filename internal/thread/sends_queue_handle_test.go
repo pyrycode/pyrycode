@@ -92,51 +92,110 @@ func TestSendQueueHandleLifetime(t *testing.T) {
 	}
 }
 
+func TestSendQueueHandleCaseVariants(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		field string
+		valid bool
+	}{
+		{``, true},
+		{`,"QUEUED_MSG_ID":7`, true},
+		{`,"queued_msg_id":7,"QUEUED_MSG_ID":7`, true},
+		{`,"QUEUED_MSG_ID":7,"queued_msg_id":7`, true},
+		{`,"queued_msg_id":7,"QUEUED_MSG_ID":8`, false},
+		{`,"QUEUED_MSG_ID":8,"queued_msg_id":7`, false},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			accept := testEntry(100, "send_accepted", `{"text":"queued"`+tc.field+`}`)
+			f := testMainReplay(t, []history.Entry{accept})
+			if (len(f.Items()) == 1) != tc.valid || f.Version() != 100 {
+				t.Fatalf("case variant validation: %+v", f.Items())
+			}
+			if !tc.valid {
+				return
+			}
+			want := uint64(7)
+			if tc.field == "" {
+				want = 0
+			}
+			check := func(item Item) {
+				t.Helper()
+				var content struct {
+					Handle *uint64 `json:"queued_msg_id"`
+				}
+				if err := json.Unmarshal(item.Content, &content); err != nil {
+					t.Fatal(err)
+				}
+				if (content.Handle == nil) != (want == 0) || (content.Handle != nil && *content.Handle != want) {
+					t.Fatalf("changed handle: %s", item.Content)
+				}
+			}
+			check(testSendItem(t, f, 100, 0, 100, "queued", true, true))
+			testFeed(t, f,
+				testEntry(101, "message", `{"role":"user","text":"delivered","queued_msg_id":99}`),
+				testSendOutcome(102, "send_delivered", `,"accepted_entry_id":100,"delivery_entry_id":101`, "delivered"),
+			)
+			check(testSendItem(t, f, 100, 101, 102, "delivered", false, true))
+		})
+	}
+}
+
 func TestStoreQueueHandleCacheRules(t *testing.T) {
 	t.Parallel()
-	if foldingRules <= 1 {
-		t.Fatal("queue-handle semantics require a folding rules bump")
+	for _, tc := range []struct {
+		name    string
+		rules   int
+		missing bool
+	}{
+		{"rules_1_missing_handle", 1, true},
+		{"rules_2_matching_rows", 2, false},
+		{"rules_2_missing_handle", 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := history.New(t.TempDir())
+			s := NewStore(h)
+			testStoreAppend(t, h, testStoreA, testEntry(1, "send_accepted", `{"text":"queued","queued_msg_id":7}`))
+			if err := s.Load(context.Background(), testStoreA); err != nil {
+				t.Fatal(err)
+			}
+			before := testStoreWait(t, s, testStoreA, StateUsable, 1)
+			if err := s.Shutdown(); err != nil {
+				t.Fatal(err)
+			}
+			dir, err := h.LogDir(testStoreA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, cacheName)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var c cacheRecord
+			if err := json.Unmarshal(raw, &c); err != nil {
+				t.Fatal(err)
+			}
+			c.Rules = tc.rules
+			if tc.missing {
+				c.Items[0].Content = json.RawMessage(`{"text":"queued"}`)
+			}
+			raw, err = json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			next := NewStore(h)
+			t.Cleanup(func() { _ = next.Shutdown() })
+			if err := next.Load(context.Background(), testStoreA); err != nil {
+				t.Fatal(err)
+			}
+			after := testStoreWait(t, next, testStoreA, StateUsable, 1)
+			if after.Epoch == before.Epoch {
+				t.Fatal("old rules retained epoch")
+			}
+			testContent(t, after.Items[0], "queued_msg_id", float64(7))
+		})
 	}
-	h := history.New(t.TempDir())
-	s := NewStore(h)
-	testStoreAppend(t, h, testStoreA, testEntry(1, "send_accepted", `{"text":"queued","queued_msg_id":7}`))
-	if err := s.Load(context.Background(), testStoreA); err != nil {
-		t.Fatal(err)
-	}
-	before := testStoreWait(t, s, testStoreA, StateUsable, 1)
-	if err := s.Shutdown(); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := h.LogDir(testStoreA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, cacheName)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var c cacheRecord
-	if err := json.Unmarshal(raw, &c); err != nil {
-		t.Fatal(err)
-	}
-	c.Rules = 1
-	c.Items[0].Content = json.RawMessage(`{"text":"queued"}`)
-	raw, err = json.Marshal(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	next := NewStore(h)
-	t.Cleanup(func() { _ = next.Shutdown() })
-	if err := next.Load(context.Background(), testStoreA); err != nil {
-		t.Fatal(err)
-	}
-	after := testStoreWait(t, next, testStoreA, StateUsable, 1)
-	if after.Epoch == before.Epoch {
-		t.Fatal("old rules retained epoch")
-	}
-	testContent(t, after.Items[0], "queued_msg_id", float64(7))
 }

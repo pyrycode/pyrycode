@@ -56,7 +56,7 @@ func validQueuedSendFact(convID, typ string, raw json.RawMessage) bool {
 	for key, value := range fields {
 		if strings.EqualFold(key, "queued_msg_id") {
 			var id uint64
-			if json.Unmarshal(value, &id) != nil || id == 0 {
+			if json.Unmarshal(value, &id) != nil || id == 0 || id != p.QueuedMessageID {
 				return false
 			}
 		}
