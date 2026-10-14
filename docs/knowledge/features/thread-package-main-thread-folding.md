@@ -231,6 +231,21 @@ ending closes its own run. Subsequent text creates a new item. Queued acceptance
 child traffic and tool reports alone do not split text. Saved text retains its
 recorded whitespace; only the summary is normalized.
 
+Main and child text and normalized summaries are maintained incrementally by
+`appendText` and `appendSummary`, with amortized work proportional to the incoming
+suffix. Owned JSON buffers grow geometrically, encoding only new text and moving
+fixed trailing fields; the summary builder carries pending whitespace across
+deltas instead of rescanning accumulated text. Output remains byte-identical to
+the former decode/concatenate/re-encode path: the creating payload keeps its
+original formatting until enrichment or a nonempty append, then JSON keys are
+sorted with unknown creating fields and `encoding/json` escaping preserved,
+including HTML-sensitive characters. Summary whitespace/control handling and
+the `assistant message` empty-result fallback match `plainSummary`. Each payload
+is decoded independently, preserving UTF-8 replacement behavior rather than
+recombining invalid byte fragments across entries. Empty appends leave content,
+revision and `LastShownVersion` unchanged. Creating visibility is retained;
+input payloads and returned snapshots remain detached through buffer growth.
+
 Parent-attributed text and tools fold in [child lanes](thread-package-agents-and-background-work.md#parent-repair), without
 opening or closing main turns, closing main calls or splitting/coalescing main
 text. Claude and metadata-free Agent/Task launches create agent items rather
@@ -286,6 +301,17 @@ received before creation remain effective across chunks. Late text may coalesce
 but stays inactive; late foreground calls are inactive and later reports cannot
 replace their ending. A linked background shell outlives that turn; a late task
 link can repair its provisional closure, and late launch results stay retained.
+
+Child text keeps separate owned intrinsic and ancestor-derived JSON buffers.
+`resolveChildren` reuses unchanged `parent_ending` enrichment and advances both
+buffers incrementally on text appends; a late background link removes only the
+provisional closure, preserving text and normalized summary received while
+inactive. Intrinsic `ending` evidence still prevents reopening independently
+closed work. Previously returned snapshots retain their bytes across closure,
+append and reopening. Optimizing `foldWork` alone would leave quadratic child
+serialization and equality work: a proven nonempty append bypasses accumulated
+content comparison, while empty deltas reuse cached closure content even before
+append-buffer initialization. See [ancestor closure and parent repair](thread-package-agents-and-background-work.md#parent-repair).
 
 Session reset can let Claude cancel a foreground call before daemon closure:
 an error `tool_result` then leaves the call `failed`, and the later cancelled
@@ -485,6 +511,20 @@ historical-capacity scans. Measure registration/removal, skipped inspections,
 tracking growth/copying and public ordering/cleanup too, including repeated
 open/close cycles and empty closure. See the related
 [public-touch capacity regression](thread-package.md#cache-and-epochs).
+
+`TestTextAppendBytes` compares exact JSON and summary output with the former
+map-based append, including case variants, escapes, control characters,
+per-payload UTF-8 replacement and input/snapshot ownership.
+`TestTextAppendChildren` and `TestTextEmptyProvisionalClosure` check append and
+empty-delta behavior through provisional closure and reopening. The fixed-size
+scenarios in `testFoldCorpus` alone cannot detect quadratic work within one long
+reply. `TestTextAppendScaling` therefore grows delta counts from 256 to 1,024 in
+one main run and child runs while open, provisionally closed, reopened and across
+all three phases; `TestFoldIngestionScaling` grows the corpus from 1,000 to 4,000
+entries. Both require less than twice the work per delta/entry. Counters include
+initialization, inspected/skipped candidates, lookups, ordering/maintenance,
+JSON/summary bytes, comparisons and buffer allocation/growth/copying; input
+generation, explicit snapshots and digests are excluded.
 
 `TestPublicTouchesReference` compares entry-scoped bookkeeping with an independent
 full-walk oracle. `TestPublicTouchAffectedWork` grows unrelated items and trees
