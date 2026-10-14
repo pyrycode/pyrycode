@@ -427,6 +427,33 @@ Before accepting a baseline comparison as attribution, compare suite composition
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.
 
+### Diagnosing reply timeouts
+
+A fast provider does not imply a fast first reply. Relay `runThreadQuery` completes
+`EncodeThreadReply` before serial delivery, so a reply wait includes whole-result
+encoding and scheduling under race instrumentation. Measure content-free provider
+readiness, first transport entry and final reconstruction before changing a wait or
+fixture. `v2Recorder.snapshot` copies routing-envelope headers, not accumulated
+ciphertext; `outbound` copies each frame once on capture. Treating polling as repeated
+frame copying would target the wrong cost.
+
+Compare old and repaired waits under identical controlled contention, retaining the
+escaped/multibyte fixture and complete protocol assertions. The
+[large-page reproduction](../../specs/architecture/3364-large-thread-page-reply-wait.md#revisions)
+records four race-test processes pinned to one CPU: all four old waits expired before
+first transport, while all four repaired runs reconstructed the same reply in about
+11.6 seconds, with first transport after four seconds. This establishes insufficient
+scheduling headroom in that experiment; unavailable historical phase logs do not
+establish a production regression or exact attribution for earlier gate failures.
+Use one measured absolute deadline across all fragments and the separate final
+coverage marker, checking expiry even with buffered replies. Resetting the budget
+per fragment would let partial progress extend the missing-completion wait. The
+15-second bound retains headroom over the measured reconstruction; scratch overlays
+dropping all replies or only the final marker each failed at that bound. A focused
+pass alone proves neither attribution nor bounded failure.
+
+### Test inputs and retained artifacts
+
 Record the source of the daemon actually executed, not only the checkout's ancestry.
 The historical #3071 candidate's `spawnPermissionDaemon` honored
 `PYRY_E2E_READINESS_BIN` and `PYRY_E2E_READINESS_MCP_CONFIG`, changing the binary

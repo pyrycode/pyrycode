@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/thread"
@@ -374,16 +375,31 @@ func TestThreadPageLargeReply(t *testing.T) {
 	}
 	items[5].Summary = strings.Repeat("<&界", protocol.MaxThreadEnvelopeBytes/2)
 	want[5].Summary = items[5].Summary
+	started := time.Now()
+	var firstSend atomic.Bool
 	p := testPagePeer(t, func(context.Context, protocol.ThreadPagePayload) (thread.QueryResult, error) {
+		t.Logf("large page provider ready after %s", time.Since(started))
 		return thread.QueryResult{State: thread.StateUsable, Epoch: "epoch", Version: 90, Items: items, LowerOrder: 5, UpperOrder: 100, Continuation: 5, OlderExists: true}, nil
-	}, nil)
+	}, func(c *V2SessionConfig) {
+		send := c.HostedAppsSend
+		c.HostedAppsSend = func(ctx context.Context, env protocol.RoutingEnvelope) error {
+			if firstSend.CompareAndSwap(false, true) {
+				t.Logf("large page first transport after %s", time.Since(started))
+			}
+			return send(ctx, env)
+		}
+		c.OutboundContext = c.HostedAppsSend
+	})
 	testPageRequest(p, 40, 100)
+	// One deadline covers encoding, delivery and reconstruction of the entire
+	// escaped reply under race instrumentation, including its final marker.
+	deadline := time.Now().Add(15 * time.Second)
 	var got []protocol.ThreadItem
 	var assembly strings.Builder
 	var index, offset, previous uint64
 	count, fragments := 0, 0
 	for {
-		e, obj := p.next()
+		e, obj := p.nextBefore(deadline)
 		raw, err := json.Marshal(obj)
 		if err != nil || len(raw) > protocol.MaxThreadEnvelopeBytes || e.ID <= previous || e.Type != protocol.TypeThreadItems || e.InReplyTo == nil || *e.InReplyTo != 40 {
 			t.Fatalf("bounded correlated envelope: %d %+v", len(raw), e)
@@ -399,7 +415,7 @@ func TestThreadPageLargeReply(t *testing.T) {
 			if err := json.Unmarshal(e.Payload, &part); err != nil {
 				t.Fatal(err)
 			}
-			if part.ConversationID != catchUpConversation || part.Epoch != "epoch" || part.Version != 90 || part.Continuation.Index != index || part.Continuation.Offset != offset {
+			if part.ConversationID != catchUpConversation || part.Epoch != "epoch" || part.Version != 90 || part.ItemID != items[5].ID || part.Rev != items[5].Rev || part.Continuation.Index != index || part.Continuation.Offset != offset {
 				t.Fatal("assembly identity/order")
 			}
 			index++
@@ -434,9 +450,10 @@ func TestThreadPageLargeReply(t *testing.T) {
 		}
 		got = append(got, batch.Items...)
 	}
-	if count <= 16 || fragments < 2 || !reflect.DeepEqual(got, want) {
+	if count <= hostedQueueLimit || fragments < 2 || !reflect.DeepEqual(got, want) {
 		t.Fatalf("large reply lost bytes: %d envelopes, %d fragments, %d items", count, fragments, len(got))
 	}
+	t.Logf("large page reconstructed after %s: %d envelopes, %d fragments, %d items", time.Since(started), count, fragments, len(got))
 	p.request(41, protocol.TypeAppCancel, `{"request_id":999}`)
 	e, _ := p.next()
 	if e.Type != protocol.TypeAppCancelled {

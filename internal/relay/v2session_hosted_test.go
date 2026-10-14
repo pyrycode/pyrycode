@@ -185,8 +185,18 @@ func (p *testHostedPeer) request(id uint64, typ, payload string) {
 }
 func (p *testHostedPeer) next() (protocol.Envelope, map[string]json.RawMessage) {
 	p.t.Helper()
-	deadline := time.After(3 * time.Second)
+	return p.nextBefore(time.Now().Add(3 * time.Second))
+}
+
+func (p *testHostedPeer) nextBefore(deadline time.Time) (protocol.Envelope, map[string]json.RawMessage) {
+	p.t.Helper()
+	remaining := time.Until(deadline)
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
 	for {
+		if !time.Now().Before(deadline) {
+			p.t.Fatalf("reply timed out after %s wait budget (consumed %d routing envelopes)", remaining, p.seen)
+		}
 		snap := p.rec.snapshot()
 		for p.seen < len(snap) {
 			e := snap[p.seen]
@@ -218,8 +228,8 @@ func (p *testHostedPeer) next() (protocol.Envelope, map[string]json.RawMessage) 
 			return env, obj
 		}
 		select {
-		case <-deadline:
-			p.t.Fatal("reply timed out")
+		case <-timer.C:
+			p.t.Fatalf("reply timed out after %s wait budget (consumed %d routing envelopes)", remaining, p.seen)
 		case <-time.After(time.Millisecond):
 		}
 	}
