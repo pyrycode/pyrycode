@@ -75,7 +75,11 @@ func testSHA(raw []byte) string { return fmt.Sprintf("%x", sha256.Sum256(raw)) }
 
 func testFoldDigest(t testing.TB, f *Fold) testFoldCheckpoint {
 	t.Helper()
-	o := f.Observe()
+	items, err := f.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := Observation{Snapshot: Snapshot{Items: items, Version: f.Version(), LastShownVersion: f.lastShown}}
 	h := sha256.New()
 	for _, item := range o.Items {
 		var frame [16]byte
@@ -113,23 +117,35 @@ func testFoldGoldenCheck(t *testing.T, path, conv, identity string, input []byte
 		if !*testWriteFoldBaselines {
 			expected = want.Checkpoints[i]
 		}
-		modes := 3
+		modes := 6
 		if *testWriteFoldBaselines {
 			modes = 1
 		}
 		for mode := 0; mode < modes; mode++ {
 			f := New(conv)
+			var source *recentSource
+			if mode >= 3 {
+				f, source = testReferenceFold(entries)
+				f.conversationID = conv
+			}
 			for start, step := 0, 0; start < version; step++ {
 				size := version
-				if mode == 1 {
+				if mode%3 == 1 {
 					size = []int{7, 31, 113}[step%3]
 				}
-				if mode == 2 {
+				if mode%3 == 2 {
 					size = 1
 				}
 				end := min(start+size, version)
+				if source != nil {
+					source.chunk = entries[start:end]
+				}
 				if err := f.Feed(entries[start:end]); err != nil {
 					t.Fatal(err)
+				}
+				if source != nil {
+					source.remember(entries[start:end])
+					source.chunk = nil
 				}
 				start = end
 			}
