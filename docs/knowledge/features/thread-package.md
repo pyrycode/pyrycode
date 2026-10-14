@@ -211,7 +211,7 @@ The later [full live-suite report](https://github.com/pyrycode/pyrycode/issues/3
 counts 1932 passed, zero failed and 27 skipped; with both artifacts present,
 the capture test validates/replays the pair rather than recording a new conversation.
 
-The unchanged `TestThreadAgentRecordedReplay` and
+`TestThreadAgentRecordedReplay` and
 `TestThreadShellRecordedReplay` remain separate offline parser-to-history proofs.
 Their recorded frames come from `parent_tool_use_v2.1.259.json`,
 `task_notification_v2.1.259.json` and `roster_after_finish_v2.1.280.json`.
@@ -221,6 +221,66 @@ The earlier Agent recording has no forwarded child text or nesting-depth proof;
 the retained pair adds observed child text, without claiming arbitrary nesting
 coverage. See [recorded replay limits](thread-package-agents-and-background-work.md#agent-validation-and-testing)
 and [capture/recovery requirements](e2e-realclaude.md#retained-shadow-history-evidence).
+
+### Reusable fold regression corpus
+
+`testFoldCorpus` and `testFoldGoldenCheck` are same-package `internal/thread`
+test helpers for the [agent](https://github.com/pyrycode/pyrycode/issues/3351),
+[visibility](https://github.com/pyrycode/pyrycode/issues/3352) and
+[text](https://github.com/pyrycode/pyrycode/issues/3353) optimizations, and the
+[publication](https://github.com/pyrycode/pyrycode/issues/3328) and
+[rendering](https://github.com/pyrycode/pyrycode/issues/3333) work that consumes
+their evidence. `fold-scenarios-v1/100-entries` repeats fixed 100-entry scenarios;
+requesting a larger count preserves the smaller prefix and adds scenarios with
+distinct turn/call/task identities and bounded payloads. Each scenario has its
+own producer lifetime, with multiple calls/tasks inside its agent group. Sharing
+one lifetime across repetitions made cross-scenario group recomputation dominate
+the gate; separate lifetimes keep the corpus practical while retaining group
+joins and long-history visibility work.
+
+The scenarios retain genuine Agent/Task child work, late links and parent
+enrichment, nested closure/reopening, mapped/durable companions, queued-send
+delivery/suppression and escaped/Unicode deltas. Bash/local_bash remain ordinary
+tools and cannot parent children. `TestFoldCorpus` independently checks lifecycle
+boundaries, prefix stability and bounded payloads; digest equality supplements
+these assertions.
+
+`TestFoldBaselines` pins generated checkpoints at versions 6, 10, 11, 12, 14,
+15, 18, 21, 22, 23, 28, 33, 100, 1,000 and 30,000 in
+[`corpus_golden.json`](../../../internal/thread/testdata/corpus_golden.json).
+Early checkpoints surround child appearance, closure/reopening, links, endings
+and send delivery/suppression; the sparse long-history checkpoints avoid testing
+every split point as `testMainReplay` does for small fixtures. It also consumes
+the unchanged raw shadow history through checkpoints in
+[`shadow_golden.json`](../../../internal/thread/testdata/shadow_golden.json).
+`cmd/pyry.TestThreadRecordedBaselines` derives the three recordings through the
+same `testRecordedFrames` helper as the independent recorded replay tests and
+retains every emitted version. All checkpoints use fresh whole-prefix feeds,
+deterministic chunks cycling through 7/31/113 entries and single-entry feeds.
+These default-build offline gates require no credentials or recapture; preserve
+the separate provenance and raw/legacy semantic assertions above. See
+[baseline writing and digest conventions](thread-package-agents-and-background-work.md#agent-validation-and-testing).
+
+### Full-feed benchmark
+
+`BenchmarkFoldCorpus30000` measures fresh fold construction and complete
+`Fold.Feed` for 30,000 generated entries per iteration. Generation, snapshots
+and digests are outside measured time/allocation. Use a single measured iteration:
+
+```bash
+go test ./internal/thread -run '^$' -bench '^BenchmarkFoldCorpus30000$' -benchtime=1x -count=1 -timeout 12m
+```
+
+The [retained pre-optimization baseline](https://github.com/pyrycode/pyrycode/pull/3374)
+measured **19.271536560 s**, **4,499,987,800 B/op** and
+**14,158,715 allocs/op**, producing **4,200 items from 30,000 entries**.
+It used Go **1.26.9** in a **Linux/amd64 container**, an **Intel Core i7-3770
+@ 3.40 GHz** and **8 logical CPUs**. Production source was
+`a920b90cc6bfd2f1fb8461e9f85ce6f19934afa6` (including the agent-only parent,
+accepted-send handle and targeted child-repair fixes); the committed test
+harness was `92c58fe5a596c5ed056c8216caf2d7baa8412565`. This was one measured
+iteration with other builder checks running concurrently on the same machine;
+retain that load qualification when comparing later measurements.
 
 ## Cache and epochs
 
