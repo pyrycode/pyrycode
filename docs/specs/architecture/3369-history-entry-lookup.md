@@ -34,6 +34,7 @@ All lookup I/O, bounds, cache operations and append updates use existing `Store.
 | Torn tail followed by restart and append | `TestLookupTornTail` |
 | Removed or symlink-replaced file, cold and cached; directory redirect after cache fill | `TestLookupMembership` |
 | Same segment/ID across conversations, LRU promotion/eviction and oversized bypass | `TestLookupCache` |
+| Cached file is resized or becomes newest after later files are removed | `TestLookupCache` |
 | Concurrent appends and repeated lookups | `TestLookupConcurrent` |
 
 ## Error handling
@@ -63,3 +64,6 @@ Pending documentation stage: `docs/knowledge/features/history-package-shape.md`,
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+- 2026-10-14: Reviewing Go's JSON timestamp decoding showed non-UTC fixed-offset locations can be allocated per entry. Cache accounting reserves an additional 256 bytes per non-UTC/non-Local timestamp for that location and its zone/transition arrays; shared UTC/Local remain excluded. `TestLookupCacheAccounting` covers capacity, metadata and this reservation. Metadata round-trip fixtures now seal the segment before mutation to prove cache detachment. Buffered discovery fixtures contain six entries so actual read-ahead remains distinguishable from whole-file reads.
