@@ -65,7 +65,7 @@ func (o *Owner) completed(id string, g *generation) {
 	o.registry.mu.Lock()
 	o.mu.Lock()
 	r := o.currentLocked(id)
-	if o.generations[id] == g && r.AppID != "" && (r.Desired == "stopped" || r.ActiveRelease == "") {
+	if o.generations[id] == g && (g.publication == nil || g.publication.activated) && r.AppID != "" && (r.Desired == "stopped" || r.ActiveRelease == "") {
 		_, _, err := o.registry.commitObservationLocked(r.Manifest.ServerID(), id, r.Revision, Observation{State: "stopped"})
 		if err != nil {
 			o.failures = errors.Join(o.failures, err)
@@ -128,6 +128,9 @@ func (o *Owner) reconcileRecords(rows []Record, revision uint64) time.Duration {
 		}
 	}
 	for id, g := range o.generations {
+		if o.publishing[id] != nil {
+			continue
+		}
 		r, ok := available[id]
 		if !ok || r.ActiveRelease != g.record.ActiveRelease {
 			if !g.retired && !generationDone(g) {
@@ -142,6 +145,9 @@ func (o *Owner) reconcileRecords(rows []Record, revision uint64) time.Duration {
 	delay := time.Hour
 	now := o.now()
 	for id, r := range available {
+		if o.publishing[id] != nil || o.removing[id] || r.PublishJournal != nil {
+			continue
+		}
 		g := o.generations[id]
 		if g != nil && !generationDone(g) {
 			continue

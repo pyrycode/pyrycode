@@ -52,6 +52,7 @@ type Registry struct {
 	snapshot  snapshot
 	persist   func(string, snapshot) error
 	consumers map[*func(Change)]struct{}
+	owner     *Owner
 }
 
 // List returns detached records in app_id order and their committed host revision.
@@ -71,8 +72,24 @@ func (r *Registry) UpdateManifest(appID string, data []byte) (bool, error) {
 }
 
 // Remove tombstones the identity permanently, retaining all source/build/data files.
+// An owner joins writers/recovery first; unresolved journals reject removal.
 // Removing an existing tombstone again is a no-op.
-func (r *Registry) Remove(appID string) (bool, error) { return r.change("remove", appID, nil, nil) }
+func (r *Registry) Remove(appID string) (bool, error) {
+	r.mu.Lock()
+	o := r.owner
+	r.mu.Unlock()
+	if o != nil {
+		return o.removeRegistration(appID)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, record := range r.snapshot.Records {
+		if record.AppID == appID && record.PublishJournal != nil {
+			return false, ErrConflict
+		}
+	}
+	return r.changeLocked("remove", appID, nil, nil)
+}
 func (r *Registry) change(action, appID string, data []byte, update *lifecycleUpdate) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

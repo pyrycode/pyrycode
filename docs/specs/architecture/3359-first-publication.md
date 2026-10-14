@@ -11,6 +11,7 @@
 - `internal/apps/runtime.go` → `prepareRelease`: data creation must follow the journal.
 - `internal/apps/registry.go`, `lifecycle.go`, `releases.go` → `changeLocked`, `UpdatePublish`, `Remove`: atomic conditional storage and removal currently discarding journals.
 - `internal/apps/candidate_test.go`, `health_test.go`, `artifacts_test.go`: reuse checked-build and controlled-health fixtures.
+- `internal/apps/releases_test.go` → `TestMetadataFailures`: removal must retain unresolved journals until their explicit completion.
 - `docs/knowledge/features/apps-package.md` and its lifecycle/concurrency/testing topics: lock registry before owner; inspect actual descendants and durable snapshots; skipped Node supplies no evidence.
 - `docs/knowledge/features/development-verification.md`: prove ordering directly and read executed outcomes.
 - `docs/specs/architecture/3120-hosted-app-contract.md` § Runtime, roots and service conventions / Registration, observed state and safe publication: minimal environment, migration deadline and atomic activation.
@@ -43,9 +44,13 @@ One synchronous caller per admitted app owns preparation, snapshot, migration an
 | Simultaneous same-app publication and Start / independent apps | `TestPublishContention` |
 | Build failure and retry using recorded bytes / completed journal | `TestPublishFailures` |
 | Migration failure/deadline and whole-group retirement | `TestPublishFailures`, `TestPublishRetirement` |
+| Migration leader exits with a surviving descendant | `TestPublishMigrationGroup` |
 | Health mismatch/deadline / activation-write failure | `TestPublishFailures` |
 | Finalization failure before/after activation / restore failure | `TestPublishFailures` |
 | Stop/removal/shutdown during parked build or health / late completion | `TestPublishRetirement` |
+| Caller cancellation / external stopped intent / obsolete health completion | `TestPublishRetirement`, `TestPublishStaleActivation` |
+| Rejected host/app/toolchain / interrupted health retry on identical bytes | `TestPublishAdmission`, `TestPublishRetry` |
+| Durable journal before data preparation / atomic activation | `TestPublishOrdering` |
 | Removal with unresolved restoration evidence | `TestPublishRemovalEvidence` |
 
 ## Error handling
@@ -79,3 +84,10 @@ Pending for documentation stage: `docs/hosted-apps.md`, “Registration and obse
 - [Threat model] Trusted local app/service code follows data/side-effect contract. Restart recovery OUT OF SCOPE (#3263), active updates OUT OF SCOPE (#3360), authenticated control boundary OUT OF SCOPE (#3301/#3266).
 
 **Reviewer:** builder self-review. **Date:** 2026-10-14.
+
+## Revisions
+
+- 2026-10-14: `TestPublishTemplate` executed twice on real Node v24.15.0/npm 11.12.0 and failed at preparation's test phase. Production `candidateEnvironment` puts TMPDIR beneath staging; maintained `fixture` puts test databases there, and `environment` correctly rejects staging data paths. Diagnostic template tests executed 17 checks: 3 passed, 14 failed, 0 skipped. Filed the inherited checked-preparation defect as #3363 (Backlog, priority:low) and linked it as a blocker. Keep the publication proof skipped with that issue until its repair lands, then remove the skip and run the complete real Node/template arm. Its required successful evidence remains outstanding; no acceptance claim is made from the skip.
+- 2026-10-14: Failure-finalization injection showed that journal clearing can fail after restoration. The fallback persists failed/stopped state with the journal retained and static `app.io_failed` where storage permits. Newer stopped intent and unresolved removal recovery retain their evidence; removal is rejected until recovery completes.
+- 2026-10-14: The maintained `environment` contract requires a positive reserved port even for migration. A stricter migrator fixture failed the initial zero-port environment. Reserve one endpoint across migration and candidate spawn, and start the startup deadline from actual spawn; release the reservation on failed publication or generation retirement.
+- 2026-10-14: Install the publication cancellation subscription inside locked admission (`subscribeLocked`) so external stopped → available intent reuse cannot pass unobserved before preparation. `TestPublishRetirement` covers repeated intent while preserving newer title/state. Candidate health feedback is current live usability, separate from the durable activation decision.
