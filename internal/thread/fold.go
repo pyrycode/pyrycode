@@ -49,6 +49,8 @@ type Fold struct {
 	pending                   map[boundaryKey][]uint64
 	turns                     map[mainKey]*mainTurn
 	openings                  map[uint64]*mainTurn
+	openTexts                 []*mainTurn
+	closureCounts             *closureWorkCounts
 	accepted, messages        map[uint64]int
 	childTurns                map[childKey]*mainTurn
 	childCalls                map[childCallKey]*childCall
@@ -143,9 +145,11 @@ func (f *Fold) feedEntry(e history.Entry) {
 		return
 	}
 	if item.Kind == "user_message" {
-		for _, st := range f.openings {
-			f.closeText(st, e.ID)
+		for len(f.openTexts) > 0 {
+			f.countClosureWork(2) // traversal and candidate lookup
+			f.closeText(f.openTexts[len(f.openTexts)-1], e.ID)
 		}
+		f.countClosureWork(1) // final empty check, including messages with no open text
 	}
 	index := f.addItem(e, item)
 	if item.Kind == "user_message" {
