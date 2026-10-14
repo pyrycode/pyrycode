@@ -67,7 +67,12 @@ On success, the queue claims `TerminalDelivered` with `SentNow: true` and fires
 `notify` for the backlog change. Once acceptance completes, `OnDelivered` runs
 before `OnTerminal`, each with its own copied projection. Failed/refused
 send-now attempts emit no terminal outcome; a reinserted message retains its
-original acceptance. See [lifecycle ordering](msgqueue-package-lifecycle.md#delivered-notification-2115).
+original acceptance and immutable item binding. `SendNowItem` checks that binding
+and takes the entry in the same `q.mu` hold; a failed write can be retried with
+the same accepted item ID. Acceptance may bind while a legacy send-now holds the
+item outside the FIFO, so the accepting lifecycle must remain reachable until
+its callback returns; see [acceptance concurrency](msgqueue-package-lifecycle.md#concurrency-model).
+See [lifecycle ordering](msgqueue-package-lifecycle.md#delivered-notification-2115).
 
 ## `headTaken` — the drain must read a refused head's own re-insertion as a drop, not a failure
 

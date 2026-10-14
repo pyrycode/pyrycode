@@ -276,6 +276,24 @@ field swaps. To distinguish an absent key from a present null or empty string,
 inspect the JSON produced by marshalling the decoded DTO too; decoded zero
 values alone cannot prove a required key was emitted.
 
+Pin public request keys in raw JSON, independently of production DTOs. A test
+and handler can agree on the same wrong struct tag while the required client
+key is ignored and an optional guard acts unbound. For `accepted_item_id`,
+`TestQueueCommandItemBinding` uses literal requests for both Drop and Send now;
+`TestQueueActionItemBindingWire` separately checks encoding. Range tests must
+make every other predicate pass: bind the target to the supplied out-of-range
+ID so identity mismatch cannot hide missing numeric validation, then test the
+maximum valid identity and first invalid identity through each action.
+
+A failed `json.Unmarshal` can leave earlier valid target fields populated.
+Duplicate keys can reproduce this: a valid queue id followed by a wrong-typed
+queue id returns an error while retaining the first value. Rejection tests must
+target a live entry and assert no action, write, change notification, terminal
+callback or wire output; assuming zero values would miss the bypass. Exercise
+malformed unbound requests separately from invalid bindings so one early-return
+branch cannot mask the other. See `TestQueueBindingDecodeFailure` and the
+authenticated `TestV2Session_DequeueMessage_DecodeFailureIsInert`.
+
 For optional pointer fields, check omission on the original wire bytes too:
 both a missing key and JSON `null` decode to nil, and re-marshalling hides an
 incorrect explicit null. For encrypted delivery, expose the authenticated
