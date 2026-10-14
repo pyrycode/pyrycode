@@ -639,7 +639,12 @@ func TestReplySuggestionEligibilityBeyondPrefix(t *testing.T) {
 				}
 				select {
 				case exchange := <-calls:
-					if source != "fallback" || !eligible || exchange != [2]string{replyExchangePrefix(user), replyExchangePrefix(assistant)} {
+					sent := assistant
+					if side == "assistant chunks" {
+						sent += "prose"
+					}
+					want := replyExchangeAssistant(replyExchangePrefix(sent), replyExchangeTail(sent, replyExchangeBytes), len(sent))
+					if source != "fallback" || !eligible || exchange != [2]string{replyExchangePrefix(user), want} {
 						t.Fatal("unexpected fallback exchange")
 					}
 				default:

@@ -624,6 +624,9 @@ type streamApprovalConfig struct {
 	timeout  time.Duration
 	surface  *approvalSurfaceReport
 	account  streamsup.AccountTokenProvider
+	// settings composes every Claude launch's --settings value with the
+	// instance's daemon-wide settings file; nil when none is configured.
+	settings streamsup.SettingsComposer
 }
 
 // approvalSurfaceReport bridges the composition-order gap between runner creation
@@ -776,6 +779,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// remain ineligible.
 		scfg.MCPStatusConfigPath = mcpServersPath
 		scfg.AccountTokenProvider = approval.account
+		scfg.SettingsComposer = approval.settings
 		tag := newStreamSessionTag(cfg.SessionID)
 		// The reset follower runs after inventory retention and before fan-in,
 		// using this runner's tag and the pool's adoption callback.
