@@ -84,9 +84,19 @@ including hidden outcomes. A valid `send_accepted` creates one permanent
 `user_message` with acceptance-entry ID/revision, status `queued`, active true
 and `Order == 0`. It is shown by default, subject to explicit `Entry.Shown`.
 Content retains recorded safe text, attachment IDs, `device_id`, app
-`message_id`, `accepted_at` and `client_sent_at`, when present. Normal attribution
-applies: absent provenance stays unknown or uses recorded successor fallback;
-explicit `kind: none` remains distinct and blocks that fallback.
+`message_id`, `accepted_at`, `client_sent_at` and `queued_msg_id`, when present.
+New acceptances copy the actual `QueuedMessage.ID`; `queuedSendHistory.accepted`
+rejects zero before recording. The queue handle is a JSON integer in
+`1..18446744073709551615`, independent of the history-ID range. Both
+`validQueuedSendFact` and `sendFact` accept legacy omission but reject supplied
+zero, null, negative, decimal/exponent notation, wrong-type or overflowing
+values without float conversion. Case-insensitive variants must all match the
+typed decoded handle: accepting conflicting positive variants could expose one
+handle while queued and another after delivery. Malformed facts consume fold
+version without creating or reserving an item.
+
+Normal attribution applies: absent provenance stays unknown or uses recorded
+successor fallback; explicit `kind: none` remains distinct and blocks that fallback.
 
 | Raw outcome | Required reason | Acceptance-item result |
 | --- | --- | --- |
@@ -114,6 +124,27 @@ decodes those sender fields in JSON order with case-insensitive matching before
 merging. Selecting them by map iteration would make duplicate case variants
 nondeterministic; the last matching recorded value wins. It removes delivered
 case variants when replacing a field, keeping one canonical sender key.
+
+The queue handle has acceptance-owned presence as well as value.
+`deliveredSendContent` removes every delivered `queued_msg_id` case variant
+before restoring the recorded acceptance handle when present. Otherwise a
+linked message could invent a handle for a legacy acceptance. Drop/loss retain
+the acceptance handle unchanged, and legacy acceptances remain handle-free
+through every terminal revision. Live additions/changes, catch-up, pages and
+reopened history expose the same permanent item ID and recorded handle.
+
+Only a queued, active `user_message` with a valid handle supplies a Drop/Send now
+target: `conversation_id` plus `content.queued_msg_id`, guarded by the accepted
+`item.id` as optional `accepted_item_id`. Clients should always include the guard:
+an acceptance item `100` with queue handle `7` must not act on item `205` when a
+new daemon run reuses `7`. The daemon matches only its current-run acceptance
+binding on a live queue entry, never a historical fold join, text or app ID.
+Valid omission keeps legacy behavior and the reuse risk. Terminal items remain
+inactive and keep the handle only as historical data. Queue IDs are
+conversation/run-local; reuse cannot reactivate an old item or establish a
+history join. See the
+[queue wire contract](../../protocol-mobile.md#queue-v2) and
+[queue durability boundary](msgqueue-package.md#durability-boundary-in-scope-vs-out).
 
 The linked message supplies the summary and receiving `Session`/`Agent`/`NoChild`
 already resolved under the existing attribution rules, including any successor

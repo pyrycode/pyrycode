@@ -125,6 +125,15 @@ new connection's handshake; consuming or reordering them can lose assertions or
 break receive-nonce order. See the `switchWire.open` regression in
 [agent-switch handover testing](conversation-session-binding.md#testing-agent-switch-handover).
 
+Receiving the Noise handshake response does not establish supplied live-state
+snapshot capture: `V2SessionManager.handleNoiseInit` sends the response before
+calling `ThreadLiveState`, while `switchWire.open` returns after `ReadResp`.
+Synchronize admission and held delivery on bounded signals from the snapshot
+callback itself. Otherwise a valid initial reading can arrive before the
+replacement and falsely fail a fresh-only assertion. Sleeping or discarding stale
+frames would obscure the delivery proof. See the
+[connect-gap regression](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery).
+
 A later frame on `Frames` cannot prove that `V2SessionManager.Run` consumed an
 asynchronous result on a separate buffered channel: either ready select arm can
 win. For a silent completion, await an observation emitted after the completion
@@ -275,6 +284,24 @@ Explicitly assert decoded field values. Distinct fixture values detect accidenta
 field swaps. To distinguish an absent key from a present null or empty string,
 inspect the JSON produced by marshalling the decoded DTO too; decoded zero
 values alone cannot prove a required key was emitted.
+
+Pin public request keys in raw JSON, independently of production DTOs. A test
+and handler can agree on the same wrong struct tag while the required client
+key is ignored and an optional guard acts unbound. For `accepted_item_id`,
+`TestQueueCommandItemBinding` uses literal requests for both Drop and Send now;
+`TestQueueActionItemBindingWire` separately checks encoding. Range tests must
+make every other predicate pass: bind the target to the supplied out-of-range
+ID so identity mismatch cannot hide missing numeric validation, then test the
+maximum valid identity and first invalid identity through each action.
+
+A failed `json.Unmarshal` can leave earlier valid target fields populated.
+Duplicate keys can reproduce this: a valid queue id followed by a wrong-typed
+queue id returns an error while retaining the first value. Rejection tests must
+target a live entry and assert no action, write, change notification, terminal
+callback or wire output; assuming zero values would miss the bypass. Exercise
+malformed unbound requests separately from invalid bindings so one early-return
+branch cannot mask the other. See `TestQueueBindingDecodeFailure` and the
+authenticated `TestV2Session_DequeueMessage_DecodeFailureIsInert`.
 
 For optional pointer fields, check omission on the original wire bytes too:
 both a missing key and JSON `null` decode to nil, and re-marshalling hides an

@@ -228,9 +228,8 @@ type Page struct {
 	AtStart bool    // the start of the log was reached while filling this page
 }
 
-// convLog is one conversation's append cursor, recovered from disk the first
-// time this process touches the conversation. It holds no resolved path: the
-// log directory is re-resolved on every call, deliberately (see resolveDir).
+// convLog holds one conversation's recovered append cursor and independent sync
+// obligations. It holds no resolved path: resolveDir rechecks each storage call.
 type convLog struct {
 	loaded   bool
 	seg      uint64 // active segment number, 0 before the first append
@@ -239,6 +238,11 @@ type convLog struct {
 
 	latestDisplayableID     uint64
 	latestDisplayableLoaded bool
+	lookupBounds            map[uint64]lookupBound
+
+	syncDone       bool
+	syncPending    map[uint64]bool
+	syncDirPending bool
 }
 
 // Store is the per-conversation log rooted at one instance directory. The zero
@@ -250,11 +254,11 @@ type Store struct {
 	maxSegmentBytes int64
 	convs           map[conversations.ConversationID]*convLog
 	followers       map[conversations.ConversationID]map[chan struct{}]struct{}
+	lookupCache     segmentCache
+	syncIO          syncIO
 
-	// AC-4 instrumentation: the two numbers "serving the newest page does work
-	// bounded by the requested page size, not by the log size" is stated in.
-	// Bumped at the single place a segment file is read, and read back by
-	// in-package tests through readStats.
+	// Actual segment opens and bytes, including lookup-prefix discovery.
+	// Cache hits do no segment I/O. Tests observe these through readStats.
 	readBytes      int64
 	segmentsOpened int
 }
@@ -278,6 +282,8 @@ func newStore(instanceDir string, maxSegmentBytes int64) *Store {
 		instanceDir:     instanceDir,
 		maxSegmentBytes: maxSegmentBytes,
 		convs:           make(map[conversations.ConversationID]*convLog),
+		lookupCache:     segmentCache{limit: 8 * 1024 * 1024},
+		syncIO:          syncIO{open: os.OpenFile, sync: (*os.File).Sync, close: (*os.File).Close},
 	}
 }
 
@@ -386,14 +392,29 @@ func (s *Store) AppendWithMetadata(convID conversations.ConversationID, typ stri
 	}
 
 	id := entry.ID
+	if c.syncPending == nil {
+		c.syncPending = make(map[uint64]bool)
+	}
+	c.syncPending[seg] = true
+	if seg != c.seg {
+		c.syncDirPending = true
+	}
 	c.lastID = id
 	if displayableEntry(entry) {
 		c.latestDisplayableID, c.latestDisplayableLoaded = id, true
 	}
 	if seg != c.seg {
+		c.rememberLookupBound(seg, written, id)
 		c.seg, c.segBytes = seg, written
 	} else {
 		c.segBytes += written
+		if bound, ok := c.lookupBounds[seg]; ok {
+			first := bound.firstID
+			if first == 0 {
+				first = id
+			}
+			c.rememberLookupBound(seg, c.segBytes, first)
+		}
 	}
 	s.notifyCommitted(convID)
 	return id, nil
@@ -687,12 +708,27 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 	if err != nil {
 		return nil, err
 	}
+	// Before the first successful sync, recovery has observed these targets but
+	// cannot certify their durability. Retain them even if a later load fails.
+	if !c.syncDone {
+		if c.syncPending == nil {
+			c.syncPending = make(map[uint64]bool)
+		}
+		for _, seg := range segs {
+			c.syncPending[seg.num] = true
+		}
+	}
 	c.lastID = 0
 	for i := len(segs) - 1; i >= 0; i-- {
 		entries, size, complete, err := s.readSegment(filepath.Join(dir, segs[i].name))
 		if err != nil {
 			return nil, err
 		}
+		first := uint64(0)
+		if len(entries) > 0 {
+			first = entries[0].entry.ID
+		}
+		c.rememberLookupBound(segs[i].num, size, first)
 		if i == len(segs)-1 {
 			c.seg, c.segBytes = segs[i].num, size
 			if !complete {

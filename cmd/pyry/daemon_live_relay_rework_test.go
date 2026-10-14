@@ -23,6 +23,15 @@ func TestDaemonLiveRelayPublisherConnectGap(t *testing.T) {
 	b := testControlBindings(t, "conv", "a")
 	send := b.sink.sinkForSessionTag(newStreamSessionTag("a"), "claude")
 	entered, release := make(chan struct{}), make(chan struct{})
+	emptyCaptured, freshAdmitted := make(chan struct{}), make(chan struct{})
+	wait := func(signal <-chan struct{}, phase string) {
+		t.Helper()
+		select {
+		case <-signal:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("connect-gap fixture did not reach %s", phase)
+		}
+	}
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	defer unblock()
@@ -32,8 +41,12 @@ func TestDaemonLiveRelayPublisherConnectGap(t *testing.T) {
 		cfg.ThreadLiveState = func() func() (relay.LiveState, bool) {
 			cursor := snapshot()
 			calls++
+			if calls == 1 {
+				close(emptyCaptured)
+			}
 			if calls == 2 {
 				send(turnevent.ModelAnnounced{Model: "fresh"})
+				close(freshAdmitted)
 			}
 			return cursor
 		}
@@ -50,20 +63,26 @@ func TestDaemonLiveRelayPublisherConnectGap(t *testing.T) {
 		}, func(ctx context.Context, id string) { _ = mgr.RetireLiveState(ctx, id) }, discardLogger())
 	})
 	w.open("phone", false, protocol.CapabilityThread)
+	// The handshake response precedes capture of the supplied live snapshot.
+	wait(emptyCaptured, "empty snapshot capture")
 	send(turnevent.ModelAnnounced{Model: "old"})
-	select {
-	case <-entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("publication did not reach held delivery")
-	}
+	wait(entered, "held delivery")
 	w.open("again", false, protocol.CapabilityThread)
+	wait(freshAdmitted, "replacement admission after second snapshot capture")
 	unblock()
 	seen := map[string]bool{}
 	for len(seen) < 2 {
 		id, e := w.read()
 		if e.Type == protocol.TypeModelAnnounced && !e.SessionStateCleared {
-			if !bytes.Contains(e.Payload, []byte("fresh")) || string(e.SessionID) != `"a"` {
+			var p protocol.ModelAnnouncedPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			if p != (protocol.ModelAnnouncedPayload{ConversationID: "conv", Model: "fresh"}) || string(e.SessionID) != `"a"` {
 				t.Fatalf("stale or unsourced reading: %+v", e)
+			}
+			if id != "phone" && id != "again" {
+				t.Fatalf("unexpected recipient: %s", id)
 			}
 			seen[id] = true
 		}

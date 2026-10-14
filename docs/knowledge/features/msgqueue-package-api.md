@@ -58,7 +58,10 @@ func (q *Queue) EnqueueIdentified(convID, messageID, text, delivery string, atta
 func (q *Queue) Snapshot(convID string) []QueuedMessage
 func (q *Queue) SnapshotAll() map[string][]QueuedMessage
 func (q *Queue) Remove(convID string, id uint64) bool
+func (q *Queue) RemoveItem(convID string, id, itemID uint64) bool
 func (q *Queue) SendNow(convID string, id uint64) bool
+func (q *Queue) SendNowItem(convID string, id, itemID uint64) bool
+func (q *Queue) BindAcceptedItem(convID string, id, itemID uint64)
 func (q *Queue) Run(ctx context.Context) error
 func DeliveryMessage(ctx context.Context) (QueuedMessage, bool)
 ```
@@ -130,6 +133,22 @@ history writer must link terminal facts to its own acceptance record instead of
 treating the queue id as a global durable key. Production lifecycle wiring and
 that writer are owned by #2972 under
 [ADR 042](../decisions/042-daemon-built-thread.md).
+
+**Guard remote actions against restart reuse (#3340).** A queue id can name a
+different message after restart, even while a client still displays the older
+acceptance. `BindAcceptedItem` records the first nonzero daemon-held acceptance
+item ID on the shared lifecycle. Production installs it in `runSupervisor`:
+`queuedSendHistory.accepted` binds after a successful durable append and before
+publishing acceptance; failed appends establish no binding. `RemoveItem` and
+`SendNowItem` require that binding on a live FIFO entry in the named conversation.
+Comparison and mutation share `q.mu`, so a separate history lookup followed by
+legacy `Remove`/`SendNow` would reopen a check-then-act race. No lookup waits for
+acceptance or creates history references; `queuedSendHistory.reference` creates
+placeholders and is unsuitable for untrusted targets. Zero, missing, mismatched
+and retired bindings return false without mutation or observers. Existing
+`Remove` and `SendNow` retain their unbound behavior. See
+[queue wire commands](../../protocol-mobile.md#queue-v2) and
+[acceptance concurrency](msgqueue-package-lifecycle.md#concurrency-model).
 
 ## Introspection, removal, and change notification (#719)
 

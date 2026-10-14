@@ -1104,6 +1104,27 @@ The eight current kinds are:
 | `turn_end` | Turn stop reason and usage. |
 | `notice` | Banner, refusal, reroute, unrecognized output, attachment offer or answered prompt; `subtype` distinguishes it. |
 
+An accepted `user_message` exposes `content.queued_msg_id` immediately (#3324):
+the daemon-assigned queue handle as a JSON integer in
+`1..18446744073709551615` (positive uint64). Preserve its exact integer value
+when decoding and sending it; floating-point conversion can lose precision.
+It is distinct from the permanent acceptance history entry `item.id`:
+item `100` can carry queue handle `7`. The same identity and handle appear in
+live additions/changes, catch-up, pages and reopened history. Legacy acceptances
+omit the handle, including after delivery; clients must not infer one from text,
+order, `message_id`, item ID or the linked delivered message.
+
+Drop and Send now require `kind: user_message`, `status: queued`, `active: true`
+and a valid handle. Target the existing [queue commands](#queue-v2) with the
+thread conversation's `conversation_id` plus `content.queued_msg_id`, never
+`item.id`.
+Delivery, drop and restart loss retain the acceptance-owned handle as historical
+data while setting `active: false`; delivery stays `delivered` with acceptance
+visibility, drop becomes hidden `dropped`, and loss becomes shown `lost`.
+Queue handles are scoped to a conversation and daemon run, so a later run can
+reuse the number for another entry. A terminal item's retained handle supplies
+no action target, even if that number is currently queued again.
+
 Unknown kinds, status words and content fields remain inert display data with
 their summary. Clients use `active` directly rather than deriving activity
 from a known status list. Content can contain untrusted user or subprocess
@@ -5041,7 +5062,63 @@ The operator declined to choose, so the batch resolves with no selection. It is 
 
 ### Queue (v2)
 
-A phone that types while claude is busy has its turn buffered in the daemon's queued-message backlog (#597 Phase 3, `internal/msgqueue`). `queue_state` (view) lets the phone see that backlog, `dequeue_message` (cancel) lets it drop an entry it no longer wants, and `send_queued_now` (#2729, accelerate) lets it write an entry into the running turn instead of waiting for idle. Like answering in the [Modal](#modal-v2) cluster since **#2605**, **viewing, dequeuing and sending-now are all ungated for any paired (authenticated) phone** (ADR 025 [Security model](#security-model)): there is no privileged per-device gate and no nonce; `queued_msg_id` is a plain per-conversation counter. All fields on the queue control frames below are always present (no omitempty); the delivered [`message`](#application-message-types) field described below is optional. This section is wire vocabulary only; *when* the daemon emits `queue_state` and *how* the handlers apply `dequeue_message` / `send_queued_now` is the producer's (#722) / handlers' (#723, #2729) runtime, documented there.
+A phone that types while claude is busy has its turn buffered in the daemon's queued-message backlog (#597 Phase 3, `internal/msgqueue`). `queue_state` (view) lets the phone see that backlog, `dequeue_message` (cancel) lets it drop an entry it no longer wants, and `send_queued_now` (#2729, accelerate) lets it write an entry into the running turn instead of waiting for idle. Like answering in the [Modal](#modal-v2) cluster since **#2605**, **viewing, dequeuing and sending-now are all ungated for any paired (authenticated) phone on an interactive connection** (ADR 025 [Security model](#security-model)): there is no privileged per-device gate and no nonce; `queued_msg_id` is a plain per-conversation counter. Both commands require `conversation_id` and `queued_msg_id`; `accepted_item_id` is optional and omitted when unset. The `queue_state` fields are always present; the delivered [`message`](#application-message-types) field described below is optional.
+
+Accepted thread `user_message` items also expose the genuine handle before
+delivery as `content.queued_msg_id` (#3324), a JSON integer in
+`1..18446744073709551615` (positive uint64). Preserve the full integer exactly.
+Use the thread conversation's `conversation_id` plus that handle for Drop
+(`dequeue_message`) or Send now (`send_queued_now`), only while `status: queued`
+and `active: true`.
+The acceptance history entry remains `item.id`. **Clients should always include
+that ID as `accepted_item_id` on both commands** (#3340). It is a JSON integer
+in `1..9007199254740991`, the thread identity range. It guards the required
+`conversation_id` plus `queued_msg_id`; it does not replace either selector.
+Legacy acceptances omit the handle; do not guess it from text, order,
+app `message_id` or history ID, or import it from a linked delivered message.
+
+Delivery, drop and restart loss retain the acceptance's handle as historical
+data with `active: false`, retaining the existing terminal status and visibility
+rules described under [Full thread item](#full-thread-item). Handles are scoped
+to a conversation and daemon run; restart does not restore the queue and a new
+run can reuse a number. A terminal item's handle must never target that later
+entry. Item identity and handle agree across live updates, catch-up, pages and
+reopened history, so catch-up can recover a missed send acknowledgement.
+
+**Current-run identity guard.** A supplied `accepted_item_id` allows the command
+to act only on a live queued entry in the named conversation with that queue
+handle and the same daemon-recorded acceptance item ID from this daemon run.
+Historical records, text, order, app `message_id` and device identity cannot
+establish this binding. Two devices can share a `message_id` and still have
+distinct acceptance items. The binding guards identity; it adds no per-device
+permission requirement and preserves the existing authenticated/interactive gates.
+
+Missing, unfinished or failed current-run acceptance records, a mismatched
+binding, or an entry already delivered, dropped or lost on restart cause a
+**silent no-op**. The check does not wait for unfinished acceptance on the relay
+loop. A present invalid binding also no-ops: `null`, zero, an empty or numeric
+string, other wrong types, negative, fractional, exponent-form or out-of-range
+numbers never fall back to the unbound operation. Malformed payloads no-op even
+if decoding populated valid target fields before failing. These rejections
+cause no queue mutation, delivery, cancellation, lifecycle/history publication
+or wire output. Supplied binding values and raw payload bytes are never echoed
+in replies or logs.
+
+**Valid omission retains legacy behavior and side effects.** Omitting
+`accepted_item_id` selects only by conversation and queue handle, so a stale
+view can act on a different entry that reuses the handle after restart, before
+the client receives the older item's loss revision. Omission and present-invalid
+remain distinct through protocol encoding. A matching bound command retains
+the existing Drop/Send now eligibility, committing-head protection and
+delivery/outcome ordering; a successful Send now still invalidates suggestions.
+Client adoption is owned by [Mobile #1986](https://github.com/pyrycode/pyrycode-mobile/issues/1986)
+and [Desktop #1906](https://github.com/pyrycode/pyrycode-desktop/issues/1906).
+
+On connections that negotiated `thread`, unsolicited `queue_state`, including
+connect-time reconciliation, remains withheld. The legacy change-driven and
+connect-time snapshots below apply to interactive connections without `thread`.
+Thread clients recover accepted items through explicit catch-up and observe
+their subsequent thread updates.
 
 #### `queue_state`
 
@@ -5054,7 +5131,7 @@ Direction **binary → phone** (outbound v2 queued-backlog snapshot; not in `v1T
 
 **`message_id` (#2092)** is the id the client minted on the [`send_message`](#send_message) that produced this item, **relayed verbatim** — byte-for-byte what the client sent, never trimmed, lower-cased or re-encoded. It is `""` when the client sent none (a legal value: the field is non-omitempty and the daemon validates nothing about it), and the daemon **never mints one**. It exists so a client can recognise a queued item as one of its own sent messages: a client posts an optimistic echo the moment the operator hits send, before the daemon confirms delivery with a user `message` push, and without a shared key the client draws the same message twice, once as a delivered bubble and once as a queued row. Worse, dropping the queued message then removes only the queued row, leaving the echo reading as a message claude received when it never did.
 
-`message_id` **addresses nothing**. [`dequeue_message`](#dequeue_message) still resolves `conversation_id` + `queued_msg_id` and nothing else, and no daemon path reads `message_id` to route, authorize, match or dedupe. It is a correlation key for the client, not an identifier on the wire — uniqueness is enforced nowhere, and two items may legally carry the same one.
+`message_id` **addresses nothing**. [`dequeue_message`](#dequeue_message) resolves `conversation_id` + `queued_msg_id`, optionally guarded by `accepted_item_id`, and no queue command uses `message_id` to route, authorize, match or dedupe. It is a correlation key for the client, not an identifier on the wire — uniqueness is enforced nowhere, and two items may legally carry the same one.
 
 **Delivered entry identity (#2819).** A delivered user `message` carries optional integer `queued_msg_id` (unsigned 64-bit, ≥ 1), copied from the same queue entry shown in `queue_state`. Use `conversation_id` plus `queued_msg_id` to associate a delivery with its queued entry: two entries sharing `message_id` still have distinct queue ids. Ordinary and Send now deliveries preserve that id in byte-identical live and stored payloads. Zero/no-entry messages, including assistant messages, omit the field; decoding and re-encoding a legacy payload does not add it. Older daemons omit it, so clients retain their current inference as fallback when it is absent. This field names the entry; its presence is an identity claim, not proof of timing on Codex or the no-echo path. Placement follows the delivery path below.
 
@@ -5075,12 +5152,13 @@ Placement waits for a successful write, never for the queue's later delivery cal
 
 #### `dequeue_message`
 
-Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler. It is **ungated**; resolving `conversation_id` to an authorized conversation and applying the removal (`msgqueue.Remove`) is the handler's (#723) job.
+Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler. It is **ungated beyond paired authentication and the `interactive` capability**; the handler applies removal in the named conversation after checking any supplied acceptance binding.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | The conversation to dequeue from. Untrusted phone input — the handler (#723) resolves it to an authorized conversation. |
-| `queued_msg_id` | integer | The id to remove (the `queued_msg_id` from a `queue_state` entry). |
+| `queued_msg_id` | integer | Positive uint64 id to remove, from a `queue_state` entry or a queued active thread item's `content.queued_msg_id`. |
+| `accepted_item_id` | integer | **Optional; clients should always include it.** JSON integer in `1..9007199254740991`, from the accepted thread item's `item.id`. Guards the required conversation and queue handle against the daemon's current-run acceptance; invalid values, missing/unfinished/failed acceptance records or mismatches silently no-op as defined above. Omission retains legacy behavior and restart-reuse risk. |
 
 #### `send_queued_now`
 
@@ -5089,9 +5167,10 @@ Direction **phone → binary** (inbound v2 control; #2729). Intercepted by the v
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | The conversation holding the message. Untrusted phone input — the handler resolves it to an authorized conversation. |
-| `queued_msg_id` | integer | The id to write now (the `queued_msg_id` from a `queue_state` entry). |
+| `queued_msg_id` | integer | Positive uint64 id to write now, from a `queue_state` entry or a queued active thread item's `content.queued_msg_id`. |
+| `accepted_item_id` | integer | **Optional; clients should always include it.** JSON integer in `1..9007199254740991`, from the accepted thread item's `item.id`. Guards the required conversation and queue handle against the daemon's current-run acceptance; invalid values, missing/unfinished/failed acceptance records or mismatches silently no-op as defined above. Omission retains legacy behavior and restart-reuse risk. |
 
-It asks the daemon to write the named queued message into that conversation's **currently running** turn instead of waiting for the ordinary drain to reach idle. There is no dedicated reply: the client observes the effect the same way it observes a `dequeue_message` — the entry drops out of the next [`queue_state`](#queue_state) push, and, when the message is the operator's own, the live `message` push the daemon makes for every delivered queued message (#2699) fires too.
+It asks the daemon to write the named queued message into that conversation's **currently running** turn instead of waiting for the ordinary drain to reach idle. There is no dedicated reply: on connections without `thread`, the entry drops out of the next [`queue_state`](#queue_state) push and the live delivered `message` push fires too. Thread connections observe the accepted item's updates through the thread protocol; unsolicited and connect-time `queue_state` remain withheld.
 
 The delivered user `message` and its history entry carry optional boolean `sent_now: true` for this delivery path. Ordinary queued delivery omits it. The daemon derives the flag from the completed queue operation, never from client message content. A client uses it to distinguish Send now from ordinary queued delivery. Since #2820, echoed ordinary Claude delivery uses the delivered push position as the answering turn's opening line; a late queue callback cannot relocate it. Send now uses its own delivered push position where Claude read it. On older daemons whose ordinary confirmation can arrive after the reply, clients retain their current inference for an already settled own echo; Codex/no-stream and no-echo fallback timing also lack the echoed ordinary opening guarantee. Queue removal alone cannot distinguish these cases. Older daemons omit `sent_now` for both paths; clients requiring the distinction need a daemon that emits it.
 

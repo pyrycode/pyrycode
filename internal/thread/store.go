@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -75,6 +76,8 @@ type Store struct {
 	shutdownDone chan struct{}
 	shutdownErr  error
 	replace      func(string, string) error
+	now          func() time.Time
+	newTimer     func(time.Duration) (<-chan time.Time, func())
 }
 
 // NewStore creates a background cache owner; history is the durable source.
@@ -90,6 +93,11 @@ func NewStore(h *history.Store, beforeFold ...func(context.Context, conversation
 		history: h, beforeFold: barrier,
 		records: make(map[conversations.ConversationID]progressRecord),
 		replace: os.Rename,
+		now:     time.Now,
+		newTimer: func(d time.Duration) (<-chan time.Time, func()) {
+			timer := time.NewTimer(d)
+			return timer.C, func() { timer.Stop() }
+		},
 		workers: make(map[conversations.ConversationID]*conversationWorker),
 		forward: func(id conversations.ConversationID) (storeReader, error) { return h.Forward(id, 0) },
 	}
@@ -147,12 +155,34 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	result := ErrUnavailable
 	var progress Snapshot
 	var recovery recoveryRecord
+	var savedVersion uint64
+	var lastCheckpoint time.Time
+	var deadline <-chan time.Time
+	var stopTimer func()
+	clearTimer := func() {
+		if stopTimer != nil {
+			stopTimer()
+		}
+		deadline, stopTimer = nil, nil
+	}
+	flush := func() error {
+		if err := s.checkpoint(id, recovery, progress); err != nil {
+			return err
+		}
+		savedVersion, lastCheckpoint = progress.Version, s.now()
+		clearTimer()
+		return nil
+	}
 	defer func() {
+		clearTimer()
 		s.mu.Lock()
 		retiring := w.retiring
 		s.mu.Unlock()
 		if retiring && progress.State == StateUsable && errors.Is(result, context.Canceled) {
-			result = s.checkpoint(id, recovery, progress)
+			result = nil
+			if progress.Version != savedVersion {
+				result = flush()
+			}
 		}
 		w.cancel()
 		s.mu.Lock()
@@ -243,10 +273,19 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		for _, item := range fold.items {
 			snapshot.Active = snapshot.Active || item.Active
 		}
-		if err := s.checkpoint(id, recovery, snapshot); err != nil {
-			return err
-		}
+		initial := progress.State != StateUsable
+		becameIdle := progress.Active && !snapshot.Active
 		progress = snapshot
+		if initial || progress.Version != savedVersion {
+			remaining := lastCheckpoint.Add(30 * time.Second).Sub(s.now())
+			if initial || becameIdle || remaining <= 0 {
+				if err := flush(); err != nil {
+					return err
+				}
+			} else if deadline == nil {
+				deadline, stopTimer = s.newTimer(remaining)
+			}
+		}
 		s.publish(ctx, id, w, snapshot, fold)
 		return nil
 	}
@@ -254,19 +293,67 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		result = err
 		return
 	}
-	// Partial Feed failures never become complete progress. Retry constructs a
-	// new reader and fold rather than redelivering into partially consumed state.
-	result = reader.Tail(ctx, func(entries []history.Entry) error {
-		if err := ctx.Err(); err != nil {
-			return err
+	// Tail waits for commits independently; only this worker accesses the fold
+	// and checkpoints. Acknowledgement keeps at most one chunk in flight.
+	tailCtx, cancelTail := context.WithCancel(ctx)
+	chunks := make(chan []history.Entry)
+	ack := make(chan error)
+	tailResult := make(chan error, 1)
+	tailDone := make(chan struct{})
+	go func() {
+		defer close(tailDone)
+		tailResult <- reader.Tail(tailCtx, func(entries []history.Entry) error {
+			select {
+			case chunks <- entries:
+			case <-tailCtx.Done():
+				return tailCtx.Err()
+			}
+			select {
+			case err := <-ack:
+				return err
+			case <-tailCtx.Done():
+				return tailCtx.Err()
+			}
+		})
+	}()
+	defer func() { cancelTail(); <-tailDone }()
+	for {
+		select {
+		case <-ctx.Done():
+			result = ctx.Err()
+			return
+		case result = <-tailResult:
+			if result == nil {
+				result = ErrUnavailable
+			}
+			return
+		case <-deadline:
+			if result = flush(); result != nil {
+				return
+			}
+		case entries := <-chunks:
+			if result = ctx.Err(); result == nil {
+				// Partial Feed failures never become complete progress. Retry
+				// constructs a fresh reader and fold after a failed chunk.
+				if err := feed(entries); err != nil {
+					result = ErrUnavailable
+					if errors.Is(err, context.Canceled) {
+						result = err
+					}
+				} else {
+					result = publish()
+				}
+			}
+			if result != nil {
+				return
+			}
+			select {
+			case ack <- nil:
+			case <-ctx.Done():
+				result = ctx.Err()
+				return
+			}
 		}
-		if err := feed(entries); err != nil {
-			return ErrUnavailable
-		}
-		return publish()
-	})
-	if result == nil {
-		result = ErrUnavailable
 	}
 }
 
@@ -311,7 +398,7 @@ func (s *Store) Snapshot(id conversations.ConversationID) Snapshot {
 	return snapshot
 }
 
-// Unload checkpoints complete progress, cancels and joins one worker, and
+// Unload checkpoints dirty complete progress, cancels and joins one worker, and
 // releases all items/private fold state. It does not certify a clean lifetime.
 // Persistence or incomplete recovery failures are returned without source data.
 func (s *Store) Unload(id conversations.ConversationID) error {

@@ -64,7 +64,7 @@ func TestSendDelivery(t *testing.T) {
 			if item.Summary != "safe delivered" {
 				t.Fatal(item)
 			}
-			for key, want := range map[string]any{"text": "safe\ndelivered", "attachment_ids": []any{"delivered-file"}, "device_id": "phone", "message_id": "same", "accepted_at": "2026-01-01T00:00:00Z", "client_sent_at": "client time", "device_name": "phone", "client_version": "v2", "queued_msg_id": float64(90), "sent_now": true, "future": "saved"} {
+			for key, want := range map[string]any{"text": "safe\ndelivered", "attachment_ids": []any{"delivered-file"}, "device_id": "phone", "message_id": "same", "accepted_at": "2026-01-01T00:00:00Z", "client_sent_at": "client time", "device_name": "phone", "client_version": "v2", "sent_now": true, "future": "saved"} {
 				testContent(t, item, key, want)
 			}
 			var saved map[string]any

@@ -145,6 +145,14 @@ committed entries after recovery, measuring preparation separately from adapter
 allocations. `TestDaemonThreadQueriesJoin` reconstructs full current states
 through race refusal, successful retry and subsequent real publisher updates.
 
+Wire lifecycle tests must read the live acceptance before completing same-version
+catch-up, which can suppress duplicate publication. A delivered message and its
+outcome can reach separate fold batches; suppressing the earlier public message
+then requires a baseline and retires the peer. `TestQueuedSendHandleActions`
+checks retained-range continuity, asserting the live terminal patch when usable
+or authenticated replacement-peer catch-up when retirement is required. Waiting
+only for a terminal patch would mistake valid retirement for missing content.
+
 Nil or failed shadow storage leaves legacy traffic operational.
 `TestThreadShadowLegacy` checks an authenticated Noise peer through
 the production session manager, comparing live frames, reconnect replay, history
@@ -264,20 +272,49 @@ establishes an incomplete run certificate and replaces the conversation's
 recovery marker, invalidating its previous clean claim. Failure leaves the view
 unavailable. Folding semantics changes must increment `foldingRules`.
 
+Choose the revision against the current merged rules: concurrent semantic changes
+can otherwise select the same revision. A missing-field cache regression can
+still pass because replayed content differs, concealing that collision.
+`TestStoreQueueHandleCacheRules` also supplies old-rule caches with matching
+rows and requires a new epoch, proving rule incompatibility independently of
+content mismatch. Accepted-send handle semantics use rules revision 3; caches
+from revisions 1 or 2 rebuild from raw history and cannot hide recorded handles.
+
 Recovery remains `StateRebuilding` until replay and a complete checkpoint
 succeed. Missing or unusable cache data rebuilds from history; genuinely missing
 or empty history gives an empty usable view at version zero. Unreadable history
 never yields a cache-only view. History/cache I/O, containment and unsafe-leaf
 failures instead leave `StateUnavailable` with generic `ErrUnavailable`;
 repair followed by `Retry` creates a new reader and fold. Completed progress is
-checkpointed before every publication, including tail updates. Writes use
-synced, closed `0600` temporary files and atomic replacement; reads use no-follow
-regular-file checks. Each operation validates IDs and re-resolves history's
+checkpointed before the first usable recovery publication. Tail items, consumed
+version, `LastShownVersion` and change notifications publish without waiting for
+the checkpoint deadline, so a usable view may be newer than its saved cache.
+A failed initial or scheduled checkpoint withdraws usability with generic
+`ErrUnavailable`; lifecycle results retain `ErrPersistence` and prevent clean
+certification.
+
+Dirty progress means a fully folded version newer than the saved version,
+including entries that change no public item. Each conversation's deadline is
+30 seconds after its last successful checkpoint. Further appends never postpone
+it: dirty progress flushes at that deadline even if appends stop, or immediately
+when it first becomes dirty after the deadline has passed. Unchanged progress
+arms no timer and causes no periodic replacement. Active-to-idle, unload and
+shutdown flush completed dirty progress as exceptions to the interval bound;
+successful lifecycle checkpoints start a new interval. Already-inactive
+publications follow the bounded schedule. Activity includes private unresolved
+work, as described under
+[isolation and lifecycle](thread-package-background-store.md#isolation-and-lifecycle).
+After an unclean stop, committed history newer than the cache is replayed along
+with earlier pending child/report evidence; items, revisions, consumed version
+and last-shown watermark converge with full replay, while the epoch rotates.
+
+Writes use synced, closed `0600` temporary files and atomic replacement; reads
+use no-follow regular-file checks. Each operation validates IDs and re-resolves history's
 exact directory containment, rejecting sibling/outside redirects and symlink or
 nonregular leaves. Errors contain no content, payloads or host paths, and cache
 operations preserve history bytes and its existing append durability contract.
 
-`Unload` checkpoints completed progress where available, cancels/joins the
+`Unload` checkpoints completed dirty progress where available, cancels/joins the
 worker, unregisters tailing and releases items and private fold state, retaining
 only scalar lifecycle records. Compatible unload/reload in one store lifetime
 preserves the epoch even though that run's certificate remains incomplete;
