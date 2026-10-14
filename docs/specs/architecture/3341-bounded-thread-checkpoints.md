@@ -59,3 +59,6 @@ Pending for documentation stage: update `docs/knowledge/features/thread-package.
 - Threat model: losing unsaved cache progress is intentional and recoverable from history. Existing history durability and hostile filesystem race model remain unchanged; no new security scope is deferred.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-14
+
+## Revisions
+- 2026-10-14: `TestStoreCheckpointCancelledFold` exposed cancellation during the optional fold barrier losing the preceding complete dirty publication. Preserve a cancellation result from `feed` so retirement flushes only that completed progress; other failed folds remain unavailable. Add this race test and `TestStoreCheckpointInitialReadiness` to the lifecycle/readiness proofs.
