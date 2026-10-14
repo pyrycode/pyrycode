@@ -52,12 +52,18 @@ func runMemoryCredential(ctx context.Context, args []string, in *os.File, out io
 		Configured bool `json:"configured"`
 	}{configured})
 }
+
+// memoryCredentialGOOS overrides the platform of the local credential store.
+// Empty in production. Tests set it so the CLI path cannot reach a real
+// keyring.
+var memoryCredentialGOOS string
+
 func localMemoryCredentialStore() (memoryCredentialStore, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return memoryCredentialStore{}, errMemoryStorage
 	}
-	return memoryCredentialStore{home: home}, nil
+	return memoryCredentialStore{home: home, goos: memoryCredentialGOOS}, nil
 }
 func resolveMemoryCredential(ctx context.Context, ref string) (string, error) {
 	s, err := localMemoryCredentialStore()
