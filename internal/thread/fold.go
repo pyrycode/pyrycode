@@ -60,6 +60,7 @@ type Fold struct {
 	childDirty                map[int]struct{}
 	childEndings              map[int]json.RawMessage
 	agentGroups               map[agentKey]*agentGroup
+	agentCounts               *agentWorkCounts
 	agentLifetimes            map[agentKey]string
 	agentObservations         map[uint64][]agentObservation
 }
