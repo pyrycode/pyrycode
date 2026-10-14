@@ -4,6 +4,7 @@
 - `internal/thread/fold.go` → `Feed`, `addItem`: partial progress and creation order.
 - `internal/thread/observations.go` → `recordShown`, `difference`: post-join visibility and exact replacement/suffix contract.
 - `internal/thread/render.go` → `render`, `recentSource`: resolve reference-backed content without changing public ownership.
+- `internal/history/forward.go` → `Walk`; `internal/history/log.go` → `Page`, `readSegment`: decoded payloads own their bytes and are not reused when later chunks arrive.
 - `internal/thread/store.go` → `run`, `publish`, `Snapshot`: successful-chunk publication and checkpoint scheduling.
 - `internal/thread/queries.go`, `internal/thread/catch_up.go` → `queryIndex`, `prepareCatchUp`: immutable captured reads and rebuilt indexes.
 - `internal/thread/observations_store.go` → `retain`, `Changes`: detached bounded change retention.
@@ -61,3 +62,16 @@ None. Preserve reference-backed rendering already present in the implementation 
 
 ## Revisions
 - 2026-10-14: `TestStoreReferenceRetry` previously required unrelated no-op tails to reread unchanged source content. Tail failure now uses a delivery join to an evicted reference, proving a required read failure rejects partial progress and fresh retry recovers. Internal additions share immutable Content; the public `difference` wrapper continues detaching additions. Each captured item has its own allocation so retaining one unchanged pointer cannot pin all replaced content from an earlier chunk.
+- Candidate enumeration uses a dense slice alongside membership lookups, preserving affected-only traversal after a historical peak; cleanup deletes only current candidates.
+
+## Performance evidence
+Capture plus comparison, median of three 300-iteration samples: Go 1.26.9, Linux/amd64, Intel Core i7-3770 @ 3.40 GHz, `GOMAXPROCS=1`. Identical bounded corpus: 1,000 entries, 170 fold rows, 140 public items, one prepared assistant item with a text suffix and summary/revision change. Feed/replay, checkpoint I/O, query-index preparation and wire/output rendering are outside timing. Other validation was active on the shared host, so ns/op is observational; allocation counts were stable.
+
+| Source/path | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| Base `e4aa4d56`, whole capture/difference | 1,333,928 | 293,190 | 689 |
+| Implementation `0c3c6f18`, whole reference path | 1,159,202 | 293,191 | 689 |
+| Implementation `0c3c6f18`, affected capture/difference | 297,057 | 27,986 | 119 |
+
+Commands: `GOMAXPROCS=1 go test -overlay /tmp/builder-3388/base-overlay.json ./internal/thread -run '^$' -bench '^BenchmarkPublicationPhases$' -benchtime=300x -count=3`, then the same command without `-overlay /tmp/builder-3388/base-overlay.json`.
+The scratch Go overlay restores base versions of `fold.go`, `observations.go`, `queries.go`, `render.go` and `store.go` from `git show e4aa4d56:internal/thread/<file>`, substitutes an empty package for the new `publication.go`, and substitutes the standalone whole-path benchmark callback for `publication_test.go`. Its setup/mutation/measurement matches the committed whole-path callback exactly; no base production source is edited. The final benchmark metadata reports public item count rather than private fold-row count; that metric-only correction does not change the measured operations.

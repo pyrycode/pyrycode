@@ -178,7 +178,7 @@ func BenchmarkPublicationPhases(b *testing.B) {
 				}
 			}
 			b.ReportMetric(float64(len(entries)), "entries")
-			b.ReportMetric(float64(len(f.items)), "items")
+			b.ReportMetric(float64(len(before.Items)), "items")
 		})
 	}
 }
