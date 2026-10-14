@@ -51,8 +51,8 @@ None. Recent entry count is capped as well as byte size; this trades hit rate fo
 
 ## Documentation handoff
 Pending documentation stage:
-- `docs/knowledge/features/thread-package-main-thread-folding.md`, **Standalone source entries**: describe converted kinds and deferred rendered user summaries.
-- `docs/knowledge/features/thread-package-background-store.md`, **Snapshots and retry**: describe fallible renderer, feed/recent/Lookup source order, 1 MiB recent-cache bound and unavailable/retry behavior. State Store snapshots still retain rendered content until #3386.
+- `docs/knowledge/features/thread-package-main-thread-folding.md`, **Standalone source entries**: describe the converted kinds and render-time plain-user summaries.
+- `docs/knowledge/features/thread-package-background-store.md`, **Snapshots and retry**: describe the fallible renderer, feed/recent/Lookup source order, 1 MiB retained-entry cache bound and unavailable/retry behavior. State that Store snapshots/query rows still retain rendered content until #3386.
 
 ## Security review
 **Verdict:** PASS
