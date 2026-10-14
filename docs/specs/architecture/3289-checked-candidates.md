@@ -50,6 +50,7 @@ None. npm selection is its CLI script passed to selected Node; trusted scripts a
 
 ## Documentation handoff
 Pending documentation stage: `docs/hosted-apps.md` § Runtime and layout and Create, publish and update: checked private staging and ordered commands; numeric versions and byte-identical retries; original recorded toolchain metadata and safe phase feedback. Under Retained candidate artifacts link retained contents and canonical inventory. State candidate success proves build validation; publication owns health-confirmed activation/readiness.
+Carry forward the earlier verifier handoff: explain private npm configuration and lifecycle Node pinning within the trusted-code boundary in those hosted-app sections. Update `docs/knowledge/features/apps-package-validation-and-stored-identity.md` § Validation and stored identity with the retained-artifact boundary: `selectBuild` ignores installer `.install-*` directories while rejecting malformed or partial digest builds. Both items remain pending for the documentation stage.
 
 ## Security review
 **Verdict:** PASS
