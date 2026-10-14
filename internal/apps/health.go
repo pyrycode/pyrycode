@@ -88,6 +88,11 @@ func (o *Owner) supervise(ctx context.Context, id string, g *generation, spawned
 				return "Service health check failed"
 			}
 			if healthy {
+				if g.publication != nil && g.publication.startupRecovery {
+					if err := o.backupOps.step(startup, "recovery-validated"); err != nil {
+						return "Service recovery validation interrupted"
+					}
+				}
 				if err := o.confirmRunning(startup, id, g); err != nil {
 					if errors.Is(err, ErrUnavailable) {
 						return "Service exited unexpectedly"

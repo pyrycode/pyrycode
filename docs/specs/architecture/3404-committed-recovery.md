@@ -60,3 +60,8 @@ Pending documentation stage: `docs/knowledge/features/apps-package-lifecycle-and
 - Threat model: trusted app code and exclusive filesystem ownership are contract assumptions. Daemon composition/control are downstream #3266/#3301 responsibilities.
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: `validMetadata` validates journal identity/shape but does not enforce candidate equality with ActiveRelease. Select the journal candidate explicitly for committed recovery and commit that pointer with successful completion; preserve the current title and all newer fields through exact revision checks. Rename the shared private restart helper to `restartRecovery` because it now selects either recovery release.
+- 2026-10-15: self-review found that skipping restoration also skips its data-path confinement. Before committed validation/start, open the existing data directory and database through `privateDir`/`regularAt` without creating files or following symlinks. A stopped symlink database must retain the journal rather than validate foreign data.
+- 2026-10-15: supported real Node exposed pre-existing macOS initialized-SQL snapshot failure in `backupOps.runBackupNode` (`/dev/fd` subprocess cwd). Filed #3415 in Backlog with priority:low and retained `TestCommittedTemplateUpdateSnapshot` skipped on macOS. The required real SQL restart arm uses actual first publication with two migrations, then writes saved preferences through its health-confirmed target before owner transfer; update recovery remains covered by the controlled real-publication restart cases. The main SQL recovery arm must execute and pass without skips.
