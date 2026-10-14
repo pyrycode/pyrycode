@@ -22,6 +22,7 @@ import (
 type healthReply struct {
 	API              bool
 	Descendant       bool
+	HoldHealth       bool
 	Body             string
 	Status           int
 	Delay, BodyDelay time.Duration
@@ -129,8 +130,29 @@ func TestHealthHelperProcess(t *testing.T) {
 			w.(http.Flusher).Flush()
 			time.Sleep(reply.BodyDelay)
 		}
+		if reply.HoldHealth {
+			w.(http.Flusher).Flush()
+			if err := os.WriteFile(filepath.Join(data, "health-blocked"), nil, 0600); err != nil {
+				os.Exit(7)
+			}
+			ticker := time.NewTicker(5 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				if _, err := os.Stat(filepath.Join(data, "health-release")); err == nil {
+					break
+				}
+				select {
+				case <-req.Context().Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}
 		w.Write([]byte(reply.Body))
 	})}
+	if config.HoldHealth {
+		server.WriteTimeout = time.Minute
+	}
 	go server.Serve(listener)
 	if e := publishOwnerPID(filepath.Join(data, "ready")); e != nil {
 		os.Exit(6)
