@@ -58,3 +58,6 @@ Pending documentation stage: update `docs/knowledge/features/thread-package-main
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+- 2026-10-14: Count recursive validation and JSON operations at their owning helpers instead of charging an estimated number of payload passes. Optional private decoder counters preserve existing helper callers. Child dirty membership is removed per visited index; `clear` could scan capacity retained from an earlier large closure. Inline intrinsic and derived buffers remain separate; a nonempty append proves inequality before child comparison, even if an internal previous slice shares reused storage. Public snapshots remain detached.

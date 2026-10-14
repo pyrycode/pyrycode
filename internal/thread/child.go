@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"slices"
@@ -22,10 +23,11 @@ type childCall struct {
 	call   *mainCall
 }
 type childState struct {
-	group          agentKey
-	parent         string
-	base, previous Item
-	restored       bool
+	group                                agentKey
+	parent                               string
+	base, previous                       Item
+	restored                             bool
+	endingBase, endingRaw, endingContent json.RawMessage
 }
 
 type childParentKey struct {
@@ -54,7 +56,7 @@ func (f *Fold) childGroup(e history.Entry) agentKey {
 	return key
 }
 func (f *Fold) childWork(e history.Entry) bool {
-	id, summary, status, shown, valid := mainDecode(e)
+	id, summary, status, shown, valid := mainDecode(e, f.ingestCounts)
 	if !valid {
 		return false
 	}
@@ -215,6 +217,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 		return
 	}
 	indices := make([]int, 0, len(f.childDirty))
+	f.countIngestion(len(f.childDirty) + 1)
 	for index := range f.childDirty {
 		f.countPublicWork(1)
 		indices = append(indices, index)
@@ -237,6 +240,9 @@ func (f *Fold) resolveChildren(rev uint64) {
 			if _, exists := f.childDirty[index]; !exists {
 				f.countPublicWork(1)
 				f.childDirty[index] = struct{}{}
+				if len(indices) == cap(indices) {
+					f.countIngestion(3*len(indices) + 1)
+				}
 				indices = append(indices, index)
 			}
 		}
@@ -290,11 +296,26 @@ func (f *Fold) resolveChildren(rev uint64) {
 				if item.Kind != "agent" {
 					item.Status = "interrupted"
 				}
-				f.setContent(index, "parent_ending", ending)
+				f.countIngestion(2)
+				// Identical intrinsic storage and ending need no repeated serialization,
+				// including empty deltas before the first nonempty append.
+				sameBase := len(item.Content) == len(state.endingBase) && len(item.Content) != 0 && &item.Content[0] == &state.endingBase[0]
+				f.countIngestion(min(len(ending), len(state.endingRaw)) + 1)
+				if f.texts[index] == nil && sameBase && bytes.Equal(ending, state.endingRaw) {
+					item.Content = state.endingContent
+				} else {
+					base := item.Content
+					f.setContent(index, "parent_ending", ending)
+					state.endingBase, state.endingRaw, state.endingContent = base, ending, item.Content
+				}
 			}
 			previous, current := state.previous, *item
 			previous.Rev, current.Rev = 0, 0
-			if !reflect.DeepEqual(previous, current) {
+			f.countIngestion(20)
+			if f.appendedText != index && len(previous.Content) == len(current.Content) && len(current.Content) != 0 && &previous.Content[0] != &current.Content[0] {
+				f.countIngestion(len(current.Content))
+			}
+			if f.appendedText == index || !reflect.DeepEqual(previous, current) {
 				item.Rev = max(item.ID, rev)
 			} else {
 				item.Rev = state.previous.Rev
@@ -312,5 +333,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 		}
 	}
 	f.countPublicWork(len(f.childDirty))
-	clear(f.childDirty)
+	for _, index := range indices {
+		delete(f.childDirty, index)
+	}
 }
