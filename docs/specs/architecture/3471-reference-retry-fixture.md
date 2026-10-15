@@ -59,3 +59,28 @@ First strengthen worker/lookup assertions and measure the original fixture under
 ## Documentation handoff
 
 Pending for documentation stage: `docs/knowledge/features/thread-package-background-store.md` § Store verification — describe bounded retry padding, controlled replay chunks, status-only event ordering and the measured fixture-cost diagnosis.
+
+## Revisions
+
+### 2026-10-15 — measured fixture cost and negative control
+
+Both design questions are resolved for the local reproduction: excessive padding dominates the retry fixture, and both chunk and FIFO residency must be removed. The design remains unchanged. The exact ten-minute failure was not reproduced on this Linux host; the MacBook's measured 600.309/600.555-second failures remain historical evidence, not a claimed local result.
+
+Host: dispatcher `build-hp-1`, container `6d2b40286902`, Linux x86_64 kernel `7.0.0-38-generic`, Go `go1.26.9 linux/amd64`. CPU quota is eight cores (`800000/100000`); observed system load averages were approximately 7–15. Default Go package/test concurrency was retained. The original complete package and focused profiling runs overlapped; diagnostic and candidate focused runs also overlapped the original full run. These are contended measurements, not isolated microbenchmarks.
+
+| Race-enabled run | Revision/source | Executed / passed / failed / skipped | Package seconds |
+| --- | --- | --- | --- |
+| Complete thread baseline | `07b6b35e14aad0de688326fb36d81c54303c691c` | 1117 / 1117 / 0 / 0 | 336.458 |
+| Original four-family retry matrix with profiles | Same baseline | 33 / 33 / 0 / 0 | 111.939 |
+| Original padding with new status/counter/timing assertions | Baseline plus diagnostic test edits | 33 / 33 / 0 / 0 | 100.918 |
+| Bounded fixture with profiles | Implementation atop plan commit `7a71edfd` | 33 / 33 / 0 / 0 | 3.714 |
+
+Counts include parent tests and nested subtests once each. All complete-baseline retention/lifecycle tests ran; no deadline or production code changed.
+
+The diagnostic run separates synchronous preparation from later waits. For `TestStoreReferenceRetry/tail/unreadable`, 4096 padding appends took 13.504s, padding catch-up 60.420ms, failure after the delivery 75.260ms, and repaired retry/equality 435.446ms. Its bounded counterpart took 111.775ms, 5.434ms and 4.260ms for the first three phases. All six original nondeferred tail arms spent 11.820–15.305s appending padding. Original replay padding without a follower took 0.438–0.902s per arm. Thus a stack blocked in append represents repeated expensive catch-up during setup, rather than a worker that spent ten minutes waiting for the terminal event.
+
+CPU and synchronization profiles corroborate the phase evidence. Across the original 111.939s retry run, sampled CPU was 109.050s; cumulative `readSegment` CPU was 39.720s, of which `forwardSegment` accounted for 36.610s. Block profiling attributed 76.256s to `AppendWithMetadata` mutex waits; mutex profiling attributed 77.989s of contention delay to unlocks in `forwardSegment`. Those are aggregate profile times, not additive wall-clock phases. The bounded run sampled 2.880s CPU, with 0.680s cumulative `readSegment` CPU. Repeated growing-segment decoding under the history mutex is the demonstrated expensive dependency; other package tests also contribute to the overall 336-second baseline. The evidence does not establish the MacBook's exact time distribution or exclude host contention there.
+
+Negative control: with the strengthened assertions and 256 padding entries but no replay chunk decorator, `TestStoreReferenceRetry/replay/missing` failed after 5.03s because worker status remained usable at version 257. No rendering poll created a false failure. Adding the decorator made all 22 leaf scenarios pass, each recording one failed authoritative target lookup. Tail arms also proved padding reached its exact usable version with zero failures before the meaningful event. Source repair then restored legacy item/revision/version/watermark equality in every arm.
+
+Raw evidence remains outside the worktree in `/tmp/builder-3471/`: `baseline-thread.json`, `baseline-retry.json`, `diagnostic-retry.json`, `no-split-control.json`, `candidate-retry.json`, CPU/mutex/block profiles and their decoded summaries. Earlier MacBook evidence was retrieved through the evidence service for #3453, verifier run `c58c2483aaabdaf904700e131fecb10d21ef15a1514ab134145a5e4ed1197342`; its verdict records both package timeouts and the independent daemon failures. Its artifacts do not supply a MacBook Go version or per-phase timings.
