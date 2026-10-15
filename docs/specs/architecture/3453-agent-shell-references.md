@@ -69,6 +69,7 @@ Pending documentation stage:
 - 2026-10-15: `TestReferenceRepeatedAgentReport` showed that comparing new report IDs alone advances revisions for identical status-empty enrichment. `addReport` now fingerprints compacted, HTML-escaped inert JSON on arrival and reuses an earlier equal-content reference within the same report kind/status/provenance. Reports still retain their own terminal-order IDs and arrival validity facts; mapped companions keep mapped content provenance. No full agent content is encoded for production lifecycle comparison.
 - 2026-10-15: The recursive guard starts at `Fold`. Its explicit boundaries are public `Item`, recipes (runtime scalar-only checks), the bounded source, and legacy `texts`/`legacyOutcomes`/child ending storage. Runtime checks require all those legacy containers and all item/child Content slots to be empty in production.
 - 2026-10-15: The broad race run exceeded its default 10-minute timeout after spending several minutes in instrumented heap measurement. Heap measurement is now explicitly selected with `-measure-thread-heap`, preserving the same separate-process workload while keeping the normal race gate focused on lifecycle/integration tests. The standalone non-race measurements below passed; instrumented allocation timing is not the heap acceptance boundary.
+- 2026-10-15 security follow-up: the report-equality fingerprint uses standard SHA-256 over transient compacted/escaped JSON. It introduces no key, nonce, credential, authentication or authorization use; the security verdict remains PASS. This qualifies the original review's statement that there were no production cryptography changes.
 
 ## Offline retention evidence
 `TestReferenceDiskHeap` runs in its own test-binary process. Both revisions used the identical test file and `testFoldCorpus(10000)` with an 8192-byte unknown JSON string added to every entry, 100-entry feed chunks and a JSONL disk source with retained ID offsets. Actual encoded history: **85,441,272 bytes**. The generator's entry array, input/chunk buffers and a complete rendered snapshot are released before GC; the fold, source, recent cache and disk-offset index remain live. Store publications are excluded, not claimed solved by this ratio.
@@ -77,6 +78,7 @@ Pending documentation stage:
 | --- | ---: | ---: | ---: | ---: |
 | Pre-family `44fe69498699cd69b0cc54543e7dabe0703c28a7` | 271,560 | 54,760,816 | 54,489,256 | 63.7739% |
 | Candidate implementation `e9c0ece7ef5b95f5deffc280c0eaeab0a8564617` | 267,824 | 5,067,408 | 4,799,584 | 5.6174% |
+| Final code/test selection `803eebddd4f1ea345c68ee13422355970a3f6677` | 281,296 | 4,943,464 | 4,662,168 | 5.4566% |
 
 Reproduce candidate: `go test ./internal/thread -run '^TestReferenceDiskHeap$' -count=1 -v -args -measure-thread-heap`. For baseline, export that revision to scratch, copy only `render_heap_test.go` from the candidate, and run the same command with `PYRY_THREAD_HEAP_BASELINE=1` (disables only the candidate threshold). An exploratory 4096-byte-padding candidate measured 10.6546%; this is a workload-specific boundary, not a universal ratio for arbitrarily small records.
 
