@@ -53,6 +53,58 @@ checks the copied owner-executable bit; ordinary nonexecutable fixtures missed
 the 0600-copy regression. `TestCandidateBuildMutation` changes module metadata
 during compilation, proving input validation must run again before retention.
 
+A successful npm build wait can still produce public build-failure feedback:
+the native diagnostic baseline captured `TestPublishTemplate`, snapshot and both
+rollback arms returning inspection EPERM after TERM, with successful build waits.
+Immediate rejection of that uncertain probe caused these preparation failures.
+EPERM proves neither live membership nor retirement. `candidateCleanupWithProbe`
+reinspects within the existing TERM/KILL windows and accepts only subsequent
+positive absence. Denied signals, persistent uncertainty and still-live groups
+remain errors; joining leaders, retiring descendants before artifact validation,
+immutable-build checks and publication recovery barriers remain required.
+
+Keep command and cleanup outcomes separately inspectable. The private per-context
+`candidateDiagnostic` observer records a fixed command label, PID/exit code and
+separate wait/start, cleanup and cancellation outcomes; it collects no arbitrary
+arguments, environment values or child output. Public `CandidateFailure`,
+`PublishFailure` and lifecycle feedback retain static messages and do not unwrap
+diagnostics. `TestCandidateCommandDiagnostics` distinguishes command, cleanup and
+combined failures; `TestCandidateDiagnosticPublicBoundary` checks private evidence
+and safe public feedback, including the child-output secret sentinel.
+`TestCandidateDiagnosticBeforeStart` distinguishes launch failure from cancellation.
+
+`TestCandidateBuildProbeRecovery` injects inspection EPERM after a successful
+controlled build, then requires real group absence before artifact validation.
+`TestCandidateCleanupProbeRecovery` covers recovery before/after forced termination,
+persistent uncertainty, denied TERM/KILL and live groups. The retained pre-repair
+run executed eight leaves: four failed (build plus three recovery sequences),
+four safety arms passed, none skipped. After repair the focused regression family
+passed 22/22 leaves and final diagnostic-boundary checks passed 3/3, without skips.
+
+The [counted macOS evidence](../../../internal/apps/testdata/3447-macos-results.json)
+retains all six attempts, including failed runs and the initial isolated diagnostic
+non-reproduction. The diagnostic overlay demonstrably executed: its matching PID,
+selected test argv, wait and TERM-probe records identify the failed builds. It
+preserved child stdout/stderr handling and captured no child output; parent logging
+changes scheduling. Neither that initial isolated pass nor reinspection establishes
+kernel membership/state at the instant of EPERM. Earlier historical failures from
+\#3418 lack effective command traces and cannot all be attributed retrospectively.
+
+The clean `e3623103` complete uncached `go test -race -json ./internal/apps -count=1`
+ran on macOS 26.6.2/arm64, Go 1.26.2 and real Node 24.15.0/npm 11.12.1 selected via
+`HOSTED_APP_NODE`/`HOSTED_APP_NPM_CLI`, at normal concurrency. Snapshot and both
+rollback leaves executed/passed 3/3 without skips, proving initialized activation,
+retained preferences, verified pre-migration backup and the intended transaction/
+startup failures followed by full schema/preferences/checksum-ledger restoration
+and old-release health. The package gate remains **FAIL**: parents 105 executed,
+104 passed, 1 failed, 0 skipped; leaves 912 executed, 906 passed, 2 failed,
+4 skipped because the filesystem rejects invalid UTF-8 names. Remaining failures
+are `TestPublishRetirement/health/remove` (denied group signal) and
+`TestPublishRetirement/health/intent_cycle` (retained retirement metadata), tracked
+by [#3418](https://github.com/pyrycode/pyrycode/issues/3418). The intent-cycle record
+alone does not identify its precise signal/probe cause. These target passes do
+not certify a green full-package gate. No live Claude is needed.
+
 A controlled child that never loads npm configuration or rewrites lifecycle
 PATH misses real npm failures. `TestCandidateNPMEnvironment` models pathname-keyed
 config loading; `TestCandidateNPMPinning` models stage-to-root binary-path

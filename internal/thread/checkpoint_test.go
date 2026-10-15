@@ -384,7 +384,7 @@ func TestStoreCheckpointCancelledFold(t *testing.T) {
 	}
 	testStoreAppend(t, h, testStoreA, testMessage(0))
 	testCheckpointLoad(t, s, testStoreA, 1)
-	testStoreAppend(t, h, testStoreA, testMessage(0))
+	completed := testStoreAppend(t, h, testStoreA, testMessage(0))
 	testStoreWait(t, s, testStoreA, StateUsable, 2)
 	testStoreAppend(t, h, testStoreA, testMessage(0))
 	testStoreSignal(t, reached)
@@ -395,7 +395,7 @@ func TestStoreCheckpointCancelledFold(t *testing.T) {
 	c.mu.Lock()
 	last := c.writes[testStoreA][1]
 	c.mu.Unlock()
-	if last.Version != 2 {
-		t.Fatal("retirement checkpoint included incomplete fold", last.Version)
+	if last.Version != 2 || last.LastShownVersion != 2 || last.Checksum != entryChecksum(completed[0]) {
+		t.Fatal("retirement checkpoint included incomplete fold", last)
 	}
 }
