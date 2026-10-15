@@ -109,6 +109,18 @@ For combined predicates, exercise each branch independently. A shared log site c
 prove which branch was taken if both inputs satisfy the first condition. Use an
 independent observable result of the path under test.
 
+`reset.wrapup.write_failed` can mean the shared context expired before
+`writeResetWrapUp` called the injected writer. Stale-note persistence consumes
+that same budget before resolution. A matching event alone can therefore let
+a delivery-error test pass without exercising its injected failure.
+`TestResetThenRotate_FailedHandoffIsStale` checks resolution, dormant activation
+and the first delivery attempt before expiry, and checks which callbacks ran.
+Its idle case retains the busy state and observes the interrupt. Give immediate
+failure classifications finite headroom separately from deliberate readiness,
+idle and completion expiry; retain the stale bytes, warning/fence, secret
+exclusion, bounded rotation and successful-recovery assertions. Permission-based
+persistence skips must remain visible as skips.
+
 A FIFO barrier proves that preceding queued work drained only after the
 asynchronous producer has finished enqueueing the work being asserted. Join
 producer completion before inserting the barrier, for both positive delivery
@@ -462,6 +474,19 @@ fixture state. Re-running one failing reader on the base without its fixture-pro
 sibling is not the same experiment. Check for an existing issue before filing another.
 
 ### Diagnosing reply timeouts
+
+For reset classification, record elapsed post-persistence resolution, first
+delivery, rotation entry and completion using durations and counts without
+content. The [stale-handoff comparison](../../specs/architecture/3428-stale-handoff-timing.md#revisions)
+used identical path assertions in four concurrent race binaries pinned to one
+CPU per policy. Both the old 35 ms policy and the repaired policy passed all
+600 tests/subtests without skips: the historical failure was not reproduced.
+The two-second classification allowance matches the fixture default; 500 ms
+leaves over twenty times the largest measured pre-delivery delay while keeping
+expiry real, and three seconds bounds reset and rotation. These finite regression bounds
+are not product latency guarantees. Retain revisions, commands, phase timings
+and execution/pass/fail/skip counts; later passes cannot establish historical
+cause or completion of earlier gates.
 
 A fast provider does not imply a fast first reply. Relay `runThreadQuery` completes
 `EncodeThreadReply` before serial delivery, so a reply wait includes whole-result
