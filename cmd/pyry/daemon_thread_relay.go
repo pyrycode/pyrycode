@@ -16,9 +16,15 @@ import (
 	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
+type daemonThreadStore interface {
+	Status(conversations.ConversationID) thread.Snapshot
+	Observe(conversations.ConversationID) thread.Observation
+	Changes(context.Context, conversations.ConversationID, string, uint64) (thread.Observation, error)
+}
+
 // Publication is owned by the existing conversation coordinator, never a writer.
 type daemonThreadPublisher struct {
-	store   *thread.Store
+	store   daemonThreadStore
 	active  func(context.Context, string) []relay.ActiveConn
 	push    func(context.Context, string, protocol.Envelope) error
 	retire  func(context.Context, string) error
@@ -147,15 +153,16 @@ func (p *daemonThreadPublisher) gap(ctx context.Context, w *shadowConversation) 
 }
 
 func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.ConversationID, w *shadowConversation) {
-	o := p.store.Observe(id)
-	if o.State != thread.StateUsable {
+	status := p.store.Status(id)
+	if status.State != thread.StateUsable {
 		if w.threadEpoch != "" {
 			p.gap(ctx, w)
 		}
 		return
 	}
+	var o thread.Observation
 	if w.threadEpoch != "" {
-		if o.Epoch == w.threadEpoch && o.Version == w.threadVersion {
+		if status.Epoch == w.threadEpoch && status.Version == w.threadVersion {
 			return
 		}
 		var err error
@@ -169,6 +176,11 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 			if o.State != thread.StateUsable {
 				return
 			}
+		}
+	} else {
+		o = p.store.Observe(id)
+		if o.State != thread.StateUsable {
+			return
 		}
 	}
 	if ctx.Err() != nil {
