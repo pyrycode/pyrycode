@@ -138,7 +138,7 @@ func (f *Fold) applyShellForeground(c *agentCall) {
 		return
 	}
 	var first *agentReport
-	for _, r := range c.reports {
+	for _, r := range c.reports.entries() {
 		if f.agentCounts != nil {
 			f.agentCounts.work++
 		}

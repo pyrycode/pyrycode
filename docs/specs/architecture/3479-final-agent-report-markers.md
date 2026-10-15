@@ -59,3 +59,20 @@ None.
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: pre-creation call reports cannot yet distinguish Agent from shell turn eligibility. Retain them until creation and reduce at `applyAgent` once the creating kind is known; `TestReferenceFinalReportsBeforeShellCreation` covers wrong-turn denial, valid foreground result, saved ending, creation and late link.
+- Reduction runs in `applyAgent` for the created call and its associated tasks. Uncreated owners/unresolved joins keep their complete pending candidates; `addReport` remains solely responsible for companion reconciliation.
+- Shell reduction keeps the earliest valid mapped result and denial plus earlier unmatched durable companions. Once a mapped report fixes foreground eligibility, later result/denial duplicates cannot affect projection and are discarded. Wrong-turn mapped reports cannot become eligible later. The marker growth regression includes repeated late denials for both Agent and Bash.
+
+## Offline retention evidence
+`TestReferenceFinalReportAccounting` repeats eight-entry turns containing a main Read call/result, Agent creation, independently finished child Read, task link/outcome and main ending. Sources are fixed-length distinct `sNNNN` identities; entry IDs are fixed-width uint64 facts. At 16/64 turns (128/512 entries), payload padding is 16/4096 bytes. Logical scalar sizes plus string bytes exclude container/header/capacity overhead and authoritative history/Store snapshots; pointer targets count once, string backing sharing is not deducted.
+
+| Turns | Padding | Final markers/turn | Metadata/recipes/turn | Unresolved/turn | Other lifecycle/turn | Source cache total |
+| --- | --- | --- | --- | --- | --- | --- |
+| 16 | 16 | 71 | 1061 | 191 | 857 | 42904 |
+| 16 | 4096 | 71 | 1061 | 191 | 857 | 565144 |
+| 64 | 16 | 71 | 1062 | 191 | 854 | 61176 |
+| 64 | 4096 | 71 | 1062 | 191 | 854 | 1046520 |
+
+Unresolved evidence includes ordinary main/child Read results and their uncreated agent-registry owners. Other lifecycle includes completed turn/call indexes and child bookkeeping, deliberately not compacted here. Metadata recipe scalar `ended_order` uses decimal JSON, explaining its small history-size difference; source/identity string length also affects accounting, while marker entry IDs do not. These are logical field bytes, not a whole-Fold heap target. Source cache totals include the fixed recent-source container and are bounded independently.

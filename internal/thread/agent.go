@@ -46,7 +46,7 @@ type agentCall struct {
 	item         int
 	launch       uint64
 	launchResult bool
-	reports      []*agentReport
+	reports      agentReports
 }
 type agentTask struct {
 	observed   uint64
@@ -54,7 +54,7 @@ type agentTask struct {
 	call       string
 	link       uint64
 	linkDigest [sha256.Size]byte
-	reports    []*agentReport
+	reports    agentReports
 }
 type agentReport struct {
 	id              uint64
@@ -425,7 +425,8 @@ func (f *Fold) agentWork(e history.Entry) bool {
 		if p.Status == "denied" {
 			field = "denial"
 		}
-		g.addReport(&g.call(call).reports, e, p.Status, field, durable)
+		c := g.call(call)
+		g.addReport(&c.reports, e, p.Status, field, durable)
 	case protocol.TypeBackgroundTaskRoster:
 		digest := agentContentDigest(e.Payload)
 		for _, row := range roster.Tasks {
@@ -468,7 +469,8 @@ func (f *Fold) agentWork(e history.Entry) bool {
 			}
 		}
 		if typ == "agent_ended_with_session" && call != "" {
-			g.addReport(&g.call(call).reports, e, p.Status, "ending", true)
+			c := g.call(call)
+			g.addReport(&c.reports, e, p.Status, "ending", true)
 		}
 	}
 	for id := range affected {
@@ -557,7 +559,12 @@ func agentContentDigest(raw json.RawMessage) [sha256.Size]byte {
 
 // Companion evidence counts once; the earliest entry owns terminal order while
 // the mapped report supplies content. Equal later reports do not replace it.
-func (g *agentGroup) addReport(reports *[]*agentReport, e history.Entry, status, field string, durable bool) {
+func (g *agentGroup) addReport(h *agentReports, e history.Entry, status, field string, durable bool) {
+	all := h.entries()
+	reports := &all
+	defer func() {
+		h.pending, h.markers = all, [4]*agentReport{}
+	}()
 	digest := agentContentDigest(e.Payload)
 	content := e.ID
 	for _, r := range *reports {
@@ -594,6 +601,9 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	if c.item < 0 {
 		return
 	}
+	if f.source != nil {
+		c.reports.reduce(c.ordinary != nil, f.items[c.item].Turn)
+	}
 	// Recompute intrinsic lifecycle state without disturbing unrelated derived closure.
 	item := &f.items[c.item]
 	previous := f.recipes[item.ID]
@@ -618,6 +628,9 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	for _, taskID := range g.taskIDs[id] {
 		g.count(2)
 		task := g.tasks[taskID]
+		if f.source != nil {
+			task.reports.reduce(false, "")
+		}
 		linked = true
 		put("task_id", taskID)
 		if task.link != 0 {
@@ -625,8 +638,9 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		} else {
 			put("task_link", nil)
 		}
-		reports = append(reports, task.reports...)
-		g.count(len(task.reports))
+		entries := task.reports.entries()
+		reports = append(reports, entries...)
+		g.count(len(entries))
 	}
 	c.linked = linked
 	if c.ordinary != nil && !linked {
@@ -634,8 +648,9 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		return
 	}
 	// Entry ordering, rather than map iteration, decides both enrichment and finals.
-	reports = append(reports, c.reports...)
-	g.count(len(c.reports))
+	entries := c.reports.entries()
+	reports = append(reports, entries...)
+	g.count(len(entries))
 	slices.SortStableFunc(reports, func(a, b *agentReport) int {
 		g.count(2)
 		if a.id < b.id {

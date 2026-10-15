@@ -138,10 +138,10 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	}
 	for _, g := range f.agentGroups {
 		for _, c := range g.calls {
-			lifecycleFacts += int(unsafe.Sizeof(*c)) + len(c.reports)*int(unsafe.Sizeof(agentReport{}))
+			lifecycleFacts += int(unsafe.Sizeof(*c)) + len(c.reports.entries())*int(unsafe.Sizeof(agentReport{}))
 		}
 		for _, task := range g.tasks {
-			lifecycleFacts += int(unsafe.Sizeof(*task)) + len(task.reports)*int(unsafe.Sizeof(agentReport{}))
+			lifecycleFacts += int(unsafe.Sizeof(*task)) + len(task.reports.entries())*int(unsafe.Sizeof(agentReport{}))
 		}
 	}
 	t.Logf("lifecycle compatibility payload before=%d after=%d; logical call/task/report facts=%d (includes fingerprints, excludes map/slice/string overhead)", legacyEvidence, private, lifecycleFacts)
