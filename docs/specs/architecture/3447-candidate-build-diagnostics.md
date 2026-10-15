@@ -65,3 +65,6 @@ Write the controlled candidate cleanup regression first and demonstrate its fail
 **Date:** 2026-10-15
 
 Sizing: approximately 650 written lines including tests, diagnostics, plan and evidence metadata; 0 exported types/interfaces, 0 consumer migrations, 3 acceptance criteria, fewer than 10 distinct rejection branches. Recount before implementation remains within the builder ceiling.
+
+## Revisions
+- 2026-10-15: The diagnostic package captured `TestPublishTemplate` failing its actual npm build with wait success and cleanup EPERM after TERM. This attributes one maintained-template build failure to inspection uncertainty, rather than compilation; the earlier #3418 failures still lack command-level attribution. The controlled pre-repair build test and three probe-sequence arms failed on immediate error return, while persistent/denied/live safety arms passed. No change to the planned repair contract.

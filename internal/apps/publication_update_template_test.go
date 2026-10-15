@@ -28,6 +28,7 @@ func updateSQL(t *testing.T, node, db string) string {
 }
 
 func TestUpdateTemplateSnapshot(t *testing.T) {
+	ctx := testCandidateDiagnostics(t)
 	node, npm := os.Getenv("HOSTED_APP_NODE"), os.Getenv("HOSTED_APP_NPM_CLI")
 	if node == "" || npm == "" {
 		t.Skip("supported real Node/npm required; skips supply no initialized update evidence")
@@ -46,7 +47,7 @@ func TestUpdateTemplateSnapshot(t *testing.T) {
 	backupOK(t, err)
 	defer o.Shutdown()
 	tools := Toolchain{Node: node, NPM: npm}
-	_, err = o.Publish(context.Background(), testHost, testApp, tools)
+	_, err = o.Publish(ctx, testHost, testApp, tools)
 	backupOK(t, err)
 	preference := `{"version":1,"selected_tab":"preferences","period":"7d"}`
 	req, err := http.NewRequest("POST", "http://caller.invalid/api/preferences", strings.NewReader(preference))
@@ -66,7 +67,7 @@ func TestUpdateTemplateSnapshot(t *testing.T) {
 	serviceTest := string(testBytes(t, filepath.Join(source, "test/service.test.mjs")))
 	serviceTest = strings.Replace(serviceTest, "writeFileSync(join(release, 'package.json')", "rmSync(join(release, 'sql/migrations/0002_candidate.sql'));\n  writeFileSync(join(release, 'package.json')", 1)
 	testArtifactWrite(t, source, "test/service.test.mjs", serviceTest)
-	result, err := o.Publish(context.Background(), testHost, testApp, tools)
+	result, err := o.Publish(ctx, testHost, testApp, tools)
 	backupOK(t, err)
 	backupCheck(t, result.Healthy && result.ActivationCommitted && !result.RecoveryPending && result.Lifecycle.ActiveRelease == "2.0.0", "candidate activation failed", result)
 	after := updateSQL(t, node, filepath.Join(data, "app.sqlite"))
@@ -107,6 +108,7 @@ func TestUpdateTemplateRollback(t *testing.T) {
 	}
 	for _, arm := range []string{"transaction", "startup"} {
 		t.Run(arm, func(t *testing.T) {
+			ctx := testCandidateDiagnostics(t)
 			r := testOpen(t)
 			testRegister(t, r, []byte(testManifest))
 			t.Cleanup(func() {
@@ -127,7 +129,7 @@ func TestUpdateTemplateRollback(t *testing.T) {
 			}
 			defer o.Shutdown()
 			tools := Toolchain{Node: node, NPM: npm}
-			if result, e := o.Publish(context.Background(), testHost, testApp, tools); e != nil {
+			if result, e := o.Publish(ctx, testHost, testApp, tools); e != nil {
 				t.Fatal(result, e)
 			}
 			target := healthTarget(t, o)
@@ -168,7 +170,7 @@ func TestUpdateTemplateRollback(t *testing.T) {
 				main := string(testBytes(t, filepath.Join(source, "src/service/main.ts")))
 				testArtifactWrite(t, source, "src/service/main.ts", "if ("+condition+") process.exit(9);\n"+main)
 			}
-			result, e := o.Publish(context.Background(), testHost, testApp, tools)
+			result, e := o.Publish(ctx, testHost, testApp, tools)
 			var failure *PublishFailure
 			wantPhase := "migration"
 			if arm == "startup" {
