@@ -56,3 +56,51 @@ Write the controlled-delay and deadline regression first and observe failure aga
 - 2026-10-15: Complete measurement under the identical four race binaries plus 32 CPU-only Python contenders on CPU 0 passed 4/4, zero skips. The scratch variant changed only the first `switchWire.receive` timeout to a provisional 30-second per-frame measurement ceiling. First provider completion occurred 5.112–5.246 seconds after wire setup, versus entry at 0.659–0.786 seconds. The largest replies needed roughly 44 seconds from request through reconstruction. Select a **60-second absolute reply bound**, leaving about 36% scheduling headroom, rather than adopting the provisional per-frame policy. The open bound question is resolved. Recovery preparation itself took up to 13 seconds under contention and remains separately measured; handshake/admission retains its original finite wait.
 - Recovery now also takes a bounded `ActiveConns` snapshot after both handshakes: response receipt alone does not prove admission. Shared-wire changes only extract the existing decoder; the query helper owns deadline-aware pending/output consumption. Seven existing reply consumers keep their signatures.
 - The first controlled-delay run failed to compile because the deadline helper had not yet been introduced; this is not regression evidence. After a temporary old-behavior helper stub, `go test -race -count=1 -run '^TestDaemonThreadQueriesRecoveryDelayedProvider$' ./cmd/pyry` executed once and failed with `missing switch frame` in 3.87 seconds. This run incidentally overlapped the tail of the measurement experiment; the timer-held provider independently exceeds the old wait, so no isolated contention attribution is claimed. The repaired race run of recovery, delayed provider and deadline controls executed/passed seven tests/subtests, failed/skipped zero. All intentional contention had been joined before that run.
+
+### Matched contention evidence
+Environment: Linux/amd64, Go 1.26.9. No explicit GOMAXPROCS override. Baseline source `07b6b35e14aad0de688326fb36d81c54303c691c` plus scratch diagnostics only: provider entry/return, handshake start/return, each transport callback and reconstructed-frame receipt. The provisional variant adds only a 30-second first `switchWire.receive` timeout. Candidate source `2d3aefe1ee64b9e55f205ff82b48902fdeb518e6`. Commands:
+
+Historical retrieval: `python3 /work/Projects/pyrycode-agents/dispatcher/scripts/fleet-task.py evidence 3453 --out /tmp/builder-3468/evidence-3453` downloaded the Mac builder bundle `6d69a887e50228e31a29bb4dd147c466947628c0393f7a2a5edd565e0848edeb`. Its agent log names `/tmp/builder-3453-gate-race.log` and `/tmp/builder-3453-daemon-rechecks.log`, but their displayed command outputs are truncated; neither complete log is included and `pointers.json` is empty. It confirms the reported failure/recheck sequence without supplying missing provider/transport phase evidence.
+
+```sh
+go test -race -c -overlay=/tmp/builder-3468/diagnostic.json -o /tmp/builder-3468/baseline.test ./cmd/pyry
+go test -race -c -overlay=/tmp/builder-3468/measurement.json -o /tmp/builder-3468/measurement.test ./cmd/pyry
+go test -race -c -o /tmp/builder-3468/candidate.test ./cmd/pyry
+python3 /tmp/builder-3468/contend.py baseline /tmp/builder-3468/baseline.test 32
+python3 /tmp/builder-3468/contend.py measurement /tmp/builder-3468/measurement.test 32
+python3 /tmp/builder-3468/contend.py candidate /tmp/builder-3468/candidate.test 32
+```
+
+Each driver starts 32 `taskset -c 0 python3 -c 'while True: pass'` contenders, then four simultaneous `taskset -c 0 BINARY -test.v -test.count=1 -test.timeout=4m -test.run=^TestDaemonThreadQueriesRecovery$` processes, captures separate logs, waits for every test process, and terminates/joins every contender. There are no deliberate contenders during ordinary checks. Counts are named tests/subtests, including parent tests:
+
+| Variant | Executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| Diagnostic baseline | 4 | 0 | 4 | 0 |
+| Provisional measurement | 4 | 4 | 0 | 0 |
+| Committed candidate | 4 | 4 | 0 | 0 |
+
+Candidate peer admission completed 657–765 ms after wire setup; first catch-up provider completed at 5.283–5.370 s. Query 40 first reconstructed frame was 12.249–12.425 s after request; all 16 frames, including the separate marker, completed in 33.765–34.066 s. Query 41 first reconstructed frame was 14.623–15.146 s; all 15 frames completed in 34.988–35.359 s. The earlier roughly 44-second estimate conservatively included independent expected-row rendering between requests; actual whole-reply headroom at 60 seconds is about 70%. Both providers and encoding/serial transport consume time; handshakes and completed recovery do not establish reply readiness. The full escaped fixture, old-revision appearance, parent closure, saved epoch, bounds and legacy assertions passed in every candidate execution.
+
+First application transport entry was 12.906–13.138 seconds after wire setup, independently recorded by the sender callback before forwarding. Reconstruction timings above have their own origin at reply collection immediately after request submission. This separates provider completion, first transport and final reconstruction rather than assigning all delay to one phase.
+
+### Focused checks and negative controls
+At candidate `2d3aefe1`, `go test -race -json -count=10 -timeout=5m -run '^TestDaemonThreadQueriesRecovery$' ./cmd/pyry` executed/passed **10/10**, failed/skipped zero. `go test -race -json -count=1 -timeout=5m -run '^Test(DaemonThreadQueries|DaemonThreadReplyDeadline|BoundQueueActions|QueuedSendHandle|RelayAgentSwitch|SwitchWire)' ./cmd/pyry` executed/passed **71/71**, failed/skipped zero. This covers the seven reply-helper consumers: recovery, reset, bounded, join, queued-send handle queries/actions, and `testBoundAction` via bound-queue restart/devices. Shared switch-wire encrypted frames/wiring checks also passed. No skip reasons exist for these runs.
+
+Three scratch overlays retain the same recovery test and actual 60-second deadline. The no-output overlay returns success from the installed `OutboundContext` without forwarding. The no-final overlay decrypts all frames but continues rather than accepting `p.Final`. The buffered-expiry overlay waits until the deadline plus one millisecond inside the final-marker branch before its completion check. For each label `no-output`, `no-final`, `buffered-expiry`, the exact command was `go test -race -json -count=1 -timeout=3m -overlay=/tmp/builder-3468/LABEL.json -run '^TestDaemonThreadQueriesRecovery$' ./cmd/pyry`. Each executed once, failed once as expected, and skipped zero. Missing output failed at **60.000779 s with zero frames**. Missing completion failed at **60.000076 s with 16 frames and six reconstructed rows**. Buffered late completion failed at **60.001071 s with all 16 frames**. These mutations are scratch-only; no recorded/expected output is discarded in the committed test. Ordinary checks overlapped each other without CPU pinning or synthetic contenders; this incidental overlap is distinct from the matched experiment.
+
+### Complete package checks
+At source `2d3aefe1`, `go test -race -json -count=1 -timeout=15m ./internal/thread ./cmd/pyry ./internal/relay` completed with:
+
+| Package | Executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| `internal/thread` | 1117 | 1117 | 0 | 0 |
+| `cmd/pyry` | 16564 | 16561 | 1 | 2 |
+| `internal/relay` | 1530 | 1530 | 0 | 0 |
+
+Recovery executed once and **passed in 5.36 seconds**; delayed-provider and deadline controls also passed. The only failure was `TestDaemonThreadMetadataAllocations`, `long-thread replay did not finish` (11.87 seconds), already tracked independently by **#3467**. Its fixture/readiness code is unchanged here; the issue explicitly says recovery-wire work is not its prerequisite. This combined command is **red**, not a claimed full pass. It incidentally overlapped focused repetitions, negative controls, vet and build, all without synthetic contention. Those other commands were finished before the separate complete cmd run reached metadata readiness.
+
+The two cmd skips were `TestRunAgentRun_RealClaude` (requires `PYRY_E2E_REAL_CLAUDE=1`) and `TestMemoryPathsCaseInsensitive` (case-sensitive filesystem cannot resolve alternate casing). Counts include named parent/subtests and report skipped starts separately. `go vet ./...` and `go build -o /tmp/builder-3468/pyry ./cmd/pyry` passed. The verifier owns the later full-module gate; no live-Claude proof is needed for this ticket.
+
+The separate `go test -race -json -count=1 -timeout=10m ./cmd/pyry/...` run at the same candidate source completed in 263.61 seconds: **16,566 executed, 16,564 passed, zero failed, two skipped**, with the same skip reasons above. `TestDaemonThreadMetadataAllocations` passed in 7.09 seconds and `TestDaemonThreadQueriesRecovery` passed in 3.00 seconds. This run began while the combined command was finishing its last tests; all focused repetitions, negative controls, vet and build had already finished, and the combined command finished before this run reached metadata readiness. It was not a fully isolated process experiment. No additional attribution is inferred from its pass.
+
+Final diff review: only the plan and three allowed test files changed; no production, recordings, expected outputs or documentation-stage files changed. All open design questions are resolved, all test/gate processes and contention workers have finished, and the written scope remains below every sizing limit. Subsequent evidence-only commits do not change the tested source revision.
