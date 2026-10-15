@@ -339,7 +339,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 			if f.appendedText != index && len(previous.Content) == len(current.Content) && len(current.Content) != 0 && &previous.Content[0] != &current.Content[0] {
 				f.countIngestion(len(current.Content))
 			}
-			if f.appendedText == index || !reflect.DeepEqual(previous, current) || !reflect.DeepEqual(state.previousRecipe, f.recipes[item.ID]) {
+			if f.appendedText == index || !reflect.DeepEqual(previous, current) || !equalRecipe(state.previousRecipe, f.recipes[item.ID]) {
 				item.Rev = max(item.ID, rev)
 			} else {
 				item.Rev = state.previous.Rev

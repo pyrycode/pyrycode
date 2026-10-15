@@ -53,6 +53,7 @@ type agentTask struct {
 	linkMapped bool
 	call       string
 	link       uint64
+	linkDigest [sha256.Size]byte
 	reports    []*agentReport
 }
 type agentReport struct {
@@ -426,6 +427,7 @@ func (f *Fold) agentWork(e history.Entry) bool {
 		}
 		g.addReport(&g.call(call).reports, e, p.Status, field, durable)
 	case protocol.TypeBackgroundTaskRoster:
+		digest := agentContentDigest(e.Payload)
 		for _, row := range roster.Tasks {
 			task := g.task(row.Task)
 			mark(task.call)
@@ -437,6 +439,7 @@ func (f *Fold) agentWork(e history.Entry) bool {
 				if task.link == 0 || (!durable && !task.linkMapped) {
 					task.linkMapped = !durable
 					task.link = e.ID
+					task.linkDigest = digest
 				}
 			}
 		}
@@ -453,6 +456,7 @@ func (f *Fold) agentWork(e history.Entry) bool {
 				if task.link == 0 || (!durable && !task.linkMapped) {
 					task.linkMapped = !durable
 					task.link = e.ID
+					task.linkDigest = agentContentDigest(e.Payload)
 				}
 			}
 			if typ == "background_task_outcome" || typ == "background_task_gone" || typ == "agent_ended_with_session" || typ == protocol.TypeBackgroundTaskUpdated {
@@ -543,15 +547,18 @@ func (g *agentGroup) insertTaskID(call, id string) {
 	}
 }
 
+func agentContentDigest(raw json.RawMessage) [sha256.Size]byte {
+	// Match encoding/json's embedded RawMessage encoding without retaining it.
+	var compact, escaped bytes.Buffer
+	_ = json.Compact(&compact, raw) // agentWork validated the object.
+	json.HTMLEscape(&escaped, compact.Bytes())
+	return sha256.Sum256(escaped.Bytes())
+}
+
 // Companion evidence counts once; the earliest entry owns terminal order while
 // the mapped report supplies content. Equal later reports do not replace it.
 func (g *agentGroup) addReport(reports *[]*agentReport, e history.Entry, status, field string, durable bool) {
-	// Fingerprint the embedded RawMessage encoding once on arrival. Repeated
-	// equal enrichment reuses its source ID without retaining any payload bytes.
-	var compact, escaped bytes.Buffer
-	_ = json.Compact(&compact, e.Payload) // agentWork validated the object.
-	json.HTMLEscape(&escaped, compact.Bytes())
-	digest := sha256.Sum256(escaped.Bytes())
+	digest := agentContentDigest(e.Payload)
 	content := e.ID
 	for _, r := range *reports {
 		g.count(1)
@@ -599,8 +606,8 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		raw, _ := json.Marshal(value)
 		recipe.fields[key] = recipeField{value: raw}
 	}
-	entry := func(key string, id uint64) {
-		recipe.fields[key] = recipeField{entry: id}
+	entry := func(key string, id uint64, digest [sha256.Size]byte) {
+		recipe.fields[key] = recipeField{entry: id, digest: digest}
 	}
 	if c.parent != "" {
 		put("parent_tool_call_id", c.parent)
@@ -614,7 +621,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		linked = true
 		put("task_id", taskID)
 		if task.link != 0 {
-			entry("task_link", task.link)
+			entry("task_link", task.link, task.linkDigest)
 		} else {
 			put("task_link", nil)
 		}
@@ -648,7 +655,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		}
 		if r.field == "result" {
 			if _, ok := recipe.fields["result"]; !ok && !c.launchResult {
-				entry("result", r.content)
+				entry("result", r.content, r.digest)
 			}
 			if linked {
 				continue
@@ -664,7 +671,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 			status = "stopping"
 		}
 		if r.field == "task_report" && r.mapped {
-			entry("task_report", r.content)
+			entry("task_report", r.content, r.digest)
 		}
 	}
 	if final != nil {
@@ -672,19 +679,19 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		if status == "completed" {
 			status = "finished"
 		}
-		entry(final.field, final.content)
+		entry(final.field, final.content, final.digest)
 		// Status-empty reports can enrich content after an ending without ending anew.
 		for _, r := range reports {
 			g.count(1)
 			if r.field == "task_report" && r.status == "" && r.mapped {
-				entry("task_update", r.content)
+				entry("task_update", r.content, r.digest)
 			}
 		}
 	}
 	if ended != 0 {
 		put("ended_order", ended)
 	}
-	changed := !reflect.DeepEqual(previous, recipe)
+	changed := !equalRecipe(previous, recipe)
 	var raw json.RawMessage
 	if f.source == nil {
 		rendered, err := renderShared([]Item{*item}, map[uint64]contentRecipe{item.ID: recipe}, legacySource(f.legacyOutcomes), nil)
@@ -694,7 +701,8 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		raw = rendered[0].Content
 		changed = !bytes.Equal(item.Content, raw)
 	}
-	if changed || item.Status != status || item.Active != active || item.EndedOrder != ended {
+	changed = changed || item.Status != status || item.Active != active || item.EndedOrder != ended
+	if changed || (f.source != nil && !reflect.DeepEqual(previous, recipe)) {
 		f.restoreChild(c.item)
 		if c.ordinary == nil && c.parent != "" {
 			f.saveChild(c.item, g.key, c.parent)
@@ -703,7 +711,10 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		if f.source != nil {
 			f.recipes[target.ID] = recipe
 		}
-		target.Content, target.Status, target.Active, target.EndedOrder, target.Rev = raw, status, active, ended, max(item.ID, rev)
+		target.Content, target.Status, target.Active, target.EndedOrder = raw, status, active, ended
+		if changed {
+			target.Rev = max(item.ID, rev)
+		}
 		f.markAffected(c.item)
 		if c.ordinary == nil {
 			f.scheduleAgentChildren(c.item)

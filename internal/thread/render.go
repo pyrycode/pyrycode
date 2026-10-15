@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"maps"
@@ -42,6 +43,21 @@ type recipeField struct {
 	item     uint64
 	revision uint64
 	value    json.RawMessage
+	digest   [32]byte
+}
+
+// equalRecipe compares rendered content facts independently of equal-content
+// source replacements. Entry provenance still belongs to each captured recipe.
+func equalRecipe(a, b contentRecipe) bool {
+	if a.creating != b.creating || a.agent != b.agent || a.delivery != b.delivery || !slices.Equal(a.text, b.text) {
+		return false
+	}
+	return maps.EqualFunc(a.fields, b.fields, func(a, b recipeField) bool {
+		if a.entry != 0 && b.entry != 0 && a.digest != [32]byte{} && a.digest == b.digest {
+			a.entry = b.entry
+		}
+		return a.entry == b.entry && a.item == b.item && a.revision == b.revision && bytes.Equal(a.value, b.value)
+	})
 }
 
 func (f *Fold) referenceItem(index int, e history.Entry) {
