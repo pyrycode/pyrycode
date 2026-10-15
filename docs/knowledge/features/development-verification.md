@@ -125,14 +125,31 @@ new connection's handshake; consuming or reordering them can lose assertions or
 break receive-nonce order. See the `switchWire.open` regression in
 [agent-switch handover testing](conversation-session-binding.md#testing-agent-switch-handover).
 
-Receiving the Noise handshake response does not establish supplied live-state
-snapshot capture: `V2SessionManager.handleNoiseInit` sends the response before
-calling `ThreadLiveState`, while `switchWire.open` returns after `ReadResp`.
+Receiving the Noise handshake response establishes neither push-queue registration
+nor supplied live-state snapshot capture: `V2SessionManager.handleNoiseInit` sends
+the response before registering the queue and calling `ThreadLiveState`, while
+`switchWire.open` returns after `ReadResp`. An immediate off-`Run` `Push` can
+therefore return `ErrConnNotFound` even after successful Noise response receipt;
+that alone does not prove an admitted connection was retired.
 Synchronize admission and held delivery on bounded signals from the snapshot
 callback itself. Otherwise a valid initial reading can arrive before the
 replacement and falsely fail a fresh-only assertion. Sleeping or discarding stale
 frames would obscure the delivery proof. See the
 [connect-gap regression](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery).
+
+A retired-snapshot absence assertion must establish snapshot evaluation completion
+before queueing its identified wire barrier: `drainOnce` lets queued pushes
+overtake snapshot reads in `drainLiveOnce`, so a marker can otherwise arrive with
+the cursor still unvisited. `TestDaemonLiveRelayRetiredSnapshot` uses bounded
+handshake and capture gates, captures the real cursor before removing its owner,
+then waits for cursor exhaustion and validates that the removed model reading
+was visited. An empty cursor cannot prove stale-state rejection. Only then does
+it verify the same phone remains admitted, push the trailing barrier and require
+receipt on that phone of the decrypted barrier with its exact type, ID and
+payload, rejecting every `model_announced` frame and unrelated output.
+Preserve Noise receive order; sleeps or retrying `Push` until
+success cannot establish these preconditions. See the
+[retired-snapshot fixture plan](../../specs/architecture/3420-retired-snapshot-fixture.md).
 
 A later frame on `Frames` cannot prove that `V2SessionManager.Run` consumed an
 asynchronous result on a separate buffered channel: either ready select arm can

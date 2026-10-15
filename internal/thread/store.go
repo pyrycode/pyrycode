@@ -69,6 +69,7 @@ type Store struct {
 	lookup       func(context.Context, conversations.ConversationID, []uint64) ([]history.Entry, error)
 	beforeFold   func(context.Context, conversations.ConversationID) error
 	queryWork    func(bool) // optional work counter: true for preparation, false for requests
+	queryCopies  func(int)  // optional pointer-copy counter for index preparation
 	workers      map[conversations.ConversationID]*conversationWorker
 	closed       bool
 	initMu       sync.Mutex
@@ -163,6 +164,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	result := ErrUnavailable
 	var progress Snapshot
 	var capture publicationCapture
+	capture.copied = s.queryCopies
 	var progressItems []*Item
 	var recovery recoveryRecord
 	var savedVersion uint64
@@ -313,7 +315,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 				deadline, stopTimer = s.newTimer(remaining)
 			}
 		}
-		s.publish(ctx, id, w, items, changes, fold)
+		s.publish(ctx, id, w, items, changes, fold, capture.affected)
 		return nil
 	}
 	if err := publish(); err != nil {
@@ -388,12 +390,17 @@ func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRec
 	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, Items: snapshot.Items, Complete: true, Recovery: recovery})
 }
 
-func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, items []*Item, changes Observation, fold *Fold) {
-	index := newPublicationIndex(items, s.queryWork)
-	index.prepareCatchUp(fold)
+func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, items []*Item, changes Observation, fold *Fold, affected []int) {
 	s.mu.Lock()
 	before := w.snapshot
+	index := w.query
 	s.mu.Unlock()
+	if index == nil {
+		index = newPublicationIndex(items, s.queryWork)
+		index.prepareCatchUp(fold)
+	} else {
+		index = index.advance(items, affected, fold, s.queryWork, s.queryCopies)
+	}
 	var batch changeBatch
 	if before.State == StateUsable {
 		batch.observation = changes
