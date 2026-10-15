@@ -59,6 +59,13 @@ func apiHelper(w http.ResponseWriter, req *http.Request, data string) {
 		<-req.Context().Done()
 		return
 	}
+	if reply.Stall == "disconnect" {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+		return
+	}
 	if reply.Truncate {
 		conn, _, err := w.(http.Hijacker).Hijack()
 		if err == nil {
@@ -287,7 +294,7 @@ func TestAPIResolution(t *testing.T) {
 	}
 }
 func TestAPIResponses(t *testing.T) {
-	r, o := apiOwner(t)
+	r, o, _ := apiResponseOwner(t)
 	for _, tc := range []struct {
 		name     string
 		reply    apiReply
@@ -317,9 +324,15 @@ func TestAPIResponses(t *testing.T) {
 			b := &responseBudget{ceiling: tc.capacity}
 			in := apiRequest(b)
 			in.Method = tc.method
+			started := time.Now()
 			p, err := o.ForwardAPI(context.Background(), testHost, testApp, "1.0.0", in)
+			if p != nil {
+				defer p.Close()
+			}
 			if !errors.Is(err, tc.want) {
-				t.Fatalf("got %v want %v", err, tc.want)
+				_, lookupErr := o.Lookup(testHost, testApp)
+				v := ownerRecord(t, r, testApp)
+				t.Fatalf("got %v want %v; elapsed=%s lookup=%v state=%s requests=%d budget=%d", err, tc.want, time.Since(started), lookupErr, v.State, apiCount(r)-before, b.used())
 			}
 			if p != nil {
 				m, err := p.Metadata()
