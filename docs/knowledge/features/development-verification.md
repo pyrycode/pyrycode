@@ -235,6 +235,13 @@ A verifier can use Go's `-overlay` option with replacement files outside the wor
 to test a mutation without editing the branch. Assert that each replacement applied.
 Run the named test being evaluated so a neighbouring assertion cannot mask its weakness.
 
+For asynchronous state resets, acknowledge completion of result processing before
+releasing the next phase. Entry into delivery or classification can precede the
+reset itself. Also observe terminal failure while awaiting progress, so a mutation
+that abandons work fails on abandonment rather than a coordination timeout. The
+[queue pending-reset proof](msgqueue-package-give-up.md#testing) combines that
+ordering with controlled elapsed time while retaining real retry timers.
+
 A content-free log assertion must not search for a short, common fragment of the
 secret. Timestamp and metadata text can contain the same digits and make an unrelated
 wall-clock value look like a disclosure. Use a distinctive sentinel or inspect the
