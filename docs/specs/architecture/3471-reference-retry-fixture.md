@@ -84,3 +84,32 @@ CPU and synchronization profiles corroborate the phase evidence. Across the orig
 Negative control: with the strengthened assertions and 256 padding entries but no replay chunk decorator, `TestStoreReferenceRetry/replay/missing` failed after 5.03s because worker status remained usable at version 257. No rendering poll created a false failure. Adding the decorator made all 22 leaf scenarios pass, each recording one failed authoritative target lookup. Tail arms also proved padding reached its exact usable version with zero failures before the meaningful event. Source repair then restored legacy item/revision/version/watermark equality in every arm.
 
 Raw evidence remains outside the worktree in `/tmp/builder-3471/`: `baseline-thread.json`, `baseline-retry.json`, `diagnostic-retry.json`, `no-split-control.json`, `candidate-retry.json`, CPU/mutex/block profiles and their decoded summaries. Earlier MacBook evidence was retrieved through the evidence service for #3453, verifier run `c58c2483aaabdaf904700e131fecb10d21ef15a1514ab134145a5e4ed1197342`; its verdict records both package timeouts and the independent daemon failures. Its artifacts do not supply a MacBook Go version or per-phase timings.
+
+### 2026-10-15 — complete candidate gate evidence
+
+Tested implementation: `e4e7cea0a981c335008a73c76b5b5ae8e74d4c28`. The complete race-enabled thread package passed in 251.859s under the full-module gate: 195 top-level tests plus 922 subtests, all 1117 passed, zero failures/skips. This includes the source-cache retention and lifecycle tests; the original complete baseline ran the same 195/922 counts in 336.458s. The focused retry runs each started four top-level tests and 29 subtests (22 leaf scenarios).
+
+The required complete gate ran as `make -k check GO=/tmp/builder-3471/go-json`. The scratch wrapper preserves each recipe's arguments and adds `-json -count=1` to test commands for uncached counted evidence. `-k` requests every stage even on failure; all results below must be assessed individually. Package/test concurrency and the default ten-minute package deadline remain unchanged.
+
+| Check | Result | Elapsed |
+| --- | --- | --- |
+| Full-module `go vet ./...` | PASS | 3.767s |
+| Full-module race suite | PASS: 4991 top-level + 22121 subtest starts; 27089 passed, 0 failed, 23 skipped | 373.330s command wall time |
+| Staticcheck | PASS | Included in complete gate wall time |
+| Substrate guard | PASS, clean | 0.304s |
+| Complete fake-daemon e2e | PASS: 265 top-level + 445 subtest starts; 708 passed, 0 failed, 2 skipped | 193.075s command wall time; package 189.672s |
+| `make build` | PASS | 0.114s timed cached build |
+
+Named unit skips and reasons (no failed tests):
+
+- `internal/agentrun/trust`: `TestMarkWorkdirTrusted_CaseMismatchWritesOnDiskKey` — case-sensitive filesystem.
+- `internal/canonicalpath`: `TestResolve_CaseMismatchFoldsToOnDiskCase` — case-sensitive filesystem; `TestResolve_DarwinRealpath` — Darwin-only alias behavior.
+- `cmd/pyry`: `TestRunAgentRun_RealClaude` — opt-in real-Claude environment absent; `TestMemoryPathsCaseInsensitive` — case-sensitive filesystem.
+- `internal/memorycapture`: `TestFilesystemAttacks/owner` — requires root for ownership substitution.
+- `internal/memoryruntime`: `TestMacOSInstallCancelled`, `TestMacOSHostGate` — macOS host boundaries.
+- `internal/streamsup`: `TestAccountTokenReadDeadline` — production-duration proof belongs to `make test-slow`.
+- `internal/apps`: `TestBackupNodeDirectoryIdentity`, `TestBackupNodeFailures/sql`, `TestBackupSQLiteCancellation`, `TestBackupSQLiteStorageErrors`, `TestBackupSQLiteWAL`, `TestCandidateSupportedTemplate`, `TestCommittedTemplateUpdateSnapshot`, `TestOwnerSupportedNode`, `TestPublishTemplate`, `TestUpdateTemplateSnapshot`, `TestUpdateTemplateRollback`, `TestRestoreSQLiteWAL`, `TestRestoreSQLiteGenericAndCancellation`, `TestStartupTemplateRecovery` — supported Node/npm or `HOSTED_APP_NODE` unavailable. These skips establish no supported-runtime acceptance.
+
+The no-test `internal/brokenpyry` package is also reported as a package skip; it is not included in the 23 skipped test/subtest count. No live-Claude or native MacBook candidate run is claimed. The documentation stage owns the pending documentation handoff above; the verifier owns rerunning the standard gate on its host.
+
+The complete `make -k check` exited zero after approximately 592 seconds (19:57:12–20:07:04 UTC). Every requested stage actually ran and passed: vet, full-module race tests, staticcheck, substrate guard and fake-daemon e2e. There were no named failures. The two e2e skips are `internal/e2e.TestInnerFatalChild` (helper runs only under `TestHarness_NoLeakOnFatal`) and `internal/e2e.TestHostedAppsRecoverySQL` (requires `HOSTED_APP_NODE` and `HOSTED_APP_TEMPLATE_BUILD`). Full captured output is `/tmp/builder-3471/check.log`; timed build output is `/tmp/builder-3471/build-timed.log`.
