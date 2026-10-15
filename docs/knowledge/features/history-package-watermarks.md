@@ -39,6 +39,19 @@ Containment is **not** cached across calls, on the same reasoning as
 re-checks every call, even once the cursor is warm, so a symlink planted after
 the cursor loaded is still caught on the next lookup.
 
+`CachedLatestEntryID` exposes only an already-loaded append cursor, with a
+separate presence flag: known empty progress is present zero, while a cold or
+missing cursor is unknown. It validates IDs and rechecks directory containment
+under the same mutex as appends, without calling `load`, opening segments or
+creating directories. `EnsureLogDir` alone does not warm it. Use this API when
+a metadata lookup must never initiate history recovery; substituting
+`LatestEntryID` silently adds cold segment reads. A saved thread certificate's
+consumed version cannot establish current raw progress, because hidden appends
+advance the raw cursor without raising the shown watermark. See
+[unloaded certificate eligibility](thread-package.md#cache-and-epochs).
+`TestCachedLatestEntryID` measures zero segment opens/bytes for warm, cold and
+empty reads; `TestCachedLatestEntryIDConcurrent` checks reads alongside appends.
+
 ### Unread state uses a separate, lazily recovered watermark (#2954)
 
 Raw `Store.LatestDisplayableEntryID` is metadata-aware. `displayableEntry` first
