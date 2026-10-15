@@ -503,6 +503,9 @@ func TestLiveStateRun(t *testing.T) {
 	cfg := threadConfig(t, frames, rec, priv)
 	started := time.Now()
 	const expected = pushQueueCap*2 + 2
+	// One budget covers handshake admission through the last decryption,
+	// including buffered frames. Progress never extends the deadline.
+	deadline := started.Add(8 * time.Second)
 	var sent atomic.Int64
 	cfg.Outbound = func(frame protocol.RoutingEnvelope) error {
 		if err := rec.outbound(frame); err != nil {
@@ -523,12 +526,54 @@ func TestLiveStateRun(t *testing.T) {
 	}
 	mgr, stop := startManager(t, cfg)
 	t.Cleanup(stop)
-	recv := openGateConn(t, frames, rec, v2TestConnID, pub, v2TestInstallPriv, threadCaps, nil)
-	msgs := waitForEnvelopes(t, rec, pushQueueCap*2+2)
-	for _, frame := range msgs[1:] {
-		threadPlain(t, frame, recv)
+	initiator, err := noise.NewInitiator(v2TestInstallPriv, pub)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("live-state decrypted: elapsed=%s received=%d/%d decrypted=%d/%d", time.Since(started), len(msgs), expected, len(msgs)-1, expected-1)
+	initMsg, err := initiator.WriteInit(buildHelloEarlyDataCaps(t, v2TestToken, threadCaps))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg)
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	poll := time.NewTicker(2 * time.Millisecond)
+	defer poll.Stop()
+	var recv *noise.CipherState
+	seen, received := 0, 0
+	checkDeadline := func() {
+		if !time.Now().Before(deadline) {
+			t.Fatalf("live-state deadline: elapsed=%s received=%d/%d decrypted=%d/%d", time.Since(started), received, expected, max(0, seen-1), expected-1)
+		}
+	}
+	for seen < expected {
+		msgs := rec.snapshot()
+		received = len(msgs)
+		checkDeadline()
+		for _, frame := range msgs[seen:] {
+			checkDeadline()
+			if seen == 0 {
+				_, _, recv, err = initiator.ReadResp(decodeRespFrame(t, frame))
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				threadPlain(t, frame, recv)
+			}
+			seen++
+			checkDeadline()
+			if seen == expected/2 || seen == expected {
+				t.Logf("live-state decrypted: elapsed=%s received=%d/%d decrypted=%d/%d", time.Since(started), received, expected, seen-1, expected-1)
+			}
+		}
+		if seen < expected {
+			select {
+			case <-timer.C:
+				checkDeadline()
+			case <-poll.C:
+			}
+		}
+	}
 	if got := mgr.ActiveConns(t.Context()); len(got) != 1 {
 		t.Fatal("snapshot overflow closed connection")
 	}
