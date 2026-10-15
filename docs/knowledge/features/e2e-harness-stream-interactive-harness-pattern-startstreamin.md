@@ -565,3 +565,53 @@ violate Noise nonce order and test a different failure. A longer milestone
 deadline cannot recover an echo the ack loop has already consumed. See
 [mutation verification](development-verification.md#prove-that-tests-distinguish-the-change)
 for using scratch Go overlays without changing the branch.
+
+#### Retaining child-exit dismissals and interpreting diagnostics
+
+Retaining the shown surface alone does not protect the child-exit wait:
+`modal_dismissed` can also arrive during the ack phase (#3412).
+`streamModalReader.next`, bound as `nextEnv`, observes every decoded envelope
+and retains the first dismissal observation by modal ID. `waitDismissed`
+checks that observation before reading more frames. Its identity and original
+phase/timing record survive eviction from the separate 128-entry diagnostic
+trace; repeated waits for the same observed ID consume no additional frame.
+The subtest goroutine owns the reader, and the existing decoder still receives
+and decrypts each ciphertext once in arrival order.
+
+`TestStreamModalReaderOrdering/early` scripts shown → dismissed → ack, so the
+ack loop consumes the dismissal before the dedicated wait. The phase-local
+wait failed this ordering; retention passes. A controlled real-daemon overlay
+also made the old wait expire after ten seconds despite receipt in phase
+`ack` after about nine milliseconds and a matching retirement audit. The
+retained wait passed with replacement-child synchronization and the ban on
+writing the origin request's permission response to that child intact. This
+proves a reader defect; the unchanged complete suite did not reproduce the
+historical failure, whose missing logs prevent attribution. See the
+[controlled evidence](../../specs/architecture/3412-child-exit-modal-retention.md#revisions).
+
+Keep the ten-second child-exit dismissal deadline. A different modal's
+dismissal cannot satisfy it. `TestStreamModalReaderDeadline` checks expiry
+even with an always-buffered unrelated stream: progress must not renew the
+absolute budget. A larger timeout cannot recover an already consumed frame.
+
+On failure, `streamModalReader.diagnostics` combines the retained observations
+and bounded receive trace with selected fields from `Harness.Stderr.String()`.
+Correlate modal ID, envelope/reply IDs, receive phase and elapsed time from
+`started_at`, envelope `daemon_ts`, and daemon audit timestamps/outcome/source.
+`streamApprovalBridge.retire` audits before broadcasting dismissal. A matching
+audit without observed receipt narrows investigation to delivery or scheduling;
+an absent audit leaves retirement unproven. Correlate
+`stream_approval.dismissed_push_err` by envelope/connection ID to identify a
+failed push. A retained receipt in an earlier phase establishes consumption
+before the dedicated wait. The `denied_timeout/timeout` audit vocabulary also
+covers child-exit retirement; it does not alone establish timeout as the cause.
+Successful child-exit runs log the same metadata after replacement synchronization.
+
+Parse quoted slog values atomically before selecting allowlisted fields.
+Whitespace splitting can mistake `modal_id=...` inside a quoted message for
+real metadata and disclose content. The diagnostic projection selects only
+`time`, `level`, `event`, `modal_id`, `outcome`, `source`, `env_id`, `conn_id`
+and `pid`; it omits message/error text, prompts, payload bodies and answer
+tokens. `TestStreamModalReaderDiagnostics` plants a secret sentinel inside
+payloads and a quoted message, checks its exclusion, and proves trace eviction
+preserves dismissal evidence.
