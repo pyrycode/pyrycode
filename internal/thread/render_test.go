@@ -397,11 +397,16 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 				}
 				// Later facts evict the creating message; neither the current feed
 				// chunk nor the recent cache can mask the failed authoritative read.
-				for range history.MaxPageEntries {
+				padding := history.MaxPageEntries
+				if deferredSend {
+					padding = 256 // Fill the FIFO before appending the terminal fact.
+				}
+				for range padding {
 					entries = append(entries, testStoreAppend(t, h, testStoreA, testEntry(0, "ignored", `{}`))...)
 				}
 				if phase == "tail" {
 					if deferredSend {
+						testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries)))
 						entries = append(entries, testStoreAppend(t, h, testStoreA, initial[len(initial)-1])...)
 					} else {
 						// Unchanged publications need no source reread. A delivery join
