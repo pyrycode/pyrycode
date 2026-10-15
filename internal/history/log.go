@@ -469,6 +469,31 @@ func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, erro
 	return c.lastID, nil
 }
 
+// CachedLatestEntryID returns the raw append cursor only when already recovered.
+// A false presence flag means unknown progress, including missing logs. It never
+// initializes a cursor, reads segments or creates directories. Like LatestEntryID,
+// it requires caller authorization and rechecks directory containment each call.
+func (s *Store) CachedLatestEntryID(convID conversations.ConversationID) (uint64, bool, error) {
+	if !conversations.ValidID(string(convID)) {
+		return 0, false, fmt.Errorf("%w: conversation id %q", ErrInvalidID, string(convID))
+	}
+	if s == nil {
+		return 0, false, fmt.Errorf("history: store is unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.resolveDir(convID, false); errors.Is(err, fs.ErrNotExist) {
+		return 0, false, nil
+	} else if err != nil {
+		return 0, false, err
+	}
+	c := s.convs[convID]
+	if c == nil || !c.loaded {
+		return 0, false, nil
+	}
+	return c.lastID, true, nil
+}
+
 // LatestDisplayableEntryID returns the newest durable entry id whose explicit
 // Shown is true, or whose type is displayable when Shown is absent. The legacy
 // rule excludes turn_state, stall, api_retry, compacting, and session_transition;
