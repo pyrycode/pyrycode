@@ -57,6 +57,8 @@ None.
 
 Pending documentation stage: update `docs/hosted-apps.md`, “Client resource bridge / Capability and envelope vocabulary” and “Implementation and validation ownership”; `docs/protocol-mobile.md`, “Hosted apps (v2)”; and `docs/knowledge/features/apps-package-lifecycle-and-restart-state.md`, “Lifecycle and restart state”. Replace resource-routing/production-attestation deferrals with implemented support, infrastructure/runtime readiness rules and counted fake-relay evidence. Explicitly leave real-relay/template validation to #3441. Preserve native viewer, publisher and live-channel acceptance as downstream work without claiming those gates passed.
 
+Pending documentation stage from verifier review: replace the stale production-activation deferral in `docs/knowledge/features/apps-package-resource-serving.md`.
+
 ## Security review
 
 **Verdict:** PASS
@@ -77,3 +79,4 @@ Pending documentation stage: update `docs/hosted-apps.md`, “Client resource br
 
 - 2026-10-15: the asset backend file is `internal/apps/assets.go`. Keep the bounded runtime probe in `internal/apps/runtime_check.go` to avoid expanding the existing launch preparation. Composition notifications now include real owner observations, so assert committed revisions rather than assuming registration/removal always consume exactly two revisions. The commit/response barrier holds the old handler after cancellation and releases it only after the new connection has submitted its reused-ID read.
 - 2026-10-15: verifier finding 1 reproduced Linux `ETXTBSY` in parallel runtime fixtures. Write and close each shell executable in a joined child so concurrent forks of the test process cannot inherit its writable descriptor. Keep every version case and the one-second cancellation bound, require the cancellation deadline to expire, and include underlying probe errors in failures. Production readiness is unchanged. Re-run 50 race repetitions, focused acceptance with a race-built daemon, and the verifier-requested complete `make check` and `make build` gates before handoff.
+- 2026-10-15: verifier re-review finding 1 identified the same executable-descriptor race in `TestDaemonAppsComposition`; the unchanged supported arm failed 3 of 100 race repetitions. Use `testWriteDaemonAppsRuntime` for both its initial executable and its post-attestation replacement. Preserve all five supported/degraded negotiation arms and the assertion that readiness remains cached after replacement. Re-run 100 composition race repetitions, runtime readiness, the touched package and focused fake-relay acceptance with a race-built daemon; the verifier owns the full-module gate.

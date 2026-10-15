@@ -147,9 +147,7 @@ func TestDaemonAppsComposition(t *testing.T) {
 				if mode == "runtime" {
 					version = "v25.0.0"
 				}
-				if err := os.WriteFile(node, []byte("#!/bin/sh\necho "+version+"\n"), 0700); err != nil {
-					t.Fatal(err)
-				}
+				testWriteDaemonAppsRuntime(t, node, "#!/bin/sh\necho "+version+"\n")
 				owner = newDaemonAppsOwner(r, node, discardLogger())
 				t.Cleanup(func() { _ = owner.Shutdown() })
 			}
@@ -166,9 +164,7 @@ func TestDaemonAppsComposition(t *testing.T) {
 				t.Fatal(err)
 			}
 			if ready {
-				if err := os.WriteFile(node, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
-					t.Fatal(err)
-				}
+				testWriteDaemonAppsRuntime(t, node, "#!/bin/sh\nexit 1\n")
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
