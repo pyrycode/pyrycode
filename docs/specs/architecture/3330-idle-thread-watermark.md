@@ -67,3 +67,4 @@ Pending documentation stage: update `docs/knowledge/features/thread-package.md`,
 
 ## Revisions
 - 2026-10-15: Added `TestDaemonThreadLastShownIO`, a Linux inotify observation of the installed callback, to count actual certificate opens and detect segment opens/writes across two history sizes, warm/cold cursors and registry removal. Portable tests still cover all eligibility predicates and loaded allocation behavior. Estimated total remains below 700 written lines; no production interface changes.
+- 2026-10-15: Verifier finding 1: observe read-only close events in `TestDaemonThreadLastShownIO` to prevent adjacent identical open events from coalescing. A two-open control uses the callback's same one-open bound and requires rejection with exactly two observed opens; before the watch change it observed one and failed for both history sizes. Production eligibility and security boundaries are unchanged; total written work remains below 800 lines.
