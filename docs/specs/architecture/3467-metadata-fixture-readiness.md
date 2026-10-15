@@ -145,3 +145,43 @@ stalled/allocation/source cases) started seven tests/subtests, passed six and
 left one unfinished at timeout, with zero skips. Those results are retained
 but superseded by the sequential final checks below. All controlled workers
 and both timed-out test processes exited before the ordinary suite runs.
+
+### 2026-10-15 — final focused and complete daemon results
+Final focused command:
+`env GOMAXPROCS=2 go test -race -count=2 -timeout=5m -json ./cmd/pyry -run '^(TestDaemonThreadMetadata(ReadinessStalled|Allocations)|TestThreadMetadataReadSources)$'`.
+Code revision `9e11b9b3`; ten tests/subtests executed and passed, zero failed or
+skipped, package 47.557s. Both stalled-worker checks expired at their one-second
+inactivity bound and joined their workers in cleanup. Allocation-fixture phase
+times (construction/replay-readiness/snapshot-validation) were
+2.630/10.512/3.705s and 0.915/4.547/2.329s. Record: `final-focused-clean.json`.
+
+Complete daemon command, revision `907261e2` (same code):
+`go test -race -count=1 -timeout=15m -json ./cmd/pyry -bench '^BenchmarkDaemonThreadMetadata$' -benchtime=1x`.
+GOMAXPROCS unset, no affinity, default test parallelism; no builder-owned
+controlled workload or other suite overlaps. All controlled processes were
+joined first. Host-wide incidental activity remains uncontrolled.
+16,539 tests/subtests started: 16,537 passed, zero failed, two skipped; package
+547.552s, command wall 550.807s, exit zero. Benchmark parent/four case `run`
+events are counted separately from tests. Skip reasons:
+- `TestRunAgentRun_RealClaude`: opt-in `PYRY_E2E_REAL_CLAUDE=1` absent.
+- `TestMemoryPathsCaseSensitiveSiblings`: case-insensitive filesystem cannot
+  represent case-differing siblings.
+
+All metadata tests and the unrelated `TestDaemonThreadQueriesRecovery` passed.
+Delayed fixture phases were 3.042/34.304/2.376s; ordinary allocation-fixture
+phases were 1.208/6.195/2.340s. Benchmark setup phases were 0.543/4.231/1.882s,
+outside the measured benchmark cases. All four cases ran one iteration:
+
+| Benchmark case | ns/op | B/op | allocs/op |
+| --- | --- | --- | --- |
+| UnchangedPublication | 6,834 | 0 | 0 |
+| InstalledListLookup | 9,625 | 0 | 0 |
+| ShadowStatus | 4,750 | 0 | 0 |
+| BaselineSnapshot | 1,945,651,791 | 39,339,584 | 62,847 |
+
+The benchmark is an execution/behavior check, not a performance comparison.
+Raw record: `/tmp/builder-3467/complete-cmd.json`. `go vet ./...` and
+`go build -o /tmp/builder-3467/pyry ./cmd/pyry` both exited zero on the final
+code; logs are `vet.log` and `build.log` in the same scratch directory.
+The combined race command began only after this complete daemon run exited;
+its final outcome is recorded in the following evidence entry.
