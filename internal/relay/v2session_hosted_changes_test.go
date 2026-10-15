@@ -20,7 +20,11 @@ const lifecycleApp = "22222222-2222-4222-8222-222222222222"
 
 func testLifecycleRegistry(t *testing.T, host string) (*apps.Registry, string) {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), "apps")
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve lifecycle fixture root: %v", err)
+	}
+	root := filepath.Join(dir, "apps")
 	r, err := apps.Open(root, host)
 	if err != nil {
 		t.Fatal(err)

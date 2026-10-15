@@ -52,6 +52,7 @@ type conversationWorker struct {
 	done       chan struct{}
 	retiring   bool
 	snapshot   Snapshot
+	items      []*Item
 	query      *queryIndex
 	err        error // read only after done closes
 	changed    chan struct{}
@@ -68,6 +69,7 @@ type Store struct {
 	lookup       func(context.Context, conversations.ConversationID, []uint64) ([]history.Entry, error)
 	beforeFold   func(context.Context, conversations.ConversationID) error
 	queryWork    func(bool) // optional work counter: true for preparation, false for requests
+	queryCopies  func(int)  // optional pointer-copy counter for index preparation
 	workers      map[conversations.ConversationID]*conversationWorker
 	closed       bool
 	initMu       sync.Mutex
@@ -161,6 +163,9 @@ func (s *Store) start(ctx context.Context, id conversations.ConversationID, retr
 func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *conversationWorker) {
 	result := ErrUnavailable
 	var progress Snapshot
+	var capture publicationCapture
+	capture.copied = s.queryCopies
+	var progressItems []*Item
 	var recovery recoveryRecord
 	var savedVersion uint64
 	var lastCheckpoint time.Time
@@ -173,7 +178,9 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		deadline, stopTimer = nil, nil
 	}
 	flush := func() error {
-		if err := s.checkpoint(id, recovery, progress); err != nil {
+		checkpoint := progress
+		checkpoint.Items = detachPublication(progressItems)
+		if err := s.checkpoint(id, recovery, checkpoint); err != nil {
 			return err
 		}
 		savedVersion, lastCheckpoint = progress.Version, s.now()
@@ -202,6 +209,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 			s.records[id] = progressRecord{Epoch: progress.Epoch, Version: progress.Version, Err: result}
 			if !w.retiring && !s.closed {
 				w.snapshot = Snapshot{State: StateUnavailable, Err: ErrUnavailable}
+				w.items = nil
 				w.query = nil
 				w.ranges, w.rangeBytes = nil, 0
 				w.notify()
@@ -246,6 +254,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	}
 	source := newRecentSource(func(ids []uint64) ([]history.Entry, error) { return s.lookup(ctx, id, ids) })
 	fold := newReferenceFold(string(id), source)
+	fold.captureSet = make(map[int]struct{})
 	feed := func(entries []history.Entry) error {
 		if s.beforeFold != nil {
 			if err := s.beforeFold(ctx, id); err != nil {
@@ -284,18 +293,18 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		items, err := fold.Render()
+		items, changes, err := capture.capture(fold)
 		source.chunk = nil
 		if err != nil {
 			return err
 		}
-		snapshot := Snapshot{State: StateUsable, Items: items, Version: fold.Version(), LastShownVersion: fold.lastShown, Epoch: epoch}
-		for _, item := range fold.items {
-			snapshot.Active = snapshot.Active || item.Active
-		}
+		snapshot := changes.Snapshot
+		snapshot.Epoch = epoch
+		changes.Snapshot = snapshot
 		initial := progress.State != StateUsable
 		becameIdle := progress.Active && !snapshot.Active
 		progress = snapshot
+		progressItems = items
 		if initial || progress.Version != savedVersion {
 			remaining := lastCheckpoint.Add(30 * time.Second).Sub(s.now())
 			if initial || becameIdle || remaining <= 0 {
@@ -306,7 +315,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 				deadline, stopTimer = s.newTimer(remaining)
 			}
 		}
-		s.publish(ctx, id, w, snapshot, fold)
+		s.publish(ctx, id, w, items, changes, fold, capture.affected)
 		return nil
 	}
 	if err := publish(); err != nil {
@@ -381,15 +390,20 @@ func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRec
 	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, Items: snapshot.Items, Complete: true, Recovery: recovery})
 }
 
-func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, snapshot Snapshot, fold *Fold) {
-	index := newQueryIndex(snapshot.Items, s.queryWork)
-	index.prepareCatchUp(fold)
+func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, items []*Item, changes Observation, fold *Fold, affected []int) {
 	s.mu.Lock()
 	before := w.snapshot
+	index := w.query
 	s.mu.Unlock()
+	if index == nil {
+		index = newPublicationIndex(items, s.queryWork)
+		index.prepareCatchUp(fold)
+	} else {
+		index = index.advance(items, affected, fold, s.queryWork, s.queryCopies)
+	}
 	var batch changeBatch
 	if before.State == StateUsable {
-		batch.observation = difference(before, snapshot)
+		batch.observation = changes
 		encoded, _ := json.Marshal(batch.observation.Changes)
 		batch.bytes = len(encoded)
 	}
@@ -399,7 +413,8 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 		if before.State == StateUsable {
 			w.retain(batch)
 		}
-		w.snapshot = snapshot
+		w.snapshot = changes.Snapshot
+		w.items = items
 		w.query = index
 		w.notify()
 	}
@@ -410,11 +425,17 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 func (s *Store) Snapshot(id conversations.ConversationID) Snapshot {
 	s.mu.Lock()
 	var snapshot Snapshot
+	var items []*Item
 	if w := s.workers[id]; w != nil && !w.retiring {
 		snapshot = w.snapshot
+		items = w.items
 	}
 	s.mu.Unlock()
-	snapshot.Items = copyItems(snapshot.Items)
+	if items != nil {
+		snapshot.Items = detachPublication(items)
+	} else {
+		snapshot.Items = copyItems(snapshot.Items)
+	}
 	return snapshot
 }
 
@@ -434,6 +455,7 @@ func (s *Store) Unload(id conversations.ConversationID) error {
 	}
 	w.retiring = true
 	w.snapshot = Snapshot{}
+	w.items = nil
 	w.query = nil
 	w.ranges, w.rangeBytes = nil, 0
 	w.notify()
@@ -465,6 +487,7 @@ func (s *Store) Shutdown() error {
 	for _, w := range s.workers {
 		w.retiring = true
 		w.snapshot = Snapshot{}
+		w.items = nil
 		w.query = nil
 		w.ranges, w.rangeBytes = nil, 0
 		w.notify()

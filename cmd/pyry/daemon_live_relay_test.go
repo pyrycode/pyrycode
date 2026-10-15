@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"sync/atomic"
 	"testing"
@@ -332,22 +333,99 @@ func TestDaemonLiveRelayReplies(t *testing.T) {
 func TestDaemonLiveRelayRetiredSnapshot(t *testing.T) {
 	b := testControlBindings(t, "conv", "a")
 	b.sink.live.acceptEvent(b.capture("conv", "a", false), turnevent.ModelAnnounced{Model: "removed"})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	responseSent, releaseHandshake := make(chan struct{}), make(chan struct{})
+	captureEntered, releaseCapture := make(chan struct{}), make(chan struct{})
+	removed, evaluated := make(chan struct{}), make(chan struct{})
+	var visited []relay.LiveState
+	wait := func(signal <-chan struct{}, phase string) {
+		t.Helper()
+		select {
+		case <-signal:
+		case <-ctx.Done():
+			t.Fatalf("retired-snapshot fixture did not reach %s", phase)
+		}
+	}
 	w, mgr := testDaemonRelayWire(t, b, relayWiring{}, nil, func(cfg *relay.V2SessionConfig) {
+		outbound := cfg.Outbound
+		first := true
+		cfg.Outbound = func(e protocol.RoutingEnvelope) error {
+			if err := outbound(e); err != nil {
+				return err
+			}
+			if first {
+				first = false
+				close(responseSent)
+				select {
+				case <-releaseHandshake:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return nil
+		}
 		snapshot := cfg.ThreadLiveState
-		cfg.ThreadLiveState = func() func() (relay.LiveState, bool) { cursor := snapshot(); b.sink.remove("conv"); return cursor }
+		cfg.ThreadLiveState = func() func() (relay.LiveState, bool) {
+			close(captureEntered)
+			select {
+			case <-releaseCapture:
+			case <-ctx.Done():
+				return nil
+			}
+			cursor := snapshot()
+			b.sink.remove("conv")
+			close(removed)
+			return func() (relay.LiveState, bool) {
+				r, ok := cursor()
+				if ok {
+					visited = append(visited, r)
+				} else {
+					// Earlier cursor entries have returned through forwardLiveState.
+					close(evaluated)
+				}
+				return r, ok
+			}
+		}
 	})
 	w.open("phone", false, protocol.CapabilityThread)
-	if err := mgr.Push(t.Context(), "phone", protocol.Envelope{ID: 130, Type: protocol.TypeError, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}); err != nil {
+	wait(responseSent, "response publication before admission")
+	barrier := protocol.Envelope{ID: 130, Type: protocol.TypeError, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}
+	// Response receipt alone cannot establish push-queue registration.
+	if err := mgr.Push(ctx, "phone", barrier); !errors.Is(err, relay.ErrConnNotFound) {
+		t.Fatalf("push before admission: got %v, want ErrConnNotFound", err)
+	}
+	close(releaseHandshake)
+	wait(captureEntered, "delayed snapshot capture")
+	close(releaseCapture)
+	wait(removed, "captured owner removal")
+	wait(evaluated, "retired snapshot evaluation completion")
+	if len(visited) != 1 {
+		t.Fatalf("snapshot visited %d readings, want the removed model reading", len(visited))
+	}
+	r := visited[0]
+	var model protocol.ModelAnnouncedPayload
+	if err := json.Unmarshal(r.Envelope.Payload, &model); err != nil {
+		t.Fatal(err)
+	}
+	if r.ConversationID != "conv" || r.Envelope.Type != protocol.TypeModelAnnounced || r.Envelope.SessionStateCleared || string(r.Envelope.SessionID) != `"a"` || model != (protocol.ModelAnnouncedPayload{ConversationID: "conv", Model: "removed"}) {
+		t.Fatalf("unexpected captured reading: %+v", r)
+	}
+	if conns := mgr.ActiveConns(ctx); len(conns) != 1 || conns[0].ConnID != "phone" || !conns[0].Thread {
+		t.Fatalf("snapshot evaluation lost the admitted phone: %+v", conns)
+	}
+	if err := mgr.Push(ctx, "phone", barrier); err != nil {
 		t.Fatal(err)
 	}
 	for {
-		_, e := w.read()
+		id, e := w.read()
 		if e.Type == protocol.TypeModelAnnounced {
 			t.Fatal("removed detached snapshot published")
 		}
-		if e.Type == protocol.TypeError {
+		if id == "phone" && e.Type == barrier.Type && e.ID == barrier.ID && bytes.Equal(e.Payload, barrier.Payload) {
 			break
 		}
+		t.Fatalf("unexpected frame before retired-snapshot barrier: peer=%s envelope=%+v", id, e)
 	}
 }
 

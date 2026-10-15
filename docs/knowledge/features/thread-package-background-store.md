@@ -54,6 +54,17 @@ and persistence errors. Notifications cover commits through the supplied history
 store only; another store or external writer supplies no wakeup. See
 [forward consumption](history-package-shape.md#forward-consumption).
 
+`recordShown` preserves deduplicated post-join candidates across the chunk for
+`publicationCapture.capture`. Capture compares only those rows' final public
+states against the previous publication, in creation-ID order, using
+`itemDifference`'s replacement and suffix rules. Repeated touches coalesce;
+late appearance, reparenting and suppression use membership at publication
+boundaries, not intermediate entry states. Ordinary tail capture neither calls
+whole-thread `Fold.Items` nor compares the whole thread with `difference`.
+Copying the stable item-pointer slots and affected lookup buckets still scales
+with the thread; query memberships are maintained from the captured affected
+slots. A failed feed chunk never reaches capture or publication.
+
 `Store.Observe(conversationID)` acquires a consistent complete baseline without
 history I/O. Once usable, pass its `Epoch` and `Version` to
 `Store.Changes(ctx, conversationID, epoch, after)` for subsequent progress. Each
@@ -114,15 +125,29 @@ explicit requests for each open conversation.
 
 ### Snapshots and retry
 
-Production workers use `Fold.Render() ([]Item, error)` for recovery comparisons
-and before constructing a complete checkpoint/publication. It resolves the
+Production workers use `Fold.Render() ([]Item, error)` for recovery comparisons.
+Publication capture uses `renderShared` on affected public rows to resolve the
 [converted standalone recipes](thread-package-main-thread-folding.md#standalone-source-entries)
-after excluding suppressed delivery rows and children without public parents,
-copies exact source payload bytes into detached public `Item.Content`, and uses
-inline content for deferred kinds. Any missing reference or source error returns
-no items, including when another reference in the same batch resolved. Legacy
-folds created by `New` remain inline, and existing `Items`, `Observe` and
-`FeedChanges` callers keep their APIs.
+after excluding suppressed delivery rows and children without public parents.
+Internal capture borrows immutable source payload or inline `Content` bytes,
+reuses unchanged item pointers and replaces affected public values. Folding
+replaces content allocations rather than mutating published bytes. Each captured
+item has its own allocation: pointers into one shared item array would let an
+unchanged row pin replaced content belonging to every other row in that array.
+Older publications and captured query indexes remain stable across later feeds.
+Internal stable slots include nil entries for private or withdrawn rows;
+`detachPublication` skips them at full-output boundaries and preserves nil
+`Items` when no public row survives. Slot count is not public item count.
+Any required missing reference or source error rejects the entire candidate
+publication, including when another reference in the same batch resolved.
+
+Public `Fold.Render`, `Fold.Items`, `Fold.Observe`, `Fold.FeedChanges` and all
+Store item/change/query results still return complete detached content with
+their existing signatures. Public rendering copies source payload bytes;
+`Store.Snapshot` captures immutable pointers under the mutex and materializes
+detached values outside it. Checkpoints likewise materialize complete detached
+items only at the [checkpoint boundaries](thread-package.md#cache-and-epochs).
+Legacy folds created by `New` remain inline.
 
 The worker-owned `recentSource` resolves IDs from the current feed chunk, then
 its recent-entry FIFO, then `history.Store.Lookup` for remaining IDs only, bound
@@ -161,8 +186,9 @@ Only `StateUsable` carries items/versions/epoch. The last-shown watermark follow
 the [history-reconstructed rule](thread-package.md#cache-and-epochs), and unread
 is `LastShownVersion > ReadUpTo`. The random epoch is independent of
 deterministic item equality and follows the [recovery compatibility rules](thread-package.md#cache-and-epochs).
-`Active` is computed from every private fold item at the same publication,
-including unresolved children omitted from `Items`. An empty public item list
+`Active` is maintained by updating an active-index set from affected private and
+public fold rows at each publication, including unresolved children omitted from
+`Items`; it requires no whole-fold activity scan. An empty public item list
 therefore cannot establish unload eligibility. `TestStorePrivateActiveWork`
 checks an invisible active child and its later closure; daemon retirement also
 requires [producer quiescence](thread-package.md#shadow-lifecycle-and-evidence).
@@ -280,25 +306,48 @@ errors use the separate returned error; cancellation discards partial results an
 conversation worker running. Queries never load a conversation, wait for
 recovery or read history.
 
-`newQueryIndex` prepares permanent-ID/parent lookup, current-order sorting and
-active-row lookup from committed public items outside the global lock.
-`prepareCatchUp` adds sorted latest-public-touch lookup and copies coverage and
-suppression evidence reconstructed entry by entry, independently of replay
-chunking. Final `Item.Rev` alone misses an older child becoming public later.
-`Store.publish` installs it atomically with the matching snapshot, rebuilding
-on recovery/retry and each successful publication. Failure, unload and shutdown
-release worker references; a reader that already captured a publication can
-finish coherently while it is replaced or retired. Binary seeks, selection,
-parent traversal and returned-content copying run outside the lock, preserving
-history-writer and other-conversation progress.
+Initial usable replay, including recovery/retry, builds permanent-ID/parent
+lookup and ordered/active membership with `newPublicationIndex`, then adds
+latest-public-touch and coverage/suppression evidence with `prepareCatchUp`.
+`newQueryIndex` adapts value slices for test callers and fresh-build oracles.
+After that, `queryIndex.advance` consumes the affected stable slots preserved by
+`publicationCapture.capture`; ordinary tail publication neither rebuilds these
+indexes, scans unrelated rows to discover changes nor sorts the whole index.
+Permanent-ID lookup uses 256 hash-map buckets, cloning each affected bucket
+once. Ordered, active and latest-public-touch membership use immutable AVL
+trees with copied update/rotation paths and subtree sizes for bounded selection.
+Hash lookup avoids a tree seek for each ancestor in parent closure.
+
+Each affected row loses its old memberships before its current public state is
+inserted. Withdrawn or claimed standalone delivery rows disappear from lookup
+and selection; late-resolved children enter at their current order. A delivered
+queued acceptance keeps its ID and moves to the delivery row's order. Older-order
+appearances and deliveries are inserted at their proper positions, including
+ties, rather than appended to the end. Touch ordering uses `Fold.touches`, so
+first public appearance is selected even when creation ID and final `Item.Rev`
+are older. Coverage, missing-ID and suppression evidence advances from fold
+metadata even when an entry changes no public rows; invalid-touch evidence is
+maintained without rescanning the index.
+
+`Store.publish` installs the immutable index and matching snapshot scalars
+atomically. `Store.captureQuery` captures both under `Store.mu`, then releases
+it before rank/range selection, parent traversal or detached Content copying.
+Old roots, lookup buckets and item bytes remain immutable: a captured read
+finishes coherently through later feed, replacement or retirement. Failure,
+unload and shutdown release worker references without invalidating readers.
+Paused selection or copying leaves history writers and other conversations free
+to progress.
 
 Request work is `O(log N + selected range + active rows + unique parents +
 returned content bytes)`; catch-up selects touched rows by version, and active
 rows apply to catch-up and newest windows. No request scans the conversation,
 reads history or clones a full `Snapshot`/`Observe` baseline. Index
-preparation is separately `O(N log N)` per publication, in addition to fold/replay
-and checkpoint work. Bounded reads do not make recovery or publication cost
-independent of conversation length. `HistoryPage`/`NewestWindow` select current
+construction is separately `O(N log N)` on initial usable replay. Tail semantic
+index work follows affected rows and balanced-tree paths; copying stable slot
+pointers and affected lookup-bucket storage can still grow with history and
+belongs in publication allocation accounting. Capture copies no Content bytes.
+Bounded reads do not make recovery or total publication cost independent of
+conversation length. `HistoryPage`/`NewestWindow` select current
 rows by order; `CatchUp` selects current states by reconstructed touch version.
 `Snapshot`/`Observe` clone full baselines and `Changes` supplies retained
 live change ranges by consumed version. A bounded result is not a complete
@@ -360,7 +409,7 @@ usable. A count limit alone cannot bound large additions, and JSON escaping can
 make a change exceed the byte limit even when its raw history payload fits.
 Baselines, additions, replacement maps and content bytes are detached from
 later observations; differences, encoding and returned copies run outside the
-publication lock. `difference` clones each text suffix into its own allocation:
+publication lock. `itemDifference` clones each text suffix into its own allocation:
 encoded byte accounting cannot bound a substring that pins an accumulated
 message's backing allocation.
 
@@ -421,9 +470,46 @@ exercise the batch sweep and feed precedence. `TestReferenceSourceBound` checks
 detached payload capacity and pointed metadata, eviction and oversized-entry
 bypass. `TestReferenceMissingAtomic` requires no partial render for incomplete
 or unreadable lookup results. `TestStoreReferenceRetry` forces creating-entry
-eviction before missing/unreadable authoritative reads during replay and tail;
-it verifies withdrawal of all usable state and equality with fresh legacy replay
+eviction before missing/unreadable authoritative reads during replay and tail.
+Its tail case uses a delivery join that must resolve the evicted message:
+unrelated no-op tails reuse unchanged content and cannot exercise read failure.
+It verifies withdrawal of all usable state and equality with fresh legacy replay
 after repair and `Retry`.
+
+`TestAffectedPublicationOracle` compares affected capture with whole-thread
+`difference` after single-entry and chunked corpus feeds, including private
+activity, late children, reparenting, delivery/suppression and no-op entries.
+`TestAffectedPublicationReplacement` checks clearing, null and mixed content
+replacement/text append. `TestAffectedPublicationOwnership` retains old
+publications, changes and query results across later feeds and concurrent reads;
+it checks pointer reuse, borrowed content and mutation of detached results.
+Retain internal pointers after text-buffer initialization to prove borrowed
+Content ownership; detached `Fold.Items` snapshots can stay correct while
+reusable buffers corrupt old publications. See the
+[text-buffer ownership checks](thread-package-main-thread-folding.md#validation-and-testing).
+`BenchmarkPublicationPhases` isolates capture/comparison from replay, checkpoint
+I/O, query preparation and output encoding; see the
+[bounded comparison evidence](../../specs/architecture/3388-immutable-publication.md#performance-evidence).
+
+`TestIncrementalQueryOracle` compares incremental indexes with fresh construction
+after every generated and retained shadow entry, including late children,
+delivery suppression and no-item progress. `TestThreadRecordedBaselines` reuses
+its recorded-frame derivation and normalization for per-entry tail versus fresh
+replay comparisons across all three histories. Compare full item states and
+result metadata, disregarding only item order (align independently generated
+Store epochs). `TestIncrementalTreeOwnership` retains lookup buckets and roots
+through concurrent reads and later membership/order updates, checking AVL
+ordering, balance and subtree sizes.
+
+`BenchmarkStorePublication` measures state-changing additions and fixed appends
+with 50,000 prepared public items, including affected capture, Changes
+construction/encoding/retention and immutable index/scalar installation. Fixture
+setup, initial replay, checkpoint serialization and caller output copies are
+excluded. `TestPublicationPreparationGrowth` separately counts semantic visits
+and pointer/index-position copies at 12,500 and 50,000 public items: low
+allocation alone cannot rule out whole-thread preparation. See the
+[complete-publication measurements](https://github.com/pyrycode/pyrycode/pull/3426)
+for before/after commits, environment and measured allocation/work counts.
 
 Restart fixtures must rebuild the thread store when reopening its history
 provider. Changing only the daemon's history field leaves the old `thread.Store`

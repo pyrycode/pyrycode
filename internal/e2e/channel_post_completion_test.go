@@ -129,7 +129,7 @@ func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	var body map[string]string
-	if len(wake) != 1 || json.Unmarshal(wake["push_wake"], &body) != nil || len(body) != 2 || body["platform"] != "fcm" || body["token"] != pushToken {
+	if len(wake) != 1 || json.Unmarshal(wake["push_wake"], &body) != nil || len(body) != 3 || body["platform"] != "fcm" || body["token"] != pushToken || body["request_id"] == "" {
 		t.Fatal("wake carried incorrect or content-bearing fields")
 	}
 	phone2, err := fakephone.Dial(ctx, fr.URL(), serverID, pair.Token, "phone-a")

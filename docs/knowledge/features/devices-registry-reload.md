@@ -33,8 +33,12 @@ The reconcile (pure helper `reconcileDevices(memory, disk)`) is a
   the next handshake is a free consequence of the mechanism).
 
 Membership after `Reload` == disk's exact set, so the accept set is **never
-widened** beyond what is on disk. Result order = disk order (irrelevant; `Save`
-re-sorts, lookups scan linearly).
+widened** beyond what is on disk. Result order = disk order; `Save` re-sorts and
+lookups scan linearly. Tests comparing complete device snapshots across reload
+must key by `TokenHash`, rather than slice position: a registration rename can
+change the persisted tie-break order without changing pairing identity. This
+keeps preservation assertions sensitive to every field without confusing a
+reordered device with a modified one, as in `TestPushWakeFeedbackPersistence`.
 
 ### Lock discipline
 

@@ -109,6 +109,18 @@ For combined predicates, exercise each branch independently. A shared log site c
 prove which branch was taken if both inputs satisfy the first condition. Use an
 independent observable result of the path under test.
 
+`reset.wrapup.write_failed` can mean the shared context expired before
+`writeResetWrapUp` called the injected writer. Stale-note persistence consumes
+that same budget before resolution. A matching event alone can therefore let
+a delivery-error test pass without exercising its injected failure.
+`TestResetThenRotate_FailedHandoffIsStale` checks resolution, dormant activation
+and the first delivery attempt before expiry, and checks which callbacks ran.
+Its idle case retains the busy state and observes the interrupt. Give immediate
+failure classifications finite headroom separately from deliberate readiness,
+idle and completion expiry; retain the stale bytes, warning/fence, secret
+exclusion, bounded rotation and successful-recovery assertions. Permission-based
+persistence skips must remain visible as skips.
+
 A FIFO barrier proves that preceding queued work drained only after the
 asynchronous producer has finished enqueueing the work being asserted. Join
 producer completion before inserting the barrier, for both positive delivery
@@ -125,14 +137,31 @@ new connection's handshake; consuming or reordering them can lose assertions or
 break receive-nonce order. See the `switchWire.open` regression in
 [agent-switch handover testing](conversation-session-binding.md#testing-agent-switch-handover).
 
-Receiving the Noise handshake response does not establish supplied live-state
-snapshot capture: `V2SessionManager.handleNoiseInit` sends the response before
-calling `ThreadLiveState`, while `switchWire.open` returns after `ReadResp`.
+Receiving the Noise handshake response establishes neither push-queue registration
+nor supplied live-state snapshot capture: `V2SessionManager.handleNoiseInit` sends
+the response before registering the queue and calling `ThreadLiveState`, while
+`switchWire.open` returns after `ReadResp`. An immediate off-`Run` `Push` can
+therefore return `ErrConnNotFound` even after successful Noise response receipt;
+that alone does not prove an admitted connection was retired.
 Synchronize admission and held delivery on bounded signals from the snapshot
 callback itself. Otherwise a valid initial reading can arrive before the
 replacement and falsely fail a fresh-only assertion. Sleeping or discarding stale
 frames would obscure the delivery proof. See the
 [connect-gap regression](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery).
+
+A retired-snapshot absence assertion must establish snapshot evaluation completion
+before queueing its identified wire barrier: `drainOnce` lets queued pushes
+overtake snapshot reads in `drainLiveOnce`, so a marker can otherwise arrive with
+the cursor still unvisited. `TestDaemonLiveRelayRetiredSnapshot` uses bounded
+handshake and capture gates, captures the real cursor before removing its owner,
+then waits for cursor exhaustion and validates that the removed model reading
+was visited. An empty cursor cannot prove stale-state rejection. Only then does
+it verify the same phone remains admitted, push the trailing barrier and require
+receipt on that phone of the decrypted barrier with its exact type, ID and
+payload, rejecting every `model_announced` frame and unrelated output.
+Preserve Noise receive order; sleeps or retrying `Push` until
+success cannot establish these preconditions. See the
+[retired-snapshot fixture plan](../../specs/architecture/3420-retired-snapshot-fixture.md).
 
 A later frame on `Frames` cannot prove that `V2SessionManager.Run` consumed an
 asynchronous result on a separate buffered channel: either ready select arm can
@@ -205,6 +234,13 @@ alongside secret exclusion; see [main-turn classification](streamsup-package-per
 A verifier can use Go's `-overlay` option with replacement files outside the worktree
 to test a mutation without editing the branch. Assert that each replacement applied.
 Run the named test being evaluated so a neighbouring assertion cannot mask its weakness.
+
+For asynchronous state resets, acknowledge completion of result processing before
+releasing the next phase. Entry into delivery or classification can precede the
+reset itself. Also observe terminal failure while awaiting progress, so a mutation
+that abandons work fails on abandonment rather than a coordination timeout. The
+[queue pending-reset proof](msgqueue-package-give-up.md#testing) combines that
+ordering with controlled elapsed time while retaining real retry timers.
 
 A content-free log assertion must not search for a short, common fragment of the
 secret. Timestamp and metadata text can contain the same digits and make an unrelated
@@ -444,7 +480,46 @@ Before accepting a baseline comparison as attribution, compare suite composition
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.
 
+### Diagnosing startup recovery runtime
+
+A test active when the package times out need not account for the package's
+elapsed time. Retain its active interval separately from package runtime, with
+phase-start diagnostics and durations for fixture construction, raw paging,
+recovery, reopened reads and repeated recovery. Preserve timeout stacks when a
+timeout occurs. Later passes establish non-reproduction, not the historical
+cause. The [startup comparison](../../specs/architecture/3431-startup-recovery-runtime.md#revisions)
+reduced isolated startup time from 28.48 to 5.78 seconds, while complete package
+runs took 303.756 and 291.762 seconds. Neither ordinary runs nor four prebuilt
+race binaries pinned to one CPU reproduced the historical timeout.
+
+Compare baseline and candidate under identical bounded contention, retaining
+each process's settings, revision, command, JSON results and status. Join the
+controlled workload before ordinary package and combined-gate measurements;
+record any incidental overlap separately. Focused passes cannot certify the
+complete gate. Retain named execution/pass/fail/skip counts and skip reasons for
+each test tier; aggregate green gates without named results cannot prove that a
+particular regression ran.
+
+Fixture cost depends on encoded bytes. JSON escaping can multiply padding size,
+and paging decodes whole segments repeatedly. Measure on-disk bytes and assert
+raw pagination and physical rollover independently before accepting smaller
+padding. See the [startup fixture coverage](history-package-producers-legacy-compatibility.md)
+for the independent failure controls and retained recovery assertions.
+
 ### Diagnosing reply timeouts
+
+For reset classification, record elapsed post-persistence resolution, first
+delivery, rotation entry and completion using durations and counts without
+content. The [stale-handoff comparison](../../specs/architecture/3428-stale-handoff-timing.md#revisions)
+used identical path assertions in four concurrent race binaries pinned to one
+CPU per policy. Both the old 35 ms policy and the repaired policy passed all
+600 tests/subtests without skips: the historical failure was not reproduced.
+The two-second classification allowance matches the fixture default; 500 ms
+leaves over twenty times the largest measured pre-delivery delay while keeping
+expiry real, and three seconds bounds reset and rotation. These finite regression bounds
+are not product latency guarantees. Retain revisions, commands, phase timings
+and execution/pass/fail/skip counts; later passes cannot establish historical
+cause or completion of earlier gates.
 
 A fast provider does not imply a fast first reply. Relay `runThreadQuery` completes
 `EncodeThreadReply` before serial delivery, so a reply wait includes whole-result
@@ -468,6 +543,32 @@ per fragment would let partial progress extend the missing-completion wait. The
 15-second bound retains headroom over the measured reconstruction; scratch overlays
 dropping all replies or only the final marker each failed at that bound. A focused
 pass alone proves neither attribution nor bounded failure.
+
+`TestLiveStateRun` is a hermetic manager test despite its name. Its complete
+snapshot needs `pushQueueCap*2+2` routing envelopes: the handshake, one generated
+clear and every reading. Four race-test processes pinned to one CPU alone still
+passed the old two-second wait; adding 32 CPU-only contenders on that CPU made
+all four old waits expire after partial output. Under identical contention the
+repaired workload completed all application decryption within 4.382 seconds in
+the provisional measurement, establishing the eight-second bound with about 83%
+headroom. This measures scheduling headroom, without attributing the historical
+491/514 result to a cause its missing phase logs cannot establish. Keep ordinary
+`waitForEnvelopes` callers on their existing default.
+
+Start that single absolute budget before manager startup and snapshot-producing
+connection admission. Log first, halfway and final transport, plus halfway and
+complete decryption, using elapsed time and received/expected and
+decrypted/expected counts only. Check expiry before processing buffered frames
+and after each decryption, including the last: a timer checked only while idle
+would let a buffered workload finish late. Progress must never restart the budget.
+The [live-state negative controls](../../specs/architecture/3430-live-state-workload-deadline.md#revisions)
+suppressed output after a partial prefix and failed at 8.0003 seconds with
+257/514 received and 256/513 decrypted; delaying the final buffered decryption's
+completion past the bound failed at 8.0102 seconds even with 514/514 received and
+513/513 decrypted. Both executed once, failed once and skipped zero times.
+Keep the full expected count and the
+[authenticated connection-survival proof](v2-session-manager-test-surface-same-package-unit-tests-internal-relay-delivery-and-control.md#complete-live-state-workload);
+reducing the fixture or accepting missing output as a skip would erase the proof.
 
 ### Test inputs and retained artifacts
 
