@@ -286,16 +286,14 @@ retain that load qualification when comparing later measurements.
 
 History is the only durable source of truth. Beneath the supplied history
 instance directory, `conversations/<conversation-id>/history/` holds
-`thread-cache.json` and `thread-recovery.json` beside the history segments.
-Schema-2 `cacheRecord` stores only `Schema`, `Rules`, `Epoch`, fully consumed
-`Version` V, `LastShownVersion`, `Checksum`, `Complete` and `Recovery` with its
-`Run`/`Coordinator` references. It omits items and serializes to fewer than 1024
-bytes regardless of thread size. At V zero the checksum is empty and the
-last-shown watermark is zero; otherwise the checksum is 64 lowercase hex
-characters and the watermark cannot exceed V. The recovery marker names the
-store lifetime that opened the conversation; its
-coordinator conversation holds `thread-run-<token>.json`. `EnsureLogDir` can
-create an empty contained directory without fabricating history entries.
+one independent `thread-certificate.json` beside the history segments.
+Schema-1 `cacheRecord` stores only `Schema`, `Rules`, `Epoch`, fully consumed
+`Version` V, `LastShownVersion`, `Checksum` and `Clean`. It contains no items or
+shared-run references and serializes to fewer than 1024 bytes regardless of
+thread size. At V zero the checksum is empty and the last-shown watermark is
+zero; otherwise the checksum is 64 lowercase SHA-256 hex characters and the
+watermark cannot exceed V. `EnsureLogDir` can create an empty contained directory
+without fabricating history entries.
 
 `entryChecksum` hashes the stored entry at V with SHA-256. Its ordered input is
 ID, type byte length, type bytes, timestamp Unix seconds, timestamp nanoseconds,
@@ -306,8 +304,8 @@ or in-memory monotonic time. Segment-line formatting is excluded, while stored
 payload bytes remain opaque. This identifies entry V, not the whole prefix or
 resumable fold state.
 
-Every load or retry reconstructs a fresh fold from readable history with bounded
-`ForwardReader.Walk` chunks. Eligible metadata retains its epoch only if replay
+Every load or retry reconstructs a fresh fold from entry 1 of readable history
+with bounded `ForwardReader.Walk` chunks. Eligible metadata retains its epoch only if replay
 reaches exactly V and both the consumed entry's checksum and reconstructed
 last-shown watermark match the record. Replay continues through the surviving
 readable bound before usability; cached fields never seed the fold.
@@ -356,16 +354,20 @@ not persist read marks. See
 [ADR 042's read marks](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
 
 Each usable `Snapshot.Epoch` is a 128-bit random identifier encoded as 32 hex
-characters, separate from deterministic item equality. Across store lifetimes,
-reuse requires a compatible complete cache, matching recovery marker, completed
-run certificate and matching checksum/watermark at V. Changed folding rules, an
-unclean stop, missing/corrupt/incompatible metadata, invalid fields, mismatched
-evidence or a cache ahead of surviving history require a new epoch. Old
-item-bearing schema-1 caches rotate once; a subsequent clean reopen of their
-schema-2 replacement retains the epoch. Before replay/publication, the store
-establishes an incomplete run certificate and replaces the conversation's
-recovery marker, invalidating its previous clean claim. Failure leaves the view
-unavailable. Folding semantics changes must increment `foldingRules`.
+characters, separate from deterministic item equality. Reuse requires this
+conversation's compatible clean certificate and matching checksum/watermark at
+exactly V in readable history. Missing, corrupt, dirty or incompatible evidence,
+invalid fields, mismatches or V beyond surviving history require a new epoch.
+Other conversations' recovery and retirement cannot authorize or invalidate it.
+Folding semantics changes must increment `foldingRules`.
+
+Before replay, every successful load/retry replaces the certificate with
+`Clean: false`, using the candidate epoch/progress or a fresh epoch at zero.
+The temporary file's sync/close, atomic replacement and containing-directory
+sync must all succeed before usability. Otherwise a machine crash could restore
+an older clean claim over lost published history. Replay can still reject the
+candidate and rotate its epoch in memory; the disk record remains dirty until
+retirement. Dirty-write failure withholds usability.
 
 **Version bounds and item equality cannot detect replaced tail entries.** A lost
 unsupported entry can be replaced at the same ID without changing folded items.
@@ -377,9 +379,10 @@ an eligible epoch.
 Empty-history evidence must explicitly contain non-null `Version`,
 `LastShownVersion` and `Checksum`. Ordinary JSON scalar decoding otherwise turns
 missing/null fields into valid-looking zero progress. `cacheRecord.UnmarshalJSON`
-tracks presence separately; `recoveryCandidate` and `finishRun` both reject absent
-evidence. `TestStoreCacheMissingEmptyEvidence` isolates these checks from run
-eligibility by supplying a complete certificate before reopening.
+tracks presence separately, and `recoveryCandidate` rejects absent evidence.
+`TestStoreCacheMissingEmptyEvidence` removes or nulls each field of a clean
+zero-version certificate and requires rotation on reopen; shutdown must leave
+that already-unloaded record untouched.
 
 Choose the revision against the current merged rules: concurrent semantic changes
 can otherwise select the same revision. A missing-field cache regression can
@@ -390,67 +393,63 @@ incompatibility independently of evidence mismatch. Accepted-send handle
 semantics use rules revision 3; caches from revisions 1 or 2 rebuild from raw
 history and cannot hide recorded handles.
 
-Recovery remains `StateRebuilding` until replay and a complete checkpoint
-succeed. Missing or unusable cache data rebuilds from history; genuinely missing
-or empty history gives an empty usable view at version zero. Unreadable history
-never yields a cache-only view. History/cache I/O, containment and unsafe-leaf
-failures instead leave `StateUnavailable` with generic `ErrUnavailable`;
-repair followed by `Retry` creates a new reader and fold. Completed progress is
-checkpointed before the first usable recovery publication. Tail items, consumed
-version, `LastShownVersion` and change notifications publish without waiting for
-the checkpoint deadline, so a usable view may be newer than its saved cache.
-Publication capture shares unchanged immutable item/content storage and compares
-only final affected public rows. Initial, scheduled and lifecycle checkpoints
-write compact evidence without rendering or serializing items. The checksum
-advances only after a successful feed; checkpoint and retirement evidence pair
-it with the version and watermark of completed publication progress. A partially
-failed feed cannot advance that evidence. Public snapshots,
-observations and queries still detach their results; see
+Recovery remains `StateRebuilding` until durable dirty marking, legacy cleanup
+and full replay through the readable bound succeed. Missing or invalid evidence
+rebuilds from history; genuinely missing or empty history gives an empty usable
+view at version zero. Unreadable or incomplete history never yields a cache-only
+view. History/certificate I/O, containment and unsafe-leaf failures leave
+`StateUnavailable` with generic `ErrUnavailable`; repair followed by `Retry`
+creates a new reader and fold. Lifecycle persistence failures retain
+`ErrPersistence`.
+
+Publication, active-to-idle transitions and elapsed intervals write no
+certificates. There is no checkpoint timer or shared run/coordinator/recovery
+marker state. Each new successful load/retry writes one dirty certificate; each
+successful joined retirement writes one clean certificate, even at unchanged V.
+Tail items, consumed version, `LastShownVersion` and change notifications publish
+together in memory. Publication capture shares unchanged immutable item/content
+storage and compares only final affected public rows. Retirement evidence pairs
+the checksum with the version and watermark of the last successfully folded and
+captured progress; a failed or interrupted chunk cannot advance it. Public
+snapshots, observations and queries still detach their results; see
 [snapshots and retry](thread-package-background-store.md#snapshots-and-retry).
-A failed initial or scheduled checkpoint withdraws usability with generic
-`ErrUnavailable`; lifecycle results retain `ErrPersistence` and prevent clean
-certification.
+After an unclean stop, full replay restores pending child/report evidence and
+subsequent tail parity, while the epoch rotates for each still-loaded conversation.
 
-Dirty progress means a fully folded version newer than the saved version,
-including entries that change no public item. Each conversation's deadline is
-30 seconds after its last successful checkpoint. Further appends never postpone
-it: dirty progress flushes at that deadline even if appends stop, or immediately
-when it first becomes dirty after the deadline has passed. Unchanged progress
-arms no timer and causes no periodic replacement. Active-to-idle, unload and
-shutdown flush completed dirty progress as exceptions to the interval bound;
-successful lifecycle checkpoints start a new interval. Already-inactive
-publications follow the bounded schedule. Activity includes private unresolved
-work, as described under
-[isolation and lifecycle](thread-package-background-store.md#isolation-and-lifecycle).
-After an unclean stop, committed history newer than the cache is replayed along
-with earlier pending child/report evidence; items, revisions, consumed version
-and last-shown watermark converge with full replay, while the epoch rotates.
-
-Writes use synced, closed `0600` temporary files and atomic replacement; reads
-use no-follow regular-file checks. Each operation validates IDs and re-resolves history's
-exact directory containment, rejecting sibling/outside redirects and symlink or
-nonregular leaves. Errors contain no content, payloads or host paths, and cache
+Writes use synced, closed `0600` temporary files, atomic replacement and directory
+sync; reads use no-follow regular-file checks. Each operation validates IDs,
+`cacheLeaf` and history's exact directory containment, rejecting sibling/outside
+redirects and symlink or nonregular metadata leaves. If directory sync fails
+after replacement, `writeCacheFile` attempts contained removal and another
+sync before returning `ErrPersistence`, so readable clean evidence is invalidated
+where possible. Errors contain no content, payloads or host paths; metadata
 operations preserve history bytes and its existing append durability contract.
 
-`Unload` checkpoints completed dirty progress where available, cancels/joins the
-worker, unregisters tailing and releases items and private fold state, retaining
-only scalar lifecycle records. Compatible unload/reload in one store lifetime
-preserves the epoch even though that run's certificate remains incomplete;
-unload never certifies a clean exit. `Shutdown() error` closes admission, joins
-all workers, revalidates/replaces final checkpoints for loaded and previously
-unloaded conversations, comparing epoch, version, checksum and watermark with
-their final consumed progress, then completes the shared run certificate last.
-Only successful completion permits epoch reuse in a later lifetime. Failed replay,
-cancellation before recovery completes or failed/interrupted checkpoint or final
-certificate writes cannot certify clean shutdown. Lifecycle methods report
-failures explicitly; repeated/concurrent shutdown callers share one result.
+Only after the first durable certificate write does `removeLegacy` remove this
+conversation's regular `thread-cache.json`, `thread-recovery.json` and allow-listed
+`thread-run-<token>.json` leaves. It rechecks containment, rejects redirects and
+special files without following them, preserves history/unrelated files and
+syncs the directory after cleanup. Cleanup failure withholds usability.
+Legacy-only startup rotates once; the next clean reopen retains the new epoch.
+Rollback to pyry 0.39 finds no legacy cache, refolds history and mints a new epoch.
+
+`Unload` marks retirement, cancels/joins the worker and writes `Clean: true` at
+its last complete progress, unregistering tailing and releasing private state.
+A successful unload stays clean even if the store later stops uncleanly with
+another conversation loaded. `Shutdown() error` closes admission and joins all
+remaining workers, certifying them independently. It preserves already-unloaded
+certificates and never folds history appended while unloaded; the next load
+replays those appends. One final write failure leaves that conversation
+uncertified and returns `ErrPersistence` after healthy workers are attempted;
+those workers can retain their epochs on reopen. Failed/incomplete recovery or
+parent-context cancellation cannot authorize clean certification, even when
+racing retirement. Repeated/concurrent lifecycle calls preserve their results.
 See [isolation and lifecycle](thread-package-background-store.md#isolation-and-lifecycle).
 
 [ADR 045](../decisions/045-thread-index-over-history.md) proposes resumable private
-fold checkpoints and a persistent index as future work. Compact evidence does
-not resume folding. The shared run/coordinator/recovery-marker lifecycle remains
-in use until [#3383](https://github.com/pyrycode/pyrycode/issues/3383) changes it;
-callers still finish producer draining and tail catch-up before `Store.Shutdown`.
+fold checkpoints and a persistent index as future work. These certificates do
+not resume folding or implement that checkpoint schedule. Callers still finish
+producer draining and tail catch-up before `Store.Shutdown`.
 
 Epoch reuse establishes compatible item identity; retained change-range
 continuity needs separate proof. `Store.Observe` acquires a detached complete
