@@ -309,12 +309,13 @@ func TestStoreReferenceRetry(t *testing.T) {
 
 func TestStoreReferenceWorkRetry(t *testing.T) {
 	entries := []history.Entry{
-		testMain(1, "assistant_delta", `,"text":"a"`),
-		testMain(2, "assistant_delta", `,"text":"b"`),
-		testMain(3, "tool_use", `,"tool_use_id":"r","name":"Read"`),
-		testMain(4, "tool_result", `,"tool_use_id":"r","is_error":false`),
+		testMain(1, "tool_use", `,"tool_use_id":"parent","name":"Agent","input":{}`),
+		testMain(2, "assistant_delta", `,"parent_tool_use_id":"parent","text":"a"`),
+		testMain(3, "assistant_delta", `,"parent_tool_use_id":"parent","text":"b"`),
+		testMain(4, "tool_use", `,"parent_tool_use_id":"parent","tool_use_id":"r","name":"Read"`),
+		testMain(5, "tool_result", `,"parent_tool_use_id":"parent","tool_use_id":"r","is_error":false`),
 	}
-	for _, missing := range []uint64{2, 4} {
+	for _, missing := range []uint64{3, 5} {
 		t.Run(fmt.Sprint(missing), func(t *testing.T) { testStoreReferenceRetry(t, entries, missing) })
 	}
 }
@@ -325,17 +326,30 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 		for _, failure := range []string{"missing", "unreadable"} {
 			t.Run(phase+"/"+failure, func(t *testing.T) {
 				s, h := testThreadStore(t)
-				entries := testStoreAppend(t, h, testStoreA, slices.Clone(initial)...)
+				first := testMessage(1)
+				if len(initial) > 1 {
+					first = initial[0]
+				}
+				target := missing
+				if phase == "tail" && len(initial) == 1 {
+					first = testAcceptance(1, "phone")
+				}
+				entries := testStoreAppend(t, h, testStoreA, first)
+				if phase == "tail" && len(initial) == 1 {
+					entries = append(entries, testStoreAppend(t, h, testStoreA, testMessage(0))...)
+					target = 2
+				}
+				entries = append(entries, testStoreAppend(t, h, testStoreA, slices.Clone(initial[1:])...)...)
 				var armed atomic.Bool
 				armed.Store(phase == "replay")
 				base := s.lookup
 				s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
-					if !armed.Load() || !slices.Contains(ids, missing) {
+					if !armed.Load() || !slices.Contains(ids, target) {
 						return base(ctx, id, ids)
 					}
 					if failure == "missing" {
 						resolved, err := base(ctx, id, ids)
-						return slices.DeleteFunc(resolved, func(e history.Entry) bool { return e.ID == missing }), err
+						return slices.DeleteFunc(resolved, func(e history.Entry) bool { return e.ID == target }), err
 					}
 					return nil, errors.New("private unreadable source")
 				}
@@ -343,13 +357,23 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 					if err := s.Load(context.Background(), testStoreA); err != nil {
 						t.Fatal(err)
 					}
-					testStoreWait(t, s, testStoreA, StateUsable, uint64(len(initial)))
+					testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries)))
 					armed.Store(true)
 				}
 				// Later facts evict the creating message; neither the current feed
 				// chunk nor the recent cache can mask the failed authoritative read.
 				for range history.MaxPageEntries {
 					entries = append(entries, testStoreAppend(t, h, testStoreA, testEntry(0, "ignored", `{}`))...)
+				}
+				if phase == "tail" {
+					// Unchanged publications need no source reread. A delivery join
+					// must resolve its evicted message before publishing progress.
+					entries = append(entries, testStoreAppend(t, h, testStoreA, testSendOutcome(0, "send_delivered", `,"accepted_entry_id":1,"delivery_entry_id":2`, "delivered"))...)
+					if len(initial) > 1 {
+						// Ancestor closure revisits both child recipes, including a
+						// completed tool whose intrinsic result remains unchanged.
+						entries = append(entries, testStoreAppend(t, h, testStoreA, testMain(0, "tool_result", `,"tool_use_id":"parent","is_error":false`))...)
+					}
 				}
 				if err := s.Load(context.Background(), testStoreA); err != nil {
 					t.Fatal(err)

@@ -66,7 +66,12 @@ type mainRuntime struct {
 	OccurredAt time.Time `json:"occurred_at"`
 }
 
-func mainDecode(e history.Entry) (mainIdentity, string, string, bool, bool) {
+func mainDecode(e history.Entry, counts ...*ingestionWorkCounts) (mainIdentity, string, string, bool, bool) {
+	d := foldDecoder{}
+	if len(counts) != 0 {
+		d.counts = counts[0]
+	}
+	decode := d.decode
 	var id mainIdentity
 	var summary, status string
 	shown := true
@@ -113,7 +118,9 @@ func mainDecode(e history.Entry) (mainIdentity, string, string, bool, bool) {
 	if valid && id.Opening == nil {
 		var fields map[string]json.RawMessage
 		_ = json.Unmarshal(e.Payload, &fields)
+		d.count(len(e.Payload))
 		for field := range fields {
+			d.count(len(field) + len("turn_opened_entry_id"))
 			if strings.EqualFold(field, "turn_opened_entry_id") {
 				valid = false // A supplied null reference cannot become an unreferenced closure.
 			}
@@ -138,7 +145,7 @@ func mainDecode(e history.Entry) (mainIdentity, string, string, bool, bool) {
 }
 
 func (f *Fold) mainWork(e history.Entry) bool {
-	id, summary, status, shown, valid := mainDecode(e)
+	id, summary, status, shown, valid := mainDecode(e, f.ingestCounts)
 	if !valid || id.Parent != "" || id.ParentCall != "" || f.agentLaunchIsChild(e, id.ToolUseID) {
 		return false
 	}
@@ -187,6 +194,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 			}
 			f.closeText(st, e.ID)
 			for _, call := range st.calls {
+				f.countIngestion(1)
 				if call.terminal == nil {
 					call.terminal = st.end
 					f.applyTerminal(call)
@@ -212,17 +220,10 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 				}
 				return true
 			}
-			var old, delta protocol.AssistantDeltaPayload
-			// Both payloads were validated before storage.
-			_ = json.Unmarshal(item.Content, &old)
-			_ = json.Unmarshal(e.Payload, &delta)
-			if delta.Text != "" {
+			if summary != "" {
 				f.appendedText = st.text
-				f.setContent(st.text, "text", old.Text+delta.Text)
-				item.Rev, item.Summary = e.ID, plainSummary(old.Text+delta.Text)
-				if item.Summary == "" {
-					item.Summary = "assistant message"
-				}
+				f.appendText(st.text, summary)
+				item.Rev = e.ID
 			}
 		} else {
 			active := st.end == nil
@@ -256,6 +257,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		}
 		var p protocol.ToolUsePayload
 		_ = json.Unmarshal(e.Payload, &p)
+		f.countIngestion(len(e.Payload))
 		if (p.Name == "Agent" || p.Name == "Task") && (!st.key.tagged || st.key.source.Kind == "claude") {
 			call.launcher = true
 			return true
@@ -340,8 +342,13 @@ func (f *Fold) setContent(index int, key string, value any) {
 		f.referenceField(index, key, recipeField{value: raw})
 		return
 	}
+	if f.textEnrichment(index, key, value) {
+		return
+	}
+	f.countIngestion(len(f.items[index].Content) * 3)
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(f.items[index].Content, &fields)
 	fields[key], _ = json.Marshal(value) // Values are strings or already-valid recorded JSON.
 	f.items[index].Content, _ = json.Marshal(fields)
+	f.countIngestion(len(f.items[index].Content) * 2)
 }

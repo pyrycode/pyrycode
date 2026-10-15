@@ -90,6 +90,19 @@ func (f *Fold) Render() ([]Item, error) {
 }
 
 func (f *Fold) render(items []Item) ([]Item, error) {
+	items, err := f.renderShared(items)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].Content = append(json.RawMessage(nil), items[i].Content...)
+	}
+	return items, nil
+}
+
+// renderShared borrows content owned by the fold or its private history source.
+// Those bytes are immutable: subsequent folding replaces Content allocations.
+func (f *Fold) renderShared(items []Item) ([]Item, error) {
 	var ids []uint64
 	for _, item := range items {
 		if r := f.recipes[item.ID]; r.creating != 0 {
@@ -177,7 +190,6 @@ func (f *Fold) render(items []Item) ([]Item, error) {
 				}
 			}
 		}
-		item.Content = append(json.RawMessage(nil), item.Content...)
 	}
 	return items, nil
 }
