@@ -283,6 +283,12 @@ can supply that content at render time without becoming a separate copied ending
 store; missing dependencies withhold the whole candidate. See
 [reference resolution and retry](thread-package-main-thread-folding.md#scoped-joins-pending-outcomes-and-closure).
 
+Publication capture and selected-output rendering must preserve recipes with
+enrichment fields even when their creating entry remains inline. Filtering only
+on a creating-entry ID drops inherited endings from nested agents.
+Publication comparisons resolve ancestors from prior captured slots and recipes;
+delayed Store output resolves them from its immutable query root.
+
 `saveChild` indexes relationships by original `agentKey` and parent call,
 including unresolved links; reparenting removes the old edge. After each entry,
 `resolveChildren` expands the dirty set through indexed agent descendants and

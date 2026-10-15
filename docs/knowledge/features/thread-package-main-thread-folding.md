@@ -604,17 +604,31 @@ selection across Claude and Codex tools. `TestReferenceWorkSourceFailure` requir
 atomic unavailable rendering/observations for missing creating, text or terminal
 entries; `TestStoreReferenceWorkRetry` covers missing/unreadable text and enrichment
 reads during replay and affected tail publication, followed by repair and `Retry`.
+`TestReferenceEndingOutcomes` checks pre-creation reports, lane endings and creation
+revision floors; `TestReferenceShellCompanion` checks distinct order/content IDs
+in both companion arrival orders. `TestReferenceInheritedEnding` compares public
+touches and observations through nested closure, late text and reopening after
+cache eviction, including selected children whose ancestor is omitted.
+`TestStoreCapturedInheritedEnding` retains a captured query root and detached
+results across late text and reopening, including inline nested agents.
+`TestReferenceEndingDependencyFailure` rejects missing/unreadable/malformed
+ancestor dependencies atomically; `TestStoreReferenceEndingRetry` checks repair
+and `Retry` for an evicted child-ending dependency.
+
 The unchanged
 [generated/shadow and recorded corpus checkpoints](thread-package.md#reusable-fold-regression-corpus)
 constrain rendered items, revisions, consumed version and last-shown watermark.
-`TestReferenceRetainedBytes` compares the same generated input in both modes,
+`TestReferenceRetainedBytes` compares unchanged `testFoldCorpus(6738)` in both modes,
 requiring zero converted item Content, child-copy Content, assistant summaries
-including child copies, and inline append buffers. It reports those separately
-from user summaries, logical recipe storage, the bounded recent cache, private
-outcomes, copied parent endings and other deferred inline content. Store's
-retained rendered snapshots remain outside this measurement and belong to
-[#3386](https://github.com/pyrycode/pyrycode/issues/3386); zero retained fold
-payload bytes do not establish total Store memory use.
+including child copies, inline append buffers, copied pending outcomes and copied
+parent endings. It checks the production compatibility map remains unused,
+child ending caches remain absent, and intrinsic/previous recipe snapshots carry
+no ancestor JSON, including recipes on inline agents. User summaries, logical
+recipe storage, the bounded recent cache and deferred agent/shell content are
+accounted separately. This fold-only measurement excludes Store publication/query
+retention; see the separate
+[render-on-output verification](thread-package-background-store.md#store-verification).
+Zero copied outcome/ancestor bytes do not establish total Store memory use.
 
 `TestMainTextRuns`, `TestMainToolTerminals` and `TestMainEndings` cover text
 splits, retained evidence, early and conflicting outcomes, activity and visibility
