@@ -34,7 +34,7 @@ func TestReferenceLifecycleGuard(t *testing.T) {
 		case reflect.Struct:
 			for i := 0; i < typ.NumField(); i++ {
 				field := typ.Field(i)
-				if typ == reflect.TypeFor[Fold]() && (field.Name == "source" || field.Name == "legacyOutcomes") {
+				if typ == reflect.TypeFor[Fold]() && (field.Name == "source" || field.Name == "legacyOutcomes" || field.Name == "texts") {
 					continue // Bounded source and legacy-only compatibility boundaries.
 				}
 				if typ == reflect.TypeFor[childState]() && field.Name == "legacyEnding" {
@@ -49,7 +49,7 @@ func TestReferenceLifecycleGuard(t *testing.T) {
 
 func testNoLifecyclePayload(t *testing.T, f *Fold) {
 	t.Helper()
-	if len(f.legacyOutcomes) != 0 {
+	if len(f.legacyOutcomes) != 0 || len(f.texts) != 0 {
 		t.Fatal("production used legacy compatibility storage")
 	}
 	for i, item := range f.items {
