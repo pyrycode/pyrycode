@@ -123,6 +123,12 @@ type Connection struct {
 	// done closes when run exits; result is set by run before close.
 	done   chan struct{}
 	result error
+
+	wakeMu    sync.Mutex
+	wakes     map[string]*wakeBinding
+	wakeSeq   uint64
+	wakeNow   func() time.Time
+	wakeAfter func(time.Duration, func()) func()
 }
 
 // Connect builds the transport, starts the lifecycle goroutine, and
@@ -323,8 +329,9 @@ type pushWakeEnvelope struct {
 }
 
 type pushWakeRequest struct {
-	Platform string `json:"platform"`
-	Token    string `json:"token"`
+	Platform  string `json:"platform"`
+	Token     string `json:"token"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // errMarshalPushWake is fixed text on purpose: the encoder's own error would be
@@ -416,7 +423,7 @@ func (c *Connection) run(ctx context.Context) {
 
 func (c *Connection) forwardFrames(ctx context.Context) {
 	for {
-		raw, err := c.client.Receive(ctx)
+		raw, generation, err := c.client.ReceiveGeneration(ctx)
 		if err != nil {
 			// Expected: transport.ErrDisconnected (conn dropped; run
 			// re-enters forwardFrames on the next Connected),
@@ -426,10 +433,18 @@ func (c *Connection) forwardFrames(ctx context.Context) {
 			c.cfg.Logger.Debug("relay: forwardFrames exiting", "err", err)
 			return
 		}
+		var outer map[string]json.RawMessage
+		if json.Unmarshal(raw, &outer) != nil || outer == nil {
+			c.cfg.Logger.Warn("relay: malformed routing envelope; dropping")
+			continue
+		}
+		if result, ok := outer["push_wake_result"]; ok {
+			c.consumeWakeResult(generation, result)
+			continue
+		}
 		var routing protocol.RoutingEnvelope
 		if err := json.Unmarshal(raw, &routing); err != nil {
-			c.cfg.Logger.Warn("relay: malformed routing envelope; dropping",
-				"err", err)
+			c.cfg.Logger.Warn("relay: malformed routing envelope; dropping")
 			continue
 		}
 		select {

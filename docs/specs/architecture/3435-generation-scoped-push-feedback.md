@@ -61,3 +61,7 @@ Pending documentation stage: `docs/knowledge/features/relay-package-push-wake.md
 **Reviewer:** builder self-review. **Date:** 2026-10-15.
 
 Sizing: one deliverable; forecast ~790 written lines, one new exported type, no existing consumer migration, five criteria, ten lifecycle/reject classes. Transport plumbing has only this consumer and stays with its proof under the sizing floor.
+
+## Revisions
+- 2026-10-15: Protocol rejection tests exposed JSON null outer envelopes reaching phone dispatch. `forwardFrames` now rejects non-object/null outer input with fixed diagnostics. Required fields use pointer decoding so duplicate keys ending in null cannot preserve an earlier valid binding identity.
+- 2026-10-15: Full admission/receive replacement proof and peer-write-failure cases bring written work above the 800-line forecast (about 870 lines). Keep transport generation plumbing with its sole consuming relay API under the explicit sizing floor. A dedicated feedback file keeps the existing connection dispatcher edits local. `TestGenerationReceiveOwnership` adds held real-pump output across replacement; expiry during held completion proves deadlines are not renewed.
