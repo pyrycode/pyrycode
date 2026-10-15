@@ -3,7 +3,9 @@ package thread
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -170,6 +172,50 @@ func TestTextAppendScaling(t *testing.T) {
 					t.Fatalf("4x deltas cost >=8x: %d -> %d", small, work)
 				}
 				small = work
+			}
+		})
+	}
+}
+
+func TestTextBufferPublicationOwnership(t *testing.T) {
+	t.Parallel()
+	for _, suffix := range []string{"x", strings.Repeat("y", 1024)} {
+		t.Run(fmt.Sprintf("suffix=%d", len(suffix)), func(t *testing.T) {
+			f := testCountedFold()
+			f.captureSet = make(map[int]struct{})
+			testFeed(t, f, testMain(1, "assistant_delta", `,"text":"initial","z":"tail"`), testMain(2, "assistant_delta", `,"text":" initialized"`))
+			b := &f.texts[0].base
+			// Guarantee spare capacity independently of the allocator's size classes.
+			raw := make([]byte, len(b.raw), len(b.raw)+64)
+			copy(raw, b.raw)
+			b.raw, f.items[0].Content = raw, raw
+			var capture publicationCapture
+			old, _, err := capture.capture(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append([]byte(nil), old[0].Content...)
+			before, prefix, capacity := f.ingestCounts.work, b.end, cap(b.raw)
+			f.growText(b, []byte(suffix))
+			if &b.raw[0] == &old[0].Content[0] || !bytes.Equal(old[0].Content, want) || !json.Valid(old[0].Content) {
+				t.Fatal("shared buffer overwritten")
+			}
+			if f.ingestCounts.work-before < cap(b.raw)+prefix {
+				t.Fatal("detachment allocation/copy work not counted")
+			}
+			if len(suffix) == 1 && cap(b.raw) != capacity {
+				t.Fatal("detachment grew an already sufficient capacity")
+			}
+			private := &b.raw[0]
+			if len(suffix) == 1 {
+				f.growText(b, []byte("z"))
+				if &b.raw[0] != private {
+					t.Fatal("private append did not reuse spare capacity")
+				}
+			}
+			f.growText(b, []byte(strings.Repeat("w", cap(b.raw))))
+			if &b.raw[0] == private || !json.Valid(b.raw) || !bytes.Equal(old[0].Content, want) {
+				t.Fatal("private growth corrupted retained content")
 			}
 		})
 	}
