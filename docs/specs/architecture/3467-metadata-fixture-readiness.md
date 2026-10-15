@@ -185,3 +185,27 @@ Raw record: `/tmp/builder-3467/complete-cmd.json`. `go vet ./...` and
 code; logs are `vet.log` and `build.log` in the same scratch directory.
 The combined race command began only after this complete daemon run exited;
 its final outcome is recorded in the following evidence entry.
+
+### 2026-10-15 — combined race gate and final resolution
+Command: `go test -race -timeout=15m -count=1 -json ./internal/thread ./cmd/pyry ./internal/relay`.
+Final code revision `9e11b9b3`; later commits contain evidence only. Same
+ordinary settings as the complete daemon run: GOMAXPROCS unset, default package
+and test parallelism, no affinity, all controlled workloads joined, and no
+overlapping builder-owned suite. Command wall 471.387s, exit zero.
+
+| Package | Tests/subtests started | Passed | Failed | Skipped | Package seconds |
+| --- | --- | --- | --- | --- | --- |
+| `internal/thread` | 1,117 | 1,117 | 0 | 0 | 453.891 |
+| `cmd/pyry` | 16,539 | 16,537 | 0 | 2 | 467.441 |
+| `internal/relay` | 1,530 | 1,530 | 0 | 0 | 87.472 |
+| Total | 19,186 | 19,184 | 0 | 2 | — |
+
+The same two expected daemon skips and reasons listed above apply. Every
+metadata test/subtest and the unrelated recovery-wire test passed; there were
+no unrelated failures to route. Delayed-fixture phases were
+1.260/29.540/2.250s; allocation-fixture phases were 0.646/4.413/1.953s.
+Raw record: `/tmp/builder-3467/combined.json`; command status and ordering:
+`/tmp/builder-3467/final-run.log`. All test processes were joined before handoff.
+All open questions are resolved: controlled reproduction establishes the local
+total-deadline dependency; exact historical attribution remains unproven. The
+verifier's full-module gate remains a later-stage check.
