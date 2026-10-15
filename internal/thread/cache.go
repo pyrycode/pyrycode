@@ -3,6 +3,8 @@ package thread
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,12 +15,13 @@ import (
 	"syscall"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 )
 
 const (
 	cacheName    = "thread-cache.json"
 	recoveryName = "thread-recovery.json"
-	cacheSchema  = 1
+	cacheSchema  = 2
 	// foldingRules must change whenever folded item semantics change.
 	foldingRules = 3
 )
@@ -36,17 +39,73 @@ type runRecord struct {
 	Complete bool
 }
 type cacheRecord struct {
-	Schema, Rules int
-	Epoch         string
-	Version       uint64
-	Items         []Item
-	Complete      bool
-	Recovery      recoveryRecord
+	Schema, Rules    int
+	Epoch            string
+	Version          uint64
+	LastShownVersion uint64
+	Checksum         string
+	Complete         bool
+	Recovery         recoveryRecord
+	fieldsPresent    bool
 }
+
+// UnmarshalJSON distinguishes absent/null evidence from valid empty progress.
+func (c *cacheRecord) UnmarshalJSON(raw []byte) error {
+	type record cacheRecord
+	var decoded struct {
+		record
+		Version          *uint64
+		LastShownVersion *uint64
+		Checksum         *string
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	*c = cacheRecord(decoded.record)
+	c.fieldsPresent = decoded.Version != nil && decoded.LastShownVersion != nil && decoded.Checksum != nil
+	if c.fieldsPresent {
+		c.Version, c.LastShownVersion, c.Checksum = *decoded.Version, *decoded.LastShownVersion, *decoded.Checksum
+	}
+	return nil
+}
+
 type progressRecord struct {
-	Epoch   string
-	Version uint64
-	Err     error
+	Epoch            string
+	Version          uint64
+	LastShownVersion uint64
+	Checksum         string
+	Err              error
+}
+
+// entryChecksum frames ID, length-prefixed type, timestamp seconds/nanoseconds
+// and length-prefixed payload using big-endian uint64s. Only the timestamp's
+// instant matters; segment formatting and in-memory monotonic time are excluded.
+func entryChecksum(entry history.Entry) string {
+	h := sha256.New()
+	var word [8]byte
+	writeWord := func(value uint64) {
+		binary.BigEndian.PutUint64(word[:], value)
+		_, _ = h.Write(word[:]) // hash.Hash.Write never returns an error
+	}
+	writeWord(entry.ID)
+	writeWord(uint64(len(entry.Type)))
+	_, _ = h.Write([]byte(entry.Type))
+	writeWord(uint64(entry.TS.Unix()))
+	writeWord(uint64(entry.TS.Nanosecond()))
+	writeWord(uint64(len(entry.Payload)))
+	_, _ = h.Write(entry.Payload)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func validEvidence(version, lastShown uint64, checksum string) bool {
+	if lastShown > version {
+		return false
+	}
+	if version == 0 {
+		return checksum == ""
+	}
+	decoded, err := hex.DecodeString(checksum)
+	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == checksum
 }
 
 func randomToken() (string, error) {
@@ -194,7 +253,7 @@ func (s *Store) recoveryCandidate(id conversations.ConversationID, bound uint64)
 		}
 		return c, err
 	}
-	if c.Schema != cacheSchema || c.Rules != foldingRules || !c.Complete || !validToken(c.Epoch) || !validToken(c.Recovery.Run) || !conversations.ValidID(string(c.Recovery.Coordinator)) || c.Version > bound {
+	if c.Schema != cacheSchema || c.Rules != foldingRules || !c.Complete || !validToken(c.Epoch) || !validToken(c.Recovery.Run) || !conversations.ValidID(string(c.Recovery.Coordinator)) || c.Version > bound || !c.fieldsPresent || !validEvidence(c.Version, c.LastShownVersion, c.Checksum) {
 		return cacheRecord{}, nil
 	}
 	var marker recoveryRecord
@@ -243,7 +302,7 @@ func (s *Store) finishRun(records map[conversations.ConversationID]progressRecor
 		}
 		var c cacheRecord
 		var marker recoveryRecord
-		if s.readCacheFile(id, cacheName, &c) != nil || s.readCacheFile(id, recoveryName, &marker) != nil || !c.Complete || c.Schema != cacheSchema || c.Rules != foldingRules || c.Epoch != p.Epoch || c.Version != p.Version || c.Recovery != marker || marker.Run != s.runID || marker.Coordinator != s.coordinator {
+		if s.readCacheFile(id, cacheName, &c) != nil || s.readCacheFile(id, recoveryName, &marker) != nil || !c.Complete || c.Schema != cacheSchema || c.Rules != foldingRules || c.Epoch != p.Epoch || c.Version != p.Version || c.LastShownVersion != p.LastShownVersion || c.Checksum != p.Checksum || !c.fieldsPresent || !validEvidence(c.Version, c.LastShownVersion, c.Checksum) || c.Recovery != marker || marker.Run != s.runID || marker.Coordinator != s.coordinator {
 			return ErrPersistence
 		}
 		if err := s.writeCacheFile(id, cacheName, c); err != nil {

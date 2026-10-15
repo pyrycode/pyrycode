@@ -143,13 +143,11 @@ func TestSendQueueHandleCaseVariants(t *testing.T) {
 func TestStoreQueueHandleCacheRules(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name    string
-		rules   int
-		missing bool
+		name  string
+		rules int
 	}{
-		{"rules_1_missing_handle", 1, true},
-		{"rules_2_matching_rows", 2, false},
-		{"rules_2_missing_handle", 2, true},
+		{"rules_1_matching_evidence", 1},
+		{"rules_2_matching_evidence", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := history.New(t.TempDir())
@@ -176,9 +174,6 @@ func TestStoreQueueHandleCacheRules(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.Rules = tc.rules
-			if tc.missing {
-				c.Items[0].Content = json.RawMessage(`{"text":"queued"}`)
-			}
 			raw, err = json.Marshal(c)
 			if err != nil {
 				t.Fatal(err)
