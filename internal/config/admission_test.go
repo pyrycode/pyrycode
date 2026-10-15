@@ -1,15 +1,20 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Predictable fixtures are synthetic, never provisioning credentials.
@@ -183,16 +188,24 @@ func TestRelayAdmissionFieldBoundaries(t *testing.T) {
 
 func TestRelayAdmissionStorage(t *testing.T) {
 	t.Parallel()
+	testRelayAdmissionStorage(t, os.Chmod, os.Chown)
+}
+
+func testRelayAdmissionStorage(t *testing.T, parentChmod func(string, os.FileMode) error, parentChown func(string, int, int) error) {
+	t.Helper()
 	for _, tc := range []struct {
 		name             string
 		file, dir        os.FileMode
 		admission, valid bool
+		effectiveGroup   bool
 	}{
-		{"private", 0o600, 0o700, true, true},
-		{"public file", 0o644, 0o700, true, false}, {"read only file", 0o400, 0o700, true, false},
-		{"public parent", 0o600, 0o755, true, false}, {"setgid parent", 0o600, os.ModeSetgid | 0o700, true, false},
-		{"legacy modes", 0o644, 0o755, false, true},
-		{"legacy searchable parent", 0o600, 0o333, false, true},
+		{"private", 0o600, 0o700, true, true, false},
+		{"public file", 0o644, 0o700, true, false, false}, {"read only file", 0o400, 0o700, true, false, false},
+		{"public parent", 0o600, 0o755, true, false, false},
+		{"setgid parent", 0o600, os.ModeSetgid | 0o700, true, false, false},
+		{"setgid parent effective group", 0o600, os.ModeSetgid | 0o700, true, false, true},
+		{"legacy modes", 0o644, 0o755, false, true, false},
+		{"legacy searchable parent", 0o600, 0o333, false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := `{}`
@@ -208,31 +221,216 @@ func TestRelayAdmissionStorage(t *testing.T) {
 			if err := os.Chmod(path, tc.file); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Chmod(filepath.Dir(path), tc.dir); err != nil {
-				t.Fatal(err)
+			var groupErr error
+			if tc.effectiveGroup {
+				admissionStorageMetadata(t, path, tc.file, 0o700)
+				groupErr = parentChown(filepath.Dir(path), -1, os.Getegid())
 			}
-			_, err := Load(path)
+			chmodErr := parentChmod(filepath.Dir(path), tc.dir)
+			file, parent := admissionStorageMetadata(t, path, tc.file, tc.dir)
+			missingSetgid := tc.dir&os.ModeSetgid != 0 && parent.Mode() == os.ModeDir|0o700 &&
+				file.Mode() == 0o600 && file.Sys().(*syscall.Stat_t).Uid == uint32(os.Geteuid()) &&
+				parent.Sys().(*syscall.Stat_t).Uid == uint32(os.Geteuid())
+			valid := tc.valid || missingSetgid
+			cfg, loadErr := Load(path)
+			updateErr := UpdateMemory(path, MemorySettings{})
+			t.Logf("effective_group_requested=%v group_setup=%v parent_chmod=%v setgid_established=%v; Load: error=%v zero_config=%v admission_present=%v; UpdateMemory: error=%v",
+				tc.effectiveGroup, groupErr, chmodErr, parent.Mode()&os.ModeSetgid != 0,
+				loadErr, reflect.DeepEqual(cfg, Config{}), cfg.RelayAdmissionTokens != nil, updateErr)
+			for _, setup := range []struct {
+				operation string
+				err       error
+			}{{"group assignment", groupErr}, {"parent chmod", chmodErr}} {
+				if setup.err != nil && !(missingSetgid && admissionSetgidUnavailable(setup.err)) {
+					t.Errorf("unexpected %s setup error: %v", setup.operation, setup.err)
+				}
+			}
+			if parent.Mode() != os.ModeDir|tc.dir && !missingSetgid {
+				t.Errorf("native prerequisite: requested parent mode %v, actual %v", os.ModeDir|tc.dir, parent.Mode())
+			}
+			if (loadErr == nil) != valid {
+				t.Errorf("Load: valid=%v, error=%v", valid, loadErr)
+			}
+			if (updateErr == nil) != valid {
+				t.Errorf("UpdateMemory: valid=%v, error=%v", valid, updateErr)
+			}
+			assertConfigErrorSafe(t, loadErr)
+			assertConfigErrorSafe(t, updateErr)
+			if loadErr != nil && !reflect.DeepEqual(cfg, Config{}) {
+				t.Error("failure returned partial config")
+			}
+			if !valid || updateErr != nil {
+				raw, err := os.ReadFile(path)
+				if err != nil || string(raw) != data {
+					t.Errorf("rejected update changed bytes: read error=%v", err)
+				}
+				afterFile, afterParent := admissionStorageMetadata(t, path, tc.file, tc.dir)
+				if afterFile.Mode() != file.Mode() || afterParent.Mode() != parent.Mode() {
+					t.Error("rejected update changed file or parent mode")
+				}
+			}
+			if missingSetgid && !t.Failed() {
+				t.Skipf("native prerequisite unmet: setgid did not persist: requested=%v actual=%v parent_uid=%d parent_gid=%d euid=%d egid=%d group_setup=%v chmod=%v; see fixture/filesystem metadata above",
+					os.ModeDir|tc.dir, parent.Mode(), parent.Sys().(*syscall.Stat_t).Uid,
+					parent.Sys().(*syscall.Stat_t).Gid, os.Geteuid(), os.Getegid(), groupErr, chmodErr)
+			}
+		})
+	}
+}
+
+// Only permission and unsupported-operation errors describe unavailable native prerequisites.
+func admissionSetgidUnavailable(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENOSYS)
+}
+
+func TestAdmissionSetgidUnavailable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		err         error
+		unavailable bool
+	}{
+		{syscall.EPERM, true}, {syscall.EACCES, true}, {syscall.ENOTSUP, true}, {syscall.ENOSYS, true},
+		{syscall.EIO, false}, {syscall.ENOENT, false}, {syscall.EINVAL, false}, {syscall.EROFS, false},
+	} {
+		t.Run(tc.err.Error(), func(t *testing.T) {
+			err := &os.PathError{Op: "setup", Path: "synthetic", Err: tc.err}
+			if got := admissionSetgidUnavailable(err); got != tc.unavailable {
+				t.Errorf("unavailable=%v, want %v: %v", got, tc.unavailable, err)
+			}
+		})
+	}
+}
+
+func TestRelayAdmissionStorageSetupFailure(t *testing.T) {
+	t.Parallel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ operation, leaf, diagnostic string }{
+		{"chmod", "setgid_parent", "unexpected parent chmod setup error"},
+		{"chown", "setgid_parent_effective_group", "unexpected group assignment setup error"},
+	} {
+		t.Run(tc.operation, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "-test.v", "-test.run=^TestRelayAdmissionStorageSetupHelperProcess$/^"+tc.leaf+"$")
+			cmd.Env = append(os.Environ(), "GO_TEST_RELAY_ADMISSION_SETUP_ERROR="+tc.operation)
+			output, err := cmd.CombinedOutput()
+			t.Logf("injected %s EIO: error=%v\n%s", tc.operation, err, output)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Errorf("setup I/O error must fail the native test: %v", err)
+			}
+			for _, want := range []string{"Load: error=", "UpdateMemory: error=", "input/output error", tc.diagnostic, "--- FAIL:"} {
+				if !strings.Contains(string(output), want) {
+					t.Errorf("missing observation %q", want)
+				}
+			}
+			if strings.Contains(string(output), "--- SKIP:") {
+				t.Error("setup I/O error was skipped")
+			}
+		})
+	}
+}
+
+func TestRelayAdmissionStorageSetupHelperProcess(t *testing.T) {
+	operation := os.Getenv("GO_TEST_RELAY_ADMISSION_SETUP_ERROR")
+	if operation == "" {
+		return
+	}
+	chmod, chown := os.Chmod, os.Chown
+	switch operation {
+	case "chmod":
+		chmod = func(path string, _ os.FileMode) error {
+			return &os.PathError{Op: operation, Path: path, Err: syscall.EIO}
+		}
+	case "chown":
+		chown = func(path string, _, _ int) error {
+			return &os.PathError{Op: operation, Path: path, Err: syscall.EIO}
+		}
+	default:
+		t.Fatalf("unknown setup operation %q", operation)
+	}
+	testRelayAdmissionStorage(t, chmod, chown)
+}
+
+func admissionStorageMetadata(t *testing.T, path string, fileMode, parentMode os.FileMode) (os.FileInfo, os.FileInfo) {
+	t.Helper()
+	resolvedRoot, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fs unix.Statfs_t
+	if err := unix.Statfs(filepath.Dir(path), &fs); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("TMPDIR supplied=%q temp_root=%q resolved=%q fixture=%q resolved_fixture=%q fs_type=%#x fs_id=%v uid=%d gid=%d euid=%d egid=%d groups=%v",
+		os.Getenv("TMPDIR"), os.TempDir(), resolvedRoot, path, resolvedPath, fs.Type, fs.Fsid, os.Getuid(), os.Getgid(), os.Geteuid(), os.Getegid(), groups)
+	infos := make([]os.FileInfo, 0, 2)
+	for _, item := range []struct {
+		path string
+		mode os.FileMode
+	}{{path, fileMode}, {filepath.Dir(path), os.ModeDir | parentMode}} {
+		info, err := os.Stat(item.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := info.Sys().(*syscall.Stat_t)
+		t.Logf("path=%q requested_mode=%v actual_mode=%v uid=%d gid=%d device=%d inode=%d",
+			item.path, item.mode, info.Mode(), st.Uid, st.Gid, st.Dev, st.Ino)
+		infos = append(infos, info)
+	}
+	return infos[0], infos[1]
+}
+
+type admissionModeInfo struct {
+	os.FileInfo
+	mode os.FileMode
+}
+
+func (i admissionModeInfo) Mode() os.FileMode { return i.mode }
+
+func TestRelayAdmissionStorageModes(t *testing.T) {
+	t.Parallel()
+	path := admissionConfigFile(t, `{"relay_admission_tokens":{}}`)
+	file, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uint32(os.Geteuid())
+	root := map[string]json.RawMessage{"relay_admission_tokens": json.RawMessage(`{}`)}
+	for _, tc := range []struct {
+		name  string
+		mode  os.FileMode
+		valid bool
+	}{
+		{"private", os.ModeDir | 0o700, true},
+		{"setgid parent", os.ModeDir | os.ModeSetgid | 0o700, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := admissionModeInfo{admissionFileInfo{file, uid}, 0o600}
+			p := admissionModeInfo{admissionFileInfo{parent, uid}, tc.mode}
+			tokens, err := validateAdmission(root, f, p)
 			if (err == nil) != tc.valid {
-				t.Fatalf("valid=%v, error=%v", tc.valid, err)
+				t.Errorf("valid=%v, error=%v", tc.valid, err)
 			}
-			if tc.valid && !tc.admission {
-				if err := UpdateMemory(path, MemorySettings{}); err != nil {
-					t.Fatal(err)
-				}
+			if tc.valid && tokens == nil || !tc.valid && tokens != nil {
+				t.Error("unexpected admission map presence")
 			}
-			if !tc.valid {
-				assertConfigErrorSafe(t, err)
-				if err := UpdateMemory(path, MemorySettings{}); err == nil {
-					t.Error("update repaired insecure storage")
-				}
-				info, err := os.Stat(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if info.Mode().Perm() != tc.file.Perm() {
-					t.Error("file permissions repaired")
-				}
-			}
+			assertConfigErrorSafe(t, err)
 		})
 	}
 }

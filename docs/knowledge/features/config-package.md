@@ -203,6 +203,8 @@ fields retain their existing decoding compatibility.
 
 A present map, including `{}`, requires a regular file with mode exactly 0600
 and a parent directory with mode exactly 0700, both owned by `os.Geteuid()`.
+`privateAdmissionStorage` compares the full `os.FileMode`, including file type
+and special bits; checking only `Mode().Perm()` would admit a setgid parent.
 `readConfig` opens the parent, opens the file relative to that handle and checks
 metadata from those same handles against the bytes read. Followed symlink targets
 must satisfy these checks. Rejection returns static, value-free errors and
@@ -216,7 +218,8 @@ JSON or type errors elsewhere in the document. Errors contain no credential,
 identity, map value or parser excerpt; ordinary filesystem read errors keep their
 classification. `UpdateMemory` validates admission before writing and preserves
 the complete map and unrelated raw settings across repeated memory replacements.
-A rejected update preserves the original config bytes.
+A rejected update preserves the original config bytes and complete file and
+parent-directory modes.
 
 `runSupervisor` loads configuration once and passes the map through `relayWiring`.
 `startRelay` selects only the loaded instance server-id's exact entry into
@@ -225,6 +228,56 @@ cross-identity fallback. Named instances select independently. There is no secre
 flag or environment override. Editing or rotating the file while running leaves
 that startup selection unchanged across reconnects; restart loads the new value.
 See [relay rejection and operator recovery](relay-package.md#reconnect-semantics).
+
+### Storage regression diagnostics
+
+Successful `os.Chmod` does not prove that the requested setgid bit persisted.
+`TestRelayAdmissionStorage` keeps separate inherited-group and effective-group
+fixtures; the latter assigns its disposable parent to `os.Getegid()` before
+requesting setgid. On the macOS physical temporary root observed in
+[#3458's verification](https://github.com/pyrycode/pyrycode/pull/3459#issuecomment-6198013669),
+an effective-user-owned parent inherited GID 0 while the process had effective
+GID 20: chmod returned nil but left mode 0700. Assigning the control parent to
+effective GID 20 allowed setgid to persist. These observations establish a
+current fixture limitation; they do not establish the initiating cause of the
+historical aggregate failure.
+
+`admissionStorageMetadata` records supplied TMPDIR, the selected and resolved
+temporary root, supplied/resolved fixture paths, filesystem type/identity,
+device/inode, requested/actual full modes, file/parent UID/GID, process real and
+effective IDs, and supplementary groups. `testRelayAdmissionStorage` records
+group-assignment and chmod errors, observed setgid capability, and exact `Load`
+and `UpdateMemory` outcomes before outcome assertions or a prerequisite skip.
+An unexpected `Load` result therefore cannot suppress the update observation.
+Diagnostics use synthetic empty admission maps and never print config contents.
+
+A native setgid row can skip only when the actual storage is an
+effective-user-owned regular 0600 file and 0700 directory with setgid missing,
+both APIs have been checked against that observed private storage, and no
+assertion has failed. A nil-error chmod that loses setgid is a native limitation.
+Setup errors qualify as unavailable prerequisites only for permission errors
+(`EPERM`/`EACCES`) or unsupported operations (`ENOTSUP`/`ENOSYS`), and only with
+that same observed missing mode. Unexpected setup errors, including `EIO`,
+`ENOENT`, `EINVAL` and `EROFS`, fail even when setgid is absent. Skipping solely
+because the bit is missing would hide a broken setup operation. Other storage
+and legacy compatibility rows continue to execute.
+
+`TestRelayAdmissionStorageModes` independently injects full-mode and effective-UID
+metadata into `validateAdmission`: a regular 0600 file and 0700 directory accept,
+while adding `os.ModeSetgid` to the same parent rejects. This proof runs regardless
+of native setgid support. When native setgid is established, both APIs must also
+reject it, `Load` must return zero config, and the rejected update must preserve
+exact bytes and complete file/parent modes. Checking only an error or permission
+bits would miss silent permission repair; skipping the native case cannot replace
+the deterministic full-mode proof.
+
+`TestAdmissionSetgidUnavailable` pins the setup-error classification.
+`TestRelayAdmissionStorageSetupFailure` injects chmod and group-assignment `EIO`
+in separate child test processes, each bounded by a 15-second context and joined
+by `CombinedOutput`. Each child must exit 1 after recording both API outcomes,
+emit its operation-specific setup-error diagnostic and report no skip. Child
+failure alone could pass for an unrelated reason and would not prove that setup
+I/O errors remain failures.
 
 ## Memory replacement and persistence
 
@@ -322,13 +375,18 @@ loss the test is meant to catch.
 
 Admission regressions in `internal/config/admission_test.go` cover malformed and
 unselected values (`TestRelayAdmissionConfig`), exact storage modes and legacy
-compatibility (`TestRelayAdmissionStorage`), effective ownership through metadata
-injection (`TestRelayAdmissionOwnership`), and repeated complete-map/raw-number
+compatibility (`TestRelayAdmissionStorage`), deterministic full-mode and effective
+ownership checks (`TestRelayAdmissionStorageModes`, `TestRelayAdmissionOwnership`),
+and repeated complete-map/raw-number
 preservation (`TestRelayAdmissionUpdateMemory`). `TestRelayAdmissionFieldBoundaries`
 checks alternate field spellings and duplicate fields/identities, including
 escaped equivalents, through both read paths. Rejection checks inspect error
 chains for decoder causes and private input, zero partial configs and unchanged
 update bytes; valid final-map checks alone would miss the occurrence defects.
+The [storage diagnostics](#storage-regression-diagnostics) distinguish unavailable
+native setgid prerequisites from unexpected setup errors, with classification
+and child-process regressions in `TestAdmissionSetgidUnavailable` and
+`TestRelayAdmissionStorageSetupFailure`.
 
 ## Related
 
