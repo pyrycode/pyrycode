@@ -75,3 +75,7 @@ Pending documentation stage: update `docs/hosted-apps.md`, “Client resource br
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-15
+
+## Revisions
+
+- 2026-10-15: Shutdown releases fixture barriers through a shared stop channel, then joins HTTP shutdown; this also cleans up a failed assertion without test-side release writes. Worker-exit observations use a three-second bound, shorter than the five-second inactivity timeout, so timeout cleanup cannot masquerade as disconnect retirement. Final written work is approximately 745 lines, with no exported API or production change.
