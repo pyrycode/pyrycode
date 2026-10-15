@@ -2,7 +2,9 @@ package thread
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -37,19 +39,20 @@ func (g *agentGroup) count(n int) {
 }
 
 type agentCall struct {
-	ordinary *mainCall
-	linked   bool
-	parent   string
-	observed uint64
-	item     int
-	launch   json.RawMessage
-	reports  []*agentReport
+	ordinary     *mainCall
+	linked       bool
+	parent       string
+	observed     uint64
+	item         int
+	launch       uint64
+	launchResult bool
+	reports      []*agentReport
 }
 type agentTask struct {
 	observed   uint64
 	linkMapped bool
 	call       string
-	link       json.RawMessage
+	link       uint64
 	reports    []*agentReport
 }
 type agentReport struct {
@@ -58,7 +61,7 @@ type agentReport struct {
 	turn            string
 	foreground      bool
 	status, field   string
-	raw             json.RawMessage
+	digest          [sha256.Size]byte
 	durable, mapped bool
 }
 type agentObservation struct {
@@ -345,6 +348,9 @@ func (f *Fold) agentWork(e history.Entry) bool {
 			return true
 		}
 	}
+	if f.source == nil {
+		f.outcome(e, "", "") // Legacy-only evidence for the shared renderer.
+	}
 	var promoted []string
 	if promote {
 		promoted = f.promoteShellEvidence(key)
@@ -404,7 +410,8 @@ func (f *Fold) agentWork(e history.Entry) bool {
 			var dto protocol.ToolUsePayload
 			_ = json.Unmarshal(e.Payload, &dto)
 			f.countIngestion(len(e.Payload))
-			c.launch = append(json.RawMessage(nil), e.Payload...)
+			c.launch = e.ID
+			_, c.launchResult = fields["result"]
 			c.item = f.addItem(e, Item{ID: e.ID, Order: e.ID, Rev: e.ID, Kind: "agent", Turn: p.Turn, Status: "running", Active: true, Shown: true, Summary: p.Name + ": " + dto.InputSummary})
 			f.childAgents[c.item] = childParentKey{key, call}
 			f.scheduleAgentChildren(c.item)
@@ -427,9 +434,9 @@ func (f *Fold) agentWork(e history.Entry) bool {
 			if id.usable(row.Call, "tool_call_id") {
 				g.associate(row.Task, task, row.Call)
 				mark(row.Call)
-				if task.link == nil || (!durable && !task.linkMapped) {
+				if task.link == 0 || (!durable && !task.linkMapped) {
 					task.linkMapped = !durable
-					task.link = append(json.RawMessage(nil), e.Payload...)
+					task.link = e.ID
 				}
 			}
 		}
@@ -443,9 +450,9 @@ func (f *Fold) agentWork(e history.Entry) bool {
 			if call != "" && (typ == "background_task_linked" || typ == protocol.TypeBackgroundTaskStarted || typ == "background_task_gone") {
 				g.associate(p.Task, task, call)
 				mark(call)
-				if task.link == nil || (!durable && !task.linkMapped) {
+				if task.link == 0 || (!durable && !task.linkMapped) {
 					task.linkMapped = !durable
-					task.link = append(json.RawMessage(nil), e.Payload...)
+					task.link = e.ID
 				}
 			}
 			if typ == "background_task_outcome" || typ == "background_task_gone" || typ == "agent_ended_with_session" || typ == protocol.TypeBackgroundTaskUpdated {
@@ -539,6 +546,20 @@ func (g *agentGroup) insertTaskID(call, id string) {
 // Companion evidence counts once; the earliest entry owns terminal order while
 // the mapped report supplies content. Equal later reports do not replace it.
 func (g *agentGroup) addReport(reports *[]*agentReport, e history.Entry, status, field string, durable bool) {
+	// Fingerprint the embedded RawMessage encoding once on arrival. Repeated
+	// equal enrichment reuses its source ID without retaining any payload bytes.
+	var compact, escaped bytes.Buffer
+	_ = json.Compact(&compact, e.Payload) // agentWork validated the object.
+	json.HTMLEscape(&escaped, compact.Bytes())
+	digest := sha256.Sum256(escaped.Bytes())
+	content := e.ID
+	for _, r := range *reports {
+		g.count(1)
+		if r.field == field && r.status == status && r.digest == digest && ((!durable && r.mapped) || (durable && r.durable && !r.mapped)) {
+			content = r.content
+			break
+		}
+	}
 	var turn string
 	var foreground bool
 	if !durable && (field == "result" || field == "denial") {
@@ -551,13 +572,12 @@ func (g *agentGroup) addReport(reports *[]*agentReport, e history.Entry, status,
 			r.id = min(r.id, e.ID)
 			r.durable, r.mapped = true, true
 			if !durable {
-				r.raw = append(json.RawMessage(nil), e.Payload...)
-				r.content, r.turn, r.foreground = e.ID, turn, foreground
+				r.content, r.turn, r.foreground, r.digest = content, turn, foreground, digest
 			}
 			return
 		}
 	}
-	*reports = append(*reports, &agentReport{id: e.ID, content: e.ID, turn: turn, foreground: foreground, status: status, field: field, raw: append(json.RawMessage(nil), e.Payload...), durable: durable, mapped: !durable})
+	*reports = append(*reports, &agentReport{id: e.ID, content: content, turn: turn, foreground: foreground, status: status, field: field, digest: digest, durable: durable, mapped: !durable})
 }
 func agentTerminal(status string) bool {
 	return status != "" && status != "stopping"
@@ -569,16 +589,18 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	}
 	// Recompute intrinsic lifecycle state without disturbing unrelated derived closure.
 	item := &f.items[c.item]
+	previous := f.recipes[item.ID]
 	if state := f.children[c.item]; state != nil && !state.restored {
 		item = &state.base
+		previous = state.baseRecipe
 	}
-	var content map[string]json.RawMessage
-	_ = json.Unmarshal(c.launch, &content)
-	f.countIngestion(len(c.launch))
-	delete(content, "ended_order")
+	recipe := contentRecipe{creating: c.launch, agent: true, fields: make(map[string]recipeField)}
 	put := func(key string, value any) {
-		content[key], _ = json.Marshal(value)
-		f.countIngestion(len(content[key])*2 + 1)
+		raw, _ := json.Marshal(value)
+		recipe.fields[key] = recipeField{value: raw}
+	}
+	entry := func(key string, id uint64) {
+		recipe.fields[key] = recipeField{entry: id}
 	}
 	if c.parent != "" {
 		put("parent_tool_call_id", c.parent)
@@ -591,7 +613,11 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		task := g.tasks[taskID]
 		linked = true
 		put("task_id", taskID)
-		put("task_link", task.link)
+		if task.link != 0 {
+			entry("task_link", task.link)
+		} else {
+			put("task_link", nil)
+		}
 		reports = append(reports, task.reports...)
 		g.count(len(task.reports))
 	}
@@ -621,8 +647,8 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 			continue
 		}
 		if r.field == "result" {
-			if _, ok := content["result"]; !ok {
-				put("result", r.raw)
+			if _, ok := recipe.fields["result"]; !ok && !c.launchResult {
+				entry("result", r.content)
 			}
 			if linked {
 				continue
@@ -638,7 +664,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 			status = "stopping"
 		}
 		if r.field == "task_report" && r.mapped {
-			put("task_report", r.raw)
+			entry("task_report", r.content)
 		}
 	}
 	if final != nil {
@@ -646,27 +672,37 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		if status == "completed" {
 			status = "finished"
 		}
-		put(final.field, final.raw)
+		entry(final.field, final.content)
 		// Status-empty reports can enrich content after an ending without ending anew.
 		for _, r := range reports {
 			g.count(1)
 			if r.field == "task_report" && r.status == "" && r.mapped {
-				put("task_update", r.raw)
+				entry("task_update", r.content)
 			}
 		}
 	}
 	if ended != 0 {
 		put("ended_order", ended)
 	}
-	raw, _ := json.Marshal(content)
-	f.countIngestion(2*len(raw) + min(len(raw), len(item.Content)))
-	if !bytes.Equal(item.Content, raw) || item.Status != status || item.Active != active || item.EndedOrder != ended {
+	changed := !reflect.DeepEqual(previous, recipe)
+	var raw json.RawMessage
+	if f.source == nil {
+		rendered, err := renderShared([]Item{*item}, map[uint64]contentRecipe{item.ID: recipe}, legacySource(f.legacyOutcomes), nil)
+		if err != nil {
+			return // Legacy evidence was validated and copied on arrival.
+		}
+		raw = rendered[0].Content
+		changed = !bytes.Equal(item.Content, raw)
+	}
+	if changed || item.Status != status || item.Active != active || item.EndedOrder != ended {
 		f.restoreChild(c.item)
 		if c.ordinary == nil && c.parent != "" {
 			f.saveChild(c.item, g.key, c.parent)
 		}
 		target := &f.items[c.item]
-		delete(f.recipes, target.ID)
+		if f.source != nil {
+			f.recipes[target.ID] = recipe
+		}
 		target.Content, target.Status, target.Active, target.EndedOrder, target.Rev = raw, status, active, ended, max(item.ID, rev)
 		f.markAffected(c.item)
 		if c.ordinary == nil {

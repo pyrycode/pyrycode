@@ -18,9 +18,23 @@ type entrySource interface {
 // Recipe fields are copy-on-write; text IDs are append-only with snapshot lengths.
 type contentRecipe struct {
 	creating uint64
+	agent    bool
 	delivery uint64
 	text     []uint64
 	fields   map[string]recipeField
+}
+
+// legacySource is compatibility storage for New; production uses recentSource.
+type legacySource map[uint64]json.RawMessage
+
+func (s legacySource) Lookup(ids []uint64) ([]history.Entry, error) {
+	entries := make([]history.Entry, 0, len(ids))
+	for _, id := range ids {
+		if raw, ok := s[id]; ok {
+			entries = append(entries, history.Entry{ID: id, Payload: raw})
+		}
+	}
+	return entries, nil
 }
 
 type recipeField struct {
@@ -73,7 +87,7 @@ func newReferenceFold(conversationID string, source entrySource) *Fold {
 
 func referencedKind(kind string) bool {
 	switch kind {
-	case "user_message", "assistant_message", "turn_end", "notice", "compaction", "session_divider":
+	case "user_message", "assistant_message", "turn_end", "notice", "compaction", "session_divider", "agent", "tool_call":
 		return true
 	}
 	return false
@@ -212,10 +226,13 @@ func renderSharedLookup(selected []Item, recipes map[uint64]contentRecipe, sourc
 				}
 				text.WriteString(p.Text)
 			}
-			if len(r.text) > 1 || len(r.fields) > 0 {
+			if r.agent || len(r.text) > 1 || len(r.fields) > 0 {
 				var fields map[string]json.RawMessage
 				if json.Unmarshal(item.Content, &fields) != nil || fields == nil {
 					return nil, ErrUnavailable
+				}
+				if r.agent {
+					delete(fields, "ended_order")
 				}
 				if len(r.text) > 1 {
 					fields["text"], _ = json.Marshal(text.String())

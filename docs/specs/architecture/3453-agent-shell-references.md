@@ -64,3 +64,6 @@ Pending documentation stage:
 - [Threat model] No authentication/authorization changes. Store publication retention is measured separately by #3386; resumable-state work remains #3335.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: `TestReferenceRepeatedAgentReport` showed that comparing new report IDs alone advances revisions for identical status-empty enrichment. `addReport` now fingerprints compacted, HTML-escaped inert JSON on arrival and reuses an earlier equal-content reference within the same report kind/status/provenance. Reports still retain their own terminal-order IDs and arrival validity facts; mapped companions keep mapped content provenance. No full agent content is encoded for production lifecycle comparison.
