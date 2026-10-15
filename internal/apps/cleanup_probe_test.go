@@ -13,14 +13,17 @@ func TestOwnerCleanupProbeRecovery(t *testing.T) {
 		name               string
 		term, probe, final error
 		wantError          bool
+		afterKill          bool
 	}{
-		{"transient permission", nil, syscall.EPERM, syscall.ESRCH, false},
-		{"persistent permission", nil, syscall.EPERM, syscall.EPERM, true},
-		{"failed termination", syscall.EPERM, nil, syscall.ESRCH, true},
+		{"transient permission", nil, syscall.EPERM, syscall.ESRCH, false, false},
+		{"persistent permission", nil, syscall.EPERM, syscall.EPERM, true, false},
+		{"failed termination", syscall.EPERM, nil, syscall.ESRCH, true, false},
+		{"permission until forced kill", nil, syscall.EPERM, syscall.ESRCH, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				probes := 0
+				killed := false
 				o := Owner{grace: time.Second, kill: func(pid int, sig syscall.Signal) error {
 					if pid != -123 {
 						t.Fatalf("unexpected process group %d", pid)
@@ -30,10 +33,13 @@ func TestOwnerCleanupProbeRecovery(t *testing.T) {
 						return tc.term
 					case 0:
 						probes++
-						if probes == 1 {
+						if probes == 1 || tc.afterKill && !killed {
 							return tc.probe
 						}
 						return tc.final
+					case syscall.SIGKILL:
+						killed = true
+						return nil
 					default:
 						return nil
 					}
