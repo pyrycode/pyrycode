@@ -29,6 +29,15 @@ The worker establishes interrupted-run detection, creates
 `history.Store.Forward(conversationID, 0)` and feeds raw entries through H into a
 private `Fold` using `ForwardReader.Walk`. Each chunk contains at most
 `history.MaxPageEntries`, including hidden facts and continuation evidence.
+For eligible compact recovery metadata at V, replay must first reach exactly V
+with the recorded stored-entry checksum and history-reconstructed last-shown
+watermark before reusing the epoch. Invalid or mismatched evidence rotates the
+epoch; replay continues through H either way. Old item-bearing schema-1 records
+rotate once, and cached fields never seed the fold. Full replay remains required;
+[ADR 045's resumable checkpoints and persistent index](../decisions/045-thread-index-over-history.md)
+are future work. Shared run/coordinator/marker eligibility, including compatible
+same-store unload/reload, remains unchanged until
+[#3383](https://github.com/pyrycode/pyrycode/issues/3383).
 Readiness requires successful completion, `Fold.Version() == H` and a persisted
 complete initial checkpoint; recovery remains `StateRebuilding` until that write
 succeeds, and partial replay publishes no usable view. A missing or empty
@@ -46,8 +55,10 @@ than the saved version is dirty, including entries with no public item changes.
 Its deadline is 30 seconds after the conversation's last successful checkpoint;
 later appends cannot postpone it. The worker's timer flushes dirty progress even
 when no further entries arrive; progress first becoming dirty after the deadline
-flushes immediately. Unchanged progress causes no periodic rewrite. Initial or
-scheduled checkpoint failure leaves `StateUnavailable` with generic
+flushes immediately. Unchanged progress causes no periodic rewrite.
+Checksum and watermark evidence advance only with successfully consumed complete
+progress; a partially failed feed cannot advance checkpoint or retirement evidence.
+Initial or scheduled checkpoint failure leaves `StateUnavailable` with generic
 `ErrUnavailable`; `Retry` reconstructs from history. See
 [cache and epochs](thread-package.md#cache-and-epochs) for lifecycle exceptions
 and persistence errors. Notifications cover commits through the supplied history
@@ -125,7 +136,8 @@ explicit requests for each open conversation.
 
 ### Snapshots and retry
 
-Production workers use `Fold.Render() ([]Item, error)` for recovery comparisons.
+Production recovery validates the stored-entry checksum and reconstructed
+last-shown watermark at the saved version instead of comparing rendered items.
 Publication capture uses `renderShared` on affected public rows to resolve the
 [converted standalone recipes](thread-package-main-thread-folding.md#standalone-source-entries)
 after excluding suppressed delivery rows and children without public parents.
@@ -145,8 +157,10 @@ Public `Fold.Render`, `Fold.Items`, `Fold.Observe`, `Fold.FeedChanges` and all
 Store item/change/query results still return complete detached content with
 their existing signatures. Public rendering copies source payload bytes;
 `Store.Snapshot` captures immutable pointers under the mutex and materializes
-detached values outside it. Checkpoints likewise materialize complete detached
-items only at the [checkpoint boundaries](thread-package.md#cache-and-epochs).
+detached values outside it. Checkpoints write only the compact scalar evidence
+described under [cache and epochs](thread-package.md#cache-and-epochs), without
+materializing detached items; they cannot supply a cache-only view or bypass
+required reference rendering before usable publication.
 Legacy folds created by `New` remain inline.
 
 The worker-owned `recentSource` resolves IDs from the current feed chunk, then
