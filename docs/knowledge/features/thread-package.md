@@ -88,7 +88,7 @@ Status is only a hint, not continuity evidence or a transaction across reads.
 Wire metadata, items/changes and cursor advancement must all come from the same
 captured `Changes` or `Observe` result. Recheck baseline usability and retire
 consumers before replacement even if withdrawal/reload races the status read.
-See [observation readiness](thread-package-background-store.md#loading-and-replay-readiness)
+See [observation readiness](thread-package-background-store-replay.md#loading-and-replay-readiness)
 and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
 
 `daemonThreadUpdates` maps exported fold field names through `ThreadItem`'s JSON
@@ -190,7 +190,7 @@ pass while parent cleanup fails clean certification with `ErrPersistence`.
 Register cleanup before loading; join `Store.Shutdown`, report its error, then
 cancel the owned context with a defer inside cleanup so fixture failures also
 release it. Keep the load parent alive through the join to preserve the
-[retirement certification contract](thread-package-background-store.md#isolation-and-lifecycle).
+[retirement certification contract](thread-package-background-store-lifecycle.md#isolation-and-lifecycle).
 
 Wire lifecycle tests must read the live acceptance before completing same-version
 catch-up, which can suppress duplicate publication. A delivered message and its
@@ -347,7 +347,7 @@ metadata and immutable content recipes: no rendered `Content` or derived
 user/assistant `Summary`. Worker progress and certificates remain scalar-only.
 Baseline reads render all public rows; bounded queries select metadata first,
 then resolve only required history references from the captured publication.
-See [snapshots and retry](thread-package-background-store.md#snapshots-and-retry).
+See [snapshots and retry](thread-package-background-store-replay.md#snapshots-and-retry).
 Deferred agent/shell and inline/private payloads, including parent-ending recipe
 values, remain outside this converted-content guarantee; their conversion is
 tracked in [#3334](https://github.com/pyrycode/pyrycode/issues/3334).
@@ -395,7 +395,7 @@ unresolved children, pending reports and private joins. Full replay restores
 unfinished text, queued sends and that hidden evidence before usability. The
 same reader then tails history, consuming commits during recovery/handoff once
 in order and converging on later commits through the supplied history store's
-notifications. See [loading and replay readiness](thread-package-background-store.md#loading-and-replay-readiness).
+notifications. See [loading and replay readiness](thread-package-background-store-replay.md#loading-and-replay-readiness).
 
 Within each entry, `markAffected` deduplicates stable indexes for additions,
 intrinsic changes, reparenting, newly publishable descendants and suppression.
@@ -493,7 +493,7 @@ storage and compares only final affected public rows. Retirement evidence pairs
 the checksum with the version and watermark of the last successfully folded and
 captured progress; a failed or interrupted chunk cannot advance it. Public
 snapshots, observations and queries still detach their results; see
-[snapshots and retry](thread-package-background-store.md#snapshots-and-retry).
+[snapshots and retry](thread-package-background-store-replay.md#snapshots-and-retry).
 After an unclean stop, full replay restores pending child/report evidence and
 subsequent tail parity, while the epoch rotates for each still-loaded conversation.
 
@@ -525,7 +525,7 @@ uncertified and returns `ErrPersistence` after healthy workers are attempted;
 those workers can retain their epochs on reopen. Failed/incomplete recovery or
 parent-context cancellation cannot authorize clean certification, even when
 racing retirement. Repeated/concurrent lifecycle calls preserve their results.
-See [isolation and lifecycle](thread-package-background-store.md#isolation-and-lifecycle).
+See [isolation and lifecycle](thread-package-background-store-lifecycle.md#isolation-and-lifecycle).
 
 [ADR 045](../decisions/045-thread-index-over-history.md) proposes resumable private
 fold checkpoints and a persistent index as future work. These certificates do
@@ -564,8 +564,8 @@ also cannot establish continuity across missing IDs; the greatest missing ID
 sets a floor for usable nonzero catch-up. Suppression of an earlier public
 projection requires reset because clients cannot remove it, while hidden/dropped
 rows still belong to `Fold.Items`. See the
-[bounded query contract](thread-package-background-store.md#bounded-queries)
+[bounded query contract](thread-package-background-store-queries.md#bounded-queries)
 for full-state/active/parent closure, reset metadata and zero-version windows,
 and the
-[observation contract](thread-package-background-store.md#loading-and-replay-readiness)
+[observation contract](thread-package-background-store-replay.md#loading-and-replay-readiness)
 for bounded retention and linked delivery suppression.
