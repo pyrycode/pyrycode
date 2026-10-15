@@ -46,15 +46,19 @@ func (s *Store) renderItems(ctx context.Context, id conversations.ConversationID
 		return nil, ctx.Err()
 	}
 	if err != nil {
-		s.withdraw(id, q)
+		s.withdraw(ctx, id, q)
 		return nil, ErrUnavailable
 	}
 	return copyItems(items), nil
 }
 
-func (s *Store) withdraw(id conversations.ConversationID, q *queryIndex) {
+func (s *Store) withdraw(ctx context.Context, id conversations.ConversationID, q *queryIndex) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Cancellation while waiting for the mutex must preserve the worker's state.
+	if ctx.Err() != nil {
+		return
+	}
 	if q == nil || q.worker == nil || s.workers[id] != q.worker || q.worker.retiring || s.closed {
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -268,6 +269,88 @@ func TestStoreOutputCancellation(t *testing.T) {
 	}
 	if s.Snapshot(testStoreA).State != StateUsable {
 		t.Fatal("request cancellation withdrew worker")
+	}
+}
+
+func TestStoreOutputCancellationWhileWithdrawing(t *testing.T) {
+	for _, mode := range []string{"page", "newest", "catch-up"} {
+		t.Run(mode, func(t *testing.T) {
+			s, h := testThreadStore(t)
+			testStoreAppend(t, h, testStoreA, testMessage(0))
+			lookup := s.lookup
+			reached, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			defer releaseOnce.Do(func() { close(release) })
+			s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
+				if ctx.Value(outputRequestKey{}) != nil {
+					close(reached)
+					<-release
+					return nil, errors.New("private source failure")
+				}
+				return lookup(ctx, id, ids)
+			}
+			if err := s.Load(context.Background(), testStoreA); err != nil {
+				t.Fatal(err)
+			}
+			testStoreWait(t, s, testStoreA, StateUsable, 1)
+			testStoreAppend(t, h, testStoreA, testMessage(0))
+			snap := testStoreWait(t, s, testStoreA, StateUsable, 2)
+			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), outputRequestKey{}, true))
+			defer cancel()
+			type outcome struct {
+				result QueryResult
+				err    error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				var got outcome
+				switch mode {
+				case "page":
+					got.result, got.err = s.HistoryPage(ctx, testStoreA, 3, 1)
+				case "newest":
+					got.result, got.err = s.NewestWindow(ctx, testStoreA, 1)
+				case "catch-up":
+					got.result, got.err = s.CatchUp(ctx, testStoreA, snap.Epoch, 1, 1)
+				}
+				done <- got
+			}()
+			testStoreSignal(t, reached)
+			func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				releaseOnce.Do(func() { close(release) })
+				// Observe withdrawal blocked on the mutex before cancelling, so the
+				// earlier post-lookup context check has already returned nil.
+				stack := make([]byte, 1<<20)
+				deadline := time.Now().Add(5 * time.Second)
+				for !strings.Contains(string(stack[:runtime.Stack(stack, true)]), "(*Store).withdraw(") {
+					if time.Now().After(deadline) {
+						t.Fatal("request did not reach contended withdrawal")
+					}
+					time.Sleep(time.Millisecond)
+				}
+				cancel()
+			}()
+			select {
+			case got := <-done:
+				if !errors.Is(got.err, context.Canceled) || !reflect.DeepEqual(got.result, QueryResult{}) {
+					t.Fatal("cancelled request returned usable output", got)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("cancelled withdrawal did not finish")
+			}
+			if got := s.Status(testStoreA); got.State != StateUsable || got.Version != snap.Version || got.Epoch != snap.Epoch {
+				t.Fatal("cancelled request withdrew publication", got)
+			}
+			if got, err := s.NewestWindow(context.Background(), testStoreA, 1); err != nil || got.State != StateUsable || len(got.Items) != 1 {
+				t.Fatal("cancelled request cleared query state", got, err)
+			}
+			if got, err := s.Changes(context.Background(), testStoreA, snap.Epoch, 1); err != nil || got.BaselineRequired || len(got.Changes) != 1 {
+				t.Fatal("cancelled request cleared retained changes", got, err)
+			}
+			testStoreAppend(t, h, testStoreA, testMessage(0))
+			testStoreWait(t, s, testStoreA, StateUsable, 3)
+		})
 	}
 }
 
