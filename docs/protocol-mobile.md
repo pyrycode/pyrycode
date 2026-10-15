@@ -990,16 +990,21 @@ result attempts/deliveries and retained records separately.
 
 This contract is published by [Core #3323](https://github.com/pyrycode/pyrycode/issues/3323).
 Feedback delivery is [relay #213](https://github.com/pyrycode/pyrycode-relay/issues/213);
-safe daemon consumption is [Core #3423](https://github.com/pyrycode/pyrycode/issues/3423).
+the daemon implementation family is [Core #3423](https://github.com/pyrycode/pyrycode/issues/3423):
+[Core #3435](https://github.com/pyrycode/pyrycode/issues/3435) provides the
+generation-scoped feedback API, and
+[Core #3436](https://github.com/pyrycode/pyrycode/issues/3436) adopts it in the
+production waker with conditional registration persistence.
 **Protocol publication does not activate feedback or token removal.** Both
 companions wait for the canonical publication, then own their ordinary code,
 review and hermetic tests; they are joint activation prerequisites rather than
 reciprocal implementation blockers.
 
 Coordinated operator activation requires the published protocol revision,
-completed compatible relay/consumer revisions and recorded evidence for new/new,
-mixed versions, matching/stale registrations, disconnect/replacement/reconnect and
-expiry conformance. Keep activation off until these prerequisites have evidence.
+completed compatible relay #213 and Core #3435/#3436 revisions and recorded
+evidence for new/new, mixed versions, matching/stale registrations,
+disconnect/replacement/reconnect and expiry conformance. Keep activation off
+until these prerequisites have evidence.
 Deployment and real-daemon checks are operator-owned. Publication and hermetic
 tests alone MUST NOT be described as proof of production activation.
 
