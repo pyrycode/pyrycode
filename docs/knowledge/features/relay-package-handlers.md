@@ -264,13 +264,18 @@ Resolution order matters for the same reason `ListConversationsWithAgents` fixed
 
 Refusal-to-code mapping has one branch worth citing by name: a *concurrent delete* between `reg.Get`'s success and `AdvanceReadUpTo`'s own scan surfaces as `AdvanceReadUpTo`'s `ErrConversationNotFound`, and the handler re-maps it to the same `conversation.not_found` the initial miss gets — truthful, not a generic "something changed" code, because by the time the reply is built the row genuinely isn't there anymore.
 
-Both handlers use this filtered watermark (#2954): exclude exactly
-`turn_state`, `stall`, `api_retry`, `compacting`, and `session_transition`;
-all other types count, including unknown types. Missing, empty and status-only
-logs yield `0`. Mark-read persists `max(held, min(up_to, latest))`, preserving
-higher held marks. Reading the last displayable ID clears unread despite
-trailing statuses; new content restores it. Status entries remain in history
-and consume IDs. See [recovery and caching](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
+Production list/read share `legacyHistoryReader` and the producer's
+`historyEntryShown(type, payload)` content policy (#3463). Explicit `Shown == false`
+vetoes content; absent metadata uses the same classifier, and true cannot promote
+metadata or unknown types. Unknown types default to non-content. Hidden statuses,
+context usage, successful endings, nonvisual info banners and restart/sleep
+dividers do not raise the target. Receipt validity establishes accounting only.
+Empty/hidden-only logs yield `0`. Mark-read persists
+`max(held, min(up_to, latest))`, preserving higher held marks even at latest zero.
+Reading the newest visible ID clears unread despite hidden tails; older reads
+leave newer content unread. Hidden restart reconciliation preserves that result;
+visible interruption/loss notices may raise unread. All IDs remain in the durable
+history space. See [watermarks and accounting](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
 
 Reply-then-push-then-return-the-reply's-error is the same ordering `SetConversationMuted` uses above, with one difference: the push is conditional on `advanced`, not unconditional. A no-op request still gets its correlated `conversation_updated` reply — a client that asked always learns the mark actually on disk — but nothing is pushed to anyone else, because nothing changed for them to learn.
 
@@ -322,12 +327,19 @@ and the [wire contract](../../protocol-mobile.md#application-message-types).
 
 ## `ListConversations` gains a third, required parameter: the history dependency is not optional (#2779)
 
-`ConversationSummary.LatestEntryID` (#2779, see [`protocol-package-types-conversations-read-payloads.md`](protocol-package-types-conversations-read-payloads.md)) needed a history read per row, so both constructors widened again: `ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarnessFunc, hist historyLatestReader)` is now the real signature, and `ListConversations(reg, hist)` delegates `ListConversationsWithAgents(reg, nil, hist)`. This is the exception to #2643's "nil default makes the old behaviour reachable" pattern directly above: `harnessFor`'s `nil` is a legitimate no-pool answer, but `hist`'s `nil` is not a legitimate no-history answer — a daemon that cannot read history cannot state whether a conversation has unread entries, so the handler fails the whole reply rather than quietly reporting `latest_entry_id: 0` for every row. The 18 existing external call sites (17 tests, 1 production — `cmd/pyry/relay.go`'s `w.hist`, a `*history.Store` built once in `main.go`) all had to pass the new argument; see the plan's Revisions for why that exceeded the pipeline's per-constructor call-site ceiling but was kept together anyway (single-consumer plumbing, the floor rule).
+`ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarnessFunc,
+hist historyLatestReader)` requires history; `ListConversations(reg, hist)` delegates
+with a nil harness reader. A nil harness is a legitimate no-pool answer, but a
+missing history reader cannot establish unread state and fails the whole reply
+with `history.unavailable`. `startRelayV2` supplies the same `legacyHistoryReader`
+over `w.hist` to list and mark-read, keeping their visible-content targets aligned.
 
 **`historyLatestReader` requires `LatestDisplayableEntryID`, not raw `LatestEntryID`, through a consumer-owned, one-method interface** — the plan's own revision from the architect's first sketch. `*history.Store` satisfies it structurally; existing handler tests built around a synthetic registry keep using small fakes that return whatever id they want (including a non-canonical one, since the interface itself doesn't reject it — only the real store's `ValidID` check does), which is what keeps 17 pre-existing tests from having to stand up a real `history.Store` just to pass the new parameter.
 
 **A nil `*history.Store` boxed into a `historyLatestReader` is not a nil interface — this is the trap the PR's own lessons-learned flagged, and the same one `history-package.md`'s "the store is nil-tolerant and a concrete pointer, never an interface" note already warns about for `appendConversationHistory`.** `ListConversationsWithAgents` normalizes it explicitly: `if store, ok := hist.(*history.Store); ok && store == nil { hist = nil }` runs before the handler closure is even built, so a daemon that wires a typed-nil store — including for an otherwise-empty registry that would never reach the per-row lookup — still answers `history.unavailable` rather than silently succeeding. Without this normalization, `hist != nil` (the interface-level check) would be true for a typed nil, and the handler would call a method on a nil receiver or, worse, read a success it shouldn't report.
 
-Missing, empty and status-only history yields `latest_entry_id: 0`; the exclusion set is shared with `MarkConversationRead` above.
+Missing, empty and hidden-only history yields `latest_entry_id: 0`; the shared
+producer content policy and explicit-false veto match `MarkConversationRead` above.
+Raw store watermark APIs and legacy receipt delivery/accounting remain separate.
 
 **The filtered lookup runs only after `multi_agent` filtering, and the whole reply is built before anything is sent.** A row a non-negotiating client's filter already dropped (an `AgentCodex` conversation) is never looked up at all, so a corrupt or unreadable history log behind a filtered-out row cannot fail a list that client was always going to receive in full. On a surviving row, a lookup error returns `history.unavailable` (retryable, the fixed message `msgListHistoryUnavailable`) immediately — there is no partially-built `ConversationsPayload` sent before or after the failing row, because the `out` slice is only marshalled and sent once the loop finishes without error.
