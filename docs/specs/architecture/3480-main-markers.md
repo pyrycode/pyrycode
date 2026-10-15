@@ -45,8 +45,8 @@ One deliverable; approximately 550 written lines including plan and tests, no ex
 None.
 
 ## Documentation handoff
-- Pending documentation stage: `docs/knowledge/features/thread-package-main-thread-folding-validation.md`, **Validation and testing**: describe finished main-turn/call markers, their first-ending/original-opening guarantees, the byte-accounting method and measured boundary, distinguishing other lifecycle state.
-- Pending documentation stage: `docs/knowledge/features/thread-package-agents-and-background-work.md`, **Background shells**: state that main-turn closure does not authorize discarding shell continuation or late-link evidence.
+- Satisfied: [Validation and testing](../../knowledge/features/thread-package-main-thread-folding-validation.md#validation-and-testing) describes finished main-turn/call markers, first-ending/original-opening guarantees, structural bounds, the byte-accounting method and measured boundary, distinguishing other lifecycle state.
+- Satisfied: [Background shells](../../knowledge/features/thread-package-agents-and-background-work.md#background-shells) states that main-turn closure does not authorize discarding shell continuation or late-link evidence.
 
 ## Security review
 **Verdict:** PASS

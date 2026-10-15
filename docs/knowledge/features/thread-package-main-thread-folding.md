@@ -6,7 +6,7 @@
 | --- | --- |
 | [Source entries and accepted sends](thread-package-main-thread-folding-sources.md) | Item identity, order and version; standalone recipes; accepted-send lifecycle. |
 | [Main work and scoped closure](thread-package-main-thread-folding-lifecycle.md) | Assistant/tool recipes, scoped joins, pending outcomes and closure. |
-| [Validation and testing](thread-package-main-thread-folding-validation.md#validation-and-testing) | Replay and ownership checks, report-marker retention and memory accounting. |
+| [Validation and testing](thread-package-main-thread-folding-validation.md#validation-and-testing) | Replay and ownership checks, main/report-marker retention and memory accounting. |
 
 ### Visibility and live-state exclusions
 
