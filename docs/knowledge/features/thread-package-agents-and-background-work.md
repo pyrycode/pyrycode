@@ -254,6 +254,10 @@ finals supply their current ending content directly. Parent/link repair,
 closure, reopening and ending enrichment therefore revisit the affected tree
 without inspecting independent trees, even within the same agent group.
 Unrelated standalone/main-only entries perform zero child-resolution work.
+Replace `childDirty` after resolution: clearing or later ranging over a reused
+map can inspect capacity retained from a former large closure, even with few
+current children. Counting only yielded keys would hide that historical cost;
+see the related [public-touch capacity regression](thread-package.md#cache-and-epochs).
 Agent evidence separately recomputes only affected calls and their indexed
 tasks/reports, retaining these targeted descendant-repair hooks for late
 parent/link enrichment and lifecycle changes. These bounds cover agent and

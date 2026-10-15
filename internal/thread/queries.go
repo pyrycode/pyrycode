@@ -34,7 +34,7 @@ type QueryResult struct {
 
 // queryIndex borrows immutable publication items; private fold rows never enter it.
 type queryIndex struct {
-	items           []Item
+	items           []*Item
 	byID            map[uint64]int
 	ordered, active []int
 	work            func(bool)
@@ -47,6 +47,14 @@ type queryIndex struct {
 }
 
 func newQueryIndex(items []Item, work func(bool)) *queryIndex {
+	shared := make([]*Item, len(items))
+	for i := range items {
+		shared[i] = &items[i]
+	}
+	return newPublicationIndex(shared, work)
+}
+
+func newPublicationIndex(items []*Item, work func(bool)) *queryIndex {
 	q := &queryIndex{items: items, byID: make(map[uint64]int, len(items)), work: work}
 	for i, item := range items {
 		q.count(true)
@@ -74,7 +82,7 @@ func (q *queryIndex) count(preparing bool) {
 		q.work(preparing)
 	}
 }
-func (q *queryIndex) item(i int) Item    { q.count(false); return q.items[i] }
+func (q *queryIndex) item(i int) Item    { q.count(false); return *q.items[i] }
 func (q *queryIndex) order(i int) uint64 { return q.item(q.ordered[i]).Order }
 
 // HistoryPage selects the newest ordered public range below upperOrder, plus
