@@ -19,33 +19,25 @@ import (
 )
 
 const (
-	cacheName    = "thread-cache.json"
-	recoveryName = "thread-recovery.json"
-	cacheSchema  = 2
+	cacheName       = "thread-certificate.json"
+	legacyCacheName = "thread-cache.json"
+	recoveryName    = "thread-recovery.json"
+	cacheSchema     = 1
 	// foldingRules must change whenever folded item semantics change.
 	foldingRules = 3
 )
 
-// ErrPersistence reports a recoverable checkpoint or recovery-marker I/O failure.
+// ErrPersistence reports a recoverable certificate I/O failure.
 var ErrPersistence = errors.New("thread: cache persistence unavailable")
 var errCacheAbsent = errors.New("thread: cache requires rebuilding")
 
-type recoveryRecord struct {
-	Run         string
-	Coordinator conversations.ConversationID
-}
-type runRecord struct {
-	Run      string
-	Complete bool
-}
 type cacheRecord struct {
 	Schema, Rules    int
 	Epoch            string
 	Version          uint64
 	LastShownVersion uint64
 	Checksum         string
-	Complete         bool
-	Recovery         recoveryRecord
+	Clean            bool
 	fieldsPresent    bool
 }
 
@@ -119,11 +111,10 @@ func validToken(token string) bool {
 	decoded, err := hex.DecodeString(token)
 	return err == nil && len(decoded) == 16 && hex.EncodeToString(decoded) == token
 }
-func runName(token string) string { return "thread-run-" + token + ".json" }
 
 // cacheLeaf allows only package-owned names, never a path from cache contents.
 func cacheLeaf(name string) bool {
-	if name == cacheName || name == recoveryName {
+	if name == cacheName || name == legacyCacheName || name == recoveryName {
 		return true
 	}
 	const prefix = "thread-run-"
@@ -226,23 +217,30 @@ func (s *Store) writeCacheFile(id conversations.ConversationID, name string, val
 	if s.replace(f.Name(), path) != nil {
 		return ErrPersistence
 	}
+	if s.syncDir(dir) != nil {
+		// A post-rename failure must not leave a reusable clean claim. Removing
+		// the leaf never follows redirects; containment is checked again first.
+		again, err := s.history.LogDir(id)
+		if err == nil && again == dir && check() == nil {
+			_ = os.Remove(path) // best-effort invalidation after failed durability
+			_ = s.syncDir(dir)  // best-effort durability of that invalidation
+		}
+		return ErrPersistence
+	}
 	return nil
 }
 
-func (s *Store) beginRun(id conversations.ConversationID) (recoveryRecord, error) {
-	s.initMu.Lock()
-	defer s.initMu.Unlock()
-	if s.runID == "" {
-		token, err := randomToken()
-		if err != nil {
-			return recoveryRecord{}, err
-		}
-		if err := s.writeCacheFile(id, runName(token), runRecord{Run: token}); err != nil {
-			return recoveryRecord{}, err
-		}
-		s.runID, s.coordinator = token, id
+func syncCacheDir(dir string) error {
+	f, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return ErrPersistence
 	}
-	return recoveryRecord{Run: s.runID, Coordinator: s.coordinator}, nil
+	err = f.Sync()
+	closeErr := f.Close()
+	if err != nil || closeErr != nil {
+		return ErrPersistence
+	}
+	return nil
 }
 
 func (s *Store) recoveryCandidate(id conversations.ConversationID, bound uint64) (cacheRecord, error) {
@@ -253,33 +251,8 @@ func (s *Store) recoveryCandidate(id conversations.ConversationID, bound uint64)
 		}
 		return c, err
 	}
-	if c.Schema != cacheSchema || c.Rules != foldingRules || !c.Complete || !validToken(c.Epoch) || !validToken(c.Recovery.Run) || !conversations.ValidID(string(c.Recovery.Coordinator)) || c.Version > bound || !c.fieldsPresent || !validEvidence(c.Version, c.LastShownVersion, c.Checksum) {
+	if c.Schema != cacheSchema || c.Rules != foldingRules || !c.Clean || !validToken(c.Epoch) || c.Version > bound || !c.fieldsPresent || !validEvidence(c.Version, c.LastShownVersion, c.Checksum) {
 		return cacheRecord{}, nil
-	}
-	var marker recoveryRecord
-	if err := s.readCacheFile(id, recoveryName, &marker); err != nil {
-		if errors.Is(err, errCacheAbsent) {
-			return cacheRecord{}, nil
-		}
-		return c, err
-	}
-	if marker != c.Recovery {
-		return cacheRecord{}, nil
-	}
-	s.initMu.Lock()
-	sameRun := c.Recovery.Run == s.runID && c.Recovery.Coordinator == s.coordinator
-	s.initMu.Unlock()
-	if !sameRun {
-		var run runRecord
-		if err := s.readCacheFile(c.Recovery.Coordinator, runName(c.Recovery.Run), &run); err != nil {
-			if errors.Is(err, errCacheAbsent) {
-				return cacheRecord{}, nil
-			}
-			return c, err
-		}
-		if !run.Complete || run.Run != c.Recovery.Run {
-			return cacheRecord{}, nil
-		}
 	}
 	return c, nil
 }
@@ -293,24 +266,34 @@ func sameItems(a, b []Item) bool {
 	return err == nil && bytes.Equal(left, right)
 }
 
-// finishRun cannot certify any participant until all final checkpoint writes
-// succeed. An interrupted final replacement leaves the run incomplete.
-func (s *Store) finishRun(records map[conversations.ConversationID]progressRecord) error {
-	for id, p := range records {
-		if p.Err != nil {
+// removeLegacy runs only after durable dirty marking. Only regular package-owned
+// leaves can be removed; redirects and unrelated entries are never traversed.
+func (s *Store) removeLegacy(id conversations.ConversationID) error {
+	dir, err := s.history.LogDir(id)
+	if err != nil {
+		return ErrPersistence
+	}
+	leaves, err := os.ReadDir(dir)
+	if err != nil {
+		return ErrPersistence
+	}
+	for _, leaf := range leaves {
+		name := leaf.Name()
+		if name == cacheName || !cacheLeaf(name) {
+			continue
+		}
+		again, err := s.history.LogDir(id)
+		if err != nil || again != dir {
 			return ErrPersistence
 		}
-		var c cacheRecord
-		var marker recoveryRecord
-		if s.readCacheFile(id, cacheName, &c) != nil || s.readCacheFile(id, recoveryName, &marker) != nil || !c.Complete || c.Schema != cacheSchema || c.Rules != foldingRules || c.Epoch != p.Epoch || c.Version != p.Version || c.LastShownVersion != p.LastShownVersion || c.Checksum != p.Checksum || !c.fieldsPresent || !validEvidence(c.Version, c.LastShownVersion, c.Checksum) || c.Recovery != marker || marker.Run != s.runID || marker.Coordinator != s.coordinator {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || os.Remove(path) != nil {
 			return ErrPersistence
 		}
-		if err := s.writeCacheFile(id, cacheName, c); err != nil {
-			return err
-		}
 	}
-	if s.runID == "" {
-		return nil
+	if s.syncDir(dir) != nil {
+		return ErrPersistence
 	}
-	return s.writeCacheFile(s.coordinator, runName(s.runID), runRecord{Run: s.runID, Complete: true})
+	return nil
 }

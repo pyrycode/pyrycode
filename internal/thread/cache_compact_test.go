@@ -37,10 +37,10 @@ func testCacheJSON(t *testing.T, s *Store) (map[string]json.RawMessage, []byte, 
 func testCacheCompact(t *testing.T, s *Store, snap Snapshot) {
 	t.Helper()
 	fields, raw, _ := testCacheJSON(t, s)
-	if len(raw) >= 1024 || fields["Items"] != nil {
+	if len(raw) >= 1024 || fields["Items"] != nil || fields["Recovery"] != nil {
 		t.Fatalf("cache retains content: %d bytes, items present %v", len(raw), fields["Items"] != nil)
 	}
-	for _, key := range []string{"Schema", "Rules", "Epoch", "Version", "LastShownVersion", "Checksum", "Complete", "Recovery"} {
+	for _, key := range []string{"Schema", "Rules", "Epoch", "Version", "LastShownVersion", "Checksum", "Clean"} {
 		if fields[key] == nil {
 			t.Fatalf("cache omits %s", key)
 		}
@@ -49,13 +49,12 @@ func testCacheCompact(t *testing.T, s *Store, snap Snapshot) {
 		Schema, Rules             int
 		Epoch, Checksum           string
 		Version, LastShownVersion uint64
-		Complete                  bool
-		Recovery                  recoveryRecord
+		Clean                     bool
 	}
 	if err := json.Unmarshal(raw, &c); err != nil {
 		t.Fatal(err)
 	}
-	if c.Schema != 2 || c.Rules != foldingRules || !c.Complete || c.Epoch != snap.Epoch || c.Version != snap.Version || c.LastShownVersion != snap.LastShownVersion || c.Recovery.Run != s.runID || c.Recovery.Coordinator != s.coordinator {
+	if c.Schema != cacheSchema || c.Rules != foldingRules || !validToken(c.Epoch) || c.Version > snap.Version || c.LastShownVersion > c.Version || (c.Clean && (c.Epoch != snap.Epoch || c.Version != snap.Version || c.LastShownVersion != snap.LastShownVersion)) {
 		t.Fatalf("incorrect complete evidence: %+v versus %+v", c, snap)
 	}
 	if c.Version == 0 {
@@ -66,8 +65,8 @@ func testCacheCompact(t *testing.T, s *Store, snap Snapshot) {
 		t.Fatal("invalid checksum", c.Checksum)
 	}
 	if c.Version > 0 {
-		page, err := s.history.Page(testStoreA, "", 1)
-		if err != nil || len(page.Entries) != 1 || page.Entries[0].ID != c.Version || c.Checksum != entryChecksum(page.Entries[0]) {
+		entries, err := s.history.Lookup(testStoreA, []uint64{c.Version})
+		if err != nil || len(entries) != 1 || entries[0].ID != c.Version || c.Checksum != entryChecksum(entries[0]) {
 			t.Fatal("checksum does not identify the stored consumed entry", err)
 		}
 	}
@@ -115,7 +114,7 @@ func TestStoreCacheLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	fields, _, path := testCacheJSON(t, s)
-	fields["Schema"] = json.RawMessage(`1`)
+	fields["Schema"] = json.RawMessage(`0`)
 	fields["Items"], _ = json.Marshal(first.Items)
 	delete(fields, "Checksum")
 	delete(fields, "LastShownVersion")
@@ -255,12 +254,8 @@ func TestStoreCacheMissingEmptyEvidence(t *testing.T) {
 				if err := os.WriteFile(path, raw, 0600); err != nil {
 					t.Fatal(err)
 				}
-				if err := s.Shutdown(); err != ErrPersistence {
-					t.Fatal("missing empty evidence certified clean", err)
-				}
-				// A complete run certificate isolates field rejection from lifecycle rejection.
-				if err := s.writeCacheFile(testStoreA, runName(s.runID), runRecord{Run: s.runID, Complete: true}); err != nil {
-					t.Fatal(err)
+				if err := s.Shutdown(); err != nil {
+					t.Fatal("shutdown touched unloaded evidence", err)
 				}
 				next := NewStore(h)
 				t.Cleanup(func() { _ = next.Shutdown() })
@@ -382,8 +377,13 @@ func TestStoreCacheFinalEvidence(t *testing.T) {
 			if err := os.WriteFile(path, raw, 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.Shutdown(); err != ErrPersistence {
-				t.Fatal("modified final evidence certified clean", err)
+			if err := s.Shutdown(); err != nil {
+				t.Fatal("shutdown touched unloaded evidence", err)
+			}
+			next := NewStore(h)
+			t.Cleanup(func() { _ = next.Shutdown() })
+			if got := testCheckpointLoad(t, next, testStoreA, 1); string(fields["Epoch"]) == `"`+got.Epoch+`"` {
+				t.Fatal("modified evidence retained epoch")
 			}
 		})
 	}

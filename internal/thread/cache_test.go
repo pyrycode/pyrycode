@@ -103,7 +103,7 @@ func TestStoreCacheWarmHistoryTruncation(t *testing.T) {
 
 func TestStoreCacheEpochs(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{"clean", "unclean", "unloaded-clean", "missing", "corrupt", "rules", "ahead", "checksum", "marker", "schema", "partial", "truncated-history"} {
+	for _, mode := range []string{"clean", "unclean", "unloaded-clean", "missing", "corrupt", "rules", "ahead", "checksum", "schema", "partial", "truncated-history"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			h := history.New(root)
@@ -125,7 +125,13 @@ func TestStoreCacheEpochs(t *testing.T) {
 			if got := testStoreWait(t, s, testStoreA, StateUsable, 1); got.Epoch != first.Epoch {
 				t.Fatal("reload changed epoch")
 			}
-			if err := s.Unload(testStoreA); err != nil {
+			if mode == "unclean" {
+				s.mu.Lock()
+				w := s.workers[testStoreA]
+				s.mu.Unlock()
+				w.cancel()
+				testStoreWait(t, s, testStoreA, StateUnavailable, 0)
+			} else if err := s.Unload(testStoreA); err != nil {
 				t.Fatal(err)
 			}
 			if mode != "unclean" {
@@ -155,7 +161,7 @@ func TestStoreCacheEpochs(t *testing.T) {
 				c.Schema++
 				raw, err = json.Marshal(c)
 			case "partial":
-				c.Complete = false
+				c.Clean = false
 				raw, err = json.Marshal(c)
 			case "truncated-history":
 				files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
@@ -174,8 +180,6 @@ func TestStoreCacheEpochs(t *testing.T) {
 			case "checksum":
 				c.Checksum = strings.Repeat("00", 32)
 				raw, err = json.Marshal(c)
-			case "marker":
-				err = os.Remove(filepath.Join(dir, recoveryName))
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -196,7 +200,7 @@ func TestStoreCacheEpochs(t *testing.T) {
 			if (got.Epoch == first.Epoch) != retain {
 				t.Fatalf("epoch retention %s: %s -> %s", mode, first.Epoch, got.Epoch)
 			}
-			for _, name := range []string{cacheName, recoveryName, runName(next.runID)} {
+			for _, name := range []string{cacheName} {
 				info, err := os.Stat(filepath.Join(dir, name))
 				if err != nil || info.Mode().Perm() != 0600 {
 					t.Fatalf("permissions %s: %v", name, err)
@@ -227,9 +231,6 @@ func TestStoreCacheShutdown(t *testing.T) {
 			a, b := s.Snapshot(testStoreA).Epoch, s.Snapshot(testStoreB).Epoch
 			if a == b {
 				t.Fatal("shared epoch")
-			}
-			if err := s.Unload(testStoreB); err != nil {
-				t.Fatal(err)
 			}
 			dir, _ := h.LogDir(testStoreB)
 			path := filepath.Join(dir, cacheName)
@@ -276,7 +277,7 @@ func TestStoreCacheShutdown(t *testing.T) {
 					t.Fatal(err)
 				}
 				got := testStoreWait(t, next, id, StateUsable, 1)
-				if (got.Epoch == conv.epoch) == fail {
+				if (got.Epoch == conv.epoch) != (!fail || id == testStoreA) {
 					t.Fatal("partial shutdown certified clean")
 				}
 			}
@@ -338,7 +339,7 @@ func TestStoreCacheContinuation(t *testing.T) {
 
 func TestStoreCacheSecurity(t *testing.T) {
 	t.Parallel()
-	for _, fault := range []string{"cache-symlink", "cache-directory", "cache-fifo", "marker-symlink", "certificate-symlink", "sibling", "outside", "replace", "marker-replace", "run-replace", "history"} {
+	for _, fault := range []string{"cache-symlink", "cache-directory", "cache-fifo", "sibling", "outside", "replace", "history"} {
 		t.Run(fault, func(t *testing.T) {
 			root := t.TempDir()
 			h := history.New(root)
@@ -348,7 +349,7 @@ func TestStoreCacheSecurity(t *testing.T) {
 			if err := s.Load(context.Background(), testStoreA); err != nil {
 				t.Fatal(err)
 			}
-			first := testStoreWait(t, s, testStoreA, StateUsable, 1)
+			testStoreWait(t, s, testStoreA, StateUsable, 1)
 			if err := s.Shutdown(); err != nil {
 				t.Fatal(err)
 			}
@@ -366,14 +367,8 @@ func TestStoreCacheSecurity(t *testing.T) {
 			t.Cleanup(func() { _ = next.Shutdown() })
 			repair := func() {}
 			switch fault {
-			case "cache-symlink", "cache-directory", "cache-fifo", "marker-symlink", "certificate-symlink":
+			case "cache-symlink", "cache-directory", "cache-fifo":
 				name := cacheName
-				if fault == "marker-symlink" {
-					name = recoveryName
-				}
-				if fault == "certificate-symlink" {
-					name = runName(s.runID)
-				}
 				path := filepath.Join(dir, name)
 				if err := os.Rename(path, path+"-saved"); err != nil {
 					t.Fatal(err)
@@ -423,11 +418,11 @@ func TestStoreCacheSecurity(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-			case "replace", "marker-replace", "run-replace":
+			case "replace":
 				base := next.replace
 				next.replace = func(from, to string) error {
 					name := filepath.Base(to)
-					fail := fault == "replace" && name == cacheName || fault == "marker-replace" && name == recoveryName || fault == "run-replace" && strings.HasPrefix(name, "thread-run-")
+					fail := name == cacheName
 					if fail {
 						return errors.New("private-payload /host/path")
 					}
@@ -471,9 +466,6 @@ func TestStoreCacheSecurity(t *testing.T) {
 			}
 			got := testStoreWait(t, next, testStoreA, StateUsable, 1)
 			testStoreEqual(t, got, testStoreA, entries)
-			if fault == "replace" && got.Epoch == first.Epoch {
-				t.Fatal("interrupted checkpoint retained prior clean epoch")
-			}
 			if !errors.Is(next.Unload("../../private"), history.ErrInvalidID) {
 				t.Fatal("invalid unload accepted")
 			}
@@ -543,34 +535,27 @@ func TestStoreCacheInterrupted(t *testing.T) {
 
 func TestStoreCacheFinalCertificate(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	h := history.New(root)
-	s := NewStore(h)
-	testStoreAppend(t, h, testStoreA, testMessage(1))
-	if err := s.Load(context.Background(), testStoreA); err != nil {
-		t.Fatal(err)
-	}
-	first := testStoreWait(t, s, testStoreA, StateUsable, 1)
+	s, h := testThreadStore(t)
+	a := testCheckpointLoad(t, s, testStoreA, 0)
 	if err := s.Unload(testStoreA); err != nil {
 		t.Fatal(err)
 	}
-	base := s.replace
-	s.replace = func(from, to string) error {
-		if filepath.Base(to) == runName(s.runID) {
-			return errors.New("private-payload /host/path")
-		}
-		return base(from, to)
-	}
+	b := testCheckpointLoad(t, s, testStoreB, 0)
+	s.mu.Lock()
+	w := s.workers[testStoreB]
+	s.mu.Unlock()
+	w.cancel()
+	testStoreWait(t, s, testStoreB, StateUnavailable, 0)
 	if err := s.Shutdown(); err != ErrPersistence {
-		t.Fatal("final marker failure unreported", err)
+		t.Fatal("unclean stop lost", err)
 	}
-	next := NewStore(history.New(root))
+	next := NewStore(h)
 	t.Cleanup(func() { _ = next.Shutdown() })
-	if err := next.Load(context.Background(), testStoreA); err != nil {
-		t.Fatal(err)
+	if got := testCheckpointLoad(t, next, testStoreA, 0); got.Epoch != a.Epoch {
+		t.Fatal("unloaded clean certificate invalidated")
 	}
-	if got := testStoreWait(t, next, testStoreA, StateUsable, 1); got.Epoch == first.Epoch {
-		t.Fatal("interrupted final certificate retained epoch")
+	if got := testCheckpointLoad(t, next, testStoreB, 0); got.Epoch == b.Epoch {
+		t.Fatal("loaded unclean certificate reused")
 	}
 }
 
