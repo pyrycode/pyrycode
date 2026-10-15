@@ -118,6 +118,13 @@ func (f *Fold) promoteShellEvidence(key agentKey) []string {
 				call.group = key
 			}
 		}
+		for id, marker := range turn.finished {
+			g.count(1)
+			if marker.item == -2 && turn.markerGroup(marker) == oldKey {
+				marker.scope, marker.lifetime = key.scope, key.lifetime
+				turn.finished[id] = marker
+			}
+		}
 	}
 	return affected
 }

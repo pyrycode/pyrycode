@@ -22,6 +22,7 @@ type mainTurn struct {
 	text     int
 	textSlot int // one-based slot in Fold.openTexts; zero for untracked/child text
 	calls    map[string]*mainCall
+	finished map[string]mainCallMarker
 	end      *mainOutcome
 }
 type mainCall struct {
@@ -209,6 +210,14 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 					f.applyTerminal(call)
 				}
 			}
+			if !child {
+				for id := range st.calls {
+					f.compactMainCall(st, id)
+				}
+				if f.source != nil && len(st.calls) == 0 {
+					st.calls = nil
+				}
+			}
 		}
 		return true
 	}
@@ -251,13 +260,25 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 	if e.Type == "main_tool_interrupted" {
 		callID = id.ToolCallID
 	}
+	if _, finished := st.finished[callID]; finished {
+		if e.Type == protocol.TypeToolUse {
+			f.closeText(st, e.ID)
+		}
+		return true
+	}
 	call := st.calls[callID]
 	if call != nil && call.shell != nil && call.group != f.childGroup(e) && id.Opening == nil {
 		call = nil
 	}
 	if call == nil {
 		call = &mainCall{group: f.childGroup(e), item: -1, terminal: st.end}
+		if st.calls == nil {
+			st.calls = make(map[string]*mainCall)
+		}
 		st.calls[callID] = call
+	}
+	if !child {
+		defer f.compactMainCall(st, callID)
 	}
 	if e.Type == protocol.TypeToolUse {
 		f.closeText(st, e.ID)

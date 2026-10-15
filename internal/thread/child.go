@@ -117,9 +117,10 @@ func (f *Fold) childWork(e history.Entry) bool {
 			if mainKey.tagged {
 				mainKey.scope = 0
 			}
-			if main := f.turns[mainKey]; main != nil && main.calls[id.ToolUseID] != nil && main.calls[id.ToolUseID].group == group {
-				call = main.calls[id.ToolUseID]
-				delete(main.calls, id.ToolUseID)
+			if main := f.turns[mainKey]; main != nil {
+				if ordinary := main.takeMainCall(id.ToolUseID, group); ordinary != nil {
+					call = ordinary
+				}
 			}
 			if call.item < 0 {
 				// A main-turn ending cannot close an uncreated child call.

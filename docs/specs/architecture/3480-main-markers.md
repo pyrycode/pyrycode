@@ -61,3 +61,22 @@ None.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: ordinary duplicate facts can return directly from a finished marker; only a child claim needs reconstruction. Duplicate creations still close the turn's current text run. Store scope/lifetime in the call marker and derive its recorded source from the owning turn, avoiding duplicate source fields. First-lifetime promotion also updates itemless launcher markers, preserving the existing child-transfer rule. `TestReferenceMainMarkerPending` additionally checks this promotion, uncreated outcomes, source/lifetime mismatch and release of empty finished-turn maps.
+
+## Offline retention evidence
+`TestReferenceFinalReportAccounting` passed under `-race` using the existing eight-entry fixed-shape workload: main Read/result, Agent launch, independently finished child Read/result, task link/completion and main ending. Each turn has its own fixed-length `sNNNN` recorded Claude source. Main turns retain two value markers and no mutable calls; child lanes retain their existing representation.
+
+| Turns | Entries | Padding bytes/entry | Main markers/turn | Agent markers/turn | Metadata/recipes/turn | Active/unresolved/turn | Other lifecycle/turn | Source cache total |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 128 | 16 | 174 | 71 | 1061 | 242 | 606 | 42904 |
+| 16 | 128 | 4096 | 174 | 71 | 1061 | 242 | 606 | 565144 |
+| 64 | 512 | 16 | 174 | 71 | 1062 | 242 | 603 | 61176 |
+| 64 | 512 | 4096 | 174 | 71 | 1062 | 242 | 603 | 1046520 |
+
+`testFinalReportBytes` follows retained fields, counting scalar sizes and string bytes, including intrinsic/previous child state. The main category includes turn/opening index keys, bounded turn cursor facts and finished call values/outcomes. Existing agent report markers are separate. Mutable main calls (shared shells or uncreated calls), active turns, pending child reports and agent-report candidates are unresolved work. Child lifecycle/snapshots and other agent indexes remain other lifecycle state. The workload has no public active items; unresolved category bytes are private speculative child/result/agent joins, not evidence of active public work.
+
+These are logical bytes, not heap or whole-Fold targets: map/slice/pointer/string headers, allocation capacity/alignment, authoritative fixture history and Store snapshots are excluded. Pointer targets count once at their first owning traversal; strings count per field without a backing-sharing deduction. Source cache bytes use the existing independent bounded cache accounting. Values per turn are rounded. Entry references are fixed-width uint64 and indexes use the host's 64-bit int; identity lengths affect byte counts. Decimal JSON recipe IDs explain the small metadata difference at the larger history size. The structural test bounds both fields and entries as redundant terminals/results grow, independently of these accounting exclusions. Main marker storage contains identity strings and fixed outcome/source references, with no rendered content. Other uncompacted categories are not claimed as savings.
+
+Focused race regressions passed, including intermediate first-ending, late creation/text, original-opening recovery, late child transfer, pending outcomes and shared shell promotion/link/completion. Goldens were not edited. The builder's downstream race suites, vet and build are recorded in the PR; the dispatcher owns the full `make check` gate.
