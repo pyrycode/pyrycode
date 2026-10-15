@@ -30,3 +30,8 @@ Use the existing `TestHostedLifecycleCommittedWire`, `TestHostedLifecycleCommitS
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-14
+
+## Revisions
+2026-10-15: Native macOS arm64 is available on this builder, so the required focused checks ran locally against pushed candidate `59e08b3517cc161a41a568b577266ae1e4fdc34b` rather than requesting another platform probe. No design or assertion changes were needed.
+
+Both used `go test -race -count=1 -json -run '^TestHostedLifecycle(CommittedWire|CommitSuppression|HostIsolation)$' ./internal/relay`, first with `TMPDIR=/private/tmp/builder-3394-native/physical`, then with `TMPDIR=/private/tmp/builder-3394-native/alias`. The alias was deliberately created as a symlink to the physical directory; both resolve to `/private/tmp/builder-3394-native/physical`. Each run executed/passed/failed/skipped **3/3/0/0**. Exact commands and native evidence are recorded in PR #3405.
