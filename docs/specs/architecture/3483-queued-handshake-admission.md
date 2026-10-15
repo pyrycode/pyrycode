@@ -163,6 +163,16 @@ Skip reasons: thread's `TestReferenceDiskHeap` requires
 `PYRY_E2E_REAL_CLAUDE=1`; cmd's `TestMemoryPathsCaseInsensitive` requires a
 filesystem where alternate component casing resolves. No assigned test skipped.
 
-`make check`: pending dispatcher/verifier full-module gate, not executed by the
-builder under the role's validation boundary. No full-module or live-suite pass
-is claimed; the unrelated scoped failure above remains recorded.
+### Dispatcher/verifier gate outcome
+
+The builder left `make check` pending under its validation boundary. The
+subsequent dispatcher gate report records `make check`, `make build`,
+`cite-guard` and `docs-guard` passing (exit 0) on reviewed commit
+`5eef7a82f5992adf0088dd939411609b91e2e87f` at
+`2026-10-15T23:08:37.131Z`; the
+[verifier's PASS verdict](https://github.com/pyrycode/pyrycode/pull/3486#issuecomment-6204188715)
+confirms that handoff. The gate report has no per-test counts, so it establishes
+the command outcomes without adding named-test execution evidence to the table
+above. No live-suite pass is claimed. The earlier scoped relay failure and its
+isolated 20/20 non-reproduction remain unresolved under #3485; a later green
+standard gate does not diagnose or erase them.
