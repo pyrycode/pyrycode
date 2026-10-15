@@ -139,7 +139,8 @@ explicit requests for each open conversation.
 Production recovery validates the stored-entry checksum and reconstructed
 last-shown watermark at the saved version instead of comparing rendered items.
 Publication capture uses `renderShared` on affected public rows to resolve the
-[converted standalone recipes](thread-package-main-thread-folding.md#standalone-source-entries)
+[standalone](thread-package-main-thread-folding.md#standalone-source-entries) and
+[assistant/ordinary-tool recipes](thread-package-main-thread-folding.md#main-work-source-entries)
 after excluding suppressed delivery rows and children without public parents.
 Internal capture borrows immutable source payload or inline `Content` bytes,
 reuses unchanged item pointers and replaces affected public values. Folding
@@ -488,7 +489,11 @@ eviction before missing/unreadable authoritative reads during replay and tail.
 Its tail case uses a delivery join that must resolve the evicted message:
 unrelated no-op tails reuse unchanged content and cannot exercise read failure.
 It verifies withdrawal of all usable state and equality with fresh legacy replay
-after repair and `Retry`.
+after repair and `Retry`. `TestStoreReferenceWorkRetry` extends this to text and
+terminal enrichment references, including a completed ordinary child tool.
+Its tail failure requires ancestor closure after recent-cache eviction to mark
+the rows affected: ignored history alone reuses the immutable slots and can
+leave a broken source unread, making a failure test pass without exercising it.
 
 `TestAffectedPublicationOracle` compares affected capture with whole-thread
 `difference` after single-entry and chunked corpus feeds, including private
