@@ -64,3 +64,6 @@ Pending documentation stage: update `docs/knowledge/features/thread-package.md`,
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: Added `TestDaemonThreadLastShownIO`, a Linux inotify observation of the installed callback, to count actual certificate opens and detect segment opens/writes across two history sizes, warm/cold cursors and registry removal. Portable tests still cover all eligibility predicates and loaded allocation behavior. Estimated total remains below 700 written lines; no production interface changes.
