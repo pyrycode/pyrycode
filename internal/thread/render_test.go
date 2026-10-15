@@ -53,6 +53,9 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	}
 	for i, item := range f.items {
 		if f.recipes[item.ID].creating != 0 {
+			if f.texts[i] != nil {
+				t.Fatal("reference item retained an inline append buffer")
+			}
 			countRecipe(f.recipes[item.ID])
 			before += len(legacy.items[i].Content)
 			after += len(item.Content)
@@ -67,7 +70,7 @@ func TestReferenceRetainedBytes(t *testing.T) {
 			if state := f.children[i]; state != nil {
 				old := legacy.children[i]
 				childBefore += len(old.base.Content) + len(old.previous.Content)
-				childAfter += len(state.base.Content) + len(state.previous.Content)
+				childAfter += len(state.base.Content) + len(state.previous.Content) + len(state.endingBase) + len(state.endingContent)
 				if item.Kind == "assistant_message" {
 					assistantBefore += len(old.base.Summary) + len(old.previous.Summary)
 					assistantAfter += len(state.base.Summary) + len(state.previous.Summary)

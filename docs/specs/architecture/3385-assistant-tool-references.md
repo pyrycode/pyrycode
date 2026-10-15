@@ -81,3 +81,12 @@ Pending documentation stage: update `docs/knowledge/features/thread-package-agen
 - Concurrency: immutable field snapshots protect child restoration; owner serialization remains mandatory.
 - Threat model: OUT OF SCOPE retained private outcome and inline parent-ending payloads belong to #3334; Store rendered snapshot retention belongs to #3386.
 **Reviewer:** builder self-review. **Date:** 2026-10-15.
+
+## Revisions
+- 2026-10-15: integrated merged #3401 and #3388 during rework. Legacy append
+  and enrichment use the incremental inline buffers; reference-backed items
+  bypass them. Immutable publication renders only affected slots, so tail source
+  failure tests now trigger a delivery join or ancestor closure after eviction,
+  including a completed ordinary child tool. The reference and retry contracts
+  are unchanged. The verifier's gate-readiness finding requires complete
+  `make check` followed by `make build` for this rework.
