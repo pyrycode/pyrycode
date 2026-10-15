@@ -109,6 +109,18 @@ For combined predicates, exercise each branch independently. A shared log site c
 prove which branch was taken if both inputs satisfy the first condition. Use an
 independent observable result of the path under test.
 
+`reset.wrapup.write_failed` can mean the shared context expired before
+`writeResetWrapUp` called the injected writer. Stale-note persistence consumes
+that same budget before resolution. A matching event alone can therefore let
+a delivery-error test pass without exercising its injected failure.
+`TestResetThenRotate_FailedHandoffIsStale` checks resolution, dormant activation
+and the first delivery attempt before expiry, and checks which callbacks ran.
+Its idle case retains the busy state and observes the interrupt. Give immediate
+failure classifications finite headroom separately from deliberate readiness,
+idle and completion expiry; retain the stale bytes, warning/fence, secret
+exclusion, bounded rotation and successful-recovery assertions. Permission-based
+persistence skips must remain visible as skips.
+
 A FIFO barrier proves that preceding queued work drained only after the
 asynchronous producer has finished enqueueing the work being asserted. Join
 producer completion before inserting the barrier, for both positive delivery
@@ -463,6 +475,19 @@ sibling is not the same experiment. Check for an existing issue before filing an
 
 ### Diagnosing reply timeouts
 
+For reset classification, record elapsed post-persistence resolution, first
+delivery, rotation entry and completion using durations and counts without
+content. The [stale-handoff comparison](../../specs/architecture/3428-stale-handoff-timing.md#revisions)
+used identical path assertions in four concurrent race binaries pinned to one
+CPU per policy. Both the old 35 ms policy and the repaired policy passed all
+600 tests/subtests without skips: the historical failure was not reproduced.
+The two-second classification allowance matches the fixture default; 500 ms
+leaves over twenty times the largest measured pre-delivery delay while keeping
+expiry real, and three seconds bounds reset and rotation. These finite regression bounds
+are not product latency guarantees. Retain revisions, commands, phase timings
+and execution/pass/fail/skip counts; later passes cannot establish historical
+cause or completion of earlier gates.
+
 A fast provider does not imply a fast first reply. Relay `runThreadQuery` completes
 `EncodeThreadReply` before serial delivery, so a reply wait includes whole-result
 encoding and scheduling under race instrumentation. Measure content-free provider
@@ -485,6 +510,32 @@ per fragment would let partial progress extend the missing-completion wait. The
 15-second bound retains headroom over the measured reconstruction; scratch overlays
 dropping all replies or only the final marker each failed at that bound. A focused
 pass alone proves neither attribution nor bounded failure.
+
+`TestLiveStateRun` is a hermetic manager test despite its name. Its complete
+snapshot needs `pushQueueCap*2+2` routing envelopes: the handshake, one generated
+clear and every reading. Four race-test processes pinned to one CPU alone still
+passed the old two-second wait; adding 32 CPU-only contenders on that CPU made
+all four old waits expire after partial output. Under identical contention the
+repaired workload completed all application decryption within 4.382 seconds in
+the provisional measurement, establishing the eight-second bound with about 83%
+headroom. This measures scheduling headroom, without attributing the historical
+491/514 result to a cause its missing phase logs cannot establish. Keep ordinary
+`waitForEnvelopes` callers on their existing default.
+
+Start that single absolute budget before manager startup and snapshot-producing
+connection admission. Log first, halfway and final transport, plus halfway and
+complete decryption, using elapsed time and received/expected and
+decrypted/expected counts only. Check expiry before processing buffered frames
+and after each decryption, including the last: a timer checked only while idle
+would let a buffered workload finish late. Progress must never restart the budget.
+The [live-state negative controls](../../specs/architecture/3430-live-state-workload-deadline.md#revisions)
+suppressed output after a partial prefix and failed at 8.0003 seconds with
+257/514 received and 256/513 decrypted; delaying the final buffered decryption's
+completion past the bound failed at 8.0102 seconds even with 514/514 received and
+513/513 decrypted. Both executed once, failed once and skipped zero times.
+Keep the full expected count and the
+[authenticated connection-survival proof](v2-session-manager-test-surface-same-package-unit-tests-internal-relay-delivery-and-control.md#complete-live-state-workload);
+reducing the fixture or accepting missing output as a skip would erase the proof.
 
 ### Test inputs and retained artifacts
 
