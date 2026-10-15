@@ -15,7 +15,7 @@ import (
 type shadowStore interface {
 	Load(context.Context, conversations.ConversationID) error
 	Retry(context.Context, conversations.ConversationID) error
-	Snapshot(conversations.ConversationID) thread.Snapshot
+	Status(conversations.ConversationID) thread.Snapshot
 	Unload(conversations.ConversationID) error
 	Shutdown() error
 }
@@ -143,7 +143,7 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 				return
 			}
 		} else {
-			snapshot := s.store.Snapshot(id)
+			snapshot := s.store.Status(id)
 			s.publish(ctx, id, w)
 			switch snapshot.State {
 			case thread.StateNotLoaded:

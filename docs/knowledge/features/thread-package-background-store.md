@@ -413,9 +413,13 @@ publications and scalar lifecycle records; history/certificate I/O, folding,
 snapshot copying and joining happen outside it. Paused replay therefore leaves
 appends and other conversations' processing and snapshot lookup free to progress.
 
-`Snapshot.Active` includes private unresolved work omitted from public `Items`.
-It informs retirement eligibility but neither activity transitions nor elapsed
-time write certificates.
+`threadShadow.follow` polls `Store.Status` every 50 ms for readiness, consumed
+version and private activity without traversing or copying items/content.
+`Status.Active` includes private unresolved work omitted from public `Items`;
+nil items do not establish inactivity. Load/retry and quiescent unload decisions
+use the captured status, taken before publication can wait on delivery. Retirement
+retains that consumed boundary so a later append still triggers reload. Activity
+transitions and elapsed time do not write certificates.
 
 `Changes` captures the immutable publication, retained ranges and notification
 channel under the same mutex used by publication. Publication closes/replaces
@@ -487,7 +491,11 @@ unavailable view until retry or unload; it does not shut down other conversation
 The daemon owns [startup discovery, retirement and final committed-version
 draining](thread-package.md#shadow-lifecycle-and-evidence). `Store.Shutdown`
 cancels workers; callers must finish producer draining and tail catch-up before
-invoking it to preserve final commits.
+invoking it to preserve final commits. Status-only polling preserves this order:
+after producers finish, shadow shutdown discovers final activity and joins
+coordinators once their usable consumed versions reach the final history
+boundaries. History/fold failures end final waiting without certifying complete
+draining; successful persistence alone cannot establish a clean daemon exit.
 
 ### Store verification
 
