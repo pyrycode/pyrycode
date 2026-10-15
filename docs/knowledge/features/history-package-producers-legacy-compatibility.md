@@ -13,7 +13,7 @@ false or true. Only the validated runtime/startup,
 [agent/task facts](history-package-producers-runtime-lifecycle.md#agenttask-attribution-and-reported-endings-3030)
 and [remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973)
 have a receipt projection.
-Visibility controls the raw
+Visibility controls content classification for the daemon
 [unread watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954),
 not permission to reach a transport. Conversely, an eligible legacy event still
 reaches its existing recipients and history pages when `Shown` is false,
@@ -74,8 +74,9 @@ cannot authorize accounting. Only the neutral banner crosses: no decisions,
 prompt/answer/tool context, correlations, session identities or provenance.
 See the [full answer validation contract](history-package-producers.md#resolved-remote-prompt-answers-2973).
 Malformed facts and arbitrary unknown types stay holes, never harmless receipts.
-The unchanged mobile decoder counts valid info receipts toward legacy latest
-without drawing content or changing turn, permission, model or status state.
+The unchanged mobile decoder counts valid info receipts toward its wire accounting
+latest, separately from the daemon's visible-content target, without drawing
+content or changing turn, permission, model or status state.
 Receipt-only delivery gives no sight; malformed/unidentified receipts and
 unaccounted holes remain barriers. Receipt accounting alone never advances a
 read mark or grants foreground presentation.
@@ -126,11 +127,10 @@ named real-Claude acceptance requires separate counted full-gate evidence. See
 [prompt-answer serialization and validation](history-package-producers.md#resolved-remote-prompt-answers-2973)
 and [the #3256 live evidence](../../specs/architecture/3256-shared-live-repair-evidence.md#revisions).
 
-Raw visibility and legacy unread targets differ (#3029): the
-[legacy watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
-counts validated receipts regardless of `Shown`. Raw facts, metadata and store
-watermarks remain unchanged. The
-[pager](history-package.md#reader-2116) retains one bounded raw page's cursor and
+The daemon's [list/read target](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
+uses content classification and the explicit-false veto, independently of receipt
+accounting (#3463). Raw facts, metadata and store watermarks retain their
+contracts. The [pager](history-package.md#reader-2116) retains one bounded raw page's cursor and
 `AtStart`; accounting never authorizes scanning ahead to fill a page.
 
 `TestLegacyRuntimeReceipts_CompletedTurn` uses the real store and `HandleFor`
@@ -175,10 +175,10 @@ recipient gates keep their original meaning.
 | `background_task_updated` | Hidden for patch-only updates; shown when `Status` or `Summary` is nonempty. |
 | Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
-| Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; validated nonvisual receipts count toward legacy latest. |
-| Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Raw payloads stay off legacy transports; validated receipts count toward legacy latest for either visibility value and confer no foreground presentation. |
-| [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. Raw payloads stay off legacy transports; validated receipts count toward legacy latest regardless of visibility and confer no sight. Running facts share page/live/replay identities; startup loss is page-only. |
-| [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the fold, with optional original asking-session provenance. Raw payloads stay off legacy transports; validated five-field nonvisual receipts count toward legacy latest regardless of visibility, with identical page/live/replay bytes and original durable ID/timestamp. Invalid facts remain holes; receipts confer no presentation or read-mark authority. Open prompts remain live-only. |
+| Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; receipt accounting does not make hidden openings or restart/sleep dividers unread. |
+| Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Raw payloads stay off legacy transports; receipts provide accounting, while only shown content qualifies for daemon latest; they confer no foreground presentation. |
+| [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. Raw payloads stay off legacy transports; receipts provide accounting without sight; hidden drops do not raise daemon latest. Running facts share page/live/replay identities; startup loss is page-only. |
+| [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the fold, with optional original asking-session provenance. Raw payloads stay off legacy transports; validated five-field nonvisual receipts preserve accounting with identical page/live/replay bytes and original durable ID/timestamp. Daemon latest follows the raw fact's content classification and explicit-false veto. Invalid facts remain holes; receipts confer no presentation or read-mark authority. Open prompts remain live-only. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -187,11 +187,17 @@ to known terminal words would silently hide future completion facts. Conditional
 legacy payloads that fail decoding conservatively classify as shown; classification
 does not rewrite or reject their payloads.
 
-Previously stored entries retain raw visibility semantics. Legacy targets count
-eligible types regardless of `Shown`, except `turn_state`, `stall`, `api_retry`,
-`compacting` and `session_transition`, which never count. Unsupported entries
-keep absent/true counting and false exclusion without certifying receipts.
-Raw pages retain hidden entries and their IDs; no metadata is rewritten.
+**The daemon uses this same policy for producer metadata and unread (#3463).**
+`legacyHistoryReader.LatestDisplayableEntryID` calls `historyEntryShown` on the
+stored type/payload and vetoes explicit `Shown == false`. Entries without
+metadata use the same classification as current writes; explicit true cannot
+promote hidden metadata or an unknown type. Unknown types default to non-content,
+so a new hidden type requires no separate unread exclusion. Receipt validation
+establishes accounting only: a hidden fact cannot raise unread merely because it
+has a valid banner projection. Known content facts can qualify independently of
+that projection. Raw pages retain every entry and its original ID; the store's
+metadata-only watermark semantics and stored metadata are unchanged. See the
+[shared list/read target and separate test oracles](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
 
 **Carry the append result, not a second lookup or another counter (#2861).**
 `appendConversationHistory` returns the successful `Store.AppendWithMetadata`
@@ -368,8 +374,8 @@ again:**
   the original linked task with its call, parent and exact available
   source/lifetime, and the unattributed call reused after a session transition.
   They exclude truncated identities and invented legacy lifetimes, check
-  `daemon_restart`, occurrence time and shown metadata, and require the latest
-  legacy displayable receipt target to equal the restart divider's ID. Repeated
+  `daemon_restart`, occurrence time and shown metadata, and require daemon latest
+  to equal the newest visible ending, below the hidden restart divider's ID. Repeated
   recovery through reopened stores must preserve the complete ending entries.
   Count-only checks could accept two copies of one ending while losing the other.
 

@@ -273,9 +273,10 @@ func TestAgentSessionEndings_Startup(t *testing.T) {
 				t.Fatal("missing distinct original task and reused call endings")
 			}
 			latest, err := (legacyHistoryReader{store: history.New(dir)}).LatestDisplayableEntryID(conversations.ConversationID(testConvID))
+			wantLatest := max(entries[0].ID, entries[1].ID)
 			newest, pageErr := history.New(dir).Page(conversations.ConversationID(testConvID), "", 1)
-			if err != nil || pageErr != nil || len(newest.Entries) != 1 || newest.Entries[0].Type != historySessionDivider || latest != newest.Entries[0].ID || latest <= entries[0].ID {
-				t.Fatalf("restart receipt target %d %v", latest, err)
+			if err != nil || pageErr != nil || len(newest.Entries) != 1 || newest.Entries[0].Type != historySessionDivider || latest != wantLatest || latest >= newest.Entries[0].ID {
+				t.Fatalf("restart visible ending target %d %v", latest, err)
 			}
 			read()
 			repeated := phase("repeated-recovery-and-read")

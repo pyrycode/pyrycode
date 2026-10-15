@@ -82,7 +82,7 @@ func TestQueuedLegacyReceipts_CompletedTurn(t *testing.T) {
 		if latest, err := reader.LatestEntryID(conversations.ConversationID(testConvID)); err != nil || latest != raw[len(raw)-1].ID {
 			t.Fatalf("raw durable target=%d,%v", latest, err)
 		}
-		testLegacyListAndMark(t, reader, checkpoint, testLegacyLatest(entries), 0)
+		testLegacyListAndMark(t, reader, checkpoint, presented, 0)
 		if !reflect.DeepEqual(historyEntries(t, reader, testConvID), raw) {
 			t.Fatal("raw facts/metadata changed")
 		}

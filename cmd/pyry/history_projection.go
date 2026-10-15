@@ -30,7 +30,8 @@ func legacyHistoryType(typ string) bool {
 }
 
 // historyVisibilityMetadata classifies new entries without changing payloads or
-// attributing a session. Old entries keep the store's absent-metadata behavior.
+// attributing a session. Unread classification shares historyEntryShown for old
+// entries whose visibility metadata is absent.
 func historyVisibilityMetadata(typ string, raw json.RawMessage) history.Metadata {
 	shown := historyEntryShown(typ, raw)
 	return history.Metadata{Shown: &shown}
