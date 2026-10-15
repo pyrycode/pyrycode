@@ -90,3 +90,7 @@ Pending documentation stage: update `docs/knowledge/features/thread-package-agen
   including a completed ordinary child tool. The reference and retry contracts
   are unchanged. The verifier's gate-readiness finding requires complete
   `make check` followed by `make build` for this rework.
+- 2026-10-15: restored main's six Codex capture fixtures after the verifier's
+  auto-commit included unrelated pre-existing recordings. Their original bytes
+  remain in `706de262`; the initial rework gate exposed mismatched capture
+  assertions. No recordings were recaptured or translation code changed.
