@@ -348,6 +348,7 @@ type openSession struct {
 func driveToOpen(t *testing.T, cfg V2SessionConfig, frames chan protocol.RoutingEnvelope, rec *v2Recorder, respPub, initPriv []byte) *openSession {
 	t.Helper()
 	mgr, stop := startManager(t, cfg)
+	t.Cleanup(stop)
 	initiator, err := noise.NewInitiator(initPriv, respPub)
 	if err != nil {
 		stop()
@@ -370,6 +371,11 @@ func driveToOpen(t *testing.T, cfg V2SessionConfig, frames chan protocol.Routing
 	if err != nil {
 		stop()
 		t.Fatalf("ReadResp: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := waitForOpenAdmission(ctx, mgr, v2TestConnID); err != nil {
+		t.Fatalf("handshake admission: %v", err)
 	}
 	return &openSession{
 		mgr:       mgr,
