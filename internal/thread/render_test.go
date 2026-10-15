@@ -44,7 +44,7 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	countRecipe := func(r contentRecipe) {
 		recipeBytes += int(unsafe.Sizeof(r)) + len(r.text)*8
 		for key, field := range r.fields {
-			recipeBytes += len(key) + int(unsafe.Sizeof(field))
+			recipeBytes += len(key) + int(unsafe.Sizeof(field)) + len(field.value)
 			if key == "parent_ending" {
 				parentEndings += len(field.value)
 			} else if len(field.value) != 0 && key != "task_id" && key != "parent_tool_call_id" && key != "ended_order" {

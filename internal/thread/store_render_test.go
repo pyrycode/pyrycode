@@ -50,7 +50,7 @@ func TestStoreReferencePublication(t *testing.T) {
 		}
 		recipes += int(unsafe.Sizeof(r)) + len(r.text)*8
 		for key, field := range r.fields {
-			recipes += len(key) + int(unsafe.Sizeof(field))
+			recipes += len(key) + int(unsafe.Sizeof(field)) + len(field.value)
 			if key == "parent_ending" {
 				parentEndings += len(field.value)
 			}
