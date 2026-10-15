@@ -316,7 +316,9 @@ Candidate ordering and cleanup traverse a reusable dense slice; membership is
 deleted only for its current indexes before resetting the slice length. Ranging
 or clearing a membership map can scan storage retained from its largest past
 entry even when few keys remain. Counting yielded keys or `len(map)` misses that
-work. `TestPublicTouchHistoricalPeakWork` checks fixed appends and duplicate
+work. Store's chunk-wide publication candidates use the same dense-slice rule;
+deduplication alone does not make enumeration affected-only after a large replay.
+`TestPublicTouchHistoricalPeakWork` checks fixed appends and duplicate
 registration after unrelated repaired trees grow from 4,096 to 16,384 children.
 
 Replay also reconstructs `Snapshot.LastShownVersion` entry by entry, independent
@@ -365,6 +367,14 @@ repair followed by `Retry` creates a new reader and fold. Completed progress is
 checkpointed before the first usable recovery publication. Tail items, consumed
 version, `LastShownVersion` and change notifications publish without waiting for
 the checkpoint deadline, so a usable view may be newer than its saved cache.
+Publication capture shares unchanged immutable item/content storage and compares
+only final affected public rows; it does not materialize a complete detached
+checkpoint on each tail chunk. The worker keeps completed metadata and immutable
+item pointers, then materializes complete detached checkpoint items for the
+initial write, scheduled flushes and lifecycle flushes. Cache schema, item
+content and recovery comparison remain unchanged. Public snapshots,
+observations and queries still detach their results; see
+[snapshots and retry](thread-package-background-store.md#snapshots-and-retry).
 A failed initial or scheduled checkpoint withdraws usability with generic
 `ErrUnavailable`; lifecycle results retain `ErrPersistence` and prevent clean
 certification.
@@ -406,7 +416,9 @@ See [isolation and lifecycle](thread-package-background-store.md#isolation-and-l
 Epoch reuse establishes compatible item identity; retained change-range
 continuity needs separate proof. `Store.Observe` acquires a detached complete
 baseline, and `Store.Changes` proves a range only from retained publication
-boundaries in the current worker, limited to 64 batches and 1 MiB. Unload/reload,
+boundaries in the current worker, limited to 64 batches and 1 MiB of JSON-encoded
+changes. Retained text suffixes have detached storage so they cannot pin an
+accumulated message beyond that accounting. Unload/reload,
 retry and a new store lifetime retain no old batches, even when recovery
 preserves the epoch. Missing live ranges or a different epoch explicitly return
 `BaselineRequired`; live consumers acquire a fresh complete baseline.

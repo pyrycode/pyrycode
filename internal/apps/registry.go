@@ -42,8 +42,8 @@ type Record struct {
 	Revision       uint64          `json:"revision"`
 	ReleaseHistory []Release       `json:"release_history,omitempty"`
 	PublishJournal *PublishJournal `json:"publish_journal,omitempty"`
-	// RetirementPending bars writers until predecessor retirement is confirmed.
-	// It precedes the verified-backup journal and survives owner replacement.
+	// RetirementPending bars restoration and writers until all prior publication
+	// writers are confirmed retired. It survives owner replacement.
 	RetirementPending bool `json:"retirement_pending,omitempty"`
 }
 

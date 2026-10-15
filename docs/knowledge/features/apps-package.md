@@ -17,8 +17,9 @@ state. Process spawn proves only starting; the owner confirms health before
 exposing private targets; owner construction reconciles registrations and recovers
 failed generations automatically. The daemon owns one owner for its discovery
 registry, independently of channels. Callable first publication and active-release
-updates are implemented; interrupted-publication startup recovery (#3263) and
-publishing control/daemon wiring (#3301/#3266) remain separate slices.
+updates and before-activation startup recovery are implemented; after-activation
+resolution (#3404) and publishing control/daemon wiring (#3301/#3266) remain
+separate slices.
 Encrypted resource activation (#3123) remains a separate responsibility.
 
 ## Package topics

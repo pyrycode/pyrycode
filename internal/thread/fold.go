@@ -42,13 +42,21 @@ type Fold struct {
 	publicCounts              *publicWorkCounts
 	affected                  []int
 	affectedSet               map[int]struct{}
+	captureSet                map[int]struct{} // optional Store-owned post-join candidates
+	captureAffected           []int
 	publicVisible             map[uint64]bool
 	items                     []Item
+	source                    entrySource
+	recipes                   map[uint64]uint64
 	successor                 history.SessionProvenance
 	lastBoundary, legacyScope uint64
 	pending                   map[boundaryKey][]uint64
 	turns                     map[mainKey]*mainTurn
 	openings                  map[uint64]*mainTurn
+	openTexts                 []*mainTurn
+	closureCounts             *closureWorkCounts
+	ingestCounts              *ingestionWorkCounts
+	texts                     map[int]*assistantText
 	accepted, messages        map[uint64]int
 	childTurns                map[childKey]*mainTurn
 	childCalls                map[childCallKey]*childCall
@@ -69,6 +77,7 @@ type Fold struct {
 func New(conversationID string) *Fold {
 	return &Fold{
 		conversationID:    conversationID,
+		texts:             make(map[int]*assistantText),
 		published:         make(map[uint64]bool),
 		touches:           make(map[uint64]uint64),
 		affectedSet:       make(map[int]struct{}),
@@ -95,8 +104,13 @@ func New(conversationID string) *Fold {
 // Feed consumes increasing IDs. Unsupported or malformed facts still advance
 // version, but cannot affect items, attribution or joins. An invalid ID returns
 // an error before consuming that entry; earlier entries remain consumed.
+// Reference folds can also fail when resolving a claimed delivery's content.
 func (f *Fold) Feed(entries []history.Entry) error {
 	for _, e := range entries {
+		if f.version == 0 {
+			f.countIngestion(24)
+		} // one-time fold/map initialization
+		f.countIngestion(20) // entry dispatch, identity comparisons and map lookups
 		if e.ID == 0 || e.ID > history.MaxEntryID || e.ID <= f.version {
 			return errors.New("thread: invalid entry order or id")
 		}
@@ -107,50 +121,56 @@ func (f *Fold) Feed(entries []history.Entry) error {
 		var owner struct {
 			ConversationID string `json:"conversation_id"`
 		}
-		if !decode(e.Payload, &owner) || (owner.ConversationID != "" && owner.ConversationID != f.conversationID) {
+		if !f.decode(e.Payload, &owner) || (owner.ConversationID != "" && owner.ConversationID != f.conversationID) {
 			continue
 		}
 		f.appendedText = -1
-		f.feedEntry(e)
+		if err := f.feedEntry(e); err != nil {
+			return err
+		}
 		f.resolveChildren(e.ID)
 		f.recordShown()
 	}
 	return nil
 }
 
-func (f *Fold) feedEntry(e history.Entry) {
+func (f *Fold) feedEntry(e history.Entry) error {
 	child := f.childWork(e)
 	main := false
 	if !child {
 		main = f.mainWork(e)
 	}
 	if f.agentWork(e) || main || child {
-		return
+		return nil
 	}
-	if f.sendFact(e) {
-		return
+	if handled, err := f.sendFact(e); handled || err != nil {
+		return err
 	}
 	item := Item{ID: e.ID, Order: e.ID, Rev: e.ID, Status: "done", Shown: true}
 	if e.Type == "session_divider" || e.Type == protocol.TypeSessionTransition {
 		scope := f.legacyScope
 		if !f.boundary(e, &item) {
-			return
+			return nil
 		}
 		if f.legacyScope != scope {
+			f.countIngestion(len(f.agentLifetimes) + 1)
 			clear(f.agentLifetimes)
 		}
-	} else if !standalone(e, &item) {
-		return
+	} else if !standalone(e, &item, f.ingestCounts) {
+		return nil
 	}
 	if item.Kind == "user_message" {
-		for _, st := range f.openings {
-			f.closeText(st, e.ID)
+		for len(f.openTexts) > 0 {
+			f.countClosureWork(2) // traversal and candidate lookup
+			f.closeText(f.openTexts[len(f.openTexts)-1], e.ID)
 		}
+		f.countClosureWork(1) // final empty check, including messages with no open text
 	}
 	index := f.addItem(e, item)
 	if item.Kind == "user_message" {
 		f.messages[e.ID] = index
 	}
+	return nil
 }
 
 func (f *Fold) addItem(e history.Entry, item Item) int {
@@ -167,11 +187,26 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 	if e.Shown != nil {
 		item.Shown = *e.Shown
 	}
-	item.Summary = plainSummary(item.Summary)
-	if item.Summary == "" {
-		item.Summary = strings.ReplaceAll(item.Kind, "_", " ")
+	reference := f.source != nil && referencedKind(item.Kind) && e.Type != "send_accepted"
+	if reference && item.Kind == "user_message" {
+		item.Summary = ""
+	} else {
+		f.countIngestion(len(item.Summary) * 3)
+		item.Summary = plainSummary(item.Summary)
+		if item.Summary == "" {
+			item.Summary = strings.ReplaceAll(item.Kind, "_", " ")
+		}
 	}
-	item.Content = append(json.RawMessage(nil), e.Payload...)
+	if reference {
+		f.recipes[item.ID] = e.ID
+	} else {
+		item.Content = append(json.RawMessage(nil), e.Payload...)
+		f.countIngestion(len(e.Payload))
+	}
+	f.countIngestion(len(item.Summary)*3 + 1)
+	if len(f.items) == cap(f.items) {
+		f.countIngestion(len(f.items)*2 + 1)
+	}
 	f.items = append(f.items, item)
 	index := len(f.items) - 1
 	f.markAffected(index)
@@ -184,19 +219,7 @@ func (f *Fold) Version() uint64 { return f.version }
 // Items returns a creation-ID-ordered snapshot that callers may mutate independently.
 // Claimed delivery rows are represented by their permanent acceptance item.
 func (f *Fold) Items() []Item {
-	var result []Item
-	visible := make(map[uint64]bool)
-	for index, item := range f.items {
-		if f.children[index] != nil && (item.Parent == 0 || !visible[item.Parent]) {
-			continue
-		}
-		if index, ok := f.messages[item.ID]; ok && index < 0 {
-			continue
-		}
-		item.Content = append(json.RawMessage(nil), item.Content...)
-		result = append(result, item)
-		visible[item.ID] = true
-	}
+	result, _ := f.Render() // New folds are inline and cannot fail rendering.
 	return result
 }
 
@@ -204,6 +227,23 @@ func (f *Fold) Items() []Item {
 // fields recursively. Null is valid for pointers, maps and slices, never their scalar
 // or struct elements. Unknown fields remain inert source content.
 func decode(raw json.RawMessage, dst any, required ...string) bool {
+	return (foldDecoder{}).decode(raw, dst, required...)
+}
+
+type foldDecoder struct{ counts *ingestionWorkCounts }
+
+func (f *Fold) decode(raw json.RawMessage, dst any, required ...string) bool {
+	return (foldDecoder{f.ingestCounts}).decode(raw, dst, required...)
+}
+
+func (d foldDecoder) count(n int) {
+	if d.counts != nil {
+		d.counts.work += n
+	}
+}
+
+func (d foldDecoder) decode(raw json.RawMessage, dst any, required ...string) bool {
+	d.count(2*len(raw) + len(required)) // object and DTO decode bytes, required-field lookups
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil || json.Unmarshal(raw, dst) != nil {
 		return false
@@ -214,16 +254,17 @@ func decode(raw json.RawMessage, dst any, required ...string) bool {
 			return false
 		}
 	}
-	return validRecordedFields(raw, reflect.TypeOf(dst).Elem())
+	return d.validRecordedFields(raw, reflect.TypeOf(dst).Elem())
 }
 
-func validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
+func (d foldDecoder) validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
+	d.count(len(raw) + 1) // recursive JSON validation bytes and node inspection
 	if string(raw) == "null" {
 		return typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Map
 	}
 	switch typ.Kind() {
 	case reflect.Pointer:
-		return validRecordedFields(raw, typ.Elem())
+		return d.validRecordedFields(raw, typ.Elem())
 	case reflect.Struct:
 		// Time's JSON decoder validates its string representation, not struct fields.
 		if typ == reflect.TypeOf(time.Time{}) {
@@ -237,8 +278,9 @@ func validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
 			field := typ.Field(i)
 			name := strings.Split(field.Tag.Get("json"), ",")[0]
 			for key, value := range fields {
+				d.count(len(key) + len(name) + 1)
 				// Match the case-insensitive field names accepted by encoding/json.
-				if strings.EqualFold(key, name) && !validRecordedFields(value, field.Type) {
+				if strings.EqualFold(key, name) && !d.validRecordedFields(value, field.Type) {
 					return false
 				}
 			}
@@ -249,7 +291,7 @@ func validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
 			return false
 		}
 		for _, value := range values {
-			if !validRecordedFields(value, typ.Elem()) {
+			if !d.validRecordedFields(value, typ.Elem()) {
 				return false
 			}
 		}
@@ -259,7 +301,7 @@ func validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
 			return false
 		}
 		for _, value := range values {
-			if !validRecordedFields(value, typ.Elem()) {
+			if !d.validRecordedFields(value, typ.Elem()) {
 				return false
 			}
 		}
@@ -267,7 +309,12 @@ func validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
 	return true
 }
 
-func standalone(e history.Entry, item *Item) bool {
+func standalone(e history.Entry, item *Item, counts ...*ingestionWorkCounts) bool {
+	d := foldDecoder{}
+	if len(counts) != 0 {
+		d.counts = counts[0]
+	}
+	decode := d.decode
 	item.Kind = "notice"
 	item.Subtype = e.Type
 	switch e.Type {

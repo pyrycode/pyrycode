@@ -33,6 +33,9 @@ type Config struct {
 }
 
 type Client struct { /* opaque */ }
+type Generation struct { /* opaque socket identity and lifetime */ }
+
+func (*Generation) Context() context.Context // cancelled when the socket generation retires
 
 // Contains only the numeric HTTP status; Unwrap returns ErrUpgradeRejected.
 type UpgradeRejectionError struct { StatusCode int }
@@ -43,6 +46,9 @@ func (*Client) Connect(ctx context.Context) error // blocking; ctx.Err() | ErrCl
 func (*Client) Send(frame []byte) error           // ErrNotConnected | ErrClosed | ErrDisconnected | nil
 func (*Client) SendContext(ctx context.Context, frame []byte) error // ordered socket completion; cancellation/deadline bounded
 func (*Client) Receive(ctx context.Context) ([]byte, error) // ErrClosed | ErrDisconnected | ctx.Err() | frame
+func (*Client) Generation() *Generation // live socket snapshot; nil when unavailable
+func (*Client) SendGeneration(ctx context.Context, g *Generation, frame []byte) error // ordered completion on exactly g's socket
+func (*Client) ReceiveGeneration(ctx context.Context) ([]byte, *Generation, error) // same receive stream, with pump-stamped ownership
 func (*Client) Connected() <-chan struct{}        // emits on every fresh conn (#248 addition)
 func (*Client) IsConnected() bool                  // synchronous level poll, agrees with Send's live-conn predicate (#874 addition)
 func (*Client) DropConn()                          // force-close live conn; reconnect via backoff (#248 addition)
@@ -144,6 +150,29 @@ that can deliver nonce 1 before nonce 0, or application output before the initia
 `noise_resp`. Socket completion and writer serialization cannot replace shared
 admission ordering. `Connection.SendContext` adapts this contract; the relay
 still owns sender IDs and [sealing order](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
+
+### Socket generation ownership
+
+A shared receive channel cannot identify the originating socket after replacement,
+and neither a reconnect edge nor successful write completion establishes inbound
+ownership. `Generation` captures the owning client, socket and cancellation
+lifetime. `serve` installs it before starting pumps and publishes connectivity
+after starting them. Pump exit, replacement, `DropConn`, `Close` and lifecycle
+cancellation retire it. `Client.Generation` snapshots it without consuming
+`Connected` notifications.
+
+`SendGeneration` pins admission and ordered write completion to that generation;
+retired or foreign generations fail rather than moving a request to a replacement
+socket. `recvPump` stamps each frame before handing it to the shared stream,
+so delayed receipt retains its original ownership. `ReceiveGeneration` and
+`Receive` consume the same ordered stream and must not have separate observers.
+The [push feedback API](relay-package-push-wake.md#correlated-feedback-and-connection-lifetime)
+uses this identity alongside request IDs; synchronous lifetime checks prevent
+notification while cancellation callbacks are still awaiting cleanup.
+`TestGenerationAdmission` and `TestGenerationReceiveOwnership` hold admission
+and pump delivery across replacement to prove these boundaries.
+
+### Pump lifecycle and shutdown
 
 ```
 caller's goroutine: client.Connect(ctx)

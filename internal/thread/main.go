@@ -17,11 +17,12 @@ type mainKey struct {
 	turn   string
 }
 type mainTurn struct {
-	key     mainKey
-	opening uint64
-	text    int
-	calls   map[string]*mainCall
-	end     *mainOutcome
+	key      mainKey
+	opening  uint64
+	text     int
+	textSlot int // one-based slot in Fold.openTexts; zero for untracked/child text
+	calls    map[string]*mainCall
+	end      *mainOutcome
 }
 type mainCall struct {
 	shell    *agentCall
@@ -34,6 +35,16 @@ type mainOutcome struct {
 	id            uint64
 	status, field string
 	raw           json.RawMessage
+}
+
+// closureWorkCounts measures closure discovery and tracking maintenance.
+// Only package tests enable it on their own serialized fold.
+type closureWorkCounts struct{ work int }
+
+func (f *Fold) countClosureWork(n int) {
+	if f.closureCounts != nil {
+		f.closureCounts.work += n
+	}
 }
 
 // mainIdentity also validates optional identity-loss markers on recorded facts.
@@ -55,7 +66,12 @@ type mainRuntime struct {
 	OccurredAt time.Time `json:"occurred_at"`
 }
 
-func mainDecode(e history.Entry) (mainIdentity, string, string, bool, bool) {
+func mainDecode(e history.Entry, counts ...*ingestionWorkCounts) (mainIdentity, string, string, bool, bool) {
+	d := foldDecoder{}
+	if len(counts) != 0 {
+		d.counts = counts[0]
+	}
+	decode := d.decode
 	var id mainIdentity
 	var summary, status string
 	shown := true
@@ -102,7 +118,9 @@ func mainDecode(e history.Entry) (mainIdentity, string, string, bool, bool) {
 	if valid && id.Opening == nil {
 		var fields map[string]json.RawMessage
 		_ = json.Unmarshal(e.Payload, &fields)
+		d.count(len(e.Payload))
 		for field := range fields {
+			d.count(len(field) + len("turn_opened_entry_id"))
 			if strings.EqualFold(field, "turn_opened_entry_id") {
 				valid = false // A supplied null reference cannot become an unreferenced closure.
 			}
@@ -127,7 +145,7 @@ func mainDecode(e history.Entry) (mainIdentity, string, string, bool, bool) {
 }
 
 func (f *Fold) mainWork(e history.Entry) bool {
-	id, summary, status, shown, valid := mainDecode(e)
+	id, summary, status, shown, valid := mainDecode(e, f.ingestCounts)
 	if !valid || id.Parent != "" || id.ParentCall != "" || f.agentLaunchIsChild(e, id.ToolUseID) {
 		return false
 	}
@@ -176,6 +194,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 			}
 			f.closeText(st, e.ID)
 			for _, call := range st.calls {
+				f.countIngestion(1)
 				if call.terminal == nil {
 					call.terminal = st.end
 					f.applyTerminal(call)
@@ -191,17 +210,10 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		if st.text >= 0 {
 			f.countPublicWork(1) // inspected append candidate, including empty deltas
 			item := &f.items[st.text]
-			var old, delta protocol.AssistantDeltaPayload
-			// Both payloads were validated before storage.
-			_ = json.Unmarshal(item.Content, &old)
-			_ = json.Unmarshal(e.Payload, &delta)
-			if delta.Text != "" {
+			if summary != "" {
 				f.appendedText = st.text
-				f.setContent(st.text, "text", old.Text+delta.Text)
-				item.Rev, item.Summary = e.ID, plainSummary(old.Text+delta.Text)
-				if item.Summary == "" {
-					item.Summary = "assistant message"
-				}
+				f.appendText(st.text, summary)
+				item.Rev = e.ID
 			}
 		} else {
 			active := st.end == nil
@@ -210,6 +222,9 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 			}
 			index := f.addItem(e, Item{ID: e.ID, Order: e.ID, Rev: e.ID, Kind: "assistant_message", Turn: id.TurnID, Status: status, Active: active, Shown: shown, Summary: summary})
 			st.text = index
+			if !child {
+				f.trackText(st)
+			}
 		}
 		return true
 	}
@@ -232,6 +247,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		}
 		var p protocol.ToolUsePayload
 		_ = json.Unmarshal(e.Payload, &p)
+		f.countIngestion(len(e.Payload))
 		if (p.Name == "Agent" || p.Name == "Task") && (!st.key.tagged || st.key.source.Kind == "claude") {
 			call.launcher = true
 			return true
@@ -258,9 +274,34 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 	return true
 }
 
+// trackText registers a newly created main coalescing run, even if inactive.
+func (f *Fold) trackText(st *mainTurn) {
+	f.countClosureWork(3) // capacity check, append and slot assignment
+	oldLen, oldCap := len(f.openTexts), cap(f.openTexts)
+	f.openTexts = append(f.openTexts, st)
+	if cap(f.openTexts) != oldCap {
+		f.countClosureWork(oldLen + cap(f.openTexts)) // copying and initializing new storage
+	}
+	st.textSlot = len(f.openTexts)
+}
+
 func (f *Fold) closeText(st *mainTurn, rev uint64) {
+	f.countClosureWork(1) // text lookup, including already closed scoped candidates
 	if st.text < 0 {
 		return
+	}
+	f.countClosureWork(1) // tracking-slot lookup, including child text
+	if st.textSlot != 0 {
+		f.countClosureWork(6) // slot/last indexes, comparison, pointer cleanup, truncation and slot reset
+		index, last := st.textSlot-1, len(f.openTexts)-1
+		if index != last {
+			f.countClosureWork(3) // moved candidate lookup and both membership updates
+			moved := f.openTexts[last]
+			f.openTexts[index], moved.textSlot = moved, index+1
+		}
+		f.openTexts[last] = nil
+		f.openTexts = f.openTexts[:last]
+		st.textSlot = 0
 	}
 	f.restoreChild(st.text)
 	f.countPublicWork(1) // inspected closure candidate, including inactive rows
@@ -269,6 +310,7 @@ func (f *Fold) closeText(st *mainTurn, rev uint64) {
 		item.Status, item.Active, item.Rev = "done", false, max(item.ID, rev)
 		f.markAffected(st.text)
 	}
+	f.countClosureWork(1) // release the coalescing row reference, including inactive text
 	st.text = -1
 }
 func (f *Fold) applyTerminal(call *mainCall) {
@@ -283,8 +325,13 @@ func (f *Fold) applyTerminal(call *mainCall) {
 }
 func (f *Fold) setContent(index int, key string, value any) {
 	f.markAffected(index)
+	if f.textEnrichment(index, key, value) {
+		return
+	}
+	f.countIngestion(len(f.items[index].Content) * 3)
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(f.items[index].Content, &fields)
 	fields[key], _ = json.Marshal(value) // Values are strings or already-valid recorded JSON.
 	f.items[index].Content, _ = json.Marshal(fields)
+	f.countIngestion(len(f.items[index].Content) * 2)
 }
