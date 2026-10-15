@@ -284,6 +284,18 @@ func TestCatchUpBoundedRecovery(t *testing.T) {
 			h = history.New(root)
 			s := NewStore(h)
 			defer s.Shutdown()
+			var selected map[uint64]bool
+			lookup := s.lookup
+			s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
+				if selected != nil {
+					for _, id := range ids {
+						if !selected[id] {
+							t.Errorf("read unselected reference %d", id)
+						}
+					}
+				}
+				return lookup(ctx, id, ids)
+			}
 			var visits, preparation atomic.Uint64
 			s.queryWork = func(preparing bool) {
 				if preparing {
@@ -338,23 +350,29 @@ func TestCatchUpBoundedRecovery(t *testing.T) {
 				t.Fatal("cold work not counted")
 			}
 			for _, after := range []uint64{saved.Version, 35990, 35999, 36000, 36000 - MaxCatchUpGap} {
+				want := testCatchUpReference(snap.Items, after)
+				selected = make(map[uint64]bool)
+				for _, item := range want {
+					selected[item.ID] = true
+					if item.ID == 35992 {
+						selected[35993] = true // second delta of this coalesced message
+					}
+					if item.ID == 35981 {
+						selected[35982] = true // selected child's terminal enrichment
+					}
+				}
 				before := visits.Load()
 				got, err := s.CatchUp(context.Background(), testStoreA, saved.Epoch, after, 1)
 				if err != nil || got.ResetRequired || got.FromVersion != after || got.Version != 36000 || got.Epoch != saved.Epoch {
 					t.Fatal(got, err)
 				}
-				want := testCatchUpReference(snap.Items, after)
 				testQueryItems(t, got.Items, want)
 				if work := visits.Load() - before; work > uint64(3*len(want)+100) {
 					t.Fatalf("conversation scan: %d visits for %d items", work, len(want))
 				}
-				allocs := testing.AllocsPerRun(2, func() { _, err = s.CatchUp(context.Background(), testStoreA, saved.Epoch, after, 1) })
-				if err != nil || allocs > float64(3*len(want)+100) {
-					t.Fatalf("full snapshot clone: %v allocations, %v", allocs, err)
-				}
 			}
-			if reads() != readBefore || preparation.Load() != prepBefore {
-				t.Fatal("query read history or prepared an index")
+			if preparation.Load() != prepBefore {
+				t.Fatal("query prepared an index")
 			}
 			if err := s.Shutdown(); err != nil {
 				t.Fatal(err)

@@ -6,8 +6,9 @@ import (
 )
 
 type queryRow struct {
-	item  *Item
-	touch uint64
+	item   *Item
+	touch  uint64
+	recipe contentRecipe
 }
 
 // queryTree is a persistent AVL tree ordered by (key, item ID). Subtree sizes
@@ -219,7 +220,7 @@ func (q *queryIndex) advance(items []*Item, affected []int, f *Fold, work func(b
 			next.membership(old, true)
 		}
 		if items[i] != nil {
-			next.membership(queryRow{items[i], f.touches[items[i].ID]}, false)
+			next.membership(queryRow{item: items[i], touch: f.touches[items[i].ID], recipe: f.recipes[items[i].ID]}, false)
 		}
 	}
 	next.evidence(f)

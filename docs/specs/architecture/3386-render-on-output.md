@@ -89,3 +89,10 @@ None.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-15
+
+## Revisions
+
+- 2026-10-15: `TestStoreOldRenderFailure` covers the old-request/Retry identity scenario separately from `TestStoreOutputFailure`. Bounded-query tests now constrain selected reference IDs instead of allocations or zero history reads: decoding a selected segment allocates independently of metadata selection work.
+- 2026-10-15: Request-triggered withdrawal can expose unavailable state while the cancelled producer is still exiting. `Retry` joins that producer outside `Store.mu` before replacement, preserving shutdown ownership and preventing overlapping recovery writes.
+- 2026-10-15: Remember request render failure on the worker so an overlapping Unload cannot reinterpret its cancellation as clean retirement; `TestStoreRenderRetryJoinsProducer` covers both join and failed certification.
+- 2026-10-15: Read `cmd/pyry/daemon_thread_queries_test.go` → `TestDaemonThreadQueriesBounded`: its allocation ceiling also assumed no history reads. Preserve its installed bounded-API/source and wire proofs, and constrain selected row count instead; focused thread tests enforce exact reference reads.

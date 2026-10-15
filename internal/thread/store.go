@@ -48,16 +48,17 @@ type storeReader interface {
 }
 
 type conversationWorker struct {
-	cancel     context.CancelFunc
-	done       chan struct{}
-	retiring   bool
-	snapshot   Snapshot
-	items      []*Item
-	query      *queryIndex
-	err        error // read only after done closes
-	changed    chan struct{}
-	ranges     []changeBatch
-	rangeBytes int
+	cancel       context.CancelFunc
+	done         chan struct{}
+	retiring     bool
+	renderFailed bool
+	snapshot     Snapshot
+	items        []*Item
+	query        *queryIndex
+	err          error // read only after done closes
+	changed      chan struct{}
+	ranges       []changeBatch
+	rangeBytes   int
 }
 
 // Store follows raw history for caller-authorized conversations. Construct it
@@ -123,6 +124,21 @@ func (s *Store) Load(ctx context.Context, id conversations.ConversationID) error
 // Retry replaces an unavailable view with fresh replay, discarding all private
 // reader/fold progress. It never replaces a rebuilding or usable worker.
 func (s *Store) Retry(ctx context.Context, id conversations.ConversationID) error {
+	// A request can withdraw a view before its producer has finished cancelling.
+	// Join that producer before replacement so shutdown still owns every worker.
+	s.mu.Lock()
+	var done <-chan struct{}
+	if w := s.workers[id]; w != nil && !w.retiring && w.snapshot.State == StateUnavailable {
+		done = w.done
+	}
+	s.mu.Unlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return s.start(ctx, id, true)
 }
 
@@ -189,8 +205,9 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		clearTimer()
 		s.mu.Lock()
 		retiring := w.retiring
+		renderFailed := w.renderFailed
 		s.mu.Unlock()
-		if retiring && progress.State == StateUsable && errors.Is(result, context.Canceled) {
+		if retiring && !renderFailed && progress.State == StateUsable && errors.Is(result, context.Canceled) {
 			result = nil
 			if progress.Version != savedVersion {
 				result = flush()
@@ -400,6 +417,7 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 	} else {
 		index = index.advance(items, affected, fold, s.queryWork, s.queryCopies)
 	}
+	index.worker = w
 	var batch changeBatch
 	if before.State == StateUsable {
 		batch.observation = changes
@@ -419,21 +437,30 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 	}
 }
 
-// Snapshot does no history I/O. Items/content are copied from an immutable
-// publication, keeping their revisions and consumed Version consistent.
+// Snapshot renders one immutable publication outside the store mutex. Source
+// failure returns only unavailable State/Err and withdraws the captured worker.
 func (s *Store) Snapshot(id conversations.ConversationID) Snapshot {
 	s.mu.Lock()
 	var snapshot Snapshot
 	var items []*Item
+	var index *queryIndex
 	if w := s.workers[id]; w != nil && !w.retiring {
 		snapshot = w.snapshot
 		items = w.items
+		index = w.query
 	}
 	s.mu.Unlock()
 	if items != nil {
 		snapshot.Items = detachPublication(items)
 	} else {
 		snapshot.Items = copyItems(snapshot.Items)
+	}
+	if snapshot.State == StateUsable {
+		var err error
+		snapshot.Items, err = s.renderItems(context.Background(), id, index, snapshot.Items)
+		if err != nil {
+			return Snapshot{State: StateUnavailable, Err: ErrUnavailable}
+		}
 	}
 	return snapshot
 }
