@@ -257,6 +257,27 @@ func (s *Store) recoveryCandidate(id conversations.ConversationID, bound uint64)
 	return c, nil
 }
 
+// UnloadedLastShownVersion reads clean certificate metadata for an unloaded,
+// caller-authorized conversation only at exactly known current raw progress.
+// It opens at most one certificate and never reads segments, starts a worker or
+// proves replay equality or retained-range continuity. Zero can be present.
+func (s *Store) UnloadedLastShownVersion(id conversations.ConversationID) (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.workers[id] != nil {
+		return 0, false
+	}
+	h, known, err := s.history.CachedLatestEntryID(id)
+	if err != nil || !known {
+		return 0, false
+	}
+	c, err := s.recoveryCandidate(id, h)
+	if err != nil || c.Epoch == "" || c.Version != h {
+		return 0, false
+	}
+	return c.LastShownVersion, true
+}
+
 func sameItems(a, b []Item) bool {
 	left, err := json.Marshal(a)
 	if err != nil {
