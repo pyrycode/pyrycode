@@ -124,21 +124,6 @@ func (s *Store) Load(ctx context.Context, id conversations.ConversationID) error
 // Retry replaces an unavailable view with fresh replay, discarding all private
 // reader/fold progress. It never replaces a rebuilding or usable worker.
 func (s *Store) Retry(ctx context.Context, id conversations.ConversationID) error {
-	// A request can withdraw a view before its producer has finished cancelling.
-	// Join that producer before replacement so shutdown still owns every worker.
-	s.mu.Lock()
-	var done <-chan struct{}
-	if w := s.workers[id]; w != nil && !w.retiring && w.snapshot.State == StateUnavailable {
-		done = w.done
-	}
-	s.mu.Unlock()
-	if done != nil {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
 	return s.start(ctx, id, true)
 }
 
@@ -148,32 +133,48 @@ func (s *Store) start(ctx context.Context, id conversations.ConversationID, retr
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return ErrClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	w := s.workers[id]
-	if w != nil && w.retiring {
-		return ErrUnloading
-	}
-	if retry {
-		if w == nil {
-			return ErrNotLoaded
+	for {
+		if s.closed {
+			return ErrClosed
 		}
-		if w.snapshot.State != StateUnavailable {
-			return ErrNotUnavailable
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-	} else if w != nil {
+		w := s.workers[id]
+		if w != nil && w.retiring {
+			return ErrUnloading
+		}
+		if retry {
+			if w == nil {
+				return ErrNotLoaded
+			}
+			if w.snapshot.State != StateUnavailable {
+				return ErrNotUnavailable
+			}
+			// Withdrawal can precede producer exit. Replacement requires the
+			// current worker to be joined under the same identity check.
+			select {
+			case <-w.done:
+			default:
+				done := w.done
+				s.mu.Unlock()
+				select {
+				case <-done:
+				case <-ctx.Done():
+				}
+				s.mu.Lock()
+				continue
+			}
+		} else if w != nil {
+			return nil
+		}
+		workerCtx, cancel := context.WithCancel(ctx)
+		w = &conversationWorker{cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), snapshot: Snapshot{State: StateRebuilding}}
+		s.workers[id] = w
+		s.records[id] = progressRecord{Err: ErrUnavailable}
+		go s.run(workerCtx, id, w)
 		return nil
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
-	w = &conversationWorker{cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), snapshot: Snapshot{State: StateRebuilding}}
-	s.workers[id] = w
-	s.records[id] = progressRecord{Err: ErrUnavailable}
-	go s.run(workerCtx, id, w)
-	return nil
 }
 
 func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *conversationWorker) {

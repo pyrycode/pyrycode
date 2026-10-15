@@ -354,6 +354,9 @@ func TestCatchUpBoundedRecovery(t *testing.T) {
 				selected = make(map[uint64]bool)
 				for _, item := range want {
 					selected[item.ID] = true
+					if item.ID == 1 {
+						selected[35995] = true // selected send's terminal outcome
+					}
 					if item.ID == 35992 {
 						selected[35993] = true // second delta of this coalesced message
 					}
