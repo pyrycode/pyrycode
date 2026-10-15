@@ -42,6 +42,13 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 		}
 		slots[i] = nil
 		if f.publicVisible[f.items[i].ID] {
+			// Both buffers can survive provisional closure and reopening. Freeze
+			// them before exposing content; the producer detaches on next append.
+			f.countIngestion(1)
+			if text := f.texts[i]; text != nil {
+				text.base.shared, text.derived.shared = true, true
+				f.countIngestion(2)
+			}
 			item := after[next]
 			slots[i] = &item
 			next++
