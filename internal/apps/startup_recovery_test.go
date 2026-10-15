@@ -337,7 +337,7 @@ func TestStartupRecoveryInvalidation(t *testing.T) {
 }
 
 func TestStartupRecoveryFailures(t *testing.T) {
-	for _, failure := range []string{"missing backup", "changed backup", "previous build", "previous health", "committed", "retirement"} {
+	for _, failure := range []string{"missing backup", "changed backup", "previous build", "previous health", "retirement"} {
 		t.Run(failure, func(t *testing.T) {
 			r, tools := interruptedPublication(t, false, "migration")
 			v := publishDisk(t, r).Records[0]
@@ -361,19 +361,14 @@ func TestStartupRecoveryFailures(t *testing.T) {
 				if err := os.WriteFile(tools.Node, []byte(script), 0700); err != nil {
 					t.Fatal(err)
 				}
-			case "committed", "retirement":
+			case "retirement":
 				fresh, e := Open(r.root, testHost)
 				if e != nil {
 					t.Fatal(e)
 				}
 				fresh.mu.Lock()
 				u := &lifecycleUpdate{serverID: testHost, expected: fresh.snapshot.Records[0].Revision, metadata: func(r *Record) error {
-					if failure == "retirement" {
-						r.RetirementPending = true
-					} else {
-						r.PublishJournal.ActivationCommitted = true
-						r.ActiveRelease = r.PublishJournal.Candidate.ReleaseVersion
-					}
+					r.RetirementPending = true
 					return nil
 				}}
 				_, e = fresh.changeLocked("lifecycle", testApp, nil, u)
@@ -385,7 +380,7 @@ func TestStartupRecoveryFailures(t *testing.T) {
 			fresh, o := reopenPublication(t, r, tools.Node)
 			waitRecoveryWorker(t, o)
 			assertRecoveryBarred(t, o, ownerRecord(t, fresh, testApp).ActiveRelease)
-			if v := ownerRecord(t, fresh, testApp); v.PublishJournal == nil || failure != "committed" && failure != "retirement" && v.LastError == nil {
+			if v := ownerRecord(t, fresh, testApp); v.PublishJournal == nil || failure != "retirement" && v.LastError == nil {
 				t.Fatal(v)
 			}
 		})

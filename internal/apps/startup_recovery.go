@@ -3,6 +3,7 @@ package apps
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"time"
@@ -10,6 +11,9 @@ import (
 
 func recoveryError(p *publication) *LastError {
 	if p.startupRecovery {
+		if p.journal.ActivationCommitted {
+			return nil
+		}
 		return &LastError{"app.unavailable", "Publication interrupted; pre-publication data recovered"}
 	}
 	return &LastError{"app.unavailable", "Update failed; previous release recovered"}
@@ -21,8 +25,17 @@ func (o *Owner) admitStartupRecoveryLocked(r Record) {
 	ctx, cancel := context.WithCancel(o.reconcileCtx)
 	p := &publication{ctx: ctx, cancel: cancel, record: r, previous: r, journal: r.PublishJournal,
 		done: make(chan struct{}), health: make(chan struct{}), startupRecovery: true, retiredOld: true}
+	if p.journal.ActivationCommitted {
+		p.previous.ActiveRelease = p.journal.Candidate.ReleaseVersion
+	}
 	p.unsubscribe = o.registry.subscribeLocked(func(c Change) {
-		if c.AppID == r.AppID && (c.Record == nil || c.Record.Desired != r.Desired || c.Record.Manifest != r.Manifest || c.Record.ActiveRelease != r.ActiveRelease) {
+		if c.AppID != r.AppID {
+			return
+		}
+		// Completion may correct an old active pointer to the journal's candidate.
+		// Its synchronous notification must not cancel the newly confirmed service.
+		completed := c.Record != nil && p.journal.ActivationCommitted && c.Record.PublishJournal == nil && c.Record.ActiveRelease == p.journal.Candidate.ReleaseVersion
+		if c.Record == nil || c.Record.Desired != r.Desired || c.Record.Manifest != r.Manifest || c.Record.ActiveRelease != r.ActiveRelease && !completed {
 			p.invalidated = true
 			cancel()
 		}
@@ -35,7 +48,7 @@ func (o *Owner) startupRecoveryCurrentLocked(app string, p *publication) error {
 	r := o.currentLocked(app)
 	if o.closed || p.ctx.Err() != nil || p.invalidated || o.removing[app] || o.publishing[app] != p || o.registry.uncertain != nil ||
 		r.AppID == "" || r.Revision != p.record.Revision || r.Desired != p.record.Desired || r.RetirementPending ||
-		!reflect.DeepEqual(r.PublishJournal, p.journal) || r.PublishJournal == nil || r.PublishJournal.ActivationCommitted {
+		!reflect.DeepEqual(r.PublishJournal, p.journal) || r.PublishJournal == nil {
 		return ErrStale
 	}
 	return nil
@@ -53,17 +66,37 @@ func (o *Owner) recoverStartup(app string, p *publication) {
 		o.registry.mu.Unlock()
 		o.signal()
 	}()
-	err := o.backupOps.restore(p.ctx, o.registry.root, p.record.Manifest.ServerID(), app, p.journal.VerifiedBackup, o.node)
+	var err error
 	code := "app.io_failed"
+	if !p.journal.ActivationCommitted {
+		err = o.backupOps.restore(p.ctx, o.registry.root, p.record.Manifest.ServerID(), app, p.journal.VerifiedBackup, o.node)
+	} else {
+		code = "app.unavailable"
+		// Committed recovery skips restoration's confinement checks. Require the
+		// existing data directory and database without creating or following links.
+		var data *os.File
+		data, err = privateDir(filepath.Join(o.registry.root, app, "data"))
+		if err == nil {
+			var db *os.File
+			db, err = regularAt(data, "app.sqlite", false)
+			if db != nil {
+				err = errors.Join(err, db.Close())
+			}
+			err = errors.Join(err, data.Close())
+		}
+	}
 	if err == nil && p.previous.ActiveRelease != "" {
 		code = "app.unavailable"
 		if p.record.Desired == "available" {
-			err = o.restartPrevious(app, p)
+			err = o.restartRecovery(app, p)
 			if err == nil {
 				return
 			}
 		} else {
 			err = o.validateStoppedRecovery(p)
+			if err == nil {
+				err = o.backupOps.step(p.ctx, "recovery-validated")
+			}
 			var retirement *candidateRetirementError
 			if errors.As(err, &retirement) {
 				p.retirementErr = retirement
@@ -109,6 +142,9 @@ func (o *Owner) recoverStartup(app string, p *publication) {
 		if err == nil {
 			r.PublishJournal, r.PendingRelease = nil, ""
 			r.LastError = recoveryError(p)
+			if p.journal.ActivationCommitted {
+				r.ActiveRelease = p.journal.Candidate.ReleaseVersion
+			}
 		}
 		return nil
 	})
@@ -118,7 +154,7 @@ func (o *Owner) recoverStartup(app string, p *publication) {
 }
 
 // Import the verified release's readiness checks, without its service or migrator.
-// Read-only SQLite prevents validation from changing restored application data.
+// Read-only SQLite prevents validation from changing application data.
 const stoppedRecoveryJS = `import {DatabaseSync} from 'node:sqlite';
 import {schema} from './dist/service/database.js';
 import {ledger,migrationFiles} from './dist/service/migrations.js';

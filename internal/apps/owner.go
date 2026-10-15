@@ -103,7 +103,7 @@ func newOwner(registry *Registry, nodeExecutable string, recoveryOps backupOps) 
 	registry.mu.Lock()
 	registry.owner = o
 	for _, r := range registry.snapshot.Records {
-		if r.PublishJournal != nil && !r.PublishJournal.ActivationCommitted && !r.RetirementPending {
+		if r.PublishJournal != nil && !r.RetirementPending {
 			o.admitStartupRecoveryLocked(cloneRecord(r))
 		}
 	}

@@ -46,12 +46,15 @@ func (o *Owner) confirmRecoveryLocked(app string, g *generation) (Record, error)
 		return Record{}, e
 	}
 	if e := o.changePublicationLocked(app, p, g.ctx, func(r *Record) error {
-		if r.PublishJournal != nil && (p.journal == nil || r.PublishJournal.VerifiedBackup.PublishID != p.journal.VerifiedBackup.PublishID || r.PublishJournal.ActivationCommitted) {
+		if r.PublishJournal != nil && (p.journal == nil || r.PublishJournal.VerifiedBackup.PublishID != p.journal.VerifiedBackup.PublishID || r.PublishJournal.ActivationCommitted && !p.startupRecovery) {
 			return ErrStale
 		}
 		r.State, r.PendingRelease, r.PublishJournal = "running", "", nil
 		r.RetirementPending = false
 		r.LastError = recoveryError(p)
+		if p.startupRecovery && p.journal.ActivationCommitted {
+			r.ActiveRelease = p.journal.Candidate.ReleaseVersion
+		}
 		return nil
 	}); e != nil {
 		return Record{}, e
@@ -61,14 +64,14 @@ func (o *Owner) confirmRecoveryLocked(app string, g *generation) (Record, error)
 	return p.record, nil
 }
 
-func (o *Owner) restartPrevious(app string, p *publication) error {
+func (o *Owner) restartRecovery(app string, p *publication) error {
 	ctx := context.Background()
 	if p.startupRecovery {
 		ctx = p.ctx
 	}
 	private := p.record
 	private.ActiveRelease = p.previous.ActiveRelease
-	// Select the existing predecessor, then independently verify its sealed bytes.
+	// Select recovery's release, then independently verify its sealed bytes.
 	dir, name, e := selectBuild(ctx, o.registry.root, private)
 	if e != nil {
 		return e
@@ -153,7 +156,7 @@ func (o *Owner) finishUpdateFailure(app string, p *publication, mutated bool, ph
 	o.mu.Unlock()
 	o.registry.mu.Unlock()
 	if restart {
-		recoveryErr = o.restartPrevious(app, p)
+		recoveryErr = o.restartRecovery(app, p)
 		if recoveryErr == nil {
 			p.recoveryFeedback = "Update failed; unchanged previous release health confirmed."
 			if mutated {
