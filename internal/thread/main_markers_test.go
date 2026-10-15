@@ -51,6 +51,10 @@ func TestReferenceMainMarkers(t *testing.T) {
 			testMessage(13),
 			testMain(14, "main_turn_interrupted", `,"turn_opened_entry_id":1,"cause":"daemon_restart","occurred_at":"2026-01-01T00:00:00Z"`),
 			testMain(15, "turn_end", `,"stop_reason":"end_turn"`),
+			testMain(16, "assistant_delta", `,"text":"tail"`),
+			testMain(17, "tool_use", `,"tool_use_id":"c","name":"Read"`),
+			testMain(18, "assistant_delta", `,"text":"after"`),
+			testMessage(19),
 		}
 		for i := range entries {
 			entries[i].Session = source
@@ -80,6 +84,10 @@ func TestReferenceMainMarkers(t *testing.T) {
 				}
 				if n == 12 {
 					testMainItem(t, f, 11, 11, "tool_call", "running", true)
+				}
+				if n >= 18 {
+					testContent(t, testMainItem(t, f, 16, 16, "assistant_message", "done", false), "text", "tail")
+					testContent(t, testMainItem(t, f, 18, 18, "assistant_message", "done", false), "text", "after")
 				}
 				if n >= 15 {
 					testMainItem(t, f, 11, 15, "tool_call", "interrupted", false)
