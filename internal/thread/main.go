@@ -22,7 +22,7 @@ type mainTurn struct {
 	text     int
 	textSlot int // one-based slot in Fold.openTexts; zero for untracked/child text
 	calls    map[string]*mainCall
-	finished map[string]mainCallMarker
+	finished map[string]*mainCallMarker
 	end      *mainOutcome
 }
 type mainCall struct {

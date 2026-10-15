@@ -11,6 +11,7 @@ import (
 
 func TestReferenceFinalReportAccounting(t *testing.T) {
 	var mainPerTurn int
+	t.Logf("host struct sizes: mutable mainCall=%d marker=%d; map slots hold pointers so sparse finished maps do not inline the larger records", reflect.TypeFor[mainCall]().Size(), reflect.TypeFor[mainCallMarker]().Size())
 	for _, turns := range []int{16, 64} {
 		for _, padding := range []int{16, 4096} {
 			var entries []history.Entry

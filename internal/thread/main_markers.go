@@ -30,9 +30,9 @@ func (f *Fold) compactMainCall(st *mainTurn, id string) {
 		item = -2
 	}
 	if st.finished == nil {
-		st.finished = make(map[string]mainCallMarker)
+		st.finished = make(map[string]*mainCallMarker)
 	}
-	st.finished[id] = mainCallMarker{item, call.group.scope, call.group.lifetime, call.terminal}
+	st.finished[id] = &mainCallMarker{item, call.group.scope, call.group.lifetime, call.terminal}
 	delete(st.calls, id)
 	if len(st.calls) == 0 {
 		st.calls = nil
@@ -51,7 +51,7 @@ func (st *mainTurn) takeMainCall(id string, group agentKey) *mainCall {
 		return call
 	}
 	m, ok := st.finished[id]
-	if !ok || st.markerGroup(m) != group {
+	if !ok || st.markerGroup(*m) != group {
 		return nil
 	}
 	delete(st.finished, id)
