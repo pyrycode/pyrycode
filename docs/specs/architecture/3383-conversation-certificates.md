@@ -95,3 +95,10 @@ separate change-range continuity rules. ADR 045 resumable checkpoints remain fut
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: `TestStoreCertificateFinalSyncFailure` showed that a failed
+  post-rename directory sync could leave readable clean evidence. Invalidate
+  that replacement with contained best-effort removal and directory sync before
+  returning `ErrPersistence`. Parent-context cancellation is checked separately
+  from retirement cancellation so racing lifecycle calls cannot authorize it.
