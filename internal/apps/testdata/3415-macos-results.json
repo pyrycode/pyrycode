@@ -1,0 +1,34 @@
+{
+  "ticket": 3415,
+  "date": "2026-10-15",
+  "platform": {"os": "macOS", "version": "26.6.2", "build": "25G83", "kernel": "Darwin 25.6.0", "architecture": "arm64"},
+  "go": "go1.26.2 darwin/arm64",
+  "node": {"version": "v24.15.0", "path": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node"},
+  "npm": {"version": "11.12.1", "cli": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js"},
+  "counts_include_named_subtests": true,
+  "focused": {
+    "revision": "8465a7e0cd81847e859d8dea04d86e47a6e443f2",
+    "command": "HOSTED_APP_NODE=/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node HOSTED_APP_NPM_CLI=/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js go test -race -count=1 -json -run '^(TestCommittedTemplateUpdateSnapshot|TestBackupSQLiteWAL|TestUpdateTemplateSnapshot|TestBackupNodeDirectoryIdentity|TestBackupNodeFailures|TestBackupNodeBootstrapRejectsInvalidDirectory|TestBackupSQLiteCancellation|TestBackupSQLiteStorageErrors)$' ./internal/apps",
+    "executed": 23, "passed": 23, "failed": 0, "skipped": 0, "elapsed_seconds": 29.301,
+    "events": "3415-macos-focused.jsonl",
+    "events_sha256": "35918d690179934d5987b987807d3a6f67639418e26bc7250af838ba9d81712e"
+  },
+  "apps_package": {
+    "revision": "6eb80a038fe22fc831c2bad255be00a15114a634",
+    "command": "HOSTED_APP_NODE=/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node HOSTED_APP_NPM_CLI=/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js go test -race -count=1 -json ./internal/apps/...",
+    "executed": 999, "passed": 995, "failed": 0, "skipped": 4, "elapsed_seconds": 328.754,
+    "required_arms": [
+      {"name": "TestCommittedTemplateUpdateSnapshot", "executed": 1, "passed": 1, "failed": 0, "skipped": 0, "elapsed_seconds": 0.18},
+      {"name": "TestBackupSQLiteWAL", "executed": 1, "passed": 1, "failed": 0, "skipped": 0, "elapsed_seconds": 0.27},
+      {"name": "TestUpdateTemplateSnapshot", "executed": 1, "passed": 1, "failed": 0, "skipped": 0, "elapsed_seconds": 25.87},
+      {"name": "TestBackupNodeDirectoryIdentity", "executed": 5, "passed": 5, "failed": 0, "skipped": 0, "elapsed_seconds": 0.36}
+    ],
+    "skipped_tests": ["TestBackupAliasedTempRoot/states/nested", "TestBackupStates/nested", "TestRestoreStates/nested", "TestRetainedValidation/invalid_UTF8"],
+    "skip_reason": "filesystem rejects invalid UTF-8 filename (EILSEQ)"
+  },
+  "vet": {"revision": "6eb80a038fe22fc831c2bad255be00a15114a634", "command": "go vet ./...", "exit_code": 0},
+  "build": {"revision": "8465a7e0cd81847e859d8dea04d86e47a6e443f2", "command": "go build -o /tmp/builder-3415-macos/pyry ./cmd/pyry", "exit_code": 0},
+  "production_unchanged_since": "60d55f6f3d4155ada166aa6b806144ec916f0ba7",
+  "live_claude_required": false,
+  "full_module_race_gate": "pending verifier"
+}

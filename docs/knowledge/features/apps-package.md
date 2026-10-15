@@ -70,6 +70,33 @@ sidecars during verification. `backupSQL` rejects non-standalone headers before
 opening and checks integrity/foreign keys without schema-specific queries or
 migrations; existing migration-ledger rows survive unchanged.
 
+macOS rejects `/dev/fd/<directory fd>` as a subprocess cwd. `runBackupNode`
+instead re-executes the current binary with a private bootstrap argv and passes
+the no-follow-opened directory through `ExtraFiles` as child fd 3.
+`execBackupNode` validates the mode, absolute Node path and directory descriptor,
+calls `fchdir`, closes the descriptor and replaces itself with the selected
+supported Node running fixed `backupSQL` with an empty environment. The parent
+cwd never changes; there is no shell or unchecked pathname fallback. Renaming
+the selected directory or replacing its old pathname with a directory/symlink
+cannot redirect the child into foreign data: it keeps the selected directory
+identity or returns an explicit failure.
+
+Pinning cwd alone is insufficient if SQL still opens `../data`: moving the work
+directory changes what its parent names. `sqliteSnapshot` moves only the copied
+main database and sidecars into the selected `sqlite-work` directory through
+descriptor-relative `renameat`, so every SQLite filename is local. It installs
+the standalone result through descriptor-relative rename and removes copied
+work inputs/sidecars before removing the work directory. Original registration
+data is never moved. `verifyBackupSQLite` likewise uses local filenames in the
+selected sealed data directory; verification errors leave sealed contents unchanged.
+
+Version probing, unsupported Node, bootstrap/start/exec/SQL failures and
+cancellation return explicit errors. The launch has a 60-second context limit
+and one-second `WaitDelay`; bootstrap becomes Node in the same PID, and every
+started child is joined before return, including cancellation. A failed snapshot
+publishes no successful verification evidence; interrupted work requires a new
+publish ID.
+
 Sidecar rejection must precede the initialized-SQL branch. Otherwise absent or
 zero-byte `app.sqlite` bypasses SQL opening and allows transient WAL/SHM/journal
 files to be inventoried as durable data. `backupSQLiteEntries` rejects orphan

@@ -4,6 +4,44 @@ See the [package overview](apps-package.md) for the topic map.
 
 ## Testing
 
+### Initialized SQLite subprocess proof
+
+Absent-data or uninitialized publications bypass SQLite snapshot subprocesses;
+their success cannot establish portable initialized-data updates. On macOS
+arm64, execute `TestCommittedTemplateUpdateSnapshot` without a platform skip,
+`TestBackupSQLiteWAL` and `TestUpdateTemplateSnapshot` using real supported Node
+and npm selected through `HOSTED_APP_NODE` and `HOSTED_APP_NPM_CLI`. The retained
+assertion calls `SnapshotData` and fresh `VerifyBackup` on an initialized database.
+The WAL arm proves committed WAL-only preferences and ledger preservation,
+standalone DELETE mode without sidecars, and repeated unchanged verification
+after removing source data. The maintained-template update must activate a
+healthy candidate, retain saved preferences and its new migration, and freshly
+verify a backup matching the complete pre-migration schema/preferences/ledger.
+See the [snapshot fixtures](apps-package-concurrency-and-testing.md#testing).
+
+`TestBackupNodeDirectoryIdentity` moves the selected directory to another parent
+at launch, then replaces its old pathname with either a directory or symlink in
+both snapshot and verify modes. It checks selected data, outside/replacement
+sentinels and unchanged parent cwd. Use canonical `testRoot` paths: macOS `/var`
+aliases otherwise fail no-follow selection before reaching the launch hook.
+`TestBackupNodeFailures` and `TestBackupNodeBootstrapRejectsInvalidDirectory`
+cover runtime/version/exec/SQL failures and missing/non-directory descriptors;
+`TestBackupSQLiteCancellation` and `TestBackupSQLiteStorageErrors` retain joined
+child, unchanged data and failed-snapshot evidence checks.
+
+Record revision, OS/architecture, Node/npm versions, exact commands and
+executed/pass/fail/skip counts for each required arm; skips, cross-compilation
+and platform probes supply no execution proof. The
+[native evidence](../../../internal/apps/testdata/3415-macos-results.json) and
+[focused events](../../../internal/apps/testdata/3415-macos-focused.jsonl)
+record macOS 26.6.2/arm64 with Node v24.15.0/npm 11.12.1: the focused family
+executed/passed 23 checks, failed/skipped 0. The final package run executed 999,
+passed 995, failed 0 and skipped 4 filename arms because the filesystem rejected
+invalid UTF-8. Every required SQL/update arm passed without skips. Exact commands
+and earlier Linux proof are in the
+[repair spec](../../specs/architecture/3415-confined-sqlite-cwd.md#validation-evidence).
+No live Claude is needed for this proof.
+
 ### Checked candidate fixtures
 
 Checking descendants only after preparation returns cannot prove artifact
@@ -376,6 +414,10 @@ child retirement, rather than inferring cleanup from failed persistence.
 arm supplies no launch evidence; controlled executable doubles cover failures and
 concurrency but cannot replace this check of committed-versus-candidate selection,
 real cwd/argv, exact environment, listener handoff and retained database bytes/modes.
+macOS may synthesize `__CF_USER_TEXT_ENCODING` even with an explicitly empty
+launch environment. Seed a hostile parent value and reject its inheritance;
+allow a different synthesized value only on Darwin before checking the remaining
+exact environment. A raw key count would reject a sanitized real launch.
 Tests shorten the private cleanup grace while `TestOwnerStartStopRaces` asserts
 the production default remains five seconds.
 

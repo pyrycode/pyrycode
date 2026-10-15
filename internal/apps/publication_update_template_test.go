@@ -27,6 +27,79 @@ func updateSQL(t *testing.T, node, db string) string {
 	return strings.TrimSpace(string(b))
 }
 
+func TestUpdateTemplateSnapshot(t *testing.T) {
+	node, npm := os.Getenv("HOSTED_APP_NODE"), os.Getenv("HOSTED_APP_NPM_CLI")
+	if node == "" || npm == "" {
+		t.Skip("supported real Node/npm required; skips supply no initialized update evidence")
+	}
+	r := testOpen(t)
+	testRegister(t, r, []byte(testManifest))
+	t.Cleanup(func() {
+		for _, release := range ownerRecord(t, r, testApp).ReleaseHistory {
+			testWritableBuild(t, release.BuildRoot)
+		}
+	})
+	files, err := templateFiles(ownerRecord(t, r, testApp).Manifest)
+	backupOK(t, err)
+	backupOK(t, writeSource(context.Background(), r.root, testApp, files))
+	o, err := NewOwner(r, node)
+	backupOK(t, err)
+	defer o.Shutdown()
+	tools := Toolchain{Node: node, NPM: npm}
+	_, err = o.Publish(context.Background(), testHost, testApp, tools)
+	backupOK(t, err)
+	preference := `{"version":1,"selected_tab":"preferences","period":"7d"}`
+	req, err := http.NewRequest("POST", "http://caller.invalid/api/preferences", strings.NewReader(preference))
+	backupOK(t, err)
+	response, err := healthTarget(t, o).Do(req)
+	backupOK(t, err)
+	backupOK(t, response.Body.Close())
+	backupCheck(t, response.StatusCode == 204, response.StatusCode)
+	data := filepath.Join(r.root, testApp, "data")
+	before := updateSQL(t, node, filepath.Join(data, "app.sqlite"))
+	source := filepath.Join(r.root, testApp, "source")
+	m := testMap(t)
+	m["release_version"], m["title"] = "2.0.0", "Candidate"
+	testArtifactWrite(t, source, "app.json", string(testJSON(t, m)))
+	testArtifactWrite(t, source, "sql/migrations/0002_candidate.sql", "CREATE TABLE candidate_only(value TEXT); INSERT INTO candidate_only VALUES('new');")
+	// Unit fixtures exercise their baseline ledger; publication exercises the new migration.
+	serviceTest := string(testBytes(t, filepath.Join(source, "test/service.test.mjs")))
+	serviceTest = strings.Replace(serviceTest, "writeFileSync(join(release, 'package.json')", "rmSync(join(release, 'sql/migrations/0002_candidate.sql'));\n  writeFileSync(join(release, 'package.json')", 1)
+	testArtifactWrite(t, source, "test/service.test.mjs", serviceTest)
+	result, err := o.Publish(context.Background(), testHost, testApp, tools)
+	backupOK(t, err)
+	backupCheck(t, result.Healthy && result.ActivationCommitted && !result.RecoveryPending && result.Lifecycle.ActiveRelease == "2.0.0", "candidate activation failed", result)
+	after := updateSQL(t, node, filepath.Join(data, "app.sqlite"))
+	backupCheck(t, strings.Contains(after, "candidate_only") && strings.Contains(after, `"version":2`), "candidate migration missing", after)
+	req, err = http.NewRequest("GET", "http://caller.invalid/api/preferences", nil)
+	backupOK(t, err)
+	response, err = healthTarget(t, o).Do(req)
+	backupOK(t, err)
+	body, err := io.ReadAll(response.Body)
+	backupOK(t, errors.Join(err, response.Body.Close()))
+	backupCheck(t, response.StatusCode == 200 && string(body) == preference, "saved preferences lost", string(body))
+	backups := filepath.Join(r.root, testApp, "backups")
+	entries, err := os.ReadDir(backups)
+	backupOK(t, err)
+	initialized := 0
+	for _, entry := range entries {
+		ref := BackupReference{ServerID: testHost, AppID: testApp, PublishID: entry.Name(), Root: filepath.Join(backups, entry.Name())}
+		db := filepath.Join(ref.Root, "data/app.sqlite")
+		if _, err := os.Stat(db); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		backupOK(t, VerifyBackup(context.Background(), r.root, testHost, testApp, ref, node))
+		backupCheck(t, updateSQL(t, node, db) == before, "backup does not retain pre-migration schema/preferences/ledger")
+		initialized++
+	}
+	backupCheck(t, initialized == 1, "initialized pre-migration backup missing", initialized)
+	for _, args := range [][]string{{"--version"}, {npm, "--version"}} {
+		version, err := exec.Command(node, args...).Output()
+		backupOK(t, err)
+		t.Logf("runtime %s: %s", strings.Join(args, " "), strings.TrimSpace(string(version)))
+	}
+}
+
 func TestUpdateTemplateRollback(t *testing.T) {
 	node, npm := os.Getenv("HOSTED_APP_NODE"), os.Getenv("HOSTED_APP_NPM_CLI")
 	if node == "" || npm == "" {
