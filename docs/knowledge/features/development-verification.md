@@ -486,6 +486,32 @@ per fragment would let partial progress extend the missing-completion wait. The
 dropping all replies or only the final marker each failed at that bound. A focused
 pass alone proves neither attribution nor bounded failure.
 
+`TestLiveStateRun` is a hermetic manager test despite its name. Its complete
+snapshot needs `pushQueueCap*2+2` routing envelopes: the handshake, one generated
+clear and every reading. Four race-test processes pinned to one CPU alone still
+passed the old two-second wait; adding 32 CPU-only contenders on that CPU made
+all four old waits expire after partial output. Under identical contention the
+repaired workload completed all application decryption within 4.382 seconds in
+the provisional measurement, establishing the eight-second bound with about 83%
+headroom. This measures scheduling headroom, without attributing the historical
+491/514 result to a cause its missing phase logs cannot establish. Keep ordinary
+`waitForEnvelopes` callers on their existing default.
+
+Start that single absolute budget before manager startup and snapshot-producing
+connection admission. Log first, halfway and final transport, plus halfway and
+complete decryption, using elapsed time and received/expected and
+decrypted/expected counts only. Check expiry before processing buffered frames
+and after each decryption, including the last: a timer checked only while idle
+would let a buffered workload finish late. Progress must never restart the budget.
+The [live-state negative controls](../../specs/architecture/3430-live-state-workload-deadline.md#revisions)
+suppressed output after a partial prefix and failed at 8.0003 seconds with
+257/514 received and 256/513 decrypted; delaying the final buffered decryption's
+completion past the bound failed at 8.0102 seconds even with 514/514 received and
+513/513 decrypted. Both executed once, failed once and skipped zero times.
+Keep the full expected count and the
+[authenticated connection-survival proof](v2-session-manager-test-surface-same-package-unit-tests-internal-relay-delivery-and-control.md#complete-live-state-workload);
+reducing the fixture or accepting missing output as a skip would erase the proof.
+
 ### Test inputs and retained artifacts
 
 Record the source of the daemon actually executed, not only the checkout's ancestry.
