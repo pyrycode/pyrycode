@@ -15,6 +15,21 @@ storage, missing/unsupported Node and app-specific start/health failures leave
 normal daemon/channel operation available without cancelling the session pool;
 composition logs only static reason codes.
 
+Hosting capability readiness is an infrastructure attestation, distinct from
+per-app health. `NewOwner` selects an absolute executable without establishing
+runtime support; probing a separate `node` from `PATH` could attest a runtime
+the owner never uses. `newDaemonAppsManager` installs discovery's registry and
+the same owner as both resource providers, with cancellable delivery, then calls
+`Owner.CheckRuntime` before message processing. The probe uses that selected
+executable's `--version`, an empty environment, bounded output and a cancellable
+five-second context, requiring Node `>=24.15.0 <25.0.0`. `HostedAppsReady` caches
+the result without handshake/request I/O. Empty registries and stopped/unhealthy
+apps permit negotiation; missing infrastructure or missing/unsupported runtime
+withholds `hosted_apps_v1` while normal channels remain usable. Conflating app
+health with capability readiness would hide discovery precisely when a client
+needs to inspect an unavailable app. Resource lookup still requires current
+health-confirmed ownership and returns `app.unavailable` for stopped/unhealthy apps.
+
 Claim the instance with `ctrl.Listen` before `openDaemonApps` or owner
 construction, and retain it until `Owner.Shutdown` has joined workers/descendants
 and finished durable observations on every exit. `Open` can persist normalized
@@ -236,10 +251,23 @@ preserves sibling services and the session pool; daemon shutdown preserves
 available intent for restart. Publication owns migration/private health, atomic
 activation, verified update recovery and before-activation startup recovery.
 After-activation resolution (#3404), publishing control/daemon wiring
-(#3301/#3266) and encrypted resource capability activation (#3123) remain downstream.
-Production `HostedAppsReady` remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes
-the attestation. Daemon startup installs no dependencies and runs no migrations. See
+(#3301/#3266) remain downstream. Encrypted resource capability activation is
+implemented (#3440); actual Node/template and real-relay validation remain #3441.
+Daemon startup installs no dependencies and runs no migrations. See
 [startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
+
+The [#3440 evidence](../../hosted-apps.md#implementation-and-validation-ownership)
+at `79e90c4bc36bcd93d12ff8524c94b7c825d54321` records uncached race proofs:
+composition **600 executed/600 passed**, runtime readiness **400/400**, and focused
+fake-relay resources/readiness/runtime isolation **13/13**, all **0 failed,
+0 skipped**, counting parents and subtests. The fake-relay proof uses a race-built
+daemon via `PYRY_E2E_BIN` and a synthetic `node` reporting `v24.15.0` and executing
+`TestHostedAppProcess`. Connection retirement leaves the service, saved data and
+host/app identity intact while fresh negotiation/discovery and reused request IDs
+reject old results; the commit/response barrier checks the uncertain write is not
+replayed. Runtime/fake-relay counts are builder-recorded; the final verifier
+independently repeated composition 600/600. This supplies no #3441 real-relay/template,
+native-viewer, publisher or live-channel acceptance; no live Claude was required.
 
 `Open` validates storage before `normalizeSnapshot`. Every available record with
 an active release becomes starting; every unpublished or intentionally stopped

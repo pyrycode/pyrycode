@@ -151,6 +151,7 @@ type relayWiring struct {
 	shadow *threadShadow
 	// appRegistry persists independently of channel/session lifetimes.
 	appRegistry *apps.Registry
+	appOwner    *apps.Owner
 	// instanceName is the daemon instance name; it derives the per-instance
 	// server-id, device-registry, conversations-registry, and static-key paths.
 	instanceName string
@@ -1507,7 +1508,7 @@ func startRelayV2(
 	}
 	installDaemonLiveRelay(&sessionConfig, w, liveContextUsage)
 	installDaemonThreadRelay(&sessionConfig, w.shadow)
-	mgr, detachApps, err := newDaemonAppsManager(sessionConfig, w.appRegistry)
+	mgr, detachApps, err := newDaemonAppsManager(ctx, sessionConfig, w.appRegistry, w.appOwner)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
 	}
