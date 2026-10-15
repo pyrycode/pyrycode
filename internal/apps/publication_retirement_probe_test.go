@@ -109,6 +109,9 @@ func TestPublishRetirementProbeSequence(t *testing.T) {
 			if _, err := o.Lookup(testHost, testApp); err == nil {
 				t.Error("retired target available")
 			}
+			if !killed.Load() || mode == "permission after kill" && probes.Load() < 6 {
+				t.Error("did not exercise forced retirement and post-kill uncertainty")
+			}
 			t.Logf("sequence=%s injected-probes=%d forced-kill=%v", mode, probes.Load(), killed.Load())
 		})
 	}
