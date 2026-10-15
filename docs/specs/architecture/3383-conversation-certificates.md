@@ -5,6 +5,7 @@
 - `internal/thread/store.go`: `run`, `Unload`, `Shutdown`; worker joins and fully consumed progress own retirement.
 - `internal/thread/cache_test.go`, `cache_compact_test.go`, `checkpoint_test.go`: recovery, security, continuation and lifecycle proofs to adapt.
 - `cmd/pyry/thread_shadow.go`: `follow`, `shutdown`; caller-owned catch-up remains before store shutdown.
+- `cmd/pyry/channel_delivery_session_test.go`: `TestChannelDelivery_SessionDaemonWiring`; startup replay and final consumed-version certification through the daemon.
 - `internal/history/log.go`, `cache_dir.go`: `LogDir`, `EnsureLogDir`; exact containment and readable history bounds.
 - `docs/knowledge/features/thread-package.md` (Cache and epochs) and `thread-package-background-store.md`: retain warm-history truncation, incomplete-walk rejection and private continuation replay lessons.
 - `CODING-STYLE.md`, `docs/knowledge/features/development-verification.md`: persistence and executed-test boundaries.
@@ -102,3 +103,8 @@ separate change-range continuity rules. ADR 045 resumable checkpoints remain fut
   that replacement with contained best-effort removal and directory sync before
   returning `ErrPersistence`. Parent-context cancellation is checked separately
   from retirement cancellation so racing lifecycle calls cannot authorize it.
+- 2026-10-15: Verifier finding 1 identified stale daemon integration assertions.
+  `TestChannelDelivery_SessionDaemonWiring` reads `thread-certificate.json` and
+  requires `Clean` at consumed version 2 after startup replay/idle retirement and
+  after joined shutdown. Production design and security boundaries are unchanged.
+  Rework validation includes the focused race test, `make check` and `make build`.
