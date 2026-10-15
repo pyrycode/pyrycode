@@ -3,6 +3,7 @@ package thread
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -15,9 +16,14 @@ import (
 	"github.com/pyrycode/pyrycode/internal/history"
 )
 
+var testMeasureThreadHeap = flag.Bool("measure-thread-heap", false, "run isolated disk-backed retained heap measurement")
+
 // TestReferenceDiskHeap isolates GC accounting from all parallel package tests.
 // The same file runs unchanged on the pre-family revision for comparison.
 func TestReferenceDiskHeap(t *testing.T) {
+	if !*testMeasureThreadHeap && os.Getenv("PYRY_THREAD_HEAP_CHILD") == "" {
+		t.Skip("run separately with -args -measure-thread-heap")
+	}
 	if os.Getenv("PYRY_THREAD_HEAP_CHILD") == "" {
 		binary, err := os.Executable()
 		if err != nil {
