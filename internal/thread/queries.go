@@ -33,6 +33,7 @@ type QueryResult struct {
 
 // queryIndex borrows immutable publication items; private fold rows never enter it.
 type queryIndex struct {
+	worker                   *conversationWorker
 	byID                     [256]map[uint64]queryRow
 	ordered, active, touched *queryTree
 	work                     func(bool)
@@ -70,7 +71,7 @@ func (q *queryIndex) count(preparing bool) {
 
 // HistoryPage selects the newest ordered public range below upperOrder, plus
 // complete public parent closure. The caller must already be authorized for id.
-// It does not load, wait for recovery or read history.
+// It does not load or wait for recovery. Only selected references are read.
 func (s *Store) HistoryPage(ctx context.Context, id conversations.ConversationID, upperOrder uint64, limit int) (QueryResult, error) {
 	return s.query(ctx, id, upperOrder, limit, false)
 }
@@ -97,7 +98,8 @@ func (s *Store) query(ctx context.Context, id conversations.ConversationID, uppe
 	if snap.State != StateUsable {
 		return QueryResult{State: snap.State, Err: snap.Err}, nil
 	}
-	return q.window(ctx, snap, upper, limit, newest)
+	result, err := q.window(ctx, snap, upper, limit, newest)
+	return s.renderQuery(ctx, id, q, result, err)
 }
 
 func (s *Store) captureQuery(id conversations.ConversationID) (Snapshot, *queryIndex) {

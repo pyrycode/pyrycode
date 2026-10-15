@@ -75,8 +75,10 @@ Copying the stable item-pointer slots and affected lookup buckets still scales
 with the thread; query memberships are maintained from the captured affected
 slots. A failed feed chunk never reaches capture or publication.
 
-`Store.Observe(conversationID)` acquires a consistent complete baseline without
-history I/O. Once usable, pass its `Epoch` and `Version` to
+`Store.Observe(conversationID)` renders a detached complete baseline from one
+immutable publication; resolving its recipes can read history outside `Store.mu`.
+Failure returns unavailable state without partial items; repair requires `Retry`.
+Once usable, pass its `Epoch` and `Version` to
 `Store.Changes(ctx, conversationID, epoch, after)` for subsequent progress. Each
 range covers `(FromVersion, Version]` and carries the epoch and last-shown
 watermark at its end. At the latest published boundary, `Changes` waits for
@@ -142,26 +144,23 @@ Publication capture uses `renderShared` on affected public rows to resolve the
 [assistant/ordinary-tool](thread-package-main-thread-folding.md#main-work-source-entries)
 and [accepted-send recipes](thread-package-main-thread-folding.md#accepted-sends-and-durable-outcomes)
 after excluding suppressed delivery rows and children without public parents.
-Internal capture borrows immutable source payload or inline `Content` bytes,
-reuses unchanged item pointers and replaces affected public values. Folding
-replaces content allocations rather than mutating published bytes. Each captured
-item has its own allocation: pointers into one shared item array would let an
-unchanged row pin replaced content belonging to every other row in that array.
-Older publications and captured query indexes remain stable across later feeds.
-Internal stable slots include nil entries for private or withdrawn rows;
-`detachPublication` skips them at full-output boundaries and preserves nil
-`Items` when no public row survives. Slot count is not public item count.
-Any required missing reference or source error rejects the entire candidate
-publication, including when another reference in the same batch resolved.
+Before/after rendering is transient: comparison slots, current publications and
+query rows retain metadata and immutable recipes, with no converted `Content`
+or derived user/assistant `Summary`. Unchanged item pointers are reused; affected
+rows get independent allocations so one row cannot pin an obsolete item array.
+Captured recipes remain stable across later feeds. Deferred inline kinds still
+retain payloads; see [cache and epochs](thread-package.md#cache-and-epochs).
+Private or withdrawn slots are nil; `detachPublication` skips them and preserves
+nil `Items` when no public row survives. Slot count is not public item count.
 
 Public `Fold.Render`, `Fold.Items`, `Fold.Observe`, `Fold.FeedChanges` and all
 Store item/change/query results still return complete detached content with
-their existing signatures. Public rendering copies source payload bytes;
-`Store.Snapshot` captures immutable pointers under the mutex and materializes
-detached values outside it. Load/retirement certificates write only the compact
-scalar evidence described under [cache and epochs](thread-package.md#cache-and-epochs),
-without materializing detached items; they cannot supply a cache-only view or bypass
-required reference rendering before usable publication.
+their existing signatures. `Snapshot` and `Observe` capture metadata, slots and
+recipes under `Store.mu`, then render all public rows through `renderShared`
+using request-local history lookup outside the mutex. They never read the live
+fold or mutable recent cache. Returned content is detached from other results
+and publications. Load/retirement certificates contain only scalar evidence;
+they cannot supply a cache-only view or bypass reference validation.
 Legacy folds created by `New` remain inline.
 
 The worker-owned `recentSource` resolves IDs from the current feed chunk, then
@@ -183,22 +182,13 @@ metadata are detached, and timestamps are normalized to UTC to avoid retaining
 arbitrary location graphs. Counting payload length alone would let a small
 slice or substring pin a much larger feed allocation outside the budget.
 
-Store snapshots and query rows still retain rendered content until
-[#3386](https://github.com/pyrycode/pyrycode/issues/3386); the recent-entry budget
-does not bound that content or deferred inline/private fold payloads.
-
-`Snapshot(conversationID) Snapshot` performs no history I/O. Its fields are
+`Snapshot(conversationID) Snapshot` can read referenced history. Its fields are
 `Active`, `State`, `Items`, `Version`, `LastShownVersion`, `Epoch` and `Err`.
 
-`Store.Status(conversationID) Snapshot` returns the same metadata and readiness
-with nil `Items` in every state. It captures `State`, `Version`, `Epoch`,
-`Active`, `LastShownVersion` and `Err` from one publication under `Store.mu`,
-which also serializes publication, retry replacement and retirement. Concurrent
-reads therefore cannot mix metadata from different publications. It performs
-no history/cache I/O, worker loading, item traversal or item/content copying,
-and allocates zero bytes regardless of thread length. Use it for progress and
-readiness checks; `Store.Snapshot` and `Store.Observe` remain complete detached
-reads for consumers that need items or an observation baseline.
+`Store.Status(conversationID) Snapshot` captures the same metadata and readiness
+from one publication under `Store.mu`, with nil `Items` in every state. It does
+no history/cache I/O, loading, item traversal or copying and allocates zero bytes.
+Use it for progress/readiness; `Snapshot` and `Observe` render complete baselines.
 
 Both reads retain these readiness rules; the items described below are returned
 by `Snapshot`:
@@ -208,7 +198,7 @@ by `Snapshot`:
 | `StateNotLoaded` | No loaded view, including while retiring or after shutdown. |
 | `StateRebuilding` | Durable dirty marking, legacy cleanup or full replay is still pending; no usable publication exists. |
 | `StateUsable` | Detached items/content, consumed version, last-shown watermark and conversation epoch from one consistent publication; newer appends may still be pending. |
-| `StateUnavailable` | The worker has ended; `Err` is the fixed `ErrUnavailable` sentinel and explicit retry can recover. |
+| `StateUnavailable` | The view is withdrawn; its producer may still be exiting. `Err` is the fixed `ErrUnavailable` sentinel; explicit retry can recover. |
 
 Only `StateUsable` carries versions/epoch, including an empty usable conversation;
 only `StateUnavailable` carries `ErrUnavailable`, and every other state has nil `Err`.
@@ -217,21 +207,22 @@ only `StateUnavailable` carries `ErrUnavailable`, and every other state has nil 
 the [history-reconstructed rule](thread-package.md#cache-and-epochs), and unread
 is `LastShownVersion > ReadUpTo`. The random epoch is independent of
 deterministic item equality and follows the [recovery compatibility rules](thread-package.md#cache-and-epochs).
-`Active` is maintained by updating an active-index set from affected private and
-public fold rows at each publication, including unresolved children omitted from
-`Items`; it requires no whole-fold activity scan. An empty public item list
-therefore cannot establish unload eligibility. `TestStorePrivateActiveWork`
-checks an invisible active child and its later closure; daemon retirement also
+An active-index set tracks affected private/public rows without a whole-fold
+scan. `TestStorePrivateActiveWork` checks an invisible active child and its later
+closure; an empty public list cannot establish unload eligibility. Retirement also
 requires [producer quiescence](thread-package.md#shadow-lifecycle-and-evidence).
-Lookup copies an immutable publication's items and content outside the store
-lock, so mutation of a returned snapshot
-cannot affect later snapshots. A missing/unreadable reference during rendering
-or a delivery join withholds the entire candidate publication, withdraws any
-prior usable view and clears query/change state. Only `StateUnavailable` with
-generic `ErrUnavailable` remains, with no items, version, last-shown watermark
-or epoch. A history/cache read or write failure, unsafe
-cache leaf, failed fold, incomplete replay through H or worker-context
-cancellation withdraws any usable publication and leaves the conversation
+
+A missing/unreadable reference during baseline, query or live-change rendering
+discards the whole output, even after successful partial lookup. Withdrawal
+clears publication/query/change state, cancels the producer and notifies waiters.
+Only `StateUnavailable` with generic `ErrUnavailable` remains: no items, version,
+watermark or epoch. `Snapshot` preserves this State/Err failure channel.
+`withdraw` checks the captured worker's identity under `Store.mu`; an old read
+cannot invalidate a Retry replacement. Context-taking requests discard cancelled
+output without withdrawing the worker. Recheck cancellation under the mutex:
+a check before lock acquisition becomes stale while waiting. A history/cache
+read or write failure, unsafe cache leaf, failed fold, incomplete replay through H
+or worker-context cancellation withdraws any usable publication and leaves the conversation
 unavailable. `Snapshot.Err` remains `ErrUnavailable`; `Unload` reports
 `ErrPersistence` for certificate/legacy-cleanup I/O failure and `ErrUnavailable`
 for failed or incomplete recovery. Raw errors are neither exposed, retained nor logged:
@@ -242,12 +233,15 @@ replay under the new context after the source is repaired. It creates a new
 reader, reference fold and recent source rather than reusing partial progress.
 It invalidates any previous clean claim with another durable dirty write before
 usability; cached progress never seeds the fold. An absent conversation returns
-`ErrNotLoaded`; rebuilding or usable workers return `ErrNotUnavailable`. **Recreate both reader
-and fold after failure:** `Fold.Feed` can consume earlier entries in a failing
-chunk while the reader leaves its position unchanged. Redelivering into that
-partially advanced fold would repeat consumed IDs. Completion records unavailable
-state and closes the worker's done channel under the same lock, preventing an old
-completion from overwriting its replacement.
+`ErrNotLoaded`; rebuilding or usable workers return `ErrNotUnavailable`.
+**Recreate both reader and fold after failure:** a failed `Fold.Feed` can consume
+entries without advancing the reader; redelivery would repeat IDs. Completion
+records unavailable state and closes `done` under the same lock. Request-triggered
+withdrawal can precede producer exit: `Store.start` joins outside `Store.mu`, then
+rechecks the current worker's identity, unavailable state and completion together
+before replacement. A concurrent Retry can make an earlier join stale; repeat
+admission checks and join the actual current worker. Render failure also blocks
+clean certification if Unload races the producer's cancellation.
 
 ### Bounded queries
 
@@ -334,9 +328,11 @@ Rebuilding and unavailable queries return the existing snapshot state, with
 `ErrUnavailable` in `QueryResult.Err` for failure. Unloaded, retiring and closed
 stores return `StateNotLoaded`. Nonusable results expose no items, epoch,
 version, covered range, reset flag or page metadata. Validation and cancellation
-errors use the separate returned error; cancellation discards partial results and leaves the
-conversation worker running. Queries never load a conversation, wait for
-recovery or read history.
+errors use the separate returned error; cancellation discards partial results
+and leaves the worker running, including while waiting to withdraw after a read
+failure. Queries never load a conversation or wait for recovery. Rendering
+failure returns only unavailable State/Err and withdraws the captured current
+worker as described under [snapshots and retry](#snapshots-and-retry).
 
 Initial usable replay, including recovery/retry, builds permanent-ID/parent
 lookup and ordered/active membership with `newPublicationIndex`, then adds
@@ -363,21 +359,23 @@ maintained without rescanning the index.
 
 `Store.publish` installs the immutable index and matching snapshot scalars
 atomically. `Store.captureQuery` captures both under `Store.mu`, then releases
-it before rank/range selection, parent traversal or detached Content copying.
-Old roots, lookup buckets and item bytes remain immutable: a captured read
-finishes coherently through later feed, replacement or retirement. Failure,
-unload and shutdown release worker references without invalidating readers.
-Paused selection or copying leaves history writers and other conversations free
-to progress.
+it before rank/range selection and complete public parent closure. Only then does
+`renderItems` collect selected rows' creating, text, delivery and enrichment
+references, including inherited dependencies, and resolve them through
+request-local `history.Store.Lookup`. History I/O runs outside `Store.mu`.
+Old roots, lookup buckets and recipes remain immutable: selection, revisions,
+epoch/version and rendering use one publication through later feed, replacement
+or retirement. Failure, unload and shutdown release worker references without
+invalidating readers. Reset and nonusable results resolve no references.
 
-Request work is `O(log N + selected range + active rows + unique parents +
-returned content bytes)`; catch-up selects touched rows by version, and active
-rows apply to catch-up and newest windows. No request scans the conversation,
-reads history or clones a full `Snapshot`/`Observe` baseline. Index
+Metadata selection is `O(log N + selected range + active rows + unique parents)`;
+rendering adds selected-reference lookup/decoding and returned content work.
+Catch-up selects touched rows by version; active extras apply to catch-up and
+newest windows. Selection scans no unrelated rows or full baseline. Index
 construction is separately `O(N log N)` on initial usable replay. Tail semantic
 index work follows affected rows and balanced-tree paths; copying stable slot
 pointers and affected lookup-bucket storage can still grow with history and
-belongs in publication allocation accounting. Capture copies no Content bytes.
+belongs in publication allocation accounting. Slots retain no converted Content.
 Bounded reads do not make recovery or total publication cost independent of
 conversation length. `HistoryPage`/`NewestWindow` select current
 rows by order; `CatchUp` selects current states by reconstructed touch version.
@@ -389,18 +387,18 @@ Production `installDaemonThreadRelay` forwards `ThreadCatchUp` to `Store.CatchUp
 and `ThreadPage` to `Store.HistoryPage` on the real publisher store, using the
 supplied request context and named conversation. It returns the captured result
 unchanged: full items, epoch/version, coverage, reset/nonusable state and page
-metadata. The adapters perform no load, raw-history read, full projection clone
-or second selection. Relay owns authorization, mapping, framing and terminal
+metadata. Adapters add no loading, history scan, full projection clone or second
+selection. Relay owns authorization, mapping, framing and terminal
 delivery under the [wire query contract](../../protocol-mobile.md#thread-query-messages).
 
 Measure the installed request after the store becomes usable:
 `TestDaemonThreadQueriesBounded` separates committed-history/recovery preparation
-from requests over 36,000 entries and bounds adapter allocations by returned
-rows. Its source check constrains the forwarding path; the retained
-`TestCatchUpBoundedRecovery` and `TestStoreQueriesBounded` supply actual backend
-history-read, visit and allocation proofs. An allocation bound alone would not
-detect an allocation-free full scan or history read. These request bounds do
-not include background recovery or publisher baseline preparation.
+from requests over 36,000 entries and bounds selected rows. Its source check
+constrains forwarding; `TestCatchUpBoundedRecovery`, `TestStoreQueriesBounded`
+and `TestStoreSelectedLookup` constrain selected references and metadata visits.
+Allocation ceilings cannot isolate selection from selected-segment decoding;
+assert exact allowed reference IDs, including accepted-send terminal outcomes.
+These bounds exclude background recovery and publisher baseline preparation.
 
 ### Isolation and lifecycle
 
@@ -515,6 +513,15 @@ terminal enrichment references, including a completed ordinary child tool.
 Its tail failure requires ancestor closure after recent-cache eviction to mark
 the rows affected: ignored history alone reuses the immutable slots and can
 leave a broken source unread, making a failure test pass without exercising it.
+With output lookup failure armed, progress waits must use `Status`: polling
+`Snapshot` would withdraw the worker before the terminal event under test.
+
+`TestStoreSelectedRecipeClosure` and `TestStoreCapturedRecipes` check selected
+dependencies and recipes surviving concurrent feeds. `TestStoreOutputFailure`
+checks atomic failure/repair; `TestStoreOldRenderFailure` protects replacement
+workers. `TestStoreOutputCancellationWhileWithdrawing` and
+`TestStoreConcurrentRetryWithdrawal` establish lock/join contention; cancellation
+during lookup alone cannot prove those boundaries.
 
 `TestAffectedPublicationOracle` compares affected capture with whole-thread
 `difference` after single-entry and chunked corpus feeds, including private
@@ -594,9 +601,9 @@ hidden/dropped membership, detached content and suppression across clean restart
 with whole/single-entry replay. `TestCatchUpMissingHistory` distinguishes crossing
 a missing ID from starting at or beyond it.
 
-`TestCatchUpBoundedRecovery` counts actual history reads, item/index visits and
-allocations over 36,000 committed entries, separately measuring cold recovery
-and publication preparation. It repeats queries after clean restart and compatible
+`TestCatchUpBoundedRecovery` constrains selected-reference reads and index visits
+over 36,000 committed entries, measuring recovery/preparation separately.
+It repeats queries after clean restart and compatible
 unload/reload with a previously returned epoch/version and no retained live
 ranges. Its reference includes repeated touches, old active work, shared/multi-level
 parents and a late-publication child: revision-only selection would silently
@@ -616,10 +623,9 @@ a newly created newer parent cannot join under the
 
 `TestStoreQueriesBounded` uses 36,000 committed entries across initial load,
 clean reopen and unload/reload. It holds the real reader at Tail, then checks
-early/middle/newest pages and newest windows against full items while counting
-actual history read bytes/segment opens, index visits and allocations. Measure
-both APIs: page-only allocation checks would miss a full baseline clone in
-newest-window reads. Keep preparation counters/timing separate from requests.
+early/middle/newest pages and newest windows against full items, constraining
+selected-reference reads and index visits without index rebuilding. Measure both
+APIs and keep preparation counters/timing separate from requests.
 Nested children near the beginning force `resolveChildren` to rebuild public
 visibility for subsequent facts; putting active nested extras late in history,
 but still outside the newest window, preserves query coverage without making
@@ -693,11 +699,10 @@ fold, including hidden pending reports and unresolved parents.
 late publication and replay of commits made while unloaded.
 
 `TestStoreFailureRetry` must commit a new tail entry before injecting failure:
-an empty tail can pass without exercising partial fold advancement or proving
-fresh replay. `TestStoreReadSecurity` checks containment, corruption, generic
-errors and byte preservation. Its snapshot-I/O proof holds the reader at a
-cancellation-aware tail barrier before moving the history directory; otherwise
-legitimate background reads can fail and falsely implicate snapshot lookup.
+an empty tail cannot prove partial fold advancement or fresh replay.
+`TestStoreReadSecurity` checks containment, corruption, generic errors and byte
+preservation. It pauses tailing before moving history, isolating snapshot
+reference-read failure from background I/O.
 Run the offline checks with `go test -race ./internal/thread ./internal/history`.
 
 `TestStoreCacheContinuation` compares every reopen cut point and subsequent tail

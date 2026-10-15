@@ -46,7 +46,16 @@ func TestAffectedPublicationOracle(t *testing.T) {
 					if !reflect.DeepEqual(got, want) {
 						t.Fatalf("version %d: changes differ\ngot %#v\nwant %#v", after.Version, got, want)
 					}
-					if !sameItems(detachPublication(items), after.Items) || got.Active != after.Active {
+					metadata := copyItems(after.Items)
+					for i := range metadata {
+						if f.recipes[metadata[i].ID].creating != 0 {
+							metadata[i].Content = nil
+							if metadata[i].Kind == "user_message" || metadata[i].Kind == "assistant_message" {
+								metadata[i].Summary = ""
+							}
+						}
+					}
+					if !sameItems(detachPublication(items), metadata) || got.Active != after.Active {
 						t.Fatalf("version %d: capture differs", after.Version)
 					}
 					before = after

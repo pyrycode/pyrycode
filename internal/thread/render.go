@@ -104,9 +104,14 @@ func (f *Fold) render(items []Item) ([]Item, error) {
 // renderShared borrows content owned by the fold or its private history source.
 // Those bytes are immutable: subsequent folding replaces Content allocations.
 func (f *Fold) renderShared(items []Item) ([]Item, error) {
+	return renderShared(items, f.recipes, f.source)
+}
+
+// renderShared resolves one immutable recipe set, independent of subsequent Feed.
+func renderShared(items []Item, recipes map[uint64]contentRecipe, source entrySource) ([]Item, error) {
 	var ids []uint64
 	for _, item := range items {
-		if r := f.recipes[item.ID]; r.creating != 0 {
+		if r := recipes[item.ID]; r.creating != 0 {
 			ids = append(ids, r.creating)
 			if r.delivery != 0 {
 				ids = append(ids, r.delivery)
@@ -121,7 +126,8 @@ func (f *Fold) renderShared(items []Item) ([]Item, error) {
 	}
 	entries := make(map[uint64]history.Entry, len(ids))
 	if len(ids) > 0 {
-		resolved, err := f.source.Lookup(ids)
+		slices.Sort(ids)
+		resolved, err := source.Lookup(slices.Compact(ids))
 		if err != nil {
 			return nil, ErrUnavailable
 		}
@@ -131,7 +137,7 @@ func (f *Fold) renderShared(items []Item) ([]Item, error) {
 	}
 	for i := range items {
 		item := &items[i]
-		if r := f.recipes[item.ID]; r.creating != 0 {
+		if r := recipes[item.ID]; r.creating != 0 {
 			e, ok := entries[r.creating]
 			if !ok {
 				return nil, ErrUnavailable

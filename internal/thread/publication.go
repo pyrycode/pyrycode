@@ -9,6 +9,7 @@ import (
 // nil slots are private. Published pointers and their content never change.
 type publicationCapture struct {
 	slots    []*Item
+	recipes  map[uint64]contentRecipe
 	active   map[int]bool
 	version  uint64
 	affected []int
@@ -28,7 +29,11 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 			after = append(after, f.items[i])
 		}
 	}
-	after, err := f.renderShared(after)
+	before, err := renderShared(before, c.recipes, f.source)
+	if err != nil {
+		return nil, Observation{}, err
+	}
+	after, err = f.renderShared(after)
 	if err != nil {
 		return nil, Observation{}, err
 	}
@@ -40,13 +45,16 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 	if c.active == nil {
 		c.active = make(map[int]bool)
 	}
-	next := 0
+	if c.recipes == nil {
+		c.recipes = make(map[uint64]contentRecipe)
+	}
 	for _, i := range indexes {
 		delete(c.active, i)
 		if f.items[i].Active {
 			c.active[i] = true
 		}
 		slots[i] = nil
+		delete(c.recipes, f.items[i].ID)
 		if f.publicVisible[f.items[i].ID] {
 			// Both buffers can survive provisional closure and reopening. Freeze
 			// them before exposing content; the producer detaches on next append.
@@ -55,9 +63,11 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 				text.base.shared, text.derived.shared = true, true
 				f.countIngestion(2)
 			}
-			item := after[next]
+			item := f.items[i]
 			slots[i] = &item
-			next++
+			if r := f.recipes[item.ID]; r.creating != 0 {
+				c.recipes[item.ID] = r
+			}
 		}
 	}
 	snapshot := Snapshot{State: StateUsable, Version: f.version, LastShownVersion: f.lastShown, Active: len(c.active) != 0}
