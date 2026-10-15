@@ -120,8 +120,24 @@ func testDaemonThreadReply(t *testing.T, w *switchWire, id uint64, expectedPeer 
 	fragments := map[string]string{}
 	var epoch string
 	var version uint64
+	started := time.Now()
+	// Provider rendering and whole-result encoding precede the first frame.
+	// One budget covers them, every fragment and the separate coverage marker.
+	deadline := started.Add(60 * time.Second)
+	frames := 0
 	for {
-		peer, e := w.read()
+		routing, err := testDaemonThreadFrame(w, deadline)
+		if err != nil {
+			t.Fatalf("query %d incomplete after %v: %d frames, %d rows, %d unfinished fragments: %v", id, time.Since(started), frames, len(items), len(fragments), err)
+		}
+		peer, e := w.decode(routing)
+		frames++
+		if frames == 1 {
+			t.Logf("query %d first reconstructed frame: %v", id, time.Since(started))
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("query %d expired during decryption after %v (%d frames)", id, time.Since(started), frames)
+		}
 		raw, err := json.Marshal(e)
 		if err != nil || len(raw) > protocol.MaxThreadEnvelopeBytes || e.TS.IsZero() || peer != recipient || e.InReplyTo == nil || *e.InReplyTo != id {
 			t.Fatalf("invalid correlated envelope: %s %#v %v", peer, e, err)
@@ -184,6 +200,10 @@ func testDaemonThreadReply(t *testing.T, w *switchWire, id uint64, expectedPeer 
 			for _, i := range items {
 				p.Items = append(p.Items, i)
 			}
+			if !time.Now().Before(deadline) {
+				t.Fatalf("query %d expired during reconstruction after %v (%d frames)", id, time.Since(started), frames)
+			}
+			t.Logf("query %d complete reconstruction: %v (%d frames)", id, time.Since(started), frames)
 			return p, e.Type
 		}
 		if p.FromVersion != nil || p.LowerOrder != nil || p.UpperOrder != nil || p.Continuation != nil || p.OlderExists != nil {
@@ -258,6 +278,11 @@ func testDaemonThreadLoad(t *testing.T, store *thread.Store, version uint64) thr
 }
 
 func TestDaemonThreadQueriesRecovery(t *testing.T) {
+	testDaemonThreadQueriesRecovery(t, nil)
+}
+
+func testDaemonThreadQueriesRecovery(t *testing.T, tweak func(*relay.V2SessionConfig)) {
+	t.Helper()
 	s, h, reg, store := testShadow(t)
 	reg.Create(conversations.Conversation{ID: testConvID})
 	for _, e := range []struct{ typ, payload string }{
@@ -289,9 +314,22 @@ func TestDaemonThreadQueriesRecovery(t *testing.T) {
 	if q.Epoch != saved.Epoch {
 		t.Fatal("clean restart changed epoch")
 	}
-	w, _ := testDaemonThreadQueryWire(t, s, nil)
+	started := time.Now()
+	w, mgr := testDaemonThreadQueryWire(t, s, func(c *relay.V2SessionConfig) {
+		testDaemonThreadQueryTrace(t, c, started)
+		if tweak != nil {
+			tweak(c)
+		}
+	})
 	w.open("phone", false, protocol.CapabilityThread)
+	t.Logf("phone handshake completed: %v", time.Since(started))
 	w.open("legacy", false)
+	admissionCtx, cancelAdmission := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancelAdmission()
+	if len(mgr.ActiveConns(admissionCtx)) != 2 {
+		t.Fatal("query peers not admitted")
+	}
+	t.Logf("both peers admitted: %v", time.Since(started))
 	request := protocol.ThreadCatchUpPayload{ConversationID: testConvID, Epoch: saved.Epoch, Version: 5, Limit: 1}
 	testDaemonThreadRequest(t, w, "phone", 40, protocol.TypeThreadCatchUp, request)
 	got, typ := testDaemonThreadReply(t, w, 40)
