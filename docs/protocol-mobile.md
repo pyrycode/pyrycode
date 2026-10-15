@@ -7333,8 +7333,9 @@ The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, wi
 
 **Discovery, committed lifecycle delivery and bounded asset/API transfers with
 credit and scoped cancellation are implemented in the relay (#3315, #3316).
-Production capability activation remains pending (#3248); native response
-assembly remains client-owned work.** The
+Production activates them with cached infrastructure/runtime readiness (#3440)
+and counted real-daemon/fake-relay acceptance. Actual Node/template and real-relay
+validation remain #3441; native response assembly remains client-owned work.** The
 [hosted-app reference](hosted-apps.md) and
 [approved v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 fix manifest fields, runtime/layout, resource/Fetch semantics, limits and safe
@@ -7348,7 +7349,7 @@ and `app_cancelled`; only `list_apps` and `app_cancel` are client directions in
 that family.
 Paged discovery and list-scoped cancellation have handlers (#3157), and committed
 lifecycle notifications have a registry-compatible relay consumer (#3158).
-Daemon subscription installation/unsubscribe ownership remains #3139. Five more
+The daemon owns subscription installation/unsubscribe (#3139). Five more
 v2-only names have Go-backed payload declarations (#3244): `app_asset_request`,
 `app_api_request`, `app_response`, `app_response_chunk` and `app_response_credit`.
 Asset/API handlers, response/chunk producers, semantic validation, credit and
@@ -7361,11 +7362,17 @@ The additive capability constant `CapabilityHostedAppsV1` is exactly
 `negotiateCapabilities` includes it in `HelloAckPayload.capabilities` only when
 the discovery provider and cancellable hosted delivery adapter are installed
 and daemon-supplied readiness attests registration, supervision and resource
-routing together. Missing or false readiness withholds it. Production installs
-the general cancellable transport adapter but withholds complete
-`HostedAppsReady` attestation, so the capability remains disabled. Complete
-production activation requires supervision/resource integration and cancellable
-transport wiring; fake sessions may explicitly attest complete readiness. Following
+routing together. Production `newDaemonAppsManager` installs discovery and both
+resource providers on supervision's daemon-owned registry, persisted host identity
+and `apps.Owner`, with `conn.SendContext` delivery. Before message processing,
+`Owner.CheckRuntime` probes that owner's selected absolute executable using
+`--version`, empty environment, bounded output and a cancellable five-second
+context, requiring Node `>=24.15.0 <25.0.0`. `HostedAppsReady` caches the result;
+no handshake/request probes the runtime. An empty registry or stopped/unhealthy
+app does not withhold support. Missing registry, owner, either resource provider
+or cancellable delivery, or missing/unsupported runtime, withholds it while normal
+channels remain usable. App-specific health still gates resource requests:
+stopped/unhealthy apps return `app.unavailable`. Following
 [ADR 037](knowledge/decisions/037-capability-strings-not-version-numbers.md), it
 advertises support and grants no authorization. Advertise it only once v1
 registration, supervision and routing are wired and available. Without negotiated
@@ -7374,6 +7381,19 @@ app list/state/resource pushes. A supporting host rejects unnegotiated requests
 with `protocol.unsupported`; an older host may return `protocol.unknown_type`.
 Other host connections and conversations continue normally. Manifest contract
 version `1`, app `release_version` and transport `v2` are distinct.
+
+The [counted #3440 evidence](hosted-apps.md#implementation-and-validation-ownership)
+records **13 executed, 13 passed, 0 failed, 0 skipped** focused fake-relay tests
+and subtests, with a race-built daemon supplied through `PYRY_E2E_BIN` and a
+synthetic `node` reporting `v24.15.0`. A paired client offering only
+`hosted_apps_v1` lists/fetches without an active channel. The proof covers exact
+asset/API bytes and digest, opaque queries, metadata-only HTTP 204, request
+rejections, credit/cancellation alongside a fake-Claude channel and request-ID
+reuse after both partial-read and committed-write disconnects. Each reconnect
+renegotiates and refreshes discovery before fresh reads; a commit/response
+barrier and invocation count rule out uncertain-write replay. Native viewers,
+publisher and live-channel acceptance remain downstream; #3441 owns actual
+Node/template and real-relay evidence. No live Claude ran or was required.
 
 | Envelope type | Direction | Purpose/correlation |
 |---|---|---|
@@ -7555,7 +7575,7 @@ sizes, counts and indices use `uint64`, HTTP status uses `int`; decoding these
 DTOs does not enforce required presence, exact JSON types, safe-integer bounds,
 URL/header validity, authorization or transfer limits. The authenticated relay
 boundary and checked asset/API preparation enforce these for resource transfers
-(#3315, #3316); production activation remains #3248.
+(#3315, #3316), with production provider/readiness wiring implemented in #3440.
 
 API bodies decode to at most 32768 bytes. Paths and queries are bounded to
 2048 and 1024 ASCII bytes; permitted header objects are at most 4096 serialized
