@@ -3,7 +3,6 @@ package thread
 import (
 	"context"
 	"encoding/json"
-	"sort"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -16,22 +15,19 @@ const MaxCatchUpGap = 1024
 // Latest public touches suffice for current-state selection; suppressed rows
 // require reset because the client has no projection removal operation.
 func (q *queryIndex) prepareCatchUp(f *Fold) {
-	q.complete, q.coveredThrough, q.suppressed = true, f.version, f.suppressed
-	q.unprovenThrough = f.unprovenThrough
-	q.touches = make([]uint64, len(q.items))
-	for i, item := range q.items {
-		q.count(true)
-		touch := f.touches[item.ID]
-		if touch == 0 || touch > f.version {
-			q.complete = false
+	q.touched, q.invalidTouches = nil, 0
+	for _, bucket := range q.byID {
+		for id, row := range bucket {
+			q.count(true)
+			row.touch = f.touches[id]
+			bucket[id] = row
+			q.touched = q.treePut(q.touched, row.touch, id, row)
+			if row.touch == 0 || row.touch > f.version {
+				q.invalidTouches++
+			}
 		}
-		q.touches[i] = touch
-		q.touched = append(q.touched, i)
 	}
-	sort.Slice(q.touched, func(i, j int) bool {
-		q.count(true)
-		return q.touches[q.touched[i]] < q.touches[q.touched[j]]
-	})
+	q.evidence(f)
 }
 
 // CatchUp returns current full states touched in (afterVersion, Version], every
@@ -65,30 +61,21 @@ func (s *Store) CatchUp(ctx context.Context, id conversations.ConversationID, ep
 		return reset, nil
 	}
 	result := QueryResult{State: StateUsable, Epoch: snap.Epoch, Version: snap.Version, FromVersion: afterVersion}
-	start := sort.Search(len(q.touched), func(i int) bool {
-		q.count(false)
-		return q.touches[q.touched[i]] > afterVersion
-	})
+	start := q.rank(q.touched, afterVersion+1)
 	seen := make(map[uint64]bool)
-	add := func(i int) {
-		item := q.item(i)
+	add := func(row queryRow) {
+		item := *row.item
 		if !seen[item.ID] {
 			seen[item.ID] = true
 			item.Content = append(json.RawMessage(nil), item.Content...)
 			result.Items = append(result.Items, item)
 		}
 	}
-	for _, i := range q.touched[start:] {
-		if err := ctx.Err(); err != nil {
-			return QueryResult{}, err
-		}
-		add(i)
+	if err := q.visit(ctx, q.touched, start, treeSize(q.touched), add); err != nil {
+		return QueryResult{}, err
 	}
-	for _, i := range q.active {
-		if err := ctx.Err(); err != nil {
-			return QueryResult{}, err
-		}
-		add(i)
+	if err := q.visit(ctx, q.active, 0, treeSize(q.active), add); err != nil {
+		return QueryResult{}, err
 	}
 	for i := 0; i < len(result.Items); i++ {
 		if err := ctx.Err(); err != nil {
@@ -96,8 +83,8 @@ func (s *Store) CatchUp(ctx context.Context, id conversations.ConversationID, ep
 		}
 		parent := result.Items[i].Parent
 		if parent != 0 && !seen[parent] {
-			if index, ok := q.byID[parent]; ok {
-				add(index)
+			if row, ok := q.lookup(parent, false); ok {
+				add(row)
 			} else {
 				return reset, nil
 			}
