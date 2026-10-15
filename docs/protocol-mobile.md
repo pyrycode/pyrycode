@@ -1066,7 +1066,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `send_message` | phone → binary | no | Carries an **optional** `attachment_ids` — the uploaded attachments this message references, so the daemon names them instead of inferring the set from upload order or arrival timing (#2036). Each element is a lowercase UUIDv4 per [The `attachment_id` shape](#the-attachment_id-shape); **at most 32 per message**, counting elements rather than distinct ids. A message naming none **omits the key entirely** — `null` and `[]` are also accepted and a receiver cannot tell the three apart. **Consumed since #2038**: the daemon names each attachment's on-host path in `claude`'s prompt, refuses an over-bound list with `protocol.malformed`, and deduplicates a repeated id. See [Naming a message's attachments](#naming-a-messages-attachments). **Since #2456, one literal in `text` is not ordinary message text**: a message whose trimmed `text` has `/clear` as its first whitespace-delimited token — exact, case-sensitive, first token only, never a prefix — is not enqueued and never reaches claude. Instead it starts the same conversation-reset routine a `new_session` naming that conversation does (see [`resetting`](#resetting)). `attachment_ids` on that message is never resolved — dropped entirely, so it cannot produce `attachment.not_found` — and the text never becomes the conversation's auto-name. The reset is **not gated on the negotiated `interactive` capability** the way the `resetting` frames themselves are: a non-interactive client's `/clear` still resets, it just does not see the frames reporting it. Rotation failure (including a refused workspace) answers with the ordinary `ack` and nothing else — there is no `new_session.workspace_refused`-shaped reply on this path, because that reply is correlated by `in_reply_to` against a `new_session` frame and would misreport what it describes. One client-visible gap: a client that renders its own optimistic echo of `/clear` as a sent row will not find that row in history after a reload, since the daemon never delivers the message — the session delimiter appears with nothing above it. Accepted, not a bug. Also carries an **optional `client_sent_at`** (RFC 3339, #2704): when the client says Send was tapped, on the client's own clock. An absent or unparseable value is **dropped, not refused** — the message is enqueued and delivered exactly as if the key were missing. It is never used for ordering (the client's clock may be wrong) and never logged. See [A history entry](#a-history-entry) for where it, and the sender's device name and app version, land on the stored turn. |
 | `message` | binary → phone | no | v1 / dispatch-leg coarse assistant-turn type; the v2 coarse `message` fan-out for **assistant** output was removed in #699 — v2 assistant output flows only through the structured interactive stream below. **Since #2699, the type IS minted on the v2 interactive path, for the operator's own message only.** For a successful `send_message` delivery, the daemon pushes exactly one `message` envelope — role `user`, byte-identical to the durable history entry (`conversation_id`, `message_id`, `text`, `attachment_ids` when present) — to every open interactive conn, the sender's included. It carries an `event_id` and joins the [replay ring](#reconnect-replay--resync-consumer-647), so a client that reconnects with an earlier `last_event_id` is replayed it in order with everything else it missed. The payload also carries optional integer `queued_msg_id` (#2819), the daemon-assigned queue entry id (unsigned 64-bit, ≥ 1), matching [`queue_state`](#queue-v2). Identify a delivered queued entry by `conversation_id` plus `queued_msg_id`; `message_id` is client-chosen and need not be unique. Ordinary and Send now deliveries carry the same id in their live and stored payloads. Since #2820, an echoed ordinary queued Claude delivery opens its answering turn after the preceding `turn_end`, if any, and before the first answering `turn_state`, assistant or tool frame; history order/timestamps, live arrival and replay/event-ID order agree. Without an echo, a confirmed ordinary write commits exactly once by the answering turn becoming idle. Late echoes or queue callbacks cannot move or repeat it. Send now retains echo placement and its grace-window idle fallback. Codex/no-stream deliveries retain commit-at-write timing. Field presence claims queue identity, not proof of timing on Codex or the no-echo path; see [Queue](#queue-v2). Zero/no-entry messages, including assistant messages, omit the field; legacy payloads decode and re-encode without adding it. Older daemons omit it, so clients retain their current inference as fallback when it is absent. It carries the same **`device_name`, `client_version` and `client_sent_at`** (#2704) the stored entry does — see [A history entry](#a-history-entry) — since #2699 the push reuses that entry's payload bytes verbatim. |
 | `list_conversations` | phone → binary | no | |
-| `conversations` | binary → phone | no | Reply to `list_conversations`, correlated by `in_reply_to`. Every row carries **`current_session_id`** (#940): an **always-present JSON string** copied from that conversation's stored session binding, including `""` when unbound. This supplies initial session ID discovery on the first list response, before any `session_transition`, without an extra `request_session_settings` request or `/clear`. A nonempty binding does **not** guarantee a running process or a successful session-scoped mutation. Every row carries **`workspace_label`** (#2208): the operator-set display name stored for that row's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every row of every reply, so a client may treat a missing one as a malformed row rather than as an unlabelled workspace, and before any workspace is ever named every row carries `null`. It is keyed by **workspace, not conversation**: rows sharing one `cwd` carry the same value, a row never carries a neighbour's, and the only thing that changes it is [`rename_workspace`](#renaming-a-workspace) — which is how a client that renames on one device sees the new label on another. **Archived rows are not exempt**: this reply is unfiltered, and archiving a conversation does not un-name its folder. The value is a stored opaque string echoed **verbatim**; as [§ Renaming a workspace](#renaming-a-workspace) already states, its 128-byte bound is a size limit and not a safety property, so rendering it safely is the client's job. Every row also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation, `false` by default. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, which is how a client paired with an older daemon keeps notifying rather than silently going quiet. Both clients raise their own alerts from events they already receive; the daemon only stores and reports this flag. Every row also carries **`archived_at`** (#2698): an RFC3339 UTC timestamp for the moment `archive_conversation` archived this row. Archiving it again keeps the original stamp, and `unarchive_conversation` clears it back to `null`. **Nullable but never omitted** — `null` on every active row, and also on a row archived before this field existed, so a client cannot distinguish "never archived" from "archived, no stamp recorded" and falls back to ordering those rows by `last_used_at`. Clients order the Archive screen newest-archived-first by this value. `conversation_updated` does not carry this field. Every row also carries **`read_up_to`** and **`latest_entry_id`** (#2779): both unsigned 64-bit integers, **always present including `0`**. `read_up_to` is the host operator's durable read mark for that conversation — not per-client, not per-device, not tied to this connection; every paired client on this host reads the same value. `latest_entry_id` is the legacy displayable-entry watermark in that conversation's durable [history log](#conversation-history-v2), using the [legacy counting rules](#marking-a-conversation-read) (`0` when no entry qualifies) — the same per-conversation id space [a history entry](#a-history-entry) carries, never an `event_id` or a connection envelope id. A client computes unread as `latest_entry_id > read_up_to`, with no separate request. [`mark_conversation_read`](#marking-a-conversation-read) (#2780) is the write verb that raises `read_up_to`. **A row surviving `multi_agent` filtering whose `latest_entry_id` cannot be resolved — an unwired or unreadable history store — fails the whole reply** with the retryable `history.unavailable` ([Error codes](#error-codes)) rather than sending a list missing that one value; a row the filter already dropped is never looked up, so a corrupt log behind a filtered-out Codex row cannot block the list. `conversation_updated` carries `read_up_to` too, but not `latest_entry_id` — see that row below. **`agent`** (`"claude"` \| `"codex"`, #2643) is the agent that runs the row's bound session — present only for a conn that negotiated the [`multi_agent`](#capability-negotiation-v2) capability, `omitempty` so it is absent, not `null`, for a conn that did not. A conversation with no bound session, or one whose bound session the daemon does not hold, reads `"claude"`. **A conn that did not negotiate `multi_agent` is not merely sent an unlabelled row: every row whose agent is `"codex"` is left out of the reply entirely**, so it receives only Claude rows, and every remaining row carries no `agent` key at all. Optional **`last_shown_version`** on negotiated thread connections comes from usable loaded status or an eligible unloaded clean certificate (#3330), whose consumed version V must exactly equal independently known current raw history progress H: absent for stale/invalid evidence or unknown progress, numeric `0` for authoritative zero including valid empty evidence at V = H = 0; see [`conversations`](#conversations). It tracks shown thread additions/text appends and preserves the stored binding and existing read/legacy watermarks. |
+| `conversations` | binary → phone | no | Reply to `list_conversations`, correlated by `in_reply_to`. Every row carries **`current_session_id`** (#940): an **always-present JSON string** copied from that conversation's stored session binding, including `""` when unbound. This supplies initial session ID discovery on the first list response, before any `session_transition`, without an extra `request_session_settings` request or `/clear`. A nonempty binding does **not** guarantee a running process or a successful session-scoped mutation. Every row carries **`workspace_label`** (#2208): the operator-set display name stored for that row's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every row of every reply, so a client may treat a missing one as a malformed row rather than as an unlabelled workspace, and before any workspace is ever named every row carries `null`. It is keyed by **workspace, not conversation**: rows sharing one `cwd` carry the same value, a row never carries a neighbour's, and the only thing that changes it is [`rename_workspace`](#renaming-a-workspace) — which is how a client that renames on one device sees the new label on another. **Archived rows are not exempt**: this reply is unfiltered, and archiving a conversation does not un-name its folder. The value is a stored opaque string echoed **verbatim**; as [§ Renaming a workspace](#renaming-a-workspace) already states, its 128-byte bound is a size limit and not a safety property, so rendering it safely is the client's job. Every row also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation, `false` by default. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, which is how a client paired with an older daemon keeps notifying rather than silently going quiet. Both clients raise their own alerts from events they already receive; the daemon only stores and reports this flag. Every row also carries **`archived_at`** (#2698): an RFC3339 UTC timestamp for the moment `archive_conversation` archived this row. Archiving it again keeps the original stamp, and `unarchive_conversation` clears it back to `null`. **Nullable but never omitted** — `null` on every active row, and also on a row archived before this field existed, so a client cannot distinguish "never archived" from "archived, no stamp recorded" and falls back to ordering those rows by `last_used_at`. Clients order the Archive screen newest-archived-first by this value. `conversation_updated` does not carry this field. Every row also carries **`read_up_to`** and **`latest_entry_id`** (#2779): both unsigned 64-bit integers, **always present including `0`**. `read_up_to` is the host operator's durable read mark for that conversation — not per-client, not per-device, not tied to this connection; every paired client on this host reads the same value. `latest_entry_id` is the newest visible conversational-content entry in that conversation's durable [history log](#conversation-history-v2), using the [shared content policy](#marking-a-conversation-read) (`0` for empty/hidden-only history). Hidden metadata and receipt accounting alone do not raise it. The target uses the same per-conversation id space [a history entry](#a-history-entry) carries, never an `event_id` or a connection envelope id. A client computes unread as `latest_entry_id > read_up_to`, with no separate request. [`mark_conversation_read`](#marking-a-conversation-read) (#2780) is the write verb that raises `read_up_to`. **A row surviving `multi_agent` filtering whose `latest_entry_id` cannot be resolved — an unwired or unreadable history store — fails the whole reply** with the retryable `history.unavailable` ([Error codes](#error-codes)) rather than sending a list missing that one value; a row the filter already dropped is never looked up, so a corrupt log behind a filtered-out Codex row cannot block the list. `conversation_updated` carries `read_up_to` too, but not `latest_entry_id` — see that row below. **`agent`** (`"claude"` \| `"codex"`, #2643) is the agent that runs the row's bound session — present only for a conn that negotiated the [`multi_agent`](#capability-negotiation-v2) capability, `omitempty` so it is absent, not `null`, for a conn that did not. A conversation with no bound session, or one whose bound session the daemon does not hold, reads `"claude"`. **A conn that did not negotiate `multi_agent` is not merely sent an unlabelled row: every row whose agent is `"codex"` is left out of the reply entirely**, so it receives only Claude rows, and every remaining row carries no `agent` key at all. Optional **`last_shown_version`** on negotiated thread connections comes from usable loaded status or an eligible unloaded clean certificate (#3330), whose consumed version V must exactly equal independently known current raw history progress H: absent for stale/invalid evidence or unknown progress, numeric `0` for authoritative zero including valid empty evidence at V = H = 0; see [`conversations`](#conversations). It tracks shown thread additions/text appends and preserves the stored binding and existing read/legacy watermarks. |
 | `create_conversation` | phone → binary | no | A non-null `cwd` is a request, not a stored value (#2568): the daemon resolves it — tilde-expanded, confined to `$HOME`, symlink-resolved to its realpath — before recording it or spawning the conversation's session there, so `default`, `~/pyry-workspace/default` and its absolute form all bind to the one folder they name rather than three. A `cwd` that cannot be confined (it escapes `$HOME`, or names no resolvable path) is refused with `protocol.malformed`, non-retryable, and no conversation is created. A `null` `cwd` is unaffected — it still records the daemon's own default workdir. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the new conversation's session runs on; absent or `null` means claude, and a request without it behaves exactly as before this ticket, including a byte-identical `conversation_created` for a client without `multi_agent`. `"codex"` is accepted only from a client that negotiated the [`multi_agent`](#capability-negotiation-v2) capability; that value from a client that did not, or any value naming neither agent, is refused before anything is created — see [Error codes](#error-codes) `protocol.unsupported`. **`model`** and **`effort`** (both `omitempty`, #2665) are the settings the new session starts on; absent keeps what a mint gives today — see [`conversation_created`](#conversation_created) below for what that is per agent. A present value is checked against the *resolved* agent's own vocabulary (ADR 039), by the same two-stage check [`set_session_settings`](#set_session_settings) runs against a bound session: shape first (`validModel` / `validEffort`'s own grammar), then membership. An `effort` is checked against the model the session will start on — the request's own `model` if it set one, else the mint's default — read from one snapshot shared with the mint itself, so a concurrent operator-default change cannot validate against one model and mint on another. A shape refusal, and a membership refusal on `effort`, both answer `protocol.malformed`, non-retryable, with this verb's **own** static message — never [`set_session_settings`](#set_session_settings)'s. A `model` absent from the vocabulary answers `protocol.malformed`, non-retryable, `requested model is not offered` — the same message `set_session_settings` gives for that cause. An incomplete or missing vocabulary answers the retryable `model_list.unavailable`. Every refusal creates nothing — no session, no registry entry, no conversation row — before `resolveSpawnDir` or the mint runs, and never echoes the requested value in a reply or a log. A request naming neither field is byte-identical on the wire to one from before this ticket. |
 | `conversation_created` | binary → phone | no | Reply to `create_conversation`, correlated by `in_reply_to`. Its `cwd` is the resolved realpath the conversation's session actually spawns in for a non-null request (#2568), never the string the request sent, and is the same value `list_conversations` reports for that row from then on; a `null` request's `cwd` is the daemon's default. Carries **`workspace_label`** (#2210): the operator-set display name stored for this conversation's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every frame, so a client may treat a missing one as malformed rather than as an unlabelled workspace. A conversation created into an already-named folder is named by it immediately, from this reply, without a `list_conversations` round trip. Same value and same contract as the [`conversations`](#conversations) row's field, including that its 128-byte bound is a size limit and **not** a safety property — rendering it safely is the client's job. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the created conversation's session runs on, set only for a client that negotiated `multi_agent` — the `conversations` row's own rule. `omitempty` is load-bearing here: a request without `agent` from a client without `multi_agent` gets a reply with no `agent` key at all, byte-identical to the frame this document described before Codex conversations existed. **Since #2665, a request's `model` and `effort` become the created session's stored settings from the mint**, field by field — an absent field keeps what a mint gives without them: a Claude conversation still inherits the operator's configured model/effort, a Codex conversation still starts with neither set and runs at Codex's own defaults. A refused `model` or `effort` is answered on `create_conversation` itself (see that row) and never reaches this reply — no conversation is created. |
 | `promote_conversation` | phone → binary | no | |
@@ -1805,10 +1805,10 @@ catch-up continuity and does not make an unloaded conversation query-ready.
 
 | Summary key | Presence and meaning |
 |---|---|
-| `last_shown_version` | JSON integer number when an authoritative usable reading is available on a thread connection, including numeric `0`. Missing, rebuilding or unavailable readings omit the key, even if supplied metadata held an old value. Always omitted without `thread`. Watermark raised by adding a shown thread item or appending text to one; never inferred from item revisions or incomplete recovery. Hidden and state-only changes do not by themselves raise it. |
+| `last_shown_version` | JSON integer number when an authoritative usable reading is available on a thread connection, including numeric `0`. Missing, rebuilding or unavailable readings omit the key, even if supplied metadata held an old value. Always omitted without `thread`. Watermark raised by adding a shown thread item or appending text to one; never inferred from item revisions or incomplete recovery. Hidden item/live-state updates and completion-only revisions do not by themselves raise it; raw consumed progress can advance beyond it. |
 | `current_session_id` | Always-present stored session binding, including `""` when unbound. A nonempty binding does not prove a running process. |
 | `read_up_to` | Always-present durable host/operator read mark, including zero; shared by paired devices. |
-| `latest_entry_id` | Always-present legacy displayable-entry watermark, including zero; see [legacy counting and clamping](#marking-a-conversation-read). It remains independent of the new thread watermark. |
+| `latest_entry_id` | Always-present newest visible-content durable entry ID, zero for empty/hidden-only history; see [content classification and clamping](#marking-a-conversation-read). Hidden metadata and receipt accounting alone do not raise it. It remains independent of the thread watermark. |
 
 Thread unread is **`last_shown_version > read_up_to`** when that authoritative
 reading is available; omission is unavailable metadata, not a numeric zero.
@@ -1843,32 +1843,37 @@ Both fields are required:
 | `up_to` | unsigned 64-bit integer | The durable [history entry id](#a-history-entry) the operator has read up to. Decoded through a `*uint64`, so a missing key or explicit `null` decodes to `nil` and `encoding/json`'s range parsing rejects a negative, fractional, exponent, string, boolean or over-`2^64-1` value — every one of these is `protocol.malformed`. `0` is a valid, meaningful value: an empty conversation's own starting mark. |
 
 **The stored mark becomes `max(held, min(up_to, latest))`**, where `held` is
-the mark already on disk and `latest` is the same legacy watermark reported
-as `list_conversations.latest_entry_id` (#3029). This legacy target follows
-wire types: `turn_state`, `stall`, `api_retry`, `compacting` and
-`session_transition` never count, even with stored `shown: true`. Every other
-eligible legacy type counts regardless of absent/false/true stored `shown`,
-including normal, failed or stopped `turn_end` and nonvisual metadata. Validated
-runtime facts projected as info-banner receipts also count at their original
-durable IDs, including receipt-only logs and runtime tails. This includes
-validated `send_accepted`, `send_delivered`, `send_dropped` and `send_lost`
-receipts (#3167), even hidden removal/give-up outcomes, and validated remote
-`prompt_answered` receipts (#3222), regardless of stored visibility. Their
-[validation](#a-history-entry) is shared by paging and the legacy list/read
-target. Unsupported entries, including malformed queued/runtime facts and
-unknown types, retain the conservative visibility fallback:
-absent/true counts, false excludes. Neither exclusion nor fallback counting
-certifies a harmless receipt. Missing/empty logs and logs with no qualifying
-entry yield `0`; an all-hidden raw log can still have a nonzero legacy target.
-A `up_to` at or below `held`
-changes nothing; a `up_to` past `latest` clamps to `latest` before the `max`;
-and the mark can never move backward, including under two devices racing each
-other. When `latest == 0`, an initial zero mark stays zero, while an existing
-higher mark is preserved, including a mark held above the current legacy
-watermark. Marks remain persistent and isolated by host and conversation.
-Reading through the last legacy-counted id clears unread
-on the next list even if excluded statuses follow it; new counted entries make
-`latest_entry_id > read_up_to` again.
+the mark already on disk and `latest` is the newest visible conversational-content
+entry, the same target reported as `list_conversations.latest_entry_id` (#3463).
+The daemon shares one payload-aware policy with producer visibility metadata.
+Explicit stored `shown: false` always excludes an entry. Entries without
+visibility metadata use the same content classification as current writes;
+explicit true cannot promote metadata or unknown vocabulary into content.
+Unknown types default to non-content until supported as visible content, so
+adding a hidden type needs no separate unread exclusion.
+
+Status/metadata-only entries, including `turn_state` and `context_usage`, normal
+successful `turn_end`, non-stopping info banners and restart/sleep dividers do
+not raise this target. Visible failed/stopped endings, interruption notices and
+loss notices can qualify. A valid legacy receipt establishes accounting, not
+visibility: a known raw content fact can qualify, but its nonvisual receipt
+projection does not itself make a hidden fact unread. Receipt validation and
+raw history retain their separate contracts.
+
+Missing/empty and hidden-only histories yield `0`. A request at or below `held`
+changes nothing; a request past `latest` clamps before the `max`. The mark never
+moves backward, including with racing devices, a held mark above the current
+target or a target of zero. It remains persistent and isolated by host and
+conversation, in the original durable ID space rather than a filtered count.
+Reading the newest visible entry clears unread despite later hidden entries;
+reading an older visible entry does not cover newer content. New visible content
+beyond the mark makes `latest_entry_id > read_up_to` again.
+
+Reopening history and repeated startup reconciliation preserve both read and
+unread results when only hidden restart entries are added. Restart alone does
+not make a read conversation unread or clear previously unread content. Genuinely
+visible interruption/loss notices may still raise unread. No read marks or old
+history metadata are rewritten.
 
 **Accounting is not presentation.** A list watermark, fetched history or a live/
 replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
@@ -1880,19 +1885,31 @@ The daemon's clamp bounds the requested mark; it does not establish that the
 operator saw the content. Raw history and its metadata-aware watermark remain
 unchanged for future thread consumers.
 
-For the completed reply below, IDs are in append order. The normal `turn_end`
-counts toward latest despite being stored hidden; the trailing idle state can
-extend an already-presented checkpoint without raising latest.
+For the completed reply below, IDs are in append order. Normal completion and
+the trailing idle state can extend client accounting without raising the daemon's
+visible-content target. The client wire accounting latest is a separate value
+from `list_conversations.latest_entry_id`.
 
-| Runtime facts | Durable sequence | Client/list latest | Presented checkpoint (`up_to`) | Confirmed `read_up_to` from an initial zero mark | Raw visible watermark |
-| --- | --- | --- | --- | --- | --- |
-| Enabled | 1 message, 2 info-banner receipt, 3 responding state, 4 assistant delta, 5 normal turn end, 6 idle state | 5 | 6 | 5 | 4 |
-| Disabled | 1 message, 2 responding state, 3 assistant delta, 4 normal turn end, 5 idle state | 4 | 5 | 4 | 3 |
+| Runtime facts | Durable sequence | Client wire accounting latest | Presented checkpoint (`up_to`) | Daemon list latest / confirmed `read_up_to` from zero |
+| --- | --- | --- | --- | --- |
+| Enabled | 1 message, 2 info-banner receipt, 3 responding state, 4 assistant delta, 5 normal turn end, 6 idle state | 5 | 6 | 4 |
+| Disabled | 1 message, 2 responding state, 3 assistant delta, 4 normal turn end, 5 idle state | 4 | 5 | 3 |
 
-History, live and replay yield the same client latest; repeated or overlapping
-delivery cannot lower latest/read marks or create presentation. The client
-merges the correlated daemon-confirmed mark, rather than assuming the requested
-checkpoint was persisted. Both controls clear `latest_entry_id > read_up_to`.
+History, live and replay preserve the same accounting identities; repeated or
+overlapping delivery cannot create presentation. The client merges the correlated
+daemon-confirmed mark, rather than assuming the requested checkpoint was persisted.
+Both controls clear `latest_entry_id > read_up_to`.
+
+Thread connections compare authoritative `last_shown_version` with the same
+stored mark. That watermark records first public appearance and appended shown
+text, not raw consumed history progress or the maximum final item revision.
+Hidden item/live-state updates and completion-only revisions do not raise it.
+For histories with completed messages followed by hidden entries, usable loaded
+metadata and eligible unloaded certificates give the same unread result as the
+legacy route.
+A hidden append can still invalidate an unloaded certificate because consumed
+progress no longer matches current raw history; an unavailable reading remains
+omitted, without a raw-progress fallback. See [thread summary eligibility](#conversations).
 
 The registry resolves the conversation **before** its history is read, so an
 unknown or empty id never reaches the history store. The compare, the save and
@@ -7120,20 +7137,23 @@ both look like small integers, and a client must not join them.
 
 **This same durable id space is what `read_up_to` and `latest_entry_id` are stated
 in (#2779).** [`list_conversations`](#list_conversations)'s `conversations` reply
-reports `latest_entry_id` using the shared
-[legacy list/read watermark](#marking-a-conversation-read): eligible wire types
-count regardless of stored `shown`, except `turn_state`, `stall`, `api_retry`,
-`compacting` and `session_transition`, which never count. Validated runtime
-info-banner receipts, including all four queued-send facts and validated remote
-prompt answers, count at their original IDs, including hidden drops, receipt-only
-pages and tails. Unsupported entries keep conservative absent/true visibility
-counting and false exclusion
-without certifying receipt accounting. **History pages still
-contain eligible hidden/status entries and validated runtime receipts, and all
-entries use the original durable ID sequence.** Neither `shown` nor session
-metadata is serialized on this legacy route; raw visibility cannot distinguish
-identical eligible wire entries' targets. Raw history,
-metadata and raw watermark APIs remain unchanged. Both that reply and
+reports the newest visible conversational-content entry as `latest_entry_id`
+using the shared [list/read content policy](#marking-a-conversation-read).
+Explicit `shown: false` vetoes content; absent metadata uses the same payload-aware
+classification as producer metadata, and explicit true cannot promote hidden
+metadata or unknown types. Unknown vocabulary defaults to non-content. Hidden
+context/status readings, normal successful endings, nonvisual info banners and
+restart/sleep dividers do not raise unread. Receipt validation provides accounting
+only; a valid nonvisual projection does not make a hidden fact content.
+Empty/hidden-only histories have target zero, and hidden restart appends preserve
+the read/unread result after reopening. Visible interruption/loss notices may
+still raise it.
+
+**History pages still contain eligible hidden/status entries and validated
+runtime receipts, all with their original durable IDs.** Neither `shown` nor
+session metadata is serialized on this legacy route. Raw history, metadata,
+receipt delivery/accounting and raw store watermark APIs retain their contracts.
+Both that reply and
 [`conversation_updated`](#conversation_updated) report `read_up_to`, the host
 operator's durable read mark, in the same space — a position among these durable
 ids, never a count of entries and never a connection's
@@ -7208,8 +7228,10 @@ prompt-answer info-banner receipts, including `send_accepted`, `send_delivered`,
 `send_dropped`, `send_lost` and `prompt_answered`:
 receipts published while running carry the same projected bytes, original
 durable ID and timestamp in history, live publication and reconnect replay.
-Startup loss is page-only. Their `banner` wire type contributes to the
-same legacy latest target on every lane, regardless of the raw fact's `shown`.
+Startup loss is page-only. These banners provide the same client accounting
+on every lane. The daemon's latest/clamp target instead follows the raw fact's
+content classification and explicit-false veto; receipt eligibility alone
+cannot make hidden content unread.
 Repeated or overlapping delivery accounts for that ID once, duplicates no
 content and cannot lower latest/read marks or grant additional sight. Do not
 derive harmlessness from a missing receipt: unknown/malformed/unidentified

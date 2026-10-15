@@ -296,7 +296,7 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 	if len(testGoneEntries(t, store, testConvID)) != 1 {
 		t.Fatal("gone fact missing from compatibility fixture")
 	}
-	// Hidden identity at the tail must still be a legacy unread target.
+	// Hidden progress at the tail retains delivery without raising unread.
 	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskProgress{TaskID: "task"}, source)
 	raw := historyEntries(t, store, testConvID)
 	events, _ := e.ring.After(testConvID, 0)
@@ -329,7 +329,7 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 			}
 		}
 		latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conversations.ConversationID(testConvID))
-		if err != nil || latest != testLegacyLatest(page) || latest != raw[len(raw)-1].ID {
+		if err != nil || latest != testGoneEntries(t, reader, testConvID)[0].ID || latest >= raw[len(raw)-1].ID {
 			t.Fatalf("unread target=%d %v", latest, err)
 		}
 		if testLegacyCheckpoint(page, 0, 0, false) != 0 {
@@ -553,11 +553,15 @@ func TestAgentHistory_ReceiptValidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, reader := range []*history.Store{isolated, history.New(dir)} {
-				latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conversations.ConversationID(testConvID))
-				if err != nil || latest != id {
-					t.Fatalf("raw shown changed legacy target: %d %v", latest, err)
+				want := uint64(0)
+				if shown && historyEntryShown(entry.Type, entry.Payload) {
+					want = id
 				}
-				testLegacyListAndMark(t, reader, id, id, 0)
+				latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conversations.ConversationID(testConvID))
+				if err != nil || latest != want {
+					t.Fatalf("content target=%d want %d: %v", latest, want, err)
+				}
+				testLegacyListAndMark(t, reader, id, want, 0)
 			}
 		}
 	}

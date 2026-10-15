@@ -203,7 +203,7 @@ func TestLegacyRuntimeReceipts_CompletedTurn(t *testing.T) {
 				}
 			}
 			for _, reader := range []*history.Store{store, history.New(dir)} {
-				testLegacyListAndMark(t, reader, wantCheckpoint, wantLatest, 0)
+				testLegacyListAndMark(t, reader, wantCheckpoint, wantRaw, 0)
 				if got, err := reader.LatestDisplayableEntryID(conversations.ConversationID(testConvID)); err != nil || got != wantRaw {
 					t.Fatalf("raw watermark=%d,%v want %d", got, err, wantRaw)
 				}
@@ -251,7 +251,7 @@ func TestLegacyRuntimeReceipts_BoundedPages(t *testing.T) {
 			}
 			for _, reader := range []*history.Store{store, history.New(dir)} {
 				if !mixed {
-					if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 12 {
+					if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 11 {
 						t.Fatalf("all-runtime watermark=%d,%v", got, err)
 					}
 				}
@@ -462,21 +462,21 @@ func TestLegacyRuntimeReceipts_Watermark(t *testing.T) {
 			t.Fatalf("raw watermark=%d,%v", got, err)
 		}
 	}
-	// Unknown content is not certified harmless by the legacy view.
+	// Unsupported vocabulary cannot establish visible content or a receipt.
 	if _, err := store.Append(id, "future_content", json.RawMessage(`{}`), historyTS); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := (legacyHistoryReader{store}).LatestDisplayableEntryID(id); err != nil || got != 6 {
+	if got, err := (legacyHistoryReader{store}).LatestDisplayableEntryID(id); err != nil || got != 5 {
 		t.Fatalf("unknown watermark=%d,%v", got, err)
 	}
 	if _, err := store.AppendWithMetadata(id, protocol.TypeMessage, json.RawMessage(`{}`), historyTS, history.Metadata{Shown: new(bool)}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := (legacyHistoryReader{store}).LatestDisplayableEntryID(id); err != nil || got != 7 {
+	if got, err := (legacyHistoryReader{store}).LatestDisplayableEntryID(id); err != nil || got != 5 {
 		t.Fatalf("hidden eligible target=%d,%v", got, err)
 	}
 	// More than one reader page of explicitly shown statuses must not hide
-	// older wire-counted content or raise the legacy target.
+	// older visible content or raise the unread target.
 	for i := 0; i < 130; i++ {
 		shown := true
 		if _, err := store.AppendWithMetadata(id, protocol.TypeTurnState, json.RawMessage(`{}`), historyTS, history.Metadata{Shown: &shown}); err != nil {
@@ -484,7 +484,7 @@ func TestLegacyRuntimeReceipts_Watermark(t *testing.T) {
 		}
 	}
 	for _, reader := range []*history.Store{store, history.New(dir)} {
-		if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 7 {
+		if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 5 {
 			t.Fatalf("multi-page legacy target=%d,%v", got, err)
 		}
 		if got, err := reader.LatestDisplayableEntryID(id); err != nil || got != 137 {
@@ -539,15 +539,16 @@ func testLegacyListAndMark(t *testing.T, store *history.Store, checkpoint, lates
 	}
 	assertList(held)
 	mark := handlers.MarkConversationRead(reg, reader, path, nil, discardLogger())
-	want := max(held, min(checkpoint, latest))
+	want := held
 	for i, upTo := range []uint64{checkpoint, 0, checkpoint, checkpoint + 100} {
+		want = max(want, min(upTo, latest))
 		env := invoke(mark, protocol.TypeMarkConversationRead, json.RawMessage(fmt.Sprintf(`{"conversation_id":"%s","up_to":%d}`, testConvID, upTo)), uint64(20+i))
 		var updated protocol.ConversationUpdatedPayload
 		if err := json.Unmarshal(env.Payload, &updated); err != nil {
 			t.Fatal(err)
 		}
-		if env.Type != protocol.TypeConversationUpdated || updated.ID != testConvID || updated.ReadUpTo != want || latest > updated.ReadUpTo {
-			t.Fatalf("mark=%+v want %d clearing latest %d", updated, want, latest)
+		if env.Type != protocol.TypeConversationUpdated || updated.ID != testConvID || updated.ReadUpTo != want {
+			t.Fatalf("mark=%+v want %d with latest %d", updated, want, latest)
 		}
 		reg, err = conversations.Load(path)
 		if err != nil {
@@ -657,10 +658,10 @@ func TestLegacyRuntimeReceipts_WireTargets(t *testing.T) {
 					if _, err := store.AppendWithMetadata(id, entryType, payload, historyTS, metadata); err != nil {
 						t.Fatal(err)
 					}
-					excluded := slices.Contains([]string{"turn_state", "stall", "api_retry", "compacting", "session_transition"}, typ)
+					excluded := slices.Contains([]string{"turn_state", "stall", "api_retry", "compacting", "tool_progress", "thinking_progress", "background_task_roster", "background_task_progress", "rate_limited", "context_usage", "model_announced", "session_facts", "mcp_status", "model_list", "slash_command_list", "background_task_updated", "main_turn_opened", "future_content", "invalid_runtime_fact"}, typ)
 					unsupported := typ == "future_content" || typ == "invalid_runtime_fact"
 					want := uint64(1)
-					if excluded || unsupported && visibility == "false" {
+					if excluded || visibility == "false" {
 						want = 0
 					}
 					for _, reader := range []*history.Store{store, history.New(dir)} {
@@ -672,8 +673,8 @@ func TestLegacyRuntimeReceipts_WireTargets(t *testing.T) {
 							if len(entries) != 0 {
 								t.Fatal("unsupported entry certified as receipt")
 							}
-						} else if got := testLegacyLatest(entries); got != want {
-							t.Fatalf("client latest=%d want %d", got, want)
+						} else if len(entries) != 1 || entries[0].ID != 1 {
+							t.Fatalf("eligible entry lost delivery/accounting: %+v", entries)
 						}
 						raw, err := reader.Page(id, "", 1)
 						if err != nil || len(raw.Entries) != 1 || raw.Entries[0].Type != entryType || !bytes.Equal(raw.Entries[0].Payload, payload) || !raw.Entries[0].TS.Equal(historyTS) || !reflect.DeepEqual(raw.Entries[0].Shown, shown) || !reflect.DeepEqual(raw.Entries[0].Session, metadata.Session) {
@@ -751,7 +752,11 @@ func TestLegacyRuntimeReceipts_CompletionTails(t *testing.T) {
 						if testLegacyCheckpoint(entries, 0, 0, false) != 0 {
 							t.Fatal("tail granted presentation")
 						}
-						testLegacyListAndMark(t, reader, tail.checkpoint, tail.latest, 0)
+						wantVisible := uint64(4)
+						if ending.shown {
+							wantVisible = 5
+						}
+						testLegacyListAndMark(t, reader, tail.checkpoint, wantVisible, 0)
 					}
 				})
 			}

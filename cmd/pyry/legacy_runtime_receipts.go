@@ -96,15 +96,13 @@ func publishLegacyHistory(ctx context.Context, bcast interactiveBroadcaster, rin
 	}
 }
 
-// legacyHistoryReader counts the legacy wire types, including validated runtime
-// facts projected as banners, independently of raw visibility. Unsupported
-// entries retain conservative visibility counting without certifying receipts.
+// legacyHistoryReader supplies the newest visible-content target for both list
+// and read clamping. Receipt eligibility establishes accounting, not visibility.
 // No raw entries, metadata or IDs are changed.
 type legacyHistoryReader struct{ store *history.Store }
 
 func (r legacyHistoryReader) LatestDisplayableEntryID(convID conversations.ConversationID) (uint64, error) {
 	// Preserve nil-store errors and the raw reader's ID/containment validation.
-	// An all-hidden log can still contain entries counted by legacy clients.
 	latest, err := r.store.LatestEntryID(convID)
 	if err != nil || latest == 0 {
 		return latest, err
@@ -116,22 +114,10 @@ func (r legacyHistoryReader) LatestDisplayableEntryID(convID conversations.Conve
 			return 0, err
 		}
 		for _, entry := range page.Entries {
-			// These status types never contribute to the client's unread target,
-			// even if a producer explicitly stored them as shown.
-			switch entry.Type {
-			case protocol.TypeTurnState, protocol.TypeStall, protocol.TypeApiRetry,
-				protocol.TypeCompacting, protocol.TypeSessionTransition:
-				continue
-			}
-			if legacyHistoryType(entry.Type) {
-				return entry.ID, nil
-			}
-			if _, ok := legacyRuntimeReceipt(string(convID), entry.Type, entry.Payload, &entry.ID, entry.TS); ok {
-				return entry.ID, nil
-			}
-			// Transport exclusion does not establish harmlessness. Unsupported
-			// entries keep the raw visibility fallback and remain receipt holes.
-			if entry.Shown == nil || *entry.Shown {
+			// Explicitly hidden entries never qualify. Absent metadata uses the
+			// same payload-aware content policy as current producer metadata;
+			// explicit true cannot promote metadata or unsupported vocabulary.
+			if (entry.Shown == nil || *entry.Shown) && historyEntryShown(entry.Type, entry.Payload) {
 				return entry.ID, nil
 			}
 		}

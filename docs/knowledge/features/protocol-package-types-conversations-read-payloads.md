@@ -56,17 +56,23 @@ const (
   durable read mark, shared by every paired client and device. `LatestEntryID`
   is resolved per row, after `multi_agent` filtering, through
   `historyLatestReader.LatestDisplayableEntryID(conv.ID)` (`legacyHistoryReader` over `*history.Store` in
-  production). This remains the legacy displayable-entry watermark:
-  known legacy types follow their wire-type counting rules, validated runtime
-  facts projected as receipts count at their original IDs, and unsupported
-  entries use the conservative stored-visibility fallback. A raw hidden entry
-  can still count in the legacy view. Missing logs or no qualifying entries
-  yield `0`; see [legacy counting](../../protocol-mobile.md#marking-a-conversation-read).
+  production). The daemon target is the newest visible conversational content
+  in the original durable ID space. The reader shares `historyEntryShown` with
+  producer metadata and vetoes explicit `Shown == false`; absent metadata uses
+  the same payload-aware classification, while explicit true cannot promote
+  metadata or unknown types. Unknown vocabulary defaults to non-content.
+  Hidden statuses, context usage, successful turn endings, nonvisual info banners
+  and restart/sleep dividers do not raise it; valid receipts provide accounting
+  without establishing content visibility. Missing/empty or hidden-only logs
+  yield `0`; see [visible-content clamping](../../protocol-mobile.md#marking-a-conversation-read).
   [`MarkConversationRead`](relay-package-handlers.md#markconversationread-cannot-copy-setconversationmuteds-best-effort-save-2780)
-  uses the same query for `max(held, min(up_to, latest))`, so reading the last
-  displayable entry clears unread despite trailing statuses, while existing
-  higher marks never decrease. Status entries remain stored and served in the
-  same durable ID space; see [history watermark recovery](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
+  uses the same target for `max(held, min(up_to, latest))`. Reading the newest
+  visible entry clears unread despite hidden tails; reading an older entry leaves
+  newer content unread. Higher held marks never decrease, even at latest zero.
+  Reopening and hidden-only restart reconciliation preserve the read/unread
+  result; genuinely visible interruption/loss notices can raise it. Hidden entries
+  retain their IDs and receipt accounting contract; see
+  [history watermarks](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
   Both fields are `uint64` without `omitempty`: clients read explicit zero,
   rather than interpreting a missing key as unknown. A lookup failure on any
   surviving row fails the whole correlated reply with retryable
@@ -88,8 +94,11 @@ const (
   the legacy watermark, and `CurrentSessionID` remains the stored binding.
   Projection adds no absent binding/watermark fields to `conversation_updated`.
   Production installs the fold-backed provider through `installDaemonThreadRelay`;
-  registered usable zero is authoritative, while missing/not-loaded or failed
-  replay cannot supply a reading. Client thread catch-up/pages and reconnect
+  usable loaded status and eligible unloaded clean certificates can supply a
+  reading, including authoritative zero. Hidden appends invalidate stale unloaded
+  certificates by advancing raw progress without raising shown progress. Missing,
+  rebuilding or unavailable evidence stays omitted; raw consumed progress never
+  substitutes for the shown watermark. Client thread catch-up/pages and reconnect
   history initialization remain #2963. See
   [relay projection](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection)
   and [the summary contract](../../protocol-mobile.md#conversations).
