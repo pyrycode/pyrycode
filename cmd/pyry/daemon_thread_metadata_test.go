@@ -19,8 +19,9 @@ import (
 	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
-func testThreadMetadataFixture(t testing.TB) (*threadShadow, *thread.Store, *daemonThreadPublisher, *shadowConversation, relay.V2SessionConfig) {
+func testThreadMetadataFixture(t testing.TB, beforeFold ...func(context.Context, conversations.ConversationID) error) (*threadShadow, *thread.Store, *daemonThreadPublisher, *shadowConversation, relay.V2SessionConfig) {
 	t.Helper()
+	fixtureStart := time.Now()
 	h := history.New(t.TempDir())
 	reg, err := conversations.Load("")
 	if err != nil {
@@ -37,7 +38,24 @@ func testThreadMetadataFixture(t testing.TB) (*threadShadow, *thread.Store, *dae
 		}
 	}
 	workerCtx, cancel := context.WithCancel(context.Background())
-	store := thread.NewStore(h)
+	t.Logf("fixture construction=%s", time.Since(fixtureStart))
+	replayStart := time.Now()
+	chunks := 0
+	progress := make(chan struct{}, 1)
+	store := thread.NewStore(h, func(ctx context.Context, id conversations.ConversationID) error {
+		chunks++
+		t.Logf("replay chunk=%d elapsed=%s", chunks, time.Since(replayStart))
+		if len(beforeFold) > 0 {
+			if err := beforeFold[0](ctx, id); err != nil {
+				return err
+			}
+		}
+		select {
+		case progress <- struct{}{}:
+		default:
+		}
+		return nil
+	})
 	t.Cleanup(func() {
 		defer cancel()
 		if err := store.Shutdown(); err != nil {
@@ -47,17 +65,18 @@ func testThreadMetadataFixture(t testing.TB) (*threadShadow, *thread.Store, *dae
 	if err := store.Load(workerCtx, testConvID); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for store.Status(testConvID).State != thread.StateUsable {
-		if time.Now().After(deadline) {
-			t.Fatal("long-thread replay did not finish")
-		}
-		time.Sleep(time.Millisecond)
+	readyCtx, readyCancel := context.WithTimeout(t.Context(), time.Minute)
+	defer readyCancel()
+	if err := testWaitThreadMetadata(readyCtx, store, progress, 10*time.Second); err != nil {
+		t.Fatalf("long-thread replay: %v; elapsed=%s status=%+v", err, time.Since(replayStart), store.Status(testConvID))
 	}
+	t.Logf("replay/readiness=%s", time.Since(replayStart))
+	validationStart := time.Now()
 	snapshot := store.Snapshot(testConvID)
-	if len(snapshot.Items) != 1024 || snapshot.LastShownVersion != 1024 {
-		t.Fatalf("fixture publication: items=%d shown=%d", len(snapshot.Items), snapshot.LastShownVersion)
+	if snapshot.State != thread.StateUsable || len(snapshot.Items) != 1024 || snapshot.Version != 1024 || snapshot.LastShownVersion != 1024 {
+		t.Fatalf("fixture publication: state=%v items=%d version=%d shown=%d", snapshot.State, len(snapshot.Items), snapshot.Version, snapshot.LastShownVersion)
 	}
+	t.Logf("snapshot validation=%s", time.Since(validationStart))
 	var contentBytes int
 	for _, item := range snapshot.Items {
 		contentBytes += len(item.Content)
