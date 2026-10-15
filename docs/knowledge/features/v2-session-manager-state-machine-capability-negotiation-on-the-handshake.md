@@ -195,7 +195,7 @@ Parents do not expand coverage, and a short page cannot establish `OlderExists`.
 Use `Continuation == LowerOrder` as the next exclusive upper bound; an empty page
 keeps the requested upper bound with lower/continuation zero and older-exists
 false. Selection and parent closure belong to
-[`Store.HistoryPage`](thread-package-background-store.md#bounded-queries),
+[`Store.HistoryPage`](thread-package-background-store-queries.md#bounded-queries),
 not another relay query engine. `TestThreadPageResults` and
 `TestThreadPageContinuation` pin forwarding and successive ranges, while
 `TestThreadPageLargeReply` checks assembly beyond `hostedQueueLimit` escaped,

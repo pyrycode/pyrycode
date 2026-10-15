@@ -78,7 +78,7 @@ shell-lifecycle calls still use the renderer's inline-content fallback, with
 conversion tracked by [#3453](https://github.com/pyrycode/pyrycode/issues/3453).
 Pending outcomes and inherited `parent_ending` content use
 [history and ancestor references](#scoped-joins-pending-outcomes-and-closure). See
-[snapshot rendering and retry](thread-package-background-store.md#snapshots-and-retry)
+[snapshot rendering and retry](thread-package-background-store-replay.md#snapshots-and-retry)
 for source resolution and the remaining Store content retention.
 
 | Raw source type | Item kind | Rendered content and status |
@@ -200,7 +200,7 @@ the entire rendered candidate through generic `ErrUnavailable`; Store withdraws
 all usable items and watermarks with `StateUnavailable`, without content or path
 disclosure. Repair followed by Store `Retry` reconstructs a fresh fold from
 authoritative history. Public rendering returns detached content. See
-[snapshots and retry](thread-package-background-store.md#snapshots-and-retry).
+[snapshots and retry](thread-package-background-store-replay.md#snapshots-and-retry).
 
 The linked message supplies the summary and receiving `Session`/`Agent`/`NoChild`
 already resolved under the existing attribution rules, including any successor
@@ -291,7 +291,7 @@ inclusive 1 MiB recent-cache and authoritative history lookup path. Any required
 missing/unreadable reference rejects the entire candidate publication with generic
 `StateUnavailable`/`ErrUnavailable`, without usable items, version or epoch.
 Repair followed by `Retry` rebuilds the view. See
-[snapshot rendering and retry](thread-package-background-store.md#snapshots-and-retry).
+[snapshot rendering and retry](thread-package-background-store-replay.md#snapshots-and-retry).
 
 Legacy `New` folds maintain main and child text and normalized summaries
 incrementally with `appendText` and `appendSummary`. Unpublished appends reuse
@@ -310,7 +310,7 @@ feeds later text and queries read outside the store lock. This also preserves
 the previous text used by `itemDifference`, so a pure append yields exactly its
 suffix without a spurious Content replacement. Allocation, prefix copying and
 the capture ownership hook are included in ingestion work counters. See
-[immutable publication](thread-package-background-store.md#snapshots-and-retry).
+[immutable publication](thread-package-background-store-replay.md#snapshots-and-retry).
 
 Parent-attributed text and tools fold in [child lanes](thread-package-agents-and-background-work.md#parent-repair), without
 opening or closing main turns, closing main calls or splitting/coalescing main
@@ -411,7 +411,7 @@ then authoritative `Lookup` precedence. A missing, unreadable or malformed
 required dependency withholds the whole candidate with generic
 `StateUnavailable`/`ErrUnavailable`, exposing no payload or host path. Repair
 followed by Store `Retry` rebuilds the view; returned public content is detached.
-See [snapshot rendering and retry](thread-package-background-store.md#snapshots-and-retry).
+See [snapshot rendering and retry](thread-package-background-store-replay.md#snapshots-and-retry).
 
 Legacy inline child text keeps separate intrinsic and ancestor-derived JSON buffers.
 `resolveChildren` reuses unchanged `parent_ending` enrichment and advances both
@@ -627,7 +627,7 @@ no ancestor JSON, including recipes on inline agents. User summaries, logical
 recipe storage, the bounded recent cache and deferred agent/shell content are
 accounted separately. This fold-only measurement excludes Store publication/query
 retention; see the separate
-[render-on-output verification](thread-package-background-store.md#store-verification).
+[render-on-output verification](thread-package-background-store-verification.md#store-verification).
 Zero copied outcome/ancestor bytes do not establish total Store memory use.
 
 `TestMainTextRuns`, `TestMainToolTerminals` and `TestMainEndings` cover text
