@@ -346,7 +346,7 @@ func TestThreadShadowRetirementCommit(t *testing.T) {
 
 type testShadowUnavailable struct{ *thread.Store }
 
-func (s testShadowUnavailable) Snapshot(conversations.ConversationID) thread.Snapshot {
+func (s testShadowUnavailable) Status(conversations.ConversationID) thread.Snapshot {
 	return thread.Snapshot{State: thread.StateUnavailable}
 }
 func TestThreadShadowFailedDrain(t *testing.T) {
