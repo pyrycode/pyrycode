@@ -188,7 +188,20 @@ Store snapshots and query rows still retain rendered content until
 does not bound that content or deferred inline/private fold payloads.
 
 `Snapshot(conversationID) Snapshot` performs no history I/O. Its fields are
-`Active`, `State`, `Items`, `Version`, `LastShownVersion`, `Epoch` and `Err`:
+`Active`, `State`, `Items`, `Version`, `LastShownVersion`, `Epoch` and `Err`.
+
+`Store.Status(conversationID) Snapshot` returns the same metadata and readiness
+with nil `Items` in every state. It captures `State`, `Version`, `Epoch`,
+`Active`, `LastShownVersion` and `Err` from one publication under `Store.mu`,
+which also serializes publication, retry replacement and retirement. Concurrent
+reads therefore cannot mix metadata from different publications. It performs
+no history/cache I/O, worker loading, item traversal or item/content copying,
+and allocates zero bytes regardless of thread length. Use it for progress and
+readiness checks; `Store.Snapshot` and `Store.Observe` remain complete detached
+reads for consumers that need items or an observation baseline.
+
+Both reads retain these readiness rules; the items described below are returned
+by `Snapshot`:
 
 | State | Meaning |
 | --- | --- |
@@ -197,7 +210,10 @@ does not bound that content or deferred inline/private fold payloads.
 | `StateUsable` | Detached items/content, consumed version, last-shown watermark and conversation epoch from one consistent publication; newer appends may still be pending. |
 | `StateUnavailable` | The worker has ended; `Err` is the fixed `ErrUnavailable` sentinel and explicit retry can recover. |
 
-Only `StateUsable` carries items/versions/epoch. The last-shown watermark follows
+Only `StateUsable` carries versions/epoch, including an empty usable conversation;
+only `StateUnavailable` carries `ErrUnavailable`, and every other state has nil `Err`.
+`Status.Active` preserves private activity even with no public items, so nil
+`Items` cannot establish inactivity or readiness. The last-shown watermark follows
 the [history-reconstructed rule](thread-package.md#cache-and-epochs), and unread
 is `LastShownVersion > ReadUpTo`. The random epoch is independent of
 deterministic item equality and follows the [recovery compatibility rules](thread-package.md#cache-and-epochs).

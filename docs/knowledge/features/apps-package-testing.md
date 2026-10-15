@@ -96,14 +96,15 @@ ran on macOS 26.6.2/arm64, Go 1.26.2 and real Node 24.15.0/npm 11.12.1 selected 
 rollback leaves executed/passed 3/3 without skips, proving initialized activation,
 retained preferences, verified pre-migration backup and the intended transaction/
 startup failures followed by full schema/preferences/checksum-ledger restoration
-and old-release health. The package gate remains **FAIL**: parents 105 executed,
+and old-release health. That package gate **failed**: parents 105 executed,
 104 passed, 1 failed, 0 skipped; leaves 912 executed, 906 passed, 2 failed,
 4 skipped because the filesystem rejects invalid UTF-8 names. Remaining failures
 are `TestPublishRetirement/health/remove` (denied group signal) and
 `TestPublishRetirement/health/intent_cycle` (retained retirement metadata), tracked
 by [#3418](https://github.com/pyrycode/pyrycode/issues/3418). The intent-cycle record
 alone does not identify its precise signal/probe cause. These target passes do
-not certify a green full-package gate. No live Claude is needed.
+not certify a green full-package gate; the later combined native acceptance is
+recorded under [publication fixtures](#publication-fixtures). No live Claude is needed.
 
 A controlled child that never loads npm configuration or rewrites lifecycle
 PATH misses real npm failures. `TestCandidateNPMEnvironment` models pathname-keyed
@@ -165,6 +166,57 @@ ordinary/published completion, replacement, repeated Shutdown and rejected then
 successful removal. Assertions inspect actual leader/descendant retirement,
 retired targets and persisted decisions; an active-release string or leader wait
 alone would miss unsafe restoration and lost cleanup failures.
+
+`publishFixture` shortens owner termination grace to 30 ms; increasing it or
+serializing tests would not prove post-SIGKILL retirement. With the real forced
+descendant from `TestHealthHelperProcess`, `TestPublishRetirementProbeSequence`
+requires a live descendant before Stop, records native group/individual PID
+probes, and controls EPERM until forced kill, across the post-kill probes or
+persistently. It requires the injected post-kill window to execute, joins Publish
+and checks both processes gone. Persistent uncertainty still requires
+`app.io_failed`, retained journal/`RetirementPending`, unavailable targets and
+rejected retry/removal, even when the real child has exited.
+`TestOwnerCleanupProbeRecovery` separately retains denied-termination and
+persistent-probe assertions. `TestOwnerCleanupErrorContext` keeps its inspection
+injection active after real ESRCH; ending it there would exercise recoverable
+uncertainty rather than the intended persistent error/context contract.
+
+The [original evidence](../../../internal/apps/testdata/3418-macos-results.json)
+retains the failing unchanged baseline, failing pre-repair controlled regressions,
+earlier batches and failed package/diagnostic attempts. Its
+[native pre-repair observations](../../../internal/apps/testdata/3418-controlled-before.jsonl.gz)
+show `live → EPERM → ESRCH` after SIGKILL; the
+[next controlled run](../../../internal/apps/testdata/3418-controlled-after.jsonl.gz)
+also observed leader ESRCH while the individual descendant probe still succeeded
+during group EPERM. A later empty `ps` sample cannot identify the earlier atomic
+kernel state. These observations establish a transient inspection window and
+the regression distinguishes the missing post-kill proof; they do not attribute
+every historical failure to exited-group bookkeeping. A passing isolated arm or
+diagnostic overlay supplies no complete-package stability proof.
+
+The [resumed evidence](../../../internal/apps/testdata/3418-macos-resumed-results.json)
+records exact commands/environment, revisions, checksums, disjoint parent/leaf
+counts and every resumed attempt after the separate candidate cleanup repair
+in [#3447](https://github.com/pyrycode/pyrycode/issues/3447). On clean `72a5d169`,
+macOS 26.6.2/arm64, Go 1.26.2 and real Node 24.15.0/npm 11.12.1 selected through
+`HOSTED_APP_NODE`/`HOSTED_APP_NPM_CLI`, normal concurrency was retained without
+`-p`/`-parallel` overrides. Two consecutive
+`go test -race -json ./internal/apps -run '^TestPublishRetirement$' -count=5`
+batches ([first](../../../internal/apps/testdata/3418-batch-5.jsonl.gz),
+[second](../../../internal/apps/testdata/3418-batch-6.jsonl.gz)) each executed/passed
+90 leaves and 5 parents, with zero failures/skips: all 18 build/migration/health ×
+stop/remove/shutdown/cancel/intent/intent-cycle arms ran five times.
+The uncached `go test -race -json ./internal/apps -count=1`
+[complete package run](../../../internal/apps/testdata/3418-package-resumed.jsonl.gz)
+executed 917 leaves: 913 passed, 0 failed, 4 skipped; all 106 parents passed.
+Every retirement and supported real-tool publication/update arm passed without
+skips. The four skipped leaves were `TestBackupAliasedTempRoot/states/nested`,
+`TestBackupStates/nested`, `TestRestoreStates/nested` and
+`TestRetainedValidation/invalid_UTF8`: the filesystem rejected invalid-UTF8 names
+with EILSEQ. Three preceding sandbox/cache setup attempts executed zero tests
+and remain failures in the resumed evidence. Earlier failed package gates remain
+failures in the original evidence; the later complete combined run establishes
+the package pass. No live Claude is required.
 
 `TestPublishTemplate` requires actual supported Node/npm through `HOSTED_APP_NODE`
 and `HOSTED_APP_NPM_CLI`, compiles the maintained template via checked preparation,

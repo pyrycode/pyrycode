@@ -413,6 +413,7 @@ func TestStoreFailureRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 				testStoreWait(t, s, testStoreA, StateUnavailable, 0)
+				testStoreStatusEqual(t, s, testStoreA)
 				snap := s.Snapshot(testStoreA)
 				if !errors.Is(snap.Err, ErrUnavailable) || snap.Items != nil || strings.Contains(snap.Err.Error(), "private") {
 					t.Fatal("unsafe failure", snap)
@@ -427,6 +428,7 @@ func TestStoreFailureRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 				testStoreEqual(t, testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries))), testStoreA, entries)
+				testStoreStatusEqual(t, s, testStoreA)
 				if !errors.Is(s.Retry(context.Background(), testStoreA), ErrNotUnavailable) {
 					t.Fatal("retry replaced usable worker")
 				}
@@ -513,6 +515,7 @@ func TestStoreReadSecurity(t *testing.T) {
 			if failed := s.Snapshot(testStoreA); failed.State != StateUnavailable || failed.Err != ErrUnavailable || failed.Items != nil {
 				t.Fatal("snapshot exposed output without readable history", failed)
 			}
+			testStoreStatusEqual(t, s, testStoreA)
 			if err := os.Rename(dir+"-saved", dir); err != nil {
 				t.Fatal(err)
 			}
@@ -577,6 +580,7 @@ func TestStoreLifecycle(t *testing.T) {
 					entries = append(entries, testStoreAppend(t, h, testStoreA, testMessage(2))...)
 				}
 				testStoreSignal(t, reached)
+				testStoreStatusEqual(t, s, testStoreA)
 				finished := make(chan struct{})
 				go func() {
 					defer close(finished)
@@ -590,6 +594,7 @@ func TestStoreLifecycle(t *testing.T) {
 					}
 				}()
 				testStoreSignal(t, cancelled)
+				testStoreStatusEqual(t, s, testStoreA)
 				if action != "context" {
 					select {
 					case <-finished:
@@ -613,11 +618,13 @@ func TestStoreLifecycle(t *testing.T) {
 				testStoreSignal(t, finished)
 				if action == "context" {
 					testStoreWait(t, s, testStoreA, StateUnavailable, 0)
+					testStoreStatusEqual(t, s, testStoreA)
 					s.Unload(testStoreA)
 				}
 				if s.Snapshot(testStoreA).State != StateNotLoaded {
 					t.Fatal("late publication")
 				}
+				testStoreStatusEqual(t, s, testStoreA)
 				s.forward = base
 				if action == "shutdown" {
 					if !errors.Is(s.Load(context.Background(), testStoreA), ErrClosed) || !errors.Is(s.Retry(context.Background(), testStoreA), ErrClosed) {
@@ -630,12 +637,15 @@ func TestStoreLifecycle(t *testing.T) {
 						t.Fatal(err)
 					}
 					testStoreEqual(t, testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries))), testStoreA, entries)
+					testStoreStatusEqual(t, s, testStoreA)
 					var wg sync.WaitGroup
 					for i := 0; i < 3; i++ {
 						wg.Add(1)
 						go func() { defer wg.Done(); s.Shutdown() }()
 					}
 					wg.Wait()
+					testStoreStatusEqual(t, s, testStoreA)
+					testStoreStatusEqual(t, s, testStoreB)
 					if s.Snapshot(testStoreA).State != StateNotLoaded || s.Snapshot(testStoreB).State != StateNotLoaded {
 						t.Fatal("shutdown retained state")
 					}
