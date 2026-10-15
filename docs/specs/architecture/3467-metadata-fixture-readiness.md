@@ -63,3 +63,16 @@ joined before ordinary suite runs. The verifier owns the full-module test gate.
 ## Open questions
 - Baseline/candidate timings, chunk counts and ordinary suite outcomes will be
   recorded after execution; historical scheduling attribution remains unknown.
+
+## Revisions
+### 2026-10-15 — measured single-chunk headroom
+The first candidate's ten-second inactivity interval expired during the final
+chunk under incidental overlapping compilation and another race-test process:
+construction 12.692s; chunk entries at 1.482, 11.298, 19.935, 27.858 and 32.671s;
+expiry at 45.675s. A chunk plus final publication can exceed ten seconds even
+though earlier chunks progress. Use twenty seconds of inactivity and a two-minute
+overall cap. Increase the controlled delay to five seconds on each of five real
+chunks: its 25 seconds of imposed delay exceeds even the new inactivity interval,
+so simply changing a total deadline to twenty seconds still fails this regression.
+The existing one-second stalled-worker proof keeps bounded failure inexpensive.
+This is local test scheduling headroom, not a production latency guarantee.

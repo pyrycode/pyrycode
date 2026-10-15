@@ -48,7 +48,7 @@ func TestDaemonThreadMetadataReadiness(t *testing.T) {
 	start := time.Now()
 	testThreadMetadataFixture(t, func(ctx context.Context, _ conversations.ConversationID) error {
 		chunks.Add(1)
-		timer := time.NewTimer(3 * time.Second)
+		timer := time.NewTimer(5 * time.Second)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
@@ -57,8 +57,8 @@ func TestDaemonThreadMetadataReadiness(t *testing.T) {
 			return ctx.Err()
 		}
 	})
-	if chunks.Load() < 4 || time.Since(start) <= 10*time.Second {
-		t.Fatalf("controlled delay did not cross the old total bound: chunks=%d elapsed=%s", chunks.Load(), time.Since(start))
+	if chunks.Load() < 5 || time.Since(start) <= 20*time.Second {
+		t.Fatalf("controlled delay did not cross the inactivity interval: chunks=%d elapsed=%s", chunks.Load(), time.Since(start))
 	}
 }
 

@@ -65,9 +65,9 @@ func testThreadMetadataFixture(t testing.TB, beforeFold ...func(context.Context,
 	if err := store.Load(workerCtx, testConvID); err != nil {
 		t.Fatal(err)
 	}
-	readyCtx, readyCancel := context.WithTimeout(t.Context(), time.Minute)
+	readyCtx, readyCancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer readyCancel()
-	if err := testWaitThreadMetadata(readyCtx, store, progress, 10*time.Second); err != nil {
+	if err := testWaitThreadMetadata(readyCtx, store, progress, 20*time.Second); err != nil {
 		t.Fatalf("long-thread replay: %v; elapsed=%s status=%+v", err, time.Since(replayStart), store.Status(testConvID))
 	}
 	t.Logf("replay/readiness=%s", time.Since(replayStart))
