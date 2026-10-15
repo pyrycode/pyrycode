@@ -87,7 +87,7 @@ func TestReferenceInheritedEnding(t *testing.T) {
 			}
 		}
 		for _, child := range f.children {
-			if child.legacyEnding != nil {
+			if child.childSnapshot != nil && child.legacyEnding != nil {
 				t.Fatal("legacy child cache used in production")
 			}
 		}

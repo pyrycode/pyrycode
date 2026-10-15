@@ -6,7 +6,7 @@
 - `internal/thread/agent.go` → `applyAgent`: foreground results can reopen; non-result finals and enrichment recompute from references.
 - `internal/thread/main_markers.go` → `takeMainCall`: preserve late main-to-child transfer.
 - `internal/thread/observations.go` → `recordShown`, and `publication.go` → `publicationCapture.capture`: membership and affected recipes drive visibility/publication.
-- `internal/thread/render_agents_test.go`, `render_endings_test.go`, `child_work_test.go`, `agent_markers_accounting_test.go`: payload guards, provisional closure, targeted repair and logical accounting.
+- `internal/thread/render_agents_test.go`, `render_work_test.go`, `render_test.go`, `render_endings_test.go`, `child_work_test.go`, `agent_markers_accounting_test.go`: payload guards, provisional closure, targeted repair and logical accounting.
 - `docs/knowledge/features/thread-package-agents-and-background-work.md` § Parent repair: intrinsic recipes must remain independent of derived closure; parent edges survive finality.
 - `docs/knowledge/features/thread-package-main-thread-folding-validation.md` § Validation and testing; ADR 045: existing accounting boundary and small continuation state.
 - `CODING-STYLE.md`; `docs/knowledge/features/development-verification.md`: contract comments and scoped evidence.
@@ -29,8 +29,8 @@ Fold access remains serialized by its owner. No goroutines, locks or shutdown pa
 | --- | --- |
 | Nested ancestor closure, late text and task-link reopening | `TestReferenceChildMarkers`, existing `TestReferenceInheritedEnding` |
 | Independent text/tool/agent completion while parent changes | `TestReferenceChildMarkers` |
-| Late parenting/reparenting and ancestor ending enrichment | `TestReferenceChildMarkers`, `TestChildTargetedRepair` |
-| Repeated reports/enrichment and equal-content replacements | `TestReferenceChildMarkers`, `TestReferenceEqualCompanion` |
+| Late parenting/reparenting, visibility repair and ancestor ending enrichment | `TestReferenceChildMarkers`, `TestReferenceFinalChildReachability`, `TestChildTargetedRepair` |
+| Repeated reports/text enrichment and equal-content replacements | `TestReferenceChildMarkers`, `TestReferenceFinalChildTextEnrichment`, `TestReferenceEqualCompanion` |
 | Reused source/lifetime/legacy IDs and late main marker transfer | `TestReferenceChildMarkerIdentity`, `TestChildNewLifetimeEarlyReport`, main-marker regressions |
 
 ## Error handling
@@ -43,6 +43,22 @@ Run `go test -race ./internal/thread ./cmd/pyry ./internal/relay`, `go vet ./...
 
 ## Open questions
 None. Background shell lifecycle snapshots remain reversible; this slice does not compact their separate owners.
+
+## Retention measurements
+`TestReferenceFinalReportAccounting` ran the same eight-entry fixed-shape turns before and after implementation. Logical accounting sums scalar sizes and string bytes, excluding map/slice/string/pointer headers, alignment, unused capacity, authoritative fixture history and Store snapshots. Shared pointer targets count once; strings count per field without a shared-backing deduction. Source cache bytes use `recentSource`'s separate accounting. These are retained-field measurements, not heap/RSS estimates.
+
+| Turns | Padding/entry | Private bytes/turn before → after | Public metadata/recipes | Child parent markers before → after | Reversible child snapshots before → after | Other lifecycle | Source cache total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 16 | 1397 → 1093 | 757 | 99 → 100 | 305 → 0 | 506 | 42904 |
+| 16 | 4096 | 1397 → 1093 | 757 | 99 → 100 | 305 → 0 | 506 | 565144 |
+| 64 | 16 | 1394 → 1090 | 758 | 99 → 100 | 305 → 0 | 503 | 61176 |
+| 64 | 4096 | 1394 → 1090 | 758 | 99 → 100 | 305 → 0 | 503 | 1046520 |
+
+Every row additionally retains 71 agent-marker, 174 main-marker and 242 active/unresolved logical bytes per turn. Public items are inactive; pending speculative child/agent joins explain the unresolved category. Private totals sum those categories, child markers/snapshots and other lifecycle, excluding public metadata/recipes and source caches. Public and other-lifecycle figures round to whole bytes/turn; private totals round after summation.
+
+The baseline walker classified snapshot Items/recipes with public metadata. Its original metadata totals were 1061/1062 bytes/turn; other lifecycle was 606/603. Reclassifying the two retained child Item/recipe copies (304 bytes), restoration boolean (1 byte), and parent marker/index facts (99 bytes) yields the before columns above. The new finality boolean adds one marker byte, for a net 304-byte reduction per turn. Required public recipes/text lists are outside the private marker bound. A runtime graph walk rejects snapshots even behind another private index and with empty Content.
+
+The host reports a 96-byte `childState` and a separate 512-byte `childSnapshot` including headers/alignment; final children allocate only the former. These host sizes are separate from logical totals. Entry references are fixed-width uint64 and indexes are host-width int; fixed-length `sNNNN` identities keep marker cost stable, while longer identities increase logical bytes. Decimal JSON `ended_order` values explain the small public-recipe difference between history sizes. No rendered content moves into markers.
 
 ## Documentation handoff
 - Pending documentation stage: `docs/knowledge/features/thread-package-agents-and-background-work.md`, **Parent repair**: describe final child markers, which snapshots they release, why provisional ancestor/foreground closure stays resumable, and why final children retain reachability/repair facts.

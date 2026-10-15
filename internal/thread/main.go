@@ -346,6 +346,9 @@ func (f *Fold) closeText(st *mainTurn, rev uint64) {
 		st.textSlot = 0
 	}
 	f.restoreChild(st.text)
+	if state := f.children[st.text]; state != nil {
+		state.final = true
+	}
 	f.countPublicWork(1) // inspected closure candidate, including inactive rows
 	item := &f.items[st.text]
 	if item.Active {
@@ -360,6 +363,9 @@ func (f *Fold) applyTerminal(call *mainCall) {
 		return
 	}
 	f.restoreChild(call.item)
+	if state := f.children[call.item]; state != nil && call.shell == nil {
+		state.final = true
+	}
 	f.countPublicWork(1)
 	item := &f.items[call.item]
 	item.Status, item.Active, item.Rev = call.terminal.status, false, max(item.ID, call.terminal.id)

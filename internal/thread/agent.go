@@ -607,7 +607,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	// Recompute intrinsic lifecycle state without disturbing unrelated derived closure.
 	item := &f.items[c.item]
 	previous := f.recipes[item.ID]
-	if state := f.children[c.item]; state != nil && !state.restored {
+	if state := f.children[c.item]; state != nil && state.childSnapshot != nil && !state.restored {
 		item = &state.base
 		previous = state.baseRecipe
 	}
@@ -734,5 +734,9 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		if c.ordinary == nil {
 			f.scheduleAgentChildren(c.item)
 		}
+	}
+	if state := f.children[c.item]; state != nil && c.ordinary == nil {
+		// Foreground results can become launch evidence on a later task link.
+		state.final = final != nil && final.field != "result"
 	}
 }
