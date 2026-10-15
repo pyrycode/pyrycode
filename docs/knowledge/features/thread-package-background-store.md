@@ -29,6 +29,15 @@ The worker establishes interrupted-run detection, creates
 `history.Store.Forward(conversationID, 0)` and feeds raw entries through H into a
 private `Fold` using `ForwardReader.Walk`. Each chunk contains at most
 `history.MaxPageEntries`, including hidden facts and continuation evidence.
+For eligible compact recovery metadata at V, replay must first reach exactly V
+with the recorded stored-entry checksum and history-reconstructed last-shown
+watermark before reusing the epoch. Invalid or mismatched evidence rotates the
+epoch; replay continues through H either way. Old item-bearing schema-1 records
+rotate once, and cached fields never seed the fold. Full replay remains required;
+[ADR 045's resumable checkpoints and persistent index](../decisions/045-thread-index-over-history.md)
+are future work. Shared run/coordinator/marker eligibility, including compatible
+same-store unload/reload, remains unchanged until
+[#3383](https://github.com/pyrycode/pyrycode/issues/3383).
 Readiness requires successful completion, `Fold.Version() == H` and a persisted
 complete initial checkpoint; recovery remains `StateRebuilding` until that write
 succeeds, and partial replay publishes no usable view. A missing or empty
@@ -46,8 +55,10 @@ than the saved version is dirty, including entries with no public item changes.
 Its deadline is 30 seconds after the conversation's last successful checkpoint;
 later appends cannot postpone it. The worker's timer flushes dirty progress even
 when no further entries arrive; progress first becoming dirty after the deadline
-flushes immediately. Unchanged progress causes no periodic rewrite. Initial or
-scheduled checkpoint failure leaves `StateUnavailable` with generic
+flushes immediately. Unchanged progress causes no periodic rewrite.
+Checksum and watermark evidence advance only with successfully consumed complete
+progress; a partially failed feed cannot advance checkpoint or retirement evidence.
+Initial or scheduled checkpoint failure leaves `StateUnavailable` with generic
 `ErrUnavailable`; `Retry` reconstructs from history. See
 [cache and epochs](thread-package.md#cache-and-epochs) for lifecycle exceptions
 and persistence errors. Notifications cover commits through the supplied history
@@ -125,9 +136,11 @@ explicit requests for each open conversation.
 
 ### Snapshots and retry
 
-Production workers use `Fold.Render() ([]Item, error)` for recovery comparisons.
+Production recovery validates the stored-entry checksum and reconstructed
+last-shown watermark at the saved version instead of comparing rendered items.
 Publication capture uses `renderShared` on affected public rows to resolve the
-[converted standalone recipes](thread-package-main-thread-folding.md#standalone-source-entries)
+[standalone](thread-package-main-thread-folding.md#standalone-source-entries) and
+[assistant/ordinary-tool recipes](thread-package-main-thread-folding.md#main-work-source-entries)
 after excluding suppressed delivery rows and children without public parents.
 Internal capture borrows immutable source payload or inline `Content` bytes,
 reuses unchanged item pointers and replaces affected public values. Folding
@@ -145,8 +158,10 @@ Public `Fold.Render`, `Fold.Items`, `Fold.Observe`, `Fold.FeedChanges` and all
 Store item/change/query results still return complete detached content with
 their existing signatures. Public rendering copies source payload bytes;
 `Store.Snapshot` captures immutable pointers under the mutex and materializes
-detached values outside it. Checkpoints likewise materialize complete detached
-items only at the [checkpoint boundaries](thread-package.md#cache-and-epochs).
+detached values outside it. Checkpoints write only the compact scalar evidence
+described under [cache and epochs](thread-package.md#cache-and-epochs), without
+materializing detached items; they cannot supply a cache-only view or bypass
+required reference rendering before usable publication.
 Legacy folds created by `New` remain inline.
 
 The worker-owned `recentSource` resolves IDs from the current feed chunk, then
@@ -173,7 +188,20 @@ Store snapshots and query rows still retain rendered content until
 does not bound that content or deferred inline/private fold payloads.
 
 `Snapshot(conversationID) Snapshot` performs no history I/O. Its fields are
-`Active`, `State`, `Items`, `Version`, `LastShownVersion`, `Epoch` and `Err`:
+`Active`, `State`, `Items`, `Version`, `LastShownVersion`, `Epoch` and `Err`.
+
+`Store.Status(conversationID) Snapshot` returns the same metadata and readiness
+with nil `Items` in every state. It captures `State`, `Version`, `Epoch`,
+`Active`, `LastShownVersion` and `Err` from one publication under `Store.mu`,
+which also serializes publication, retry replacement and retirement. Concurrent
+reads therefore cannot mix metadata from different publications. It performs
+no history/cache I/O, worker loading, item traversal or item/content copying,
+and allocates zero bytes regardless of thread length. Use it for progress and
+readiness checks; `Store.Snapshot` and `Store.Observe` remain complete detached
+reads for consumers that need items or an observation baseline.
+
+Both reads retain these readiness rules; the items described below are returned
+by `Snapshot`:
 
 | State | Meaning |
 | --- | --- |
@@ -182,7 +210,10 @@ does not bound that content or deferred inline/private fold payloads.
 | `StateUsable` | Detached items/content, consumed version, last-shown watermark and conversation epoch from one consistent publication; newer appends may still be pending. |
 | `StateUnavailable` | The worker has ended; `Err` is the fixed `ErrUnavailable` sentinel and explicit retry can recover. |
 
-Only `StateUsable` carries items/versions/epoch. The last-shown watermark follows
+Only `StateUsable` carries versions/epoch, including an empty usable conversation;
+only `StateUnavailable` carries `ErrUnavailable`, and every other state has nil `Err`.
+`Status.Active` preserves private activity even with no public items, so nil
+`Items` cannot establish inactivity or readiness. The last-shown watermark follows
 the [history-reconstructed rule](thread-package.md#cache-and-epochs), and unread
 is `LastShownVersion > ReadUpTo`. The random epoch is independent of
 deterministic item equality and follows the [recovery compatibility rules](thread-package.md#cache-and-epochs).
@@ -474,7 +505,11 @@ eviction before missing/unreadable authoritative reads during replay and tail.
 Its tail case uses a delivery join that must resolve the evicted message:
 unrelated no-op tails reuse unchanged content and cannot exercise read failure.
 It verifies withdrawal of all usable state and equality with fresh legacy replay
-after repair and `Retry`.
+after repair and `Retry`. `TestStoreReferenceWorkRetry` extends this to text and
+terminal enrichment references, including a completed ordinary child tool.
+Its tail failure requires ancestor closure after recent-cache eviction to mark
+the rows affected: ignored history alone reuses the immutable slots and can
+leave a broken source unread, making a failure test pass without exercising it.
 
 `TestAffectedPublicationOracle` compares affected capture with whole-thread
 `difference` after single-entry and chunked corpus feeds, including private

@@ -3,6 +3,7 @@ package apps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,7 +38,14 @@ func candidateCommand(ctx context.Context, stage string, env []string, node stri
 }
 
 func candidateCommandWithCleanup(ctx context.Context, stage string, env []string, node string, args []string, version bool, cleanup func(int) error) (string, error) {
+	diagnostic := candidateDiagnostic{Command: candidateCommandName(args), ExitCode: -1}
+	defer func() {
+		if observe, ok := ctx.Value(candidateDiagnosticKey{}).(func(candidateDiagnostic)); ok {
+			observe(diagnostic)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
+		diagnostic.Cancel = err
 		return "", err
 	}
 	cmd := exec.Command(node, args...)
@@ -50,8 +58,10 @@ func candidateCommandWithCleanup(ctx context.Context, stage string, env []string
 		cmd.WaitDelay = 100 * time.Millisecond
 	}
 	if err := cmd.Start(); err != nil {
+		diagnostic.Wait = err
 		return "", err
 	}
+	diagnostic.PID = cmd.Process.Pid
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
 	var err error
@@ -66,6 +76,8 @@ func candidateCommandWithCleanup(ctx context.Context, stage string, env []string
 		}
 	}
 	cleanupErr := cleanup(cmd.Process.Pid)
+	diagnostic.ExitCode, diagnostic.Wait = cmd.ProcessState.ExitCode(), err
+	diagnostic.Cleanup, diagnostic.Cancel = cleanupErr, ctx.Err()
 	if cleanupErr != nil {
 		cleanupErr = &candidateRetirementError{cleanupErr}
 	}
@@ -82,26 +94,33 @@ func candidateCleanup(pid int) error {
 }
 
 func candidateCleanupWithKill(pid int, kill func(int, syscall.Signal) error) error {
+	return candidateCleanupWithProbe(pid, kill, candidateGroupLive)
+}
+
+func candidateCleanupWithProbe(pid int, kill func(int, syscall.Signal) error, probe func(int) (bool, error)) error {
+	var probeErr error
 	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
 		if err := kill(-pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
+			return fmt.Errorf("apps: signal process group: %w", err)
 		}
 		deadline := time.Now().Add(100 * time.Millisecond)
 		if sig == syscall.SIGKILL {
 			deadline = time.Now().Add(time.Second)
 		}
 		for time.Now().Before(deadline) {
-			live, err := candidateGroupLive(pid)
+			// Inspection errors leave retirement uncertain. Only a later positive
+			// absence result can clear them, including after forced termination.
+			live, err := probe(pid)
+			probeErr = err
 			if err != nil {
-				return err
-			}
-			if !live {
+				probeErr = fmt.Errorf("apps: inspect process group: %w", err)
+			} else if !live {
 				return nil
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	return ErrUnavailable
+	return errors.Join(ErrUnavailable, probeErr)
 }
 func candidateGroupLive(pid int) (bool, error) {
 	if runtime.GOOS != "linux" {

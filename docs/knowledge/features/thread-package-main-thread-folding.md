@@ -47,7 +47,7 @@ Child work retains its recorded turn and uses an older agent item's creating ID
 as `Parent`; see [parent repair](thread-package-agents-and-background-work.md#parent-repair) for unresolved evidence and
 ancestor closure.
 `plainSummary` collapses whitespace and removes control characters, with a kind
-label when the result is empty. `Content` retains copied source JSON, including
+label when the result is empty. Rendered `Content` retains source JSON, including
 unknown fields, as inert display data; summary normalization does not rewrite it.
 
 ### Standalone source entries
@@ -71,10 +71,11 @@ summary: clearing it releases retained bytes but still pays for discarded
 allocations. `TestReferenceSummaryDeferred` guards that creation cost.
 
 `New`, `Items`, `Observe` and `FeedChanges` remain source compatible for legacy
-inline folds. Accepted sends remain inline through delivery merging. Other
-kinds use the renderer's inline-content fallback; assistant/tool conversion is
-deferred to [#3385](https://github.com/pyrycode/pyrycode/issues/3385), including
-private continuation payloads such as `mainOutcome.raw`. See
+inline folds. Assistant text and ordinary tools use the richer recipes described
+under [main work](#main-work-source-entries). Accepted sends, agents and
+shell-lifecycle calls use the renderer's inline-content fallback. Their conversion,
+private `mainOutcome.raw` payloads and copied `parent_ending` content remain
+[#3334](https://github.com/pyrycode/pyrycode/issues/3334). See
 [snapshot rendering and retry](thread-package-background-store.md#snapshots-and-retry)
 for source resolution and the remaining Store content retention.
 
@@ -213,7 +214,7 @@ live state or current session bindings. The ordinary result/closure rules below
 apply to foreground calls; [linked background shells](thread-package-agents-and-background-work.md#background-shells) use
 independent task lifecycle.
 
-| Raw source type | Item kind | Saved content and status |
+| Raw source type | Item kind | Rendered content and status |
 | --- | --- | --- |
 | Main `assistant_delta` | `assistant_message` | Creating payload with accumulated `text`; `running` while open, `done` after closure. |
 | Ordinary main `tool_use` | `tool_call` | Creating payload, including input; initially `running`. |
@@ -231,21 +232,47 @@ ending closes its own run. Subsequent text creates a new item. Queued acceptance
 child traffic and tool reports alone do not split text. Saved text retains its
 recorded whitespace; only the summary is normalized.
 
-Main and child text and normalized summaries are maintained incrementally by
-`appendText` and `appendSummary`. Unpublished appends reuse private capacity with
-amortized work proportional to the incoming suffix. Private JSON buffers grow
+Production reference folds keep main and child `assistant_message` content as a
+`contentRecipe`: creating-entry ID, ordered text-entry IDs and named enrichment
+fields. Each field references a source entry or holds a small computed JSON
+value; copied `parent_ending` remains the temporary exception described under
+[parent repair](thread-package-agents-and-background-work.md#parent-repair).
+Nonempty subsequent deltas append only their IDs. Retained items and intrinsic
+and previous child copies contain no selected payload, accumulated text or assistant
+summary, and these items bypass inline append buffers. The shared `renderShared`
+path decodes each text payload separately, concatenates the decoded strings and
+derives `Summary` with `plainSummary`, using `assistant message` when empty.
+
+Ordinary `tool_call` items use the same renderer after launcher/shell lifecycle
+classification. Claude and metadata-free `Bash`/`local_bash` calls stay inline,
+even before a background task link; Claude/legacy Agent/Task calls remain agents.
+Codex calls with any of those names are ordinary reference-backed tools.
+Selecting by tool name alone would skip eligible Codex calls. Result, denial,
+interruption and turn-ending fields reference their original report IDs through
+`setOutcome`; private pending `mainOutcome.raw` copies remain deferred.
+
+Both modes preserve exact output bytes: the creating payload keeps its original
+formatting until enrichment or a nonempty append, then JSON keys are sorted with
+unknown creating fields and `encoding/json` escaping preserved, including
+HTML-sensitive characters. Summary whitespace/control handling matches
+`plainSummary`. Decoding each payload independently preserves UTF-8 replacement
+behavior rather than recombining invalid byte fragments across entries. Empty
+appends leave content, revision and `LastShownVersion` unchanged. Creating
+visibility is retained; inputs and returned snapshots remain detached.
+
+Creating, text and enrichment references share the Store's current-chunk,
+inclusive 1 MiB recent-cache and authoritative history lookup path. Any required
+missing/unreadable reference rejects the entire candidate publication with generic
+`StateUnavailable`/`ErrUnavailable`, without usable items, version or epoch.
+Repair followed by `Retry` rebuilds the view. See
+[snapshot rendering and retry](thread-package-background-store.md#snapshots-and-retry).
+
+Legacy `New` folds maintain main and child text and normalized summaries
+incrementally with `appendText` and `appendSummary`. Unpublished appends reuse
+private capacity with amortized work proportional to the incoming suffix. Private JSON buffers grow
 geometrically, encoding only new text and moving fixed trailing fields; the
 summary builder carries pending whitespace across deltas instead of rescanning
-accumulated text. Output remains byte-identical to the former
-decode/concatenate/re-encode path: the creating payload keeps its
-original formatting until enrichment or a nonempty append, then JSON keys are
-sorted with unknown creating fields and `encoding/json` escaping preserved,
-including HTML-sensitive characters. Summary whitespace/control handling and
-the `assistant message` empty-result fallback match `plainSummary`. Each payload
-is decoded independently, preserving UTF-8 replacement behavior rather than
-recombining invalid byte fragments across entries. Empty appends leave content,
-revision and `LastShownVersion` unchanged. Creating visibility is retained;
-input payloads and returned snapshots remain detached through buffer growth.
+accumulated text, preserving the same byte and summary rules as reference rendering.
 
 `publicationCapture.capture` borrows Content bytes without copying them and marks
 the exposed row's text buffers shared before publication. `growText` detaches
@@ -303,19 +330,32 @@ scope rules above.
 Tool reports can precede creation and remain pending across feed chunks. The
 first valid foreground terminal outcome in entry-ID order wins; later duplicate or
 conflicting outcomes change neither content, state nor revision. The creating
-call retains its input and gets the saved report when it arrives. Applying an
-earlier report keeps revision at least the creating ID.
+call retains its creating input through its recipe or inline payload and gets
+the saved report when it arrives. Applying an earlier report keeps revision at
+least the creating ID.
 
 The first matching turn ending closes running text as `done` and unfinished
-foreground ordinary calls as `interrupted`, storing the raw ending under
-`ending` on each call. **A turn closure supplies no successful tool result.**
+foreground ordinary calls as `interrupted`, rendering the raw ending under
+`ending` on each call from its source ID in reference mode.
+**A turn closure supplies no successful tool result.**
 Already terminal calls retain their outcome; child work is unaffected. Endings
 received before creation remain effective across chunks. Late text may coalesce
 but stays inactive; late foreground calls are inactive and later reports cannot
 replace their ending. A linked background shell outlives that turn; a late task
 link can repair its provisional closure, and late launch results stay retained.
 
-Child text keeps separate owned intrinsic and ancestor-derived JSON buffers.
+Reference-backed child text and ordinary tools keep independent intrinsic and
+previous recipes alongside their item metadata. `restoreChild` restores the
+intrinsic recipe before mutation; `resolveChildren` captures the updated base
+before deriving ancestor closure. Enrichment maps use copy-on-write and text-ID
+lists retain snapshot lengths. Sharing one mutable recipe would leave provisional
+`parent_ending` behind after reopening or discard late text received while
+inactive. Child comparisons include recipe state without resolving history during
+ingestion; public snapshots and observations use the shared renderer. Intrinsic
+`ending` evidence still prevents reopening independently closed work. Scope,
+visibility, public touches and revision rules are the same in both modes.
+
+Legacy inline child text keeps separate intrinsic and ancestor-derived JSON buffers.
 `resolveChildren` reuses unchanged `parent_ending` enrichment and advances both
 buffers incrementally on text appends; a late background link removes only the
 provisional closure, preserving text and normalized summary received while
@@ -498,13 +538,25 @@ unchanged pending pairs, scope and attribution before later matching and replay;
 
 `TestReferenceRendering` compares reference and legacy items across feed sizes,
 including exact JSON formatting, unknown fields, detached content and the empty
-user-summary fallback. The unchanged
+user-summary fallback. `TestReferenceWorkRendering` compares every observation
+and public touch in both modes through empty/nonempty appends, early terminals,
+child closure/reopening and late text, then resolves old text and terminal IDs
+after recent-cache eviction. `TestReferenceToolClassification` checks lifecycle
+selection across Claude and Codex tools. `TestReferenceWorkSourceFailure` requires
+atomic unavailable rendering/observations for missing creating, text or terminal
+entries; `TestStoreReferenceWorkRetry` covers missing/unreadable text and enrichment
+reads during replay and affected tail publication, followed by repair and `Retry`.
+The unchanged
 [generated/shadow and recorded corpus checkpoints](thread-package.md#reusable-fold-regression-corpus)
 constrain rendered items, revisions, consumed version and last-shown watermark.
 `TestReferenceRetainedBytes` compares the same generated input in both modes,
-reporting converted content and plain-user summary bytes separately from recipe
-ID storage, the bounded recent cache and deferred inline content; this is not a
-measurement of total Store memory.
+requiring zero converted item Content, child-copy Content, assistant summaries
+including child copies, and inline append buffers. It reports those separately
+from user summaries, logical recipe storage, the bounded recent cache, private
+outcomes, copied parent endings and other deferred inline content. Store's
+retained rendered snapshots remain outside this measurement and belong to
+[#3386](https://github.com/pyrycode/pyrycode/issues/3386); zero retained fold
+payload bytes do not establish total Store memory use.
 
 `TestMainTextRuns`, `TestMainToolTerminals` and `TestMainEndings` cover text
 splits, retained evidence, early and conflicting outcomes, activity and visibility

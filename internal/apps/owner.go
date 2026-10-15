@@ -454,5 +454,27 @@ func (o *Owner) cleanup(pid int) error {
 		time.Sleep(10 * time.Millisecond)
 	}
 	signal(syscall.SIGKILL, "kill")
-	return errors.Join(result, probeErr)
+	// Signal delivery is not retirement. In particular, an exiting macOS group
+	// can temporarily deny probes before the kernel reports its absence.
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		err := o.kill(-pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return result
+		}
+		if err == nil {
+			// Linux may retain orphan zombies; inspect every member to prove
+			// none can execute, rather than waiting for init to collect them.
+			var live bool
+			live, err = candidateGroupLive(pid)
+			if err == nil && !live {
+				return result
+			}
+		}
+		if err != nil && probeErr == nil {
+			probeErr = fmt.Errorf("apps: inspect process group: %w", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.Join(result, probeErr, errors.New("apps: process group retirement unconfirmed"))
 }

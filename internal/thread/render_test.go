@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -38,23 +39,79 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	testFeed(t, f, entries...)
 	source.remember(entries)
 	source.chunk = nil
-	var before, after, summaryBefore, summaryAfter, deferred int
+	var before, after, summaryBefore, summaryAfter, deferred, assistantBefore, assistantAfter, childBefore, childAfter, recipeBytes, parentEndings int
+	countRecipe := func(r contentRecipe) {
+		recipeBytes += int(unsafe.Sizeof(r)) + len(r.text)*8
+		for key, field := range r.fields {
+			recipeBytes += len(key) + int(unsafe.Sizeof(field))
+			if key == "parent_ending" {
+				parentEndings += len(field.value)
+			} else if len(field.value) != 0 {
+				t.Fatal("unexpected copied enrichment")
+			}
+		}
+	}
 	for i, item := range f.items {
-		if f.recipes[item.ID] != 0 {
+		if f.recipes[item.ID].creating != 0 {
+			if f.texts[i] != nil {
+				t.Fatal("reference item retained an inline append buffer")
+			}
+			countRecipe(f.recipes[item.ID])
 			before += len(legacy.items[i].Content)
 			after += len(item.Content)
 			if item.Kind == "user_message" {
 				summaryBefore += len(legacy.items[i].Summary)
 				summaryAfter += len(item.Summary)
 			}
+			if item.Kind == "assistant_message" {
+				assistantBefore += len(legacy.items[i].Summary)
+				assistantAfter += len(item.Summary)
+			}
+			if state := f.children[i]; state != nil {
+				old := legacy.children[i]
+				childBefore += len(old.base.Content) + len(old.previous.Content)
+				childAfter += len(state.base.Content) + len(state.previous.Content) + len(state.endingBase) + len(state.endingContent)
+				if item.Kind == "assistant_message" {
+					assistantBefore += len(old.base.Summary) + len(old.previous.Summary)
+					assistantAfter += len(state.base.Summary) + len(state.previous.Summary)
+				}
+				countRecipe(state.baseRecipe)
+				countRecipe(state.previousRecipe)
+			}
 		} else {
 			deferred += len(item.Content)
 		}
 	}
-	if before == 0 || after != 0 || summaryBefore == 0 || summaryAfter != 0 || source.bytes > recentEntryBudget {
+	if before == 0 || after != 0 || childBefore == 0 || childAfter != 0 || assistantBefore == 0 || assistantAfter != 0 || summaryBefore == 0 || summaryAfter != 0 || source.bytes > recentEntryBudget {
 		t.Fatal("reference retention did not drop", before, after, source.bytes)
 	}
-	t.Logf("generated entries=%d converted Content bytes before=%d after=%d plain-user Summary bytes before=%d after=%d recipes=%d (%d ID bytes excluding map overhead) recent cache=%d deferred inline item Content=%d", len(entries), before, after, summaryBefore, summaryAfter, len(f.recipes), len(f.recipes)*16, source.bytes, deferred)
+	seen := make(map[*mainOutcome]bool)
+	private := 0
+	countOutcome := func(o *mainOutcome) {
+		if o != nil && !seen[o] {
+			seen[o] = true
+			private += len(o.raw)
+		}
+	}
+	countTurn := func(st *mainTurn) {
+		countOutcome(st.end)
+		for _, call := range st.calls {
+			countOutcome(call.terminal)
+		}
+	}
+	for _, st := range f.turns {
+		countTurn(st)
+	}
+	for _, st := range f.openings {
+		countTurn(st)
+	}
+	for _, st := range f.childTurns {
+		countTurn(st)
+	}
+	for _, o := range f.childReports {
+		countOutcome(o)
+	}
+	t.Logf("generated entries=%d converted Content before=%d after=%d child-copy Content before=%d after=%d assistant Summary (including child copies) before=%d after=%d user Summary before=%d after=%d; recipes=%d logical recipe bytes=%d (includes child slots, excludes map/slice overhead, may share ID storage); bounded recent cache=%d; deferred private outcomes=%d inline parent-ending bytes across recipe slots=%d inline item Content=%d; Store snapshots excluded", len(entries), before, after, childBefore, childAfter, assistantBefore, assistantAfter, summaryBefore, summaryAfter, len(f.recipes), recipeBytes, source.bytes, private, parentEndings, deferred)
 }
 
 func TestReferenceSummaryDeferred(t *testing.T) {
@@ -89,7 +146,7 @@ func TestReferenceRendering(t *testing.T) {
 			source.remember(chunk)
 			source.chunk = nil
 		}
-		if f.items[0].Content != nil || f.items[0].Summary != "" || f.recipes[1] != 1 {
+		if f.items[0].Content != nil || f.items[0].Summary != "" || f.recipes[1].creating != 1 {
 			t.Fatal("plain message retained content or summary")
 		}
 		got, err := f.Render()
@@ -250,27 +307,52 @@ func TestReferenceDeliveryEvicted(t *testing.T) {
 }
 
 func TestStoreReferenceRetry(t *testing.T) {
+	testStoreReferenceRetry(t, []history.Entry{testMessage(1)}, 1)
+}
+
+func TestStoreReferenceWorkRetry(t *testing.T) {
+	entries := []history.Entry{
+		testMain(1, "tool_use", `,"tool_use_id":"parent","name":"Agent","input":{}`),
+		testMain(2, "assistant_delta", `,"parent_tool_use_id":"parent","text":"a"`),
+		testMain(3, "assistant_delta", `,"parent_tool_use_id":"parent","text":"b"`),
+		testMain(4, "tool_use", `,"parent_tool_use_id":"parent","tool_use_id":"r","name":"Read"`),
+		testMain(5, "tool_result", `,"parent_tool_use_id":"parent","tool_use_id":"r","is_error":false`),
+	}
+	for _, missing := range []uint64{3, 5} {
+		t.Run(fmt.Sprint(missing), func(t *testing.T) { testStoreReferenceRetry(t, entries, missing) })
+	}
+}
+
+func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint64) {
+	t.Helper()
 	for _, phase := range []string{"replay", "tail"} {
 		for _, failure := range []string{"missing", "unreadable"} {
 			t.Run(phase+"/"+failure, func(t *testing.T) {
 				s, h := testThreadStore(t)
 				first := testMessage(1)
-				if phase == "tail" {
+				if len(initial) > 1 {
+					first = initial[0]
+				}
+				target := missing
+				if phase == "tail" && len(initial) == 1 {
 					first = testAcceptance(1, "phone")
 				}
 				entries := testStoreAppend(t, h, testStoreA, first)
-				if phase == "tail" {
+				if phase == "tail" && len(initial) == 1 {
 					entries = append(entries, testStoreAppend(t, h, testStoreA, testMessage(0))...)
+					target = 2
 				}
+				entries = append(entries, testStoreAppend(t, h, testStoreA, slices.Clone(initial[1:])...)...)
 				var armed atomic.Bool
 				armed.Store(phase == "replay")
 				base := s.lookup
 				s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
-					if !armed.Load() {
+					if !armed.Load() || !slices.Contains(ids, target) {
 						return base(ctx, id, ids)
 					}
 					if failure == "missing" {
-						return nil, nil
+						resolved, err := base(ctx, id, ids)
+						return slices.DeleteFunc(resolved, func(e history.Entry) bool { return e.ID == target }), err
 					}
 					return nil, errors.New("private unreadable source")
 				}
@@ -290,6 +372,11 @@ func TestStoreReferenceRetry(t *testing.T) {
 					// Unchanged publications need no source reread. A delivery join
 					// must resolve its evicted message before publishing progress.
 					entries = append(entries, testStoreAppend(t, h, testStoreA, testSendOutcome(0, "send_delivered", `,"accepted_entry_id":1,"delivery_entry_id":2`, "delivered"))...)
+					if len(initial) > 1 {
+						// Ancestor closure revisits both child recipes, including a
+						// completed tool whose intrinsic result remains unchanged.
+						entries = append(entries, testStoreAppend(t, h, testStoreA, testMain(0, "tool_result", `,"tool_use_id":"parent","is_error":false`))...)
+					}
 				}
 				if err := s.Load(context.Background(), testStoreA); err != nil {
 					t.Fatal(err)

@@ -163,9 +163,9 @@ func (s *Store) start(ctx context.Context, id conversations.ConversationID, retr
 func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *conversationWorker) {
 	result := ErrUnavailable
 	var progress Snapshot
+	var checksum, progressChecksum string
 	var capture publicationCapture
 	capture.copied = s.queryCopies
-	var progressItems []*Item
 	var recovery recoveryRecord
 	var savedVersion uint64
 	var lastCheckpoint time.Time
@@ -178,9 +178,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		deadline, stopTimer = nil, nil
 	}
 	flush := func() error {
-		checkpoint := progress
-		checkpoint.Items = detachPublication(progressItems)
-		if err := s.checkpoint(id, recovery, checkpoint); err != nil {
+		if err := s.checkpoint(id, recovery, progress, progressChecksum); err != nil {
 			return err
 		}
 		savedVersion, lastCheckpoint = progress.Version, s.now()
@@ -206,7 +204,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		}
 		w.err = result
 		if s.workers[id] == w {
-			s.records[id] = progressRecord{Epoch: progress.Epoch, Version: progress.Version, Err: result}
+			s.records[id] = progressRecord{Epoch: progress.Epoch, Version: progress.Version, LastShownVersion: progress.LastShownVersion, Checksum: progressChecksum, Err: result}
 			if !w.retiring && !s.closed {
 				w.snapshot = Snapshot{State: StateUnavailable, Err: ErrUnavailable}
 				w.items = nil
@@ -264,18 +262,20 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		source.chunk = entries
 		err := fold.Feed(entries)
 		source.remember(entries)
-		return err
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			checksum = entryChecksum(entries[len(entries)-1])
+		}
+		return nil
 	}
 	epoch := ""
 	if candidate.Epoch != "" {
 		if err := reader.Walk(ctx, candidate.Version, feed); err != nil {
 			return
 		}
-		items, err := fold.Render()
-		if err != nil {
-			return
-		}
-		if fold.Version() == candidate.Version && sameItems(candidate.Items, items) {
+		if fold.Version() == candidate.Version && checksum == candidate.Checksum && fold.lastShown == candidate.LastShownVersion {
 			epoch = candidate.Epoch
 		}
 	}
@@ -303,8 +303,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		changes.Snapshot = snapshot
 		initial := progress.State != StateUsable
 		becameIdle := progress.Active && !snapshot.Active
-		progress = snapshot
-		progressItems = items
+		progress, progressChecksum = snapshot, checksum
 		if initial || progress.Version != savedVersion {
 			remaining := lastCheckpoint.Add(30 * time.Second).Sub(s.now())
 			if initial || becameIdle || remaining <= 0 {
@@ -386,8 +385,8 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	}
 }
 
-func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRecord, snapshot Snapshot) error {
-	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, Items: snapshot.Items, Complete: true, Recovery: recovery})
+func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRecord, snapshot Snapshot, checksum string) error {
+	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, LastShownVersion: snapshot.LastShownVersion, Checksum: checksum, Complete: true, Recovery: recovery})
 }
 
 func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, items []*Item, changes Observation, fold *Fold, affected []int) {
@@ -436,6 +435,19 @@ func (s *Store) Snapshot(id conversations.ConversationID) Snapshot {
 	} else {
 		snapshot.Items = copyItems(snapshot.Items)
 	}
+	return snapshot
+}
+
+// Status returns Snapshot's metadata and readiness from one publication, with
+// nil Items. It performs no I/O, worker load, item traversal or allocation.
+func (s *Store) Status(id conversations.ConversationID) Snapshot {
+	s.mu.Lock()
+	var snapshot Snapshot
+	if w := s.workers[id]; w != nil && !w.retiring {
+		snapshot = w.snapshot
+	}
+	s.mu.Unlock()
+	snapshot.Items = nil
 	return snapshot
 }
 

@@ -375,6 +375,26 @@ and forbids restoration/removal. Cancellation-independent restoration is joined
 by Stop/Shutdown. A committed or uncertain activation also forbids destructive
 restoration; see [durability](apps-package-concurrency-and-persistence.md#registry-durability).
 
+SIGKILL delivery is not retirement proof. `Owner.cleanup` polls for up to one
+second after forced termination, accepting only positive group absence. Transient
+inspection errors such as macOS EPERM can resolve through a later ESRCH; EPERM
+itself never establishes absence. After a successful group probe,
+`candidateGroupLive` also permits Linux groups containing only nonexecuting
+zombies; this fallback cannot bypass a denied probe. Denied TERM/KILL signals
+remain errors even after confirmed absence. Persistent inspection uncertainty or
+live members at the deadline return unconfirmed retirement. The publication
+supervisor joins both cleanup helpers and the asynchronous leader wait before
+`completed` closes `g.done`; completion carries cleanup failure and is not by
+itself a successful-retirement claim.
+
+Retirement uncertainty must remain distinct from the health sentinel
+`ErrUnavailable`: `finishUpdateFailure` interprets that sentinel as unconfirmed
+previous-service health. Reusing it for cleanup timeout would misclassify unsafe
+writers as `app.unavailable`. Uncertain retirement retains static `app.io_failed`
+metadata, the journal/`RetirementPending` as applicable, unavailable targets and
+barriers against restoration, removal, reuse and retry. See the
+[controlled retirement proofs](apps-package-testing.md#publication-fixtures).
+
 Previous-release health is a recovery decision, not candidate activation.
 `confirmRunning` dispatches recovery to `confirmRecoveryLocked`, which clears
 evidence and exposes the previous release only after verified restoration (when
