@@ -187,8 +187,8 @@ before message processing; see
 The [counted #3440 proof](../../hosted-apps.md#implementation-and-validation-ownership)
 records **13 executed, 13 passed, 0 failed, 0 skipped** focused fake-relay tests
 and subtests with a race-built daemon and synthetic `node` reporting `v24.15.0`.
-Actual Node/template and real-relay validation remain #3441; native assembly,
-publisher and live-channel acceptance remain downstream.
+The same evidence records passing real-relay and actual Node/template arms
+(#3441); native assembly, publisher and live-channel acceptance remain downstream.
 
 A zero-body 204 finishes at response metadata, so withholding chunk credit cannot
 establish a disconnect after commit but before response. `TestHostedAppsPairedResources`

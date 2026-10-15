@@ -21,8 +21,8 @@ updates and before-activation startup recovery are implemented; after-activation
 resolution (#3404) and publishing control/daemon wiring (#3301/#3266) remain
 separate slices.
 The daemon installs this owner for encrypted asset/API routing and cached
-infrastructure/runtime readiness (#3440). Actual Node/template and real-relay
-validation remain #3441; see [readiness and evidence](apps-package-lifecycle-and-restart-state.md#lifecycle-and-restart-state).
+infrastructure/runtime readiness (#3440), with counted actual Node/template and
+real-relay acceptance (#3441); see [readiness and evidence](apps-package-lifecycle-and-restart-state.md#lifecycle-and-restart-state).
 
 ## Package topics
 
