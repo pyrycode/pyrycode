@@ -10,6 +10,8 @@ import (
 )
 
 func TestReferenceFinalReportAccounting(t *testing.T) {
+	var mainPerTurn int
+	t.Logf("host struct sizes: mutable mainCall=%d marker=%d; map slots hold pointers so sparse finished maps do not inline the larger records", reflect.TypeFor[mainCall]().Size(), reflect.TypeFor[mainCallMarker]().Size())
 	for _, turns := range []int{16, 64} {
 		for _, padding := range []int{16, 4096} {
 			var entries []history.Entry
@@ -46,11 +48,22 @@ func TestReferenceFinalReportAccounting(t *testing.T) {
 					t.Fatal("workload contains unfinished items")
 				}
 			}
+			for _, st := range f.turns {
+				if st.calls != nil || len(st.finished) != 2 {
+					t.Fatal("finished workload retained mutable calls or unexpected marker count")
+				}
+			}
 			bytes := testFinalReportBytes(f)
 			if bytes[0] != turns*testFinalReportBytesForOne() {
 				t.Fatal("final marker cost changed with history or payload size", bytes[0])
 			}
-			t.Logf("turns=%d entries=%d padding=%d logical bytes/turn: final-markers=%.0f metadata-recipes=%.0f active-unresolved=%.0f other-lifecycle=%.0f; source-cache=%d total; scalar sizes + string bytes; container/header/capacity overhead excluded, pointer targets counted once, strings counted per field (no backing-sharing deduction); fixed-width entry IDs, fixed-length source IDs", turns, len(entries), padding, float64(bytes[0])/float64(turns), float64(bytes[1])/float64(turns), float64(bytes[2])/float64(turns), float64(bytes[3])/float64(turns), source.bytes)
+			if mainPerTurn == 0 {
+				mainPerTurn = bytes[4] / turns
+			}
+			if mainPerTurn == 0 || bytes[4] != turns*mainPerTurn {
+				t.Fatal("main marker cost changed with history or payload size", bytes[4])
+			}
+			t.Logf("turns=%d entries=%d padding=%d logical bytes/turn: agent-markers=%.0f main-markers=%.0f metadata-recipes=%.0f active-unresolved=%.0f other-lifecycle=%.0f; source-cache=%d total; scalar sizes + string bytes; container/header/capacity overhead excluded, pointer targets counted once, strings counted per field (no backing-sharing deduction); fixed-width entry IDs, fixed-length source IDs", turns, len(entries), padding, float64(bytes[0])/float64(turns), float64(bytes[4])/float64(turns), float64(bytes[1])/float64(turns), float64(bytes[2])/float64(turns), float64(bytes[3])/float64(turns), source.bytes)
 		}
 	}
 }
@@ -63,13 +76,19 @@ func testFinalReportBytesForOne() int {
 
 // Logical accounting follows every retained field, including intrinsic/previous
 // child state. It excludes the authoritative fixture source and Store snapshots.
-func testFinalReportBytes(root any) [4]int {
-	var totals [4]int
+func testFinalReportBytes(root any) [5]int {
+	var totals [5]int
 	seen := make(map[uintptr]bool)
 	var walk func(reflect.Value, int)
 	walk = func(v reflect.Value, category int) {
 		if !v.IsValid() {
 			return
+		}
+		if v.Type() == reflect.TypeFor[mainCallMarker]() {
+			category = 4
+		}
+		if category == 4 && v.Type() == reflect.TypeFor[mainTurn]() && v.FieldByName("end").IsNil() {
+			category = 2
 		}
 		if v.Type() == reflect.TypeFor[Item]() || v.Type() == reflect.TypeFor[contentRecipe]() {
 			category = 1
@@ -94,10 +113,21 @@ func testFinalReportBytes(root any) [4]int {
 			}
 		case reflect.Struct:
 			for i := 0; i < v.NumField(); i++ {
-				if v.Type() == reflect.TypeFor[Fold]() && v.Type().Field(i).Name == "source" {
-					continue
+				fieldCategory := category
+				if v.Type() == reflect.TypeFor[Fold]() {
+					switch v.Type().Field(i).Name {
+					case "source":
+						continue
+					case "turns", "openings", "openTexts":
+						fieldCategory = 4
+					case "childReports":
+						fieldCategory = 2
+					}
 				}
-				walk(v.Field(i), category)
+				if category == 4 && v.Type() == reflect.TypeFor[mainTurn]() && v.Type().Field(i).Name == "calls" {
+					fieldCategory = 2 // unresolved calls and shared shell exceptions
+				}
+				walk(v.Field(i), fieldCategory)
 			}
 		case reflect.Map:
 			iter := v.MapRange()

@@ -240,6 +240,15 @@ the callback before returning; a replacement is untouched. Child start and exit
 also drain pending reads. Sacrificing the unresponsive child avoids both an
 unbounded waiter and a partial control envelope.
 
+`TestRunner_QueryAppliedSettings_ContextEndsBlockedWrite` runs cancellation and
+deadline cases inside `testing/synctest.Test`, asserting a live context when the
+writer starts before checking unsuccessful completion, writer closure, retired
+child binding and the exact context error. Starting a short wall-clock deadline
+before dispatch can expire under host load before the query reaches `Write`,
+testing admission refusal instead of interruption. The isolated clock lets
+runnable query work reach the blocked writer before time advances, while still
+exercising timer-driven cancellation.
+
 `New` infers correlation when `Config.Stdout` is directly the `*Parser`. When a
 wrapper such as `io.MultiWriter` also observes raw output, `Config.ControlParser`
 must name the exact parser receiving every child byte. Otherwise parsing works
