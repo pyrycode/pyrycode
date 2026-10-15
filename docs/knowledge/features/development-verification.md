@@ -480,6 +480,32 @@ Before accepting a baseline comparison as attribution, compare suite composition
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.
 
+### Diagnosing startup recovery runtime
+
+A test active when the package times out need not account for the package's
+elapsed time. Retain its active interval separately from package runtime, with
+phase-start diagnostics and durations for fixture construction, raw paging,
+recovery, reopened reads and repeated recovery. Preserve timeout stacks when a
+timeout occurs. Later passes establish non-reproduction, not the historical
+cause. The [startup comparison](../../specs/architecture/3431-startup-recovery-runtime.md#revisions)
+reduced isolated startup time from 28.48 to 5.78 seconds, while complete package
+runs took 303.756 and 291.762 seconds. Neither ordinary runs nor four prebuilt
+race binaries pinned to one CPU reproduced the historical timeout.
+
+Compare baseline and candidate under identical bounded contention, retaining
+each process's settings, revision, command, JSON results and status. Join the
+controlled workload before ordinary package and combined-gate measurements;
+record any incidental overlap separately. Focused passes cannot certify the
+complete gate. Retain named execution/pass/fail/skip counts and skip reasons for
+each test tier; aggregate green gates without named results cannot prove that a
+particular regression ran.
+
+Fixture cost depends on encoded bytes. JSON escaping can multiply padding size,
+and paging decodes whole segments repeatedly. Measure on-disk bytes and assert
+raw pagination and physical rollover independently before accepting smaller
+padding. See the [startup fixture coverage](history-package-producers-legacy-compatibility.md)
+for the independent failure controls and retained recovery assertions.
+
 ### Diagnosing reply timeouts
 
 For reset classification, record elapsed post-persistence resolution, first
