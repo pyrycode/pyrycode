@@ -129,3 +129,48 @@ Both suites had the same fourteen skips:
 `go vet ./...` passed (exit 0). `TMPDIR=/private/tmp/builder-3399/physical make build` passed (exit 0; recipe `go build -o ./pyry ./cmd/pyry`). `git diff --check` passed. No binary was installed or swapped.
 
 Open questions are resolved as follows: baseline repeated runs did not reproduce historical invalidation, and the retained controlled experiment distinguishes its error pattern without asserting its historical cause; the scoped suite found the existing #3418 failure. The aggregate gate remains **pending/incomplete**, owned by the verifier: run uncached `make check` at the final pushed revision with normal package concurrency, a recorded supplied/resolved TMPDIR, and named counts/skips for full-module race tests and fake-daemon e2e, plus vet, staticcheck and substrate-guard results. `make build` is already green here. No live-Claude evidence is required.
+
+### 2026-10-15 — verifier finding 1, merged native retirement repair
+
+The dispatcher merged main into this branch at `8f543e1ab6fe1ee60089a384cdd79d8b9565b0cb`. This includes closed #3418 through merge `5864fa30`: `Owner.cleanup` now positively confirms process-group retirement after SIGKILL, with a finite one-second observation window, preserving denied-signal and persistent-uncertainty errors. Its controlled regression and native evidence are in `internal/apps/publication_retirement_probe_test.go` and `internal/apps/testdata/3418-macos-resumed-results.json`. The separate candidate-command cleanup repair #3447 is included too. No API or publication production code is changed by this rework.
+
+The retrieved verifier bundle `7a23f7303bd8fd65f7cfb26a64f710fcdbc143d3f7addc0459480e06439317e6` confirms the earlier `dab1ee787ae8` aggregate stopped in the race unit tier at `TestPublishRetirement/health/intent`; the later tiers did not run. That failed result remains recorded above and is not superseded by focused passes.
+
+Revalidate the merged tree with the named retirement regression, twenty API response repetitions and one uncached complete apps race suite per physical/symlink TMPDIR, plus vet and build. Select the supported real Node/npm used by #3418 to exercise the real-tool arms. Keep normal concurrency and retain all attempted results. The builder still does not run `make check`: the pushed rework resumes the dispatcher/verifier aggregate gate, which must execute uncached at that pushed revision, report named counts/skips and all tiers, then run `make build`. The aggregate remains pending until its owning stage records those results.
+
+### Rework scoped verification evidence
+
+Test source revision: `8f543e1ab6fe1ee60089a384cdd79d8b9565b0cb`; only this plan was dirty during tests. Native macOS 26.6.2/arm64, Go 1.26.2, Node 24.15.0/npm 11.12.1. Every test command supplied `HOSTED_APP_NODE=/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node` and `HOSTED_APP_NPM_CLI=/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js`. `GOFLAGS`, `GOMAXPROCS`, `GORACE`, `CGO_ENABLED` and `GOTOOLCHAIN` were unset; no package/test concurrency override or concurrent validation workload was introduced by this run.
+
+TMPDIR physical supplied/resolved: `/private/tmp/builder-3399-rework/physical`; deliberately created symlink supplied: `/private/tmp/builder-3399-rework/alias`, resolved to that physical directory. Scratch JSON, stderr and summaries are under `/tmp/builder-3399-rework/`. Exact test commands, with the Node selections above:
+
+- `TMPDIR=/private/tmp/builder-3399-rework/physical go test -race -json -count=1 -run '^TestPublishRetirement$' ./internal/apps`
+- For each supplied root: `TMPDIR=<root> go test -race -json -count=20 -run '^TestAPIResponses$' ./internal/apps`
+- For each supplied root: `TMPDIR=<root> go test -race -json -count=1 ./internal/apps`
+
+Counts include parent tests and subtests, in executed / passed / failed / skipped order:
+
+| Run | Counts | Result |
+| --- | --- | --- |
+| Named retirement regression | 19 / 19 / 0 / 0 | PASS, 10.676 s |
+| Physical response repetitions | 360 / 360 / 0 / 0 | PASS, 13.975 s |
+| Alias response repetitions | 360 / 360 / 0 / 0 | PASS, 14.359 s |
+| Physical complete apps | 1029 / 1025 / 0 / 4 | PASS, 385.670 s |
+| Alias complete apps | 1029 / 1025 / 0 / 4 | PASS, 344.142 s |
+
+The named regression executed/passed every build/migration/health × stop/remove/shutdown/cancel/intent/intent_cycle arm and its parent, with no skips. Each response repetition batch executed/passed all seventeen arms listed in the earlier evidence twenty times, including exact, overflow and capacity; no arm skipped. Both full-suite top-level counts were 213 / 213 / 0 / 0. Each complete suite passed all 24 API response/diagnostic records, all eighteen retirement arms and the supported real-tool checks without skips.
+
+Both complete suites skipped exactly `TestBackupAliasedTempRoot/states/nested`, `TestBackupStates/nested`, `TestRestoreStates/nested` and `TestRetainedValidation/invalid_UTF8`: each reported `filesystem rejects invalid UTF-8 filename (EILSEQ)`. There were no unsupported-Node/npm skips. All five test commands exited zero, and all five stderr logs were empty; no failed attempt was discarded or retried.
+
+The physical complete run's controlled diagnostics retained the same classes: overflow `apps: response byte limit exceeded` (67.032 ms, 33 reservations/33 reads), capacity `apps: response capacity unavailable` (0.784 ms, 1/0), header/body `apps: response I/O failed` (0.746/0.751 ms, 0/0 and 1/1), all with valid targets, one request and zero retained budget. Controlled invalidation returned `apps: service unavailable` after 27.916 ms with an invalid target, one request and zero budget; the subsequent capacity attempt returned unavailable with no additional request and zero budget. These observations retain the historical attribution limits.
+
+The alias complete run observed those same exact errors, phases, target validity, request counts and zero budgets. Its durations were 62.832 ms (overflow), 1.805 ms (capacity), 1.206/1.598 ms (header/body I/O) and 28.520 ms (invalidation); no timing bound was increased.
+
+`TMPDIR=/private/tmp/builder-3399-rework/physical go vet ./...` and `TMPDIR=/private/tmp/builder-3399-rework/physical make build` passed (exit zero); build executed `go build -o ./pyry ./cmd/pyry`. `git diff --check` passed. No binary was installed or swapped. The rework changes this plan only; the production retirement repair remains owned by merged #3418.
+
+Aggregate handoff remains **pending/incomplete**, with no aggregate command executed by this builder. At the final pushed revision, the dispatcher/verifier should use the physical TMPDIR and supported Node/npm selections above with `make check GO=/tmp/builder-3399-rework/go-counted`, then `make build`. The prepared scratch wrapper forwards to `/opt/homebrew/bin/go`, adding only `-json -count=1` for test commands, preserving ordinary package concurrency; recreate it if necessary on another checkout/computer. Record every actual gate tier, named counts and skip reasons, including full-module race and fake-daemon e2e. A cached/focused pass cannot satisfy acceptance criterion 4. The earlier failed gates remain failures; this scoped success alone does not complete the aggregate requirement.
+
+## Documentation handoff
+
+- Pending documentation stage: `docs/knowledge/features/apps-package-testing.md`, "Other package fixtures": describe the response-specific manual health clock, retained failure-class experiment and preserved exact-size, rejection, forwarding and budget assertions.
+- Pending documentation stage: `docs/knowledge/features/development-verification.md`, "Test execution and artifact survival": carry forward historical-attribution limits and the final aggregate outcome, including any continuing retirement limitation. Distinguish passing response proofs from a failing/incomplete aggregate gate.
