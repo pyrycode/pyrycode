@@ -15,23 +15,18 @@ const MaxCatchUpGap = 1024
 // Latest public touches suffice for current-state selection; suppressed rows
 // require reset because the client has no projection removal operation.
 func (q *queryIndex) prepareCatchUp(f *Fold) {
-	root := q.byID
 	q.touched, q.invalidTouches = nil, 0
-	var prepare func(*queryTree)
-	prepare = func(n *queryTree) {
-		if n == nil {
-			return
+	for _, bucket := range q.byID {
+		for id, row := range bucket {
+			q.count(true)
+			row.touch = f.touches[id]
+			bucket[id] = row
+			q.touched = q.treePut(q.touched, row.touch, id, row)
+			if row.touch == 0 || row.touch > f.version {
+				q.invalidTouches++
+			}
 		}
-		prepare(n.left)
-		row := queryRow{n.row.item, f.touches[n.row.item.ID]}
-		q.byID = q.treePut(q.byID, row.item.ID, row.item.ID, row)
-		q.touched = q.treePut(q.touched, row.touch, row.item.ID, row)
-		if row.touch == 0 || row.touch > f.version {
-			q.invalidTouches++
-		}
-		prepare(n.right)
 	}
-	prepare(root)
 	q.evidence(f)
 }
 

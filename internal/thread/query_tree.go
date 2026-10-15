@@ -1,6 +1,9 @@
 package thread
 
-import "context"
+import (
+	"context"
+	"maps"
+)
 
 type queryRow struct {
 	item  *Item
@@ -109,18 +112,9 @@ func (q *queryIndex) treePut(n *queryTree, key, id uint64, row queryRow) *queryT
 }
 
 func (q *queryIndex) lookup(id uint64, preparing bool) (queryRow, bool) {
-	for n := q.byID; n != nil; {
-		q.count(preparing)
-		if id == n.key {
-			return n.row, true
-		}
-		if id < n.key {
-			n = n.left
-		} else {
-			n = n.right
-		}
-	}
-	return queryRow{}, false
+	q.count(preparing)
+	row, ok := q.byID[id%uint64(len(q.byID))][id]
+	return row, ok
 }
 
 func (q *queryIndex) rank(n *queryTree, key uint64) int {
@@ -175,7 +169,16 @@ func (q *queryIndex) membership(row queryRow, remove bool) {
 	if remove {
 		value = queryRow{}
 	}
-	q.byID = q.treePut(q.byID, item.ID, item.ID, value)
+	bucket := item.ID % uint64(len(q.byID))
+	q.count(true)
+	if remove {
+		delete(q.byID[bucket], item.ID)
+	} else {
+		if q.byID[bucket] == nil {
+			q.byID[bucket] = make(map[uint64]queryRow)
+		}
+		q.byID[bucket][item.ID] = row
+	}
 	if item.Order != 0 {
 		q.ordered = q.treePut(q.ordered, item.Order, item.ID, value)
 	}
@@ -196,8 +199,22 @@ func (q *queryIndex) advance(items []*Item, affected []int, f *Fold, work func(b
 	next := *q
 	next.work = work
 	next.copied = copied
+	// Copy only affected hash buckets. Clone copies index storage without
+	// comparing unrelated items; parent lookup remains constant-time.
+	var cloned [256]bool
+	if copied != nil {
+		copied(len(next.byID))
+	}
 	for _, i := range affected {
 		next.count(true)
+		bucket := f.items[i].ID % uint64(len(next.byID))
+		if !cloned[bucket] {
+			if copied != nil {
+				copied(3 * len(next.byID[bucket]))
+			}
+			next.byID[bucket] = maps.Clone(next.byID[bucket])
+			cloned[bucket] = true
+		}
 		if old, ok := next.lookup(f.items[i].ID, true); ok {
 			next.membership(old, true)
 		}

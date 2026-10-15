@@ -169,6 +169,9 @@ func TestIncrementalTreeOwnership(t *testing.T) {
 	go func() {
 		defer close(done)
 		for range 50 {
+			if row, ok := old.lookup(300, false); !ok || row.item.Rev != 300 || row.touch != 300 {
+				t.Error("borrowed ID lookup changed")
+			}
 			got, err := old.window(context.Background(), snap, 0, 10, true)
 			if err != nil || !reflect.DeepEqual(got, want) {
 				t.Error("borrowed root changed", err)
@@ -190,7 +193,7 @@ func TestIncrementalTreeOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 		s.publish(context.Background(), testStoreA, w, items, changes, f, c.affected)
-		for _, root := range []*queryTree{w.query.byID, w.query.ordered, w.query.active, w.query.touched} {
+		for _, root := range []*queryTree{w.query.ordered, w.query.active, w.query.touched} {
 			var validate func(*queryTree) (int, int)
 			validate = func(n *queryTree) (int, int) {
 				if n == nil {

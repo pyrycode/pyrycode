@@ -33,14 +33,15 @@ type QueryResult struct {
 
 // queryIndex borrows immutable publication items; private fold rows never enter it.
 type queryIndex struct {
-	byID, ordered, active, touched *queryTree
-	work                           func(bool)
-	copied                         func(int) // copied tree pointers, separate from semantic visits
-	invalidTouches                 int
-	coveredThrough                 uint64
-	unprovenThrough                uint64
-	suppressed                     uint64
-	complete                       bool
+	byID                     [256]map[uint64]queryRow
+	ordered, active, touched *queryTree
+	work                     func(bool)
+	copied                   func(int) // copied pointers/index positions, separate from semantic visits
+	invalidTouches           int
+	coveredThrough           uint64
+	unprovenThrough          uint64
+	suppressed               uint64
+	complete                 bool
 }
 
 func newQueryIndex(items []Item, work func(bool)) *queryIndex {
