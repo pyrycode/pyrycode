@@ -163,6 +163,15 @@ method name and only delegates. `TestDaemonThreadStatusInterleaving` forces
 advancement, withdrawal and same-epoch reload after the status hint, checking
 captured output/cursors and retirement before replacement.
 
+`testThreadMetadataFixture`, shared with `BenchmarkDaemonThreadMetadata`, owns
+an independent worker context for `Store.Load`. `testing.TB.Context` is cancelled
+before cleanup: using it as the load parent can let both allocation subtests
+pass while parent cleanup fails clean certification with `ErrPersistence`.
+Register cleanup before loading; join `Store.Shutdown`, report its error, then
+cancel the owned context with a defer inside cleanup so fixture failures also
+release it. Keep the load parent alive through the join to preserve the
+[retirement certification contract](thread-package-background-store.md#isolation-and-lifecycle).
+
 Wire lifecycle tests must read the live acceptance before completing same-version
 catch-up, which can suppress duplicate publication. A delivered message and its
 outcome can reach separate fold batches; suppressing the earlier public message

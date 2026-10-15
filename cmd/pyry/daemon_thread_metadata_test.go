@@ -36,13 +36,15 @@ func testThreadMetadataFixture(t testing.TB) (*threadShadow, *thread.Store, *dae
 			t.Fatal(err)
 		}
 	}
+	workerCtx, cancel := context.WithCancel(context.Background())
 	store := thread.NewStore(h)
 	t.Cleanup(func() {
+		defer cancel()
 		if err := store.Shutdown(); err != nil {
 			t.Error(err)
 		}
 	})
-	if err := store.Load(t.Context(), testConvID); err != nil {
+	if err := store.Load(workerCtx, testConvID); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
