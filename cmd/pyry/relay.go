@@ -151,6 +151,7 @@ type relayWiring struct {
 	shadow *threadShadow
 	// appRegistry persists independently of channel/session lifetimes.
 	appRegistry *apps.Registry
+	appOwner    *apps.Owner
 	// instanceName is the daemon instance name; it derives the per-instance
 	// server-id, device-registry, conversations-registry, and static-key paths.
 	instanceName string
@@ -1507,7 +1508,7 @@ func startRelayV2(
 	}
 	installDaemonLiveRelay(&sessionConfig, w, liveContextUsage)
 	installDaemonThreadRelay(&sessionConfig, w.shadow)
-	mgr, detachApps, err := newDaemonAppsManager(sessionConfig, w.appRegistry)
+	mgr, detachApps, err := newDaemonAppsManager(ctx, sessionConfig, w.appRegistry, w.appOwner)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
 	}
@@ -1577,7 +1578,10 @@ func startRelayV2(
 	// goroutine, so the two fan-outs that trigger it never wait on it; it exits
 	// with the daemon ctx. Handed to the bridge and the emitter below, each before
 	// the goroutine that reads the field starts.
-	waker := newPushWaker(mgr, registry, conn.SendPushWake, logger)
+	waker := newPushWaker(mgr, registry, conn.SendPushWakeFeedback, logger)
+	waker.invalid = func(ctx context.Context, snapshot devices.Device) {
+		clearInvalidPushRegistration(ctx, registry, resolveDevicesPath(w.instanceName), snapshot, logger)
+	}
 	go waker.run(ctx)
 
 	// Stream-json approval bridge (#1080): joins the daemon-singleton permbridge

@@ -4,6 +4,44 @@ See the [package overview](apps-package.md) for the topic map.
 
 ## Testing
 
+### Initialized SQLite subprocess proof
+
+Absent-data or uninitialized publications bypass SQLite snapshot subprocesses;
+their success cannot establish portable initialized-data updates. On macOS
+arm64, execute `TestCommittedTemplateUpdateSnapshot` without a platform skip,
+`TestBackupSQLiteWAL` and `TestUpdateTemplateSnapshot` using real supported Node
+and npm selected through `HOSTED_APP_NODE` and `HOSTED_APP_NPM_CLI`. The retained
+assertion calls `SnapshotData` and fresh `VerifyBackup` on an initialized database.
+The WAL arm proves committed WAL-only preferences and ledger preservation,
+standalone DELETE mode without sidecars, and repeated unchanged verification
+after removing source data. The maintained-template update must activate a
+healthy candidate, retain saved preferences and its new migration, and freshly
+verify a backup matching the complete pre-migration schema/preferences/ledger.
+See the [snapshot fixtures](apps-package-concurrency-and-testing.md#testing).
+
+`TestBackupNodeDirectoryIdentity` moves the selected directory to another parent
+at launch, then replaces its old pathname with either a directory or symlink in
+both snapshot and verify modes. It checks selected data, outside/replacement
+sentinels and unchanged parent cwd. Use canonical `testRoot` paths: macOS `/var`
+aliases otherwise fail no-follow selection before reaching the launch hook.
+`TestBackupNodeFailures` and `TestBackupNodeBootstrapRejectsInvalidDirectory`
+cover runtime/version/exec/SQL failures and missing/non-directory descriptors;
+`TestBackupSQLiteCancellation` and `TestBackupSQLiteStorageErrors` retain joined
+child, unchanged data and failed-snapshot evidence checks.
+
+Record revision, OS/architecture, Node/npm versions, exact commands and
+executed/pass/fail/skip counts for each required arm; skips, cross-compilation
+and platform probes supply no execution proof. The
+[native evidence](../../../internal/apps/testdata/3415-macos-results.json) and
+[focused events](../../../internal/apps/testdata/3415-macos-focused.jsonl)
+record macOS 26.6.2/arm64 with Node v24.15.0/npm 11.12.1: the focused family
+executed/passed 23 checks, failed/skipped 0. The final package run executed 999,
+passed 995, failed 0 and skipped 4 filename arms because the filesystem rejected
+invalid UTF-8. Every required SQL/update arm passed without skips. Exact commands
+and earlier Linux proof are in the
+[repair spec](../../specs/architecture/3415-confined-sqlite-cwd.md#validation-evidence).
+No live Claude is needed for this proof.
+
 ### Checked candidate fixtures
 
 Checking descendants only after preparation returns cannot prove artifact
@@ -222,6 +260,50 @@ and ten baseline focused race repetitions passed. The phase and measurement gaps
 justify this proof repair without establishing a historical scheduler cause or
 queue-handle regression.
 
+### Daemon composition fixtures
+
+Parallel test-process forks can inherit a writable executable descriptor even
+after its creator closes it, making another sibling's launch fail with Linux
+`ETXTBSY`. `testWriteDaemonAppsRuntime` writes and closes the shell executable in
+a joined child, keeping writable descriptors out of sibling forks. Use it for
+initial fixtures and post-attestation replacements in both
+`TestDaemonAppsRuntimeReadiness` and `TestDaemonAppsComposition`: cached readiness
+would otherwise preserve a transient fixture launch failure as unsupported hosting.
+Preserve all supported/degraded version arms and expose the underlying probe error.
+Cancellation assertions must require the context
+deadline to expire as well as bounded return; an immediate launch error otherwise
+passes without exercising cancellation. See the
+[runtime readiness contract](apps-package-lifecycle-and-restart-state.md#lifecycle-and-restart-state).
+
+Installing the actual owner also introduces asynchronous committed lifecycle
+observations. `TestDaemonAppsComposition` compares discovery/tombstone revisions
+with committed registry snapshots and drains intervening updates; assuming
+registration/removal consume exactly two revisions would reject valid owner
+observations or correlate the wrong notification.
+
+### Paired resource fixtures
+
+A late-response test can stay green with broken request-ID fencing if it releases
+the old response after the replacement read finishes. `TestLiveRelay_HostedResources`
+holds the replacement at its own backend barrier, releases the retired response,
+and asserts no output before allowing the replacement to return. Count the uncertain
+write relative to the preceding successful mutation: two total invocations here
+mean the uncertain write added exactly one. See
+[resource retirement](apps-package-resource-serving.md#resource-serving).
+
+Worker exit after the five-second resource inactivity deadline could prove timeout
+cleanup rather than disconnect retirement. The same test observes
+`v2.hosted.resource_exited` within three seconds after closure. Keep that observation
+bound shorter than inactivity expiry and retain service PID/data/identity checks;
+connection cleanup must not terminate the daemon-owned service.
+
+Typed unsigned decoding alone accepts absent/null wire fields as zero. Raw-field
+presence and numeric-type assertions are needed to distinguish required zero
+`size_bytes`, `total_chunks` and first-chunk `index` from missing fields. The
+[#3441 verifier](https://github.com/pyrycode/pyrycode/pull/3445#issuecomment-6189748734)
+identified this remaining assertion gap in `hostedWire.response`; its passing
+204/first-chunk checks establish decoded values, not strict raw-field presence.
+
 ### Other package fixtures
 
 Inspect the compiled bundle itself, not only generated output.
@@ -332,6 +414,10 @@ child retirement, rather than inferring cleanup from failed persistence.
 arm supplies no launch evidence; controlled executable doubles cover failures and
 concurrency but cannot replace this check of committed-versus-candidate selection,
 real cwd/argv, exact environment, listener handoff and retained database bytes/modes.
+macOS may synthesize `__CF_USER_TEXT_ENCODING` even with an explicitly empty
+launch environment. Seed a hostile parent value and reject its inheritance;
+allow a different synthesized value only on Darwin before checking the remaining
+exact environment. A raw key count would reject a sanitized real launch.
 Tests shorten the private cleanup grace while `TestOwnerStartStopRaces` asserts
 the production default remains five seconds.
 

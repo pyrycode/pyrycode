@@ -778,6 +778,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		admissionTokens:  cfg.RelayAdmissionTokens,
 		instanceName:     *name,
 		appRegistry:      appRegistry,
+		appOwner:         appOwner,
 		relayURL:         relayURL,
 		version:          Version,
 		allowInsecure:    allowInsecure,

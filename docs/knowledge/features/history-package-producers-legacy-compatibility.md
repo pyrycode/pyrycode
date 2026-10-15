@@ -361,10 +361,31 @@ again:**
   link-before-result, terminal evidence, unlinked identities and repeated/late
   reports after the main turn ends. `TestAgentSessionEndings_Isolation` checks
   stale exits, replacement incarnations and Codex exclusion.
-  `TestAgentSessionEndings_Startup` forces raw pagination and segment rollover,
-  legacy ID reuse, missing attribution and truncated identities through reopened
-  stores; `TestAgentSessionEndings_ReportedRecovery` checks late reports and
-  source/lifetime reuse. `TestAgentSessionEndings_RosterReferenceIsolation`
+  `TestAgentSessionEndings_Startup` independently requires at least two nonempty
+  raw pages at the production reader's 128-entry size and two nonempty regular
+  on-disk segments before recovery, with the first reaching
+  `history.MaxSegmentBytes`. Reopened reads require exactly two distinct endings:
+  the original linked task with its call, parent and exact available
+  source/lifetime, and the unattributed call reused after a session transition.
+  They exclude truncated identities and invented legacy lifetimes, check
+  `daemon_restart`, occurrence time and shown metadata, and require the latest
+  legacy displayable receipt target to equal the restart divider's ID. Repeated
+  recovery through reopened stores must preserve the complete ending entries.
+  Count-only checks could accept two copies of one ending while losing the other.
+
+  Size padding by encoded disk bytes rather than character count. JSON escaped
+  the fixture's 8192 NULs per entry to roughly six times their input size;
+  printable ASCII keeps 140 entries, two raw pages and real 1 MiB rollover at
+  roughly 1.16 MB instead of 6.9 MB. A few large entries can roll over without
+  paging; many small entries can page without rolling over. Independent scratch
+  controls removing each boundary failed its own assertion. The
+  [measured comparison](../../specs/architecture/3431-startup-recovery-runtime.md#revisions)
+  supports reducing fixture scan cost without attributing the non-reproduced
+  historical timeout to daemon recovery. See
+  [runtime diagnosis](development-verification.md#diagnosing-startup-recovery-runtime).
+
+  `TestAgentSessionEndings_ReportedRecovery` checks late reports and source/lifetime
+  reuse. `TestAgentSessionEndings_RosterReferenceIsolation`
   saves only one ending for a two-task legacy roster, then reuses both IDs after
   a delimiter. Linked/unlinked and attributed/unattributed cases prove that each
   original task closes once across repeated reconciliation. A fully successful

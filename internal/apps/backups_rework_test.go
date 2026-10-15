@@ -171,7 +171,9 @@ func TestBackupSQLiteStorageErrors(t *testing.T) {
 						changed = true
 						switch operation {
 						case "replace":
-							backupOK(t, os.Remove(filepath.Join(ref.Root, "data/app.sqlite")))
+							if err := os.Remove(filepath.Join(ref.Root, "data/app.sqlite")); err != nil && !errors.Is(err, os.ErrNotExist) {
+								t.Fatal(err)
+							}
 							backupOK(t, os.Mkdir(filepath.Join(ref.Root, "data/app.sqlite"), 0700))
 						case "sidecar":
 							backupOK(t, os.Mkdir(filepath.Join(ref.Root, "data/app.sqlite-wal"), 0700))

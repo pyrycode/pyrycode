@@ -204,61 +204,138 @@ func TestGiveUpExempt_NonPendingStillGivesUp(t *testing.T) {
 	}
 }
 
-// #1014 AC-1 (reset semantics): a real-failure streak that precedes a pending
-// hold is discarded — the pending window resets the give-up clock, so neither
-// non-pending window alone crosses the bound and give-up never fires. Without the
-// reset, the pre-pending streak would survive and trip give-up mid second window.
+// A processed pending result resets the same head's failure streak. Each real
+// streak stays below the elapsed bound while the original start expires.
 func TestGiveUpExempt_PendingResetsStreak(t *testing.T) {
 	t.Parallel()
-	const (
-		giveUpAfter = 80 * time.Millisecond
-		phaseA      = 30 * time.Millisecond // real failure, < bound
-		phaseB      = 40 * time.Millisecond // pending hold, resets the clock
-		phaseC      = 30 * time.Millisecond // real failure again, < bound
-	)
-	d := &scriptDeliver{err: errRealFail}
+	const giveUpAfter = 80 * time.Millisecond
+	type step struct {
+		name string
+		at   time.Duration
+		err  error
+	}
+	steps := []step{
+		{"first failure", 0, errRealFail},
+		{"first streak", 30 * time.Millisecond, errRealFail},
+		{"pending", 40 * time.Millisecond, errTrustPending},
+		{"fresh failure", 100 * time.Millisecond, errRealFail},
+		{"second streak", 130 * time.Millisecond, errRealFail},
+		{"recovery", 140 * time.Millisecond, nil},
+	}
+	firstStreak := steps[1].at - steps[0].at
+	secondStreak := steps[4].at - steps[3].at
+	withoutReset := steps[4].at - steps[0].at
+	if firstStreak >= giveUpAfter || secondStreak >= giveUpAfter || steps[3].at-steps[0].at <= giveUpAfter {
+		t.Fatal("script must keep separate streaks below the bound and expire the original start before recovery")
+	}
 
-	gaveUp := make(chan struct{}, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	results := make(chan step)
+	entered := make(chan QueuedMessage)
+	delivered := make(chan QueuedMessage, 1)
+	gaveUp := make(chan string, 1)
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	// Only the drain reads or writes now and writes; scheduling consumes no fake time.
+	now := base
+	writes := 0
 	q, err := New(Config{
-		Deliver:       d.deliver,
+		Deliver: func(ctx context.Context, _ string, payload []byte) error {
+			msg, _ := DeliveryMessage(ctx)
+			// Include the actual delivery payload in the acknowledged projection.
+			msg.Text = string(payload)
+			select {
+			case entered <- msg:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			select {
+			case result := <-results:
+				now = base.Add(result.at)
+				if result.err == nil {
+					writes++
+				}
+				return result.err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
 		RetryInterval: time.Millisecond,
 		GiveUpAfter:   giveUpAfter,
 		Pending:       exemptPending,
-		OnGiveUp:      func(convID, reason string) { gaveUp <- struct{}{} },
+		OnGiveUp:      func(convID, reason string) { gaveUp <- reason },
+		OnDelivered:   func(_ string, msg QueuedMessage) { delivered <- msg },
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runErr := make(chan error, 1)
-	go func() { runErr <- q.Run(ctx) }()
+	q.failureNow = func() time.Time { return now }
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = q.Run(ctx)
+		close(done)
+	}()
+	stop := func() {
+		cancel()
+		select {
+		case <-done:
+			if !errors.Is(runErr, context.Canceled) {
+				t.Errorf("Run returned %v, want context.Canceled", runErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not join its drain after cancellation")
+		}
+	}
+	t.Cleanup(stop)
 
-	q.Enqueue("c", "m")
-	time.Sleep(phaseA) // build a real-failure streak (< bound)
-	d.setErr(errTrustPending)
-	time.Sleep(phaseB) // legitimate hold: resets the give-up clock
-	d.setErr(errRealFail)
-	time.Sleep(phaseC) // fresh real-failure streak (< bound)
-
-	// The combined real-failure exposure (phaseA + phaseC) exceeds the bound, but
-	// the pending window reset the clock between them, so neither streak alone
-	// crosses it and give-up must not have fired.
+	id := q.Enqueue("c", "m")
+	for i, result := range steps {
+		select {
+		case reason := <-gaveUp:
+			t.Fatalf("OnGiveUp fired before %s: pending did not reset the failure streak: %s", result.name, reason)
+		case msg := <-entered:
+			if msg.ID != id || msg.Text != "m" {
+				t.Fatalf("attempt %s = %+v, want original head %d with payload m", result.name, msg, id)
+			}
+		case <-ctx.Done():
+			t.Fatalf("waiting for attempt %s: %v", result.name, ctx.Err())
+		}
+		// The next Deliver entry follows all prior result processing and retry,
+		// so this acknowledges pending completion, not just classification.
+		if i > 0 {
+			t.Logf("processed %s at elapsed=%s", steps[i-1].name, steps[i-1].at)
+		}
+		if snap := q.Snapshot("c"); len(snap) != 1 || snap[0].ID != id || snap[0].Text != "m" {
+			t.Fatalf("head before %s = %+v, want original queued message %d", result.name, snap, id)
+		}
+		select {
+		case results <- result:
+		case <-ctx.Done():
+			t.Fatalf("releasing attempt %s: %v", result.name, ctx.Err())
+		}
+	}
 	select {
-	case <-gaveUp:
-		t.Fatal("OnGiveUp fired: the pending window did not reset the pre-pending failure streak")
+	case msg := <-delivered:
+		if msg.ID != id || msg.Text != "m" {
+			t.Fatalf("delivered = %+v, want original message %d", msg, id)
+		}
+	case reason := <-gaveUp:
+		t.Fatalf("OnGiveUp fired instead of recovery delivery: %s", reason)
+	case <-ctx.Done():
+		t.Fatalf("message m was never delivered after recovery: %v", ctx.Err())
+	}
+	stop()
+	if writes != 1 || len(delivered) != 0 || len(q.Snapshot("c")) != 0 {
+		t.Fatalf("recovery writes=%d, extra delivery callbacks=%d, backlog=%v", writes, len(delivered), q.Snapshot("c"))
+	}
+	select {
+	case reason := <-gaveUp:
+		t.Fatalf("OnGiveUp fired despite recovery delivery: %s", reason)
 	default:
 	}
-
-	// The head is still alive and delivers once the failure clears — proof the
-	// drain held rather than abandoned it.
-	d.setErr(nil)
-	waitDelivered(t, d, "m")
-
-	cancel()
-	if err := <-runErr; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run returned %v, want context.Canceled", err)
-	}
+	t.Logf("processed recovery at elapsed=%s; streaks=%s,%s < bound=%s; without reset=%s > bound; writes=%d; give-ups=0",
+		steps[5].at, firstStreak, secondStreak, giveUpAfter, withoutReset, writes)
 }
 
 // #1014 AC-1 (opt-in guard): with Pending nil (the pre-#1014 construction) a
