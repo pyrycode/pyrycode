@@ -139,8 +139,9 @@ explicit requests for each open conversation.
 Production recovery validates the stored-entry checksum and reconstructed
 last-shown watermark at the saved version instead of comparing rendered items.
 Publication capture uses `renderShared` on affected public rows to resolve the
-[standalone](thread-package-main-thread-folding.md#standalone-source-entries) and
-[assistant/ordinary-tool recipes](thread-package-main-thread-folding.md#main-work-source-entries)
+[standalone](thread-package-main-thread-folding.md#standalone-source-entries),
+[assistant/ordinary-tool](thread-package-main-thread-folding.md#main-work-source-entries)
+and [accepted-send recipes](thread-package-main-thread-folding.md#accepted-sends-and-durable-outcomes)
 after excluding suppressed delivery rows and children without public parents.
 Internal capture borrows immutable source payload or inline `Content` bytes,
 reuses unchanged item pointers and replaces affected public values. Folding
