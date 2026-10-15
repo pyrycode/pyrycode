@@ -96,3 +96,8 @@ than ten failure branches. No in-flight dependency.
 - Threat model: production relay/mobile authentication and authorization contracts do not change; no newly deferred threat.
 
 **Reviewer:** builder self-review, 2026-10-15.
+
+## Revisions
+
+- 2026-10-15: Phase instrumentation also touches `internal/e2e/handshake_interactive_helpers_test.go` → `driveHandshakeToOpenDaemonInteractiveResuming`, adding content-free init-sent/response-received logs so a failed read identifies the Noise phase. Remote branches checked: no overlap. No handshake or caller contract changes.
+- The controlled regression reproduced an accepted phone upgrade followed by normal WebSocket closure during its first handshake read, with old pumps joined and deregistration held. This demonstrates the stale-registration dependency, not the historical EOF's exact cause or close shape. The membership-only negative control failed all four new leaf scenarios.
