@@ -79,6 +79,17 @@ Downstream obligations the dispatcher (#248) inherits:
 
 The `payload_encrypted: true` v2 reservation is rejected via `ErrUnsupported` before any v2-shaped data could be processed.
 
+The [push-wake result contract](../../protocol-mobile.md#push_wake_result) is an
+outer daemon-addressed shape, independent of `Envelope.Type` and phone
+`RoutingEnvelope.Frame`. A syntactically valid correlation establishes neither
+provider truth nor a registration target: the consumer must require a live
+same-generation local binding and an atomic paired-identity/registration-snapshot
+match. Feedback remains an advisory relay report outside Noise; a malicious
+relay can deny push service by falsely invalidating a still-matching token.
+Unknown-field tolerance preserves additive compatibility but never licenses
+malformed required fields or unknown result codes. Consumer implementation and
+operator activation remain [separate prerequisites](../../protocol-mobile.md#push-wake-publication-and-activation).
+
 ## Consumers (deferred)
 
 No production consumers in this slice. Future:
