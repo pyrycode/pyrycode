@@ -18,6 +18,7 @@ type entrySource interface {
 // Only parent_ending may carry a copied payload until its lifecycle conversion.
 type contentRecipe struct {
 	creating uint64
+	delivery uint64
 	text     []uint64
 	fields   map[string]recipeField
 }
@@ -107,6 +108,9 @@ func (f *Fold) renderShared(items []Item) ([]Item, error) {
 	for _, item := range items {
 		if r := f.recipes[item.ID]; r.creating != 0 {
 			ids = append(ids, r.creating)
+			if r.delivery != 0 {
+				ids = append(ids, r.delivery)
+			}
 			ids = append(ids, r.text...)
 			for _, field := range r.fields {
 				if field.entry != 0 {
@@ -133,6 +137,14 @@ func (f *Fold) renderShared(items []Item) ([]Item, error) {
 				return nil, ErrUnavailable
 			}
 			item.Content = e.Payload
+			if r.delivery != 0 {
+				delivery, ok := entries[r.delivery]
+				if !ok || !decode(e.Payload, &struct{}{}) || !decode(delivery.Payload, &struct{}{}) {
+					return nil, ErrUnavailable
+				}
+				item.Content = deliveredSendContent(e.Payload, delivery.Payload)
+				e = delivery // Delivered text owns the summary, acceptance owns identity.
+			}
 			var text strings.Builder
 			for _, id := range r.text {
 				e, ok := entries[id]
@@ -146,7 +158,7 @@ func (f *Fold) renderShared(items []Item) ([]Item, error) {
 			}
 			if len(r.text) > 1 || len(r.fields) > 0 {
 				var fields map[string]json.RawMessage
-				if json.Unmarshal(e.Payload, &fields) != nil || fields == nil {
+				if json.Unmarshal(item.Content, &fields) != nil || fields == nil {
 					return nil, ErrUnavailable
 				}
 				if len(r.text) > 1 {
@@ -160,6 +172,9 @@ func (f *Fold) renderShared(items []Item) ([]Item, error) {
 							return nil, ErrUnavailable
 						}
 						raw = e.Payload
+						if !decode(raw, &struct{}{}) {
+							return nil, ErrUnavailable
+						}
 					}
 					if !json.Valid(raw) {
 						return nil, ErrUnavailable
@@ -181,7 +196,7 @@ func (f *Fold) renderShared(items []Item) ([]Item, error) {
 				var p struct {
 					Text string `json:"text"`
 				}
-				if err := json.Unmarshal(e.Payload, &p); err != nil {
+				if !decode(e.Payload, &p) {
 					return nil, ErrUnavailable
 				}
 				item.Summary = plainSummary(p.Text)

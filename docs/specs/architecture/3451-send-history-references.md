@@ -79,3 +79,8 @@ Pending for documentation stage: update `docs/knowledge/features/thread-package-
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-15
+
+## Revisions
+
+- 2026-10-15: Source-failure tests also inject malformed JSON and null objects before delivery claims and after eviction. Shared rendering now rejects non-object referenced enrichments and user-message sources with the generic unavailable result, addressing the security review's SHOULD FIX finding.
+- 2026-10-15: Store Retry covers acceptance/delivery failures in replay and tail, and outcome failures in replay. An immutable outcome's only terminal tail publication resolves it from the current chunk; ignored tail entries do not reread unchanged publications. Fold rendering separately tests outcome failure after eviction. The reuse helper defers send outcomes until after tail eviction rather than injecting an unreachable tail lookup fault.
