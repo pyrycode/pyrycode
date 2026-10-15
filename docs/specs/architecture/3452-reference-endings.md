@@ -86,3 +86,10 @@ None. Separate order/content IDs and inline ancestor lookup are required contrac
 - Threat model: recursive agent/shell payload retention guard is deliberately deferred to #3453; this ticket proves its own pending/ancestor byte boundary.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: Legacy observation comparison exposed that an ancestor ID alone
+  misses late ending-content enrichment. Inherited references also carry the
+  ancestor revision for private equality; content still resolves solely by ID.
+  Foreground shell terminal application promotes that row to a creating-entry
+  recipe; a later background link restores the existing inline lifecycle render.

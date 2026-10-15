@@ -118,15 +118,11 @@ func (f *Fold) promoteShellEvidence(key agentKey) []string {
 
 // Ordinary mapped results keep the source turn validation used by mainWork;
 // lifecycle reports have no main-turn identity and remain independently scoped.
-func shellReportMatches(r *agentReport, turn string, counts ...*ingestionWorkCounts) bool {
-	typ := "tool_result"
-	if r.field == "denial" {
-		typ = "tool_denied"
-	} else if r.field != "result" {
+func shellReportMatches(r *agentReport, turn string) bool {
+	if r.field != "denial" && r.field != "result" {
 		return true
 	}
-	id, _, _, _, valid := mainDecode(history.Entry{Type: typ, Payload: r.raw}, counts...)
-	return valid && id.TurnID == turn
+	return r.foreground && r.turn == turn
 }
 
 // A lifetime may be learned after a child creation. Its retained ordinary owner
@@ -140,7 +136,7 @@ func (f *Fold) applyShellForeground(c *agentCall) {
 		if f.agentCounts != nil {
 			f.agentCounts.work++
 		}
-		if r.mapped && (r.field == "result" || r.field == "denial") && shellReportMatches(r, f.items[c.item].Turn, f.ingestCounts) && (first == nil || r.id < first.id) {
+		if r.mapped && (r.field == "result" || r.field == "denial") && shellReportMatches(r, f.items[c.item].Turn) && (first == nil || r.id < first.id) {
 			first = r
 		}
 	}
@@ -151,6 +147,8 @@ func (f *Fold) applyShellForeground(c *agentCall) {
 	if status == "completed" {
 		status = "done"
 	}
-	c.ordinary.terminal = &mainOutcome{id: first.id, status: status, field: first.field, raw: first.raw}
+	outcome := f.outcome(history.Entry{ID: first.content, Payload: first.raw}, status, first.field)
+	outcome.id = first.id
+	c.ordinary.terminal = outcome
 	f.applyTerminal(c.ordinary)
 }

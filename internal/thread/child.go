@@ -2,6 +2,7 @@ package thread
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"reflect"
 	"slices"
@@ -23,13 +24,17 @@ type childCall struct {
 	call   *mainCall
 }
 type childState struct {
-	group                                agentKey
-	parent                               string
-	base, previous                       Item
-	baseRecipe, previousRecipe           contentRecipe
-	restored                             bool
-	endingBase, endingRaw, endingContent json.RawMessage
+	group                      agentKey
+	parent                     string
+	base, previous             Item
+	baseRecipe, previousRecipe contentRecipe
+	restored                   bool
+	legacyEnding               *legacyChildEnding
 }
+
+type legacyChildEnding struct{ base, raw, content json.RawMessage }
+
+type endingReference struct{ item, revision uint64 }
 
 type childParentKey struct {
 	group agentKey
@@ -81,7 +86,7 @@ func (f *Fold) childWork(e history.Entry) bool {
 		if e.Type == protocol.TypeToolDenied {
 			field = "denial"
 		}
-		f.childReports[ck] = &mainOutcome{id: e.ID, status: status, field: field, raw: append(json.RawMessage(nil), e.Payload...)}
+		f.childReports[ck] = f.outcome(e, status, field)
 	}
 	if parent == "" && id.ToolUseID != "" {
 		f.countPublicWork(1)
@@ -196,7 +201,7 @@ func (f *Fold) restoreChild(index int) {
 	state.previousRecipe = f.recipes[state.previous.ID]
 	f.countPublicWork(3) // stored item, intrinsic restoration and dirty maintenance
 	f.items[index] = state.base
-	if state.baseRecipe.creating != 0 {
+	if f.source != nil {
 		f.recipes[state.base.ID] = state.baseRecipe
 	}
 	f.items[index].Parent = state.previous.Parent
@@ -266,7 +271,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 		}
 		state := f.children[index]
 		f.countPublicWork(2) // child state and stored item
-		var ending json.RawMessage
+		var ending endingReference
 		if state != nil {
 			f.restoreChild(index)
 			if f.childCounts != nil {
@@ -292,28 +297,40 @@ func (f *Fold) resolveChildren(rev uint64) {
 						f.countPublicWork(1)
 						ending = f.childEndings[c.item]
 						if parent.EndedOrder != 0 {
-							ending = parent.Content
+							ending = endingReference{item: parent.ID, revision: parent.Rev}
 						}
 					}
 				}
 			}
 			item.Parent = parentID
-			if ending != nil && item.Active {
+			if ending.item != 0 && item.Active {
 				item.Active = false
 				if item.Kind != "agent" {
 					item.Status = "interrupted"
 				}
-				f.countIngestion(2)
-				// Identical intrinsic storage and ending need no repeated serialization,
-				// including empty deltas before the first nonempty append.
-				sameBase := len(item.Content) == len(state.endingBase) && len(item.Content) != 0 && &item.Content[0] == &state.endingBase[0]
-				f.countIngestion(min(len(ending), len(state.endingRaw)) + 1)
-				if f.texts[index] == nil && sameBase && bytes.Equal(ending, state.endingRaw) {
-					item.Content = state.endingContent
+				if f.source != nil {
+					f.referenceField(index, "parent_ending", recipeField{item: ending.item, revision: ending.revision})
 				} else {
-					base := item.Content
-					f.setContent(index, "parent_ending", ending)
-					state.endingBase, state.endingRaw, state.endingContent = base, ending, item.Content
+					if state.legacyEnding == nil {
+						state.legacyEnding = &legacyChildEnding{}
+					}
+					cache := state.legacyEnding
+					ancestor, _ := slices.BinarySearchFunc(f.items, ending.item, func(item Item, id uint64) int {
+						return cmp.Compare(item.ID, id)
+					})
+					raw := f.items[ancestor].Content
+					f.countIngestion(2)
+					// Identical intrinsic storage and ending need no repeated serialization,
+					// including empty deltas before the first nonempty append.
+					sameBase := len(item.Content) == len(cache.base) && len(item.Content) != 0 && &item.Content[0] == &cache.base[0]
+					f.countIngestion(min(len(raw), len(cache.raw)) + 1)
+					if f.texts[index] == nil && sameBase && bytes.Equal(raw, cache.raw) {
+						item.Content = cache.content
+					} else {
+						base := item.Content
+						f.setContent(index, "parent_ending", raw)
+						cache.base, cache.raw, cache.content = base, raw, item.Content
+					}
 				}
 			}
 			previous, current := state.previous, *item
