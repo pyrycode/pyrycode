@@ -508,6 +508,13 @@ A local authentication failure says nothing about the separately launched live g
 Use the gate's own results to establish what it exercised. Current role instructions
 control whether agents or the dispatcher run each test tier.
 
+Retain the granularity of gate evidence. Nonverbose package `ok` results establish
+package outcomes, not individual test/subtest counts or skip reasons; do not infer
+that a named test ran from them. Keep separately counted JSON results distinct
+from the standard gate, and state missing concurrency settings explicitly. The
+[relay admission investigation](../../specs/architecture/3485-relay-fixture-admission.md#standard-gate-result)
+retains both forms without treating a gate pass as historical failure attribution.
+
 Before accepting a baseline comparison as attribution, compare suite composition and
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.

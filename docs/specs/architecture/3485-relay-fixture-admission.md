@@ -76,8 +76,9 @@ transport test and controlled regression at least 20 times uncached under race.
 Run complete relay race tests, the original three-package race command, vet and
 build. Record revisions, Linux/Go/GOMAXPROCS settings, counts and skip reasons.
 Do not introduce artificial stress into ordinary suites; report incidental overlap.
-The builder instructions prohibit `make check` and full-module race sweeps: its
-outcome is pending the dispatcher's standard gate, not claimed green here.
+The builder instructions prohibit `make check` and full-module race sweeps.
+The dispatcher subsequently ran the standard gate; its outcome and evidence
+limits are recorded under [Standard gate result](#standard-gate-result).
 
 ## Open questions
 
@@ -187,9 +188,28 @@ All three scoped-command skips are explicit, unrelated opt-ins/platform cases:
 - `TestMemoryPathsCaseInsensitive`: `case-sensitive filesystem: alternate component casing cannot resolve`.
 - `TestReferenceDiskHeap`: `run separately with -args -measure-thread-heap`.
 
-Standard `make check` outcome: **pending dispatcher/verifier gate; not run by
-builder**, per the role's prohibition on duplicating the full-module gate.
-No aggregate green, staticcheck result, substrate-guard result or fake-daemon
-e2e result is claimed here. The dispatcher must retain its revision, settings,
-executed/passed/failed/skipped counts and skip reasons for the final gate record.
 No live-Claude or native-platform task is required by this hermetic change.
+
+### Standard gate result
+
+The dispatcher recorded **PASS** at `2026-10-15T23:25:44.611Z` on integration
+commit `3010e7ff5999992e00bb09041b1467795f18785b`. The
+[verifier verdict](https://github.com/pyrycode/pyrycode/pull/3487#issuecomment-6204427067)
+confirmed the gate stamp and logs; the documentation stage also checked their
+retained evidence bundle. This supersedes the builder's pending-gate wording
+in the PR. Commands, each exit 0:
+
+- `$AGENTS_REPO_PATH/bin/pyrycode-tool cite-guard`.
+- `$AGENTS_REPO_PATH/bin/pyrycode-tool docs-guard`.
+- `make check`: `go vet ./...`, `go test -race ./...`, staticcheck,
+  substrate-guard and `go test -tags e2e -race -count=1 ./internal/e2e/...`.
+- `make build`.
+
+The race tier reports 55 passing packages and one package with no test files;
+the fake-daemon e2e tier reports seven passing packages. No cached results or
+failures appear. Nonverbose logs retain no individual test/subtest
+executed/passed/failed/skipped counts, skip reasons or explicit concurrency
+settings. They do not establish that any particular named test ran, nor supply
+a live-Claude result. The builder's Linux/Go/`GOMAXPROCS=8` settings above
+describe its own runs and are not inferred for the dispatcher gate. No gate was
+rerun to manufacture finer evidence. Historical failure attribution remains open.
