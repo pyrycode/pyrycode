@@ -2,6 +2,19 @@
 
 Each test constructs a `V2SessionManager` with an in-memory `outbound` recorder (mutex-guarded slice; goroutine-safe) and a `devices.Registry` built inline.
 
+`driveToOpen` returns only after completed admission. A recorded, authenticated
+`noise_resp` alone is insufficient: `handleNoiseInit` publishes it before
+persistence, `V2StateOpen` and push-queue registration, so an immediate `Push`
+can otherwise return `ErrConnNotFound`. After asserting exactly one handshake
+envelope and authenticating it with `Initiator.ReadResp`, the fixture calls
+`waitForOpenAdmission` with a two-second context derived from `t.Context()`.
+One `ActiveConns` snapshot, serialized through `Run` after the handshake handler,
+must contain the connection; cancellation or missing admission fails the fixture.
+Manager cleanup is registered immediately after startup, before any assertion
+can fail. The caller signature and returned cipher states are preserved; keep
+decrypting captured application frames in capture order to authenticate the
+nonce sequence. See the [controlled admission regression](v2-session-manager-test-surface-same-package-unit-tests-internal-relay-handshake-and-rekey.md#admission-readiness).
+
 A later handshake proves only `Run` progressed, not that a silent worker handler
 finished. Wait for a subsequent reply on the same connection's FIFO worker before
 asserting no calls or replies; `TestV2Session_StopBackgroundTask_Contract` uses a
