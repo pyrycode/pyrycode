@@ -256,16 +256,40 @@ func TestReferenceMissingAtomic(t *testing.T) {
 }
 
 func TestReferenceDeliveryFailure(t *testing.T) {
-	entries := testFoldCorpus(23)
-	f, source := testReferenceFold(entries)
-	testFeed(t, f, entries[:22]...)
-	before := f.items[f.accepted[21]]
-	source.lookup = func([]uint64) ([]history.Entry, error) { return nil, errors.New("unreadable delivery") }
-	if err := f.Feed(entries[22:]); err == nil {
-		t.Fatal("claimed delivery ignored source failure")
-	}
-	if !reflect.DeepEqual(f.items[f.accepted[21]], before) || f.messages[22] < 0 {
-		t.Fatal("failed delivery altered permanent acceptance or suppressed message")
+	for _, missing := range []uint64{1, 2} {
+		for _, failure := range []string{"missing", "unreadable", "malformed", "null"} {
+			t.Run(fmt.Sprint(missing, failure), func(t *testing.T) {
+				entries := testReferenceSendEntries()
+				f, source := testReferenceFold(entries)
+				testFeed(t, f, entries[:2]...)
+				before := slices.Clone(f.items)
+				lookup := source.lookup
+				source.lookup = func(ids []uint64) ([]history.Entry, error) {
+					out, err := lookup(ids)
+					if failure == "unreadable" {
+						return nil, errors.New("private unreadable delivery")
+					}
+					if failure == "missing" {
+						return slices.DeleteFunc(out, func(e history.Entry) bool { return e.ID == missing }), err
+					}
+					for i := range out {
+						if out[i].ID == missing {
+							out[i].Payload = []byte(`{"private"`)
+							if failure == "null" {
+								out[i].Payload = []byte(`null`)
+							}
+						}
+					}
+					return out, err
+				}
+				if err := f.Feed(entries[2:]); err != ErrUnavailable {
+					t.Fatal("claimed delivery ignored source failure", err)
+				}
+				if !reflect.DeepEqual(f.items, before) || f.messages[2] < 0 || f.recipes[1].delivery != 0 || len(f.recipes[1].fields) != 0 {
+					t.Fatal("failed delivery altered acceptance or suppressed message")
+				}
+			})
+		}
 	}
 }
 
@@ -294,7 +318,7 @@ func TestReferenceDeliveryEvicted(t *testing.T) {
 		source.remember(source.chunk)
 		source.chunk = nil
 	}
-	if !reflect.DeepEqual(requested, []uint64{2}) {
+	if !reflect.DeepEqual(requested, []uint64{1, 2}) {
 		t.Fatal("delivery did not resolve evicted entry", requested)
 	}
 	items, err := f.Render()
@@ -323,9 +347,12 @@ func TestStoreReferenceWorkRetry(t *testing.T) {
 	}
 }
 
-func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint64) {
+func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint64, phases ...string) {
 	t.Helper()
-	for _, phase := range []string{"replay", "tail"} {
+	if len(phases) == 0 {
+		phases = []string{"replay", "tail"}
+	}
+	for _, phase := range phases {
 		for _, failure := range []string{"missing", "unreadable"} {
 			t.Run(phase+"/"+failure, func(t *testing.T) {
 				s, h := testThreadStore(t)
@@ -342,7 +369,12 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 					entries = append(entries, testStoreAppend(t, h, testStoreA, testMessage(0))...)
 					target = 2
 				}
-				entries = append(entries, testStoreAppend(t, h, testStoreA, slices.Clone(initial[1:])...)...)
+				deferredSend := phase == "tail" && len(initial) > 1 && initial[0].Type == "send_accepted"
+				end := len(initial)
+				if deferredSend {
+					end-- // Resolve the send only after its source entries are evicted.
+				}
+				entries = append(entries, testStoreAppend(t, h, testStoreA, slices.Clone(initial[1:end])...)...)
 				var armed atomic.Bool
 				armed.Store(phase == "replay")
 				base := s.lookup
@@ -365,17 +397,26 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 				}
 				// Later facts evict the creating message; neither the current feed
 				// chunk nor the recent cache can mask the failed authoritative read.
-				for range history.MaxPageEntries {
+				padding := history.MaxPageEntries
+				if deferredSend {
+					padding = 256 // Fill the FIFO before appending the terminal fact.
+				}
+				for range padding {
 					entries = append(entries, testStoreAppend(t, h, testStoreA, testEntry(0, "ignored", `{}`))...)
 				}
 				if phase == "tail" {
-					// Unchanged publications need no source reread. A delivery join
-					// must resolve its evicted message before publishing progress.
-					entries = append(entries, testStoreAppend(t, h, testStoreA, testSendOutcome(0, "send_delivered", `,"accepted_entry_id":1,"delivery_entry_id":2`, "delivered"))...)
-					if len(initial) > 1 {
-						// Ancestor closure revisits both child recipes, including a
-						// completed tool whose intrinsic result remains unchanged.
-						entries = append(entries, testStoreAppend(t, h, testStoreA, testMain(0, "tool_result", `,"tool_use_id":"parent","is_error":false`))...)
+					if deferredSend {
+						testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries)))
+						entries = append(entries, testStoreAppend(t, h, testStoreA, initial[len(initial)-1])...)
+					} else {
+						// Unchanged publications need no source reread. A delivery join
+						// must resolve its evicted message before publishing progress.
+						entries = append(entries, testStoreAppend(t, h, testStoreA, testSendOutcome(0, "send_delivered", `,"accepted_entry_id":1,"delivery_entry_id":2`, "delivered"))...)
+						if len(initial) > 1 {
+							// Ancestor closure revisits both child recipes, including a
+							// completed tool whose intrinsic result remains unchanged.
+							entries = append(entries, testStoreAppend(t, h, testStoreA, testMain(0, "tool_result", `,"tool_use_id":"parent","is_error":false`))...)
+						}
 					}
 				}
 				if err := s.Load(context.Background(), testStoreA); err != nil {
