@@ -7,7 +7,7 @@
 `agentWork` creates one immutable-kind `agent` only from a valid mapped Claude
 `tool_use` named `Agent` or `Task`, including a parent-attributed launch.
 Metadata-free legacy launches qualify; explicitly non-Claude sources do not.
-The mapped call entry supplies `ID`, `Order`, recorded `Turn`, retained input,
+The mapped call entry supplies `ID`, `Order`, recorded `Turn`, input reference,
 creation attribution and visibility. A preceding `agent_call_observed` supplies
 lifetime/parent evidence, never the creating ID. Observations, links and reports
 create no rows. The item starts `running` and active unless pending evidence
@@ -15,8 +15,18 @@ already changes it. Creation attribution and visibility stay fixed on updates.
 Parent call evidence remains in content; [parent repair](#parent-repair) resolves
 `Item.Parent` to the older creating ID and folds child text/tools beneath it.
 
-`applyAgent` retains the launch JSON and adds copied `result`, `denial`,
-`task_id`/`task_link`, `task_report` and `ending` fields as evidence arrives.
+Production `agentCall`, `agentTask` and `agentReport` retain launch, task-link
+and report history IDs plus small lifecycle facts, with no payload copies.
+`agentWork` and `agentGroup.addReport` capture validity, status, turn, foreground
+eligibility and launch-result presence on arrival. `applyAgent` builds immutable
+recipes for `result`, `denial`, `task_link`, `task_report` and `ending`, with small
+computed scalars such as `task_id` and `ended_order`. It compares recipes and
+metadata without re-decoding reports or serializing accumulated content.
+`renderShared` resolves the launch and enrichment IDs through the
+[bounded source](thread-package-background-store-replay.md#snapshots-and-retry),
+preserves unknown launch fields and exact JSON encoding, and removes creating
+`ended_order` before applying recomputed fields. Legacy `New` uses the same
+renderer with lazy compatibility storage that production leaves empty.
 Status-empty mapped reports can enrich content without closing work; after a
 final they are retained under `task_update`. Payloads, including patch strings,
 remain inert data. A patch containing a status cannot supply that status.
@@ -65,6 +75,17 @@ so early reports cannot place an ending before its item. Observable content,
 link or state changes advance `Rev`, also floored at creation; redundant reports
 do not. Entry-ID order, never timestamps or map iteration, selects the final.
 
+**Content equality and source identity are separate.** `agentContentDigest`
+fingerprints transient compacted, HTML-escaped JSON at ingestion; `equalRecipe`
+uses those facts for reports and task links. An equal durable/mapped companion
+must preserve `Rev`, public touches and shown bookkeeping while still replacing
+the recipe's content reference with mapped provenance. Suppressing the recipe
+update would leave new publications on the durable source; mutating a shared
+recipe would rewrite captured child/query views. Repeated equal reports within
+the same kind/status/provenance reuse an earlier content reference while keeping
+their own order facts. Fingerprint a roster once per entry: hashing the whole
+roster again for each linked row would make ingestion quadratic.
+
 Progress, roster absence and main-turn end supply no ending in the fold. Gone
 requires the [saved producer fact](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
 Session endings retain the recorded cause, including `daemon_restart`,
@@ -77,9 +98,9 @@ acceptance fact, so an inbound stop request cannot imply either `stopping` or
 
 `foldWork` creates Claude/legacy `Bash` and `local_bash` as ordinary `tool_call`
 items; `registerShell` retains their owners for task lifecycle enrichment. A
-complete usable task-to-call link enriches that existing item with copied
-`task_id`, `task_link`, launch `result`, `task_report` and saved `ending` evidence
-as available. It creates neither an `agent` nor a task row. Creating input,
+complete usable task-to-call link enriches that existing item with computed
+`task_id` and history-backed `task_link`, launch `result`, `task_report` and saved
+`ending` evidence as available. It creates neither an `agent` nor a task row. Creating input,
 `ID`, `Kind`, `Order`, `Turn`, attribution, visibility and existing child
 parenting remain intact. Tasks without a usable matching call create no item;
 early reports wait for their link and creation. Unlinked shells keep ordinary
@@ -109,6 +130,14 @@ only validated saved lifecycle evidence supplies that status. A saved
 `agent_ended_with_session` can end the linked shell with its recorded cause even
 after the main turn ended; a divider by itself supplies no such ending. See
 [independent session endings](history-package-producers-runtime-lifecycle.md#unfinished-agenttask-session-endings-3032).
+
+`shellReportMatches` uses the report's ingestion-time foreground eligibility
+and turn facts, never retained JSON. `applyShellForeground` supplies separate
+terminal-order and mapped-content IDs to `mainOutcome`; looking up the earliest
+order ID as content would select the wrong companion. Launch/link/report recipes
+use current-chunk, inclusive 1 MiB recent-cache, then authoritative Lookup.
+Missing/unreadable dependencies withhold the whole candidate through generic
+`StateUnavailable`/`ErrUnavailable`; repair requires Store `Retry`.
 
 Shell reports and task ownership changes use the same affected-call
 recomputation and lexicographic associated-task index as agents; reassociation
@@ -172,14 +201,13 @@ including parent evidence saved before a mapped launch or supplied only on a
 report. Main Agent/Task launches still split main text; queued sends do not,
 and delivered user messages retain their main-text closure behavior.
 
-Production assistant text and ordinary child tools use the same
+Production assistant text, child tools and nested agents use the same
 [history recipes and exact-byte renderer](thread-package-main-thread-folding.md#main-work-source-entries)
 as main work. Their items and intrinsic/previous copies retain creating/text IDs
 and enrichment recipes, with assistant summaries derived only when rendered.
 They retain no inline payload, accumulated text, assistant summary or append
-buffer. Codex tools remain ordinary calls even with shell/agent names. Agents and
-linked Claude/legacy shells still retain inline launch/link/report content, whose
-conversion remains [#3453](https://github.com/pyrycode/pyrycode/issues/3453).
+buffer or copied agent/shell launch/link/report payload. Codex tools remain
+ordinary calls even with shell/agent names.
 Foreground shell terminal content uses history recipes too; pending outcomes and
 inherited endings retain references rather than payload copies.
 
@@ -257,12 +285,11 @@ base before deriving closure. First registration treats the live item as intrins
 through that entry's mutations, so late parenting cannot discard a final
 received in the same entry. Unrelated children retain their derived state.
 `applyAgent` compares recomputed lifecycle state against intrinsic state and
-schedules dependents only on actual changes, including ending-content enrichment.
+schedules dependents for content/state changes and provenance replacements.
 Foreground shell results use the same targeted ordinary mutation hooks.
 
-Intrinsic and previous recipes are independent value snapshots, including on
-inline agents with derived reference fields: text-ID lists keep their own
-lengths and enrichment maps use copy-on-write. A single mutable
+Intrinsic and previous recipes are independent value snapshots for every child:
+text-ID lists keep their own lengths and enrichment maps use copy-on-write. A single mutable
 recipe would carry provisional `parent_ending` into the intrinsic base and keep
 it after reopening. Resolution compares recipe state as well as item metadata,
 without history reads during ingestion; rendering later resolves creating, text
@@ -278,14 +305,12 @@ reference also carries the ancestor's revision as a private equality fact, so
 late enrichment advances affected descendants' revisions without reading history
 during ingestion. Content still resolves solely through the ancestor item ID.
 `renderShared` obtains that item's content from the same item/recipe view as the
-child, even when the ancestor is outside selected output. A deferred inline agent
-can supply that content at render time without becoming a separate copied ending
-store; missing dependencies withhold the whole candidate. See
+child, even when the ancestor is outside selected output. Agent ancestors render
+from their captured recipes; missing dependencies withhold the whole candidate. See
 [reference resolution and retry](thread-package-main-thread-folding.md#scoped-joins-pending-outcomes-and-closure).
 
-Publication capture and selected-output rendering must preserve recipes with
-enrichment fields even when their creating entry remains inline. Filtering only
-on a creating-entry ID drops inherited endings from nested agents.
+Publication capture and selected-output rendering preserve complete recipes,
+including inherited fields on nested agents.
 Publication comparisons resolve ancestors from prior captured slots and recipes;
 delayed Store output resolves them from its immutable query root.
 
@@ -336,6 +361,17 @@ rows. Unsupported fields can remain in saved raw content without becoming join
 keys. `TestAgentTaskExtraIdentity` covers this boundary; the identity-marker
 tests compare whole fold state, catching damaged pending joins even while
 visible rows remain unchanged.
+
+`TestReferenceAgentLifecycle` and `TestReferenceRepeatedAgentReport` compare
+reference/legacy lifecycle output and redundant enrichment. After confirmed
+cache eviction, `TestReferenceEqualCompanion` covers call reports, task reports
+and links in both arrival orders for agents/shells, including nested closure,
+late links and reopening. It compares every Item field, revisions, touches,
+watermarks, live changes, captured query roots and wire bytes.
+`TestReferenceAgentDependencies` rejects missing/unreadable launch/link/report
+dependencies atomically with generic errors; `TestStoreReferenceAgentRetry`
+checks repair and fresh replay. Returned results stay detached and captured
+views immutable, including ancestors outside the selected page.
 
 `TestAgentLifecyclePermutations`, `TestAgentDurableCompanions` and
 `TestAgentCompanionPendingFinals` cover early reports, late links and companion

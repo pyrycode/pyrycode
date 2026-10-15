@@ -348,9 +348,11 @@ user/assistant `Summary`. Worker progress and certificates remain scalar-only.
 Baseline reads render all public rows; bounded queries select metadata first,
 then resolve only required history references from the captured publication.
 See [snapshots and retry](thread-package-background-store-replay.md#snapshots-and-retry).
-Deferred agent/shell and inline/private payloads, including parent-ending recipe
-values, remain outside this converted-content guarantee; their conversion is
-tracked in [#3334](https://github.com/pyrycode/pyrycode/issues/3334).
+All production item kinds, including agents and linked shells, use references;
+private outcomes and parent endings retain no payload copies. Legacy `New`
+compatibility storage is unused in production. The
+[fold/source heap proof](thread-package-main-thread-folding.md#validation-and-testing)
+excludes Store publications, whose structural accounting remains separate.
 The worker's recent-entry cache (256 entries, inclusive 1 MiB), history's bounded
 caches and the detached change ring (64 batches, 1 MiB encoded) are separate
 budgets. Transient rendering creates no unbounded rendered-item or entry cache.

@@ -31,7 +31,7 @@ consume the same IDs without sharing items, successor attribution, pending
 pairs, send claims or main-work state. The owner serializes `Feed`, `Render`,
 `Items` and `Version`; `Fold` itself has no locks or goroutines. Folds constructed
 with `New` copy payloads on ingestion. Production Store folds use the history
-references described below for converted kinds. Both rendering paths return
+references described below for all item kinds. Both rendering paths return
 detached items with copied content, so snapshot mutation cannot change fold state.
 
 Each item also has recorded `Session`/`Agent`, `NoChild`, optional `Turn`/`Parent`,
@@ -74,12 +74,11 @@ allocations. `TestReferenceSummaryDeferred` guards that creation cost.
 inline folds. Assistant text and ordinary tools use the richer recipes described
 under [main work](#main-work-source-entries); accepted sends use the
 [send-merge recipes](#accepted-sends-and-durable-outcomes) below. Agents and
-shell-lifecycle calls still use the renderer's inline-content fallback, with
-conversion tracked by [#3453](https://github.com/pyrycode/pyrycode/issues/3453).
+shell-lifecycle calls use [lifecycle recipes](thread-package-agents-and-background-work.md#agent-lifecycle).
 Pending outcomes and inherited `parent_ending` content use
 [history and ancestor references](#scoped-joins-pending-outcomes-and-closure). See
 [snapshot rendering and retry](thread-package-background-store-replay.md#snapshots-and-retry)
-for source resolution and the remaining Store content retention.
+for source resolution and separate Store publication budgets.
 
 | Raw source type | Item kind | Rendered content and status |
 | --- | --- | --- |
@@ -267,17 +266,15 @@ path decodes each text payload separately, concatenates the decoded strings and
 derives `Summary` with `plainSummary`, using `assistant message` when empty.
 
 Ordinary `tool_call` items use the same renderer after launcher/shell lifecycle
-classification. Claude and metadata-free `Bash`/`local_bash` calls retain inline
-launch evidence; `setOutcome` promotes foreground terminal content to a
-creating-entry recipe. A later background task link restores inline lifecycle
-rendering.
-Claude/legacy Agent/Task calls remain agents.
+classification. Claude and metadata-free `Bash`/`local_bash` calls use launch
+and report references for foreground work, then ID-backed lifecycle recipes
+after a background task link. Claude/legacy Agent/Task calls remain agents.
 Codex calls with any of those names are ordinary reference-backed tools.
 Selecting by tool name alone would skip eligible Codex calls. Result, denial,
 interruption and turn-ending fields reference their original report IDs through
 `setOutcome`; pending outcomes also retain only IDs and decoded lifecycle facts.
 
-Both modes preserve exact output bytes: the creating payload keeps its original
+Both modes preserve exact bytes: the creating payload keeps its original
 formatting until enrichment or a nonempty append, then JSON keys are sorted with
 unknown creating fields and `encoding/json` escaping preserved, including
 HTML-sensitive characters. Summary whitespace/control handling matches
@@ -356,7 +353,7 @@ scope rules above.
 Tool reports can precede creation and remain pending across feed chunks. The
 first valid foreground terminal outcome in entry-ID order wins; later duplicate or
 conflicting outcomes change neither content, state nor revision. The creating
-call retains its creating input through its recipe or inline payload and gets
+call retains its creating input reference (inline in legacy `New`) and gets
 the saved report when it arrives. Applying an earlier report keeps revision at
 least the creating ID.
 
@@ -387,10 +384,9 @@ but stays inactive; late foreground calls are inactive and later reports cannot
 replace their ending. A linked background shell outlives that turn; a late task
 link can repair its provisional closure, and late launch results stay retained.
 
-Reference-backed child text and ordinary tools keep independent intrinsic and
-previous recipes alongside their item metadata; inline agents also keep separate
-recipes for inherited fields. `restoreChild` restores the intrinsic recipe
-before mutation; `resolveChildren` captures the updated base
+All production child items keep independent intrinsic and previous recipes
+alongside their metadata, including nested agents and shell-backed tools.
+`restoreChild` restores the intrinsic recipe before mutation; `resolveChildren` captures the updated base
 before deriving ancestor closure. Enrichment maps use copy-on-write and text-ID
 lists retain snapshot lengths. Sharing one mutable recipe would leave provisional
 `parent_ending` behind after reopening or discard late text received while
@@ -585,9 +581,9 @@ DTO would miss these optional recorded fields and could admit truncated identity
 or turn a malformed recovery reference into an unrelated closure.
 
 `TestStandaloneItems` checks whole items with Claude, Codex, unknown and explicit
-no-child provenance. `TestFoldReplay` compares every two-chunk partition with
-replay and checks independent conversation owners; `TestFoldOwnership` checks ID
-bounds and detached snapshots.
+no-child provenance. `TestFoldReplay` compares every two-chunk partition and
+independent owners;
+`TestFoldOwnership` checks ID bounds and detached snapshots.
 `TestBoundaryPairing`, `TestBoundaryAttribution` and
 `TestBoundaryMalformedNeutrality` cover pairing, successor changes, old answers
 and eviction. `TestMalformedRecordedFields` asserts version-only consumption and
@@ -610,7 +606,7 @@ in both companion arrival orders. `TestReferenceInheritedEnding` compares public
 touches and observations through nested closure, late text and reopening after
 cache eviction, including selected children whose ancestor is omitted.
 `TestStoreCapturedInheritedEnding` retains a captured query root and detached
-results across late text and reopening, including inline nested agents.
+results across late text and reopening, including reference-backed nested agents.
 `TestReferenceEndingDependencyFailure` rejects missing/unreadable/malformed
 ancestor dependencies atomically; `TestStoreReferenceEndingRetry` checks repair
 and `Retry` for an evicted child-ending dependency.
@@ -618,17 +614,37 @@ and `Retry` for an evicted child-ending dependency.
 The unchanged
 [generated/shadow and recorded corpus checkpoints](thread-package.md#reusable-fold-regression-corpus)
 constrain rendered items, revisions, consumed version and last-shown watermark.
-`TestReferenceRetainedBytes` compares unchanged `testFoldCorpus(6738)` in both modes,
-requiring zero converted item Content, child-copy Content, assistant summaries
-including child copies, inline append buffers, copied pending outcomes and copied
-parent endings. It checks the production compatibility map remains unused,
-child ending caches remain absent, and intrinsic/previous recipe snapshots carry
-no ancestor JSON, including recipes on inline agents. User summaries, logical
-recipe storage, the bounded recent cache and deferred agent/shell content are
-accounted separately. This fold-only measurement excludes Store publication/query
-retention; see the separate
-[render-on-output verification](thread-package-background-store-verification.md#store-verification).
-Zero copied outcome/ancestor bytes do not establish total Store memory use.
+`TestReferenceLifecycleGuard` recursively walks retained `Fold` types through
+pointers, maps, slices, arrays and structs, rejecting private `json.RawMessage`
+fields. Public `Item`, recipes, the bounded source and legacy compatibility
+containers are explicit boundaries; transient decoding DTOs are outside retained
+state. Runtime `testNoLifecyclePayload` requires empty item and child
+intrinsic/previous Content, empty legacy storage and scalar-only recipe literals.
+`TestReferenceRetainedBytes` uses unchanged `testFoldCorpus(6738)`: item Content
+748,225 → 0 bytes, child Content 452,847 → 0, lifecycle compatibility payload
+291,215 → 0, assistant summaries including child copies 68,907 → 0, user summaries
+2,448 → 0; private outcome and parent-ending copies remain zero. Logical
+fold/child recipes cost 367,360 bytes and lifecycle facts including fingerprints
+115,328 bytes; recent cache costs 90,482 bytes. Logical counts exclude container
+overhead and shared-storage deduplication.
+
+`TestReferenceDiskHeap` isolates post-GC measurement in a helper process using
+`testFoldCorpus(10000)`, an 8,192-byte unknown string per entry, 100-entry chunks
+and a disk JSONL source: **85,441,272 encoded bytes**. Input/chunks and rendered
+snapshots are released; fold/source/cache and disk offsets stay live.
+
+| Revision | Pre-fold heap | Post-GC heap | Retained delta | Log fraction |
+| --- | ---: | ---: | ---: | ---: |
+| `44fe69498699cd69b0cc54543e7dabe0703c28a7` | 271,560 | 54,760,816 | 54,489,256 | 63.7739% |
+| `476c7664d5b9ababd54135b0bb48b3de765dacba` | 271,288 | 5,497,320 | 5,226,032 | 6.1165% |
+
+Run alone with `go test ./internal/thread -run '^TestReferenceDiskHeap$' -count=1 -v -args -measure-thread-heap`;
+ordinary tests skip this opt-in measurement. The under-10% fold/source
+boundary is workload-specific. Store publications are excluded: `TestStoreReferencePublication` separately reports
+zero copied Content/summary/private payload and 242,580 logical public recipe
+bytes on the unchanged corpus, not a Store heap ratio. See the
+[measurement and baseline reproduction](../../specs/architecture/3453-agent-shell-references.md#offline-retention-evidence)
+and [Store verification](thread-package-background-store-verification.md#store-verification).
 
 `TestMainTextRuns`, `TestMainToolTerminals` and `TestMainEndings` cover text
 splits, retained evidence, early and conflicting outcomes, activity and visibility
