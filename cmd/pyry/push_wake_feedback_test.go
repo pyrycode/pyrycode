@@ -253,8 +253,15 @@ func TestPushWakeFeedbackReconcile(t *testing.T) {
 	for _, revoke := range []bool{false, true} {
 		t.Run(fmt.Sprint(revoke), func(t *testing.T) {
 			p := newFeedbackLeg(t, "old-hash-secret")
+			applying := make(chan struct{})
+			p.w.invalid = func(ctx context.Context, d devices.Device) {
+				close(applying)
+				clearInvalidPushRegistration(ctx, p.reg, p.path, d, slog.New(p.log))
+			}
 			id := p.request()
 			entered, release := make(chan struct{}), make(chan struct{})
+			releaseHolder := sync.OnceFunc(func() { close(release) })
+			defer releaseHolder()
 			done := make(chan error, 1)
 			var pairedInfo os.FileInfo
 			go func() {
@@ -283,7 +290,8 @@ func TestPushWakeFeedbackReconcile(t *testing.T) {
 			feedbackTake(t, entered)
 			p.result(id)
 			p.barrier()
-			close(release)
+			feedbackTake(t, applying)
+			releaseHolder()
 			if err := feedbackTake(t, done); err != nil {
 				t.Fatal(err)
 			}
