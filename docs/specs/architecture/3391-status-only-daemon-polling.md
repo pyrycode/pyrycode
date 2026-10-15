@@ -77,6 +77,28 @@ and full-module validation per the builder role; no live-Claude evidence needed.
 ## Open questions
 None.
 
+## Performance evidence
+Measured on Linux/amd64, Intel Core i7-8700, Go 1.26.9, with
+`go test ./cmd/pyry -run '^$' -bench '^BenchmarkDaemonThreadMetadata$' -benchmem -benchtime=100x -count=1`.
+Before: production at plan commit `cdb522a2`, with the benchmark harness added
+before implementation. After: this implementation, using the identical harness
+and loaded fixture. The fixture contains 1,024 public items, 4,096 text bytes per
+item and 4,219,904 total JSON content bytes. Setup, history writes, replay,
+checkpoint creation and initial publication are outside measured subbenchmarks.
+
+| Metadata check | Before B/op | Before allocs/op | After B/op | After allocs/op |
+| --- | ---: | ---: | ---: | ---: |
+| Unchanged publisher | 5,177,346 | 1,025 | 0 | 0 |
+| Installed list lookup | 5,177,344 | 1,025 | 0 | 0 |
+| Shadow metadata read (`Snapshot` → `Status`) | 5,177,347 | 1,025 | 0 | 0 |
+
+The shadow row compares `BaselineSnapshot` with `ShadowStatus` on that same
+loaded store; the source guard pins the actual polling call to `Status`.
+Complete baseline reads remain detached: after migration `BaselineSnapshot`
+still reports 5,177,346 B/op and 1,025 allocs/op. Before implementation the new
+allocation regressions failed with 1,025 allocations/read for both publisher and
+installed list lookup, and the shadow/list source guards rejected baseline reads.
+
 ## Documentation handoff
 Pending for the documentation stage:
 - `docs/knowledge/features/thread-package-background-store.md`, **Isolation and lifecycle**: describe status-only shadow polling and unchanged final draining.
