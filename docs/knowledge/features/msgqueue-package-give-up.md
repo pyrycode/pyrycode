@@ -89,7 +89,53 @@ to bridge.
   `cmd/pyry`'s `approvalParkedReport`/`markApprovalHolds`/`approvalHoldPending`
   and [features/streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md](streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md).
 
+  When `Pending` accepts an error, `Queue.drain` clears `firstFailedAt` and
+  retries the same head. The next real failure starts a fresh streak; neither
+  the preceding failure streak nor time spent pending carries into it. With
+  `Pending` nil, every delivery error counts toward the bound.
+
+Failure elapsed time uses the private `Queue.failureNow` clock, initialized by
+`New` to `time.Now`. Subtracting those timestamps retains Go's monotonic elapsed
+measurement in production. The seam controls only failure-streak measurement;
+retry timers and enqueue timestamps still use real time. Configure any test
+replacement before `Run` starts.
+
 ## Testing
+
+`TestGiveUpExempt_PendingResetsStreak` drives the real drain with ordered,
+channel-released results. Delivery or pending-classifier entry is too early to
+prove that the reset ran. Entry into the next delivery acknowledges complete
+processing of the previous result, including reset and retry, before the test
+releases another result. Every attempt checks the original queued ID and payload.
+
+The drain alone reads and advances its queue-local clock from a nonzero base;
+scheduling pauses consume no controlled elapsed time. The 80 ms bound is tested
+with this schedule:
+
+| Elapsed from original failure | Result | Evaluated failure streak |
+| --- | --- | --- |
+| 0 ms | Real failure | 0 ms |
+| 30 ms | Real failure | 30 ms |
+| 40 ms | Pending | Reset |
+| 100 ms | Real failure | 0 ms |
+| 130 ms | Real failure | 30 ms |
+| 140 ms | Recovery | Confirmed delivery |
+
+Both real-failure streaks stay strictly below the bound, while the original
+start is already expired at the first post-pending failure. A scratch overlay
+deleting only the pending branch's `firstFailedAt` reset must fail on
+`OnGiveUp fired before second streak: pending did not reset the failure streak`.
+Phase waits observe give-up as well as the next attempt, so abandonment produces
+that assertion instead of merely timing out. Recovery requires one write, one
+delivery notification, an empty backlog and no give-up. Waits are finite, and
+cleanup cancels and joins `Run` even after assertion failure.
+
+Retain genuine-failure and nil-`Pending` give-up, held-head acceptance and
+content-free logging coverage alongside this reset proof. Passing an old test
+under bounded contention does not disprove an earlier flake or establish its
+cause; the [PR's comparison and mutation evidence](https://github.com/pyrycode/pyrycode/pull/3432)
+records both old and repaired passes with the same contention settings. See
+[verification practices](development-verification.md#prove-that-tests-distinguish-the-change).
 
 Stale give-up tests must establish removal before exercising the expired
 attempt. Removing on attempt two with a 1 ms deadline is scheduling-sensitive:

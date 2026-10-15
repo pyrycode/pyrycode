@@ -378,7 +378,7 @@ func TestTwoHosts(t *testing.T) {
 	t.Parallel()
 	r := testOpen(t)
 	other := "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
-	s, e := Open(filepath.Join(t.TempDir(), "apps"), other)
+	s, e := Open(filepath.Join(testRoot(t), "apps"), other)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -391,11 +391,11 @@ func TestTwoHosts(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, root := range []string{"relative", ""} {
-		if _, e := Open(root, testHost); e == nil {
-			t.Fatal(root)
+		if _, e := Open(root, testHost); !errors.Is(e, ErrInvalidStorage) {
+			t.Fatal(root, e)
 		}
 	}
-	if _, e := Open(t.TempDir(), "bad"); e == nil {
-		t.Fatal("bad host")
+	if _, e := Open(testRoot(t), "bad"); !errors.Is(e, ErrInvalidIdentity) {
+		t.Fatal("bad host", e)
 	}
 }

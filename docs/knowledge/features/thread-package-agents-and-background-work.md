@@ -172,6 +172,16 @@ including parent evidence saved before a mapped launch or supplied only on a
 report. Main Agent/Task launches still split main text; queued sends do not,
 and delivered user messages retain their main-text closure behavior.
 
+Production assistant text and ordinary child tools use the same
+[history recipes and exact-byte renderer](thread-package-main-thread-folding.md#main-work-source-entries)
+as main work. Their items and intrinsic/previous copies retain creating/text IDs
+and enrichment recipes, with assistant summaries derived only when rendered.
+They retain no inline payload, accumulated text, assistant summary or append
+buffer. Lifecycle selection still excludes Claude/legacy shell calls and agents;
+Codex tools remain ordinary calls even with shell/agent names. Those deferred
+inline conversions, private pending outcome payloads and copied `parent_ending`
+JSON remain [#3334](https://github.com/pyrycode/pyrycode/issues/3334).
+
 `resolveChildren` requires the parent item's immutable `Kind` to be `agent`
 and its creating ID to be strictly less than the child's, in this conversation
 and the same recorded source/lifetime or legacy scope. Registration in
@@ -237,13 +247,22 @@ or linked background shell.
 
 **Derive ancestor closure from genuine agent finals, keeping intrinsic child
 state separate.** `restoreChild` restores only the affected child's intrinsic
-state before mutation, once per entry; resolution captures its updated base
-before deriving closure. First registration treats the live item as intrinsic
+item and recipe before mutation, once per entry; resolution captures its updated
+base before deriving closure. First registration treats the live item as intrinsic
 through that entry's mutations, so late parenting cannot discard a final
 received in the same entry. Unrelated children retain their derived state.
 `applyAgent` compares recomputed lifecycle state against intrinsic state and
 schedules dependents only on actual changes, including ending-content enrichment.
 Foreground shell results use the same targeted ordinary mutation hooks.
+
+Intrinsic and previous recipes are independent value snapshots: text-ID lists
+keep their own lengths and enrichment maps use copy-on-write. A single mutable
+recipe would carry provisional `parent_ending` into the intrinsic base and keep
+it after reopening. Resolution compares recipe state as well as item metadata,
+without history reads during ingestion; rendering later resolves creating, text
+and terminal references through the shared source. The deferred `parent_ending`
+field still carries copied ancestor JSON, even on a reference-backed child.
+Removing only that derived field preserves late text and genuine child endings.
 
 `saveChild` indexes relationships by original `agentKey` and parent call,
 including unresolved links; reparenting removes the old edge. After each entry,
@@ -254,6 +273,10 @@ finals supply their current ending content directly. Parent/link repair,
 closure, reopening and ending enrichment therefore revisit the affected tree
 without inspecting independent trees, even within the same agent group.
 Unrelated standalone/main-only entries perform zero child-resolution work.
+Replace `childDirty` after resolution: clearing or later ranging over a reused
+map can inspect capacity retained from a former large closure, even with few
+current children. Counting only yielded keys would hide that historical cost;
+see the related [public-touch capacity regression](thread-package.md#cache-and-epochs).
 Agent evidence separately recomputes only affected calls and their indexed
 tasks/reports, retaining these targeted descendant-repair hooks for late
 parent/link enrichment and lifecycle changes. These bounds cover agent and

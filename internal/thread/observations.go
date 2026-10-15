@@ -33,7 +33,11 @@ type Observation struct {
 
 // Observe returns a detached complete baseline. Fold access must be serialized.
 func (f *Fold) Observe() Observation {
-	return Observation{Snapshot: Snapshot{State: StateUsable, Items: f.Items(), Version: f.version, LastShownVersion: f.lastShown}}
+	items, err := f.Render()
+	if err != nil {
+		return Observation{Snapshot: Snapshot{State: StateUnavailable, Err: ErrUnavailable}}
+	}
+	return Observation{Snapshot: Snapshot{State: StateUsable, Items: items, Version: f.version, LastShownVersion: f.lastShown}}
 }
 
 // FeedChanges consumes entries with Feed's partial-error semantics and returns
@@ -41,7 +45,14 @@ func (f *Fold) Observe() Observation {
 func (f *Fold) FeedChanges(entries []history.Entry) (Observation, error) {
 	before := f.Observe().Snapshot
 	err := f.Feed(entries)
-	return difference(before, f.Observe().Snapshot), err
+	after := f.Observe().Snapshot
+	if after.State != StateUsable {
+		return Observation{Snapshot: after}, ErrUnavailable
+	}
+	if before.State != StateUsable {
+		return Observation{Snapshot: after, BaselineRequired: true}, err
+	}
+	return difference(before, after), err
 }
 
 func messageText(item Item) string {
@@ -124,12 +135,23 @@ func (f *Fold) recordShown() {
 	// would also scan storage retained from previously affected large trees.
 	for _, index := range f.affected {
 		f.countPublicWork(2) // candidate inspection and membership removal
+		if f.captureSet != nil {
+			if _, exists := f.captureSet[index]; !exists {
+				f.captureSet[index] = struct{}{}
+				f.captureAffected = append(f.captureAffected, index)
+			}
+		}
 		delete(f.affectedSet, index)
 	}
 	f.affected = f.affected[:0]
 }
 
 func difference(before, after Snapshot) Observation {
+	return itemDifference(before, after, false)
+}
+
+// Shared additions are internal immutable values; public Fold results detach them.
+func itemDifference(before, after Snapshot, shared bool) Observation {
 	o := Observation{Snapshot: after, FromVersion: before.Version}
 	o.Items = nil
 	old := make(map[uint64]Item, len(before.Items))
@@ -142,7 +164,9 @@ func difference(before, after Snapshot) Observation {
 		c := Change{ID: item.ID, PreviousRev: prior.Rev, Rev: item.Rev, Version: after.Version}
 		if !exists {
 			copy := item
-			copy.Content = append(json.RawMessage(nil), item.Content...)
+			if !shared {
+				copy.Content = append(json.RawMessage(nil), item.Content...)
+			}
 			c.Addition = &copy
 		} else {
 			left, right := reflect.ValueOf(prior), reflect.ValueOf(item)

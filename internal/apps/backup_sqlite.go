@@ -1,11 +1,13 @@
 package apps
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,7 +18,7 @@ const backupSQL = `const {DatabaseSync,backup}=require('node:sqlite');
 const options={defensive:true,allowExtension:false,enableForeignKeyConstraints:true,timeout:1000};
 function integrity(db){const rows=db.prepare('PRAGMA main.integrity_check').all();if(rows.length!==1||Object.values(rows[0])[0]!=='ok'||db.prepare('PRAGMA main.foreign_key_check').all().length)throw Error('invalid SQL integrity');}
 (async()=>{if(process.argv[1]==='snapshot'){
- const source=new DatabaseSync('../data/app.sqlite',{...options,readOnly:true});
+ const source=new DatabaseSync('app.sqlite',{...options,readOnly:true});
  try{integrity(source);await backup(source,'backup.sqlite');}finally{source.close();}
  const sealed=new DatabaseSync('backup.sqlite',options);
  try{if(Object.values(sealed.prepare('PRAGMA journal_mode=DELETE').get())[0]!=='delete')throw Error('not standalone');integrity(sealed);}finally{sealed.close();}
@@ -51,16 +53,29 @@ func (o backupOps) runBackupNode(ctx context.Context, node string, dir *os.File,
 	version := exec.CommandContext(ctx, node, "--version")
 	version.Env = []string{}
 	version.WaitDelay = time.Second
-	bytes, err := version.Output()
+	versionOutput, err := version.Output()
 	if err != nil {
 		return fmt.Errorf("apps: snapshot node version: %w", errors.Join(err, ctx.Err()))
 	}
-	if !supportedNode(strings.TrimSpace(string(bytes))) {
+	if !supportedNode(strings.TrimSpace(string(versionOutput))) {
 		return errors.New("apps: unsupported snapshot node")
 	}
-	cmd := exec.CommandContext(ctx, node, "-e", backupSQL, mode)
+	selected, err := filepath.Abs(version.Path)
+	if err != nil {
+		return fmt.Errorf("apps: resolve snapshot node: %w", err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("apps: select snapshot bootstrap: %w", err)
+	}
+	if err = o.step(ctx, "sqlite-start"); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, executable, backupNodeBootstrap, selected, mode)
 	cmd.Env = []string{}
-	cmd.Dir = fmt.Sprintf("/dev/fd/%d", dir.Fd())
+	cmd.ExtraFiles = []*os.File{dir}
+	var diagnostic bytes.Buffer
+	cmd.Stderr = &diagnostic
 	cmd.WaitDelay = time.Second
 	if err = cmd.Start(); err != nil {
 		return fmt.Errorf("apps: start snapshot SQLite: %w", errors.Join(err, ctx.Err()))
@@ -69,7 +84,7 @@ func (o backupOps) runBackupNode(ctx context.Context, node string, dir *os.File,
 		o.nodeStarted(cmd.Process)
 	}
 	if err = errors.Join(cmd.Wait(), ctx.Err()); err != nil {
-		return fmt.Errorf("apps: snapshot SQLite: %w", err)
+		return fmt.Errorf("apps: snapshot SQLite: %w: %s", err, strings.TrimSpace(diagnostic.String()))
 	}
 	return nil
 }
@@ -82,6 +97,16 @@ func (o backupOps) sqliteSnapshot(ctx context.Context, node string, root, data *
 		return err
 	}
 	defer work.Close()
+	// Keep every SQLite path local to the pinned work directory. Parent-relative
+	// SQL paths could escape it if the directory were moved before launch.
+	for _, name := range []string{"app.sqlite", "app.sqlite-wal", "app.sqlite-shm", "app.sqlite-journal"} {
+		if err = unix.Renameat(int(data.Fd()), name, int(work.Fd()), name); err != nil {
+			if name != "app.sqlite" && errors.Is(err, unix.ENOENT) {
+				continue
+			}
+			return fmt.Errorf("apps: stage snapshot SQLite %q: %w", name, err)
+		}
+	}
 	if err = o.runBackupNode(ctx, node, work, "snapshot"); err != nil {
 		return err
 	}
@@ -103,6 +128,11 @@ func (o backupOps) sqliteSnapshot(ctx context.Context, node string, root, data *
 	for _, name := range []string{"app.sqlite-wal", "app.sqlite-shm", "app.sqlite-journal"} {
 		if err = unix.Unlinkat(int(data.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
 			return fmt.Errorf("apps: remove snapshot sidecar %q: %w", name, err)
+		}
+	}
+	for _, name := range []string{"app.sqlite", "app.sqlite-wal", "app.sqlite-shm", "app.sqlite-journal"} {
+		if err = unix.Unlinkat(int(work.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			return fmt.Errorf("apps: remove snapshot SQLite work file %q: %w", name, err)
 		}
 	}
 	if err = unix.Unlinkat(int(root.Fd()), "sqlite-work", unix.AT_REMOVEDIR); err != nil {

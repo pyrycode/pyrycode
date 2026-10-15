@@ -1,0 +1,85 @@
+# Publication retirement inspection
+
+## Files read
+- `internal/apps/publication_test.go` → `publishFixture`, `TestPublishRetirement`: 30 ms grace and all 18 retirement arms.
+- `internal/apps/owner.go` → `cleanup`, `launch`: graceful termination, asynchronous leader join and error retention.
+- `internal/apps/candidate_process.go` → `candidateCleanupWithKill`, `candidateGroupLive`: positive group inspection and Linux zombie exclusion.
+- `internal/apps/publication_process.go` → `supervisePublication`: two cleanup helpers currently run before leader join.
+- `internal/apps/publication_update.go` → `retirePrevious`, `finishUpdateFailure`: errors bar snapshot/restoration.
+- `internal/apps/publication.go` → `finishPublicationFailure`: safe metadata and recovery evidence.
+- `internal/apps/cleanup_probe_test.go`, `internal/apps/retirement_errors_test.go`, predecessor/migration uncertainty tests: retain denied-signal and persistent-uncertainty assertions.
+- `internal/apps/runtime_errors_test.go` → `TestOwnerCleanupErrorContext`: persistent inspection injection must outlive actual group retirement to verify error context.
+- `internal/apps/health_test.go`, `internal/apps/owner_process_test.go`: real forced descendants and atomic PID markers.
+- `docs/knowledge/features/apps-package-testing.md` § Publication fixtures and `apps-package-lifecycle-and-restart-state.md` § Publication writers and completion: leader exit alone never proves retirement.
+- `CODING-STYLE.md`, `docs/knowledge/features/development-verification.md`: bounded tests, native evidence and attribution limits.
+
+## Context
+The unchanged native baseline reproduced health/cancel failure. Two independent cleanup passes can signal a group immediately after SIGKILL, while macOS still reports its exited members. Inspection errors must be allowed to resolve through positive absence without erasing actual signal failures. Establish the exact sequence through a controlled real-fixture probe experiment before claiming attribution. No new public contract or decision record is required. #3415 is merged. #3404 overlaps only owner startup admission; keep cleanup edits local and additive.
+
+## Design
+Keep `cleanup(pid) error` and `candidateCleanupWithKill(pid, kill) error` internal contracts. Bound post-kill inspection; only positively absent groups permit success, and preserve every denied termination. Inspect candidate groups before signalling so already-retired groups need no redundant signal. Retry transient inspection uncertainty within the existing bounded retirement window, returning persistent uncertainty. Keep leader join before generation completion. Use the existing publication/health/forced-descendant fixtures for controlled transient and persistent probes and record native group versus individual-member observations. If observation contradicts this sketch, append a revision before changing the design.
+
+Sizing: one deliverable; approximately 400 written lines including evidence summaries, at most three production files, zero exported types, zero consumer signature changes, three acceptance criteria and fewer than ten error outcomes. Rechecked before plan commit: within all five limits.
+
+## Concurrency model
+Existing supervisors retain ownership and asynchronous `Cmd.Wait`; no new production goroutines. Cleanup runs without registry/owner locks. `g.done` remains after group retirement and leader join. Test hooks are installed before launch and coordinate through channels/atomics; all test publishers and fixture children are joined.
+
+## State transitions and identity reuse
+| Event | Race test |
+| --- | --- |
+| Build/migration/health canceled by six retirement events | `TestPublishRetirement` |
+| Leader exits while forced descendant remains live, then group exits | new controlled publication probe regression |
+| Inspection uncertainty resolves after forced kill / remains persistent | `TestOwnerCleanupProbeRecovery` and new controlled regression |
+| Denied termination, repeated shutdown, generation replacement/removal | `TestGenerationRetirementErrors`, `TestPublishServiceRetirementUncertain` |
+| Previous publication retired before snapshot / migration descendant survives | existing predecessor/migration retirement uncertainty tests |
+
+## Error handling
+Persistent inspection errors and denied signals remain errors. Never infer absence from leader exit or EPERM. Existing publication failure handling retains journals/RetirementPending, unavailable targets and barred unsafe restoration/removal/retry. Successful cleanup needs positive absence and generation completion also joins the leader.
+
+## Testing strategy
+Commit this plan first, then write discriminating tests and record their failure before implementation. Record controlled native probe observations separately from injected sequencing. Run two consecutive complete `go test -race -json ./internal/apps -run '^TestPublishRetirement$' -count=5` batches with normal concurrency, then `go test -race -json ./internal/apps -count=1` with real supported Node/npm. Keep every attempted batch, exact revision/environment, parent/leaf counts and skip reasons in committed testdata evidence. Run `go vet ./...` and build `./cmd/pyry`; full-module race gate belongs to verifier.
+
+## Open questions
+- Which helper produces native EPERM, and does it resolve to ESRCH after actual individual descendants disappear? Resolve with recorded probes; distinguish controlled attribution from historical inference.
+
+## Security review
+**Verdict:** PASS
+- Trust boundaries: `candidateGroupLive` must positively establish absence; EPERM is uncertainty, never proof.
+- Tokens/cryptography: no credentials or cryptographic operations enter cleanup or evidence.
+- File operations: existing publication failure paths retain recovery evidence; no confinement changes.
+- Subprocesses: SHOULD FIX: discriminate a live forced descendant from exited group bookkeeping before suppressing any inspection error; retain denied signal errors even after absence.
+- Network/I/O: no new network operations; existing health fixtures retain HTTP bounds.
+- Errors/logs: preserve safe external publication feedback; record only test fixture process identifiers and errors.
+- Concurrency: no new production goroutines or lock orders; supervisor completion still joins leader and group cleanup.
+- Threat model: trusted same-account services remain confined to existing process groups; escaping process groups is outside the hosted-app contract, unchanged here.
+**Reviewer:** builder (self-review)
+**Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: The native fixture observed `live → EPERM → ESRCH` immediately after SIGKILL. The controlled until-kill probe fails on unchanged cleanup, which returns without post-kill inspection. Narrow implementation to `Owner.cleanup`: positively await group absence after SIGKILL, retrying inspection for one second and preserving signal errors. This also ensures the subsequent candidate helper starts after positive absence, so changing candidate cleanup is unnecessary for the demonstrated publication failure. Existing candidate cleanup remains unchanged. Native observations establish the transient window, not exact attribution of each historical failure. The open question is resolved to that limit.
+- 2026-10-15: Preserve Linux orphan-zombie behavior through existing `candidateGroupLive` only after the injected group probe succeeds; persistent EPERM cannot bypass inspection. An initial focused run caught `ErrUnavailable` being interpreted as previous-service health failure by `finishUpdateFailure`; use a distinct static retirement error so uncertain writers retain `app.io_failed`. Keep that failed run in the evidence.
+- 2026-10-15: The first full-package gate failed the two inspection arms of `TestOwnerCleanupErrorContext` in `internal/apps/runtime_errors_test.go`: its injection ended on real ESRCH and therefore exercised recoverable uncertainty. Keep the context/errno assertions and make that inspection injection persistent, including after real retirement. Signal-denial arms remain unchanged. The new post-kill regression also asserts that its injected window actually executed. Production remains unchanged from `702b8396`; retain the failed package attempt and repeat final native gates.
+- 2026-10-15: Resumed after #3447 merged. Read its `candidateCleanupWithProbe` implementation and the `candidateCommandWithCleanup`/publication call paths: bounded inspection retries now cover the separate candidate-command cleanup while denied signals remain errors. The combined source is `72a5d169`; no further production or test edits are needed for this resumption. #3404 still overlaps only startup admission in `Owner`, so there is no cleanup dependency on it. Preserve the earlier failing gates and record fresh complete native acceptance runs separately.
+
+## Documentation handoff
+- Pending documentation stage: `docs/knowledge/features/apps-package-lifecycle-and-restart-state.md`, “Publication writers and completion”: describe bounded post-SIGKILL positive group inspection, retained denied-signal/persistent-uncertainty errors and joined leader before completion.
+- Pending documentation stage: `docs/knowledge/features/apps-package-testing.md`, “Publication fixtures”: describe the controlled native/EPERM sequencing regression and link the exact native batches/package evidence, including attribution limits and skips.
+
+## Validation evidence
+Native macOS 26.6.2/arm64, Go 1.26.2, supported real Node 24.15.0/npm 11.12.1. Exact commands, environment, revisions, disjoint parent/leaf counts, skips and every attempt's compressed events are in `internal/apps/testdata/3418-macos-results.json`.
+
+- Unchanged baseline: 90 retirement leaves executed, 89 passed and health/cancel failed once; 5 parent records, 4 passed and 1 failed. No skips.
+- Controlled pre-repair regressions failed; final focused safety family passed all 29 leaves and 6 parents. Strengthened context/probe family passed 10 leaves and 2 parents.
+- Both consecutive retirement batches at `702b8396` and both repeated consecutive batches at final test revision `bdb47b53` each passed all 90 leaves and 5 parent records, with no skips. All 18 retirement arms also passed in both complete package attempts.
+- First complete package gate FAILED the two transient inspection-context assertions; their persistent injection repair is recorded above. Final complete package gate still FAILED: 902 leaves, 895 passed, 3 failed and 4 skipped; 103 parents, 102 passed and 1 failed. Failures were initial-publication build phases in `TestUpdateTemplateSnapshot` and both `TestUpdateTemplateRollback` arms. Skips were four filesystem-rejected invalid-UTF8 filename arms, not retirement or real-tool publication arms.
+- A diagnostic overlay passed the snapshot/update arm, which does not establish a cause or a package pass. A fresh unchanged-main `e18dda62` archive then failed all three maintained-template leaves during build. Its intended logging overlay used a noncanonical `/tmp` path and emitted no diagnostics; this establishes baseline failure but no inner command attribution. No production fix for these separate failures was attempted.
+- Filed native blocker #3447 for that existing build-stage investigation. The complete package gate remains failing/incomplete, and must be rerun after the blocker is repaired. This is required builder verification, not a documentation or live-test handoff.
+- `go vet ./...` and daemon build passed. Full-module verifier gate remains pending; no live Claude is required.
+
+Final sizing: approximately 640 textual lines including generated evidence, one production file, no exported types or consumer signature changes; all five limits remain satisfied.
+
+## Resumed validation after #3447
+
+The combined clean source `72a5d169` passed both consecutive native retirement batches: each 90/90 leaves and 5/5 parents, all 18 arms repeated five times, zero failures/skips. The uncached complete apps race gate passed: 917 leaves executed, 913 passed, zero failed, four skipped; 106/106 parents passed. The four skips remain filesystem-rejected invalid-UTF8 cases; every retirement and supported real-tool publication/update arm executed and passed. `go vet ./...` and the daemon build passed on the same source. Full-module verification and the documentation handoff remain pending.
+
+Exact environment, commands, revisions, disjoint counts, skip reasons, checksums and every resumed attempt are in `internal/apps/testdata/3418-macos-resumed-results.json` and its compressed event logs. Three initial sandbox attempts could not access the Go build cache and executed zero tests; elevated native acceptance commands then ran normally. The original evidence remains unchanged, including its failed package gates and attribution limits. #3447 is merged and no longer blocks this stage. Documentation should link both evidence summaries. Resumed changes contain only this plan revision and evidence, keeping total textual work below 800 lines.

@@ -4,6 +4,44 @@ See the [package overview](apps-package.md) for the topic map.
 
 ## Testing
 
+### Initialized SQLite subprocess proof
+
+Absent-data or uninitialized publications bypass SQLite snapshot subprocesses;
+their success cannot establish portable initialized-data updates. On macOS
+arm64, execute `TestCommittedTemplateUpdateSnapshot` without a platform skip,
+`TestBackupSQLiteWAL` and `TestUpdateTemplateSnapshot` using real supported Node
+and npm selected through `HOSTED_APP_NODE` and `HOSTED_APP_NPM_CLI`. The retained
+assertion calls `SnapshotData` and fresh `VerifyBackup` on an initialized database.
+The WAL arm proves committed WAL-only preferences and ledger preservation,
+standalone DELETE mode without sidecars, and repeated unchanged verification
+after removing source data. The maintained-template update must activate a
+healthy candidate, retain saved preferences and its new migration, and freshly
+verify a backup matching the complete pre-migration schema/preferences/ledger.
+See the [snapshot fixtures](apps-package-concurrency-and-testing.md#testing).
+
+`TestBackupNodeDirectoryIdentity` moves the selected directory to another parent
+at launch, then replaces its old pathname with either a directory or symlink in
+both snapshot and verify modes. It checks selected data, outside/replacement
+sentinels and unchanged parent cwd. Use canonical `testRoot` paths: macOS `/var`
+aliases otherwise fail no-follow selection before reaching the launch hook.
+`TestBackupNodeFailures` and `TestBackupNodeBootstrapRejectsInvalidDirectory`
+cover runtime/version/exec/SQL failures and missing/non-directory descriptors;
+`TestBackupSQLiteCancellation` and `TestBackupSQLiteStorageErrors` retain joined
+child, unchanged data and failed-snapshot evidence checks.
+
+Record revision, OS/architecture, Node/npm versions, exact commands and
+executed/pass/fail/skip counts for each required arm; skips, cross-compilation
+and platform probes supply no execution proof. The
+[native evidence](../../../internal/apps/testdata/3415-macos-results.json) and
+[focused events](../../../internal/apps/testdata/3415-macos-focused.jsonl)
+record macOS 26.6.2/arm64 with Node v24.15.0/npm 11.12.1: the focused family
+executed/passed 23 checks, failed/skipped 0. The final package run executed 999,
+passed 995, failed 0 and skipped 4 filename arms because the filesystem rejected
+invalid UTF-8. Every required SQL/update arm passed without skips. Exact commands
+and earlier Linux proof are in the
+[repair spec](../../specs/architecture/3415-confined-sqlite-cwd.md#validation-evidence).
+No live Claude is needed for this proof.
+
 ### Checked candidate fixtures
 
 Checking descendants only after preparation returns cannot prove artifact
@@ -14,6 +52,59 @@ and descendant live and checks no later phase. `TestCandidateSourceExecutable`
 checks the copied owner-executable bit; ordinary nonexecutable fixtures missed
 the 0600-copy regression. `TestCandidateBuildMutation` changes module metadata
 during compilation, proving input validation must run again before retention.
+
+A successful npm build wait can still produce public build-failure feedback:
+the native diagnostic baseline captured `TestPublishTemplate`, snapshot and both
+rollback arms returning inspection EPERM after TERM, with successful build waits.
+Immediate rejection of that uncertain probe caused these preparation failures.
+EPERM proves neither live membership nor retirement. `candidateCleanupWithProbe`
+reinspects within the existing TERM/KILL windows and accepts only subsequent
+positive absence. Denied signals, persistent uncertainty and still-live groups
+remain errors; joining leaders, retiring descendants before artifact validation,
+immutable-build checks and publication recovery barriers remain required.
+
+Keep command and cleanup outcomes separately inspectable. The private per-context
+`candidateDiagnostic` observer records a fixed command label, PID/exit code and
+separate wait/start, cleanup and cancellation outcomes; it collects no arbitrary
+arguments, environment values or child output. Public `CandidateFailure`,
+`PublishFailure` and lifecycle feedback retain static messages and do not unwrap
+diagnostics. `TestCandidateCommandDiagnostics` distinguishes command, cleanup and
+combined failures; `TestCandidateDiagnosticPublicBoundary` checks private evidence
+and safe public feedback, including the child-output secret sentinel.
+`TestCandidateDiagnosticBeforeStart` distinguishes launch failure from cancellation.
+
+`TestCandidateBuildProbeRecovery` injects inspection EPERM after a successful
+controlled build, then requires real group absence before artifact validation.
+`TestCandidateCleanupProbeRecovery` covers recovery before/after forced termination,
+persistent uncertainty, denied TERM/KILL and live groups. The retained pre-repair
+run executed eight leaves: four failed (build plus three recovery sequences),
+four safety arms passed, none skipped. After repair the focused regression family
+passed 22/22 leaves and final diagnostic-boundary checks passed 3/3, without skips.
+
+The [counted macOS evidence](../../../internal/apps/testdata/3447-macos-results.json)
+retains all six attempts, including failed runs and the initial isolated diagnostic
+non-reproduction. The diagnostic overlay demonstrably executed: its matching PID,
+selected test argv, wait and TERM-probe records identify the failed builds. It
+preserved child stdout/stderr handling and captured no child output; parent logging
+changes scheduling. Neither that initial isolated pass nor reinspection establishes
+kernel membership/state at the instant of EPERM. Earlier historical failures from
+\#3418 lack effective command traces and cannot all be attributed retrospectively.
+
+The clean `e3623103` complete uncached `go test -race -json ./internal/apps -count=1`
+ran on macOS 26.6.2/arm64, Go 1.26.2 and real Node 24.15.0/npm 11.12.1 selected via
+`HOSTED_APP_NODE`/`HOSTED_APP_NPM_CLI`, at normal concurrency. Snapshot and both
+rollback leaves executed/passed 3/3 without skips, proving initialized activation,
+retained preferences, verified pre-migration backup and the intended transaction/
+startup failures followed by full schema/preferences/checksum-ledger restoration
+and old-release health. That package gate **failed**: parents 105 executed,
+104 passed, 1 failed, 0 skipped; leaves 912 executed, 906 passed, 2 failed,
+4 skipped because the filesystem rejects invalid UTF-8 names. Remaining failures
+are `TestPublishRetirement/health/remove` (denied group signal) and
+`TestPublishRetirement/health/intent_cycle` (retained retirement metadata), tracked
+by [#3418](https://github.com/pyrycode/pyrycode/issues/3418). The intent-cycle record
+alone does not identify its precise signal/probe cause. These target passes do
+not certify a green full-package gate; the later combined native acceptance is
+recorded under [publication fixtures](#publication-fixtures). No live Claude is needed.
 
 A controlled child that never loads npm configuration or rewrites lifecycle
 PATH misses real npm failures. `TestCandidateNPMEnvironment` models pathname-keyed
@@ -76,6 +167,57 @@ successful removal. Assertions inspect actual leader/descendant retirement,
 retired targets and persisted decisions; an active-release string or leader wait
 alone would miss unsafe restoration and lost cleanup failures.
 
+`publishFixture` shortens owner termination grace to 30 ms; increasing it or
+serializing tests would not prove post-SIGKILL retirement. With the real forced
+descendant from `TestHealthHelperProcess`, `TestPublishRetirementProbeSequence`
+requires a live descendant before Stop, records native group/individual PID
+probes, and controls EPERM until forced kill, across the post-kill probes or
+persistently. It requires the injected post-kill window to execute, joins Publish
+and checks both processes gone. Persistent uncertainty still requires
+`app.io_failed`, retained journal/`RetirementPending`, unavailable targets and
+rejected retry/removal, even when the real child has exited.
+`TestOwnerCleanupProbeRecovery` separately retains denied-termination and
+persistent-probe assertions. `TestOwnerCleanupErrorContext` keeps its inspection
+injection active after real ESRCH; ending it there would exercise recoverable
+uncertainty rather than the intended persistent error/context contract.
+
+The [original evidence](../../../internal/apps/testdata/3418-macos-results.json)
+retains the failing unchanged baseline, failing pre-repair controlled regressions,
+earlier batches and failed package/diagnostic attempts. Its
+[native pre-repair observations](../../../internal/apps/testdata/3418-controlled-before.jsonl.gz)
+show `live → EPERM → ESRCH` after SIGKILL; the
+[next controlled run](../../../internal/apps/testdata/3418-controlled-after.jsonl.gz)
+also observed leader ESRCH while the individual descendant probe still succeeded
+during group EPERM. A later empty `ps` sample cannot identify the earlier atomic
+kernel state. These observations establish a transient inspection window and
+the regression distinguishes the missing post-kill proof; they do not attribute
+every historical failure to exited-group bookkeeping. A passing isolated arm or
+diagnostic overlay supplies no complete-package stability proof.
+
+The [resumed evidence](../../../internal/apps/testdata/3418-macos-resumed-results.json)
+records exact commands/environment, revisions, checksums, disjoint parent/leaf
+counts and every resumed attempt after the separate candidate cleanup repair
+in [#3447](https://github.com/pyrycode/pyrycode/issues/3447). On clean `72a5d169`,
+macOS 26.6.2/arm64, Go 1.26.2 and real Node 24.15.0/npm 11.12.1 selected through
+`HOSTED_APP_NODE`/`HOSTED_APP_NPM_CLI`, normal concurrency was retained without
+`-p`/`-parallel` overrides. Two consecutive
+`go test -race -json ./internal/apps -run '^TestPublishRetirement$' -count=5`
+batches ([first](../../../internal/apps/testdata/3418-batch-5.jsonl.gz),
+[second](../../../internal/apps/testdata/3418-batch-6.jsonl.gz)) each executed/passed
+90 leaves and 5 parents, with zero failures/skips: all 18 build/migration/health ×
+stop/remove/shutdown/cancel/intent/intent-cycle arms ran five times.
+The uncached `go test -race -json ./internal/apps -count=1`
+[complete package run](../../../internal/apps/testdata/3418-package-resumed.jsonl.gz)
+executed 917 leaves: 913 passed, 0 failed, 4 skipped; all 106 parents passed.
+Every retirement and supported real-tool publication/update arm passed without
+skips. The four skipped leaves were `TestBackupAliasedTempRoot/states/nested`,
+`TestBackupStates/nested`, `TestRestoreStates/nested` and
+`TestRetainedValidation/invalid_UTF8`: the filesystem rejected invalid-UTF8 names
+with EILSEQ. Three preceding sandbox/cache setup attempts executed zero tests
+and remain failures in the resumed evidence. Earlier failed package gates remain
+failures in the original evidence; the later complete combined run establishes
+the package pass. No live Claude is required.
+
 `TestPublishTemplate` requires actual supported Node/npm through `HOSTED_APP_NODE`
 and `HOSTED_APP_NPM_CLI`, compiles the maintained template via checked preparation,
 runs migration and matching live health, checks durable activation/cleared journal
@@ -119,6 +261,28 @@ uncertainty coverage would leave this earlier writer gap untested.
 their cancellation and old-group completion at snapshot time, rather than only
 after Publish returns. `TestUpdateCancellationRecovery` includes stopped →
 available intent reuse; final available intent alone would hide obsolete recovery.
+
+A same-owner rollback does not prove restart recovery. Startup fixtures must
+join the old owner, transfer exclusive filesystem ownership and exercise real
+`Open`/`NewOwner` with retained evidence. `TestStartupRecoveryRetry` interrupts
+partial replacement, restored-before-finalization and final persistence twice
+before successful reopen; clearing the journal after restoration alone would lose
+that retry path. `TestStartupRecoveryInvalidation` checks absent API/asset targets
+while parked, a usable sibling and stale completion after stop/intent reuse,
+metadata changes, removal and shutdown. Constructor-time backup hooks must be
+installed before workers start; mutating hooks after `NewOwner` races admission.
+
+`TestStartupTemplateRecovery` compares complete restored schema/preferences/ledger
+and removes candidate-only SQL/files before previous-release health; its previous
+service guard rejects either leftover before health can pass. It also checks stopped
+validation without a service. An invalid-preferences snapshot cannot simply insert
+values violating the maintained schema's CHECK constraints: SQLite integrity rejects
+that fixture before release validation runs. Use a permissive schema with invalid
+saved data so snapshot verification succeeds and restored-release validation must
+reject it before journal completion. SQLite integrity alone proves neither schema
+nor saved-preference/complete migration-checksum compatibility. Supported Node/npm
+arms must execute and pass; skips supply no restart evidence. See the
+[startup recovery matrix](apps-package-lifecycle-and-restart-state.md#startup-publication-recovery).
 
 ### Retained-build fixtures
 
@@ -199,6 +363,50 @@ the event, so observing it measures no new cancellation latency. The historical
 and ten baseline focused race repetitions passed. The phase and measurement gaps
 justify this proof repair without establishing a historical scheduler cause or
 queue-handle regression.
+
+### Daemon composition fixtures
+
+Parallel test-process forks can inherit a writable executable descriptor even
+after its creator closes it, making another sibling's launch fail with Linux
+`ETXTBSY`. `testWriteDaemonAppsRuntime` writes and closes the shell executable in
+a joined child, keeping writable descriptors out of sibling forks. Use it for
+initial fixtures and post-attestation replacements in both
+`TestDaemonAppsRuntimeReadiness` and `TestDaemonAppsComposition`: cached readiness
+would otherwise preserve a transient fixture launch failure as unsupported hosting.
+Preserve all supported/degraded version arms and expose the underlying probe error.
+Cancellation assertions must require the context
+deadline to expire as well as bounded return; an immediate launch error otherwise
+passes without exercising cancellation. See the
+[runtime readiness contract](apps-package-lifecycle-and-restart-state.md#lifecycle-and-restart-state).
+
+Installing the actual owner also introduces asynchronous committed lifecycle
+observations. `TestDaemonAppsComposition` compares discovery/tombstone revisions
+with committed registry snapshots and drains intervening updates; assuming
+registration/removal consume exactly two revisions would reject valid owner
+observations or correlate the wrong notification.
+
+### Paired resource fixtures
+
+A late-response test can stay green with broken request-ID fencing if it releases
+the old response after the replacement read finishes. `TestLiveRelay_HostedResources`
+holds the replacement at its own backend barrier, releases the retired response,
+and asserts no output before allowing the replacement to return. Count the uncertain
+write relative to the preceding successful mutation: two total invocations here
+mean the uncertain write added exactly one. See
+[resource retirement](apps-package-resource-serving.md#resource-serving).
+
+Worker exit after the five-second resource inactivity deadline could prove timeout
+cleanup rather than disconnect retirement. The same test observes
+`v2.hosted.resource_exited` within three seconds after closure. Keep that observation
+bound shorter than inactivity expiry and retain service PID/data/identity checks;
+connection cleanup must not terminate the daemon-owned service.
+
+Typed unsigned decoding alone accepts absent/null wire fields as zero. Raw-field
+presence and numeric-type assertions are needed to distinguish required zero
+`size_bytes`, `total_chunks` and first-chunk `index` from missing fields. The
+[#3441 verifier](https://github.com/pyrycode/pyrycode/pull/3445#issuecomment-6189748734)
+identified this remaining assertion gap in `hostedWire.response`; its passing
+204/first-chunk checks establish decoded values, not strict raw-field presence.
 
 ### Other package fixtures
 
@@ -310,6 +518,10 @@ child retirement, rather than inferring cleanup from failed persistence.
 arm supplies no launch evidence; controlled executable doubles cover failures and
 concurrency but cannot replace this check of committed-versus-candidate selection,
 real cwd/argv, exact environment, listener handoff and retained database bytes/modes.
+macOS may synthesize `__CF_USER_TEXT_ENCODING` even with an explicitly empty
+launch environment. Seed a hostile parent value and reject its inheritance;
+allow a different synthesized value only on Darwin before checking the remaining
+exact environment. A raw key count would reject a sanitized real launch.
 Tests shorten the private cleanup grace while `TestOwnerStartStopRaces` asserts
 the production default remains five seconds.
 

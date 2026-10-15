@@ -47,7 +47,12 @@ func TestHostedAppProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(4)
 	}
-	server := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", port), ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	resources := hostedResourceHandler(data)
+	server := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", port), ReadHeaderTimeout: time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/_pyry/health" {
+			resources.ServeHTTP(w, r)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ready": string(service) != "bad-health", "app_id": os.Getenv("PYRY_APP_ID"), "release_version": os.Getenv("PYRY_APP_RELEASE")})
 	})}
 	go func() { <-sig; _ = child.Process.Kill(); _ = child.Wait(); _ = server.Close() }()

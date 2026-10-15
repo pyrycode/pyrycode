@@ -15,6 +15,21 @@ storage, missing/unsupported Node and app-specific start/health failures leave
 normal daemon/channel operation available without cancelling the session pool;
 composition logs only static reason codes.
 
+Hosting capability readiness is an infrastructure attestation, distinct from
+per-app health. `NewOwner` selects an absolute executable without establishing
+runtime support; probing a separate `node` from `PATH` could attest a runtime
+the owner never uses. `newDaemonAppsManager` installs discovery's registry and
+the same owner as both resource providers, with cancellable delivery, then calls
+`Owner.CheckRuntime` before message processing. The probe uses that selected
+executable's `--version`, an empty environment, bounded output and a cancellable
+five-second context, requiring Node `>=24.15.0 <25.0.0`. `HostedAppsReady` caches
+the result without handshake/request I/O. Empty registries and stopped/unhealthy
+apps permit negotiation; missing infrastructure or missing/unsupported runtime
+withholds `hosted_apps_v1` while normal channels remain usable. Conflating app
+health with capability readiness would hide discovery precisely when a client
+needs to inspect an unavailable app. Resource lookup still requires current
+health-confirmed ownership and returns `app.unavailable` for stopped/unhealthy apps.
+
 Claim the instance with `ctrl.Listen` before `openDaemonApps` or owner
 construction, and retain it until `Owner.Shutdown` has joined workers/descendants
 and finished durable observations on every exit. `Open` can persist normalized
@@ -59,9 +74,9 @@ which guards the operation's current revision/ownership before `changeLocked`.
 Unconditional `UpdatePublish` alone cannot reject obsolete health/finalization.
 Recovery callers clear the journal together with their resulting lifecycle
 fields. The registry validates and persists caller-supplied results; it neither
-derives those fields from the journal nor performs recovery itself. Callable first
-publication and active-release updates are implemented; interrupted-publication
-startup recovery (#3263) remains downstream. Stored references and decisions alone
+derives those fields from the journal nor performs recovery itself. `NewOwner`
+implements [before-activation startup recovery](#startup-publication-recovery);
+after-activation resolution remains #3404. Stored references and decisions alone
 prove neither readiness nor verified or restored data. See
 [publication and recovery](../../hosted-apps.md#publication-and-recovery).
 
@@ -234,12 +249,41 @@ can cancel its own wait independently. The daemon invokes joined shutdown on
 normal exit and every startup failure after owner construction. Local stop
 preserves sibling services and the session pool; daemon shutdown preserves
 available intent for restart. Publication owns migration/private health, atomic
-activation and verified update recovery; interrupted-publication startup recovery
-(#3263), publishing control/daemon wiring (#3301/#3266) and encrypted resource
-capability activation (#3123) remain downstream. Production `HostedAppsReady`
-remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes
-the attestation. Daemon startup installs no dependencies and runs no migrations. See
+activation, verified update recovery and before-activation startup recovery.
+After-activation resolution (#3404), publishing control/daemon wiring
+(#3301/#3266) remain downstream. Encrypted resource capability activation is
+implemented (#3440), with counted actual Node/template and real-relay acceptance
+complete (#3441).
+Daemon startup installs no dependencies and runs no migrations. See
 [startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
+
+The [#3440 evidence](../../hosted-apps.md#implementation-and-validation-ownership)
+at `79e90c4bc36bcd93d12ff8524c94b7c825d54321` records uncached race proofs:
+composition **600 executed/600 passed**, runtime readiness **400/400**, and focused
+fake-relay resources/readiness/runtime isolation **13/13**, all **0 failed,
+0 skipped**, counting parents and subtests. The fake-relay proof uses a race-built
+daemon via `PYRY_E2E_BIN` and a synthetic `node` reporting `v24.15.0` and executing
+`TestHostedAppProcess`. Connection retirement leaves the service, saved data and
+host/app identity intact while fresh negotiation/discovery and reused request IDs
+reject old results; the commit/response barrier checks the uncertain write is not
+replayed. Runtime/fake-relay counts are builder-recorded; the final verifier
+independently repeated composition 600/600.
+
+The [#3441 evidence](../../hosted-apps.md#implementation-and-validation-ownership)
+adds real-loopback-relay `TestLiveRelay_HostedResources` and
+`TestLiveRelay_HostedTemplate`: each **1 executed/1 passed, 0 failed, 0 skipped**,
+independently repeated by the verifier with race-instrumented tests and daemon;
+the complete package is **5/5**, including a backend helper entry point.
+Partial-read and committed-write disconnects retire connection workers while
+preserving service PID, saved data and host/app identity. Reconnect refreshes
+negotiation/discovery and reads with retired IDs without replaying the uncertain
+write. The separate unchanged template runs on actual Node **v24.15.0** and proves
+encrypted preferences POST/204/GET with nondefault readback. Its releases,
+migrations and seed data are prepared before daemon ownership; ordinary daemon
+startup still performs no migration. Native-viewer, publisher and live-channel
+acceptance remain downstream; no live Claude was required. See the
+[paired resource fixtures](apps-package-testing.md#paired-resource-fixtures)
+for barriers and timing bounds that distinguish request-ID fencing from cleanup.
 
 `Open` validates storage before `normalizeSnapshot`. Every available record with
 an active release becomes starting; every unpublished or intentionally stopped
@@ -270,6 +314,56 @@ Backoff is a delay, never another registry state. No live Claude was used or
 required; seeded persistence supplies no resource-routing or publisher
 migration/rollback acceptance. See the [runtime reference](../../hosted-apps.md#runtime-and-layout).
 
+### Startup publication recovery
+
+`Open` preserves legacy loading and strict storage validation before recovery;
+malformed storage is rejected without rewriting it. After exclusive ownership
+transfers from a joined previous owner, `NewOwner` admits one asynchronous worker
+per uncommitted journal without `RetirementPending`, before ordinary reconciliation
+or `prepareRelease` can write data. Construction waits for neither restoration nor validation/health.
+Until conditional durable completion, that app's Start, reconciliation, Publish,
+API and asset targets remain barred. Restoration and validation waits hold neither
+registry nor owner locks, so another app's reconciliation, targets and registry
+operations remain usable.
+
+| Restart evidence / intent | Recovery and admission outcome |
+|---|---|
+| Uncommitted update, available | Freshly verify/restore the entire snapshot, freshly `VerifyBuild` the previous release, then privately confirm matching previous-release health before exposing targets. |
+| Uncommitted first publication, available | Restore data; durably finish failed and unpublished, without a target. |
+| Uncommitted update, stopped | Restore data, freshly verify the previous build and validate its restored schema, saved preferences and complete migration-version/checksum ledger; remain stopped without a service or target. |
+| Uncommitted first publication, stopped | Restore data; durably remain stopped and unpublished, without a target. |
+| Committed activation journal | Keep the candidate decision; never restore pre-publication data. Reopened targets remain barred pending #3404. |
+| `RetirementPending`, with or without a journal | Remain barred; retained backup evidence does not establish positive writer retirement. |
+
+Recovery runs no migrations. Stopped validation uses the verified release's
+`schema`, `ledger` and `migrationFiles` helpers against read-only SQLite, without
+starting its HTTP service. Successful before-activation completion clears pending
+release/journal atomically with the resulting state and safe interrupted-publication
+error; it retains committed title, previous active release (if any), manifest and
+intent. Candidate manifest metadata never becomes committed display metadata.
+`usableLocked` permits a committed journal only for its still-live health-confirmed
+activated publication generation; that exception supplies no readiness on reopen.
+
+Stop/removal/shutdown and incompatible newer commits cancel stale recovery.
+Completion checks exact app revision, journal and ownership, preserving newer
+fields/intent and never reviving a tombstone; even stopped → available reuse cannot
+validate old work. Stop/Shutdown join workers and private processes. Unresolved
+recovery rejects removal without discarding registration/evidence. A newer stop
+cannot be undone by late health or finalization.
+
+Keep the journal, previous build and immutable backup until completion is durable.
+Partial replacement, interruption after restoration and failed/uncertain finalization
+remain retryable from the retained snapshot on a fresh exclusive reopen, with fresh
+verification each time; failures do not trigger a busy automatic retry loop.
+Missing/invalid snapshots, restoration I/O, damaged previous builds and incompatible
+or unhealthy restored data leave no target or successful-rollback claim. Safe errors
+use `app.io_failed` for restoration failures where persistence permits and
+`app.unavailable` for previous-build/compatibility/health failures. Evidence remains
+when persistence fails. Host/app revisions never reset, decrease or wrap; exhaustion
+refuses completion. Publishing composition/integration remains #3266 and local
+publishing control remains #3301. See the
+[reference matrix](../../hosted-apps.md#update-and-startup-recovery-contract).
+
 ### Publication writers and completion
 
 `prepareRelease` can create data/database files even when launch later fails, so
@@ -280,6 +374,26 @@ positive whole-group retirement. Leader exit leaves descendants able to write;
 and forbids restoration/removal. Cancellation-independent restoration is joined
 by Stop/Shutdown. A committed or uncertain activation also forbids destructive
 restoration; see [durability](apps-package-concurrency-and-persistence.md#registry-durability).
+
+SIGKILL delivery is not retirement proof. `Owner.cleanup` polls for up to one
+second after forced termination, accepting only positive group absence. Transient
+inspection errors such as macOS EPERM can resolve through a later ESRCH; EPERM
+itself never establishes absence. After a successful group probe,
+`candidateGroupLive` also permits Linux groups containing only nonexecuting
+zombies; this fallback cannot bypass a denied probe. Denied TERM/KILL signals
+remain errors even after confirmed absence. Persistent inspection uncertainty or
+live members at the deadline return unconfirmed retirement. The publication
+supervisor joins both cleanup helpers and the asynchronous leader wait before
+`completed` closes `g.done`; completion carries cleanup failure and is not by
+itself a successful-retirement claim.
+
+Retirement uncertainty must remain distinct from the health sentinel
+`ErrUnavailable`: `finishUpdateFailure` interprets that sentinel as unconfirmed
+previous-service health. Reusing it for cleanup timeout would misclassify unsafe
+writers as `app.unavailable`. Uncertain retirement retains static `app.io_failed`
+metadata, the journal/`RetirementPending` as applicable, unavailable targets and
+barriers against restoration, removal, reuse and retry. See the
+[controlled retirement proofs](apps-package-testing.md#publication-fixtures).
 
 Previous-release health is a recovery decision, not candidate activation.
 `confirmRunning` dispatches recovery to `confirmRecoveryLocked`, which clears

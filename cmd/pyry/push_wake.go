@@ -64,17 +64,18 @@ type pushWakeDevices interface {
 // send_err, or skipped with its reason, each naming the device, the conversation
 // and the trigger, so the journal alone says whether a wake was asked for.
 //
-// SECURITY: the push token reaches send and nothing else. A log line here may
-// carry the device's name from its devices.Registry entry, as the v2 handshake
+// SECURITY: registration snapshots stay local except for the wake token sent to
+// the relay. A log line may carry the registry device's name, as the v2 handshake
 // accept line does, but never a token, a token hash or a send error, whose text
 // can echo the token. Nor the hello-claimed ActiveConn.DeviceName, which a phone
 // chooses for itself.
 type pushWaker struct {
-	conns  pushWakeConns
-	devs   pushWakeDevices
-	send   func(platform, token string) error // (*relay.Connection).SendPushWake
-	now    func() time.Time
-	logger *slog.Logger
+	conns   pushWakeConns
+	devs    pushWakeDevices
+	send    func(context.Context, string, string, string) (<-chan string, error)
+	invalid func(context.Context, devices.Device)
+	now     func() time.Time
+	logger  *slog.Logger
 
 	// trig holds at most one pending pass: a burst of triggers while a pass runs
 	// collapses into one more pass against the then-current state.
@@ -90,7 +91,7 @@ type pushWaker struct {
 	last map[string]time.Time
 }
 
-func newPushWaker(conns pushWakeConns, devs pushWakeDevices, send func(platform, token string) error, logger *slog.Logger) *pushWaker {
+func newPushWaker(conns pushWakeConns, devs pushWakeDevices, send func(context.Context, string, string, string) (<-chan string, error), logger *slog.Logger) *pushWaker {
 	return &pushWaker{
 		conns:  conns,
 		devs:   devs,
@@ -160,9 +161,7 @@ func (w *pushWaker) wakeAbsent(ctx context.Context, cause pushWakeCause) {
 		}
 	}
 
-	// Newest pairing first (#2602): the relay drops wakes past its per-server-id
-	// burst, and dead tokens from older pairings are never pruned, so walking
-	// oldest first let them spend the burst before the live phone.
+	// Newest pairings get first use of the relay's per-server wake burst.
 	devs := w.devs.List()
 	slices.SortStableFunc(devs, func(a, b devices.Device) int {
 		return b.PairedAt.Compare(a.PairedAt)
@@ -179,13 +178,68 @@ func (w *pushWaker) wakeAbsent(ctx context.Context, cause pushWakeCause) {
 			w.logDecision("relay: push_wake skipped", d, cause, "push_wake.skipped", "recently_woken")
 			continue
 		}
-		if err := w.send(pushWakePlatform, d.PushToken); err != nil {
+		feedback, err := w.send(ctx, d.Platform, d.PushToken, d.TokenHash)
+		if err != nil {
 			w.logDecision("relay: push_wake send dropped", d, cause, "push_wake.send_err", "")
 			continue
 		}
 		w.last[d.TokenHash] = now
 		w.logDecision("relay: push_wake sent", d, cause, "push_wake.sent", "")
+		if w.invalid != nil {
+			go w.awaitInvalid(ctx, feedback, d)
+		}
 	}
+}
+
+// awaitInvalid uses only the submission snapshot. Channel closure, including
+// expiry and legacy overflow, is never evidence of an invalid registration.
+func (w *pushWaker) awaitInvalid(ctx context.Context, feedback <-chan string, snapshot devices.Device) {
+	select {
+	case <-ctx.Done():
+		return
+	case _, ok := <-feedback:
+		if ok && ctx.Err() == nil {
+			w.invalid(ctx, snapshot)
+		}
+	}
+}
+
+// clearInvalidPushRegistration reconciles pairing membership under the same
+// file lock used by pairing and registration writers. Advisory feedback never
+// self-heals corrupt disk state or retries a consumed notification.
+func clearInvalidPushRegistration(ctx context.Context, reg *devices.Registry, path string, snapshot devices.Device, logger *slog.Logger) {
+	if ctx.Err() != nil {
+		return
+	}
+	event := "push_wake.registration_unchanged"
+	reason := "lock_failed"
+	err := devices.WithLock(path, 250*time.Millisecond, func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		reason = "reload_failed"
+		if err := reg.Reload(path); err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !reg.ClearPushRegistrationIfMatch(snapshot.TokenHash, snapshot.Platform, snapshot.PushToken) {
+			return nil
+		}
+		reason = "save_failed"
+		if err := reg.Save(path); err != nil {
+			return err
+		}
+		event = "push_wake.registration_cleared"
+		return nil
+	})
+	// Even decode errors may echo credentials; expose only fixed classifications.
+	if err != nil {
+		logger.Warn("relay: push registration clear failed", "event", "push_wake.registration_failed", "reason", reason)
+		return
+	}
+	logger.Info("relay: push registration feedback applied", "event", event)
 }
 
 // logDecision logs one device's wake decision at Info, with reason only on a

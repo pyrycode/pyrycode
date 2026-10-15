@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"slices"
@@ -22,10 +23,12 @@ type childCall struct {
 	call   *mainCall
 }
 type childState struct {
-	group          agentKey
-	parent         string
-	base, previous Item
-	restored       bool
+	group                                agentKey
+	parent                               string
+	base, previous                       Item
+	baseRecipe, previousRecipe           contentRecipe
+	restored                             bool
+	endingBase, endingRaw, endingContent json.RawMessage
 }
 
 type childParentKey struct {
@@ -54,7 +57,7 @@ func (f *Fold) childGroup(e history.Entry) agentKey {
 	return key
 }
 func (f *Fold) childWork(e history.Entry) bool {
-	id, summary, status, shown, valid := mainDecode(e)
+	id, summary, status, shown, valid := mainDecode(e, f.ingestCounts)
 	if !valid {
 		return false
 	}
@@ -160,7 +163,8 @@ func (f *Fold) saveChild(index int, group agentKey, parent string) {
 		}
 		// A first registration is already intrinsic, including mutations made
 		// later in this entry before its first derived resolution.
-		state = &childState{base: f.items[index], previous: f.items[index], restored: true}
+		r := f.recipes[f.items[index].ID]
+		state = &childState{base: f.items[index], previous: f.items[index], baseRecipe: r, previousRecipe: r, restored: true}
 		f.children[index] = state
 	} else {
 		f.restoreChild(index)
@@ -189,8 +193,12 @@ func (f *Fold) restoreChild(index int) {
 		f.childCounts.restored++
 	}
 	state.previous = f.items[index]
+	state.previousRecipe = f.recipes[state.previous.ID]
 	f.countPublicWork(3) // stored item, intrinsic restoration and dirty maintenance
 	f.items[index] = state.base
+	if state.baseRecipe.creating != 0 {
+		f.recipes[state.base.ID] = state.baseRecipe
+	}
 	f.items[index].Parent = state.previous.Parent
 	f.items[index].Rev = state.previous.Rev
 	state.restored = true
@@ -215,6 +223,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 		return
 	}
 	indices := make([]int, 0, len(f.childDirty))
+	f.countIngestion(len(f.childDirty) + 1)
 	for index := range f.childDirty {
 		f.countPublicWork(1)
 		indices = append(indices, index)
@@ -237,6 +246,9 @@ func (f *Fold) resolveChildren(rev uint64) {
 			if _, exists := f.childDirty[index]; !exists {
 				f.countPublicWork(1)
 				f.childDirty[index] = struct{}{}
+				if len(indices) == cap(indices) {
+					f.countIngestion(3*len(indices) + 1)
+				}
 				indices = append(indices, index)
 			}
 		}
@@ -261,6 +273,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 				f.childCounts.baseCopies++
 			}
 			state.base = f.items[index]
+			state.baseRecipe = f.recipes[state.base.ID]
 		}
 		item := &f.items[index]
 		if state != nil {
@@ -290,17 +303,33 @@ func (f *Fold) resolveChildren(rev uint64) {
 				if item.Kind != "agent" {
 					item.Status = "interrupted"
 				}
-				f.setContent(index, "parent_ending", ending)
+				f.countIngestion(2)
+				// Identical intrinsic storage and ending need no repeated serialization,
+				// including empty deltas before the first nonempty append.
+				sameBase := len(item.Content) == len(state.endingBase) && len(item.Content) != 0 && &item.Content[0] == &state.endingBase[0]
+				f.countIngestion(min(len(ending), len(state.endingRaw)) + 1)
+				if f.texts[index] == nil && sameBase && bytes.Equal(ending, state.endingRaw) {
+					item.Content = state.endingContent
+				} else {
+					base := item.Content
+					f.setContent(index, "parent_ending", ending)
+					state.endingBase, state.endingRaw, state.endingContent = base, ending, item.Content
+				}
 			}
 			previous, current := state.previous, *item
 			previous.Rev, current.Rev = 0, 0
-			if !reflect.DeepEqual(previous, current) {
+			f.countIngestion(20)
+			if f.appendedText != index && len(previous.Content) == len(current.Content) && len(current.Content) != 0 && &previous.Content[0] != &current.Content[0] {
+				f.countIngestion(len(current.Content))
+			}
+			if f.appendedText == index || !reflect.DeepEqual(previous, current) || !reflect.DeepEqual(state.previousRecipe, f.recipes[item.ID]) {
 				item.Rev = max(item.ID, rev)
 			} else {
 				item.Rev = state.previous.Rev
 			}
 			state.base.Parent, state.base.Rev = item.Parent, item.Rev
 			state.previous = *item
+			state.previousRecipe = f.recipes[item.ID]
 			state.restored = false
 		}
 		if item.Kind == "agent" {
@@ -312,5 +341,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 		}
 	}
 	f.countPublicWork(len(f.childDirty))
-	clear(f.childDirty)
+	// The next discovery must not iterate capacity retained from a former peak.
+	f.childDirty = make(map[int]struct{})
+	f.countIngestion(1)
 }

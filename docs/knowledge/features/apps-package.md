@@ -17,9 +17,12 @@ state. Process spawn proves only starting; the owner confirms health before
 exposing private targets; owner construction reconciles registrations and recovers
 failed generations automatically. The daemon owns one owner for its discovery
 registry, independently of channels. Callable first publication and active-release
-updates are implemented; interrupted-publication startup recovery (#3263) and
-publishing control/daemon wiring (#3301/#3266) remain separate slices.
-Encrypted resource activation (#3123) remains a separate responsibility.
+updates and before-activation startup recovery are implemented; after-activation
+resolution (#3404) and publishing control/daemon wiring (#3301/#3266) remain
+separate slices.
+The daemon installs this owner for encrypted asset/API routing and cached
+infrastructure/runtime readiness (#3440), with counted actual Node/template and
+real-relay acceptance (#3441); see [readiness and evidence](apps-package-lifecycle-and-restart-state.md#lifecycle-and-restart-state).
 
 ## Package topics
 
@@ -66,6 +69,33 @@ Read-only SQLite opening alone is insufficient: a WAL-mode file can create
 sidecars during verification. `backupSQL` rejects non-standalone headers before
 opening and checks integrity/foreign keys without schema-specific queries or
 migrations; existing migration-ledger rows survive unchanged.
+
+macOS rejects `/dev/fd/<directory fd>` as a subprocess cwd. `runBackupNode`
+instead re-executes the current binary with a private bootstrap argv and passes
+the no-follow-opened directory through `ExtraFiles` as child fd 3.
+`execBackupNode` validates the mode, absolute Node path and directory descriptor,
+calls `fchdir`, closes the descriptor and replaces itself with the selected
+supported Node running fixed `backupSQL` with an empty environment. The parent
+cwd never changes; there is no shell or unchecked pathname fallback. Renaming
+the selected directory or replacing its old pathname with a directory/symlink
+cannot redirect the child into foreign data: it keeps the selected directory
+identity or returns an explicit failure.
+
+Pinning cwd alone is insufficient if SQL still opens `../data`: moving the work
+directory changes what its parent names. `sqliteSnapshot` moves only the copied
+main database and sidecars into the selected `sqlite-work` directory through
+descriptor-relative `renameat`, so every SQLite filename is local. It installs
+the standalone result through descriptor-relative rename and removes copied
+work inputs/sidecars before removing the work directory. Original registration
+data is never moved. `verifyBackupSQLite` likewise uses local filenames in the
+selected sealed data directory; verification errors leave sealed contents unchanged.
+
+Version probing, unsupported Node, bootstrap/start/exec/SQL failures and
+cancellation return explicit errors. The launch has a 60-second context limit
+and one-second `WaitDelay`; bootstrap becomes Node in the same PID, and every
+started child is joined before return, including cancellation. A failed snapshot
+publishes no successful verification evidence; interrupted work requires a new
+publish ID.
 
 Sidecar rejection must precede the initialized-SQL branch. Otherwise absent or
 zero-byte `app.sqlite` bypasses SQL opening and allows transient WAL/SHM/journal

@@ -68,7 +68,9 @@ func TestOwnerCleanupErrorContext(t *testing.T) {
 				// failure, so an error assertion cannot conceal a leaked real child.
 				o.kill = func(pid int, sig syscall.Signal) error {
 					err := syscall.Kill(pid, sig)
-					if err == nil && sig == failure.signal {
+					// Inspection uncertainty persists even after actual retirement;
+					// this arm verifies error context, not transient recovery.
+					if sig == failure.signal && (err == nil || sig == 0) {
 						return syscall.EPERM
 					}
 					return err

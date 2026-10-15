@@ -60,9 +60,10 @@ Unconditional `UpdatePublish` alone cannot reject obsolete health/finalization.
 Recovery callers clear the journal together with their resulting lifecycle
 fields. The registry validates and persists caller-supplied results; it neither
 derives those fields from the journal nor performs recovery itself. Callable first
-publication and active-release updates are implemented; interrupted-publication
-startup recovery (#3263) remains downstream. Stored references and decisions alone
-prove neither readiness nor verified or restored data. See
+publication, active-release updates and
+[before-activation startup recovery](apps-package-lifecycle-and-restart-state.md#startup-publication-recovery)
+are implemented; after-activation resolution remains #3404. Stored references and
+decisions alone prove neither readiness nor verified or restored data. See
 [publication and recovery](../../hosted-apps.md#publication-and-recovery).
 
 Both metadata mutations use `changeLocked`: validation, persistence, snapshot
@@ -234,11 +235,13 @@ can cancel its own wait independently. The daemon invokes joined shutdown on
 normal exit and every startup failure after owner construction. Local stop
 preserves sibling services and the session pool; daemon shutdown preserves
 available intent for restart. Publication owns migration/private health, atomic
-activation and verified update recovery; interrupted-publication startup recovery
-(#3263), publishing control/daemon wiring (#3301/#3266) and encrypted resource
-capability activation (#3123) remain downstream. Production `HostedAppsReady`
-remains unsatisfied and `hosted_apps_v1` withheld until resource routing completes
-the attestation. Daemon startup installs no dependencies and runs no migrations. See
+activation, verified update recovery and before-activation startup recovery.
+After-activation resolution (#3404), publishing control/daemon wiring
+(#3301/#3266) remain downstream. Production installs the owner's encrypted
+asset/API providers and cached infrastructure/runtime attestation (#3440);
+see [readiness and counted fake-/real-relay evidence](apps-package-lifecycle-and-restart-state.md#lifecycle-and-restart-state),
+including actual Node/template acceptance (#3441).
+Daemon startup installs no dependencies and runs no migrations. See
 [startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
 
 See [publication writers and completion](apps-package-lifecycle-and-restart-state.md#publication-writers-and-completion)

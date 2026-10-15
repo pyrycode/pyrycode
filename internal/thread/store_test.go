@@ -82,7 +82,7 @@ func testStoreEqual(t *testing.T, snap Snapshot, id conversations.ConversationID
 	t.Helper()
 	f := New(string(id))
 	testFeed(t, f, entries...)
-	if snap.Version != f.Version() || !reflect.DeepEqual(snap.Items, f.Items()) {
+	if snap.Version != f.Version() || snap.LastShownVersion != f.lastShown || !reflect.DeepEqual(snap.Items, f.Items()) {
 		t.Fatalf("snapshot differs from full replay: %#v, want %#v", snap, f.Items())
 	}
 }

@@ -69,6 +69,10 @@ type generation struct {
 // NewOwner selects Node once and starts asynchronous committed-intent reconciliation.
 // Construction waits for neither service spawn nor fresh health confirmation.
 func NewOwner(registry *Registry, nodeExecutable string) (*Owner, error) {
+	return newOwner(registry, nodeExecutable, backupOps{})
+}
+
+func newOwner(registry *Registry, nodeExecutable string, recoveryOps backupOps) (*Owner, error) {
 	if registry == nil {
 		return nil, ErrInvalidStorage
 	}
@@ -82,6 +86,7 @@ func NewOwner(registry *Registry, nodeExecutable string) (*Owner, error) {
 	}
 	o := &Owner{registry: registry, node: node, generations: map[string]*generation{}, ports: map[int]bool{}, previous: map[string]int{}, grace: stopGrace, kill: syscall.Kill, startup: startupDeadline, startInterval: startupInterval, runtimeInterval: healthInterval, requestTimeout: healthRequestTimeout, listen: func() (net.Listener, error) { return net.Listen("tcp4", "127.0.0.1:0") }}
 	o.now = time.Now
+	o.backupOps = recoveryOps
 	o.publishing = make(map[string]*publication)
 	o.removing = make(map[string]bool)
 	o.migrateTimeout = 60 * time.Second
@@ -97,6 +102,11 @@ func NewOwner(registry *Registry, nodeExecutable string) (*Owner, error) {
 	})
 	registry.mu.Lock()
 	registry.owner = o
+	for _, r := range registry.snapshot.Records {
+		if r.PublishJournal != nil && !r.PublishJournal.ActivationCommitted && !r.RetirementPending {
+			o.admitStartupRecoveryLocked(cloneRecord(r))
+		}
+	}
 	registry.mu.Unlock()
 	go o.reconcile()
 	o.signal()
@@ -328,6 +338,9 @@ func (o *Owner) Stop(appID string) error {
 	o.registry.mu.Unlock()
 	if p != nil {
 		<-p.done
+		if p.startupRecovery {
+			err = errors.Join(err, p.retirementErr)
+		}
 	}
 	if g != nil {
 		<-g.done
@@ -441,5 +454,27 @@ func (o *Owner) cleanup(pid int) error {
 		time.Sleep(10 * time.Millisecond)
 	}
 	signal(syscall.SIGKILL, "kill")
-	return errors.Join(result, probeErr)
+	// Signal delivery is not retirement. In particular, an exiting macOS group
+	// can temporarily deny probes before the kernel reports its absence.
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		err := o.kill(-pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return result
+		}
+		if err == nil {
+			// Linux may retain orphan zombies; inspect every member to prove
+			// none can execute, rather than waiting for init to collect them.
+			var live bool
+			live, err = candidateGroupLive(pid)
+			if err == nil && !live {
+				return result
+			}
+		}
+		if err != nil && probeErr == nil {
+			probeErr = fmt.Errorf("apps: inspect process group: %w", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.Join(result, probeErr, errors.New("apps: process group retirement unconfirmed"))
 }

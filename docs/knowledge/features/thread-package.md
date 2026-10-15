@@ -287,15 +287,30 @@ retain that load qualification when comparing later measurements.
 History is the only durable source of truth. Beneath the supplied history
 instance directory, `conversations/<conversation-id>/history/` holds
 `thread-cache.json` and `thread-recovery.json` beside the history segments.
-The cache stores detached items, consumed version, schema and folding-rule
-revisions, epoch, complete-progress flag and run/coordinator references. The
-recovery marker names the store lifetime that opened the conversation; its
+Schema-2 `cacheRecord` stores only `Schema`, `Rules`, `Epoch`, fully consumed
+`Version` V, `LastShownVersion`, `Checksum`, `Complete` and `Recovery` with its
+`Run`/`Coordinator` references. It omits items and serializes to fewer than 1024
+bytes regardless of thread size. At V zero the checksum is empty and the
+last-shown watermark is zero; otherwise the checksum is 64 lowercase hex
+characters and the watermark cannot exceed V. The recovery marker names the
+store lifetime that opened the conversation; its
 coordinator conversation holds `thread-run-<token>.json`. `EnsureLogDir` can
 create an empty contained directory without fabricating history entries.
 
+`entryChecksum` hashes the stored entry at V with SHA-256. Its ordered input is
+ID, type byte length, type bytes, timestamp Unix seconds, timestamp nanoseconds,
+payload byte length and stored payload bytes. Every integer is a big-endian
+uint64, including the converted Unix seconds; type and payload bytes are
+length-prefixed. The timestamp identifies its instant independently of timezone
+or in-memory monotonic time. Segment-line formatting is excluded, while stored
+payload bytes remain opaque. This identifies entry V, not the whole prefix or
+resumable fold state.
+
 Every load or retry reconstructs a fresh fold from readable history with bounded
-`ForwardReader.Walk` chunks. Cached items are compared with fresh replay at their
-consumed version before their epoch can be retained; they never seed the fold.
+`ForwardReader.Walk` chunks. Eligible metadata retains its epoch only if replay
+reaches exactly V and both the consumed entry's checksum and reconstructed
+last-shown watermark match the record. Replay continues through the surviving
+readable bound before usability; cached fields never seed the fold.
 **Visible items are insufficient continuation state:** `Fold.Items` omits
 unresolved children, pending reports and private joins. Full replay restores
 unfinished text, queued sends and that hidden evidence before usability. The
@@ -316,7 +331,9 @@ Candidate ordering and cleanup traverse a reusable dense slice; membership is
 deleted only for its current indexes before resetting the slice length. Ranging
 or clearing a membership map can scan storage retained from its largest past
 entry even when few keys remain. Counting yielded keys or `len(map)` misses that
-work. `TestPublicTouchHistoricalPeakWork` checks fixed appends and duplicate
+work. Store's chunk-wide publication candidates use the same dense-slice rule;
+deduplication alone does not make enumeration affected-only after a large replay.
+`TestPublicTouchHistoricalPeakWork` checks fixed appends and duplicate
 registration after unrelated repaired trees grow from 4,096 to 16,384 children.
 
 Replay also reconstructs `Snapshot.LastShownVersion` entry by entry, independent
@@ -331,7 +348,7 @@ hiding or dropping a row never replace or lower the earlier watermark.
 **Final item revisions cannot reconstruct unread state.** A queued send can
 first appear shown, then be dropped with a newer `Rev` and `Shown == false`;
 the earlier shown watermark still applies. Every load/retry reconstructs it
-from history rather than cached items or the maximum final shown `Rev`.
+from history rather than the cached watermark or the maximum final shown `Rev`.
 A usable empty conversation has both `Version` and `LastShownVersion` zero.
 Consumers determine unread with `LastShownVersion > ReadUpTo`, using the
 existing single read mark in the same history-ID space; the fold/store does
@@ -341,20 +358,37 @@ not persist read marks. See
 Each usable `Snapshot.Epoch` is a 128-bit random identifier encoded as 32 hex
 characters, separate from deterministic item equality. Across store lifetimes,
 reuse requires a compatible complete cache, matching recovery marker, completed
-run certificate and matching replayed items. Changed folding rules, an unclean
-stop, missing/corrupt/incompatible metadata, mismatched items or a cache ahead of
-surviving history require a new epoch. Before replay/publication, the store
+run certificate and matching checksum/watermark at V. Changed folding rules, an
+unclean stop, missing/corrupt/incompatible metadata, invalid fields, mismatched
+evidence or a cache ahead of surviving history require a new epoch. Old
+item-bearing schema-1 caches rotate once; a subsequent clean reopen of their
+schema-2 replacement retains the epoch. Before replay/publication, the store
 establishes an incomplete run certificate and replaces the conversation's
 recovery marker, invalidating its previous clean claim. Failure leaves the view
 unavailable. Folding semantics changes must increment `foldingRules`.
+
+**Version bounds and item equality cannot detect replaced tail entries.** A lost
+unsupported entry can be replaced at the same ID without changing folded items.
+`TestStoreCacheReplacedTail` deliberately preserves item equality, requiring the
+checksum mismatch to rotate the epoch. `TestStoreCacheChecksumAtVersion` checks
+the saved V rather than a newer replay bound, so ordinary later appends retain
+an eligible epoch.
+
+Empty-history evidence must explicitly contain non-null `Version`,
+`LastShownVersion` and `Checksum`. Ordinary JSON scalar decoding otherwise turns
+missing/null fields into valid-looking zero progress. `cacheRecord.UnmarshalJSON`
+tracks presence separately; `recoveryCandidate` and `finishRun` both reject absent
+evidence. `TestStoreCacheMissingEmptyEvidence` isolates these checks from run
+eligibility by supplying a complete certificate before reopening.
 
 Choose the revision against the current merged rules: concurrent semantic changes
 can otherwise select the same revision. A missing-field cache regression can
 still pass because replayed content differs, concealing that collision.
 `TestStoreQueueHandleCacheRules` also supplies old-rule caches with matching
-rows and requires a new epoch, proving rule incompatibility independently of
-content mismatch. Accepted-send handle semantics use rules revision 3; caches
-from revisions 1 or 2 rebuild from raw history and cannot hide recorded handles.
+version, checksum and watermark and requires a new epoch, proving rule
+incompatibility independently of evidence mismatch. Accepted-send handle
+semantics use rules revision 3; caches from revisions 1 or 2 rebuild from raw
+history and cannot hide recorded handles.
 
 Recovery remains `StateRebuilding` until replay and a complete checkpoint
 succeed. Missing or unusable cache data rebuilds from history; genuinely missing
@@ -365,6 +399,14 @@ repair followed by `Retry` creates a new reader and fold. Completed progress is
 checkpointed before the first usable recovery publication. Tail items, consumed
 version, `LastShownVersion` and change notifications publish without waiting for
 the checkpoint deadline, so a usable view may be newer than its saved cache.
+Publication capture shares unchanged immutable item/content storage and compares
+only final affected public rows. Initial, scheduled and lifecycle checkpoints
+write compact evidence without rendering or serializing items. The checksum
+advances only after a successful feed; checkpoint and retirement evidence pair
+it with the version and watermark of completed publication progress. A partially
+failed feed cannot advance that evidence. Public snapshots,
+observations and queries still detach their results; see
+[snapshots and retry](thread-package-background-store.md#snapshots-and-retry).
 A failed initial or scheduled checkpoint withdraws usability with generic
 `ErrUnavailable`; lifecycle results retain `ErrPersistence` and prevent clean
 certification.
@@ -396,17 +438,26 @@ only scalar lifecycle records. Compatible unload/reload in one store lifetime
 preserves the epoch even though that run's certificate remains incomplete;
 unload never certifies a clean exit. `Shutdown() error` closes admission, joins
 all workers, revalidates/replaces final checkpoints for loaded and previously
-unloaded conversations, then completes the shared run certificate last. Only
-successful completion permits epoch reuse in a later lifetime. Failed replay,
+unloaded conversations, comparing epoch, version, checksum and watermark with
+their final consumed progress, then completes the shared run certificate last.
+Only successful completion permits epoch reuse in a later lifetime. Failed replay,
 cancellation before recovery completes or failed/interrupted checkpoint or final
 certificate writes cannot certify clean shutdown. Lifecycle methods report
 failures explicitly; repeated/concurrent shutdown callers share one result.
 See [isolation and lifecycle](thread-package-background-store.md#isolation-and-lifecycle).
 
+[ADR 045](../decisions/045-thread-index-over-history.md) proposes resumable private
+fold checkpoints and a persistent index as future work. Compact evidence does
+not resume folding. The shared run/coordinator/recovery-marker lifecycle remains
+in use until [#3383](https://github.com/pyrycode/pyrycode/issues/3383) changes it;
+callers still finish producer draining and tail catch-up before `Store.Shutdown`.
+
 Epoch reuse establishes compatible item identity; retained change-range
 continuity needs separate proof. `Store.Observe` acquires a detached complete
 baseline, and `Store.Changes` proves a range only from retained publication
-boundaries in the current worker, limited to 64 batches and 1 MiB. Unload/reload,
+boundaries in the current worker, limited to 64 batches and 1 MiB of JSON-encoded
+changes. Retained text suffixes have detached storage so they cannot pin an
+accumulated message beyond that accounting. Unload/reload,
 retry and a new store lifetime retain no old batches, even when recovery
 preserves the epoch. Missing live ranges or a different epoch explicitly return
 `BaselineRequired`; live consumers acquire a fresh complete baseline.
@@ -419,7 +470,7 @@ unload/reload offers the same reconstructed continuity without retained live
 batches; epoch equality alone remains insufficient. Saved versions need not
 coincide with publication boundaries. Catch-up evidence and indexes remain
 disposable, history-derived query data, reconstructed on every load/retry;
-cached items never establish the range or seed continuation.
+compact recovery evidence never establishes the range or seeds continuation.
 
 Recovery records public touches and appearances entry by entry, independently
 of replay chunks. A public item receives a touch at the current consumed version

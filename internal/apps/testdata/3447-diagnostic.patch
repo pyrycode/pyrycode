@@ -1,0 +1,26 @@
+--- a/internal/apps/candidate_process.go
++++ b/internal/apps/candidate_process.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
+@@ -66,6 +67,7 @@
+ 		}
+ 	}
+ 	cleanupErr := cleanup(cmd.Process.Pid)
++	fmt.Fprintf(os.Stderr, "3447 command args=%q pid=%d wait=%v cleanup=%v context=%v\n", args, cmd.Process.Pid, err, cleanupErr, ctx.Err())
+ 	if cleanupErr != nil {
+ 		cleanupErr = &candidateRetirementError{cleanupErr}
+ 	}
+@@ -92,6 +94,7 @@
+ 		}
+ 		for time.Now().Before(deadline) {
+ 			live, err := candidateGroupLive(pid)
++			if err != nil { fmt.Fprintf(os.Stderr, "3447 probe pid=%d signal=%d live=%v err=%v\n", pid, sig, live, err) }
+ 			if err != nil {
+ 				return err
+ 			}
