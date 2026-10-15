@@ -243,6 +243,29 @@ with committed registry snapshots and drains intervening updates; assuming
 registration/removal consume exactly two revisions would reject valid owner
 observations or correlate the wrong notification.
 
+### Paired resource fixtures
+
+A late-response test can stay green with broken request-ID fencing if it releases
+the old response after the replacement read finishes. `TestLiveRelay_HostedResources`
+holds the replacement at its own backend barrier, releases the retired response,
+and asserts no output before allowing the replacement to return. Count the uncertain
+write relative to the preceding successful mutation: two total invocations here
+mean the uncertain write added exactly one. See
+[resource retirement](apps-package-resource-serving.md#resource-serving).
+
+Worker exit after the five-second resource inactivity deadline could prove timeout
+cleanup rather than disconnect retirement. The same test observes
+`v2.hosted.resource_exited` within three seconds after closure. Keep that observation
+bound shorter than inactivity expiry and retain service PID/data/identity checks;
+connection cleanup must not terminate the daemon-owned service.
+
+Typed unsigned decoding alone accepts absent/null wire fields as zero. Raw-field
+presence and numeric-type assertions are needed to distinguish required zero
+`size_bytes`, `total_chunks` and first-chunk `index` from missing fields. The
+[#3441 verifier](https://github.com/pyrycode/pyrycode/pull/3445#issuecomment-6189748734)
+identified this remaining assertion gap in `hostedWire.response`; its passing
+204/first-chunk checks establish decoded values, not strict raw-field presence.
+
 ### Other package fixtures
 
 Inspect the compiled bundle itself, not only generated output.

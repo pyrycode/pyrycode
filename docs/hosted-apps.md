@@ -19,7 +19,7 @@ The daemon owns storage, service reconciliation/recovery,
 discovery subscriptions and cancellable delivery independently of channels.
 Production resource routing and cached infrastructure/runtime attestation are
 implemented (#3440), with counted real-daemon/fake-relay acceptance below.
-Actual Node/template and real-relay validation remain #3441.
+Counted real-relay and actual Node/template acceptance is also complete (#3441).
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
 `templates/hosted-app/`; after-activation publication recovery (#3404),
@@ -1097,7 +1097,7 @@ implemented, including before-activation publication restart recovery;
 publishing control/daemon wiring remains #3301/#3266, after-activation resolution
 remains #3404 and maintained orchestrator
 acceptance remains #3133. Encrypted resource capability activation is implemented
-(#3440); actual Node/template and real-relay acceptance remain #3441.
+(#3440), with real-relay and actual Node/template acceptance proven by #3441.
 
 The maintained standalone template supplies its own migration/startup validation
 and health endpoint. The commands below exercise that template directly; they do
@@ -1188,6 +1188,11 @@ withhold capability. Missing registry, owner, either resource provider or
 cancellable delivery, or missing/unsupported runtime, withholds it while normal
 channels remain usable. Negotiation does not establish an individual app's health:
 a stopped/unhealthy app's resource request returns `app.unavailable`.
+
+The [counted acceptance evidence](#implementation-and-validation-ownership)
+covers this negotiation through the real loopback relay with both a controlled
+reconnect backend and the unchanged maintained template on actual Node v24.15.0
+(#3441). The relay forwards existing encrypted frames without hosted-app parsing.
 
 The capability grants no authorization: require the authenticated, nonrevoked
 paired device and host identity for every operation. V1 uses existing host-level
@@ -1460,8 +1465,8 @@ and transport error mapping are implemented in the relay
 ([#3315](https://github.com/pyrycode/pyrycode/issues/3315)); see the
 [asset wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
 API routing is also implemented (#3316), and production installs both providers
-with counted fake-relay acceptance (#3440). Actual Node/template and real-relay
-validation remain #3441. See the
+with counted fake-relay acceptance (#3440), followed by counted real-relay and
+actual Node/template acceptance (#3441). See the
 [apps resource-serving overview](knowledge/features/apps-package-resource-serving.md#resource-serving)
 for ownership, concurrency and regression details.
 
@@ -1925,8 +1930,51 @@ independently repeated the 600/600 composition proof; runtime and fake-relay
 counts above are builder-recorded. Dispatcher `make check` and `make build`
 passed at that revision; their aggregate exit status supplies no named-test counts.
 
+The [PR #3445 evidence](https://github.com/pyrycode/pyrycode/pull/3445) adds
+uncached real-loopback-relay acceptance. Builder and
+[independent verifier](https://github.com/pyrycode/pyrycode/pull/3445#issuecomment-6189748734)
+each recorded the following counts with race instrumentation for the Go tests
+and daemon:
+
+| Real-relay proof | Executed | Passed | Failed | Skipped |
+|---|---:|---:|---:|---:|
+| `TestLiveRelay_HostedResources` | 1 | 1 | 0 | 0 |
+| `TestLiveRelay_HostedTemplate` | 1 | 1 | 0 | 0 |
+| Complete `internal/e2e/liverelay` package, including both arms | 5 | 5 | 0 | 0 |
+
+The package count includes the backend helper entry point; it is not another
+acceptance arm. Builder daemon revision was
+`293a752a40a20300d54f8d5173c0087823be3522`; verifier daemon revision was
+`9cd96d4967eacf8f042ce1536273eb225ad23816`. Both used unchanged relay revision
+`9939bc1ff8afec5021c09862e6f14dadba33ad42` and actual Node **v24.15.0** for the
+template arm. The maintained template tree
+`0a23e747e8e90360e7a9108dad3e57c23efcce73` was scaffolded, installed with
+`npm ci` and compiled with `npm run build` without source edits. The PR records
+exact build/run commands and artifact digests; the verifier matched the relay,
+compiled service and lockfile digests and independently exercised that build.
+
+`TestLiveRelay_HostedResources` uses an authenticated paired phone offering only
+`hosted_apps_v1`, fresh Noise negotiation and discovery. It verifies a 70000-byte
+binary with ordered credit-paced chunks, app/release/correlation, status,
+permitted headers, exact bytes/count/digest and absent conversation metadata.
+A body-bearing mutation completes at HTTP 204 metadata before readback. Partial
+read and committed-write disconnects retire resource workers within three seconds,
+before the five-second inactivity timeout. Reconnect renegotiates/discovers and
+reuses retired IDs; the old response is released while its replacement read is
+held active, with no old output delivered. The uncertain mutation adds exactly
+one invocation (two total including the earlier write); fresh reads preserve its
+committed value without replay, with unchanged service PID, saved data and host/app
+identity. Its controlled backend does not supply actual-template evidence.
+
+`TestLiveRelay_HostedTemplate` separately executes encrypted preferences
+GET/POST/GET against the unchanged compiled template on supported actual Node.
+It reads back `{"version":1,"selected_tab":"preferences","period":"7d"}`.
+POST's HTTP 204 has zero bytes/chunks and the empty SHA-256 digest, completes at
+metadata, needs no client credit and has no host completion frame. Registry/release
+preparation, migration and default seeding all precede daemon startup; no test-side
+registry writes or migrations run during daemon ownership. The relay remains
+content-blind, using existing framing and routes without protocol changes.
+
 These stopped-seed proofs require no live Claude and establish no local publisher
-or rollback acceptance. Actual Node/template and real-relay validation remain
-[#3441](https://github.com/pyrycode/pyrycode/issues/3441); native viewers,
-host navigation, publishing/daemon wiring and live channel/readiness-link
-acceptance remain with the downstream owners above.
+or rollback acceptance. Native viewers, host navigation, publishing/daemon wiring
+and live channel/readiness-link acceptance remain with the downstream owners above.

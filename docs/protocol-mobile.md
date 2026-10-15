@@ -7334,8 +7334,9 @@ The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, wi
 **Discovery, committed lifecycle delivery and bounded asset/API transfers with
 credit and scoped cancellation are implemented in the relay (#3315, #3316).
 Production activates them with cached infrastructure/runtime readiness (#3440)
-and counted real-daemon/fake-relay acceptance. Actual Node/template and real-relay
-validation remain #3441; native response assembly remains client-owned work.** The
+and counted real-daemon/fake-relay acceptance. Counted real-relay and actual
+Node/template acceptance is complete (#3441); native response assembly remains
+client-owned work.** The
 [hosted-app reference](hosted-apps.md) and
 [approved v1 contract](specs/architecture/3120-hosted-app-contract.md#normative-contract)
 fix manifest fields, runtime/layout, resource/Fetch semantics, limits and safe
@@ -7391,9 +7392,24 @@ asset/API bytes and digest, opaque queries, metadata-only HTTP 204, request
 rejections, credit/cancellation alongside a fake-Claude channel and request-ID
 reuse after both partial-read and committed-write disconnects. Each reconnect
 renegotiates and refreshes discovery before fresh reads; a commit/response
-barrier and invocation count rule out uncertain-write replay. Native viewers,
-publisher and live-channel acceptance remain downstream; #3441 owns actual
-Node/template and real-relay evidence. No live Claude ran or was required.
+barrier and invocation count rule out uncertain-write replay.
+
+The [counted #3441 evidence](hosted-apps.md#implementation-and-validation-ownership)
+adds real-loopback-relay proofs: `TestLiveRelay_HostedResources` and
+`TestLiveRelay_HostedTemplate` each **1 executed, 1 passed, 0 failed, 0 skipped**,
+independently repeated by the verifier with race-instrumented tests and daemon.
+The full package is **5/5**, including the backend helper entry point.
+The synthetic arm delivers 70000 binary bytes with credit, retires workers before
+inactivity expiry after both disconnects, renegotiates/discovers and reuses IDs.
+An old reply released during a held replacement read cannot satisfy it; invocation
+counts prove no uncertain-write replay while service/data/identity survive.
+The separate unchanged compiled-template arm uses actual Node **v24.15.0**:
+encrypted preferences POST/GET reads back nondefault `preferences`/`7d` values.
+HTTP 204 completes at metadata with zero bytes/chunks and the empty digest,
+requiring neither credit nor a completion frame. Preparation/migration/seeding
+precede daemon ownership. Relay payload parsing and protocol are unchanged.
+Native viewers, publisher and live-channel acceptance remain downstream.
+No live Claude ran or was required.
 
 | Envelope type | Direction | Purpose/correlation |
 |---|---|---|

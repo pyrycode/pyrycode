@@ -252,7 +252,8 @@ available intent for restart. Publication owns migration/private health, atomic
 activation, verified update recovery and before-activation startup recovery.
 After-activation resolution (#3404), publishing control/daemon wiring
 (#3301/#3266) remain downstream. Encrypted resource capability activation is
-implemented (#3440); actual Node/template and real-relay validation remain #3441.
+implemented (#3440), with counted actual Node/template and real-relay acceptance
+complete (#3441).
 Daemon startup installs no dependencies and runs no migrations. See
 [startup and health](../../hosted-apps.md#startup-and-health) for downstream boundaries.
 
@@ -266,8 +267,23 @@ daemon via `PYRY_E2E_BIN` and a synthetic `node` reporting `v24.15.0` and execut
 host/app identity intact while fresh negotiation/discovery and reused request IDs
 reject old results; the commit/response barrier checks the uncertain write is not
 replayed. Runtime/fake-relay counts are builder-recorded; the final verifier
-independently repeated composition 600/600. This supplies no #3441 real-relay/template,
-native-viewer, publisher or live-channel acceptance; no live Claude was required.
+independently repeated composition 600/600.
+
+The [#3441 evidence](../../hosted-apps.md#implementation-and-validation-ownership)
+adds real-loopback-relay `TestLiveRelay_HostedResources` and
+`TestLiveRelay_HostedTemplate`: each **1 executed/1 passed, 0 failed, 0 skipped**,
+independently repeated by the verifier with race-instrumented tests and daemon;
+the complete package is **5/5**, including a backend helper entry point.
+Partial-read and committed-write disconnects retire connection workers while
+preserving service PID, saved data and host/app identity. Reconnect refreshes
+negotiation/discovery and reads with retired IDs without replaying the uncertain
+write. The separate unchanged template runs on actual Node **v24.15.0** and proves
+encrypted preferences POST/204/GET with nondefault readback. Its releases,
+migrations and seed data are prepared before daemon ownership; ordinary daemon
+startup still performs no migration. Native-viewer, publisher and live-channel
+acceptance remain downstream; no live Claude was required. See the
+[paired resource fixtures](apps-package-testing.md#paired-resource-fixtures)
+for barriers and timing bounds that distinguish request-ID fencing from cleanup.
 
 `Open` validates storage before `normalizeSnapshot`. Every available record with
 an active release becomes starting; every unpublished or intentionally stopped
