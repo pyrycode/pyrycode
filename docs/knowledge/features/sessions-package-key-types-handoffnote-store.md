@@ -212,6 +212,13 @@ note/freshness read without acquiring lifecycle locks. Metadata errors can
 name host paths, so the reset logs only `reset.wrapup.freshness_failed`, never
 the error value. Size limits, safe reads and shared admission remain unchanged.
 
+`MarkHandoffNoteStale` performs real persistence inside ordinary reset's shared
+wrap-up deadline, before target resolution and delivery. A classification test
+with too little headroom can exhaust that deadline before its injected writer
+runs and still observe `reset.wrapup.write_failed`. Prove the intended callbacks
+ran with an unexpired context and keep deliberate wait expiry on a separate
+finite test budget; see [reset path verification](development-verification.md#prove-that-tests-distinguish-the-change).
+
 See [`writeMCPSettings`](sessions-package-key-types-writemcpsettings-session-settingspath.md)
 and [`writeSystemPrompt`](sessions-package-key-types-writesystemprompt-systemprompttext.md#carrying-the-conversations-handoff-note-2475)
 for the placement and atomic-write recipe this store copies and for the

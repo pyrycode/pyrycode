@@ -43,9 +43,20 @@ func TestResetThenRotate_FailedHandoffIsStale(t *testing.T) {
 				if tc.stage == "persistence" && os.Geteuid() == 0 {
 					t.Skip("requires directory permission enforcement")
 				}
+				// Classification needs room for stale-state persistence under -race.
+				// Only the wait-expiry cases deliberately consume the shorter budget.
+				deadline := 2 * time.Second
+				switch tc.stage {
+				case "readiness", "idle", "completion":
+					deadline = 500 * time.Millisecond
+				}
+				var started time.Time
+				var resolved, firstWrite, rotating time.Duration
+				var activated bool
+				writes := 0
 				var f *resetFixture
 				tail := newResettingTail(t, func(_ *resettingTail) *resetFixture {
-					f = newResetFixture(t, resetOptions{deadline: 35 * time.Millisecond, startBusy: tc.stage == "idle"})
+					f = newResetFixture(t, resetOptions{deadline: deadline, startBusy: tc.stage == "idle"})
 					return f
 				}, nil)
 				root := t.TempDir()
@@ -68,15 +79,27 @@ func TestResetThenRotate_FailedHandoffIsStale(t *testing.T) {
 				f.reset.notes = pool
 				resolve := f.reset.resolve
 				f.reset.resolve = func(id string) (resetTarget, bool) {
+					resolved = time.Since(started)
 					target, ok := resolve(id)
 					target.runner = resetStateRunner{resetRunner: f.runner.(*resetRunner), live: live}
-					target.activate = func(context.Context) error {
+					target.activate = func(ctx context.Context) error {
+						activated = true
+						if ctx.Err() != nil {
+							t.Error("deadline expired before activation")
+						}
 						if tc.stage == "resume" {
 							return errors.New("SENSITIVE-ERROR /private/path")
 						}
 						return nil
 					}
-					target.write = func(context.Context, string, []byte) error {
+					target.write = func(ctx context.Context, _ string, _ []byte) error {
+						writes++
+						if writes == 1 {
+							firstWrite = time.Since(started)
+							if ctx.Err() != nil {
+								t.Error("deadline expired before first delivery attempt")
+							}
+						}
 						switch tc.stage {
 						case "readiness":
 							return streamsup.ErrNoLiveChild
@@ -105,20 +128,33 @@ func TestResetThenRotate_FailedHandoffIsStale(t *testing.T) {
 				}
 				var successor sessions.SessionID
 				tail.starter.rotate = func(id sessions.SessionID) (sessions.SessionID, error) {
+					rotating = time.Since(started)
 					tail.rotateCalls++
 					var err error
 					successor, err = pool.RotateForNewSession(id)
 					return successor, err
 				}
 				completed := false
-				started := time.Now()
+				started = time.Now()
 				tail.starter.resetThenRotate(func() {}, func(err error) {
 					if err != nil {
 						t.Error(err)
 					}
 					completed = true
 				}, tail.runner, oldID, resetConvA, "", false)
-				if !completed || tail.rotateCalls != 1 || tail.runner.restartCount() != 1 || time.Since(started) > time.Second {
+				t.Logf("reset phases: deadline=%s resolved=%s first_write=%s rotating=%s completed=%s writes=%d activated=%t",
+					deadline, resolved, firstWrite, rotating, time.Since(started), writes, activated)
+				if resolved >= deadline || activated != !live {
+					t.Error("reset did not reach its intended pre-expiry activation/idle path")
+				}
+				wantWrite := tc.stage != "resume" && tc.stage != "idle"
+				if (writes > 0) != wantWrite {
+					t.Errorf("delivery attempts = %d, want attempted = %t", writes, wantWrite)
+				}
+				if tc.stage == "idle" && (!f.marked() || !strings.Contains(strings.Join(f.steps.seen(), ","), "interrupt")) {
+					t.Error("idle expiry did not wait on an interrupted busy conversation")
+				}
+				if !completed || tail.rotateCalls != 1 || tail.runner.restartCount() != 1 || time.Since(started) > 3*time.Second {
 					t.Fatal("failed wrap-up did not complete bounded rotation")
 				}
 				assertEdges(t, tail.bcast.recorded(),
