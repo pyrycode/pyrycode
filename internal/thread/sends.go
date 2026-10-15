@@ -83,16 +83,23 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 		if !ok || delivery < 0 || p.DeliveryEntryID >= e.ID {
 			return true, nil
 		}
-		rendered, err := f.render([]Item{f.items[delivery]})
+		// Validate both sources before claiming or suppressing either identity.
+		rendered, err := f.render([]Item{*item, f.items[delivery]})
 		if err != nil {
 			return true, err
 		}
-		message := rendered[0]
+		message := rendered[1]
 		f.countPublicWork(1)
-		f.countIngestion(len(item.Content) + len(message.Content))
-		item.Content = deliveredSendContent(item.Content, message.Content)
-		f.countIngestion(len(item.Content) * 3)
-		item.Summary, item.Order = message.Summary, message.ID
+		if r := f.recipes[item.ID]; r.creating != 0 {
+			r.delivery = p.DeliveryEntryID
+			f.recipes[item.ID] = r
+		} else {
+			f.countIngestion(len(item.Content) + len(message.Content))
+			item.Content = deliveredSendContent(item.Content, message.Content)
+			f.countIngestion(len(item.Content) * 3)
+			item.Summary = message.Summary
+		}
+		item.Order = message.ID
 		item.Session, item.Agent, item.NoChild = message.Session, message.Agent, message.NoChild
 		// Preserve internal indexes held by main work; suppress only the public row.
 		f.messages[p.DeliveryEntryID] = -1
@@ -101,7 +108,11 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 		item.Shown = status == "lost"
 	}
 	item.Status, item.Active, item.Rev = status, false, e.ID
-	f.setContent(index, "outcome", e.Payload)
+	if f.recipes[item.ID].creating != 0 {
+		f.referenceField(index, "outcome", recipeField{entry: e.ID})
+	} else {
+		f.setContent(index, "outcome", e.Payload)
+	}
 	return true, nil
 }
 

@@ -187,7 +187,7 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 	if e.Shown != nil {
 		item.Shown = *e.Shown
 	}
-	reference := f.source != nil && referencedKind(item.Kind) && e.Type != "send_accepted"
+	reference := f.source != nil && referencedKind(item.Kind)
 	if reference && (item.Kind == "user_message" || item.Kind == "assistant_message") {
 		item.Summary = ""
 	} else {
