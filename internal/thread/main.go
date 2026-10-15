@@ -190,7 +190,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		if st != nil && st.end == nil {
 			st.end = &mainOutcome{id: e.ID, status: "interrupted", field: "ending", raw: append(json.RawMessage(nil), e.Payload...)}
 			if child && st.text >= 0 {
-				f.setContent(st.text, "ending", st.end.raw)
+				f.setOutcome(st.text, st.end)
 			}
 			f.closeText(st, e.ID)
 			for _, call := range st.calls {
@@ -210,6 +210,16 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		if st.text >= 0 {
 			f.countPublicWork(1) // inspected append candidate, including empty deltas
 			item := &f.items[st.text]
+			if r := f.recipes[item.ID]; r.creating != 0 {
+				if summary != "" {
+					f.appendedText = st.text
+					r.text = append(r.text, e.ID)
+					f.recipes[item.ID] = r
+					item.Rev = e.ID
+					f.markAffected(st.text)
+				}
+				return true
+			}
 			if summary != "" {
 				f.appendedText = st.text
 				f.appendText(st.text, summary)
@@ -255,6 +265,8 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		call.item = f.addItem(e, Item{ID: e.ID, Order: e.ID, Rev: e.ID, Kind: "tool_call", Turn: id.TurnID, Status: status, Active: true, Shown: shown, Summary: summary})
 		if (p.Name == "Bash" || p.Name == "local_bash") && (!st.key.tagged || st.key.source.Kind == "claude") {
 			f.registerShell(e, callID, call)
+		} else if f.source != nil {
+			f.referenceItem(call.item, e)
 		}
 		if call.terminal == nil {
 			call.terminal = st.end
@@ -321,10 +333,15 @@ func (f *Fold) applyTerminal(call *mainCall) {
 	f.countPublicWork(1)
 	item := &f.items[call.item]
 	item.Status, item.Active, item.Rev = call.terminal.status, false, max(item.ID, call.terminal.id)
-	f.setContent(call.item, call.terminal.field, call.terminal.raw)
+	f.setOutcome(call.item, call.terminal)
 }
 func (f *Fold) setContent(index int, key string, value any) {
 	f.markAffected(index)
+	if f.recipes[f.items[index].ID].creating != 0 {
+		raw, _ := json.Marshal(value)
+		f.referenceField(index, key, recipeField{value: raw})
+		return
+	}
 	if f.textEnrichment(index, key, value) {
 		return
 	}
