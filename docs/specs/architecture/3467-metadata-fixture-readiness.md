@@ -64,6 +64,16 @@ joined before ordinary suite runs. The verifier owns the full-module test gate.
 - Baseline/candidate timings, chunk counts and ordinary suite outcomes will be
   recorded after execution; historical scheduling attribution remains unknown.
 
+## Documentation handoff
+- Pending for the documentation stage: in
+  `docs/knowledge/features/development-verification.md`, section
+  "Diagnosing startup recovery runtime", document the metadata fixture's
+  complete-publication invariant (usable status and snapshot, consumed and shown
+  versions 1,024, and 1,024 complete items), progress/inactivity watchdog,
+  independent overall cap and shutdown joined before load-context cancellation.
+  Preserve the distinction between controlled reproduction of the total-deadline
+  dependency and unknown historical scheduling attribution.
+
 ## Revisions
 ### 2026-10-15 — measured single-chunk headroom
 The first candidate's ten-second inactivity interval expired during the final
@@ -209,3 +219,49 @@ Raw record: `/tmp/builder-3467/combined.json`; command status and ordering:
 All open questions are resolved: controlled reproduction establishes the local
 total-deadline dependency; exact historical attribution remains unproven. The
 verifier's full-module gate remains a later-stage check.
+
+### 2026-10-15 — verifier rework: complete successful gate
+Finding 1 required a complete successful gate after the hosted-app sibling was
+observed in `starting` state. Finding 2 reported no metadata source defect.
+Retain the reviewed implementation unchanged; this rework adds evidence and the
+pending documentation handoff only. The dispatcher merged current main before
+this run, producing tested revision `e7002e954e7be34fd6bb52cb3945f735ab7858f3`.
+
+Command: `env GOMAXPROCS=2 GOFLAGS=-p=2 make check GO=/tmp/builder-3467-rework/go-record`.
+The wrapper adds only `-json -count=1` to test commands; package timeouts remain
+the default ten minutes. Environment remains macOS arm64, Go 1.26.2, with default
+test parallelism and no affinity. No separate controlled contention workload,
+compilation or other builder-owned suite overlaps this gate. Host-wide incidental
+contention remains uncontrolled. The complete command exited zero after
+1,058.514 seconds, including vet, staticcheck and substrate-guard.
+
+| Complete tier | Started | Passed | Failed | Skipped |
+| --- | --- | --- | --- | --- |
+| Module race tests | 27,097 | 27,071 | 0 | 26 |
+| Fake-daemon e2e race tests | 710 | 708 | 0 | 2 |
+
+The six metadata/read-source tests and subtests all passed without skips:
+`TestDaemonThreadMetadataReadiness` (34.030s),
+`TestDaemonThreadMetadataReadinessStalled` (1.020s),
+`TestDaemonThreadMetadataAllocations` and both allocation subtests (parent
+10.410s), and `TestThreadMetadataReadSources` (0.030s).
+`TestHostedAppsRuntimeFailureIsolation` and all four cases passed (5/5 checks),
+including `start` (2.660s). This establishes non-reproduction of that gate
+failure, not its cause or a source repair. Complete daemon, thread and e2e
+package durations were 499.009s, 240.568s and 275.325s respectively.
+Delayed-fixture construction/readiness/snapshot phases were
+0.532/28.137/1.766s; allocation-fixture phases were 0.842/4.184/1.705s.
+
+Module skips: supported Node/npm inputs absent (14), case-insensitive filesystem
+(3), invalid UTF-8 filenames rejected (4), and one each for the unavailable
+deleted-cwd prerequisite, root-only ownership substitution, Linux-only
+parent-death contract, opt-in slow proof and opt-in live Claude. E2e skips were
+`TestInnerFatalChild` (child-only harness helper) and `TestHostedAppsRecoverySQL`
+(optional Node/template inputs absent). No optional SQL or live proof is claimed.
+Raw output, complete named counts/skip reasons and command status are retained
+in `/tmp/builder-3467-rework/check.log`, `summary.json` and `check-status.json`.
+
+After the gate exited, `env GOMAXPROCS=2 GOFLAGS=-p=2 make build BIN=/tmp/builder-3467-rework/pyry`
+exited zero; output is `/tmp/builder-3467-rework/build.log`. All check and build
+processes were joined before handoff. No new source fix or follow-up is required
+by this successful recheck; documentation remains pending for its owning stage.
