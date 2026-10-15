@@ -139,10 +139,16 @@ threading the model through the caller.
 
 ## The capture's live gaps, and what they mean for a recapture
 
-`TestCaptureLive` (env-gated: `PYRY_CODEX_CAPTURE_BIN` +
-`PYRY_CODEX_CAPTURE_HOME`, so `make check` never runs Codex) captures plain
-text, an accepted command, a declined command, an interrupted turn and a
-file-edit attempt against real Codex 0.156.1. Two frame types could not be
+`TestCaptureLive` in `capture_live_test.go` requires the `codex_capture` build
+tag. Run `go test -tags codex_capture -run TestCaptureLive ./internal/codexsup/`
+with `PYRY_CODEX_CAPTURE_BIN` pointing to a Codex 0.156.1 binary and
+`PYRY_CODEX_CAPTURE_HOME` pointing to an isolated `CODEX_HOME` holding only a
+minimal config and the sign-in. It skips if either variable is empty; when
+enabled, it spends Codex allowance and rewrites `testdata/capture/` fixtures.
+Ordinary `go test ./...` and `make check` exclude the live test at compilation,
+even when both variables are inherited from the environment. The capture records
+plain text, an accepted command, a declined command, an interrupted turn and a
+file-edit attempt against real Codex. Two frame types could not be
 produced on demand and are hand-built instead, each schema-validated by the
 package's `jsonSchema.validate`:
 
@@ -329,11 +335,25 @@ surfacing as a deadline error far from the actual double-send. Any change to
 a shared frame-dispatch loop like this one needs a check for an existing
 fallthrough path before adding a parallel one.
 
-No test in this file makes a live Codex call — the whole point of building
-against the committed schema and the fake is that `client_test.go` runs with
-no Codex account. `capture_test.go`'s `TestCaptureLive` (above) is the one
-exception in the package, and it is skipped unless both capture env vars are
-set, so `make check` still never touches Codex.
+`client_test.go` and the offline capture tests run without a Codex account.
+`TestCaptureLive` lives in `capture_live_test.go`, behind `codex_capture`;
+recapture with `go test -tags codex_capture -run TestCaptureLive ./internal/codexsup/`.
+It still requires both `PYRY_CODEX_CAPTURE_BIN` and `PYRY_CODEX_CAPTURE_HOME`
+as described above and spends Codex allowance. `cmd/pyry`'s
+[`TestCodexApprovalLive`](codexsup-package-production-wiring.md) shares the tag
+and environment guards. Environment guards alone allowed inherited capture
+settings to activate live tests during ordinary gates; the build tag excludes
+both live entry points from default compilation and test listings.
+
+Keep live-only helper graphs behind the same tag as their entry points.
+Leaving `captureTurn`, `writeCapture`, `scrub` or `waitTurnEnd` untagged makes
+them unreachable to default staticcheck, which reports U1000 even when tests
+and vet pass. Keep helpers used by offline tests untagged: `captureModel` is
+also needed by fixture replays, while `TestCaptureFixturesScrubbed` and
+`TestCaptureApprovalPredicates` must remain in the ordinary suite. Check both
+default and tagged staticcheck and test listings when changing this boundary;
+a tagged run that skips at the environment guards proves selection and guarding,
+not live Codex behavior.
 
 ## Related
 
