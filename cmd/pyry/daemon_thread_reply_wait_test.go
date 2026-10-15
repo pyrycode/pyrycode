@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -93,24 +94,36 @@ func TestDaemonThreadQueriesRecoveryDelayedProvider(t *testing.T) {
 func TestDaemonThreadReplyDeadline(t *testing.T) {
 	for _, scenario := range []string{"missing", "expired buffered", "expired pending", "partial"} {
 		t.Run(scenario, func(t *testing.T) {
-			w := &switchWire{out: make(chan protocol.RoutingEnvelope, 1)}
-			deadline := time.Now().Add(30 * time.Millisecond)
-			switch scenario {
-			case "expired buffered":
-				w.out <- protocol.RoutingEnvelope{}
-				deadline = time.Now().Add(-time.Second)
-			case "expired pending":
-				w.pending = []protocol.RoutingEnvelope{{}}
-				deadline = time.Now().Add(-time.Second)
-			case "partial":
-				w.out <- protocol.RoutingEnvelope{}
-				if _, err := testDaemonThreadFrame(w, deadline); err != nil {
-					t.Fatal(err)
+			synctest.Test(t, func(t *testing.T) {
+				w := &switchWire{out: make(chan protocol.RoutingEnvelope, 1)}
+				deadline := time.Now().Add(30 * time.Millisecond)
+				switch scenario {
+				case "expired buffered":
+					w.out <- protocol.RoutingEnvelope{}
+					deadline = time.Now().Add(-time.Second)
+				case "expired pending":
+					w.pending = []protocol.RoutingEnvelope{{}}
+					deadline = time.Now().Add(-time.Second)
+				case "partial":
+					w.out <- protocol.RoutingEnvelope{}
+					// Virtual time consumes part of the same budget without making
+					// successful receipt depend on wall-clock scheduling.
+					time.Sleep(20 * time.Millisecond)
+					if _, err := testDaemonThreadFrame(w, deadline); err != nil {
+						t.Fatal(err)
+					}
 				}
-			}
-			if _, err := testDaemonThreadFrame(w, deadline); !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("missing absolute expiry: %v", err)
-			}
+				wantExpiry := time.Now()
+				if wantExpiry.Before(deadline) {
+					wantExpiry = deadline
+				}
+				if _, err := testDaemonThreadFrame(w, deadline); !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("missing absolute expiry: %v", err)
+				}
+				if now := time.Now(); !now.Equal(wantExpiry) {
+					t.Fatalf("expiry at %v, want %v", now, wantExpiry)
+				}
+			})
 		})
 	}
 }
