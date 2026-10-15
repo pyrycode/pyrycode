@@ -53,3 +53,7 @@ Commit this plan first, then write discriminating tests and record their failure
 - Threat model: trusted same-account services remain confined to existing process groups; escaping process groups is outside the hosted-app contract, unchanged here.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: The native fixture observed `live → EPERM → ESRCH` immediately after SIGKILL. The controlled until-kill probe fails on unchanged cleanup, which returns without post-kill inspection. Narrow implementation to `Owner.cleanup`: positively await group absence after SIGKILL, retrying inspection for one second and preserving signal errors. This also ensures the subsequent candidate helper starts after positive absence, so changing candidate cleanup is unnecessary for the demonstrated publication failure. Existing candidate cleanup remains unchanged. Native observations establish the transient window, not exact attribution of each historical failure. The open question is resolved to that limit.
+- 2026-10-15: Preserve Linux orphan-zombie behavior through existing `candidateGroupLive` only after the injected group probe succeeds; persistent EPERM cannot bypass inspection. An initial focused run caught `ErrUnavailable` being interpreted as previous-service health failure by `finishUpdateFailure`; use a distinct static retirement error so uncertain writers retain `app.io_failed`. Keep that failed run in the evidence.
