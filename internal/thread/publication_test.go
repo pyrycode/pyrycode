@@ -48,6 +48,14 @@ func TestAffectedPublicationOracle(t *testing.T) {
 					}
 					metadata := copyItems(after.Items)
 					for i := range metadata {
+						if r := f.recipes[metadata[i].ID]; r.creating == 0 && len(r.fields) != 0 {
+							for _, item := range f.items {
+								if item.ID == metadata[i].ID {
+									metadata[i].Content = item.Content
+									break
+								}
+							}
+						}
 						if f.recipes[metadata[i].ID].creating != 0 {
 							metadata[i].Content = nil
 							if metadata[i].Kind == "user_message" || metadata[i].Kind == "assistant_message" {

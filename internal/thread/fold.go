@@ -66,7 +66,8 @@ type Fold struct {
 	childEdges                map[childParentKey]map[int]struct{}
 	childAgents               map[int]childParentKey
 	childDirty                map[int]struct{}
-	childEndings              map[int]json.RawMessage
+	childEndings              map[int]endingReference
+	legacyOutcomes            map[uint64]json.RawMessage
 	agentGroups               map[agentKey]*agentGroup
 	agentCounts               *agentWorkCounts
 	agentLifetimes            map[agentKey]string
@@ -89,7 +90,7 @@ func New(conversationID string) *Fold {
 		childEdges:        make(map[childParentKey]map[int]struct{}),
 		childAgents:       make(map[int]childParentKey),
 		childDirty:        make(map[int]struct{}),
-		childEndings:      make(map[int]json.RawMessage),
+		childEndings:      make(map[int]endingReference),
 		agentGroups:       make(map[agentKey]*agentGroup),
 		agentLifetimes:    make(map[agentKey]string),
 		agentObservations: make(map[uint64][]agentObservation),

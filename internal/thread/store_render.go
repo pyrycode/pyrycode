@@ -35,13 +35,23 @@ func (s *Store) renderItems(ctx context.Context, id conversations.ConversationID
 	if q != nil {
 		for _, item := range items {
 			row := q.byID[item.ID%uint64(len(q.byID))][item.ID]
-			if row.recipe.creating != 0 {
+			if row.recipe.creating != 0 || len(row.recipe.fields) != 0 {
 				recipes[item.ID] = row.recipe
 			}
 		}
 	}
 	source := entryLookup(func(ids []uint64) ([]history.Entry, error) { return s.lookup(ctx, id, ids) })
-	items, err := renderShared(items, recipes, source)
+	items, err := renderSharedLookup(items, recipes, source, func(id uint64) (Item, bool) {
+		if q == nil {
+			return Item{}, false
+		}
+		row, ok := q.byID[id%uint64(len(q.byID))][id]
+		if !ok || row.item == nil {
+			return Item{}, false
+		}
+		recipes[id] = row.recipe
+		return *row.item, true
+	})
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}

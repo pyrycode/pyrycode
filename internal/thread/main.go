@@ -32,9 +32,18 @@ type mainCall struct {
 	terminal *mainOutcome
 }
 type mainOutcome struct {
-	id            uint64
+	id, content   uint64
 	status, field string
-	raw           json.RawMessage
+}
+
+func (f *Fold) outcome(e history.Entry, status, field string) *mainOutcome {
+	if f.source == nil {
+		if f.legacyOutcomes == nil {
+			f.legacyOutcomes = make(map[uint64]json.RawMessage)
+		}
+		f.legacyOutcomes[e.ID] = append(json.RawMessage(nil), e.Payload...)
+	}
+	return &mainOutcome{id: e.ID, content: e.ID, status: status, field: field}
 }
 
 // closureWorkCounts measures closure discovery and tracking maintenance.
@@ -188,7 +197,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 			f.addItem(e, item)
 		}
 		if st != nil && st.end == nil {
-			st.end = &mainOutcome{id: e.ID, status: "interrupted", field: "ending", raw: append(json.RawMessage(nil), e.Payload...)}
+			st.end = f.outcome(e, "interrupted", "ending")
 			if child && st.text >= 0 {
 				f.setOutcome(st.text, st.end)
 			}
@@ -280,7 +289,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		if e.Type == "main_tool_interrupted" {
 			field = "interruption"
 		}
-		call.terminal = &mainOutcome{id: e.ID, status: status, field: field, raw: append(json.RawMessage(nil), e.Payload...)}
+		call.terminal = f.outcome(e, status, field)
 		f.applyTerminal(call)
 	}
 	return true

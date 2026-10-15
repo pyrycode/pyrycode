@@ -71,7 +71,10 @@ func TestReferenceRetainedBytes(t *testing.T) {
 			if state := f.children[i]; state != nil {
 				old := legacy.children[i]
 				childBefore += len(old.base.Content) + len(old.previous.Content)
-				childAfter += len(state.base.Content) + len(state.previous.Content) + len(state.endingBase) + len(state.endingContent)
+				childAfter += len(state.base.Content) + len(state.previous.Content)
+				if state.legacyEnding != nil {
+					t.Fatal("production retained legacy ending cache")
+				}
 				if item.Kind == "assistant_message" {
 					assistantBefore += len(old.base.Summary) + len(old.previous.Summary)
 					assistantAfter += len(state.base.Summary) + len(state.previous.Summary)
@@ -81,6 +84,7 @@ func TestReferenceRetainedBytes(t *testing.T) {
 			}
 		} else {
 			deferred += len(item.Content)
+			countRecipe(f.recipes[item.ID])
 		}
 	}
 	if before == 0 || after != 0 || childBefore == 0 || childAfter != 0 || assistantBefore == 0 || assistantAfter != 0 || summaryBefore == 0 || summaryAfter != 0 || source.bytes > recentEntryBudget {
@@ -91,7 +95,7 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	countOutcome := func(o *mainOutcome) {
 		if o != nil && !seen[o] {
 			seen[o] = true
-			private += len(o.raw)
+			private += len(f.legacyOutcomes[o.content])
 		}
 	}
 	countTurn := func(st *mainTurn) {
@@ -111,6 +115,18 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	}
 	for _, o := range f.childReports {
 		countOutcome(o)
+	}
+	for i, state := range f.children {
+		if state.legacyEnding != nil {
+			t.Fatal("production child cache retained payload", i)
+		}
+		if f.recipes[f.items[i].ID].creating == 0 {
+			countRecipe(state.baseRecipe)
+			countRecipe(state.previousRecipe)
+		}
+	}
+	if private != 0 || parentEndings != 0 || len(f.legacyOutcomes) != 0 {
+		t.Fatal("production copied outcomes or ancestor endings", private, parentEndings)
 	}
 	t.Logf("generated entries=%d converted Content before=%d after=%d child-copy Content before=%d after=%d assistant Summary (including child copies) before=%d after=%d user Summary before=%d after=%d; recipes=%d logical recipe bytes=%d (includes child slots, excludes map/slice overhead, may share ID storage); bounded recent cache=%d; deferred private outcomes=%d inline parent-ending bytes across recipe slots=%d inline item Content=%d; Store snapshots excluded", len(entries), before, after, childBefore, childAfter, assistantBefore, assistantAfter, summaryBefore, summaryAfter, len(f.recipes), recipeBytes, source.bytes, private, parentEndings, deferred)
 }

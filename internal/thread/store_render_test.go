@@ -63,30 +63,11 @@ func TestStoreReferencePublication(t *testing.T) {
 		t.Fatalf("converted publication/query retention Content=%d -> %d Summary=%d -> %d", beforeContent, afterContent, beforeSummary, afterSummary)
 	}
 	private := 0
-	seen := make(map[*mainOutcome]bool)
-	count := func(o *mainOutcome) {
-		if o != nil && !seen[o] {
-			seen[o] = true
-			private += len(o.raw)
-		}
+	for _, raw := range f.legacyOutcomes {
+		private += len(raw)
 	}
-	countTurn := func(turn *mainTurn) {
-		count(turn.end)
-		for _, call := range turn.calls {
-			count(call.terminal)
-		}
-	}
-	for _, turn := range f.turns {
-		countTurn(turn)
-	}
-	for _, turn := range f.openings {
-		countTurn(turn)
-	}
-	for _, turn := range f.childTurns {
-		countTurn(turn)
-	}
-	for _, outcome := range f.childReports {
-		count(outcome)
+	if private != 0 || parentEndings != 0 {
+		t.Fatalf("copied private outcomes=%d parent endings=%d", private, parentEndings)
 	}
 	t.Logf("entries=%d GC complete; publication/query converted Content=%d -> %d Summary=%d -> %d; logical public recipes=%d (shared values, excludes container overhead); recent cache=%d; deferred public inline=%d private outcomes=%d recipe parent-ending=%d; history cache=0 (fixture history input excluded); change ring=0 (initial publication)", len(entries), beforeContent, afterContent, beforeSummary, afterSummary, recipes, source.bytes, deferred, private, parentEndings)
 	runtime.KeepAlive(c)
