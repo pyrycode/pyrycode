@@ -243,6 +243,25 @@ func (r *Registry) UpdatePushRegistration(tokenHash, platform, pushToken, name s
 	return false
 }
 
+// ClearPushRegistrationIfMatch clears only a still-matching registration on the
+// same pairing. Comparison and mutation are atomic against registration updates.
+// It preserves every other field and reports whether a Save is warranted.
+func (r *Registry) ClearPushRegistrationIfMatch(tokenHash, platform, pushToken string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if pushToken == "" {
+		return false
+	}
+	for i := range r.devices {
+		d := &r.devices[i]
+		if d.TokenHash == tokenHash && d.Platform == platform && d.PushToken == pushToken {
+			d.Platform, d.PushToken = "", ""
+			return true
+		}
+	}
+	return false
+}
+
 // ClearRedeemBy zeroes RedeemBy on the device whose TokenHash equals
 // tokenHash, durably recording that its pairing token has been redeemed.
 // Returns true iff a matching device was found AND its RedeemBy was non-zero —
