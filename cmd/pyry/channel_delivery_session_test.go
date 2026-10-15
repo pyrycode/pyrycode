@@ -381,12 +381,12 @@ func TestChannelDelivery_SessionDaemonWiring(t *testing.T) {
 		}
 	}
 	testShadowWait(t, func() bool {
-		raw, err := os.ReadFile(filepath.Join(instance, "conversations", string(old), "history", "thread-cache.json"))
-		var cache struct {
-			Version  uint64
-			Complete bool
+		raw, err := os.ReadFile(filepath.Join(instance, "conversations", string(old), "history", "thread-certificate.json"))
+		var certificate struct {
+			Version uint64
+			Clean   bool
 		}
-		return err == nil && json.Unmarshal(raw, &cache) == nil && cache.Version == 2 && cache.Complete
+		return err == nil && json.Unmarshal(raw, &certificate) == nil && certificate.Version == 2 && certificate.Clean
 	})
 	if err := control.ChannelPost(ctx, socket, "posts", "accepted by daemon"); err != nil {
 		t.Fatal(err)
@@ -407,16 +407,16 @@ func TestChannelDelivery_SessionDaemonWiring(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("daemon shutdown did not join")
 	}
-	rawCache, err := os.ReadFile(filepath.Join(instance, "conversations", string(id), "history", "thread-cache.json"))
+	rawCertificate, err := os.ReadFile(filepath.Join(instance, "conversations", string(id), "history", "thread-certificate.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cache struct {
-		Version  uint64
-		Complete bool
+	var certificate struct {
+		Version uint64
+		Clean   bool
 	}
-	if json.Unmarshal(rawCache, &cache) != nil || cache.Version != 2 || !cache.Complete {
-		t.Fatal("daemon did not persist final shadow version")
+	if json.Unmarshal(rawCertificate, &certificate) != nil || certificate.Version != 2 || !certificate.Clean {
+		t.Fatal("daemon did not certify final shadow version clean")
 	}
 	// Reload retains the same source captured at acceptance.
 	h := history.New(instance)

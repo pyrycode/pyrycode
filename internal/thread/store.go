@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -48,6 +47,7 @@ type storeReader interface {
 }
 
 type conversationWorker struct {
+	parent       context.Context
 	cancel       context.CancelFunc
 	done         chan struct{}
 	retiring     bool
@@ -73,15 +73,11 @@ type Store struct {
 	queryCopies  func(int)  // optional pointer-copy counter for index preparation
 	workers      map[conversations.ConversationID]*conversationWorker
 	closed       bool
-	initMu       sync.Mutex
-	runID        string
-	coordinator  conversations.ConversationID
 	records      map[conversations.ConversationID]progressRecord
 	shutdownDone chan struct{}
 	shutdownErr  error
 	replace      func(string, string) error
-	now          func() time.Time
-	newTimer     func(time.Duration) (<-chan time.Time, func())
+	syncDir      func(string) error
 }
 
 // NewStore creates a background cache owner; history is the durable source.
@@ -97,11 +93,7 @@ func NewStore(h *history.Store, beforeFold ...func(context.Context, conversation
 		history: h, beforeFold: barrier,
 		records: make(map[conversations.ConversationID]progressRecord),
 		replace: os.Rename,
-		now:     time.Now,
-		newTimer: func(d time.Duration) (<-chan time.Time, func()) {
-			timer := time.NewTimer(d)
-			return timer.C, func() { timer.Stop() }
-		},
+		syncDir: syncCacheDir,
 		workers: make(map[conversations.ConversationID]*conversationWorker),
 		forward: func(id conversations.ConversationID) (storeReader, error) { return h.Forward(id, 0) },
 		lookup: func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
@@ -169,7 +161,7 @@ func (s *Store) start(ctx context.Context, id conversations.ConversationID, retr
 			return nil
 		}
 		workerCtx, cancel := context.WithCancel(ctx)
-		w = &conversationWorker{cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), snapshot: Snapshot{State: StateRebuilding}}
+		w = &conversationWorker{parent: ctx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), snapshot: Snapshot{State: StateRebuilding}}
 		s.workers[id] = w
 		s.records[id] = progressRecord{Err: ErrUnavailable}
 		go s.run(workerCtx, id, w)
@@ -183,36 +175,13 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	var checksum, progressChecksum string
 	var capture publicationCapture
 	capture.copied = s.queryCopies
-	var recovery recoveryRecord
-	var savedVersion uint64
-	var lastCheckpoint time.Time
-	var deadline <-chan time.Time
-	var stopTimer func()
-	clearTimer := func() {
-		if stopTimer != nil {
-			stopTimer()
-		}
-		deadline, stopTimer = nil, nil
-	}
-	flush := func() error {
-		if err := s.checkpoint(id, recovery, progress, progressChecksum); err != nil {
-			return err
-		}
-		savedVersion, lastCheckpoint = progress.Version, s.now()
-		clearTimer()
-		return nil
-	}
 	defer func() {
-		clearTimer()
 		s.mu.Lock()
 		retiring := w.retiring
 		renderFailed := w.renderFailed
 		s.mu.Unlock()
-		if retiring && !renderFailed && progress.State == StateUsable && errors.Is(result, context.Canceled) {
-			result = nil
-			if progress.Version != savedVersion {
-				result = flush()
-			}
+		if retiring && !renderFailed && w.parent.Err() == nil && progress.State == StateUsable && errors.Is(result, context.Canceled) {
+			result = s.checkpoint(id, progress, progressChecksum, true)
 		}
 		w.cancel()
 		s.mu.Lock()
@@ -255,12 +224,20 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		result = err
 		return
 	}
-	recovery, err = s.beginRun(id)
-	if err != nil {
+	dirty := candidate
+	if dirty.Epoch == "" {
+		dirty.Epoch, err = randomToken()
+		if err != nil {
+			result = err
+			return
+		}
+	}
+	dirty.Schema, dirty.Rules, dirty.Clean = cacheSchema, foldingRules, false
+	if err := s.writeCacheFile(id, cacheName, dirty); err != nil {
 		result = err
 		return
 	}
-	if err := s.writeCacheFile(id, recoveryName, recovery); err != nil {
+	if err := s.removeLegacy(id); err != nil {
 		result = err
 		return
 	}
@@ -288,13 +265,15 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		}
 		return nil
 	}
-	epoch := ""
+	epoch := dirty.Epoch
 	if candidate.Epoch != "" {
 		if err := reader.Walk(ctx, candidate.Version, feed); err != nil {
 			return
 		}
 		if fold.Version() == candidate.Version && checksum == candidate.Checksum && fold.lastShown == candidate.LastShownVersion {
 			epoch = candidate.Epoch
+		} else {
+			epoch = ""
 		}
 	}
 	if err := reader.Walk(ctx, bound, feed); err != nil || fold.Version() != bound || ctx.Err() != nil {
@@ -319,19 +298,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		snapshot := changes.Snapshot
 		snapshot.Epoch = epoch
 		changes.Snapshot = snapshot
-		initial := progress.State != StateUsable
-		becameIdle := progress.Active && !snapshot.Active
 		progress, progressChecksum = snapshot, checksum
-		if initial || progress.Version != savedVersion {
-			remaining := lastCheckpoint.Add(30 * time.Second).Sub(s.now())
-			if initial || becameIdle || remaining <= 0 {
-				if err := flush(); err != nil {
-					return err
-				}
-			} else if deadline == nil {
-				deadline, stopTimer = s.newTimer(remaining)
-			}
-		}
 		s.publish(ctx, id, w, items, changes, fold, capture.affected)
 		return nil
 	}
@@ -339,72 +306,23 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		result = err
 		return
 	}
-	// Tail waits for commits independently; only this worker accesses the fold
-	// and checkpoints. Acknowledgement keeps at most one chunk in flight.
-	tailCtx, cancelTail := context.WithCancel(ctx)
-	chunks := make(chan []history.Entry)
-	ack := make(chan error)
-	tailResult := make(chan error, 1)
-	tailDone := make(chan struct{})
-	go func() {
-		defer close(tailDone)
-		tailResult <- reader.Tail(tailCtx, func(entries []history.Entry) error {
-			select {
-			case chunks <- entries:
-			case <-tailCtx.Done():
-				return tailCtx.Err()
-			}
-			select {
-			case err := <-ack:
-				return err
-			case <-tailCtx.Done():
-				return tailCtx.Err()
-			}
-		})
-	}()
-	defer func() { cancelTail(); <-tailDone }()
-	for {
-		select {
-		case <-ctx.Done():
-			result = ctx.Err()
-			return
-		case result = <-tailResult:
-			if result == nil {
-				result = ErrUnavailable
-			}
-			return
-		case <-deadline:
-			if result = flush(); result != nil {
-				return
-			}
-		case entries := <-chunks:
-			if result = ctx.Err(); result == nil {
-				// Partial Feed failures never become complete progress. Retry
-				// constructs a fresh reader and fold after a failed chunk.
-				if err := feed(entries); err != nil {
-					result = ErrUnavailable
-					if errors.Is(err, context.Canceled) {
-						result = err
-					}
-				} else {
-					result = publish()
-				}
-			}
-			if result != nil {
-				return
-			}
-			select {
-			case ack <- nil:
-			case <-ctx.Done():
-				result = ctx.Err()
-				return
-			}
+	result = reader.Tail(ctx, func(entries []history.Entry) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
+		// Partial Feed failures never become complete retirement progress.
+		if err := feed(entries); err != nil {
+			return err
+		}
+		return publish()
+	})
+	if result == nil {
+		result = ErrUnavailable
 	}
 }
 
-func (s *Store) checkpoint(id conversations.ConversationID, recovery recoveryRecord, snapshot Snapshot, checksum string) error {
-	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, LastShownVersion: snapshot.LastShownVersion, Checksum: checksum, Complete: true, Recovery: recovery})
+func (s *Store) checkpoint(id conversations.ConversationID, snapshot Snapshot, checksum string, clean bool) error {
+	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, LastShownVersion: snapshot.LastShownVersion, Checksum: checksum, Clean: clean})
 }
 
 func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, items []*Item, changes Observation, fold *Fold, affected []int) {
@@ -479,8 +397,8 @@ func (s *Store) Status(id conversations.ConversationID) Snapshot {
 	return snapshot
 }
 
-// Unload checkpoints dirty complete progress, cancels and joins one worker, and
-// releases all items/private fold state. It does not certify a clean lifetime.
+// Unload cancels and joins one worker, certifies its complete progress clean,
+// and releases all items/private fold state.
 // Persistence or incomplete recovery failures are returned without source data.
 func (s *Store) Unload(id conversations.ConversationID) error {
 	if !conversations.ValidID(string(id)) {
@@ -510,9 +428,8 @@ func (s *Store) Unload(id conversations.ConversationID) error {
 	return w.err
 }
 
-// Shutdown closes admission, joins workers and checkpoints every conversation
-// opened in this lifetime, including unloaded ones. Only successful completion
-// certifies epoch reuse on reopen. Concurrent callers share the same result.
+// Shutdown closes admission and joins workers, certifying each independently.
+// Already unloaded certificates are preserved. Concurrent callers share the result.
 func (s *Store) Shutdown() error {
 	s.mu.Lock()
 	if s.shutdownDone != nil {
@@ -539,10 +456,14 @@ func (s *Store) Shutdown() error {
 		<-w.done
 	}
 	s.mu.Lock()
-	records := s.records
+	var err error
+	for _, p := range s.records {
+		if p.Err != nil {
+			err = ErrPersistence
+		}
+	}
 	clear(s.workers)
 	s.mu.Unlock()
-	err := s.finishRun(records)
 	s.mu.Lock()
 	s.shutdownErr = err
 	close(s.shutdownDone)
