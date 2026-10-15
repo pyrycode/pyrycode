@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"os"
+	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,27 +29,34 @@ func TestDaemonAppsRuntimeReadiness(t *testing.T) {
 				t.Fatal(err)
 			}
 			node := filepath.Join(t.TempDir(), "node")
-			if err := os.WriteFile(node, []byte("#!/bin/sh\nprintf '%s\\n' '"+tc.version+"'\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
+			testWriteDaemonAppsRuntime(t, node, "#!/bin/sh\nprintf '%s\\n' '"+tc.version+"'\n")
 			o := newDaemonAppsOwner(r, node, discardLogger())
 			if o == nil {
 				t.Fatal("owner missing")
 			}
 			defer o.Shutdown()
-			if got := o.CheckRuntime(context.Background()) == nil; got != tc.supported {
-				t.Fatalf("supported = %v", got)
+			probeErr := o.CheckRuntime(context.Background())
+			if got := probeErr == nil; got != tc.supported {
+				t.Fatalf("supported = %v, want %v; probe error: %v", got, tc.supported, probeErr)
 			}
-			// The executable selected at construction is independent of PATH changes.
-			if err := os.WriteFile(node, []byte("#!/bin/sh\nexec /bin/sleep 20\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
+			// Replacing the selected executable exercises the same absolute path.
+			testWriteDaemonAppsRuntime(t, node, "#!/bin/sh\nexec /bin/sleep 20\n")
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 			defer cancel()
 			start := time.Now()
-			if err := o.CheckRuntime(ctx); err == nil || time.Since(start) > time.Second {
-				t.Fatalf("unbounded runtime probe: %v", err)
+			if err := o.CheckRuntime(ctx); err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) || time.Since(start) > time.Second {
+				t.Fatalf("runtime probe: error = %v, context error = %v, elapsed = %v", err, ctx.Err(), time.Since(start))
 			}
 		})
+	}
+}
+
+// A joined child writes and closes the executable so concurrent test-process
+// forks cannot inherit a writable descriptor and make exec fail with ETXTBSY.
+func testWriteDaemonAppsRuntime(t *testing.T, path, script string) {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", `printf '%s' "$1" > "$2" && chmod 700 "$2"`, "write-node", script, path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write runtime fixture: %v: %s", err, out)
 	}
 }
