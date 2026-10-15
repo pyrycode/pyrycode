@@ -6,6 +6,35 @@ Split out of [`relay-package.md`](relay-package.md) (parent doc — see there fo
 
 `(*Connection).SendPushWake(platform, token string) error` asks the relay to send a platform push to an absent device — the daemon-authored half of `docs/protocol-mobile.md` § `push_wake`. Unlike `CloseConn` and `Send`, the envelope is **relay-addressed, not conn-addressed**: it carries no `conn_id` and no `frame`. It can't reuse `protocol.RoutingEnvelope` for this — that type's `conn_id` and `frame` fields have no `omitempty`, so it always serializes both keys, which is off-spec for an envelope meant to carry neither. `SendPushWake` marshals its own unexported `pushWakeEnvelope{PushWake: pushWakeRequest{Platform, Token}}` via `marshalPushWake`, then forwards through the same `transport.Client.Send` path as `CloseConn`, returning the transport sentinels unchanged. A marshal failure returns a fixed sentinel rather than a wrapped encoder error, so no error from this method can carry the token; neither send path logs the token. The envelope is never sealed in a Noise session — the relay is its only reader.
 
+### Correlated feedback and connection lifetime
+
+The [published invalid-token result contract](../../protocol-mobile.md#push_wake_result)
+requires a connection generation in addition to a request ID. `Connection.run`
+reuses `Connection.Frames` across transport reconnects, and
+`V2SessionManager.handleFrame` currently drops envelopes without `conn_id`.
+The channel cannot identify which connection produced a result: accepting a
+matching ID from it alone could clear a registration after reconnect. The
+pending consumer in [Core #3423](https://github.com/pyrycode/pyrycode/issues/3423)
+must bind both submission and consumption to the original connection generation,
+paired identity and exact registration snapshot, invalidating bindings on failed
+submission or disconnect. Separate `Registry.FindByTokenHash` and
+`Registry.UpdatePushRegistration` calls leave a gap in which a replacement token can arrive and then be erased. Compare
+and clear atomically against in-process updates inside the existing
+[lock/reload/mutate/save region](relay-package-handlers.md#behavioural-contract),
+which also preserves concurrent pairing/revocation writes.
+Current `SendPushWake` remains uncorrelated; publication activates no removal.
+
+The companion [relay #213](https://github.com/pyrycode/pyrycode-relay/issues/213)
+cannot satisfy the feedback deadline by reusing `WSConn.Send` unchanged: that
+method waits for its serialized writer before starting a ten-second write
+timeout. The [five-second feedback budget](../../protocol-mobile.md#feedback-bounds-and-overflow)
+includes queue and writer wait as well as I/O, with earlier cancellation on
+expiry, disconnect or shutdown. Moving delivery off the read loop alone does
+not bound its lifetime. Likewise, evicting a coalescing-cache entry must not
+release accounting for an original result still queued for delivery; otherwise
+queue pressure can bypass the feedback caps. These are companion requirements,
+not behavior implemented by protocol publication.
+
 ### Daemon-side trigger (`cmd/pyry`'s `pushWaker`, #2564)
 
 The daemon wakes an absent phone from three fan-out points:
@@ -18,7 +47,7 @@ All three call `Trigger(conversationID, trigger)` on a nil-safe `pushWaker` — 
 
 A device is woken when its `Platform` is `fcm` with a non-empty `PushToken`, no open v2 session belongs to it, and it was not already woken inside a 30 s window — a failed send does not start that window, so the next trigger retries it. "Belongs to it" is decided on `ActiveConn.DeviceTokenHash` (the `TokenHash` of the device the handshake authenticated, filled in `handleActiveConns` from `s.device`), **never** the hello-claimed `ActiveConn.DeviceName` — a phone could otherwise silence another device's wake by claiming that device's name in `hello`. See [`v2-session-manager-surface.md`](v2-session-manager-surface.md) for the `ActiveConn` field list.
 
-Eligible devices are sent newest `PairedAt` first (\#2602): `wakeAbsent` sorts the `devices.Registry.List()` copy with `slices.SortStableFunc` (comparing `PairedAt` descending) right before the send loop. The relay caps each server-id to a burst of 6 wakes and silently drops the rest as rate-limited; dead tokens from earlier pairings are never pruned (needs the relay to report FCM's answer back — out of scope), so sending in `List()`'s on-disk order (oldest first, per `Registry.save`'s persisted sort) let stale registrations spend the whole burst before the live phone's wake was ever sent, dropping it. The sort is stable, so devices with equal (e.g. zero) `PairedAt` keep registry order, and it sorts the `List()` copy rather than relying on or reversing the registry's own ordering, so it doesn't couple to `devices.Registry`'s internal ordering guarantee.
+Eligible devices are sent newest `PairedAt` first (\#2602): `wakeAbsent` sorts the `devices.Registry.List()` copy with `slices.SortStableFunc` (comparing `PairedAt` descending) right before the send loop. The relay caps each server-id to a burst of 6 wakes and silently drops the rest as rate-limited; dead tokens from earlier pairings are currently never pruned (correlated feedback is [specified](../../protocol-mobile.md#push_wake_result), with relay #213 and Core #3423 implementation pending), so sending in `List()`'s on-disk order (oldest first, per `Registry.save`'s persisted sort) let stale registrations spend the whole burst before the live phone's wake was ever sent, dropping it. The sort is stable, so devices with equal (e.g. zero) `PairedAt` keep registry order, and it sorts the `List()` copy rather than relying on or reversing the registry's own ordering, so it doesn't couple to `devices.Registry`'s internal ordering guarantee.
 
 **Since #2601, a phone drops out of `ActiveConns` the instant its WebSocket ends, not just at the 15-minute idle sweep.** The relay's own close notice (a `{conn_id, close_code}` routing envelope with no `frame`, pyrycode-relay#152) now tears the v2 session down at once — see [`v2-session-manager.md` § Inbound peer-close notice](v2-session-manager-state-machine-inbound-peer-close-handlepeerclose-teardown.md). Before this, a phone that had just backgrounded stayed listed as an open session until the sweep fired, so `wakeAbsent` skipped it and a turn ending or a modal appearing while it was briefly away sent no wake at all — the failure this section's #2564 motivation describes. The idle sweep remains the fallback for a relay that never sends the notice.
 
