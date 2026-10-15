@@ -121,7 +121,11 @@ func (w *switchWire) request(id string, p protocol.SwitchAgentPayload) {
 }
 func (w *switchWire) read() (string, protocol.Envelope) {
 	w.t.Helper()
-	e := w.await()
+	return w.decode(w.await())
+}
+
+func (w *switchWire) decode(e protocol.RoutingEnvelope) (string, protocol.Envelope) {
+	w.t.Helper()
 	plain, err := w.phones[e.ConnID].recv.Decrypt(w.data(e))
 	if err != nil {
 		w.t.Fatal(err)
