@@ -82,3 +82,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-15
+
+## Revisions
+
+2026-10-15: The full scoped race run also identified superseded hidden-receipt target assertions in `TestQueuedSendHistoryLifecycle` (`cmd/pyry/queued_send_history_test.go`) and `TestPromptAnswerReceiptsPages` (`cmd/pyry/prompt_answer_receipts_test.go`). Update only those server target expectations; preserve their receipt validation, paging, checkpoint and delivery checks. No production design change. The final regression uses authenticated legacy/thread list and mark-read routes, tests a completion revision beyond shown progress, and covers loaded metadata and eligible/unavailable unloaded certificates. Written work remains below 800 lines, with zero exported types or changed consumer signatures.

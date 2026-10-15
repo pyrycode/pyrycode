@@ -238,7 +238,11 @@ func TestPromptAnswerReceiptsPages(t *testing.T) {
 						t.Fatal("receipt did not count toward legacy target")
 					}
 					latest, err := (legacyHistoryReader{store}).LatestDisplayableEntryID(conv)
-					if err != nil || latest != 1 {
+					want := uint64(1)
+					if visibility == "hidden" {
+						want = 0
+					}
+					if err != nil || latest != want {
 						t.Fatalf("legacy latest=%d %v", latest, err)
 					}
 				}
