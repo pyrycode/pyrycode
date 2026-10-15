@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,7 +189,7 @@ func TestAgentSessionEndings_Startup(t *testing.T) {
 			put(protocol.TypeBackgroundTaskStarted, map[string]any{"task_id": "bad", "tool_call_id": "call", "truncated_fields": []string{"task_id"}}, nil)
 			// Force multiple raw pages and a real segment rollover without retaining prose in recovery.
 			for i := 0; i < 140; i++ {
-				put("padding", map[string]string{"padding": string(make([]byte, 8192))}, nil)
+				put("padding", map[string]string{"padding": strings.Repeat("x", 8192)}, nil)
 			}
 			constructed()
 			inspected := phase("raw-pages")

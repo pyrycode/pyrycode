@@ -65,3 +65,20 @@ Pending for the documentation stage: preserve the ADR 045 requirements from #333
 - Threat model: no product trust or permission boundary changes; storage architecture and relay security remain outside this test-only repair.
 
 **Reviewer:** builder self-review. **Date:** 2026-10-15.
+
+## Revisions
+- 2026-10-15: Baseline diagnostics and coverage assertions were committed as `90ecea2f025d8d1f76e99452abd17459e1493606`, on `3ec72c34` with all three sibling repairs. Linux amd64, Go 1.26.9, allowed CPUs 0–7, cgroup quota six CPUs, empty GOFLAGS. Compile with `go test -race -c -o /tmp/builder-3431/baseline.test ./cmd/pyry`. Ordinary measurement executes that binary with `-test.run=^TestAgentSessionEndings_Startup$ -test.count=1 -test.timeout=10m -test.v`; all three named tests/subtests passed without skips. Legacy took 13.57 seconds and modern 14.70 (parent 28.27). Actual fixture bytes were 6,893,719 / 6,896,943; each had seven real segments and two nonempty 128-entry pages (148 / 155 entries). The initial scratch JSON converter incorrectly treated its raw log as an executable after the test passed; corrected conversion reads stdin. Raw logs and converted named results agree; this was an evidence-tool error, not a test failure.
+- 2026-10-15: Identical contention policy to #3364: launch four prebuilt race binaries simultaneously using `taskset -c 0 /tmp/builder-3431/baseline.test -test.run=^TestAgentSessionEndings_Startup$ -test.count=1 -test.timeout=10m -test.v`, join all four, retain individual raw logs, JSON converted through `go tool test2json -t -p github.com/pyrycode/pyrycode/cmd/pyry`, and process statuses. Four parents, four legacy and four modern executions all passed: 12 named executions/passes, zero failures/skips, all process exits 0. Legacy took 53.85–53.94 seconds and modern 57.04–57.28; parent 110.88–111.22. No timeout or deadlock reproduced. The controlled workload supports reducing needless fixture scan cost; it does not establish the historical package timeout's cause.
+
+Baseline phase seconds (ordinary value; range across four contended processes):
+
+| Phase | Legacy ordinary | Legacy contention | Modern ordinary | Modern contention |
+| --- | --- | --- | --- | --- |
+| Construction | 1.257 | 5.053–5.147 | 1.108 | 4.153–4.200 |
+| Raw paging/segment inspection | 1.290 | 4.761–4.793 | 1.134 | 4.566–4.605 |
+| First recovery | 3.830 | 15.900–15.932 | 3.910 | 16.158–16.500 |
+| Reopened endings/receipt reads | 2.096 | 8.286–8.306 | 2.442 | 9.783–9.845 |
+| Repeated recovery and ending read | 5.088 | 19.761–19.789 | 6.105 | 22.167–22.300 |
+
+- 2026-10-15: Scratch overlays independently prove the new guards: `go test -race -json -count=1 -timeout=10m -overlay=/tmp/builder-3431/no-rollover.json -run '^TestAgentSessionEndings_Startup$' ./cmd/pyry` changes printable padding to one byte and fails both subtests with `fixture did not roll over`. The analogous `no-pagination.json` uses three 524,288-byte entries, retains real rollover, and fails both subtests with `fixture has only 1 nonempty raw pages`. Each overlay executed three named tests/subtests with three expected failures, no skips, command exit 1. No overlay enters the candidate. These failures precede accepting the printable-padding repair.
+- 2026-10-15: The one-line fixture repair replaces NULs with printable ASCII, retaining 140 entries of 8192 characters. Actual bytes become 1,159,109 legacy / 1,162,333 modern (about 83% less); legacy segment sizes are 1,051,518 and 107,591 bytes, preserving the production 1 MiB rollover. The modern fixture also has two real segments; both retain two nonempty pages and their original entry counts. `go test -race -json -count=3 -timeout=10m -run '^TestAgentSessionEndings_Startup$' ./cmd/pyry` passed all nine named executions: three parents, three legacy, three modern, zero failures/skips, exit 0, package 20.685 seconds. These validation runs overlapped the baseline package's ordinary work, so the final isolated ordinary/controlled comparison is recorded separately. No storage or daemon production change is supported or needed by the observations.
