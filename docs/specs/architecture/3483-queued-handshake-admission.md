@@ -98,3 +98,71 @@ with its controlled regression and evidence. Expected total written work about
 300–400 lines, no exported types/interfaces, three local check insertions, four
 acceptance criteria and no new production reject branches; all five limits hold.
 Fetched feature branches have no overlap in the three fixture files inspected.
+
+## Investigation evidence
+
+### Conclusion and limits
+Both open questions are resolved. Holding the successful response callback after
+publication lets the unchanged raw `switchWire.open` return while the queue is
+still absent. The diagnostic early push returns `ErrConnNotFound` before any
+teardown can run. The admission check times out during that hold, respects an
+already-canceled caller, and succeeds after release; the same connection then
+accepts and decrypts envelope 20 with its exact type and payload. The existing
+four queued frames retain their order, IDs 10–13, type and exact payload.
+
+This proves unfinished admission is a sufficient cause of the observed error,
+and repairs that demonstrated fixture dependency. It does not establish the
+historical scheduler ordering or show an admitted connection disappearing.
+The refined issue's contrary evidence remains relevant: the original scoped
+failure on `70905aa7` followed a passing scoped run, and an isolated ten-run
+attempt on `146f6c71` passed all ten tests. Our passing repetitions do not
+retroactively diagnose that failure. No production change was needed.
+
+### Revisions and environment tested
+- Base: `d9d2a7b9`; plan committed first as `dbcc18d9`.
+- Expected-red source: `dbcc18d9` plus the controlled regression and a no-op admission check. The diagnostic early push produced the expected missing-queue error; the regression then failed with `admission while response callback held: got <nil>, want deadline exceeded`.
+- Green test source: `77e6e6a95ca3473828e9d10afb26aa9a61ca6cf1`. The repetitions ran on the identical working test source immediately before this commit; scoped validation used the same bytes. Subsequent changes only append this evidence.
+- Linux `7.0.0-38-generic x86_64`, Go `go1.26.9 linux/amd64`, `CGO_ENABLED=1`, `GOTOOLCHAIN=auto`, empty `GOFLAGS`; eight available CPUs. Green checks explicitly used `GOMAXPROCS=8`, default test parallelism 8 and no custom build tags. The initial red run used the unset/default GOMAXPROCS configuration.
+- Only the response callback hold is controlled scheduling. Focused repetitions finished before the scoped run. Vet/build overlapped part of the scoped command. The follow-up isolated relay repetitions began after relay had finished but while thread/cmd validation continued. Other external process overlap was not inventoried and is not attributed as a cause.
+
+### Commands and outcomes
+Counts below are Go JSON test/subtest `run`, `pass`, `fail` and `skip` events,
+including parent tests and subtests. `-count=20` disables test-result caching.
+
+| Check | Executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| Expected-red controlled regression | 1 | 0 | 1 | 0 |
+| Original queued-handshake test, race count 20 | 20 | 20 | 0 | 0 |
+| Controlled admission regression, race count 20 | 20 | 20 | 0 | 0 |
+| Scoped race: `internal/thread` | 1186 | 1185 | 0 | 1 |
+| Scoped race: `cmd/pyry` | 16567 | 16565 | 0 | 2 |
+| Scoped race: `internal/relay` | 1530 | 1529 | 1 | 0 |
+| Isolated unchanged relay follow-up, race count 20 | 20 | 20 | 0 | 0 |
+
+Commands (JSON output was captured outside the checkout under `/tmp/builder-3483`):
+
+```sh
+go test -race ./cmd/pyry -run '^TestDaemonRelayWireAdmissionBeforePush$' -count=1 -json
+GOMAXPROCS=8 go test -race ./cmd/pyry -run '^TestDaemonRelayWire(QueuedPushDuringHandshake|AdmissionBeforePush)$' -count=20 -json
+GOMAXPROCS=8 go test -race ./internal/thread ./cmd/pyry ./internal/relay -json
+GOMAXPROCS=8 go test -race ./internal/relay -run '^TestV2Session_Push_HoldGatedOnProbeNotSendError$' -count=20 -json
+GOMAXPROCS=8 go vet ./...
+GOMAXPROCS=8 go build -o /tmp/builder-3483/pyry ./cmd/pyry
+```
+
+Vet and build passed (exit 0). Scoped race validation exited 1: the unchanged
+`TestV2Session_Push_HoldGatedOnProbeNotSendError` failed its initial push with
+`relay: conn not found: rekey: conn not found`. Neither relay nor thread differs
+from the base. After searching for an existing tracker, filed
+[#3485](https://github.com/pyrycode/pyrycode/issues/3485) with the failure and
+20/20 isolated non-reproducing results; verified Backlog and `priority:low`.
+Its cause remains unestablished and its separate fixture was left untouched.
+
+Skip reasons: thread's `TestReferenceDiskHeap` requires
+`-args -measure-thread-heap`; cmd's `TestRunAgentRun_RealClaude` requires
+`PYRY_E2E_REAL_CLAUDE=1`; cmd's `TestMemoryPathsCaseInsensitive` requires a
+filesystem where alternate component casing resolves. No assigned test skipped.
+
+`make check`: pending dispatcher/verifier full-module gate, not executed by the
+builder under the role's validation boundary. No full-module or live-suite pass
+is claimed; the unrelated scoped failure above remains recorded.
