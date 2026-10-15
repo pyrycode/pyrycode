@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -63,7 +64,7 @@ func TestAffectedPublicationOwnership(t *testing.T) {
 	f := New("a")
 	f.captureSet = make(map[int]struct{})
 	var capture publicationCapture
-	testFeed(t, f, testMessage(1), testMain(2, "main_turn_opened", `,"occurred_at":"2026-01-01T00:00:00Z"`), testMain(3, "assistant_delta", `,"text":"old"`))
+	testFeed(t, f, testMessage(1), testMain(2, "main_turn_opened", `,"occurred_at":"2026-01-01T00:00:00Z"`), testMain(3, "assistant_delta", `,"text":"old"`), testMain(4, "assistant_delta", `,"text":" initialized"`))
 	old, changes, err := capture.capture(f)
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +87,7 @@ func TestAffectedPublicationOwnership(t *testing.T) {
 		}
 	}()
 	defer func() { <-done }()
-	for id := uint64(4); id < 24; id++ {
+	for id := uint64(5); id < 24; id++ {
 		testFeed(t, f, testMain(id, "assistant_delta", `,"text":" suffix"`))
 		items, _, err := capture.capture(f)
 		if err != nil {
@@ -112,6 +113,123 @@ func TestAffectedPublicationOwnership(t *testing.T) {
 	retained.Changes[0].Addition.Content[0] = '!'
 	if !sameItems(detachPublication(old), baseline) {
 		t.Fatal("addition aliases publication")
+	}
+}
+
+func TestAffectedPublicationTextLifecycle(t *testing.T) {
+	t.Parallel()
+	large, _ := json.Marshal(strings.Repeat("<&>雪 ", 100))
+	for _, lane := range []string{"main", "child"} {
+		t.Run(lane, func(t *testing.T) {
+			f := New("a")
+			f.captureSet = make(map[int]struct{})
+			var capture publicationCapture
+			type retained struct {
+				items    []*Item
+				want     []Item
+				snapshot Snapshot
+				query    *queryIndex
+				result   QueryResult
+			}
+			var roots []retained
+			feed := func(e history.Entry) {
+				e.ID = f.version + 1
+				testFeed(t, f, e)
+			}
+			delta := func(raw string) history.Entry {
+				if lane == "child" {
+					return testChild(1, "assistant_delta", "p", `,"text":`+raw+`,"z":"tail"`)
+				}
+				return testMain(1, "assistant_delta", `,"text":`+raw+`,"z":"tail"`)
+			}
+			check := func() {
+				for _, root := range roots {
+					if !sameItems(detachPublication(root.items), root.want) || !sameItems(root.result.Items, root.want) {
+						t.Error("retained publication/result changed at version", root.snapshot.Version)
+						return
+					}
+					result, err := root.query.window(context.Background(), root.snapshot, 0, 10, true)
+					if err != nil || !sameItems(result.Items, root.want) {
+						t.Error("retained query root changed", root.snapshot.Version, err)
+						return
+					}
+					for _, item := range root.items {
+						if !json.Valid(item.Content) {
+							t.Error("invalid retained JSON", root.snapshot.Version)
+						}
+					}
+				}
+			}
+			retain := func() Observation {
+				items, changes, err := capture.capture(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i, item := range items {
+					if &item.Content[0] != &f.items[i].Content[0] {
+						t.Fatal("capture copied content")
+					}
+				}
+				q := newPublicationIndex(items, nil)
+				result, err := q.window(context.Background(), changes.Snapshot, 0, 10, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				roots = append(roots, retained{items, f.Items(), changes.Snapshot, q, result})
+				check()
+				return changes
+			}
+			if lane == "child" {
+				feed(testMain(1, "tool_use", `,"tool_use_id":"p","name":"Agent"`))
+			}
+			feed(delta(`"initial"`))
+			feed(delta(`" initialized"`))
+			retain()
+			for phase := 0; phase < 3; phase++ {
+				if lane == "child" && phase == 1 {
+					feed(testMain(1, "tool_result", `,"tool_use_id":"p","is_error":false`))
+					retain()
+					if f.items[1].Active {
+						t.Fatal("child not provisionally closed")
+					}
+				}
+				if lane == "child" && phase == 2 {
+					feed(testMain(1, "background_task_started", `,"task_id":"task","tool_call_id":"p"`))
+					retain()
+					if !f.items[1].Active {
+						t.Fatal("child did not reopen")
+					}
+				}
+				for _, suffix := range []string{`" x"`, string(large), `" y"`} {
+					// Only the producer mutates the fold; retained roots are read concurrently.
+					func() {
+						done := make(chan struct{})
+						defer func() { <-done }()
+						go func() {
+							defer close(done)
+							for range 10 {
+								check()
+							}
+						}()
+						feed(delta(suffix))
+					}()
+					changes := retain()
+					var want string
+					_ = json.Unmarshal([]byte(suffix), &want)
+					if len(changes.Changes) != 1 || changes.Changes[0].TextAppend != want || changes.Changes[0].Fields["Content"] != nil {
+						t.Fatal("pure append did not publish exactly its suffix", changes.Changes)
+					}
+				}
+			}
+			for _, root := range roots {
+				root.result.Items[len(root.result.Items)-1].Content[0] = '!'
+				copy := detachPublication(root.items)
+				copy[len(copy)-1].Content[0] = '!'
+				if !sameItems(detachPublication(root.items), root.want) {
+					t.Fatal("public result aliases publication")
+				}
+			}
+		})
 	}
 }
 

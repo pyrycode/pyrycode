@@ -18,12 +18,13 @@ func (f *Fold) countIngestion(n int) {
 	}
 }
 
-// textBuffer owns inline JSON. Only the text suffix and fixed trailing fields
-// move during append; geometric growth amortizes copying accumulated content.
+// textBuffer owns inline JSON. Append detaches shared publication storage before
+// moving the text suffix and fixed trailing fields. Private growth is geometric.
 type textBuffer struct {
 	raw        []byte
 	start, end int
 	tail       []byte
+	shared     bool
 }
 
 type assistantText struct {
@@ -36,13 +37,16 @@ type assistantText struct {
 
 func (f *Fold) growText(b *textBuffer, suffix []byte) {
 	n := b.end + len(suffix) + len(b.tail)
-	f.countIngestion(len(suffix) + len(b.tail) + 3)
-	if cap(b.raw) < n {
-		capacity := max(n, 2*cap(b.raw))
+	f.countIngestion(len(suffix) + len(b.tail) + 4)
+	if b.shared || cap(b.raw) < n {
+		capacity := cap(b.raw)
+		if capacity < n {
+			capacity = max(n, 2*capacity)
+		}
 		raw := make([]byte, b.end, capacity)
 		copy(raw, b.raw[:b.end])
 		f.countIngestion(capacity + b.end + 1)
-		b.raw = raw
+		b.raw, b.shared = raw, false
 	}
 	b.raw = append(b.raw[:b.end], suffix...)
 	b.end = len(b.raw)
