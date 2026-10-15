@@ -588,6 +588,58 @@ per fragment would let partial progress extend the missing-completion wait. The
 dropping all replies or only the final marker each failed at that bound. A focused
 pass alone proves neither attribution nor bounded failure.
 
+Recovery readiness and peer admission are separate from query completion.
+`testDaemonThreadLoad` waits for a usable exact-version query before opening
+peers; receiving both handshake responses still needs a bounded `ActiveConns`
+snapshot to establish admission. Record recovery, handshake/admission, provider
+entry/completion, first transport and complete reconstruction separately, using
+durations and counts without content. The
+[recovery-wire comparison](../../specs/architecture/3468-recovery-wire-wait.md#matched-contention-evidence)
+ran four race binaries with 32 CPU-only contenders pinned to CPU 0. All four
+baseline three-second waits expired after recovery and handshakes, before the
+first provider returned; all four repaired runs passed with the full escaped
+fixture. Recovery preparation took up to 13 seconds. Candidate admission took
+0.657–0.765 seconds after wire setup, first provider completion 5.283–5.370
+seconds and first transport 12.906–13.138 seconds. Separately timed from reply
+collection, the first catch-up frame took 12.249–12.425 seconds and complete
+catch-up/page reconstruction took 33.765–35.359 seconds. These measurements
+establish scheduling headroom for this controlled experiment. The truncated
+historical #3453 evidence cannot identify the cause of its earlier failure.
+
+`testDaemonThreadReply` starts one 60-second absolute budget at reply collection
+immediately after request submission, covering provider work, encoding, every
+fragment and the separate final coverage marker. This leaves about 70% headroom
+over the largest measured complete reply. `testDaemonThreadFrame` checks expiry
+before consuming ordered pending or buffered output; the reply helper checks
+again after decryption and final reconstruction. Progress never restarts the
+budget. Keep shared `switchWire.receive` and handshake waits at their existing
+three-second defaults, using `switchWire.decode` for the same authenticated,
+nonce-ordered decoding under the query budget. This is a test workload bound,
+not a product latency guarantee.
+
+Preserve full rows and parent closure, saved epoch reuse, old-revision first
+appearance, page bounds, correlation and legacy history when testing the wait.
+`TestDaemonThreadQueriesRecoveryDelayedProvider` holds the first provider beyond
+the old frame wait, then requires the identical complete recovered reply with
+bounded, joined gate cleanup. The
+[missing/late completion controls](../../specs/architecture/3468-recovery-wire-wait.md#focused-checks-and-negative-controls)
+retain the fixture: suppressing all transport, withholding final completion
+after 16 frames and delaying buffered final completion each failed at about
+60 seconds. A larger allowance alone does not establish reliable completion or
+finite failure.
+
+Deadline controls must also avoid short wall-clock success assumptions.
+`TestDaemonThreadReplyDeadline` originally required its first buffered receive
+within 30 ms; contention could consume that budget during setup. A later passing
+rerun did not erase the observed failure. Use `testing/synctest` for these local
+timer/channel scenarios: consume 20 ms of the original 30 ms budget, receive the
+buffered prefix, then require missing output to expire exactly at the original
+deadline. Already-expired pending/buffered output must fail immediately. The
+[deterministic controls](../../specs/architecture/3468-recovery-wire-wait.md#rework-validation-at-662b97de)
+show that a real 60 ms setup pause fails the old test and passes the virtual-clock
+test, while restarting the timer fails at virtual 50 ms instead of 30 ms. This
+checks the deadline policy independently of OS scheduling.
+
 `TestLiveStateRun` is a hermetic manager test despite its name. Its complete
 snapshot needs `pushQueueCap*2+2` routing envelopes: the handshake, one generated
 clear and every reading. Four race-test processes pinned to one CPU alone still
