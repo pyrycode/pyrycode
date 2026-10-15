@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,6 +122,7 @@ func TestOwnerSupportedNode(t *testing.T) {
 	t.Setenv("HOSTED_APP_NODE", node)
 	t.Setenv("NOISE_SECRET", "never inherit")
 	t.Setenv("NODE_OPTIONS", "--throw-deprecation")
+	t.Setenv("__CF_USER_TEXT_ENCODING", "never inherit")
 	r, o := ownerFixture(t)
 	dir := ownerBuild(t, r, testApp, "a", "1.0.0", ownerService)
 	m := testMap(t)
@@ -148,6 +150,10 @@ func TestOwnerSupportedNode(t *testing.T) {
 	}
 	if e := json.Unmarshal(waitFile(t, filepath.Join(data, "ready")), &proof); e != nil {
 		t.Fatal(e)
+	}
+	// macOS may synthesize this key even when Node starts with an empty environment.
+	if runtime.GOOS == "darwin" && proof.Env["__CF_USER_TEXT_ENCODING"] != "never inherit" {
+		delete(proof.Env, "__CF_USER_TEXT_ENCODING")
 	}
 	if proof.Cwd != dir || len(proof.Argv) != 2 || proof.Argv[1] != filepath.Join(dir, "dist/service/main.js") || proof.Bytes != "retained bytes" || len(proof.Env) != 8 || proof.Env["PYRY_APP_RELEASE"] != "1.0.0" || proof.Env["NODE_ENV"] != "production" || proof.Env["PYRY_APP_BIND_HOST"] != "127.0.0.1" {
 		t.Fatal(proof)

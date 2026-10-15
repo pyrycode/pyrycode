@@ -28,10 +28,11 @@ Full replay and incremental feeds produce the same items and version, including
 chunks split between companion boundaries, early reports, creations and endings.
 Different conversation owners can
 consume the same IDs without sharing items, successor attribution, pending
-pairs, send claims or main-work state. The owner serializes `Feed`, `Items` and
-`Version`; `Fold` itself has no locks or goroutines. Payloads are copied on ingestion,
-and `Items` returns detached items with copied content, so input or snapshot
-mutation cannot change fold state.
+pairs, send claims or main-work state. The owner serializes `Feed`, `Render`,
+`Items` and `Version`; `Fold` itself has no locks or goroutines. Folds constructed
+with `New` copy payloads on ingestion. Production Store folds use the history
+references described below for converted kinds. Both rendering paths return
+detached items with copied content, so snapshot mutation cannot change fold state.
 
 Each item also has recorded `Session`/`Agent`, `NoChild`, optional `Turn`/`Parent`,
 `Status`, `Active`, `Shown`, a plain one-line `Summary` and kind-specific
@@ -51,7 +52,33 @@ unknown fields, as inert display data; summary normalization does not rewrite it
 
 ### Standalone source entries
 
-| Raw source type | Item kind | Saved content and status |
+Production Store folds use `newReferenceFold` and private creating-entry-ID
+recipes for plain `user_message`, `turn_end`, `notice`, `compaction` and
+`session_divider` items, following
+[ADR 045](../decisions/045-thread-index-over-history.md#decision). This covers
+every notice and boundary source in the table, plus both ending sources handled
+by `foldWork`: protocol `turn_end` and `main_turn_interrupted`. The fold keeps
+their attribution, order, revision and visibility, but no `Item.Content` payload
+copy behind the recipe. `Fold.Render` restores the public `Content` bytes from
+history without re-encoding JSON, preserving unknown fields and original
+formatting. The public item and wire shapes are unchanged.
+
+Plain user messages retain neither text nor summary in the reference fold.
+Rendering derives `Summary` through `plainSummary`, collapsing whitespace and
+removing control characters; an empty result falls back to `user message`.
+Skip normalization at creation rather than normalizing and then clearing the
+summary: clearing it releases retained bytes but still pays for discarded
+allocations. `TestReferenceSummaryDeferred` guards that creation cost.
+
+`New`, `Items`, `Observe` and `FeedChanges` remain source compatible for legacy
+inline folds. Accepted sends remain inline through delivery merging. Other
+kinds use the renderer's inline-content fallback; assistant/tool conversion is
+deferred to [#3385](https://github.com/pyrycode/pyrycode/issues/3385), including
+private continuation payloads such as `mainOutcome.raw`. See
+[snapshot rendering and retry](thread-package-background-store.md#snapshots-and-retry)
+for source resolution and the remaining Store content retention.
+
+| Raw source type | Item kind | Rendered content and status |
 | --- | --- | --- |
 | `message` with `role: user` | `user_message` | Text, attachment IDs and recorded client/device/send metadata; `Status: delivered`. |
 | `session_divider` or unmatched `session_transition` | `session_divider` | Recorded boundary cause/reason, session IDs, agents and reset handoff outcome; `Status: done`. |
@@ -146,6 +173,12 @@ history join. See the
 [queue wire contract](../../protocol-mobile.md#queue-v2) and
 [queue durability boundary](msgqueue-package.md#durability-boundary-in-scope-vs-out).
 
+For a reference-backed delivery, `sendFact` resolves the linked message through
+the renderer before merging acceptance content or suppressing the delivery row.
+A missing or unreadable source fails the feed without changing either item.
+The join also works when message and outcome arrive in separate chunks after
+recent-cache eviction; the permanent acceptance retains its merged inline bytes.
+
 The linked message supplies the summary and receiving `Session`/`Agent`/`NoChild`
 already resolved under the existing attribution rules, including any successor
 fallback at message ingestion. Acceptance-time or outcome-time bindings and
@@ -198,6 +231,34 @@ ending closes its own run. Subsequent text creates a new item. Queued acceptance
 child traffic and tool reports alone do not split text. Saved text retains its
 recorded whitespace; only the summary is normalized.
 
+Main and child text and normalized summaries are maintained incrementally by
+`appendText` and `appendSummary`. Unpublished appends reuse private capacity with
+amortized work proportional to the incoming suffix. Private JSON buffers grow
+geometrically, encoding only new text and moving fixed trailing fields; the
+summary builder carries pending whitespace across deltas instead of rescanning
+accumulated text. Output remains byte-identical to the former
+decode/concatenate/re-encode path: the creating payload keeps its
+original formatting until enrichment or a nonempty append, then JSON keys are
+sorted with unknown creating fields and `encoding/json` escaping preserved,
+including HTML-sensitive characters. Summary whitespace/control handling and
+the `assistant message` empty-result fallback match `plainSummary`. Each payload
+is decoded independently, preserving UTF-8 replacement behavior rather than
+recombining invalid byte fragments across entries. Empty appends leave content,
+revision and `LastShownVersion` unchanged. Creating visibility is retained;
+input payloads and returned snapshots remain detached through buffer growth.
+
+`publicationCapture.capture` borrows Content bytes without copying them and marks
+the exposed row's text buffers shared before publication. `growText` detaches
+shared storage before writing any suffix or closing JSON bytes, even when spare
+capacity suffices: it copies the existing prefix into a new private allocation,
+preserving capacity unless growth is needed. Retained publications and query
+roots therefore keep immutable, valid JSON while the serialized fold worker
+feeds later text and queries read outside the store lock. This also preserves
+the previous text used by `itemDifference`, so a pure append yields exactly its
+suffix without a spurious Content replacement. Allocation, prefix copying and
+the capture ownership hook are included in ingestion work counters. See
+[immutable publication](thread-package-background-store.md#snapshots-and-retry).
+
 Parent-attributed text and tools fold in [child lanes](thread-package-agents-and-background-work.md#parent-repair), without
 opening or closing main turns, closing main calls or splitting/coalescing main
 text. Claude and metadata-free Agent/Task launches create agent items rather
@@ -220,6 +281,25 @@ even when successor fallback gives them the same displayed session and agent.
 Other sources, turns and conversation owners remain independent. Empty or
 explicitly truncated/dropped join identities cannot create joins.
 
+Delivered user `message` entries discover only open main text runs throughout
+the conversation, including older generations retained after turn-ID reuse and
+earlier legacy scopes. Open means still eligible for text coalescing, including
+inactive late text; filtering on `Item.Active` would let that text coalesce across
+a delivered message. Closure clears its coalescing reference without changing an
+inactive row's settled revision, visibility or the shown watermark. Subsequent
+text starts a new row and remains inactive if its turn already ended. Main tool
+launches and matching turn endings retain their scoped closure rules; queued
+acceptance, child traffic and tool reports alone do not split main text.
+
+`Fold.openTexts` tracks only main coalescing runs in a dense slice, independently
+of retained recovery openings. `trackText` registers newly created main rows;
+`closeText` removes membership by swapping the final entry into the released
+slot. Traversal uses current length, so unrelated closed openings and a former
+peak in open runs add no closure discovery work. Closed explicit and implicit
+openings remain available to their original recovery references after closure,
+generation reuse and legacy scope changes; coalescing still uses the source and
+scope rules above.
+
 Tool reports can precede creation and remain pending across feed chunks. The
 first valid foreground terminal outcome in entry-ID order wins; later duplicate or
 conflicting outcomes change neither content, state nor revision. The creating
@@ -234,6 +314,22 @@ received before creation remain effective across chunks. Late text may coalesce
 but stays inactive; late foreground calls are inactive and later reports cannot
 replace their ending. A linked background shell outlives that turn; a late task
 link can repair its provisional closure, and late launch results stay retained.
+
+Child text keeps separate owned intrinsic and ancestor-derived JSON buffers.
+`resolveChildren` reuses unchanged `parent_ending` enrichment and advances both
+buffers incrementally on text appends; a late background link removes only the
+provisional closure, preserving text and normalized summary received while
+inactive. Intrinsic `ending` evidence still prevents reopening independently
+closed work. Publication capture marks both intrinsic and derived buffers shared,
+conservatively protecting either side of provisional closure. Reusing cached
+`parent_ending` content preserves its shared flag; newly built enrichment buffers
+start private. Subsequent appends detach each shared buffer before writing, so
+retained internal publications and query roots, as well as detached public
+snapshots, keep their bytes across closure, append and reopening. Optimizing
+`foldWork` alone would leave quadratic child serialization and equality work:
+a proven nonempty append bypasses accumulated
+content comparison, while empty deltas reuse cached closure content even before
+append-buffer initialization. See [ancestor closure and parent repair](thread-package-agents-and-background-work.md#parent-repair).
 
 Session reset can let Claude cancel a foreground call before daemon closure:
 an error `tool_result` then leaves the call `failed`, and the later cancelled
@@ -400,6 +496,16 @@ and eviction. `TestMalformedRecordedFields` asserts version-only consumption and
 unchanged pending pairs, scope and attribution before later matching and replay;
 `TestNullableRecordedFields` protects legitimate nullable content.
 
+`TestReferenceRendering` compares reference and legacy items across feed sizes,
+including exact JSON formatting, unknown fields, detached content and the empty
+user-summary fallback. The unchanged
+[generated/shadow and recorded corpus checkpoints](thread-package.md#reusable-fold-regression-corpus)
+constrain rendered items, revisions, consumed version and last-shown watermark.
+`TestReferenceRetainedBytes` compares the same generated input in both modes,
+reporting converted content and plain-user summary bytes separately from recipe
+ID storage, the bounded recent cache and deferred inline content; this is not a
+measurement of total Store memory.
+
 `TestMainTextRuns`, `TestMainToolTerminals` and `TestMainEndings` cover text
 splits, retained evidence, early and conflicting outcomes, activity and visibility
 with Claude, Codex and metadata-free fixtures. `TestMainScopeAndRecovery`,
@@ -413,6 +519,40 @@ look unchanged. `testMainReplay` checks every two-chunk partition against full
 replay; `TestMainReplayAndOwnership` checks copied pending reports, detached
 content and independent owners. Run the offline package checks with
 `go test -race ./internal/thread`.
+
+`TestMainTextClosureTracking` checks retained generations, legacy scopes,
+inactive late text, original-opening recovery and child isolation, including
+unchanged settled revisions and `LastShownVersion`. `TestMainTextClosureWork`
+compares fixed ingestion after fourfold growth in closed openings and historical
+open-run peaks. Counting only successful closures or yielded map keys would miss
+historical-capacity scans. Measure registration/removal, skipped inspections,
+tracking growth/copying and public ordering/cleanup too, including repeated
+open/close cycles and empty closure. See the related
+[public-touch capacity regression](thread-package.md#cache-and-epochs).
+
+`TestTextAppendBytes` compares exact JSON and summary output with the former
+map-based append, including case variants, escapes, control characters,
+per-payload UTF-8 replacement and input/snapshot ownership.
+`TestTextAppendChildren` and `TestTextEmptyProvisionalClosure` check append and
+empty-delta behavior through provisional closure and reopening.
+`TestAffectedPublicationOwnership` and `TestAffectedPublicationTextLifecycle`
+retain internal publications and query roots after append-buffer initialization,
+then check immutable JSON, borrowed Content, exact suffix changes, concurrent
+reads and detached public results through later appends and child reopening.
+Capturing only before initialization misses mutable-buffer corruption because
+the first nonempty append replaces the creating payload's allocation; retaining
+only detached `Fold.Items` output cannot prove internal publication ownership.
+`TestTextBufferPublicationOwnership` forces spare capacity and growth, checks
+detachment before writes and subsequent private reuse, and requires the
+allocation/copy work to be counted. The fixed-size scenarios in `testFoldCorpus`
+alone cannot detect quadratic work within one long
+reply. `TestTextAppendScaling` therefore grows delta counts from 256 to 1,024 in
+one main run and child runs while open, provisionally closed, reopened and across
+all three phases; `TestFoldIngestionScaling` grows the corpus from 1,000 to 4,000
+entries. Both require less than twice the work per delta/entry. Counters include
+initialization, inspected/skipped candidates, lookups, ordering/maintenance,
+JSON/summary bytes, comparisons and buffer allocation/growth/copying; input
+generation, explicit snapshots and digests are excluded.
 
 `TestPublicTouchesReference` compares entry-scoped bookkeeping with an independent
 full-walk oracle. `TestPublicTouchAffectedWork` grows unrelated items and trees
@@ -437,3 +577,10 @@ attribution even when rows appear unchanged; wrongly typed/null scalars or links
 and unsupported reasons change version only. These scenarios use `testMainReplay`
 to compare full replay with every two-chunk partition, including the gap between
 message and outcome.
+
+`TestReferenceDeliveryEvicted` proves the delivery left both the current chunk
+and recent cache and asserts its authoritative lookup before comparing merged
+acceptance bytes, provenance, suppression, revisions, touches and watermarks with
+legacy folding. Separate message/outcome chunks alone can remain cache hits and
+leave the eviction path untested. `TestReferenceDeliveryFailure` checks that
+failed resolution neither mutates acceptance nor suppresses the message.

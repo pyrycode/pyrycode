@@ -40,6 +40,7 @@ type publication struct {
 	recovered           bool
 	recoveryFeedback    string
 	invalidated         bool // Protected by the registry mutex, including callbacks.
+	startupRecovery     bool
 }
 
 func publicPublication(server, app string, p *publication, r Record) PublishResult {
@@ -359,6 +360,9 @@ func (o *Owner) finishPublicationFailure(app string, p *publication, mutated boo
 		return
 	}
 	u := &lifecycleUpdate{serverID: r.Manifest.ServerID(), expected: r.Revision, metadata: func(r *Record) error {
+		if p.retirementErr != nil || g != nil && g.cleanupErr != nil {
+			r.RetirementPending = true
+		}
 		if recoveryErr == nil {
 			r.PublishJournal = nil
 			r.PendingRelease = ""

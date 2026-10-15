@@ -180,7 +180,22 @@ The relay reserves decoded API request bytes before allocation and retains them
 until response disposal; `APIRequest.Reserve`/`Release` account for response
 staging within that same budget. Request reservation activity does not report
 preparation progress. The callable APIs honor supplied context deadlines and
-caller capacity policy. Production
-`hosted_apps_v1` capability activation and real-daemon/relay acceptance remain
-[#3248](https://github.com/pyrycode/pyrycode/issues/3248); native assembly remains
-client-owned work.
+caller capacity policy. Production `newDaemonAppsManager` installs both providers
+on discovery/supervision's existing owner/registry and attests the selected runtime
+before message processing; see
+[infrastructure readiness](apps-package-lifecycle-and-restart-state.md#lifecycle-and-restart-state).
+The [counted #3440 proof](../../hosted-apps.md#implementation-and-validation-ownership)
+records **13 executed, 13 passed, 0 failed, 0 skipped** focused fake-relay tests
+and subtests with a race-built daemon and synthetic `node` reporting `v24.15.0`.
+The same evidence records passing real-relay and actual Node/template arms
+(#3441); native assembly, publisher and live-channel acceptance remain downstream.
+
+A zero-body 204 finishes at response metadata, so withholding chunk credit cannot
+establish a disconnect after commit but before response. `TestHostedAppsPairedResources`
+uses a backend commit/response barrier, waits for old-request cancellation, then
+renegotiates and refreshes discovery before submitting a read with the old request
+ID. Only then may the old handler return. This forces late old-generation output
+to compete with the replacement read, rather than letting a pre-reconnect cleanup
+hide misrouting. Exact readback and mutation invocation counts establish preserved
+committed state without replay; the service process and saved identity/data must
+also survive transfer retirement.

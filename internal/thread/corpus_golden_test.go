@@ -75,7 +75,11 @@ func testSHA(raw []byte) string { return fmt.Sprintf("%x", sha256.Sum256(raw)) }
 
 func testFoldDigest(t testing.TB, f *Fold) testFoldCheckpoint {
 	t.Helper()
-	o := f.Observe()
+	items, err := f.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := Observation{Snapshot: Snapshot{Items: items, Version: f.Version(), LastShownVersion: f.lastShown}}
 	h := sha256.New()
 	for _, item := range o.Items {
 		var frame [16]byte
@@ -113,34 +117,51 @@ func testFoldGoldenCheck(t *testing.T, path, conv, identity string, input []byte
 		if !*testWriteFoldBaselines {
 			expected = want.Checkpoints[i]
 		}
-		modes := 3
+		modes := 6
 		if *testWriteFoldBaselines {
 			modes = 1
 		}
 		for mode := 0; mode < modes; mode++ {
-			f := New(conv)
-			for start, step := 0, 0; start < version; step++ {
-				size := version
-				if mode == 1 {
-					size = []int{7, 31, 113}[step%3]
+			t.Run(fmt.Sprintf("%d/%d", version, mode), func(t *testing.T) {
+				if !*testWriteFoldBaselines {
+					t.Parallel()
 				}
-				if mode == 2 {
-					size = 1
+				f := New(conv)
+				var source *recentSource
+				if mode >= 3 {
+					f, source = testReferenceFold(entries)
+					f.conversationID = conv
 				}
-				end := min(start+size, version)
-				if err := f.Feed(entries[start:end]); err != nil {
-					t.Fatal(err)
+				for start, step := 0, 0; start < version; step++ {
+					size := version
+					if mode%3 == 1 {
+						size = []int{7, 31, 113}[step%3]
+					}
+					if mode%3 == 2 {
+						size = 1
+					}
+					end := min(start+size, version)
+					if source != nil {
+						source.chunk = entries[start:end]
+					}
+					if err := f.Feed(entries[start:end]); err != nil {
+						t.Fatal(err)
+					}
+					if source != nil {
+						source.remember(entries[start:end])
+						source.chunk = nil
+					}
+					start = end
 				}
-				start = end
-			}
-			digest := testFoldDigest(t, f)
-			if *testWriteFoldBaselines {
-				expected = digest
-				got.Checkpoints = append(got.Checkpoints, digest)
-			}
-			if digest != expected {
-				t.Fatalf("%s version %d mode %d: got %+v want %+v", path, version, mode, digest, expected)
-			}
+				digest := testFoldDigest(t, f)
+				if *testWriteFoldBaselines {
+					expected = digest
+					got.Checkpoints = append(got.Checkpoints, digest)
+				}
+				if digest != expected {
+					t.Fatalf("%s version %d mode %d: got %+v want %+v", path, version, mode, digest, expected)
+				}
+			})
 		}
 	}
 	if *testWriteFoldBaselines {

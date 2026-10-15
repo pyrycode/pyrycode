@@ -23,6 +23,7 @@ type boundaryKey struct {
 }
 
 func (f *Fold) boundary(e history.Entry, item *Item) bool {
+	decode := f.decode
 	var p boundaryFact
 	if !decode(e.Payload, &p, "occurred_at") || p.OccurredAt.IsZero() {
 		return false

@@ -28,6 +28,7 @@ func (r *Registry) List() []Device
 func (r *Registry) FindByTokenHash(hash string) (Device, bool)
 func (r *Registry) Validate(plain string, peerStatic []byte) (Device, ValidateResult)
 func (r *Registry) UpdatePushRegistration(tokenHash, platform, pushToken, name string) bool
+func (r *Registry) ClearPushRegistrationIfMatch(tokenHash, platform, pushToken string) bool
 func (r *Registry) Reload(path string) error
 func (r *Registry) ClearRedeemBy(tokenHash string) bool
 func (r *Registry) SetClientVersion(tokenHash, version string) bool
@@ -135,13 +136,31 @@ Empty-file → empty-registry asymmetry vs. `internal/config.Load` (which surfac
 
 The returned `*Registry` is independent of the on-disk file — subsequent `Save` calls re-encode from the in-memory slice; the file may be moved or deleted between `Load` and `Save` without affecting in-memory state.
 
-The disk-read branch is shared with `Reload` (#782) via an unexported `readDevicesFile(path) ([]Device, error)` helper: `(nil, nil)` for ENOENT/zero-byte, `(nil, wrapped err)` for malformed/other-read-error, `(devs, nil)` for a valid list. `Load` constructs a fresh registry from it; `Reload` reconciles it into an existing one. The helper wraps `path` only, never the file bytes — a corrupt `devices.json` may embed a `token_hash`, so echoing its contents into an error (and thence a log) would leak it.
+The disk-read branch is shared with `Reload` (#782) via an unexported `readDevicesFile(path) ([]Device, error)` helper: `(nil, nil)` for ENOENT/zero-byte, `(nil, wrapped err)` for malformed/other-read-error, `(devs, nil)` for a valid list. `Load` constructs a fresh registry from it; `Reload` reconciles it into an existing one. The helper adds the path as context but wraps the underlying decoder error, which can contain supplied bytes from a corrupt `devices.json`. Callers must log fixed classifications instead of the returned error text; `TestPushWakeFeedbackFailures` uses distinctive secret markers to pin this boundary.
 
 ## Lookup: linear scan with `==`
 
 `FindByTokenHash` is byte-exact `==` over a linear scan, not `subtle.ConstantTimeCompare`. The constant-time concern is the plain↔hash boundary, owned by `devices.VerifyToken` (#208). Once the wire-presented plain has been hashed (deterministic SHA-256), comparing two 64-char hex strings is byte-exact — and any timing leak from `==` early-exit on a prefix mismatch reveals a public derivative (a hash the attacker could compute themselves), not a secret. See [`features/devices-package.md`](devices-package.md) and #208's security review for the full reasoning.
 
 `Add` does not validate uniqueness. The pair-mint consumer (#TBD) is the single producer that reaches `Add` and validates against `List()` first if needed. `Remove` returns `true` iff a device with matching `Name` was found and removed — consumers can assert "the device I just revoked actually existed" before logging.
+
+## Conditional push registration clear
+
+`Registry.ClearPushRegistrationIfMatch` compares `TokenHash`, `Platform` and
+`PushToken` and clears only the latter two fields in one `Registry.mu` region.
+It returns true only when a nonempty submitted token still matches and was
+cleared; missing identities, mismatches and an already-empty registration
+return false. The return value decides whether a Save is needed.
+
+A separate `FindByTokenHash` followed by `UpdatePushRegistration` leaves a
+replacement-erasure race between the two mutex holds; the update method also
+overwrites the current name. Conditional clearing must preserve every other
+device field and identify the pairing by hash, because a revoked name can be
+reused for a new pairing. `TestClearPushRegistrationIfMatch` races registration
+replacement against clearing and compares the full device value.
+The sole production consumer, `clearInvalidPushRegistration` beside the daemon
+waker, wraps reload/conditional clear/Save in one file-lock region; see
+[failure and persistence semantics](relay-package-push-wake.md#conditional-registration-removal).
 
 ## Tests
 

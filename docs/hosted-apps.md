@@ -8,20 +8,22 @@ process ownership, retained-artifact validation and immutable installation with
 independent verification, checked candidate preparation and durable recording,
 persistent-data snapshots with restart verification and
 repeatable restoration, synchronous health-confirmed publication and active-release
-updates with verified rollback, health supervision, automatic service
+updates with verified rollback, before-activation publication restart recovery,
+health supervision, automatic service
 reconciliation/recovery and
 guarded private targets, generation-bound stable response preparation and confined
 callable active-release assets are implemented in the `internal/apps` package. The relay
 implements authenticated paged discovery, committed lifecycle notifications,
-bounded credit-paced asset transfers and scoped cancellation (#3315).
+bounded credit-paced asset/API transfers and scoped cancellation (#3315/#3316).
 The daemon owns storage, service reconciliation/recovery,
 discovery subscriptions and cancellable delivery independently of channels.
-Encrypted API routing remains #3316; production capability activation and
-real-daemon/relay acceptance remain #3248.
+Production resource routing and cached infrastructure/runtime attestation are
+implemented (#3440), with counted real-daemon/fake-relay acceptance below.
+Counted real-relay and actual Node/template acceptance is also complete (#3441).
 A React/TypeScript scaffold with a responsive saved-preference UI, SQLite,
 migrations, service health and built-browser proof is maintained under
-`templates/hosted-app/`; interrupted-publication
-startup recovery (#3263), publishing control/daemon wiring (#3301/#3266) and native
+`templates/hosted-app/`; after-activation publication recovery (#3404),
+publishing control/daemon wiring (#3301/#3266) and native
 viewers remain later work. This reference preserves the contract's fields,
 limits and guarantees. The spec owns the
 [shared JSON examples](specs/architecture/3120-hosted-app-contract.md#10-shared-json-examples)
@@ -136,11 +138,12 @@ bound of 16 envelopes per connection. Overflow retires/closes the affected
 generation so clients can reconnect and refresh discovery, rather than miss an
 update while remaining connected. No lifecycle history or replay is retained;
 reconnect always starts a fresh list walk, and predecessor work cannot reach a
-replacement even when connection/request IDs are reused. Wired discovery and
-cancellable delivery do not activate `hosted_apps_v1`: `HostedAppsReady` must
-attest registration, supervision and resource routing together. Production
-withholds the capability pending #3123; an offering paired phone sees its
-omission from `hello_ack`, and `list_apps` returns `protocol.unsupported`.
+replacement even when connection/request IDs are reused. Production
+`HostedAppsReady` attests initialized registration, supervision, both resource
+providers, cancellable delivery and the owner's supported selected runtime.
+Empty registries and stopped/unhealthy apps still permit negotiation and listing;
+missing infrastructure or missing/unsupported runtime withholds `hosted_apps_v1`
+from `hello_ack`, and app requests return `protocol.unsupported`.
 No test environment variable bypasses this readiness gate.
 
 There are at most 256 live registrations; admission of a 257th fails unchanged.
@@ -348,8 +351,11 @@ publication journal or `retirement_pending` evidence bars ordinary Start and
 automatic launch, including after reopening. The retirement flag also bars targets,
 Publish and removal even before a verified backup exists. It is replaced atomically
 by the verified-backup journal, or cleared only by safe failure completion or
-health-confirmed recovery after positive retirement. Interrupted-publication
-startup recovery remains #3263; observed-state normalization does not resolve it.
+health-confirmed recovery after positive retirement. `NewOwner` asynchronously
+recovers uncommitted journals before service preparation; observed-state
+normalization alone resolves no journal. Committed journals and retirement-only
+or retirement-uncertain records remain barred on reopen; see the
+[recovery matrix](#update-and-startup-recovery-contract).
 Every automatic attempt rechecks committed intent/release and conditionally
 observes starting without changing intent. Explicit starts and automatic work
 coalesce; lifecycle notifications do not cause duplicate launches or restart loops.
@@ -401,10 +407,10 @@ desired intent, releases and saved data survive. Only changed states advance
 monotonic host/record revisions; an unchanged restart adds none. Stored `running`
 does not establish a live process or an openable readiness link. See
 [durable registration](#durable-registration) for atomic normalization and
-revision limits. Storage, discovery and supervision leave production
-`HostedAppsReady` unsatisfied and `hosted_apps_v1` withheld until #3123 supplies
-resource routing as part of the complete readiness attestation. Publication,
-migration serialization, activation and rollback remain publisher-owned
+revision limits. Production installs discovery and both resource providers on
+this same owner/registry and caches its infrastructure/runtime attestation before
+relay message processing; see [capability readiness](#capability-and-envelope-vocabulary).
+Publication, migration serialization, activation and rollback remain publisher-owned
 (#3125/#3133).
 
 The [final verifier review for #3204](https://github.com/pyrycode/pyrycode/pull/3237#issuecomment-6117617232)
@@ -612,8 +618,9 @@ the committed release from build manifests without a persisted build index.
 Network fields are never joined to arbitrary host paths. Registry writes use
 same-directory temporary file, file sync, close, atomic rename and directory
 sync; post-rename uncertainty bars further writes and targets. Callable first
-publication owns its activation/data-restoration journal; interrupted-publication
-startup recovery remains #3263. Builds and app data persist
+publication owns its activation/data-restoration journal; `NewOwner` implements
+before-activation startup recovery, while after-activation resolution remains
+\#3404. Builds and app data persist
 across channel stop, `/clear`, idle eviction, daemon restart and client reconnect.
 
 The template owns `npm run typecheck` (TypeScript checks both frontend and service
@@ -694,8 +701,9 @@ stopped, release-changed or retired ownership and cannot address replacements,
 even when app/release/port recur. Metadata-only commits after confirmation do not
 invalidate an otherwise valid target. Proxies, redirects and connection reuse
 are disabled. Neither endpoint, generation nor environment paths enter discovery
-or client metadata. Encrypted resource authorization/routing and transfer limits
-remain #3123. Loopback privacy is a routing boundary, not authentication against
+or client metadata. The daemon's paired v2 boundary enforces resource authorization,
+routing and [transfer limits](#bounded-transfers-and-retirement).
+Loopback privacy is a routing boundary, not authentication against
 other processes under the same OS account.
 
 The publication contract (#3125) runs migrations before candidate startup using `node dist/service/migrate.js` with the same identity/data environment, exiting 0 only on completed schema validation. Ordinary `Owner.Start` never invokes this command. Ordered SQL files match `^[0-9]{4}_[a-z0-9_]+\.sql$`, have unique increasing prefixes, and are immutable once applied. The SQL `pyry_schema_migrations` table records `version INTEGER PRIMARY KEY` and `sha256 TEXT NOT NULL`; an applied checksum mismatch fails validation. Missing new migrations are applied in one explicit SQLite transaction; failures roll back the transaction. Nontransactional SQL and external side effects are forbidden in migrations. The migration process has a 60-second deadline.
@@ -1085,9 +1093,11 @@ and stopped/unpublished registrations stay unlaunched.
 Daemon-owned reconciliation/recovery and the
 [Node/SQLite/unrelated-channel proof](#runtime-and-layout) are complete.
 Callable publication, migrations, activation and verified update rollback are
-implemented; publishing control/daemon wiring remains #3301/#3266,
-interrupted-publication startup recovery remains #3263 and maintained orchestrator
-acceptance remains #3133. Encrypted resource capability activation remains #3123.
+implemented, including before-activation publication restart recovery;
+publishing control/daemon wiring remains #3301/#3266, after-activation resolution
+remains #3404 and maintained orchestrator
+acceptance remains #3133. Encrypted resource capability activation is implemented
+(#3440), with real-relay and actual Node/template acceptance proven by #3441.
 
 The maintained standalone template supplies its own migration/startup validation
 and health endpoint. The commands below exercise that template directly; they do
@@ -1159,7 +1169,37 @@ and readiness-confirmed links described in
 
 ### Capability and envelope vocabulary
 
-`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an installed discovery provider, cancellable hosted delivery adapter and daemon readiness attesting v1 registration, supervision and resource routing together. Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges it via `HelloAckPayload.capabilities`. Production wires initialized storage as discovery, a daemon-owned service supervisor and `conn.SendContext` as hosted delivery but supplies no complete `HostedAppsReady` attestation, so activation remains disabled pending #3248. It grants no authorization: require the authenticated, nonrevoked paired device and host identity for every operation. V1 uses existing host-level pairing authorization for all registered apps, without a new per-app ACL; native page access is further restricted to the selected app. Revocation retires work through the existing authenticated-session close path. Apps do not require `interactive`, `thread` or an active channel session.
+`negotiateCapabilities` admits the offered literal `hosted_apps_v1` only with an
+installed discovery provider, cancellable hosted delivery adapter and daemon
+readiness attesting v1 registration, supervision and resource routing together.
+Clients offer it via `HelloClientPayload.capabilities`; the daemon acknowledges
+it via `HelloAckPayload.capabilities`. Production `newDaemonAppsManager` uses
+discovery/supervision's daemon-owned registry, persisted host identity and
+`apps.Owner`, installing that owner as both `HostedAppsAssets` and `HostedAppsAPI`
+with `conn.SendContext` delivery.
+
+Before message processing, `Owner.CheckRuntime` probes the owner's selected
+absolute executable with `--version`, an empty environment, a five-second context
+bound, bounded output and cancellation. It requires Node `>=24.15.0 <25.0.0`.
+Owner construction selects an executable but does not establish version support.
+`HostedAppsReady` caches the infrastructure/probe result; handshakes and requests
+perform no runtime probe. Empty registries and stopped/unhealthy apps do not
+withhold capability. Missing registry, owner, either resource provider or
+cancellable delivery, or missing/unsupported runtime, withholds it while normal
+channels remain usable. Negotiation does not establish an individual app's health:
+a stopped/unhealthy app's resource request returns `app.unavailable`.
+
+The [counted acceptance evidence](#implementation-and-validation-ownership)
+covers this negotiation through the real loopback relay with both a controlled
+reconnect backend and the unchanged maintained template on actual Node v24.15.0
+(#3441). The relay forwards existing encrypted frames without hosted-app parsing.
+
+The capability grants no authorization: require the authenticated, nonrevoked
+paired device and host identity for every operation. V1 uses existing host-level
+pairing authorization for all registered apps, without a new per-app ACL; native
+page access is further restricted to the selected app. Revocation retires work
+through the existing authenticated-session close path. A client offering only
+`hosted_apps_v1` can list/fetch without `interactive`, `thread` or an active channel.
 
 Without the negotiated capability, clients show that host's Apps feature as unsupported and send no app requests; hosts emit no app list/state/resource pushes to that peer. An old host may return existing `protocol.unknown_type`; a supporting host receiving an app request without negotiation returns `error` with `protocol.unsupported`. Other host connections/conversations continue normally. A new contract version uses a new capability and vocabulary for incompatible semantics, never reinterprets these enums.
 
@@ -1186,7 +1226,7 @@ The authenticated v2 `routeHosted` boundary recognizes the vocabulary and enforc
 
 Discovery uses up to 16 records per page, sorted by `app_id`, including all desired/observed states. Cap registered apps at 256 per host in v1; create beyond that fails without overwriting anything. `items` is always an array, including `[]`. `apps.revision` is the atomic host sequence captured for the page, 0–9007199254740991 (0 only before any registration). `next_cursor` is required and null at the end. A nonempty opaque cursor is at most 256 ASCII bytes and binds host, revision and last app ID in connection-owned state; it expires 30 seconds after issuance. Empty/null request cursors are invalid. The daemon validates it without using it as a path or host selector. If revision changed or cursor expired, return retryable `apps.changed` and require a fresh walk; do not combine pages from different revisions. One page request is pending per connection through read and delivery; a delivered page's cursor holds no worker. Further pending lists return `app.busy` with `retry_after_s: 1`. A fresh `{}` after completion replaces the previous walk. List cancellation retires only that connection's pending target; a blocked read retains capacity until it exits. The ordered discovery/control lane holds at most 16 envelopes including active delivery and cancel acknowledgements. Reconnect always starts a new list walk. See the [implemented wire behavior](protocol-mobile.md#paging-cancellation-and-validation).
 
-Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. The daemon owns subscription wiring and relay-lifetime cleanup. Asset responses/chunks, credit and app-scoped cancellation are implemented with independent resource bounds (#3315); API forwarding remains #3316. See the [implemented asset wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
+Committed lifecycle notification delivery is implemented in the relay. A fresh list is authoritative: reconcile records/tombstones by revision, buffer newer notifications during a walk (at most 256, then restart), discard older notifications and restart on a gap. Hosts emit updates in revision order to negotiated paired peers; notifications share the 16-envelope delivery bound above, including callback handoff. List cancellation does not unsubscribe them. The daemon owns subscription wiring and relay-lifetime cleanup. Asset/API responses, chunks, credit and app-scoped cancellation are implemented with independent resource bounds (#3315/#3316) and installed in production (#3440). See the [implemented resource wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
 
 ### Asset/API fields and HTTP semantics
 
@@ -1329,11 +1369,10 @@ delivery boundary. Forwarding sends once, with no automatic retries. A cancelled
 or failed mutation may already have changed service state; cancellation never
 replays it or asserts rollback.
 
-This callable backend does not activate encrypted API routing. Wire base64
-parsing and API integration with the relay's resource budgets, credit, deadlines
-and wire error mapping remain
-[#3316](https://github.com/pyrycode/pyrycode/issues/3316); the caller supplies
-context deadlines and capacity policy here.
+The relay implements wire base64 parsing and API integration with its resource
+budgets, credit, deadlines and wire error mapping (#3316). Production installs
+this same owner as its API provider (#3440); direct callable users still supply
+their own context deadlines and capacity policy.
 
 #### Callable confined assets
 
@@ -1425,8 +1464,9 @@ Paired asset routing, resource budgets, credit, deadlines, wire serialization
 and transport error mapping are implemented in the relay
 ([#3315](https://github.com/pyrycode/pyrycode/issues/3315)); see the
 [asset wire behavior](protocol-mobile.md#asset-transfers-credit-and-cancellation).
-Encrypted API routing remains #3316, and production capability activation and
-real-daemon/relay acceptance remain #3248. See the
+API routing is also implemented (#3316), and production installs both providers
+with counted fake-relay acceptance (#3440), followed by counted real-relay and
+actual Node/template acceptance (#3441). See the
 [apps resource-serving overview](knowledge/features/apps-package-resource-serving.md#resource-serving)
 for ownership, concurrency and regression details.
 
@@ -1650,9 +1690,11 @@ also conflict; a snapshot retry uses a new publish ID. Snapshot copy, SQLite,
 verification, sync failures and cancellation return errors, preserving
 recoverable source data; an unsuccessful snapshot must never authorize mutation.
 
-First publication and active-release updates (`Owner.Publish`, #3359/#3360)
-consume these primitives; interrupted-publication startup recovery remains #3263
-until it lands. Persist the selected `BackupReference`;
+First publication and active-release updates (`Owner.Publish`, #3359/#3360), plus
+before-activation startup recovery (`NewOwner`, #3403), consume these primitives.
+After-activation resolution remains #3404; publishing composition/integration
+remains #3266 and local publishing control remains #3301.
+Persist the selected `BackupReference`;
 `apps.RestoreData` freshly verifies its complete disk evidence on every call, including after restart.
 It restores the whole tree/schema, removes candidate-only content and transient
 SQLite sidecars, and preserves distinct absent/empty/uninitialized states as
@@ -1661,8 +1703,8 @@ replacement can leave partial data; retry the same reference with a fresh caller
 before claiming recovery. Backup contents/evidence remain independently
 verifiable after successful, failed or interrupted restoration. Retain the
 backup until durable recovery completion; deletion belongs to the caller.
-Durable recovery completion, old-release health and admission of API requests
-remain caller-owned.
+The primitives alone establish neither durable recovery completion nor old-release
+health or request admission; `Owner` supplies those publication/recovery decisions.
 
 #### Callable first publication
 
@@ -1779,11 +1821,56 @@ without discarding its registration/evidence. Shutdown preserves desired intent
 and joins restoration or retains evidence. Completed recovered generations record
 stopped on shutdown or stopped intent while preserving the safe update error.
 
-Interrupted-publication startup recovery remains #3263 until it lands. Reopening
-preserves the journal/retirement barrier but does not resolve it or launch beneath
-it. Its contract will restore pre-activation data and the previous release for an
-uncommitted decision, or select the committed candidate without reapplying completed
-migrations, before exposing targets. These guarantees assume trusted service code
+Before-activation startup recovery is implemented. `Open` first preserves legacy
+loading and strict storage validation: malformed storage is rejected without
+rewriting it. After the previous owner has joined and exclusive filesystem
+ownership transfers, `NewOwner` admits independent per-app recovery workers for
+uncommitted journals without retirement uncertainty, before ordinary reconciliation
+or service preparation. It returns without waiting for
+restoration, validation or health. That app's ordinary Start/reconciliation,
+new publication, API and asset targets remain barred until recovery validation
+and conditional durable completion succeed. Parked restoration holds neither
+registry nor owner locks; unrelated apps and registry operations remain usable.
+
+| Durable evidence / intent on reopen | Outcome |
+|---|---|
+| `activation_committed=false`, update, available | Freshly verify and restore the whole pre-publication snapshot, freshly verify the previous immutable build, then privately confirm matching previous-release health before durable completion and target exposure. |
+| `activation_committed=false`, first publication, available | Restore the snapshot; finish failed and unpublished, with no active release or target. |
+| `activation_committed=false`, update, stopped | Restore the snapshot, freshly verify the previous build and validate restored schema/preferences and the complete migration-version/checksum ledger; remain stopped without starting a service or exposing a target. |
+| `activation_committed=false`, first publication, stopped | Restore the snapshot; remain stopped and unpublished with no target. |
+| `activation_committed=true` | The committed candidate remains authoritative; never restore pre-publication data. Reopened targets stay barred; resolution is pending #3404. |
+| `retirement_pending=true`, with or without a journal | Remain barred without positive whole-group writer-retirement proof; a backup is not that proof. |
+
+Recovery runs no migrations. Stopped update validation uses read-only SQLite and
+the freshly verified previous release's schema/ledger helpers, without an HTTP
+service. Invalid schema, saved preferences or missing/changed applied migration
+checksums retain the journal. Successful uncommitted recovery durably clears
+pending release and journal, retains committed title, previous active release
+(if any) and desired intent, and records a safe interrupted-publication error.
+Candidate manifest metadata does not become committed display metadata. A
+health-confirmed live activated publication may still serve with its committed
+journal while finalization is pending; this exception never admits a reopened
+committed journal.
+
+Stop/removal/shutdown and newer incompatible intent invalidate stale recovery;
+Stop/Shutdown join owned workers, validators and services. Conditional completion
+preserves newer fields/intent, never revives tombstones and cannot undo a newer
+stop through late health. Unresolved recovery rejects removal and retains the
+registration/evidence. Keep the journal, previous build and immutable snapshot
+until completion is durable. Partial restoration and interruption after restoration
+but before final commit remain retryable, including repeated interruptions, by
+freshly verifying/restoring the same retained snapshot on a fresh exclusive reopen.
+There is no busy automatic retry loop.
+
+Missing/invalid snapshots, restore I/O failure, damaged previous builds and
+incompatible/unhealthy restored data leave the app unavailable without targets
+or a successful-rollback claim. Restoration failures use safe `app.io_failed`
+where persistence permits; previous-build, compatibility and health failures use
+safe `app.unavailable`. Failed or uncertain finalization retains recovery evidence
+and bars targets. Host/app revisions remain monotonic across reopen/retry;
+exhaustion refuses changes rather than resetting or wrapping.
+Publishing integration remains #3266 and local publishing control remains #3301.
+These guarantees assume trusted service code
 follows data-directory and side-effect conventions; they cannot undo arbitrary OS
 or fleet-service effects. No fleet mutation may run as a startup/health side effect.
 
@@ -1812,5 +1899,82 @@ assigns the orchestrator/fleet integration to #3127–#3132.
 
 The [lifecycle and hostile-content test matrix](specs/architecture/3120-hosted-app-contract.md#9-errors-and-lifecycle-test-obligations)
 belongs to those implementations. Maintained live orchestrator acceptance is
-#3133, desktop #1929 and mobile #2065. This design ticket supplies shared JSON
-fixtures, not evidence of executable hosting, rollback or viewer isolation.
+#3133, desktop #1929 and mobile #2065. The #3120 design supplies shared JSON
+fixtures; executable hosting, rollback and viewer isolation require their own proofs.
+
+Production activation is implemented by #3440. The
+[PR #3442 evidence](https://github.com/pyrycode/pyrycode/pull/3442) at revision
+`79e90c4bc36bcd93d12ff8524c94b7c825d54321` records these uncached race runs;
+counts include parent tests and subtests:
+
+| Focused proof | Executed | Passed | Failed | Skipped |
+|---|---:|---:|---:|---:|
+| `TestDaemonAppsComposition`, 100 repetitions | 600 | 600 | 0 | 0 |
+| `TestDaemonAppsRuntimeReadiness`, 50 repetitions | 400 | 400 | 0 | 0 |
+| `TestHostedAppsPairedResources`, `TestHostedAppsProductionReadiness`, `TestHostedAppsRuntimeFailureIsolation` | 13 | 13 | 0 | 0 |
+
+The fake-relay run used a separately race-built daemon through `PYRY_E2E_BIN`
+and an absolute synthetic `node` launcher reporting `v24.15.0` and executing
+`TestHostedAppProcess`. It fetched seeded HTML, a relative JS module, a
+70000-byte binary and navigation fallback; checked status, permitted headers,
+exact bytes/digest and absent conversation metadata; preserved opaque query bytes;
+and completed a body-bearing mutation at HTTP 204 metadata before readback.
+It exercised unavailable/stale/hostile requests, credit wait/cancellation beside
+an unrelated fake-Claude channel, and fresh negotiation/discovery with reused
+request IDs after partial-read and committed-write disconnects. A deterministic
+commit/response barrier proved the uncertain mutation ran once; late old results
+could not corrupt the new read, and service/data/host-app identity survived.
+Unnegotiated peers received `protocol.unsupported` and no lifecycle push.
+The [final verifier review](https://github.com/pyrycode/pyrycode/pull/3442#issuecomment-6188899345)
+independently repeated the 600/600 composition proof; runtime and fake-relay
+counts above are builder-recorded. Dispatcher `make check` and `make build`
+passed at that revision; their aggregate exit status supplies no named-test counts.
+
+The [PR #3445 evidence](https://github.com/pyrycode/pyrycode/pull/3445) adds
+uncached real-loopback-relay acceptance. Builder and
+[independent verifier](https://github.com/pyrycode/pyrycode/pull/3445#issuecomment-6189748734)
+each recorded the following counts with race instrumentation for the Go tests
+and daemon:
+
+| Real-relay proof | Executed | Passed | Failed | Skipped |
+|---|---:|---:|---:|---:|
+| `TestLiveRelay_HostedResources` | 1 | 1 | 0 | 0 |
+| `TestLiveRelay_HostedTemplate` | 1 | 1 | 0 | 0 |
+| Complete `internal/e2e/liverelay` package, including both arms | 5 | 5 | 0 | 0 |
+
+The package count includes the backend helper entry point; it is not another
+acceptance arm. Builder daemon revision was
+`293a752a40a20300d54f8d5173c0087823be3522`; verifier daemon revision was
+`9cd96d4967eacf8f042ce1536273eb225ad23816`. Both used unchanged relay revision
+`9939bc1ff8afec5021c09862e6f14dadba33ad42` and actual Node **v24.15.0** for the
+template arm. The maintained template tree
+`0a23e747e8e90360e7a9108dad3e57c23efcce73` was scaffolded, installed with
+`npm ci` and compiled with `npm run build` without source edits. The PR records
+exact build/run commands and artifact digests; the verifier matched the relay,
+compiled service and lockfile digests and independently exercised that build.
+
+`TestLiveRelay_HostedResources` uses an authenticated paired phone offering only
+`hosted_apps_v1`, fresh Noise negotiation and discovery. It verifies a 70000-byte
+binary with ordered credit-paced chunks, app/release/correlation, status,
+permitted headers, exact bytes/count/digest and absent conversation metadata.
+A body-bearing mutation completes at HTTP 204 metadata before readback. Partial
+read and committed-write disconnects retire resource workers within three seconds,
+before the five-second inactivity timeout. Reconnect renegotiates/discovers and
+reuses retired IDs; the old response is released while its replacement read is
+held active, with no old output delivered. The uncertain mutation adds exactly
+one invocation (two total including the earlier write); fresh reads preserve its
+committed value without replay, with unchanged service PID, saved data and host/app
+identity. Its controlled backend does not supply actual-template evidence.
+
+`TestLiveRelay_HostedTemplate` separately executes encrypted preferences
+GET/POST/GET against the unchanged compiled template on supported actual Node.
+It reads back `{"version":1,"selected_tab":"preferences","period":"7d"}`.
+POST's HTTP 204 has zero bytes/chunks and the empty SHA-256 digest, completes at
+metadata, needs no client credit and has no host completion frame. Registry/release
+preparation, migration and default seeding all precede daemon startup; no test-side
+registry writes or migrations run during daemon ownership. The relay remains
+content-blind, using existing framing and routes without protocol changes.
+
+These stopped-seed proofs require no live Claude and establish no local publisher
+or rollback acceptance. Native viewers, host navigation, publishing/daemon wiring
+and live channel/readiness-link acceptance remain with the downstream owners above.

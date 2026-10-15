@@ -128,7 +128,7 @@ type Client struct {
 	// sendCh serializes all application writes on the current socket. Both
 	// channels are unbuffered: admission retains no backlog after cancellation.
 	sendCh chan sendRequest
-	recvCh chan []byte
+	recvCh chan receivedFrame
 
 	closeOnce sync.Once
 	closeCh   chan struct{}
@@ -147,15 +147,44 @@ type Client struct {
 	connDone   chan struct{}
 
 	// mu guards conn (nil when no live conn).
-	mu   sync.Mutex
-	conn *websocket.Conn
+	mu         sync.Mutex
+	conn       *websocket.Conn
+	generation *Generation
+}
+
+// Generation identifies one socket owned by one Client. Its context is cancelled
+// on disconnect, replacement, DropConn, Close or lifecycle cancellation.
+type Generation struct {
+	client *Client
+	conn   *websocket.Conn
+	ctx    context.Context
+	retire context.CancelFunc
+}
+
+// Context reports the generation's lifetime; callers cannot extend it.
+func (g *Generation) Context() context.Context { return g.ctx }
+
+type receivedFrame struct {
+	data       []byte
+	generation *Generation
+}
+
+// Generation snapshots the live socket without consuming Connected notifications.
+func (c *Client) Generation() *Generation {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn == nil || c.generation == nil || c.generation.ctx.Err() != nil {
+		return nil
+	}
+	return c.generation
 }
 
 type sendRequest struct {
-	frame []byte
-	ctx   context.Context
-	conn  *websocket.Conn
-	done  chan error
+	frame      []byte
+	ctx        context.Context
+	conn       *websocket.Conn
+	done       chan error
+	generation *Generation
 }
 
 // Sentinel errors.
@@ -246,7 +275,7 @@ func New(cfg Config) *Client {
 		closeFrameGrace:  closeFrameGrace,
 		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
 		sendCh:           make(chan sendRequest),
-		recvCh:           make(chan []byte),
+		recvCh:           make(chan receivedFrame),
 		closeCh:          make(chan struct{}),
 		connectedCh:      make(chan struct{}, 1),
 		connDone:         preClosed,
@@ -447,9 +476,22 @@ func (c *Client) Send(frame []byte) error {
 // no queued or active write, and a request cannot migrate to a reconnected socket.
 // Cancellation after admission retires that socket generation before completion.
 func (c *Client) SendContext(ctx context.Context, frame []byte) error {
+	return c.sendContext(ctx, nil, frame)
+}
+
+// SendGeneration waits for ordered write completion on exactly g's socket.
+// A retired or foreign generation is rejected rather than redirected.
+func (c *Client) SendGeneration(ctx context.Context, g *Generation, frame []byte) error {
+	if g == nil || g.client != c {
+		return ErrNotConnected
+	}
+	return c.sendContext(ctx, g, frame)
+}
+
+func (c *Client) sendContext(ctx context.Context, g *Generation, frame []byte) error {
 	writeCtx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
-	req := sendRequest{frame: frame, ctx: writeCtx, done: make(chan error, 1)}
+	req := sendRequest{frame: frame, ctx: writeCtx, done: make(chan error, 1), generation: g}
 	if err := c.enqueueSend(writeCtx, req); err != nil {
 		return err
 	}
@@ -469,6 +511,10 @@ func (c *Client) enqueueSend(ctx context.Context, req sendRequest) error {
 	}
 	c.mu.Lock()
 	req.conn = c.conn
+	if req.generation != nil && (c.generation != req.generation || req.generation.ctx.Err() != nil) {
+		c.mu.Unlock()
+		return ErrDisconnected
+	}
 	c.mu.Unlock()
 	if req.conn == nil {
 		return ErrNotConnected
@@ -478,8 +524,11 @@ func (c *Client) enqueueSend(ctx context.Context, req sendRequest) error {
 	// exited and would never drain c.sendCh — the connDone close is the
 	// only signal that prevents the Send goroutine from wedging forever.
 	c.connDoneMu.Lock()
-	done := c.connDone
+	var done <-chan struct{} = c.connDone
 	c.connDoneMu.Unlock()
+	if req.generation != nil {
+		done = req.generation.ctx.Done()
+	}
 	select {
 	case c.sendCh <- req:
 		return nil
@@ -498,9 +547,16 @@ func (c *Client) enqueueSend(ctx context.Context, req sendRequest) error {
 // observes Connected() to learn when a fresh conn becomes available and
 // re-runs any application-layer handshake on it.
 func (c *Client) Receive(ctx context.Context) ([]byte, error) {
+	raw, _, err := c.ReceiveGeneration(ctx)
+	return raw, err
+}
+
+// ReceiveGeneration returns the identity stamped by the socket's receive pump.
+// It shares Receive's single ordered stream and must not be observed separately.
+func (c *Client) ReceiveGeneration(ctx context.Context) ([]byte, *Generation, error) {
 	select {
 	case <-c.closeCh:
-		return nil, ErrClosed
+		return nil, nil, ErrClosed
 	default:
 	}
 	c.connDoneMu.Lock()
@@ -508,13 +564,13 @@ func (c *Client) Receive(ctx context.Context) ([]byte, error) {
 	c.connDoneMu.Unlock()
 	select {
 	case frame := <-c.recvCh:
-		return frame, nil
+		return frame.data, frame.generation, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	case <-c.closeCh:
-		return nil, ErrClosed
+		return nil, nil, ErrClosed
 	case <-done:
-		return nil, ErrDisconnected
+		return nil, nil, ErrDisconnected
 	}
 }
 
@@ -560,6 +616,9 @@ func (c *Client) IsConnected() bool {
 func (c *Client) DropConn() {
 	c.mu.Lock()
 	conn := c.conn
+	if c.generation != nil {
+		c.generation.retire()
+	}
 	c.mu.Unlock()
 	if conn != nil {
 		_ = conn.CloseNow()
@@ -572,6 +631,9 @@ func (c *Client) Close() error {
 		close(c.closeCh)
 		c.mu.Lock()
 		conn := c.conn
+		if c.generation != nil {
+			c.generation.retire()
+		}
 		c.mu.Unlock()
 		if conn != nil {
 			_ = conn.Close(websocket.StatusNormalClosure, "client closing")
@@ -611,6 +673,14 @@ func (c *Client) realDial(ctx context.Context) (*websocket.Conn, error) {
 func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	lifetime, retire := context.WithCancel(ctx)
+	defer retire()
+	c.mu.Lock()
+	if c.generation != nil {
+		c.generation.retire()
+	}
+	c.generation = &Generation{client: c, conn: conn, ctx: lifetime, retire: retire}
+	c.mu.Unlock()
 	fresh := make(chan struct{})
 	c.connDoneMu.Lock()
 	c.connDone = fresh
@@ -621,9 +691,9 @@ func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 		c.connDoneMu.Unlock()
 	}()
 	errCh := make(chan error, 3)
-	go func() { errCh <- c.recvPump(ctx, conn) }()
-	go func() { errCh <- c.sendPump(ctx, conn) }()
-	go func() { errCh <- c.pingLoop(ctx, conn) }()
+	go func() { defer retire(); errCh <- c.recvPump(ctx, conn) }()
+	go func() { defer retire(); errCh <- c.sendPump(ctx, conn) }()
+	go func() { defer retire(); errCh <- c.pingLoop(ctx, conn) }()
 	c.setConn(conn)
 	defer c.setConn(nil)
 	select {
@@ -680,13 +750,16 @@ func awaitCloseStatus(errCh <-chan error, grace time.Duration) []error {
 }
 
 func (c *Client) recvPump(ctx context.Context, conn *websocket.Conn) error {
+	c.mu.Lock()
+	g := c.generation
+	c.mu.Unlock()
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
 			return safeTransportError("recv", err)
 		}
 		select {
-		case c.recvCh <- data:
+		case c.recvCh <- receivedFrame{data: data, generation: g}:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -713,6 +786,9 @@ func (c *Client) sendPump(ctx context.Context, conn *websocket.Conn) error {
 			err := writeCtx.Err()
 			if err == nil {
 				err = ctx.Err()
+			}
+			if err == nil && req.generation != nil {
+				err = req.generation.ctx.Err()
 			}
 			if err == nil {
 				err = conn.Write(writeCtx, websocket.MessageText, req.frame)

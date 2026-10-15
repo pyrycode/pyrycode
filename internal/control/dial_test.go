@@ -17,11 +17,20 @@ func TestIsTransientStartupError(t *testing.T) {
 	// Case 1: real *net.OpError wrapping *os.PathError{Err: ENOENT}, produced
 	// by dialing a unix socket path that does not exist. Pins the real-world
 	// shape end-to-end through the kernel.
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(shortTempDir(t))
+	if err != nil {
+		t.Fatalf("canonical socket directory: %v", err)
+	}
 	missing := filepath.Join(dir, "missing.sock")
+	if len(missing) >= 104 {
+		t.Fatalf("canonical socket path is %d bytes, want fewer than 104: %s", len(missing), missing)
+	}
 	_, enoentErr := net.Dial("unix", missing)
 	if enoentErr == nil {
 		t.Fatalf("net.Dial against missing socket unexpectedly succeeded")
+	}
+	if !errors.Is(enoentErr, syscall.ENOENT) {
+		t.Fatalf("net.Dial against missing socket: %v, want ENOENT", enoentErr)
 	}
 
 	// Case 2: synthetic *net.OpError wrapping *os.SyscallError{Err: ECONNREFUSED}.

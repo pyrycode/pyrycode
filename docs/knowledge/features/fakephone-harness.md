@@ -124,6 +124,12 @@ cancelled. A `Receive` that hits its deadline therefore makes the
 tests that anticipate timeouts should construct a fresh Client per
 attempt. Documented on `Receive`'s godoc.
 
+When a final silence assertion deliberately expires the receive deadline, place
+it after the lifecycle change whose delivery it must exclude. Timing out first
+would close the client and make subsequent silence vacuous.
+`TestHostedAppsPairedResources` waits for a committed owner revision after stopping
+the service before checking that an unnegotiated peer received no lifecycle push.
+
 The AC ("on deadline exceeded returns a typed error the caller can
 match against") is fully covered; only the spec's optional "conn
 remains usable after timeout" sub-assertion was dropped.

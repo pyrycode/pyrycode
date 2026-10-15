@@ -417,7 +417,7 @@ type daemonProc struct {
 // stand-in child, the control socket under a short /tmp dir (the #860 sun_path
 // fix), and the relay wired to relayURL. Blocks until the control socket is
 // dialable. relayURL is the BARE base URL — resolveDialURL appends /v1/server.
-func spawnDaemon(t *testing.T, home, relayURL string) *daemonProc {
+func spawnDaemon(t *testing.T, home, relayURL string, extraEnv ...string) *daemonProc {
 	t.Helper()
 	bin := ensurePyryBuilt(t)
 	socket := shortSocketPath(t)
@@ -429,6 +429,7 @@ func spawnDaemon(t *testing.T, home, relayURL string) *daemonProc {
 		"-pyry-name=test",
 		"-pyry-claude=" + claudeBin,
 		"-pyry-idle-timeout=0",
+		"-pyry-verbose",
 		// The serve path confines the workdir to $HOME (#670); default it to HOME
 		// so the daemon doesn't fail-fast on the confinement check.
 		"-pyry-workdir=" + home,
@@ -438,6 +439,7 @@ func spawnDaemon(t *testing.T, home, relayURL string) *daemonProc {
 	// childEnv pins HOME=home; PYRY_ALLOW_INSECURE_RELAY=1 lets resolveDialURL
 	// accept the ws:// (plaintext, loopback) scheme.
 	cmd.Env = append(childEnv(home), "PYRY_ALLOW_INSECURE_RELAY=1")
+	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
@@ -624,9 +626,8 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 	return initSend, initRecv
 }
 
-// buildHello marshals the phone's early-data hello envelope (no capabilities —
-// list_conversations needs none).
-func buildHello(t *testing.T, token string) []byte {
+// buildHello marshals the phone's early-data hello with optional capabilities.
+func buildHello(t *testing.T, token string, capabilities ...string) []byte {
 	t.Helper()
 	payload, err := json.Marshal(protocol.HelloClientPayload{
 		Role:             "client",
@@ -634,6 +635,7 @@ func buildHello(t *testing.T, token string) []byte {
 		ClientVersion:    "0.0.1-test",
 		ProtocolVersions: []string{"v2"},
 		Token:            token,
+		Capabilities:     capabilities,
 	})
 	if err != nil {
 		t.Fatalf("marshal hello payload: %v", err)

@@ -347,11 +347,12 @@ type convQueue struct {
 type Queue struct {
 	deliver     DeliverFunc
 	retry       time.Duration
-	giveUpAfter time.Duration // bounds persistent-failure retry before give-up
-	max         int           // per-conversation backlog cap; > 0 always in practice
-	onChange    ChangeFunc    // nil ⇒ change notification disabled
-	onGiveUp    GiveUpFunc    // nil ⇒ give-up notification disabled
-	onDelivered DeliveredFunc // nil ⇒ delivered notification disabled
+	giveUpAfter time.Duration    // bounds persistent-failure retry before give-up
+	failureNow  func() time.Time // elapsed failure clock; configure before Run
+	max         int              // per-conversation backlog cap; > 0 always in practice
+	onChange    ChangeFunc       // nil ⇒ change notification disabled
+	onGiveUp    GiveUpFunc       // nil ⇒ give-up notification disabled
+	onDelivered DeliveredFunc    // nil ⇒ delivered notification disabled
 	onAccepted  AcceptedFunc
 	onTerminal  TerminalFunc
 	pending     PendingFunc // nil ⇒ no delivery error is treated as a hold
@@ -394,6 +395,7 @@ func New(cfg Config) (*Queue, error) {
 		deliver:     cfg.Deliver,
 		retry:       retry,
 		giveUpAfter: giveUpAfter,
+		failureNow:  time.Now,
 		max:         max,
 		onChange:    cfg.OnChange,
 		onGiveUp:    cfg.OnGiveUp,
@@ -1046,7 +1048,7 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		// Retry the SAME head — lossless, and what makes a message survive a
 		// child respawn. NEVER log head.text: it is untrusted phone content.
 		if firstFailedAt.IsZero() || streakID != head.id {
-			firstFailedAt = time.Now()
+			firstFailedAt = q.failureNow()
 			streakID = head.id
 		}
 		q.log.Warn("msgqueue: delivery failed, will retry",
@@ -1054,7 +1056,7 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			"queued_msg_id", head.id,
 			"queued_at", head.ts,
 			"err", err)
-		if elapsed := time.Since(firstFailedAt); elapsed >= q.giveUpAfter {
+		if elapsed := q.failureNow().Sub(firstFailedAt); elapsed >= q.giveUpAfter {
 			if q.giveUp(convID, c, head, elapsed, err) {
 				return
 			}

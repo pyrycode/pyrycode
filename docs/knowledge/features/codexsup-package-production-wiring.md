@@ -316,12 +316,15 @@ which flags the same absence for the translator). A regression in that
 correlation would silently decline every Codex file edit with no test
 catching it.
 
-`TestCodexApprovalLive` (`cmd/pyry/codex_approval_test.go`) is the live
+`TestCodexApprovalLive` (`cmd/pyry/codex_approval_live_test.go`) is the live
 counterpart, on `gpt-6-luna` at effort `low`: a declined `touch` does not
-run, an accepted one does. It is not reached by any dispatcher gate —
-`make e2e-realclaude` never starts Codex — so it has to be run by hand with
-`PYRY_CODEX_CAPTURE_BIN`/`PYRY_CODEX_CAPTURE_HOME` set, the same env pair
-`TestCaptureLive` (above) uses.
+run, an accepted one does. Run it explicitly with
+`go test -tags codex_capture -run TestCodexApprovalLive ./cmd/pyry/` and
+`PYRY_CODEX_CAPTURE_BIN`/`PYRY_CODEX_CAPTURE_HOME` set, using the same isolated
+home as [`TestCaptureLive`](codexsup-package.md#the-captures-live-gaps-and-what-they-mean-for-a-recapture).
+It spends Codex allowance and skips if either variable is empty. Without the
+`codex_capture` tag it is excluded from compilation and test listings, even
+when both variables are set; `make e2e-realclaude` never starts this test.
 
 ### Codex questions reach the shared bridge (#2671)
 

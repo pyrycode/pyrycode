@@ -31,7 +31,7 @@ func daemonAppManifest(host string) []byte {
 func TestDaemonAppsStorage(t *testing.T) {
 	for _, mode := range []string{"missing", "corrupt", "foreign", "unreadable", "symlink"} {
 		t.Run(mode, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
+			t.Setenv("HOME", testRealTempDir(t))
 			const name = "test/instance"
 			root := filepath.Join(resolveInstanceDirPath(name), "apps")
 			if err := os.MkdirAll(root, 0755); err != nil {
@@ -107,17 +107,22 @@ func TestDaemonAppsStorage(t *testing.T) {
 }
 
 func TestDaemonAppsComposition(t *testing.T) {
-	for _, ready := range []bool{false, true} {
-		t.Run(fmt.Sprint(ready), func(t *testing.T) {
+	for _, mode := range []string{"supported", "owner", "delivery", "runtime", "registry"} {
+		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
+			ready := mode == "supported"
 			host := string(identity.NewServerID())
-			r, err := apps.Open(filepath.Join(t.TempDir(), "apps"), host)
+			r, err := apps.Open(filepath.Join(testRealTempDir(t), "apps"), host)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if _, err = r.Register(daemonAppManifest(host)); err != nil {
 				t.Fatal(err)
 			}
+			if _, err = r.UpdateLifecycle(host, daemonAppID, apps.Lifecycle{Title: "Candidate", Desired: "stopped", State: "stopped"}); err != nil {
+				t.Fatal(err)
+			}
+			_, initialRevision := r.List()
 			key, err := ecdh.X25519().GenerateKey(rand.Reader)
 			if err != nil {
 				t.Fatal(err)
@@ -134,12 +139,32 @@ func TestDaemonAppsComposition(t *testing.T) {
 					return ctx.Err()
 				}
 			}
-			if ready {
-				cfg.HostedAppsReady = func() bool { return true }
-			} // Complete fake dependencies; production supplies no attestation.
-			mgr, detach, err := newDaemonAppsManager(cfg, r)
+			var owner *apps.Owner
+			var node string
+			if mode != "owner" {
+				node = filepath.Join(t.TempDir(), "node")
+				version := "v24.15.0"
+				if mode == "runtime" {
+					version = "v25.0.0"
+				}
+				testWriteDaemonAppsRuntime(t, node, "#!/bin/sh\necho "+version+"\n")
+				owner = newDaemonAppsOwner(r, node, discardLogger())
+				t.Cleanup(func() { _ = owner.Shutdown() })
+			}
+			if mode == "delivery" {
+				cfg.OutboundContext = nil
+			}
+			registry := r
+			if mode == "registry" {
+				registry = nil
+			}
+			cfg.HostedAppsReady = func() bool { return true }
+			mgr, detach, err := newDaemonAppsManager(context.Background(), cfg, registry, owner)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if ready {
+				testWriteDaemonAppsRuntime(t, node, "#!/bin/sh\nexit 1\n")
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
@@ -191,6 +216,9 @@ func TestDaemonAppsComposition(t *testing.T) {
 				t.Fatal(payload)
 			}
 			w.phones["apps"] = switchPhone{send, recv}
+			if mode == "delivery" {
+				return
+			}
 			request := func(id uint64) {
 				t.Helper()
 				sealed, err := send.Encrypt(marshal(protocol.Envelope{ID: id, Type: protocol.TypeListApps, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}))
@@ -215,10 +243,10 @@ func TestDaemonAppsComposition(t *testing.T) {
 			if err := json.Unmarshal(env.Payload, &list); err != nil {
 				t.Fatal(err)
 			}
-			if env.Type != protocol.TypeApps || list.Revision != 1 || len(list.Items) != 1 || list.Items[0].AppID != daemonAppID {
+			if env.Type != protocol.TypeApps || list.Revision != initialRevision || len(list.Items) != 1 || list.Items[0].AppID != daemonAppID {
 				t.Fatal(env, list)
 			}
-			state := apps.Lifecycle{Title: "Committed", Desired: "available", State: "running", ActiveRelease: "1.0.0"}
+			state := apps.Lifecycle{Title: "Committed", Desired: "stopped", State: "stopped", ActiveRelease: "1.0.0"}
 			if _, err := r.UpdateLifecycle(host, daemonAppID, state); err != nil {
 				t.Fatal(err)
 			}
@@ -227,7 +255,7 @@ func TestDaemonAppsComposition(t *testing.T) {
 			if err := json.Unmarshal(env.Payload, &update); err != nil {
 				t.Fatal(err)
 			}
-			if env.Type != protocol.TypeAppUpdated || env.InReplyTo != nil || update.Title != "Committed" || update.State != "running" || update.Revision != 2 {
+			if env.Type != protocol.TypeAppUpdated || env.InReplyTo != nil || update.Title != "Committed" || update.State != "stopped" || update.Revision != initialRevision+1 {
 				t.Fatal(env, update)
 			}
 			otherID := "33333333-3333-4333-8333-333333333333"
@@ -242,11 +270,15 @@ func TestDaemonAppsComposition(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, env = w.read()
+			for env.Type == protocol.TypeAppUpdated {
+				_, env = w.read()
+			}
 			var removed protocol.AppRemovedPayload
 			if err := json.Unmarshal(env.Payload, &removed); err != nil {
 				t.Fatal(err)
 			}
-			if env.Type != protocol.TypeAppRemoved || env.InReplyTo != nil || removed.AppID != otherID || removed.Revision != 4 {
+			_, removedRevision := r.List()
+			if env.Type != protocol.TypeAppRemoved || env.InReplyTo != nil || removed.AppID != otherID || removed.Revision != removedRevision {
 				t.Fatal(env, removed)
 			}
 			detach()
@@ -263,18 +295,18 @@ func TestDaemonAppsComposition(t *testing.T) {
 			if err := json.Unmarshal(env.Payload, &list); err != nil {
 				t.Fatal(err)
 			}
-			if list.Revision != 5 || list.Items[0].Title != "Detached" {
+			if list.Revision != removedRevision+1 || list.Items[0].Title != "Detached" {
 				t.Fatal(list)
 			}
 		})
 	}
 }
 func TestDaemonAppsCompositionFailure(t *testing.T) {
-	r, err := apps.Open(filepath.Join(t.TempDir(), "apps"), string(identity.NewServerID()))
+	r, err := apps.Open(filepath.Join(testRealTempDir(t), "apps"), string(identity.NewServerID()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	mgr, detach, err := newDaemonAppsManager(relay.V2SessionConfig{Frames: make(chan protocol.RoutingEnvelope), Logger: discardLogger()}, r)
+	mgr, detach, err := newDaemonAppsManager(context.Background(), relay.V2SessionConfig{Frames: make(chan protocol.RoutingEnvelope), Logger: discardLogger()}, r, nil)
 	if err == nil || mgr != nil || detach != nil {
 		t.Fatal("invalid manager construction succeeded")
 	}
