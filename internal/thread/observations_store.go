@@ -32,7 +32,7 @@ func (w *conversationWorker) retain(batch changeBatch) {
 	}
 }
 
-// Observe acquires a consistent detached baseline without history I/O.
+// Observe renders a consistent detached baseline from one publication.
 func (s *Store) Observe(id conversations.ConversationID) Observation {
 	return Observation{Snapshot: s.Snapshot(id)}
 }

@@ -93,3 +93,10 @@ None. Separate order/content IDs and inline ancestor lookup are required contrac
   ancestor revision for private equality; content still resolves solely by ID.
   Foreground shell terminal application promotes that row to a creating-entry
   recipe; a later background link restores the existing inline lifecycle render.
+- 2026-10-15: Merge #3386's render-on-output publications. Shared rendering now
+  accepts an ancestor lookup from the same captured view: publication comparisons
+  use prior slots, and delayed Store output uses the immutable query root and
+  authoritative history lookup. Preserve field-only recipes on inline agents.
+  `TestStoreCapturedInheritedEnding` covers omitted ancestors, inline nested
+  agents, late text/reopening and detached retained results across later feeds.
+  Publication tests compare retained metadata separately from rendered content.

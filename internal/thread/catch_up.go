@@ -20,6 +20,7 @@ func (q *queryIndex) prepareCatchUp(f *Fold) {
 		for id, row := range bucket {
 			q.count(true)
 			row.touch = f.touches[id]
+			row.recipe = f.recipes[id]
 			bucket[id] = row
 			q.touched = q.treePut(q.touched, row.touch, id, row)
 			if row.touch == 0 || row.touch > f.version {
@@ -32,7 +33,7 @@ func (q *queryIndex) prepareCatchUp(f *Fold) {
 
 // CatchUp returns current full states touched in (afterVersion, Version], every
 // active public item and complete public parents. The caller must be authorized
-// for id. It neither loads nor waits for recovery nor reads history. Nonzero
+// for id. It neither loads nor waits for recovery. It renders selected references. Nonzero
 // queries ignore limit; zero selects NewestWindow with its validation and clamp.
 // ResetRequired carries the current epoch/version but no items or covered bounds.
 // Cancellation discards partial results and leaves the worker running.
@@ -55,7 +56,8 @@ func (s *Store) CatchUp(ctx context.Context, id conversations.ConversationID, ep
 		return reset, nil
 	}
 	if afterVersion == 0 {
-		return q.window(ctx, snap, 0, min(limit, MaxQueryItems), true)
+		result, err := q.window(ctx, snap, 0, min(limit, MaxQueryItems), true)
+		return s.renderQuery(ctx, id, q, result, err)
 	}
 	if afterVersion > snap.Version || snap.Version-afterVersion > MaxCatchUpGap || q == nil || !q.complete || q.coveredThrough != snap.Version || q.unprovenThrough > afterVersion || q.suppressed > afterVersion {
 		return reset, nil
@@ -93,5 +95,5 @@ func (s *Store) CatchUp(ctx context.Context, id conversations.ConversationID, ep
 	if err := ctx.Err(); err != nil {
 		return QueryResult{}, err
 	}
-	return result, nil
+	return s.renderQuery(ctx, id, q, result, nil)
 }

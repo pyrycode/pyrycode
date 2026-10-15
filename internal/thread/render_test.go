@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
@@ -422,7 +423,18 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 				}
 				if phase == "tail" {
 					if deferredSend {
-						testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries)))
+						// Observe metadata while output lookup failure is armed.
+						deadline := time.Now().Add(5 * time.Second)
+						for {
+							status := s.Status(testStoreA)
+							if status.State == StateUsable && status.Version == uint64(len(entries)) {
+								break
+							}
+							if status.State == StateUnavailable || time.Now().After(deadline) {
+								t.Fatal("padding did not publish before terminal failure", status)
+							}
+							time.Sleep(time.Millisecond)
+						}
 						entries = append(entries, testStoreAppend(t, h, testStoreA, initial[len(initial)-1])...)
 					} else {
 						// Unchanged publications need no source reread. A delivery join

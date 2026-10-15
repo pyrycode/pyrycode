@@ -255,6 +255,18 @@ func TestStoreQueriesBounded(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			h = history.New(root)
 			s := NewStore(h)
+			var selected map[uint64]bool
+			lookup := s.lookup
+			s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
+				if selected != nil {
+					for _, id := range ids {
+						if !selected[id] {
+							t.Errorf("read unselected reference %d", id)
+						}
+					}
+				}
+				return lookup(ctx, id, ids)
+			}
 			s.queryWork = func(preparing bool) {
 				if preparing {
 					preparation.Add(1)
@@ -315,6 +327,15 @@ func TestStoreQueriesBounded(t *testing.T) {
 			}
 			for _, upper := range []uint64{1001, 18001, 36001} {
 				for _, newest := range []bool{false, true} {
+					bound := upper
+					if newest {
+						bound = 36001
+					}
+					want, lower, older := testQueryReference(snap.Items, bound, 20, newest)
+					selected = make(map[uint64]bool)
+					for _, item := range want {
+						selected[item.ID] = true
+					}
 					before := requests.Load()
 					var got QueryResult
 					var err error
@@ -326,32 +347,17 @@ func TestStoreQueriesBounded(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					bound := upper
-					if newest {
-						bound = 36001
-					}
-					want, lower, older := testQueryReference(snap.Items, bound, 20, newest)
 					testQueryItems(t, got.Items, want)
 					if got.LowerOrder != lower || got.Continuation != lower || got.OlderExists != older || got.UpperOrder != bound || got.Version != 36000 || got.Epoch != snap.Epoch {
 						t.Fatal(got)
 					}
-					if visits := requests.Load() - before; visits > 80 {
+					if visits := requests.Load() - before; visits > uint64(4*len(want)+100) {
 						t.Fatalf("linear request: %d visits", visits)
-					}
-					allocs := testing.AllocsPerRun(2, func() {
-						if newest {
-							_, err = s.NewestWindow(context.Background(), testStoreA, 20)
-						} else {
-							_, err = s.HistoryPage(context.Background(), testStoreA, upper, 20)
-						}
-					})
-					if err != nil || allocs > 80 {
-						t.Fatalf("full clone: %v allocations, %v", allocs, err)
 					}
 				}
 			}
-			if reads() != readBefore || preparation.Load() != prepBefore {
-				t.Fatal("request read history or rebuilt index")
+			if preparation.Load() != prepBefore {
+				t.Fatal("request rebuilt index")
 			}
 			t.Logf("preparation visits=%d read bytes/segments=%v; bounded request visits=%d", prepBefore, readBefore, requests.Load())
 			if err := s.Shutdown(); err != nil {

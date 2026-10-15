@@ -342,6 +342,19 @@ zero; otherwise the checksum is 64 lowercase SHA-256 hex characters and the
 watermark cannot exceed V. `EnsureLogDir` can create an empty contained directory
 without fabricating history entries.
 
+Converted Store publication slots, comparison state and query rows retain only
+metadata and immutable content recipes: no rendered `Content` or derived
+user/assistant `Summary`. Worker progress and certificates remain scalar-only.
+Baseline reads render all public rows; bounded queries select metadata first,
+then resolve only required history references from the captured publication.
+See [snapshots and retry](thread-package-background-store.md#snapshots-and-retry).
+Deferred agent/shell and inline/private payloads, including parent-ending recipe
+values, remain outside this converted-content guarantee; their conversion is
+tracked in [#3334](https://github.com/pyrycode/pyrycode/issues/3334).
+The worker's recent-entry cache (256 entries, inclusive 1 MiB), history's bounded
+caches and the detached change ring (64 batches, 1 MiB encoded) are separate
+budgets. Transient rendering creates no unbounded rendered-item or entry cache.
+
 For unloaded unread metadata, `Store.UnloadedLastShownVersion` holds the store
 lock and rejects a closed store or any worker, including one still retiring.
 It obtains H from `history.Store.CachedLatestEntryID`, which never warms a cold

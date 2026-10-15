@@ -512,8 +512,8 @@ func TestStoreReadSecurity(t *testing.T) {
 			if err := os.Rename(dir, dir+"-saved"); err != nil {
 				t.Fatal(err)
 			}
-			if s.Snapshot(testStoreA).State != StateUsable {
-				t.Fatal("snapshot performed history I/O")
+			if failed := s.Snapshot(testStoreA); failed.State != StateUnavailable || failed.Err != ErrUnavailable || failed.Items != nil {
+				t.Fatal("snapshot exposed output without readable history", failed)
 			}
 			testStoreStatusEqual(t, s, testStoreA)
 			if err := os.Rename(dir+"-saved", dir); err != nil {

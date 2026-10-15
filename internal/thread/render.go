@@ -117,6 +117,18 @@ func (f *Fold) renderShared(items []Item) ([]Item, error) {
 // renderShared resolves dependencies from the same item/recipe view as the
 // selected output. No ancestor is fetched from a mutable external fold.
 func renderShared(selected []Item, recipes map[uint64]contentRecipe, source entrySource, view []Item) ([]Item, error) {
+	return renderSharedLookup(selected, recipes, source, func(id uint64) (Item, bool) {
+		index, ok := slices.BinarySearchFunc(view, id, func(item Item, id uint64) int { return cmp.Compare(item.ID, id) })
+		if !ok {
+			return Item{}, false
+		}
+		return view[index], true
+	})
+}
+
+// lookup resolves ancestors from the selected view and makes their recipes
+// available in recipes before returning. Rendering never consults another view.
+func renderSharedLookup(selected []Item, recipes map[uint64]contentRecipe, source entrySource, lookup func(uint64) (Item, bool)) ([]Item, error) {
 	items := slices.Clone(selected)
 	seen := make(map[uint64]bool, len(items))
 	for _, item := range items {
@@ -133,11 +145,11 @@ func renderShared(selected []Item, recipes map[uint64]contentRecipe, source entr
 			if seen[field.item] {
 				continue
 			}
-			index, ok := slices.BinarySearchFunc(view, field.item, func(item Item, id uint64) int { return cmp.Compare(item.ID, id) })
+			ancestor, ok := lookup(field.item)
 			if !ok {
 				return nil, ErrUnavailable
 			}
-			items = append(items, view[index])
+			items = append(items, ancestor)
 			seen[field.item] = true
 		}
 	}

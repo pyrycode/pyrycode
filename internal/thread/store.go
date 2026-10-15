@@ -47,17 +47,18 @@ type storeReader interface {
 }
 
 type conversationWorker struct {
-	parent     context.Context
-	cancel     context.CancelFunc
-	done       chan struct{}
-	retiring   bool
-	snapshot   Snapshot
-	items      []*Item
-	query      *queryIndex
-	err        error // read only after done closes
-	changed    chan struct{}
-	ranges     []changeBatch
-	rangeBytes int
+	parent       context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}
+	retiring     bool
+	renderFailed bool
+	snapshot     Snapshot
+	items        []*Item
+	query        *queryIndex
+	err          error // read only after done closes
+	changed      chan struct{}
+	ranges       []changeBatch
+	rangeBytes   int
 }
 
 // Store follows raw history for caller-authorized conversations. Construct it
@@ -124,32 +125,48 @@ func (s *Store) start(ctx context.Context, id conversations.ConversationID, retr
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return ErrClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	w := s.workers[id]
-	if w != nil && w.retiring {
-		return ErrUnloading
-	}
-	if retry {
-		if w == nil {
-			return ErrNotLoaded
+	for {
+		if s.closed {
+			return ErrClosed
 		}
-		if w.snapshot.State != StateUnavailable {
-			return ErrNotUnavailable
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-	} else if w != nil {
+		w := s.workers[id]
+		if w != nil && w.retiring {
+			return ErrUnloading
+		}
+		if retry {
+			if w == nil {
+				return ErrNotLoaded
+			}
+			if w.snapshot.State != StateUnavailable {
+				return ErrNotUnavailable
+			}
+			// Withdrawal can precede producer exit. Replacement requires the
+			// current worker to be joined under the same identity check.
+			select {
+			case <-w.done:
+			default:
+				done := w.done
+				s.mu.Unlock()
+				select {
+				case <-done:
+				case <-ctx.Done():
+				}
+				s.mu.Lock()
+				continue
+			}
+		} else if w != nil {
+			return nil
+		}
+		workerCtx, cancel := context.WithCancel(ctx)
+		w = &conversationWorker{parent: ctx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), snapshot: Snapshot{State: StateRebuilding}}
+		s.workers[id] = w
+		s.records[id] = progressRecord{Err: ErrUnavailable}
+		go s.run(workerCtx, id, w)
 		return nil
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
-	w = &conversationWorker{parent: ctx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), snapshot: Snapshot{State: StateRebuilding}}
-	s.workers[id] = w
-	s.records[id] = progressRecord{Err: ErrUnavailable}
-	go s.run(workerCtx, id, w)
-	return nil
 }
 
 func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *conversationWorker) {
@@ -161,8 +178,9 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	defer func() {
 		s.mu.Lock()
 		retiring := w.retiring
+		renderFailed := w.renderFailed
 		s.mu.Unlock()
-		if retiring && w.parent.Err() == nil && progress.State == StateUsable && errors.Is(result, context.Canceled) {
+		if retiring && !renderFailed && w.parent.Err() == nil && progress.State == StateUsable && errors.Is(result, context.Canceled) {
 			result = s.checkpoint(id, progress, progressChecksum, true)
 		}
 		w.cancel()
@@ -318,6 +336,7 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 	} else {
 		index = index.advance(items, affected, fold, s.queryWork, s.queryCopies)
 	}
+	index.worker = w
 	var batch changeBatch
 	if before.State == StateUsable {
 		batch.observation = changes
@@ -337,21 +356,30 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 	}
 }
 
-// Snapshot does no history I/O. Items/content are copied from an immutable
-// publication, keeping their revisions and consumed Version consistent.
+// Snapshot renders one immutable publication outside the store mutex. Source
+// failure returns only unavailable State/Err and withdraws the captured worker.
 func (s *Store) Snapshot(id conversations.ConversationID) Snapshot {
 	s.mu.Lock()
 	var snapshot Snapshot
 	var items []*Item
+	var index *queryIndex
 	if w := s.workers[id]; w != nil && !w.retiring {
 		snapshot = w.snapshot
 		items = w.items
+		index = w.query
 	}
 	s.mu.Unlock()
 	if items != nil {
 		snapshot.Items = detachPublication(items)
 	} else {
 		snapshot.Items = copyItems(snapshot.Items)
+	}
+	if snapshot.State == StateUsable {
+		var err error
+		snapshot.Items, err = s.renderItems(context.Background(), id, index, snapshot.Items)
+		if err != nil {
+			return Snapshot{State: StateUnavailable, Err: ErrUnavailable}
+		}
 	}
 	return snapshot
 }

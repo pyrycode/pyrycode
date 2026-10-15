@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -31,6 +32,7 @@ func TestReferenceInheritedEnding(t *testing.T) {
 	var capture publicationCapture
 	var old []*Item
 	var baseline []Item
+	var metadata []Item
 	var view []Item
 	var recipes map[uint64]contentRecipe
 	for i, e := range entries {
@@ -48,10 +50,11 @@ func TestReferenceInheritedEnding(t *testing.T) {
 			t.Fatal(err)
 		}
 		if e.ID == 4 {
-			old, baseline = published, detachPublication(published)
+			old, metadata = published, detachPublication(published)
+			baseline = legacy.Items()
 			view, recipes = slices.Clone(f.items), maps.Clone(f.recipes)
 		}
-		if old != nil && !reflect.DeepEqual(detachPublication(old), baseline) {
+		if old != nil && !reflect.DeepEqual(detachPublication(old), metadata) {
 			t.Fatal("captured view changed")
 		}
 		if view != nil {
@@ -93,6 +96,54 @@ func TestReferenceInheritedEnding(t *testing.T) {
 		for id := uint64(100); id < 400; id++ {
 			source.remember([]history.Entry{testEntry(id, "ignored", `{}`)})
 		}
+	}
+}
+
+func TestStoreCapturedInheritedEnding(t *testing.T) {
+	s, h := testThreadStore(t)
+	entries := testEndingEntries()
+	first := testStoreAppend(t, h, testStoreA, entries[:4]...)
+	if err := s.Load(context.Background(), testStoreA); err != nil {
+		t.Fatal(err)
+	}
+	testStoreWait(t, s, testStoreA, StateUsable, 4)
+	_, captured := s.captureQuery(testStoreA)
+	legacy := New(string(testStoreA))
+	testFeed(t, legacy, first...)
+	want := legacy.Items()[1:3]
+	var selected []Item
+	for _, id := range []uint64{2, 3} {
+		row, ok := captured.lookup(id, false)
+		if !ok {
+			t.Fatal("missing selected child", id)
+		}
+		selected = append(selected, *row.item)
+	}
+	read := func() []Item {
+		t.Helper()
+		got, err := s.renderItems(context.Background(), testStoreA, captured, slices.Clone(selected))
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("captured child with omitted ancestor differs: %v\ngot %#v\nwant %#v", err, got, want)
+		}
+		return got
+	}
+	old := read()
+	testStoreAppend(t, h, testStoreA, entries[4:6]...)
+	testStoreWait(t, s, testStoreA, StateUsable, 6)
+	read()
+	if !reflect.DeepEqual(old, want) {
+		t.Fatal("returned child changed after reopening")
+	}
+	old[0].Content[0] = '!'
+	read()
+	var reopened bool
+	for _, item := range s.Snapshot(testStoreA).Items {
+		if item.ID == 3 {
+			reopened = item.Active && messageText(item) == "unfinished late"
+		}
+	}
+	if !reopened {
+		t.Fatal("current child lost reopening or late text")
 	}
 }
 
