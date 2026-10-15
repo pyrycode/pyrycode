@@ -72,3 +72,7 @@ Pending documentation stage: update `docs/hosted-apps.md`, “Client resource br
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-15
+
+## Revisions
+
+- 2026-10-15: the asset backend file is `internal/apps/assets.go`. Keep the bounded runtime probe in `internal/apps/runtime_check.go` to avoid expanding the existing launch preparation. Composition notifications now include real owner observations, so assert committed revisions rather than assuming registration/removal always consume exactly two revisions. The commit/response barrier holds the old handler after cancellation and releases it only after the new connection has submitted its reused-ID read.

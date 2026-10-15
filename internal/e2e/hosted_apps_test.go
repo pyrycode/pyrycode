@@ -18,11 +18,9 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/apps"
 	"github.com/pyrycode/pyrycode/internal/control"
-	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/identity"
-	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -228,72 +226,85 @@ func TestHostedAppsChannelIndependence(t *testing.T) {
 	hostedGone(t, proof)
 }
 
-func TestHostedAppsProductionUnsupported(t *testing.T) {
-	home := shortHome(t)
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-	payload, err := paireddevice.Setup(paireddevice.Config{Home: home, InstanceName: "test", Relay: fr.URL() + "/v2/server", DeviceName: "phone"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hostedSeed(t, home, "Not supervised")
-	h := StartInWithEnv(t, home, []string{"PYRY_ALLOW_INSECURE_RELAY=1"}, "-pyry-relay="+payload.Relay)
-	t.Cleanup(func() { h.Stop(t) })
-	waitBinaryHello(t, fr, readPersistedServerID(t, home))
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	phone, err := fakephone.Dial(ctx, fr.URL(), readPersistedServerID(t, home), payload.Token, "phone")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = phone.Close() })
-	pub, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	init, err := noise.NewInitiator(fakephone.InstallKey(payload.Token), pub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hello := protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: payload.Token, Capabilities: []string{protocol.CapabilityHostedAppsV1}}
-	msg, err := init.WriteInit(mustJSON(t, protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: mustJSON(t, hello)}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sendNoiseInit(t, phone, msg)
-	frame := readInnerFrame(t, phone, 3*time.Second)
-	raw, err := base64.StdEncoding.DecodeString(frame.Data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ack, send, recv, err := init.ReadResp(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var env protocol.Envelope
-	var ackPayload protocol.HelloAckPayload
-	if err := json.Unmarshal(ack, &env); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(env.Payload, &ackPayload); err != nil {
-		t.Fatal(err)
-	}
-	if slices.Contains(ackPayload.Capabilities, protocol.CapabilityHostedAppsV1) {
-		t.Fatal("registration activated hosting")
-	}
-	seal, next := noiseWire(t, phone, send, recv)
-	seal(protocol.Envelope{ID: 2, Type: protocol.TypeListApps, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)})
-	var ok bool
-	env, ok = next(time.Now().Add(3 * time.Second))
-	if !ok {
-		t.Fatal("missing unsupported reply")
-	}
-	var p protocol.ErrorPayload
-	if err := json.Unmarshal(env.Payload, &p); err != nil {
-		t.Fatal(err)
-	}
-	if env.Type != protocol.TypeError || p.Code != "protocol.unsupported" || env.InReplyTo == nil || *env.InReplyTo != 2 {
-		t.Fatal(env, p)
+func TestHostedAppsProductionReadiness(t *testing.T) {
+	for _, mode := range []string{"empty", "stopped", "unhealthy", "missing", "unsupported", "storage"} {
+		t.Run(mode, func(t *testing.T) {
+			home := shortHome(t)
+			fr := fakerelay.New(relayTestLogger())
+			t.Cleanup(func() { _ = fr.Close() })
+			pair, err := paireddevice.Setup(paireddevice.Config{Home: home, InstanceName: "test", Relay: fr.URL() + "/v2/server", DeviceName: "phone"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode != "empty" {
+				seed := hostedSeed(t, home, "Readiness")
+				if mode == "stopped" {
+					r, err := apps.Open(hostedRoot(home), seed.ServerID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, record := range seed.Records {
+						if _, err := r.UpdateLifecycle(seed.ServerID, record.AppID, apps.Lifecycle{Title: record.Title, Desired: "stopped", State: "stopped", ActiveRelease: record.ActiveRelease}); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if mode == "unhealthy" {
+					if err := os.WriteFile(filepath.Join(hostedRoot(home), hostedAppID, "builds", strings.Repeat("a", 64), "dist/service/main.js"), []byte("bad-health"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mode == "storage" {
+					if err := os.WriteFile(filepath.Join(hostedRoot(home), "registry.json"), []byte("invalid"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			env := hostedNodeEnv(t)
+			node := strings.TrimPrefix(strings.Split(env[0], ":")[0], "PATH=") + "/node"
+			if mode == "missing" {
+				env[0] = "PATH=" + filepath.Dir(node)
+				if err := os.Remove(node); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "unsupported" {
+				if err := os.WriteFile(node, []byte("#!/bin/sh\necho v25.0.0\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env = append(env, "PYRY_ALLOW_INSECURE_RELAY=1")
+			h := StartInWithEnv(t, home, env, "-pyry-relay="+pair.Relay)
+			waitBinaryHello(t, fr, readPersistedServerID(t, home))
+			ready := mode == "empty" || mode == "stopped" || mode == "unhealthy"
+			p := hostedConnect(t, fr, home, pair.Token, pair.ServerStaticPubkey, true, ready)
+			p.request(2, protocol.TypeListApps, protocol.ListAppsPayload{})
+			if ready {
+				e := p.reply(2, protocol.TypeApps)
+				var list protocol.AppsPayload
+				if err := json.Unmarshal(e.Payload, &list); err != nil || (mode == "empty" && len(list.Items) != 0) || (mode != "empty" && len(list.Items) != 4) {
+					t.Fatal(string(e.Payload), err)
+				}
+				if mode != "empty" {
+					p.request(3, protocol.TypeAppAssetRequest, protocol.AppAssetRequestPayload{AppID: hostedAppID, ReleaseVersion: "1.0.0", Path: "/index.html"})
+					e = p.reply(3, protocol.TypeError)
+					var failure protocol.ErrorPayload
+					if err := json.Unmarshal(e.Payload, &failure); err != nil || failure.Code != "app.unavailable" {
+						t.Fatal(string(e.Payload), err)
+					}
+				}
+			} else {
+				e := p.reply(2, protocol.TypeError)
+				var failure protocol.ErrorPayload
+				if err := json.Unmarshal(e.Payload, &failure); err != nil || failure.Code != "protocol.unsupported" {
+					t.Fatal(string(e.Payload), err)
+				}
+			}
+			if result := h.Run(t, "status"); result.ExitCode != 0 {
+				t.Fatal(string(result.Stderr))
+			}
+			h.Stop(t)
+		})
 	}
 }
 

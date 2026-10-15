@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -53,14 +54,20 @@ func newDaemonAppsOwner(reg *apps.Registry, node string, logger *slog.Logger) *a
 	return owner
 }
 
-// newDaemonAppsManager attaches only fully initialized storage to a valid
-// manager. HostedAppsReady remains the caller's complete hosting attestation;
-// registration and cancellable delivery alone establish no service readiness.
-func newDaemonAppsManager(cfg relay.V2SessionConfig, reg *apps.Registry) (*relay.V2SessionManager, func(), error) {
+// newDaemonAppsManager attests infrastructure before message processing. The
+// cached readiness callback performs no I/O and does not depend on app health.
+func newDaemonAppsManager(ctx context.Context, cfg relay.V2SessionConfig, reg *apps.Registry, owner *apps.Owner) (*relay.V2SessionManager, func(), error) {
+	ready := false
 	if reg != nil {
 		cfg.HostedAppsDiscovery = reg
 		cfg.HostedAppsSend = cfg.OutboundContext
+		if owner != nil {
+			cfg.HostedAppsAssets = owner
+			cfg.HostedAppsAPI = owner
+			ready = cfg.HostedAppsSend != nil && owner.CheckRuntime(ctx) == nil
+		}
 	}
+	cfg.HostedAppsReady = func() bool { return ready }
 	mgr, err := relay.NewV2SessionManager(cfg)
 	if err != nil {
 		return nil, nil, err
