@@ -97,3 +97,40 @@ Candidate phase seconds (ordinary value; range across four contended processes):
 
 - 2026-10-15: The repeated baseline ordinary phase seconds were legacy 1.367 / 1.394 / 4.046 / 2.317 / 5.088 and modern 1.093 / 1.315 / 4.308 / 2.277 / 5.272 in table order. Both ordinary comparisons show about fivefold lower complete startup cost. Candidate modern encoded size varies by a few timestamp bytes (1,162,329–1,162,334 in recorded comparisons); ordinary segment sizes were 1,054,738 / 107,591, and contention measured 1,054,739–1,054,743 / 107,591. The repeated baseline modern fixture measured 6,896,944 bytes. All candidate cases have two real segments and two nonempty pages before recovery. This resolves both planning questions: actual rollover survives the reduction, and neither ordinary nor bounded contention reproduced a runtime defect. The fixture-cost reduction is the supported repair.
 - 2026-10-15: Complete candidate package at `a0160185`: `go test -race -json -count=1 -timeout=10m ./cmd/pyry`, exit 0, package 291.762 seconds; 16,460 named executions, 16,457 passes, zero failures and the same three documented skips. Startup passed in 7.89 seconds (legacy 3.61, modern 4.27). Ordinary package concurrency was unchanged and no controlled load overlapped this run. Package runtime remains dominated by other work; the 31.61→7.89-second startup reduction does not imply an equal whole-package reduction. Complete gate evidence follows separately; focused/package passes alone do not certify it.
+- 2026-10-15: Combined gate source is `b009cd8405731058f3a3b13f30996b41a55c4493` (production/tests identical to `a0160185`). Command: `make check GO=/tmp/builder-3431/go-uncached`, normal package concurrency, empty GOFLAGS. Module vet passed, and the complete uncached unit race tier passed: 26,788 named executions / 26,767 passes / zero failures / 21 skips. `cmd/pyry` completed in 411.204 seconds under module concurrency, with startup active for 8.35 seconds. Repaired siblings executed and passed: `TestGiveUpExempt_PendingResetsStreak` 0.01 seconds, `TestResetThenRotate_FailedHandoffIsStale` 2.61, `TestLiveStateRun` 0.32, and retained #3364 `TestThreadPageLargeReply` 5.48. No timeout stacks were produced because no test timed out.
+
+The external wrapper adds only the requested uncached JSON flags to tests; other Go commands and package concurrency are unchanged:
+
+```sh
+#!/bin/sh
+subcommand=$1
+shift
+if [ "$subcommand" = test ]; then
+    exec /usr/local/go/bin/go test -count=1 -json "$@"
+fi
+exec /usr/local/go/bin/go "$subcommand" "$@"
+```
+
+Unit skip inventory (these capabilities are not certified):
+- `cmd/pyry`: the same three live-Claude, live-Codex and case-sensitive-filesystem skips listed above.
+- `internal/agentrun/trust`: `TestMarkWorkdirTrusted_CaseMismatchWritesOnDiskKey`, case-sensitive filesystem.
+- `internal/canonicalpath`: `TestResolve_DarwinRealpath`, Darwin-only alias; `TestResolve_CaseMismatchFoldsToOnDiskCase`, case-sensitive filesystem.
+- `internal/codexsup`: `TestCaptureLive`, requires live capture binary/home.
+- `internal/apps`: `TestBackupSQLiteCancellation`, `TestBackupSQLiteStorageErrors`, `TestBackupSQLiteWAL`, `TestCandidateSupportedTemplate`, `TestOwnerSupportedNode`, `TestPublishTemplate`, `TestUpdateTemplateRollback`, `TestRestoreSQLiteWAL`, `TestRestoreSQLiteGenericAndCancellation`, `TestStartupTemplateRecovery`; require configured supported Node/npm, including SQLite-capable runtime for the SQL cases.
+- `internal/memorycapture`: `TestFilesystemAttacks/owner`, ownership substitution requires root.
+- `internal/memoryruntime`: `TestMacOSInstallCancelled` and `TestMacOSHostGate`, require macOS host (arm64 for install cancellation).
+- `internal/streamsup`: `TestAccountTokenReadDeadline`, full production deadline belongs to opt-in `make test-slow`.
+
+- 2026-10-15: The complete sequence finished at gate revision `b009cd8405731058f3a3b13f30996b41a55c4493`: uncached `make check GO=/tmp/builder-3431/go-uncached` exit 0 in 712.224 seconds, then `make build` exit 0 in 1.310 seconds. The build command was `go build -o ./pyry ./cmd/pyry`. No failing or unfinished sequence remains. Only this plan's evidence was edited during the gate; tested production/test sources remain identical. The verifier's later full-module gate and the ADR documentation handoff remain stage-owned follow-up, not unexecuted builder checks.
+
+| Tier | Command emitted by make | Exit | Named executions / passes / failures / skips |
+| --- | --- | --- | --- |
+| Vet | `/tmp/builder-3431/go-uncached vet ./...` | 0 | Not a test tier |
+| Unit race | `/tmp/builder-3431/go-uncached test -race ./...` | 0 | 26,788 / 26,767 / 0 / 21 |
+| Staticcheck | `/usr/local/bin/staticcheck ./...` | 0 | Not a test tier |
+| Substrate guard | `/tmp/builder-3431/go-uncached run ./cmd/substrate-guard` | 0 | `substrate-guard: clean` |
+| Fake-daemon e2e race | `/tmp/builder-3431/go-uncached test -tags e2e -race -count=1 ./internal/e2e/...` | 0 | 703 / 701 / 0 / 2 |
+| Build, after complete check | `make build` | 0 | Not a test tier |
+
+- 2026-10-15: E2e root package passed in 188.426 seconds; all seven test-bearing packages passed. Its skips are `TestInnerFatalChild` (helper executed only by `TestHarness_NoLeakOnFatal`) and `TestHostedAppsRecoverySQL` (requires `HOSTED_APP_NODE` and `HOSTED_APP_TEMPLATE_BUILD`). Untagged offline tests in the `realclaude` directory are part of this hermetic run; no authenticated live-Claude run is claimed or required. All logs/statuses remain under `/tmp/builder-3431`, with durable commands, source revisions, counts, skip reasons and outcomes retained here and linked from PR #3438.
+- 2026-10-15: For completeness, the standalone candidate startup active interval began at package elapsed 254.545 seconds (7.89 seconds active within 291.762 total). In the combined unit gate it began at 374.735 seconds (8.35 active within 411.204 total). Neither package-wide elapsed time is attributed to the active startup subtest. The historical timeout remains non-reproduced; measured fixture overhead and preserved coverage justify the repair independently of unexplained green reruns.
