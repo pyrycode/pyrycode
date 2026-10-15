@@ -139,6 +139,17 @@ use current-chunk, inclusive 1 MiB recent-cache, then authoritative Lookup.
 Missing/unreadable dependencies withhold the whole candidate through generic
 `StateUnavailable`/`ErrUnavailable`; repair requires Store `Retry`.
 
+**Terminal-looking shell rows alone do not authorize report compaction.** A
+foreground result remains reversible when a late link makes it launch evidence.
+Before creation, reports must wait: the creating kind and turn determine shell
+eligibility, and an early wrong-turn denial must not discard a valid result.
+`applyAgent` reduces reports only after creation and a non-result terminal.
+Shell reduction preserves the earliest eligible mapped result and denial plus
+earlier unmatched durable companions, whose later mapped companions can still
+change foreground eligibility. Once mapped evidence fixes eligibility, later
+duplicates can be discarded; wrong-turn mapped reports cannot become eligible.
+Unresolved joins and unmatched nonterminal durable companions remain pending.
+
 Shell reports and task ownership changes use the same affected-call
 recomputation and lexicographic associated-task index as agents; reassociation
 recomputes both owners. First-lifetime promotion transfers that index with
@@ -202,7 +213,7 @@ report. Main Agent/Task launches still split main text; queued sends do not,
 and delivered user messages retain their main-text closure behavior.
 
 Production assistant text, child tools and nested agents use the same
-[history recipes and exact-byte renderer](thread-package-main-thread-folding.md#main-work-source-entries)
+[history recipes and exact-byte renderer](thread-package-main-thread-folding-lifecycle.md#main-work-source-entries)
 as main work. Their items and intrinsic/previous copies retain creating/text IDs
 and enrichment recipes, with assistant summaries derived only when rendered.
 They retain no inline payload, accumulated text, assistant summary or append
@@ -268,7 +279,7 @@ later conflicting reports cannot change its outcome. An earlier report floors
 revision at creation. Production `childReports` retains no report JSON;
 rendering resolves the saved content-source ID. Only legacy `New` folds populate
 the detached compatibility payload map. See
-[pending outcomes](thread-package-main-thread-folding.md#scoped-joins-pending-outcomes-and-closure)
+[pending outcomes](thread-package-main-thread-folding-lifecycle.md#scoped-joins-pending-outcomes-and-closure)
 for distinct terminal-order and content-source IDs on companion reports.
 
 A parent-attributed `turn_end` creates no row. It closes matching child text as
@@ -307,7 +318,7 @@ during ingestion. Content still resolves solely through the ancestor item ID.
 `renderShared` obtains that item's content from the same item/recipe view as the
 child, even when the ancestor is outside selected output. Agent ancestors render
 from their captured recipes; missing dependencies withhold the whole candidate. See
-[reference resolution and retry](thread-package-main-thread-folding.md#scoped-joins-pending-outcomes-and-closure).
+[reference resolution and retry](thread-package-main-thread-folding-lifecycle.md#scoped-joins-pending-outcomes-and-closure).
 
 Publication capture and selected-output rendering preserve complete recipes,
 including inherited fields on nested agents.
@@ -344,6 +355,17 @@ launch evidence, remove its derived closure and reopen still-unfinished
 children. Independently closed text and terminal calls remain closed. Eagerly
 storing ancestor closure as a child's own terminal would make this repair
 impossible.
+
+Task reassociation can likewise reverse provisional completion on the new
+owner or restore foreground completion on the old owner. `agentGroup.associate`
+repairs the ownership index; both owners are recomputed and their affected
+descendants revisited. Final report markers stay with the scoped task, and
+original `agentObservations` recovery references survive shell promotion.
+An inactive child or ancestor therefore cannot authorize report reduction by
+itself: derived closure and foreground results must remain reversible. Only
+genuine non-result terminal evidence permits bounded final markers, with pending
+continuation evidence retained separately. See the
+[marker validation and accounting](thread-package-main-thread-folding-validation.md#validation-and-testing).
 
 ### Agent validation and testing
 

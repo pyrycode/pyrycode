@@ -17,7 +17,7 @@ func TestReferenceEqualCompanion(t *testing.T) {
 	for _, tool := range []string{"Agent", "Bash"} {
 		for _, nested := range []bool{false, true} {
 			for _, mappedFirst := range []bool{false, true} {
-				for _, kind := range []string{"call", "task", "link"} {
+				for _, kind := range []string{"call", "denial", "task", "link"} {
 					t.Run(fmt.Sprint(tool, nested, mappedFirst, kind), func(t *testing.T) {
 						launch := testMain(3, "tool_use", fmt.Sprintf(`,"tool_use_id":"c","name":%q`, tool))
 						if nested {
@@ -30,7 +30,10 @@ func TestReferenceEqualCompanion(t *testing.T) {
 						link := testEntry(5, "ignored", `{}`)
 						durable := testDurable(6, "agent_call_result", `,"turn_id":"t","tool_call_id":"c","tool_use_id":"c","is_error":false,"status":"completed","summary":"same <&>"`)
 						mappedType, field := "tool_result", "result"
-						if kind == "task" {
+						if kind == "denial" {
+							durable = testDurable(6, "agent_call_denied", `,"turn_id":"t","tool_call_id":"c","tool_use_id":"c","status":"denied","summary":"same <&>"`)
+							mappedType, field = "tool_denied", "denial"
+						} else if kind == "task" {
 							link = testMain(5, "background_task_started", `,"task_id":"task","tool_call_id":"c"`)
 							durable = testDurable(6, "background_task_outcome", `,"task_id":"task","status":"completed","summary":"same <&>"`)
 							mappedType, field = "background_task_updated", "task_report"

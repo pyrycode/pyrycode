@@ -341,7 +341,7 @@ namespace.
 User message identity is conversation ID plus delivery `Item.Order`; source time is
 the corresponding raw delivery `Entry.TS`, retained by `memoryTranscriptReader.feed`.
 Using `Item.ID` would change an already exported message when a later
-[acceptance outcome](thread-package-main-thread-folding.md#accepted-sends-and-durable-outcomes)
+[acceptance outcome](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes)
 suppresses the standalone delivery row in favor of the acceptance item. A
 persisted delivered message is independently eligible while its linked outcome
 is absent; later reconciliation yields the same single exported message,
@@ -353,7 +353,7 @@ tools and completion cannot move either. Text after a closed run creates a new
 row with its own first-text identity/time; subsequent deltas can extend that new
 row even after the lifetime's terminal. Assuming all late text extends the
 pre-terminal row would impose a false identity contract. See
-[main-work text splitting](thread-package-main-thread-folding.md#main-work-source-entries).
+[main-work text splitting](thread-package-main-thread-folding-lifecycle.md#main-work-source-entries).
 Render only `Content.text`: all main text runs
 before/between/after tools retain exact whitespace and coalesce deltas once, in
 durable creation/delivery order. `Item.Rev` can advance for closure without any
@@ -374,7 +374,7 @@ terminal-only evidence; reused turn IDs cannot carry earlier completion into it.
 A supplied recovery opening reference must match its original source and turn,
 without falling back to the current scope. Malformed/foreign facts, child endings
 and unresolved references release no reply. See
-[main-work joins](thread-package-main-thread-folding.md#scoped-joins-pending-outcomes-and-closure).
+[main-work joins](thread-package-main-thread-folding-lifecycle.md#scoped-joins-pending-outcomes-and-closure).
 
 The first valid terminal in entry order owns the lifetime. `turn_end` permits
 export, including error/cancellation endings; `main_turn_interrupted` permanently
