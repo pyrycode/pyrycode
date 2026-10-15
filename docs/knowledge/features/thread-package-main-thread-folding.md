@@ -72,10 +72,12 @@ allocations. `TestReferenceSummaryDeferred` guards that creation cost.
 
 `New`, `Items`, `Observe` and `FeedChanges` remain source compatible for legacy
 inline folds. Assistant text and ordinary tools use the richer recipes described
-under [main work](#main-work-source-entries). Accepted sends, agents and
-shell-lifecycle calls use the renderer's inline-content fallback. Their conversion,
-private `mainOutcome.raw` payloads and copied `parent_ending` content remain
-[#3334](https://github.com/pyrycode/pyrycode/issues/3334). See
+under [main work](#main-work-source-entries); accepted sends use the
+[send-merge recipes](#accepted-sends-and-durable-outcomes) below. Agents and
+shell-lifecycle calls still use the renderer's inline-content fallback, with
+conversion tracked by [#3453](https://github.com/pyrycode/pyrycode/issues/3453).
+Private `mainOutcome.raw` payloads and copied `parent_ending` content remain
+[#3452](https://github.com/pyrycode/pyrycode/issues/3452). See
 [snapshot rendering and retry](thread-package-background-store.md#snapshots-and-retry)
 for source resolution and the remaining Store content retention.
 
@@ -126,6 +128,15 @@ version without creating or reserving an item.
 Normal attribution applies: absent provenance stays unknown or uses recorded
 successor fallback; explicit `kind: none` remains distinct and blocks that fallback.
 
+Production `newReferenceFold` sends retain only history IDs and lifecycle
+metadata in their items and `contentRecipe` values: the creating acceptance ID,
+optional delivery ID and terminal `outcome` entry reference. Queued, delivered,
+dropped and lost items retain no `Content` or `Summary` bytes, and their recipes
+contain no copied payload literals. `renderShared` derives summaries from
+acceptance text for queued/drop/loss and from delivery text for delivered sends,
+using `plainSummary` and the empty-text fallback `user message`. Legacy `New`
+folds keep their inline content and summaries with the same public output.
+
 | Raw outcome | Required reason | Acceptance-item result |
 | --- | --- | --- |
 | `send_delivered` | `delivered` | Inactive, `delivered`, linked message's entry ID as order; acceptance visibility retained. |
@@ -144,9 +155,12 @@ cannot claim another message. Text, app IDs, daemon-local queue IDs and
 timestamps never establish the join. Equal app IDs across devices still create
 distinct acceptance items.
 
-Delivery keeps the acceptance ID/kind and starts content from the linked
-message's safe delivered text, attachments and client metadata. Recorded
-acceptance `device_id`, `message_id`, `accepted_at` and `client_sent_at` override
+Delivery keeps the acceptance ID/kind. At render time, `renderShared` applies
+`deliveredSendContent` to the acceptance and delivery entries, starting content
+from the linked message's safe delivered text, attachments and client metadata,
+then enriches it with the referenced outcome. This preserves legacy JSON
+encoding and unknown fields. Recorded acceptance `device_id`, `message_id`,
+`accepted_at` and `client_sent_at` override
 the corresponding delivered fields only when present. `deliveredSendContent`
 decodes those sender fields in JSON order with case-insensitive matching before
 merging. Selecting them by map iteration would make duplicate case variants
@@ -174,20 +188,29 @@ history join. See the
 [queue wire contract](../../protocol-mobile.md#queue-v2) and
 [queue durability boundary](msgqueue-package.md#durability-boundary-in-scope-vs-out).
 
-For a reference-backed delivery, `sendFact` resolves the linked message through
-the renderer before merging acceptance content or suppressing the delivery row.
-A missing or unreadable source fails the feed without changing either item.
-The join also works when message and outcome arrive in separate chunks after
-recent-cache eviction; the permanent acceptance retains its merged inline bytes.
+Before a reference-backed delivery changes either identity, `sendFact` renders
+both acceptance and delivery candidates to validate source availability. A
+missing, unreadable, malformed or null source fails the feed without changing
+either item, recording a delivery recipe or claiming/suppressing the message.
+Only after validation does the recipe acquire the delivery ID. The join also
+works across chunks after recent-cache eviction: resolution uses the current
+chunk, then the inclusive 1 MiB recent cache, then conversation-bound history
+`Lookup`. Missing or unusable acceptance, delivery or outcome content rejects
+the entire rendered candidate through generic `ErrUnavailable`; Store withdraws
+all usable items and watermarks with `StateUnavailable`, without content or path
+disclosure. Repair followed by Store `Retry` reconstructs a fresh fold from
+authoritative history. Public rendering returns detached content. See
+[snapshots and retry](thread-package-background-store.md#snapshots-and-retry).
 
 The linked message supplies the summary and receiving `Session`/`Agent`/`NoChild`
 already resolved under the existing attribution rules, including any successor
 fallback at message ingestion. Acceptance-time or outcome-time bindings and
 later session switches cannot replace that snapshot. See
 [operator receiving provenance](history-package-producers.md#operator-delivery-provenance-2983).
-Drop/loss retain acceptance content and provenance. Every valid terminal stores
-its copied raw payload under `outcome`, retaining reason, `occurred_at` and
-links, and sets revision to the outcome entry ID. Outcome visibility cannot
+Drop/loss render acceptance content and retain acceptance provenance. Every
+valid terminal references its history entry for rendering under `outcome`,
+retaining reason, `occurred_at` and links, and sets revision to that entry ID.
+Only legacy inline folds copy the terminal payload. Outcome visibility cannot
 override the table's rules.
 
 After delivery, `Items` omits the claimed message's public row; unmatched
@@ -634,5 +657,19 @@ message and outcome.
 and recent cache and asserts its authoritative lookup before comparing merged
 acceptance bytes, provenance, suppression, revisions, touches and watermarks with
 legacy folding. Separate message/outcome chunks alone can remain cache hits and
-leave the eviction path untested. `TestReferenceDeliveryFailure` checks that
-failed resolution neither mutates acceptance nor suppresses the message.
+leave the eviction path untested. `TestReferenceDeliveryFailure` checks missing,
+unreadable, malformed and null acceptance/delivery sources before claiming either
+identity. `TestReferenceSendRendering` compares complete observations, changes,
+touches, items and watermarks with legacy through each lifecycle and after
+eviction, asserts zero retained send content/summary or recipe payload literals,
+and checks detached results. `TestReferenceSendSourceFailure` withholds entire
+renders and observations for acceptance/delivery/outcome faults after eviction.
+
+`TestStoreReferenceSendRetry` proves repair and fresh replay after missing or
+unreadable acceptance/delivery reads in replay and tail, and outcome reads in
+replay. **A terminal outcome is still in the current chunk on its only tail
+mutation.** Ignored tail entries reuse unchanged publications and cannot force
+an outcome lookup; exercise evicted-outcome failure through replay or explicit
+rendering. For tail acceptance/delivery faults, consume 256 ignored entries
+before appending the terminal fact. Waiting for that consumed version proves
+FIFO eviction independently of tail chunk scheduling, without full-page padding.
