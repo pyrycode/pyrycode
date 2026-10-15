@@ -152,12 +152,8 @@ func TestReferenceToolClassification(t *testing.T) {
 			f, _ := testReferenceFold([]history.Entry{e})
 			testFeed(t, f, e)
 			item := f.items[0]
-			converted := sourceKind == "codex" || name == "Read"
-			if converted != (len(item.Content) == 0) {
+			if len(item.Content) != 0 {
 				t.Fatal("wrong lifecycle selection", sourceKind, name)
-			}
-			if !converted && !json.Valid(item.Content) {
-				t.Fatal("inline fallback lost payload")
 			}
 		}
 	}

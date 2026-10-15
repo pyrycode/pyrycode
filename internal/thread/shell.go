@@ -21,7 +21,13 @@ func (f *Fold) registerShell(e history.Entry, id string, call *mainCall) {
 		return
 	}
 	c.ordinary, call.shell = call, c
-	c.item, c.launch = call.item, append(json.RawMessage(nil), e.Payload...)
+	c.item, c.launch = call.item, e.ID
+	if f.source == nil {
+		f.outcome(e, "", "")
+	}
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(e.Payload, &fields)
+	_, c.launchResult = fields["result"]
 	var p agentFact
 	_ = json.Unmarshal(e.Payload, &p)
 	f.countIngestion(len(e.Payload))
@@ -147,8 +153,7 @@ func (f *Fold) applyShellForeground(c *agentCall) {
 	if status == "completed" {
 		status = "done"
 	}
-	outcome := f.outcome(history.Entry{ID: first.content, Payload: first.raw}, status, first.field)
-	outcome.id = first.id
+	outcome := &mainOutcome{id: first.id, content: first.content, status: status, field: first.field}
 	c.ordinary.terminal = outcome
 	f.applyTerminal(c.ordinary)
 }

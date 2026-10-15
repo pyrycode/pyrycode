@@ -44,10 +44,10 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	countRecipe := func(r contentRecipe) {
 		recipeBytes += int(unsafe.Sizeof(r)) + len(r.text)*8
 		for key, field := range r.fields {
-			recipeBytes += len(key) + int(unsafe.Sizeof(field))
+			recipeBytes += len(key) + int(unsafe.Sizeof(field)) + len(field.value)
 			if key == "parent_ending" {
 				parentEndings += len(field.value)
-			} else if len(field.value) != 0 {
+			} else if len(field.value) != 0 && key != "task_id" && key != "parent_tool_call_id" && key != "ended_order" {
 				t.Fatal("unexpected copied enrichment")
 			}
 		}
@@ -128,6 +128,23 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	if private != 0 || parentEndings != 0 || len(f.legacyOutcomes) != 0 {
 		t.Fatal("production copied outcomes or ancestor endings", private, parentEndings)
 	}
+	testNoLifecyclePayload(t, f)
+	if deferred != 0 {
+		t.Fatal("unconverted item payload", deferred)
+	}
+	var legacyEvidence, lifecycleFacts int
+	for _, raw := range legacy.legacyOutcomes {
+		legacyEvidence += len(raw)
+	}
+	for _, g := range f.agentGroups {
+		for _, c := range g.calls {
+			lifecycleFacts += int(unsafe.Sizeof(*c)) + len(c.reports)*int(unsafe.Sizeof(agentReport{}))
+		}
+		for _, task := range g.tasks {
+			lifecycleFacts += int(unsafe.Sizeof(*task)) + len(task.reports)*int(unsafe.Sizeof(agentReport{}))
+		}
+	}
+	t.Logf("lifecycle compatibility payload before=%d after=%d; logical call/task/report facts=%d (includes fingerprints, excludes map/slice/string overhead)", legacyEvidence, private, lifecycleFacts)
 	t.Logf("generated entries=%d converted Content before=%d after=%d child-copy Content before=%d after=%d assistant Summary (including child copies) before=%d after=%d user Summary before=%d after=%d; recipes=%d logical recipe bytes=%d (includes child slots, excludes map/slice overhead, may share ID storage); bounded recent cache=%d; deferred private outcomes=%d inline parent-ending bytes across recipe slots=%d inline item Content=%d; Store snapshots excluded", len(entries), before, after, childBefore, childAfter, assistantBefore, assistantAfter, summaryBefore, summaryAfter, len(f.recipes), recipeBytes, source.bytes, private, parentEndings, deferred)
 }
 

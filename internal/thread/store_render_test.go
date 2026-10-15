@@ -50,8 +50,10 @@ func TestStoreReferencePublication(t *testing.T) {
 		}
 		recipes += int(unsafe.Sizeof(r)) + len(r.text)*8
 		for key, field := range r.fields {
-			recipes += len(key) + int(unsafe.Sizeof(field))
-			parentEndings += len(field.value)
+			recipes += len(key) + int(unsafe.Sizeof(field)) + len(field.value)
+			if key == "parent_ending" {
+				parentEndings += len(field.value)
+			}
 		}
 		row, _ := q.lookup(item.ID, false)
 		afterContent += len(row.item.Content)
@@ -396,7 +398,7 @@ func TestStoreSelectedRecipeClosure(t *testing.T) {
 	var armed atomic.Bool
 	base := s.lookup
 	s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
-		if armed.Load() && !reflect.DeepEqual(ids, []uint64{4, 5}) {
+		if armed.Load() && !reflect.DeepEqual(ids, []uint64{1, 4, 5, 6}) {
 			t.Errorf("selected tool resolved unrelated references: %v", ids)
 		}
 		return base(ctx, id, ids)
