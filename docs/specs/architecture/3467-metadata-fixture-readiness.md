@@ -76,3 +76,72 @@ chunks: its 25 seconds of imposed delay exceeds even the new inactivity interval
 so simply changing a total deadline to twenty seconds still fails this regression.
 The existing one-second stalled-worker proof keeps bounded failure inexpensive.
 This is local test scheduling headroom, not a production latency guarantee.
+
+### 2026-10-15 — controlled evidence and resolved mechanism
+Environment: macOS arm64, Go 1.26.2. Baseline source revision
+`07b6b35e14aad0de688326fb36d81c54303c691c`; final candidate
+`9e11b9b3` (code unchanged by subsequent evidence commits). The controlled fault
+is a finite scheduling delay at the existing cancellable real-fold seam. It
+demonstrates the fixture's total-deadline dependency, not a production failure
+or the exact historical scheduling cause. Historical `/tmp/builder-3453-gate-race.log`
+and `/tmp/builder-3453-daemon-rechecks.log` were available locally, and the uploaded
+#3453 builder bundle was retrieved through `fleet-task.py evidence 3453`.
+
+Initial scratch overlay on the baseline added construction/chunk/readiness/
+validation diagnostics and three-second cancellable delays at `NewStore`'s
+fold seam. Command: `env GOMAXPROCS=2 go test -race -count=1 -timeout=2m -json -overlay=/tmp/builder-3467/baseline-overlay.json ./cmd/pyry -run '^TestDaemonThreadMetadataAllocations$'`.
+One test executed, zero passed, one expected failure, zero skipped: construction
+0.979s, chunk admission at 0.128/3.777/7.456s, readiness expiry at 10.001s while
+rebuilding with zero published versions. Snapshot validation never began.
+The new delayed-replay regression also failed against the original wait:
+`env GOMAXPROCS=2 go test -race -count=1 -timeout=2m -json ./cmd/pyry -run '^TestDaemonThreadMetadataReadiness$'`
+with three-second delays, one executed/zero passed/one failed/zero skipped.
+A preliminary diagnostic-format build failure executed zero tests and was
+corrected before that regression run.
+
+An intermediate `9fe27c3b` run used `-count=3 -timeout=3m` and
+`-run '^(TestDaemonThreadMetadata(Readiness|ReadinessStalled|Allocations)|TestThreadMetadataReadSources)$'`.
+It started 13 tests/subtests: 11 passed, one inactivity failure, one unfinished
+at package timeout, zero skips. It overlapped baseline/candidate compilation and
+an incidental existing race binary. This failed experiment drove the headroom
+revision above; it is not final acceptance evidence.
+
+For matched final binaries, build candidate with
+`env GOMAXPROCS=2 go test -c -race -o /tmp/builder-3467/final-candidate.test ./cmd/pyry`.
+Build baseline with the same command plus
+`-overlay=/tmp/builder-3467/matched-baseline-overlay.json` and output
+`final-baseline.test`. That overlay replaces only the fixture source with its
+instrumented equivalent using the original ten-second total polling wait; both
+binaries include the identical five-second-per-chunk regression from the final
+candidate. No production code differs. Per process command:
+`go tool test2json -t -p github.com/pyrycode/pyrycode/cmd/pyry BINARY -test.v=test2json -test.count=1 -test.timeout=3m -test.run='^TestDaemonThreadMetadataReadiness$'`.
+
+The clean comparison launches two copies per policy, each with GOMAXPROCS=2,
+no CPU affinity, five-second cancellable delay per actual chunk. Join both
+baseline processes before launching both candidates. No other builder-owned
+workload or compilation overlaps this comparison. Host-wide incidental work
+is not isolated. All candidates retain 1,024 items and 4,219,904 content bytes.
+
+| Policy/process | Construction | Replay/readiness | Snapshot validation | Executed/passed/failed/skipped |
+| --- | --- | --- | --- | --- |
+| Original / 0 | 5.039s | 10.032s, rebuilding | Not entered | 1/0/1/0 |
+| Original / 1 | 5.037s | 10.288s, rebuilding | Not entered | 1/0/1/0 |
+| Final / 0 | 6.828s | 59.523s | 18.286s | 1/1/0/0 |
+| Final / 1 | 7.343s | 59.091s | 18.229s | 1/1/0/0 |
+
+Raw records: `/tmp/builder-3467/clean-{baseline,candidate}-contended-{0,1}.json`;
+launcher/status record: `/tmp/builder-3467/final-run.log`. Baseline wall 17.099s,
+exits 1/1; candidate wall 111.895s, exits 0/0. Candidate chunk admissions for
+process 0 were 1.173/13.876/24.144/32.706/39.536s. Twenty-five seconds of controlled
+delay alone exceeds the final twenty-second inactivity interval, proving a
+twenty-second total-deadline increase would not pass this regression.
+
+An earlier four-process comparison used identical per-process settings but
+overlapped a builder-owned focused batch: all four baselines failed; all four
+candidates passed (4/4/0/0), package durations 114.820–116.668s. Its records are
+`final-{baseline,candidate}-contended-{0,1,2,3}.json` and `comparison.log` in the
+same scratch directory. The overlapping focused batch (`-count=3 -timeout=2m`,
+stalled/allocation/source cases) started seven tests/subtests, passed six and
+left one unfinished at timeout, with zero skips. Those results are retained
+but superseded by the sequential final checks below. All controlled workers
+and both timed-out test processes exited before the ordinary suite runs.
