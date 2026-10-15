@@ -89,3 +89,30 @@ Native route task `f4108002713f4bbdad100532cfb3908f8a231d1570b884e0dafb456d4c982
 **Native acceptance remains blocked on an apps-capable execution recipe.** Required macOS command, with supported real tools selected through `HOSTED_APP_NODE`/`HOSTED_APP_NPM_CLI`:
 `go test -race -count=1 -v -run '^(TestCommittedTemplateUpdateSnapshot|TestBackupSQLiteWAL|TestUpdateTemplateSnapshot|TestBackupNodeDirectoryIdentity)$' ./internal/apps`.
 Native candidate tests executed 0; no runtime versions or passing SQL/update counts can be claimed from the route probe. This is incomplete builder proof, not a documentation or live-Claude handoff.
+
+### Native macOS validation, 2026-10-15
+
+The resumed builder executes directly on macOS 26.6.2 (25G83), Darwin 25.6.0/arm64, Go 1.26.2. Real supported tools are Node v24.15.0 and npm 11.12.1 from `/tmp/builder-3404/node-v24.15.0-darwin-arm64`, selected explicitly below. This native execution resolves the earlier missing apps-capable recipe; the old platform probe remains historical route evidence only. No live Claude is used.
+
+At revision `8465a7e0cd81847e859d8dea04d86e47a6e443f2`:
+`HOSTED_APP_NODE=/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node HOSTED_APP_NPM_CLI=/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js go test -race -count=1 -json -run '^(TestCommittedTemplateUpdateSnapshot|TestBackupSQLiteWAL|TestUpdateTemplateSnapshot|TestBackupNodeDirectoryIdentity|TestBackupNodeFailures|TestBackupNodeBootstrapRejectsInvalidDirectory|TestBackupSQLiteCancellation|TestBackupSQLiteStorageErrors)$' ./internal/apps`
+executed 23, passed 23, failed 0, skipped 0; package elapsed 29.301 seconds. Exact JSON events are committed at `internal/apps/testdata/3415-macos-focused.jsonl`, SHA-256 `35918d690179934d5987b987807d3a6f67639418e26bc7250af838ba9d81712e`.
+
+| Required native arm | Executed / passed / failed / skipped, including subtests | Elapsed seconds |
+| --- | --- | --- |
+| `TestCommittedTemplateUpdateSnapshot` (no platform skip) | 1 / 1 / 0 / 0 | 0.19 |
+| `TestBackupSQLiteWAL` | 1 / 1 / 0 / 0 | 0.27 |
+| `TestUpdateTemplateSnapshot` | 1 / 1 / 0 / 0 | 25.67 |
+| `TestBackupNodeDirectoryIdentity` | 5 / 5 / 0 / 0 | 0.33 |
+
+The update arm proves healthy candidate activation, retained saved preferences, the new candidate migration and a freshly verified backup matching the pre-migration schema/preferences/ledger. The WAL arm verifies committed WAL-only rows and ledger contents, standalone DELETE mode without transient sidecars, and repeated immutable verification after source removal. Launch substitution arms preserve selected-directory identity and outside sentinels while the parent cwd remains unchanged. All required native arms ran without skips.
+
+Earlier native attempts are retained here as failures, not passing evidence: at `ad61e40850c9fd28d838a64b4545d56c89414841`, the required four-family command executed 8/passed 3/failed 5/skipped 0 because the identity family and its four children rejected the fixture's symlinked temp prefix before launch. At `8465a7e0cd81847e859d8dea04d86e47a6e443f2`, the initial complete package run executed 999/passed 994/failed 1/skipped 4 in 330.363 seconds; only `TestOwnerSupportedNode` failed on the macOS-generated environment key. The two test-only corrections are recorded in Revisions. A direct real-Node probe with `subprocess.run([node,'-e','console.log(JSON.stringify(process.env))'],env={},capture_output=True,text=True,check=True)` returned only `__CF_USER_TEXT_ENCODING`, establishing synthesis even with an explicitly empty environment.
+
+At revision `6eb80a038fe22fc831c2bad255be00a15114a634`, the same tool-selection variables with `go test -race -count=1 -json -run '^TestOwnerSupportedNode$' ./internal/apps` executed 1/passed 1/failed 0/skipped 0. This includes the hostile-parent-value assertion. No production code changed during this native continuation.
+
+The final complete native run at `6eb80a038fe22fc831c2bad255be00a15114a634`:
+`HOSTED_APP_NODE=/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node HOSTED_APP_NPM_CLI=/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js go test -race -count=1 -json ./internal/apps/...`
+passed in 328.754 seconds: executed 999, passed 995, failed 0, skipped 4. Required parent assertions all passed again: retained initialized snapshot 0.18 seconds, WAL 0.27 seconds, maintained-template update 25.87 seconds and directory identity 0.36 seconds. `TestOwnerSupportedNode` passed in 0.10 seconds. The four skipped arms are `TestBackupAliasedTempRoot/states/nested`, `TestBackupStates/nested`, `TestRestoreStates/nested` and `TestRetainedValidation/invalid_UTF8`; each reports `filesystem rejects invalid UTF-8 filename (EILSEQ)`. Those skips supply no filename proof and do not skip any required SQL/update arm. Structured runtime/revision/command/count evidence is committed at `internal/apps/testdata/3415-macos-results.json`.
+
+`go vet ./...` passed at the final code/test revision. `go build -o /tmp/builder-3415-macos/pyry ./cmd/pyry` passed at `8465a7e0cd81847e859d8dea04d86e47a6e443f2`; subsequent changes affect tests/evidence only. `git diff --check` and formatting checks passed. Earlier Linux execution remains recorded above; production code is unchanged. Native builder acceptance is now complete. Documentation remains pending for its own stage, and the verifier owns the full-module race gate.
