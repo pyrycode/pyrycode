@@ -688,17 +688,3 @@ func TestCodexDecision(t *testing.T) {
 		}
 	}
 }
-
-// waitTurnEnd closes the returned channel at the next TurnEnd on events.
-func waitTurnEnd(events <-chan turnevent.Event) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		for ev := range events {
-			if isTurnEnd(ev) {
-				close(done)
-				return
-			}
-		}
-	}()
-	return done
-}

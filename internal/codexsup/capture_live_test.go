@@ -6,10 +6,34 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// captureEffort is set on every captured turn; the thread never inherits a default.
+const captureEffort = "low"
+
+// captureFrame is one line of a capture file: a server notification, or a
+// server request with the answer the capture gave it.
+type captureFrame struct {
+	Kind   string          `json:"kind"` // "notification" or "request"
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params,omitempty"`
+	Answer json.RawMessage `json:"answer,omitempty"`
+}
+
+type captureScenario struct {
+	name   string
+	prompt string
+	// accept reports whether an approval request is answered with accept;
+	// anything it rejects is declined.
+	accept func(method string, params json.RawMessage) bool
+	// interrupt interrupts the turn after its first agent text delta.
+	interrupt bool
+}
 
 // TestCaptureLive records live Codex frames with the codex_capture build tag:
 //
@@ -133,4 +157,136 @@ func TestCaptureLive(t *testing.T) {
 		mu.Unlock()
 		writeCapture(t, sc.name, got, cwd, home)
 	}
+}
+
+// captureTurn starts a thread and runs one turn on it until turn/completed,
+// then waits briefly for trailing notifications.
+func captureTurn(ctx context.Context, t *testing.T, c *Client, cwd string, sc captureScenario, notes chan captureFrame) {
+	t.Helper()
+	threadParams := map[string]any{
+		// untrusted prompts for every command outside Codex's read-only allowlist.
+		"cwd": cwd, "sandbox": "read-only", "model": captureModel, "approvalPolicy": "untrusted",
+	}
+	var tr threadResult
+	if err := c.call(ctx, methodThreadStart, threadParams, &tr); err != nil {
+		t.Fatalf("%s: thread/start: %v", sc.name, err)
+	}
+	if _, err := c.setThread(methodThreadStart, tr); err != nil {
+		t.Fatal(err)
+	}
+	turnParams := map[string]any{
+		"threadId": tr.Thread.ID, "model": captureModel, "effort": captureEffort, "summary": "detailed",
+		"input": []map[string]string{{"type": "text", "text": sc.prompt}},
+	}
+	var res struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	if err := c.call(ctx, methodTurnStart, turnParams, &res); err != nil {
+		t.Fatalf("%s: turn/start: %v", sc.name, err)
+	}
+	interrupted := false
+	deadline := time.After(4 * time.Minute)
+	for {
+		select {
+		case f := <-notes:
+			if sc.interrupt && !interrupted && f.Method == "item/agentMessage/delta" {
+				interrupted = true
+				if err := c.Interrupt(ctx, res.Turn.ID); err != nil {
+					t.Errorf("%s: interrupt: %v", sc.name, err)
+				}
+			}
+			if f.Method == "turn/completed" {
+				drain(notes, 2*time.Second)
+				return
+			}
+		case <-deadline:
+			t.Fatalf("%s: no turn/completed", sc.name)
+		}
+	}
+}
+
+// drain waits for trailing notifications until quiet for d.
+func drain(notes chan captureFrame, d time.Duration) {
+	for {
+		select {
+		case <-notes:
+		case <-time.After(d):
+			return
+		}
+	}
+}
+
+var accountKeyPrefix = []string{"account", "user", "email", "org", "workspace"}
+
+// writeCapture scrubs account identity, machine identity and local paths from
+// frames and writes them as one JSON object per line. codexHome is replaced
+// before cwd and the user's home: its path can hold both, and a thread's
+// rollout path lives under it.
+func writeCapture(t *testing.T, name string, frames []captureFrame, cwd, codexHome string) {
+	t.Helper()
+	userHome, _ := os.UserHomeDir()
+	type replacement struct{ from, to string }
+	var repl []replacement
+	for _, r := range []replacement{{codexHome, "/capture/codexhome"}, {cwd, "/capture/cwd"}, {userHome, "/capture/home"}} {
+		if r.from == "" {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(r.from); err == nil && resolved != r.from {
+			repl = append(repl, replacement{resolved, r.to})
+		}
+		repl = append(repl, r)
+	}
+	var b strings.Builder
+	for _, f := range frames {
+		for _, raw := range []*json.RawMessage{&f.Params, &f.Answer} {
+			if len(*raw) == 0 {
+				continue
+			}
+			var v any
+			if err := json.Unmarshal(*raw, &v); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			scrubbed, _ := json.Marshal(scrub(v))
+			*raw = scrubbed
+		}
+		line, _ := json.Marshal(f)
+		s := string(line)
+		for _, r := range repl {
+			s = strings.ReplaceAll(s, r.from, r.to)
+		}
+		b.WriteString(emailPattern.ReplaceAllString(s, "redacted@example.invalid"))
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(captureDir, name+".jsonl"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// scrub replaces the value of every key naming an account, user, email,
+// organisation or workspace identity, and of every machineKeys key.
+func scrub(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			lk := strings.ToLower(k)
+			hit := machineKeys[k]
+			for _, p := range accountKeyPrefix {
+				if strings.HasPrefix(lk, p) || strings.HasSuffix(lk, p+"id") {
+					hit = true
+				}
+			}
+			if _, isStr := val.(string); hit && isStr {
+				x[k] = "redacted"
+				continue
+			}
+			x[k] = scrub(val)
+		}
+	case []any:
+		for i := range x {
+			x[i] = scrub(x[i])
+		}
+	}
+	return v
 }

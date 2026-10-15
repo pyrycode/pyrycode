@@ -64,3 +64,17 @@ func TestCodexApprovalLive(t *testing.T) {
 		t.Errorf("accepted.txt was not created: %v", err)
 	}
 }
+
+// waitTurnEnd closes the returned channel at the next TurnEnd on events.
+func waitTurnEnd(events <-chan turnevent.Event) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		for ev := range events {
+			if isTurnEnd(ev) {
+				close(done)
+				return
+			}
+		}
+	}()
+	return done
+}
