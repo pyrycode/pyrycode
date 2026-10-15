@@ -47,7 +47,9 @@ the request context, named conversation and complete captured `QueryResult`.
 same store. Missing providers withhold negotiation; readiness does not promise
 that every conversation has completed replay. Queries on not-loaded, rebuilding
 or unavailable views fail explicitly with `thread.query_failed`, without loading
-the conversation or supplying partial items. Such views have no usable
+the conversation or supplying partial items. `ThreadLastShownVersion` checks
+registry membership and reads `Store.Status` for loaded-conversation metadata
+without copying a baseline. Missing, unregistered or unusable views supply no
 watermark; registered usable zero is authoritative. The no-relay composition
 continues folding without wire publication; legacy connections retain their
 existing stream and access gates.
@@ -61,14 +63,21 @@ leave the checkpoint unchanged. Live publication racing an unfinished query
 can cancel it; retry from the last completed checkpoint to converge. See
 [query/live ordering](../../protocol-mobile.md#querylive-ordering).
 
-Each existing conversation coordinator owns one publication cursor. It starts
-from a complete usable `Store.Observe` baseline, sending full additions to
-eligible peers present at publication, then follows only proven `Store.Changes`
-ranges. It does not initialize connections admitted after that baseline.
+Each existing conversation coordinator owns one publication cursor.
+`daemonThreadPublisher.publish` checks `Store.Status` first; an unchanged usable
+epoch/version returns without reading or traversing items/content. Changed
+publication follows proven `Store.Changes` ranges. Full `Store.Observe` baseline
+reads occur only for initial publication or a required replacement, sending
+every item as a full addition to eligible peers present at publication. It does
+not initialize connections admitted after that baseline.
 `BaselineRequired`, epoch change, a withdrawn usable view or encoding failure
 retires prior consumers through `RetireLiveState`, forgets the cursor and
 reacquires a usable baseline. Same-epoch reload cannot establish retained-range
 continuity; full additions over stale peer state cannot repair a suppressed row.
+Status is only a hint, not continuity evidence or a transaction across reads.
+Wire metadata, items/changes and cursor advancement must all come from the same
+captured `Changes` or `Observe` result. Recheck baseline usability and retire
+consumers before replacement even if withdrawal/reload races the status read.
 See [observation readiness](thread-package-background-store.md#loading-and-replay-readiness)
 and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
 
@@ -86,7 +95,7 @@ within the total 250 ms publication/coalescing budget. This bounds waiting to
 enqueue, not replay, encoding or network delivery time. See the
 [wire assembly contract](../../protocol-mobile.md#bounded-thread-encoding-and-assembly).
 
-A caught-up usable fold unloads only when `Snapshot.Active` is false and
+A caught-up usable fold unloads only when `Status.Active` is false and
 `shadowQuiescent` finds producer/transition processing quiescent. Active
 background or unresolved private work, queue entries, channel writes, pending
 runtime boundaries, unconsumed stream output and placement commands prevent
@@ -94,7 +103,7 @@ retirement. Idle sleep must publish and fold its closure/divider facts first.
 Unload releases items, private joins and pending reports while coordination
 retains the consumed version. Later commits reload through cache validation and
 fresh log replay, including a direct post or an append racing `Unload`; cached
-public items never seed continuation state. Capture the consumed snapshot
+public items never seed continuation state. Capture the consumed status
 boundary before publication can wait on delivery, then retain that boundary at
 unload. Reading a newer boundary after held delivery can mark an unpublished
 commit consumed and prevent its reload. `TestDaemonThreadIdleCommit` exercises
@@ -144,6 +153,15 @@ nonusable failure, reset evidence and the 1024/1025 gap boundary.
 committed entries after recovery, measuring preparation separately from adapter
 allocations. `TestDaemonThreadQueriesJoin` reconstructs full current states
 through race refusal, successful retry and subsequent real publisher updates.
+
+`TestDaemonThreadMetadataAllocations` checks unchanged publication and the
+installed list lookup on a loaded long thread. Pair allocation checks with
+`TestThreadMetadataReadSources`: allocation counts alone stay green for an item
+traversal that allocates nothing. Source checks must select
+`daemonThreadPublisher.publish` by receiver; `threadShadow.publish` shares its
+method name and only delegates. `TestDaemonThreadStatusInterleaving` forces
+advancement, withdrawal and same-epoch reload after the status hint, checking
+captured output/cursors and retirement before replacement.
 
 Wire lifecycle tests must read the live acceptance before completing same-version
 catch-up, which can suppress duplicate publication. A delivered message and its
