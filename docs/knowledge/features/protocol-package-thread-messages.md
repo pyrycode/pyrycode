@@ -55,7 +55,7 @@ providers forward to the real publisher store's bounded reads. Request limits
 normalize through `NormalizeThreadQueryLimit`: omitted/zero defaults to 50 ordered rows,
 positive clamps to 256, negative rejects even for nonzero catch-up. Nonzero
 catch-up is never truncated; ties, active rows and parents can exceed window
-limits. The [backend](thread-package-background-store.md#bounded-queries) ignores
+limits. The [backend](thread-package-background-store-queries.md#bounded-queries) ignores
 limits on nonzero catch-up, so handlers must still normalize before selecting it.
 
 **Dispatch registration and provider readiness are separate.** An implemented
