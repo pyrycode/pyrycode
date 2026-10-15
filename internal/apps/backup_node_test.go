@@ -15,7 +15,7 @@ func TestBackupNodeDirectoryIdentity(t *testing.T) {
 	for _, mode := range []string{"snapshot", "verify"} {
 		for _, replacement := range []string{"directory", "symlink"} {
 			t.Run(mode+"/"+replacement, func(t *testing.T) {
-				parent, outside := t.TempDir(), t.TempDir()
+				parent, outside := testRoot(t), testRoot(t)
 				selected := filepath.Join(parent, "selected")
 				backupOK(t, os.Mkdir(selected, 0700))
 				backupOK(t, exec.Command(node, "-e", `const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(process.argv[1]);d.exec("CREATE TABLE saved(value TEXT);INSERT INTO saved VALUES('selected')");d.close()`, filepath.Join(selected, "app.sqlite")).Run())
@@ -62,7 +62,7 @@ func TestBackupNodeDirectoryIdentity(t *testing.T) {
 func TestBackupNodeFailures(t *testing.T) {
 	for _, arm := range []string{"unsupported", "version", "exec", "sql"} {
 		t.Run(arm, func(t *testing.T) {
-			dir, err := privateDir(t.TempDir())
+			dir, err := privateDir(testRoot(t))
 			backupOK(t, err)
 			defer dir.Close()
 			node := writeNodeDouble(t, "v24.15.0", arm == "exec")
