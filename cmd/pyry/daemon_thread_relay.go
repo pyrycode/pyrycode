@@ -53,6 +53,9 @@ func installDaemonThreadRelay(cfg *relay.V2SessionConfig, s *threadShadow) {
 			return 0, false
 		}
 		o := store.Status(conversations.ConversationID(id))
+		if o.State == thread.StateNotLoaded {
+			return store.UnloadedLastShownVersion(conversations.ConversationID(id))
+		}
 		return o.LastShownVersion, o.State == thread.StateUsable
 	}
 	cfg.ThreadCatchUp = func(ctx context.Context, r protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {

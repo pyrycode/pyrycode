@@ -48,9 +48,19 @@ same store. Missing providers withhold negotiation; readiness does not promise
 that every conversation has completed replay. Queries on not-loaded, rebuilding
 or unavailable views fail explicitly with `thread.query_failed`, without loading
 the conversation or supplying partial items. `ThreadLastShownVersion` checks
-registry membership and reads `Store.Status` for loaded-conversation metadata
-without copying a baseline. Missing, unregistered or unusable views supply no
-watermark; registered usable zero is authoritative. The no-relay composition
+registry membership before any certificate access. Loaded usable conversations
+read `Store.Status` without certificate I/O or copying a baseline; rebuilding
+and unavailable views supply no watermark. Unloaded registered conversations
+use `Store.UnloadedLastShownVersion` only when clean, validated certificate
+progress exactly equals independently known current raw history progress
+(V = H); see [certificate eligibility](#cache-and-epochs). Unregistered or
+removed IDs, stale/invalid evidence and unknown progress supply no watermark.
+Eligible zero is authoritative, including explicit empty evidence at V = H = 0.
+The lookup starts no worker, traverses/copies no items and writes nothing;
+unloaded reads open at most one certificate and no history segment, regardless
+of history size. This bound applies to `ThreadLastShownVersion`; the list
+handler's separate [legacy watermark scan](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
+can still read history. The no-relay composition
 continues folding without wire publication; legacy connections retain their
 existing stream and access gates.
 
@@ -162,6 +172,16 @@ traversal that allocates nothing. Source checks must select
 method name and only delegates. `TestDaemonThreadStatusInterleaving` forces
 advancement, withdrawal and same-epoch reload after the status hint, checking
 captured output/cursors and retirement before replacement.
+
+`TestDaemonThreadLastShownCertificates` covers certificate eligibility and
+warm/cold progress; `TestDaemonThreadLastShownLifecycle` checks hidden append
+invalidation and restoration after load/fold and joined unload.
+`TestDaemonThreadLastShownIO` observes the installed callback's actual file
+operations on Linux. Adjacent identical inotify open events coalesce, so an
+open-only watch can accept two reads as one. `IN_CLOSE_NOWRITE` separates the
+opens; a deliberate two-open control must fail the same one-open bound used
+for callback checks. Portable worker/copy/traversal guards remain separate
+from this filesystem observation.
 
 `testThreadMetadataFixture`, shared with `BenchmarkDaemonThreadMetadata`, owns
 an independent worker context for `Store.Load`. `testing.TB.Context` is cancelled
@@ -321,6 +341,27 @@ thread size. At V zero the checksum is empty and the last-shown watermark is
 zero; otherwise the checksum is 64 lowercase SHA-256 hex characters and the
 watermark cannot exceed V. `EnsureLogDir` can create an empty contained directory
 without fabricating history entries.
+
+For unloaded unread metadata, `Store.UnloadedLastShownVersion` holds the store
+lock and rejects a closed store or any worker, including one still retiring.
+It obtains H from `history.Store.CachedLatestEntryID`, which never warms a cold
+cursor or reads segments. Missing/unknown progress and history lookup failures
+return absence before certificate access. Loading an empty thread need not warm
+that cursor: a clean zero-version certificate alone cannot establish H = 0.
+An ordinary history operation must independently establish current progress.
+
+`recoveryCandidate` then reads at most the one contained, no-follow certificate
+leaf and checks current schema/rules, clean status, epoch and explicit non-null
+evidence fields, watermark bounds and checksum shape. Missing, unreadable,
+malformed, dirty, incompatible or invalid evidence returns absence. Metadata
+eligibility additionally requires exact V = H, rejecting both older and newer
+certificates. Valid empty evidence at V = H = 0 returns present zero. Any later
+append invalidates the unloaded reading even if it would not raise
+`LastShownVersion`; neither the shown watermark nor retained retired-fold
+progress can substitute for H. Ordinary loading/folding and clean retirement
+can restore eligibility. This metadata read validates checksum syntax only;
+it proves neither replay/checksum equality nor catch-up continuity. Epoch reuse
+still requires the full replay validation below.
 
 `entryChecksum` hashes the stored entry at V with SHA-256. Its ordered input is
 ID, type byte length, type bytes, timestamp Unix seconds, timestamp nanoseconds,
