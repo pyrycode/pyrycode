@@ -449,6 +449,41 @@ case. Keep those proofs separate. `TestAPIForwarding` compares exact captured
 RequestURI/body bytes, including mixed-case escapes and duplicate/empty query
 values, rather than comparing parsed URLs that conceal normalization.
 
+Sharing one live target across response-policy arms lets readiness loss mask
+later rejection assertions with `ErrUnavailable`. `apiResponseOwner` installs
+the manual `Owner.healthTicks` channel before startup and still waits for real
+startup health confirmation. `TestAPIResponses` supplies no runtime ticks;
+`apiOwner` and shared health defaults retain their existing behavior. The response
+proof keeps 1048576-byte exact success, 1048577-byte `ErrResponseLimit`,
+zero-capacity `ErrResponseCapacity`, all status/body/header assertions, exactly
+one forwarded request per arm and zero budget after cleanup, including repeated
+close. Unexpected errors report elapsed time, lookup/lifecycle state, request
+count and budget. See [runtime probe control](#health-failure-observations).
+
+`TestAPIResponseFailureClasses` exercises the private HTTP backend with a fresh
+response fixture per scenario. Overflow reserves and reads before
+`ErrResponseLimit`; zero capacity attempts reservation without a positive read
+before `ErrResponseCapacity`. Closing before headers returns `ErrResponseIO`
+without reservation or positive read; truncating a body returns the same error
+after both. Each requires a valid target, nil result, one request and zero
+retained budget. Keep the header-loss setup at valid status 200: status zero
+made an early control pass through an invalid-status helper failure, without
+proving the intended disconnect. Reservation/read observations distinguish the
+failure phases even when their public error is identical.
+
+The invalidation arm withholds headers, waits for the backend request, then
+delivers three failed health probes, observing each completed failure. It requires
+`ErrUnavailable`, an invalid target and zero retained budget; a subsequent
+zero-capacity request must return unavailable without another backend request.
+The forwarding worker has a four-second caller deadline and is joined before
+cleanup. Probe and helper I/O deadlines remain finite and unchanged. This
+reproduces an invalidation error pattern, not the initiating cause of a historical
+failure; physical/symlink reruns cannot establish that cause. The
+[diagnosis and two-root evidence](../../specs/architecture/3399-api-response-verification.md#revisions)
+retain exact errors, timings, commands and assertion coverage; the
+[aggregate outcome](development-verification.md#diagnosing-api-response-gate-failures)
+has a separate verification boundary.
+
 An empty backend response has no body read to notice a stale generation.
 `TestAPIEmptyReplacement` stops and restarts the same release between backend
 response and preparation for GET/204 and HEAD, proving the retained target rejects
