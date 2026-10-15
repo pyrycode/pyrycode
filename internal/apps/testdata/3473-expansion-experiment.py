@@ -98,3 +98,10 @@ print(json.dumps(record, indent=2))
 expected = {'baseline': 0, 'candidate': 0, 'baseline-delayed': 1, 'candidate-delayed': 0, 'no-reuse': 1}
 if any(results[name]['exit'] != code for name, code in expected.items()):
     sys.exit('Unexpected experiment outcome; inspect all logs before acceptance')
+for name, executed in [('baseline', 60), ('candidate', 60), ('baseline-delayed', 3), ('candidate-delayed', 3), ('no-reuse', 1)]:
+    failed = expected[name]
+    if results[name]['counts'] != {'executed': executed, 'passed': executed-failed, 'failed': failed, 'skipped': 0}:
+        sys.exit('Unexpected test counts: ' + name)
+for name, message in [('baseline-delayed', 'install repeated expansion: error=apps: install retained build: apps: retained artifacts: context deadline exceeded'), ('no-reuse', 'bounded repeated expansion: error=context canceled')]:
+    if message not in (OUT / (name + '.log')).read_text():
+        sys.exit('Wrong diagnostic failure: ' + name)

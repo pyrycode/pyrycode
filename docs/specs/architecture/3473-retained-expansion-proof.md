@@ -111,3 +111,87 @@ feature branch touches `internal/apps/artifact_resolution_test.go`.
   commands, platform, counts and logs outside the checkout. No new runtime
   behavior. Linux children share two CPUs; Darwin reports no affinity control.
   The measured graph uses 133 checkpoints; keep the planned 512 cap.
+
+## Investigation and validation evidence
+
+Baseline: `4bc9790a35943200b86946a2968e10914e74b8c7`; candidate:
+`9c0610c8` (test implementation). `git diff` against the historical baseline
+`07b6b35e14aad0de688326fb36d81c54303c691c` is empty for the resolution test,
+resolver and installer. The #3467 verifier evidence was retrieved using
+`fleet-task.py evidence 3467`; its final PR #3469 review reports the original
+installation timeout and explicitly leaves historical attribution unproven.
+
+Environment: Linux amd64, Go 1.26.9, `GOMAXPROCS=2`, `GOFLAGS=-p=2`.
+The historical machine instead used macOS arm64 and Go 1.26.2. These are not
+interchangeable native results. The experiment runs two race binaries
+concurrently on the same two Linux CPUs, with identical settings for each pair.
+No other builder-owned check overlapped the final comparison.
+
+Reproduction:
+`python3 internal/apps/testdata/3473-expansion-experiment.py /tmp/builder-3473/final-experiment`.
+The helper records its exact compile/execution commands in `results.json`;
+each normal binary runs the three named tests 20 times with `-test.count=20`,
+`-test.v`, and the unchanged `-test.timeout=10m`. Compiled binary execution has
+no Go result cache. Delayed variants run each test once.
+
+| Experiment | Executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| Unchanged test, 20 repetitions | 60 | 60 | 0 | 0 |
+| Repaired test, 20 repetitions | 60 | 60 | 0 | 0 |
+| Unchanged test, controlled installation delay | 3 | 2 | 1 | 0 |
+| Repaired test, same controlled delay | 3 | 3 | 0 | 0 |
+| Repaired proof, cache reuse disabled | 1 | 0 | 1 | 0 |
+
+No focused skip reasons. The last two failing rows are expected diagnostic
+failures, retained rather than discarded. The injected context sleeps 1.1s on
+the first installation cancellation checkpoint, before resolution. The unchanged
+test fails with the historical installation error text at 1.102729044s; candidate
+installation succeeds at 1.108917336s. This demonstrates a scheduling dependency
+outside graph resolution, not the exact cause of the historical failure.
+
+Normal phase ranges in milliseconds:
+
+| Phase | Unchanged min–max | Candidate min–max |
+| --- | --- | --- |
+| Validation | 2.567–12.792 | 2.311–11.753 |
+| Installation | 9.193–25.304 | 8.191–17.626 |
+| Verification | 1.850–4.101 | 1.525–6.101 |
+| Fixture filesystem walk | Not separately instrumented | 0.808–13.402 |
+| In-memory resolution | Not separately instrumented | 0.111–0.719 |
+
+All timings include scheduling. Graph work is independently counted: 133/512
+checkpoints on every candidate iteration, including the delayed case. Disabling
+only the completed-cache lookup with a Go source overlay fails at exactly 512
+checkpoints in 1.064958ms with `context canceled`, before integration starts.
+No production file is modified on disk by these experiments. Normal unchanged
+tests did not reproduce the historical timeout.
+
+Initial preliminary comparisons had the same outcomes (60/60 passes for each
+normal arm, one expected delayed-baseline failure, one expected mutation failure).
+One sandboxed setup attempt executed zero tests because the Go cache was read
+only; the authorized escalated rerun passed. It is not counted as test evidence.
+
+`go vet ./...` and `make build BIN=/tmp/builder-3473/final-pyry` pass on the
+committed candidate with the environment above. Build/vet execute zero tests.
+The first complete `go test -race -count=1 -json ./internal/apps/...` passed:
+1,007 executed, 993 passed, 0 failed, 14 skipped (supported Node/npm absent).
+The final committed-source rerun and exact per-test skip reasons are recorded
+in `internal/apps/testdata/3473-linux-results.json`: identical counts, 108.896s,
+no unrelated failures. A third fresh helper run with explicit count/error checks
+also produced 60/60 normal passes on each side, the expected delayed-baseline
+failure, and the expected 512-checkpoint mutation failure. Its failed-attempt
+logs and counts are retained in the same evidence file. Final written work is
+under 500 added lines, zero production files, exports or consumer updates;
+the original builder limits still hold.
+
+Required macOS execution remains unperformed: `fleet-support.py` →
+`native_recipe` implements only discovery for `platform-probe`, and its native
+execution recipes exercise memoryruntime, Android or Desktop. None accepts an
+apps test command. Requesting one of those would not supply this ticket's proof.
+No irrelevant task was launched or probe claimed as acceptance. An apps-capable
+managed native executor is required to close this validation gap.
+
+Complete uncached `make check` remains pending for the verifier-owned full-module
+gate under the builder role instructions; it has not been passed or substituted
+with the focused result. The historical complete baseline gate's apps failure
+and unrelated #3474 e2e failure are recorded in PR #3469's verifier review.
