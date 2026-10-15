@@ -101,3 +101,13 @@ feature branch touches `internal/apps/artifact_resolution_test.go`.
   operation cap must reject disabled cache reuse. No isolation boundary changes.
 
 **Reviewer:** builder (self-review). **Date:** 2026-10-15.
+
+## Revisions
+
+- 2026-10-15: Retain the controlled experiment as
+  `internal/apps/testdata/3473-expansion-experiment.py` so the required native
+  comparison can reproduce both overlays and all failed attempts. It compiles
+  race binaries, runs each baseline/candidate pair concurrently, and records
+  commands, platform, counts and logs outside the checkout. No new runtime
+  behavior. Linux children share two CPUs; Darwin reports no affinity control.
+  The measured graph uses 133 checkpoints; keep the planned 512 cap.
