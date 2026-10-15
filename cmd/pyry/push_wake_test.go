@@ -40,12 +40,12 @@ type wakeSends struct {
 	err    error
 }
 
-func (w *wakeSends) send(platform, token string) error {
+func (w *wakeSends) send(_ context.Context, platform, token, _ string) (<-chan string, error) {
 	if platform != "fcm" {
-		return errors.New("unexpected platform " + platform)
+		return nil, errors.New("unexpected platform " + platform)
 	}
 	w.tokens = append(w.tokens, token)
-	return w.err
+	return nil, w.err
 }
 
 // newTestPushWaker builds a waker over fakes with a controllable clock and a
@@ -216,11 +216,11 @@ func TestPushWaker_DecisionLines(t *testing.T) {
 	conns := []relay.ActiveConn{{ConnID: "c1", DeviceTokenHash: "h-conn"}}
 	w, _, _, logs := newTestPushWaker(conns, devs)
 	w.last["h-recent"] = w.now() // woken inside the window by an earlier pass
-	w.send = func(_, token string) error {
+	w.send = func(_ context.Context, _, token, _ string) (<-chan string, error) {
 		if token == "tok-fail" {
-			return errors.New("fcm unavailable")
+			return nil, errors.New("fcm unavailable")
 		}
-		return nil
+		return nil, nil
 	}
 
 	w.wakeAbsent(context.Background(), testWakeCause)
@@ -349,7 +349,7 @@ func TestPushWaker_Run_WakesOnTrigger(t *testing.T) {
 	t.Parallel()
 	sent := make(chan string, 1)
 	w := newPushWaker(&fakeWakeConns{}, &fakeWakeDevices{devs: []devices.Device{fcmDevice("h1", "Pixel", "tok-1")}},
-		func(_, token string) error { sent <- token; return nil }, discardLogger())
+		func(_ context.Context, _, token, _ string) (<-chan string, error) { sent <- token; return nil, nil }, discardLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); w.run(ctx) }()
