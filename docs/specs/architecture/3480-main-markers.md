@@ -64,6 +64,7 @@ None.
 
 ## Revisions
 - 2026-10-15: ordinary duplicate facts can return directly from a finished marker; only a child claim needs reconstruction. Duplicate creations still close the turn's current text run. Store scope/lifetime in the call marker and derive its recorded source from the owning turn, avoiding duplicate source fields. First-lifetime promotion also updates itemless launcher markers, preserving the existing child-transfer rule. `TestReferenceMainMarkerPending` additionally checks this promotion, uncreated outcomes, source/lifetime mismatch and release of empty finished-turn maps.
+- 2026-10-15: the pending-child-claim regression exposed one remaining empty mutable map after transferring the last unresolved call. `takeMainCall` now releases that allocation immediately, including for the legacy path; rendered output and call ownership are unchanged.
 
 ## Offline retention evidence
 `TestReferenceFinalReportAccounting` passed under `-race` using the existing eight-entry fixed-shape workload: main Read/result, Agent launch, independently finished child Read/result, task link/completion and main ending. Each turn has its own fixed-length `sNNNN` recorded Claude source. Main turns retain two value markers and no mutable calls; child lanes retain their existing representation.

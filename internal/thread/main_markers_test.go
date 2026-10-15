@@ -134,6 +134,18 @@ func TestReferenceMainMarkerChild(t *testing.T) {
 }
 
 func TestReferenceMainMarkerPending(t *testing.T) {
+	t.Run("uncreated child claim", func(t *testing.T) {
+		entries := []history.Entry{
+			testMain(1, "tool_result", `,"tool_use_id":"c","is_error":false`),
+			testMain(2, "turn_end", `,"stop_reason":"end_turn"`),
+			testChild(3, "tool_use", "missing", `,"tool_use_id":"c","name":"Read"`),
+		}
+		testMainMarkerReplay(t, entries, func(f *Fold, n int) {
+			if n == 3 && (f.openings[1].calls != nil || len(f.childCalls) != 1) {
+				t.Fatal("child claim left the finished turn's mutable collection allocated")
+			}
+		})
+	})
 	entries := []history.Entry{
 		testMain(1, "tool_result", `,"tool_use_id":"c","is_error":false,"result_detail":"original"`),
 		testMain(2, "turn_end", `,"stop_reason":"end_turn"`),

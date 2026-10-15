@@ -45,6 +45,9 @@ func (st *mainTurn) takeMainCall(id string, group agentKey) *mainCall {
 	call := st.calls[id]
 	if call != nil && call.group == group {
 		delete(st.calls, id)
+		if len(st.calls) == 0 {
+			st.calls = nil
+		}
 		return call
 	}
 	m, ok := st.finished[id]
