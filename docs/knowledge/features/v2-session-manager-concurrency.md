@@ -234,7 +234,26 @@ before-decode inert gate. Capability advertisement is separate (#2797).
 
 **A zero-value enum member needs a producer that names it, or staticcheck flags it dead even though the type "handles" it by default.** The first cut of this widening leaned on `appFrameRoute`'s zero value implicitly — the v1 `enqueueAppFrame` call built `appFrameJob{plaintext: plaintext}` with no `kind`, and the worker caught it with a bare `default:` rather than a `case appFrameRoute:`. `staticcheck`'s `U1000` correctly called `appFrameRoute` unused: nothing in the source named the identifier, so the compiler couldn't see that the zero value was meaningful rather than accidental, and the doc-block claim that "the routing decision lives in one place" rested on a member neither producer nor consumer mentioned. The fix is to name it at both ends — the v1 call passes `kind: appFrameRoute` explicitly and the worker gains its own `case appFrameRoute:` — which makes `default:` genuinely unreachable in normal operation while still being the safe catch for a kind added without an arm. The general lesson: when a tagged-dispatch enum's zero value is meant to be a real, load-bearing case (not just "unset"), give it an explicit producer and an explicit consumer arm rather than trusting Go's zero-value default to stand in for both — the compiler cannot verify that a default arm and an elided zero-value case actually agree on what they mean.
 
-`V2Session.State()` is a plain field read. Safe today because no cross-goroutine reads exist. Both the push surface (#571, rewritten #610) and the #588 enumeration surface deliberately keep it that way: the #610 `Push` reads only `m.queues` under `pushMu` (never `s.state`), while `forwardEnvelope` reads `s.state` **on the `Run` goroutine** during the drain, and `handleActiveConns` reads `s.state` (and `s.interactive`, #626) **on the `Run` goroutine** (funneled through `m.snapshot`) — neither via a cross-goroutine `State()` call. So the broadcast/enumeration layer that this comment once anticipated (the [#589](../codebase/589.md) assistant-turn fan-out, built on #571's `Push` + #588's `ActiveConns`) introduces **no** new reader of `s.state` off the owner goroutine, and `State()` still needs no `atomic.Int32`/mutex. Should a future slice read `s.state` directly from a producer goroutine *outside* the funnel, that accessor will need the atomic/mutex then — not pre-emptively refactored.
+`V2Session.State()` is a plain field read confined to `Run`. Off-`Run` `Push`
+reads only `m.queues` under the leaf `pushMu`; `forwardEnvelope` and
+`handleActiveConns` read state on `Run`, the latter through `m.snapshot`.
+`Run` alone creates and removes queue keys; producers mutate their contents.
+An off-owner state reader would need synchronization; the snapshot funnel
+needs no atomic field or session mutex.
+
+Successful `noise_resp` publication precedes persistence, `V2StateOpen` and queue
+registration in `handleNoiseInit`. `ErrConnNotFound` can mean unfinished
+admission, so it does not establish teardown. After response receipt,
+`testDaemonRelayAdmission` requires the exact ID in a Run-owned `ActiveConns`
+snapshot and checks context errors before and after it, bounded by three seconds
+or earlier caller cancellation. It never retries `Push` or consumes ciphertext.
+The snapshot cannot prevent later teardown.
+
+`TestDaemonRelayWireAdmissionBeforePush` holds the published response's callback:
+the helper returns and an early push finds no queue while `Run` cannot tear down.
+Admission expires while held, then succeeds after release. The hold honors
+cancellation and deferred release precedes fixture joins. This proves a
+sufficient ordering; see the [experiment and unresolved historical attribution](development-verification.md#prove-that-tests-distinguish-the-change).
 
 ## Hosted discovery and ordered delivery
 

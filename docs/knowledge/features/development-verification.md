@@ -143,10 +143,42 @@ the response before registering the queue and calling `ThreadLiveState`, while
 `switchWire.open` returns after `ReadResp`. An immediate off-`Run` `Push` can
 therefore return `ErrConnNotFound` even after successful Noise response receipt;
 that alone does not prove an admitted connection was retired.
-Synchronize admission and held delivery on bounded signals from the snapshot
-callback itself. Otherwise a valid initial reading can arrive before the
-replacement and falsely fail a fresh-only assertion. Sleeping or discarding stale
-frames would obscure the delivery proof. See the
+
+For readiness-dependent pushes after `open`, `testDaemonRelayAdmission` requests
+one `ActiveConns` snapshot serialized on `Run` after the handshake finishes. It
+requires the exact connection ID and checks context errors before and after the
+snapshot, with a three-second upper bound or the caller's earlier cancellation.
+`ActiveConns` returns no error, so cancellation must not be mistaken for an empty
+successful snapshot. A missing ID fails immediately; no sleep or failed-push
+retry establishes readiness. The snapshot does not prevent subsequent teardown.
+See [relay concurrency](v2-session-manager-concurrency.md).
+
+`TestDaemonRelayWireAdmissionBeforePush` publishes the successful `noise_resp`
+then holds its outbound callback before queue registration. The raw wire helper
+returns, and a diagnostic early push observes `ErrConnNotFound` while `Run` is
+held and cannot perform teardown. Admission must expire during the hold, honor
+an already-canceled caller, then succeed after release before envelope 20 is
+pushed and decrypted with its exact type and payload. Removing the admission
+check makes the held-deadline assertion fail. The hold selects on cancellation;
+a deferred idempotent release precedes fixture cleanup joining `Run` and the
+publisher. Keep wire reads and phone ciphers on the test thread. The sibling
+`TestDaemonRelayWireQueuedPushDuringHandshake` preserves the four queued frames
+for phone/legacy/phone/legacy, IDs 10–13, expected type and exact payload, before
+checking delivery of envelope 20 to the newly admitted again.
+
+This controlled ordering proves unfinished admission can cause the missing
+queue; it does not attribute the historical intermittent failure. The original
+scoped failure followed a passing run, and ten isolated repetitions subsequently
+passed. Neither those passes nor the repaired tests' 20/20 race repetitions
+identify the original scheduling. Retain contrary results and incidental process
+overlap separately from controlled scheduling in the
+[investigation evidence](../../specs/architecture/3483-queued-handshake-admission.md#investigation-evidence).
+
+For supplied live-state replacement tests, synchronize admission and held
+delivery on bounded signals from the snapshot callback itself. Otherwise a
+valid initial reading can arrive before the replacement and falsely fail a
+fresh-only assertion. Sleeping or discarding stale frames would obscure the
+delivery proof. See the
 [connect-gap regression](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery).
 
 A retired-snapshot absence assertion must establish snapshot evaluation completion
