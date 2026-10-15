@@ -4,6 +4,46 @@
 
 ### Validation and testing
 
+Production reference folds keep `mainTurn` as a bounded cursor for its scoped
+turn generation: recorded source/key, original opening, first ending and current
+text-coalescing position. `compactMainCall` replaces created, terminal ordinary
+calls with `mainCallMarker` records holding an item index, scope, lifetime and
+first outcome reference; an item-index sentinel represents an itemless launcher.
+The source comes from the owning turn. The finished index holds pointers to these
+small records, never the former mutable `mainCall`; empty mutable call maps are
+released. Marker storage contains no rendered content. Legacy `New` keeps its
+mutable representation as the differential oracle.
+
+**Duplicate suppression still needs continuation identity.** A finished call
+can gain child-parent evidence later. `takeMainCall` reconstructs only that
+addressed marker and transfers its original item/group/outcome to the child lane;
+discarding those facts would lose the intrinsic first ending. Uncreated calls
+keep pending outcomes until creation establishes their kind, and shared shells
+keep their original mutable owner for [late links](thread-package-agents-and-background-work.md#background-shells).
+Child lanes retain their existing mutable bookkeeping.
+
+Later results cannot replace a call's first terminal or a turn's first ending.
+Original-opening references still select the original source/turn generation
+after ID reuse or a divider, rather than closing its successor. Inactive late
+text still coalesces until a text-closing fact; even a duplicate creation for a
+finished call must split that run. Bounds apply per scoped generation/call
+identity, rather than to the number of distinct identities in a history.
+
+`TestReferenceMainMarkers` rejects the former mutable finished-call collection,
+checks the four marker fields and bounds marker entries and logical bytes across
+64 rounds of redundant results/endings. Each redundant ending can still create
+a public item, outside that continuation-state bound. Intermediate assertions
+cover late result/creation/text, a divider, generation reuse and original-opening
+recovery. `TestReferenceMainMarkerChild` checks late ownership transfer;
+`TestReferenceMainMarkerPending` checks uncreated outcomes, launcher promotion,
+lifetime mismatch and release of empty maps. `TestReferenceMainMarkerShell`
+checks shared ownership through main closure, first-lifetime promotion, late
+linking and completion with reused source/lifetime/legacy identities.
+`testMainMarkerReplay` compares whole, five-entry and single-entry feeds with
+legacy `New`, including complete items/Content/revisions, observations, touches,
+publication visibility, consumed/last-shown versions, suppression and unproven
+watermarks. Recorded replays and corpus golden expectations stay unchanged.
+
 Production reference folds reduce genuinely final call/task histories through
 `agentReports.reduce` in `applyAgent`, after `agentGroup.addReport` reconciles
 companions. Four content-free marker slots retain the earliest non-result final,
@@ -45,26 +85,41 @@ source identity. Entries feed in eight-entry chunks and all four items per turn
 must be inactive. `testFinalReportBytes` walks retained fields, including child
 intrinsic/previous state, and separates logical scalar sizes plus string bytes:
 
-| Turns | Padding bytes | Final markers/turn | Metadata and recipes/turn | Active or unresolved/turn | Other lifecycle/turn | Source cache total |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 16 | 71 | 1,061 | 191 | 857 | 42,904 |
-| 16 | 4,096 | 71 | 1,061 | 191 | 857 | 565,144 |
-| 64 | 16 | 71 | 1,062 | 191 | 854 | 61,176 |
-| 64 | 4,096 | 71 | 1,062 | 191 | 854 | 1,046,520 |
+| Turns | Padding bytes/entry | Main markers/turn | Agent markers/turn | Metadata and recipes/turn | Active or unresolved/turn | Other lifecycle/turn | Source cache total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 16 | 174 | 71 | 1,061 | 242 | 606 | 42,904 |
+| 16 | 4,096 | 174 | 71 | 1,061 | 242 | 606 | 565,144 |
+| 64 | 16 | 174 | 71 | 1,062 | 242 | 603 | 61,176 |
+| 64 | 4,096 | 174 | 71 | 1,062 | 242 | 603 | 1,046,520 |
 
-These are logical field bytes, with per-turn values rounded, rather than a
-whole-Fold heap target. Container/header/capacity overhead, authoritative history
-and Store snapshots are excluded. Pointer targets count once; strings count per
-field without deducting shared backing storage. Source caches are accounted
-separately and bounded independently. The active/unresolved category still
-contains ordinary main/child Read results and their uncreated agent-registry
-owners even though every public item is finished. Completed main-turn/call
-indexes and child bookkeeping remain in other uncompacted lifecycle state.
-The 71-byte marker cost is fixed for this workload and independent of padding;
-it does not claim those other categories have been compacted. Identity string
-length changes logical cost; marker entry IDs are fixed-width uint64 facts.
-Recipe `ended_order` uses decimal JSON, explaining its slight history-size
-increase. See the [retained measurement](../../specs/architecture/3479-final-agent-report-markers.md#offline-retention-evidence)
+Main-marker accounting includes turn/opening index keys, bounded turn cursor
+facts and finished call/outcome records. Each workload turn retains two finished
+call markers and no mutable main calls. Existing agent-report markers remain a
+separate category. Active turns, mutable main calls (shared shells or uncreated
+calls), pending child reports and agent-report candidates count as active or
+unresolved work. Here all public items are finished: speculative child/result/
+agent joins explain the unresolved bytes. Child lifecycle/snapshots and other
+agent indexes remain in other lifecycle state; those categories are not claimed
+as compaction savings.
+
+These are logical field bytes with rounded per-turn values, not a whole-Fold
+heap target. Map/slice/pointer/string headers, capacity/alignment overhead,
+authoritative fixture history and Store snapshots are excluded. Shared pointer
+targets count once at their first owning traversal; strings count per field
+without deducting shared backing storage. Source caches use their existing
+independent bounded accounting. The 174-byte main and 71-byte agent marker costs
+are fixed for this workload at both history and padding sizes. Entry references
+are fixed-width uint64; item indexes use the host's 64-bit int, while identity
+string lengths change logical cost. Recipe `ended_order` uses decimal JSON,
+explaining the slight metadata increase with history size.
+
+Container shape matters even outside logical accounting: inline marker values
+would reserve a whole record in unused sparse-map slots. Pointer slots avoid
+that cost without retaining old owners. The test separately logs host struct
+sizes of 96 bytes for `mainCall` and 40 for `mainCallMarker`; these are not the
+logical per-turn totals or allocator-level savings. See the
+[main-marker measurement](../../specs/architecture/3480-main-markers.md#offline-retention-evidence),
+[earlier agent-only measurement](../../specs/architecture/3479-final-agent-report-markers.md#offline-retention-evidence)
 and [ADR 045](../decisions/045-thread-index-over-history.md).
 
 `decode` checks object shape, required discriminating fields and known DTO field

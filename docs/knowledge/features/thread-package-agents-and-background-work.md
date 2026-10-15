@@ -107,6 +107,12 @@ early reports wait for their link and creation. Unlinked shells keep ordinary
 foreground result and turn-closure behavior. Explicitly non-Claude calls,
 including Codex Bash calls, keep ordinary semantics.
 
+**Main-turn closure does not authorize discarding shell continuation or late-link
+evidence.** `compactMainCall` excludes shared shells: `registerShell` links the
+ordinary `mainCall` and `agentCall` to each other, and lifetime promotion, late
+task linking and background completion still need that original owner after its
+turn ends. A finished ordinary-call marker cannot replace this relationship.
+
 **A launch result cannot finish linked shell work.** `applyAgent` uses the
 [first genuine final and companion rules](#agent-lifecycle) on the ordinary
 item: `completed` becomes inactive `finished`; `failed`, `stopped`, `gone`,
@@ -158,6 +164,13 @@ companion enrichment and first-terminal order. The transfer runs once when the
 source first acquires a lifetime; subsequent ordinary reports do not scan saved
 promotion evidence again. [Identity and recovery](#identity-and-recovery)
 defines which pre-lifetime evidence can move.
+
+Promotion tests must establish an accepted lifetime observation and assert the
+shared shell relationship. A durable `agent_call_observed` naming Bash does not
+announce a lifetime: that parser accepts Agent/Task observations. Such a fixture
+could leave a promotion regression green without exercising the transfer.
+`TestReferenceMainMarkerShell` uses a valid Agent observation and checks the
+ordinary/shell owner link before later task linking and completion.
 
 ### Identity and recovery
 
