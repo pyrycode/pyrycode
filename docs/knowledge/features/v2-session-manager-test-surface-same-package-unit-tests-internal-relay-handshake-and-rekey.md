@@ -11,6 +11,31 @@
 - `TestNewV2SessionManager_ConfigValidation` — panics on nil `Frames` / nil `Logger`; wrapped errors on nil `Outbound` / nil `Devices` / empty `ServerID` / wrong-length `StaticPriv`. `Handlers` is optional — no new validation case.
 - `TestV2Session_SweptThenNoiseMsg_4410_ThenReHandshakes` (#2488) — the end-to-end proof that a client whose session the daemon dropped can recover on its own: `setIdleTimeout` to a sub-second value, `driveToOpen` on one conn id, wait for the `4408` sweep via `waitForConnClose`, then send a frame sealed under the initiator's still-live send `CipherState` (`sealAppFrame`/`wrapInnerFrame`) on the SAME conn id and assert a `4410` close with `Frame == nil`, then `handshakeConnToOpen` a SECOND conn id against the same still-running manager to prove it still serves a fresh handshake. In-package because `idleTimeout` is a package var only an in-package test can shrink; not `t.Parallel()`, matching the other `setIdleTimeout` tests. Deterministic rather than timing-dependent: `closeWith` deletes from `m.sessions` before the close envelope is emitted, and both the sweep and frame dispatch run on `Run`, so waiting on the recorded `4408` proves the delete already happened before the sealed frame is sent — it is guaranteed to hit `handleFrame`'s lazy-create path into a fresh `V2StateAwaitingInit` session, not the `V2StateClosed` drop-silently branch, which would have made the test a silent no-op.
 
+## Admission readiness
+
+`TestDriveToOpen_WaitsForAdmission` holds the first outbound callback after
+recording `noise_resp`, before returning to `handleNoiseInit`. Within a
+`testing/synctest` bubble, 10 ms of virtual time lets the recorder poll run and
+`synctest.Wait` establishes durable blocking: the fixture must still be waiting
+for admission. This schedules the observation without a wall-clock sleep as a
+readiness condition. Release permits admission; two subsequent pushes must
+authenticate and decrypt in order with the returned receive cipher.
+
+If the fixture returns early, the hold excludes teardown and orders direct
+inspection of the Run-owned session; queue presence is inspected under `pushMu`.
+Removing only the admission wait demonstrated a present
+`V2StateHandshakeComplete` session, absent queue and `ErrConnNotFound` on the
+first push. An absent queue by itself cannot distinguish admission from teardown.
+Cleanup always releases outbound before joining the fixture and stopping/joining
+the manager, including on failure. `TestWaitForOpenAdmission_Context` uses no
+running manager and virtual time to check both the two-second deadline and
+earlier caller cancellation.
+
+The [investigation evidence](../../specs/architecture/3485-relay-fixture-admission.md#revisions)
+retains 20/20 controlled failures without the barrier and repaired passes.
+The original transport test still passed 20/20 without the barrier; this proves
+the fixture dependency while leaving the historical failure's cause unresolved.
+
 ## Open-state dispatch
 
 - `TestV2Session_OpenState_EncryptedRoundTrip` — paired-device happy path through `dispatchAppFrame`. Stub handler keyed by `TypeListConversations` replies via `c.Reply`; phone-side decrypt of the captured `noise_msg` matches the handler's payload, `InReplyTo` echoes the request id, session state stays `V2StateOpen`.
