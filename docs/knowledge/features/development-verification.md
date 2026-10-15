@@ -480,6 +480,50 @@ Before accepting a baseline comparison as attribution, compare suite composition
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.
 
+### Diagnosing API response gate failures
+
+An unexpected `ErrUnavailable` in a response-limit or capacity arm establishes
+target unavailability, not what initiated it. The historical #3399 log recorded
+unavailable errors across overflow, capacity, truncation and the final request,
+without probe or target-state evidence establishing the trigger. Baseline race
+repetitions passed 360/360 records; passing physical and symlink TMPDIR reruns
+therefore cannot assign a TMPDIR or timeout cause. Retain a
+[controlled failure-class experiment](apps-package-testing.md#other-package-fixtures)
+that separates rejection, header/body I/O and invalidation using exact errors,
+reservation/read phases, target validity, requests and retained budget. Injected
+invalidation reproduces the error pattern while leaving historical attribution
+open; shared fixture registry roots already canonicalize symlinks.
+
+Keep scoped API results separate from aggregate acceptance. The
+[final #3399 verifier verdict](https://github.com/pyrycode/pyrycode/pull/3446#issuecomment-6196362331)
+records dispatcher cite/docs guards, `make check` and build green at
+`a4f94aedb3f5c704427b1ca4b65d8043728159a8`, with cached unit packages and no
+per-test counts. The additional uncached, normal-concurrency `make check` at
+that head remained **failing/incomplete**: 26984 executed / 26969 passed /
+2 failed / 13 skipped test/subtest records. Main baseline `6ab3c311` also
+failed: 26978 / 26963 / 2 / 13. Both failures were
+`TestRelayAdmissionStorage/setgid_parent` and its parent, with leaf diagnostic
+`valid=false, error=<nil>`, tracked in [#3458](https://github.com/pyrycode/pyrycode/issues/3458).
+Those observations establish neither actual setgid-parent acceptance nor a
+filesystem setup cause. Vet passed, but both uncached attempts stopped in the
+race unit tier; staticcheck, substrate-guard and fake-daemon e2e ran only in the
+separate dispatcher gate. The subsequent head build passed. No uncached e2e
+count or green uncached aggregate is implied by the dispatcher result.
+
+The verdict retains exact commands, supplied/resolved physical TMPDIR,
+supported Node/npm selections, counts and thirteen skip reasons. All 24 API
+response/diagnostic records passed without skips. Merged #3418's positive
+retirement confirmation cleared the earlier retirement finding: all eighteen
+`TestPublishRetirement` arms and parent passed (19/19, no skips). Earlier
+`health/stop` and `health/intent` failures remain failed historical results;
+they are distinct from #3458. The
+[two-root rework evidence](../../specs/architecture/3399-api-response-verification.md#rework-scoped-verification-evidence)
+at `8f543e1a` records 360/360 response records per root and complete apps suites
+of 1029 executed / 1025 passed / 0 failed / 4 filesystem EILSEQ skips per root.
+These focused successes do not complete the red aggregate. A separately
+interrupted sandbox attempt with listener-bind `operation not permitted` errors
+also supplied no completed gate or product attribution.
+
 ### Diagnosing startup recovery runtime
 
 A test active when the package times out need not account for the package's
