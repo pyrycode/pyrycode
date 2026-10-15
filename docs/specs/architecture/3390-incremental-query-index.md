@@ -24,9 +24,9 @@ No new goroutines or locks. The conversation worker owns capture and tree update
 ## State transitions and identity reuse
 | Event | Race-detector proof |
 | --- | --- |
-| Repeated touches, active settlement, late public children, reparenting and delivery suppression | per-entry incremental/rebuild oracle and existing `TestStoreQueriesUpdates` |
-| No-item progress, missing IDs, epoch/reset/coverage | oracle and existing `TestCatchUpContracts`, `TestCatchUpMissingHistory` |
-| Old captured roots during later feed/replacement/retirement | retained-root oracle and existing ownership/query isolation tests |
+| Repeated touches, active settlement, late public children, reparenting and delivery suppression | `TestIncrementalQueryOracle`, `TestThreadRecordedBaselines` and existing `TestStoreQueriesUpdates` |
+| No-item progress, missing IDs, epoch/reset/coverage | `TestIncrementalQueryOracle` and existing `TestCatchUpContracts`, `TestCatchUpMissingHistory` |
+| Old captured roots during later feed/replacement/retirement | `TestIncrementalTreeOwnership`, `TestAffectedPublicationOwnership`, `TestCatchUpIsolation` and `TestStoreQueriesRetirementIsolation` |
 | Retry, unload/reload and clean reopen | existing Store lifecycle and bounded recovery tests |
 
 ## Error handling
@@ -55,3 +55,7 @@ Pending documentation stage: `docs/knowledge/features/thread-package-background-
 - Threat model: deterministic AVL balance bounds adversarial ordering; existing relay authentication/authorization and request validation remain the boundary.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-15
+
+## Revisions
+- 2026-10-15: Main commit `95ec3fa5` already fails `TestAffectedPublicationOracle` after #3401 changed `growText` to overwrite borrowed JSON buffer tails. Confirmed with all modified production files replaced by unchanged base sources through a scratch Go overlay. Filed #3425 and recorded it as an open blocker: producer-side Content immutability must be restored outside this index ticket. Existing tests remain enabled. Synthetic retained-root checks isolate index ownership from this known producer bug.
+- Stable-slot output includes nil private/withdrawn rows internally; `detachPublication` skips them and initial index construction excludes them. No public contract changes. Recorded-index evidence extends `TestThreadRecordedBaselines` with per-entry tail versus fresh replay comparisons using its existing derivation/normalization helpers; independently generated epochs are aligned for result comparison.

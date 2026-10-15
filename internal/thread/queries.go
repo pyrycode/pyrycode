@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sort"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -34,16 +33,14 @@ type QueryResult struct {
 
 // queryIndex borrows immutable publication items; private fold rows never enter it.
 type queryIndex struct {
-	items           []*Item
-	byID            map[uint64]int
-	ordered, active []int
-	work            func(bool)
-	touched         []int
-	touches         []uint64
-	coveredThrough  uint64
-	unprovenThrough uint64
-	suppressed      uint64
-	complete        bool
+	byID, ordered, active, touched *queryTree
+	work                           func(bool)
+	copied                         func(int) // copied tree pointers, separate from semantic visits
+	invalidTouches                 int
+	coveredThrough                 uint64
+	unprovenThrough                uint64
+	suppressed                     uint64
+	complete                       bool
 }
 
 func newQueryIndex(items []Item, work func(bool)) *queryIndex {
@@ -55,25 +52,12 @@ func newQueryIndex(items []Item, work func(bool)) *queryIndex {
 }
 
 func newPublicationIndex(items []*Item, work func(bool)) *queryIndex {
-	q := &queryIndex{items: items, byID: make(map[uint64]int, len(items)), work: work}
-	for i, item := range items {
-		q.count(true)
-		q.byID[item.ID] = i
-		if item.Order != 0 {
-			q.ordered = append(q.ordered, i)
-		}
-		if item.Active {
-			q.active = append(q.active, i)
+	q := &queryIndex{work: work}
+	for _, item := range items {
+		if item != nil {
+			q.membership(queryRow{item: item}, false)
 		}
 	}
-	sort.Slice(q.ordered, func(i, j int) bool {
-		q.count(true)
-		a, b := items[q.ordered[i]], items[q.ordered[j]]
-		if a.Order != b.Order {
-			return a.Order < b.Order
-		}
-		return a.ID < b.ID
-	})
 	return q
 }
 
@@ -82,8 +66,6 @@ func (q *queryIndex) count(preparing bool) {
 		q.work(preparing)
 	}
 }
-func (q *queryIndex) item(i int) Item    { q.count(false); return *q.items[i] }
-func (q *queryIndex) order(i int) uint64 { return q.item(q.ordered[i]).Order }
 
 // HistoryPage selects the newest ordered public range below upperOrder, plus
 // complete public parent closure. The caller must already be authorized for id.
@@ -132,35 +114,30 @@ func (q *queryIndex) window(ctx context.Context, snap Snapshot, upper uint64, li
 		upper = snap.Version + 1
 	}
 	result := QueryResult{State: StateUsable, Epoch: snap.Epoch, Version: snap.Version, UpperOrder: upper}
-	end := sort.Search(len(q.ordered), func(i int) bool { return q.order(i) >= upper })
+	end := q.rank(q.ordered, upper)
 	start := max(0, end-limit)
 	if start < end {
-		result.LowerOrder = q.order(start)
+		result.LowerOrder = q.at(q.ordered, start).item.Order
 		// Tied orders must never leave a hole in the continuous range.
-		start = sort.Search(start, func(i int) bool { return q.order(i) >= result.LowerOrder })
+		start = q.rank(q.ordered, result.LowerOrder)
 		result.Continuation = result.LowerOrder
 		result.OlderExists = start > 0
 	}
 	seen := make(map[uint64]bool)
-	add := func(item Item) {
+	add := func(row queryRow) {
+		item := *row.item
 		if !seen[item.ID] {
 			seen[item.ID] = true
 			item.Content = append(json.RawMessage(nil), item.Content...)
 			result.Items = append(result.Items, item)
 		}
 	}
-	for i := start; i < end; i++ {
-		if err := ctx.Err(); err != nil {
-			return QueryResult{}, err
-		}
-		add(q.item(q.ordered[i]))
+	if err := q.visit(ctx, q.ordered, start, end, add); err != nil {
+		return QueryResult{}, err
 	}
 	if newest {
-		for _, i := range q.active {
-			if err := ctx.Err(); err != nil {
-				return QueryResult{}, err
-			}
-			add(q.item(i))
+		if err := q.visit(ctx, q.active, 0, treeSize(q.active), add); err != nil {
+			return QueryResult{}, err
 		}
 	}
 	// Appended parents are visited in turn, making multi-level closure iterative.
@@ -170,8 +147,8 @@ func (q *queryIndex) window(ctx context.Context, snap Snapshot, upper uint64, li
 		}
 		parent := result.Items[i].Parent
 		if parent != 0 && !seen[parent] {
-			if index, ok := q.byID[parent]; ok {
-				add(q.item(index))
+			if row, ok := q.lookup(parent, false); ok {
+				add(row)
 			}
 		}
 	}

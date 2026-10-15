@@ -118,6 +118,7 @@ func TestThreadRecordedBaselines(t *testing.T) {
 				return testNormalizeRecorded(t, entries)
 			}
 			entries := derive()
+			testRecordedQueryIndexes(t, entries)
 			if !reflect.DeepEqual(entries, derive()) {
 				t.Fatal("repeated normalized derivations differ")
 			}

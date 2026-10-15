@@ -8,13 +8,16 @@ import (
 // publicationCapture belongs to the fold worker. Slots have stable fold indexes;
 // nil slots are private. Published pointers and their content never change.
 type publicationCapture struct {
-	slots   []*Item
-	active  map[int]bool
-	version uint64
+	slots    []*Item
+	active   map[int]bool
+	version  uint64
+	affected []int
+	copied   func(int)
 }
 
 func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 	indexes := f.captureAffected
+	c.affected = append(c.affected[:0], indexes...)
 	slices.Sort(indexes)
 	var before, after []Item
 	for _, i := range indexes {
@@ -31,6 +34,9 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 	}
 	slots := make([]*Item, len(f.items))
 	copy(slots, c.slots)
+	if c.copied != nil {
+		c.copied(len(c.slots))
+	}
 	if c.active == nil {
 		c.active = make(map[int]bool)
 	}
@@ -56,23 +62,21 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 		delete(f.captureSet, i)
 	}
 	f.captureAffected = f.captureAffected[:0]
-	var items []*Item
-	for _, item := range slots {
-		if item != nil {
-			items = append(items, item)
-		}
-	}
-	return items, changes, nil
+	return slots, changes, nil
 }
 
 func detachPublication(items []*Item) []Item {
 	var result []Item
-	if items != nil {
-		result = make([]Item, len(items))
-	}
-	for i, item := range items {
-		result[i] = *item
-		result[i].Content = append(json.RawMessage(nil), item.Content...)
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if result == nil {
+			result = make([]Item, 0, len(items))
+		}
+		copy := *item
+		copy.Content = append(json.RawMessage(nil), item.Content...)
+		result = append(result, copy)
 	}
 	return result
 }
