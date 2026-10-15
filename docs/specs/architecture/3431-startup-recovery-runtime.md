@@ -48,7 +48,24 @@ Measure a complete uncached baseline package run and candidate package run separ
 - Does printable padding retain real rollover? Resolve with on-disk bytes and segment assertions before accepting the reduction.
 
 ## Documentation handoff
-Pending for the documentation stage: preserve the ADR 045 requirements from #3331 / PR #3348 in `docs/specs/architecture/3331-thread-index-over-history.md` § Documentation handoff: Proposed `docs/knowledge/decisions/045-thread-index-over-history.md` with Context, Decision, Reliability, Rejected options, Consequences, Migration and rollback; `docs/knowledge/decisions/042-daemon-built-thread.md` § The six approved decisions, Storage cross-reference; `docs/knowledge/CATALOG.md` § Decisions, ADR 045 entry. This ticket changes neither the proposed storage architecture nor that handoff's ownership.
+Verified by the documentation stage on 2026-10-15 against
+[#3331's handoff](3331-thread-index-over-history.md#documentation-handoff):
+[ADR 045](../../knowledge/decisions/045-thread-index-over-history.md) already
+retains Proposed status and the complete Context, Decision, Reliability,
+Rejected options, Consequences, Migration and rollback requirements.
+[ADR 042 § The six approved decisions](../../knowledge/decisions/042-daemon-built-thread.md#the-six-approved-decisions)
+already includes the Storage cross-reference, and the
+[catalog § Decisions](../../knowledge/CATALOG.md#decisions) already lists ADR 045
+as Proposed. All three handoff items are satisfied in the existing documents;
+their ownership remains with #3331 / PR #3348. This fixture repair changes none
+of that proposed architecture.
+
+The verifier's fixture-cost and runtime-attribution handoff is satisfied in
+[development verification](../../knowledge/features/development-verification.md#diagnosing-startup-recovery-runtime)
+and [history producer verification](../../knowledge/features/history-package-producers-legacy-compatibility.md):
+measure encoded bytes, assert pagination and rollover independently, and retain
+active-test intervals separately from package elapsed time without attributing
+the historical timeout to an unobserved runtime defect.
 
 ## Security review
 **Verdict:** PASS
