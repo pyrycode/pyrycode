@@ -28,6 +28,7 @@ type sendRecord struct {
 // sendFact consumes supported sends even when malformed, so they never enter
 // standalone or main-work processing. Only valid earlier entries can be linked.
 func (f *Fold) sendFact(e history.Entry) (bool, error) {
+	decode := f.decode
 	status := ""
 	switch e.Type {
 	case "send_accepted":
@@ -47,9 +48,12 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 	}
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(e.Payload, &fields) // decode validated the object.
+	f.countIngestion(len(e.Payload))
 	for key, value := range fields {
+		f.countIngestion(len(key) + len("queued_msg_id"))
 		if strings.EqualFold(key, "queued_msg_id") {
 			var id uint64
+			f.countIngestion(len(value))
 			if json.Unmarshal(value, &id) != nil || id == 0 || id != p.QueuedMessageID {
 				return true, nil
 			}
@@ -85,7 +89,9 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 		}
 		message := rendered[0]
 		f.countPublicWork(1)
+		f.countIngestion(len(item.Content) + len(message.Content))
 		item.Content = deliveredSendContent(item.Content, message.Content)
+		f.countIngestion(len(item.Content) * 3)
 		item.Summary, item.Order = message.Summary, message.ID
 		item.Session, item.Agent, item.NoChild = message.Session, message.Agent, message.NoChild
 		// Preserve internal indexes held by main work; suppress only the public row.
