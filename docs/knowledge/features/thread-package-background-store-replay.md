@@ -140,9 +140,9 @@ explicit requests for each open conversation.
 Production recovery validates the stored-entry checksum and reconstructed
 last-shown watermark at the saved version instead of comparing rendered items.
 Publication capture uses `renderShared` on affected public rows to resolve the
-[standalone](thread-package-main-thread-folding.md#standalone-source-entries),
-[assistant/ordinary-tool](thread-package-main-thread-folding.md#main-work-source-entries),
-[accepted-send](thread-package-main-thread-folding.md#accepted-sends-and-durable-outcomes)
+[standalone](thread-package-main-thread-folding-sources.md#standalone-source-entries),
+[assistant/ordinary-tool](thread-package-main-thread-folding-lifecycle.md#main-work-source-entries),
+[accepted-send](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes)
 and [agent/shell lifecycle recipes](thread-package-agents-and-background-work.md#agent-lifecycle)
 after excluding suppressed delivery rows and children without public parents.
 Before/after rendering is transient: comparison slots, current publications and
@@ -153,7 +153,7 @@ Captured recipes remain stable across later feeds, including equal-content
 companion replacements that change provenance without public revisions/touches.
 All production item kinds retain references; legacy `New` remains inline.
 Store publication/query recipes and the detached change ring are separate from
-the [fold/source heap measurement](thread-package-main-thread-folding.md#validation-and-testing);
+the [fold/source heap measurement](thread-package-main-thread-folding-validation.md#validation-and-testing);
 that ratio excludes publications. See [cache and epochs](thread-package.md#cache-and-epochs).
 Private or withdrawn slots are nil; `detachPublication` skips them and preserves
 nil `Items` when no public row survives. Slot count is not public item count.

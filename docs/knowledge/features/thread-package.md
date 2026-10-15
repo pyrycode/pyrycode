@@ -351,7 +351,7 @@ See [snapshots and retry](thread-package-background-store-replay.md#snapshots-an
 All production item kinds, including agents and linked shells, use references;
 private outcomes and parent endings retain no payload copies. Legacy `New`
 compatibility storage is unused in production. The
-[fold/source heap proof](thread-package-main-thread-folding.md#validation-and-testing)
+[fold/source heap proof](thread-package-main-thread-folding-validation.md#validation-and-testing)
 excludes Store publications, whose structural accounting remains separate.
 The worker's recent-entry cache (256 entries, inclusive 1 MiB), history's bounded
 caches and the detached change ring (64 batches, 1 MiB encoded) are separate
