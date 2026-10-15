@@ -1577,7 +1577,10 @@ func startRelayV2(
 	// goroutine, so the two fan-outs that trigger it never wait on it; it exits
 	// with the daemon ctx. Handed to the bridge and the emitter below, each before
 	// the goroutine that reads the field starts.
-	waker := newPushWaker(mgr, registry, conn.SendPushWake, logger)
+	waker := newPushWaker(mgr, registry, conn.SendPushWakeFeedback, logger)
+	waker.invalid = func(ctx context.Context, snapshot devices.Device) {
+		clearInvalidPushRegistration(ctx, registry, resolveDevicesPath(w.instanceName), snapshot, logger)
+	}
 	go waker.run(ctx)
 
 	// Stream-json approval bridge (#1080): joins the daemon-singleton permbridge

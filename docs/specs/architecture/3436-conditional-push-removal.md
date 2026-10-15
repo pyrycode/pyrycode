@@ -31,11 +31,11 @@ The existing waker goroutine owns coalescing. Each successful submission has a f
 |---|---|
 | A/B held replies, registration replacement, repeated/duplicate invalid result | `TestPushWakeFeedbackPersistence` |
 | Revocation, reused display name, pair committed while waiting for lock | `TestPushWakeFeedbackReconcile` |
-| Registration update before conditional clear | `TestPushWakeFeedbackPersistence`, `TestClearPushRegistrationIfMatch` |
+| Registration update before conditional clear, busy/cancelled lock acquisition | `TestPushWakeFeedbackPersistence`, `TestPushWakeFeedbackLockBarrier`, `TestClearPushRegistrationIfMatch` |
 | Disconnect/reconnect and stale reply | `TestPushWakeFeedbackReconnect` |
-| Immediate result, malformed/transient/unknown result, legacy silence, overflow | `TestPushWakeFeedbackRejected`, upstream `TestWakeFeedbackResults`, `TestWakeFeedbackWriteOrdering`, `TestWakeFeedbackBounds` |
-| Expiry and cancellation | upstream `TestWakeFeedbackBounds`, `TestWakeFeedbackRetirement`; `TestPushWakeFeedbackFailures` |
-| Failed send then next trigger | existing `TestPushWaker` send-failure assertions |
+| Immediate result, malformed/transient/unknown result, legacy silence, overflow | `TestPushWakeFeedbackImmediate`, `TestPushWakeFeedbackRejected`, `TestPushWakeFeedbackCapacity`; upstream `TestWakeFeedbackResults`, `TestWakeFeedbackWriteOrdering` |
+| Expiry and cancellation | `TestPushWakeFeedbackExpiry`, `TestPushWakeFeedbackFailures`; upstream `TestWakeFeedbackBounds`, `TestWakeFeedbackRetirement` |
+| Failed send then next trigger | `TestPushWakeFeedbackFailedSend` and existing `TestPushWaker` send-failure assertions |
 
 ## Error handling
 Lock failure/cancellation causes no mutation or Save. Reload failure preserves memory/disk and is contained before logging. Missing identity or changed registration causes no Save. Save failure retains the clear in memory and prior atomic disk file, reports fixed failure text, and never retries a consumed notification. Pair/revoke commits are reconciled inside the file lock.
@@ -62,3 +62,6 @@ Pending for documentation stage: `docs/protocol-mobile.md`, **Push-wake publicat
 - Threat model: relay can advise invalidity only for a live correlated request. Pairing credentials, permissions and key bindings remain intact. Live compatibility/activation evidence belongs to coordinated operator work under #3423 and relay #213.
 
 Sizing recheck: one observable deliverable, approximately 700 total written lines, no new exported type, four constructor consumers plus send wiring, five acceptance criteria, five persistence terminal outcomes; all limits satisfied.
+
+## Revisions
+2026-10-15: Expanded public-API proof to use the real 60-second expiry timer, exact 128/129 capacity boundary, immediate replies, failed-write retry and explicit lock barriers. The upstream controlled-clock tests continue to pin the exact expiry boundary. Full-device comparisons key by pairing identity because Reload adopts disk ordering after renames. No production contract change; final written work remains below 800 lines.
