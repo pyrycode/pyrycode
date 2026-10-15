@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,6 +144,13 @@ func TestAgentSessionEndings_Startup(t *testing.T) {
 	t.Parallel()
 	for _, modern := range []bool{false, true} {
 		t.Run(map[bool]string{false: "legacy", true: "modern"}[modern], func(t *testing.T) {
+			started := time.Now()
+			phase := func(name string) func() {
+				t.Logf("startup phase=%s begin elapsed=%s", name, time.Since(started))
+				at := time.Now()
+				return func() { t.Logf("startup phase=%s duration=%s elapsed=%s", name, time.Since(at), time.Since(started)) }
+			}
+			constructed := phase("fixture")
 			dir := t.TempDir()
 			store := history.New(dir)
 			reg := &conversations.Registry{}
@@ -155,12 +165,17 @@ func TestAgentSessionEndings_Startup(t *testing.T) {
 				}
 			}
 			var source *history.SessionProvenance
+			var lifetime string
 			if modern {
 				source = &history.SessionProvenance{Kind: "claude", SessionID: "source"}
 				e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
 				e.hist, e.runtimeFacts = store, true
 				for _, ev := range []turnevent.Event{turnevent.ToolStart{Title: "Agent", ToolCallID: "call", ParentToolCallID: "parent"}, turnevent.ToolUpdate{ToolCallID: "call", Status: turnevent.ToolStatusCompleted}, turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "call"}, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}} {
 					e.HandleFor(context.Background(), testConvID, ev, *source)
+				}
+				lifetime = e.agentLifetime
+				if lifetime == "" {
+					t.Fatal("missing modern lifetime")
 				}
 			} else {
 				put(protocol.TypeToolUse, map[string]string{"name": "Agent", "tool_use_id": "call", "parent_tool_use_id": "parent"}, nil)
@@ -174,37 +189,101 @@ func TestAgentSessionEndings_Startup(t *testing.T) {
 			put(protocol.TypeBackgroundTaskStarted, map[string]any{"task_id": "bad", "tool_call_id": "call", "truncated_fields": []string{"task_id"}}, nil)
 			// Force multiple raw pages and a real segment rollover without retaining prose in recovery.
 			for i := 0; i < 140; i++ {
-				put("padding", map[string]string{"padding": string(make([]byte, 8192))}, nil)
+				put("padding", map[string]string{"padding": strings.Repeat("x", 8192)}, nil)
 			}
+			constructed()
+			inspected := phase("raw-pages")
+			files, err := filepath.Glob(filepath.Join(dir, "conversations", testConvID, "history", "segment-*.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var bytes int64
+			var sizes []int64
+			for _, file := range files {
+				info, err := os.Lstat(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !info.Mode().IsRegular() || info.Size() == 0 {
+					t.Fatal("expected nonempty real segment")
+				}
+				bytes += info.Size()
+				sizes = append(sizes, info.Size())
+			}
+			if len(sizes) < 2 || sizes[0] < history.MaxSegmentBytes {
+				t.Fatalf("fixture did not roll over: segment sizes=%v", sizes)
+			}
+			reader := history.New(dir)
+			pages, count, cursor := 0, 0, ""
+			for {
+				page, err := reader.Page(conversations.ConversationID(testConvID), cursor, 128)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(page.Entries) > 0 {
+					pages++
+					count += len(page.Entries)
+				}
+				if page.AtStart {
+					break
+				}
+				cursor = page.Cursor
+			}
+			if pages < 2 {
+				t.Fatalf("fixture has only %d nonempty raw pages", pages)
+			}
+			t.Logf("startup fixture bytes=%d segment_sizes=%v raw_pages=%d entries=%d page_size=128", bytes, sizes, pages, count)
+			inspected()
 			now := time.Now().UTC()
+			recovered := phase("recovery")
 			reconcileStartupHistory(history.New(dir), reg, discardLogger(), now)
+			recovered()
+			read := phase("reopened-reads")
 			entries := testSessionEndings(t, history.New(dir))
 			if len(entries) != 2 {
 				t.Fatalf("endings=%d want=2", len(entries))
 			}
+			seen := map[string]bool{}
 			for _, entry := range entries {
-				var p map[string]any
-				_ = json.Unmarshal(entry.Payload, &p)
-				if p["cause"] != "daemon_restart" || !entry.TS.Equal(now) || entry.Shown == nil || !*entry.Shown {
+				var p agentHistoryFact
+				if err := json.Unmarshal(entry.Payload, &p); err != nil {
+					t.Fatal(err)
+				}
+				if p.ConversationID != testConvID || p.Cause != "daemon_restart" || !p.OccurredAt.Equal(now) || !entry.TS.Equal(now) || entry.Shown == nil || !*entry.Shown || p.ToolCallID != "call" {
 					t.Fatalf("bad ending %s", entry.Payload)
 				}
-				if p["task_id"] == "task" {
-					if p["tool_call_id"] != "call" || p["parent_tool_call_id"] != "parent" || !reflect.DeepEqual(entry.Session, source) {
+				if seen[p.TaskID] {
+					t.Fatalf("duplicate ending for task %q", p.TaskID)
+				}
+				seen[p.TaskID] = true
+				switch p.TaskID {
+				case "task":
+					if p.ParentToolCallID != "parent" || !reflect.DeepEqual(entry.Session, source) || p.LifetimeID != lifetime || p.Tool != "Agent" {
 						t.Fatalf("lost attribution: %s", entry.Payload)
 					}
+				case "":
+					if p.ParentToolCallID != "" || entry.Session != nil || p.LifetimeID != "" || p.Tool != "Task" || p.CallObservedEntryID == 0 {
+						t.Fatalf("bad reused call: %s", entry.Payload)
+					}
+				default:
+					t.Fatalf("unexpected task ending: %s", entry.Payload)
 				}
-				if source == nil && p["lifetime_id"] != nil {
-					t.Fatal("minted legacy lifetime")
-				}
+			}
+			if !seen["task"] || !seen[""] || entries[0].ID == entries[1].ID {
+				t.Fatal("missing distinct original task and reused call endings")
 			}
 			latest, err := (legacyHistoryReader{store: history.New(dir)}).LatestDisplayableEntryID(conversations.ConversationID(testConvID))
-			if err != nil || latest <= entries[0].ID {
+			newest, pageErr := history.New(dir).Page(conversations.ConversationID(testConvID), "", 1)
+			if err != nil || pageErr != nil || len(newest.Entries) != 1 || newest.Entries[0].Type != historySessionDivider || latest != newest.Entries[0].ID || latest <= entries[0].ID {
 				t.Fatalf("restart receipt target %d %v", latest, err)
 			}
+			read()
+			repeated := phase("repeated-recovery-and-read")
 			reconcileStartupHistory(history.New(dir), reg, discardLogger(), now.Add(time.Second))
-			if len(testSessionEndings(t, history.New(dir))) != 2 {
+			if !reflect.DeepEqual(testSessionEndings(t, history.New(dir)), entries) {
 				t.Fatal("repeated recovery")
 			}
+			repeated()
 		})
 	}
 }
