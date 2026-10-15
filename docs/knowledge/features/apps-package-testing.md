@@ -222,6 +222,27 @@ and ten baseline focused race repetitions passed. The phase and measurement gaps
 justify this proof repair without establishing a historical scheduler cause or
 queue-handle regression.
 
+### Daemon composition fixtures
+
+Parallel test-process forks can inherit a writable executable descriptor even
+after its creator closes it, making another sibling's launch fail with Linux
+`ETXTBSY`. `testWriteDaemonAppsRuntime` writes and closes the shell executable in
+a joined child, keeping writable descriptors out of sibling forks. Use it for
+initial fixtures and post-attestation replacements in both
+`TestDaemonAppsRuntimeReadiness` and `TestDaemonAppsComposition`: cached readiness
+would otherwise preserve a transient fixture launch failure as unsupported hosting.
+Preserve all supported/degraded version arms and expose the underlying probe error.
+Cancellation assertions must require the context
+deadline to expire as well as bounded return; an immediate launch error otherwise
+passes without exercising cancellation. See the
+[runtime readiness contract](apps-package-lifecycle-and-restart-state.md#lifecycle-and-restart-state).
+
+Installing the actual owner also introduces asynchronous committed lifecycle
+observations. `TestDaemonAppsComposition` compares discovery/tombstone revisions
+with committed registry snapshots and drains intervening updates; assuming
+registration/removal consume exactly two revisions would reject valid owner
+observations or correlate the wrong notification.
+
 ### Other package fixtures
 
 Inspect the compiled bundle itself, not only generated output.
