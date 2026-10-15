@@ -8,6 +8,7 @@
 - `internal/apps/publication_update.go` → `retirePrevious`, `finishUpdateFailure`: errors bar snapshot/restoration.
 - `internal/apps/publication.go` → `finishPublicationFailure`: safe metadata and recovery evidence.
 - `internal/apps/cleanup_probe_test.go`, `internal/apps/retirement_errors_test.go`, predecessor/migration uncertainty tests: retain denied-signal and persistent-uncertainty assertions.
+- `internal/apps/runtime_errors_test.go` → `TestOwnerCleanupErrorContext`: persistent inspection injection must outlive actual group retirement to verify error context.
 - `internal/apps/health_test.go`, `internal/apps/owner_process_test.go`: real forced descendants and atomic PID markers.
 - `docs/knowledge/features/apps-package-testing.md` § Publication fixtures and `apps-package-lifecycle-and-restart-state.md` § Publication writers and completion: leader exit alone never proves retirement.
 - `CODING-STYLE.md`, `docs/knowledge/features/development-verification.md`: bounded tests, native evidence and attribution limits.
@@ -62,3 +63,16 @@ Commit this plan first, then write discriminating tests and record their failure
 ## Documentation handoff
 - Pending documentation stage: `docs/knowledge/features/apps-package-lifecycle-and-restart-state.md`, “Publication writers and completion”: describe bounded post-SIGKILL positive group inspection, retained denied-signal/persistent-uncertainty errors and joined leader before completion.
 - Pending documentation stage: `docs/knowledge/features/apps-package-testing.md`, “Publication fixtures”: describe the controlled native/EPERM sequencing regression and link the exact native batches/package evidence, including attribution limits and skips.
+
+## Validation evidence
+Native macOS 26.6.2/arm64, Go 1.26.2, supported real Node 24.15.0/npm 11.12.1. Exact commands, environment, revisions, disjoint parent/leaf counts, skips and every attempt's compressed events are in `internal/apps/testdata/3418-macos-results.json`.
+
+- Unchanged baseline: 90 retirement leaves executed, 89 passed and health/cancel failed once; 5 parent records, 4 passed and 1 failed. No skips.
+- Controlled pre-repair regressions failed; final focused safety family passed all 29 leaves and 6 parents. Strengthened context/probe family passed 10 leaves and 2 parents.
+- Both consecutive retirement batches at `702b8396` and both repeated consecutive batches at final test revision `bdb47b53` each passed all 90 leaves and 5 parent records, with no skips. All 18 retirement arms also passed in both complete package attempts.
+- First complete package gate FAILED the two transient inspection-context assertions; their persistent injection repair is recorded above. Final complete package gate still FAILED: 902 leaves, 895 passed, 3 failed and 4 skipped; 103 parents, 102 passed and 1 failed. Failures were initial-publication build phases in `TestUpdateTemplateSnapshot` and both `TestUpdateTemplateRollback` arms. Skips were four filesystem-rejected invalid-UTF8 filename arms, not retirement or real-tool publication arms.
+- A diagnostic overlay passed the snapshot/update arm, which does not establish a cause or a package pass. A fresh unchanged-main `e18dda62` archive then failed all three maintained-template leaves during build. Its intended logging overlay used a noncanonical `/tmp` path and emitted no diagnostics; this establishes baseline failure but no inner command attribution. No production fix for these separate failures was attempted.
+- Filed native blocker #3447 for that existing build-stage investigation. The complete package gate remains failing/incomplete, and must be rerun after the blocker is repaired. This is required builder verification, not a documentation or live-test handoff.
+- `go vet ./...` and daemon build passed. Full-module verifier gate remains pending; no live Claude is required.
+
+Final sizing: approximately 640 textual lines including generated evidence, one production file, no exported types or consumer signature changes; all five limits remain satisfied.
