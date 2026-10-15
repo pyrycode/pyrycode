@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -500,6 +501,19 @@ func TestLiveStateRun(t *testing.T) {
 	frames := make(chan protocol.RoutingEnvelope, 2)
 	rec := &v2Recorder{}
 	cfg := threadConfig(t, frames, rec, priv)
+	started := time.Now()
+	const expected = pushQueueCap*2 + 2
+	var sent atomic.Int64
+	cfg.Outbound = func(frame protocol.RoutingEnvelope) error {
+		if err := rec.outbound(frame); err != nil {
+			return err
+		}
+		n := sent.Add(1)
+		if n == 1 || n == expected/2 || n == expected {
+			t.Logf("live-state transport: elapsed=%s received=%d/%d", time.Since(started), n, expected)
+		}
+		return nil
+	}
 	cfg.ThreadLiveState = func() func() (LiveState, bool) {
 		i := 0
 		return func() (LiveState, bool) {
@@ -514,6 +528,7 @@ func TestLiveStateRun(t *testing.T) {
 	for _, frame := range msgs[1:] {
 		threadPlain(t, frame, recv)
 	}
+	t.Logf("live-state decrypted: elapsed=%s received=%d/%d decrypted=%d/%d", time.Since(started), len(msgs), expected, len(msgs)-1, expected-1)
 	if got := mgr.ActiveConns(t.Context()); len(got) != 1 {
 		t.Fatal("snapshot overflow closed connection")
 	}
