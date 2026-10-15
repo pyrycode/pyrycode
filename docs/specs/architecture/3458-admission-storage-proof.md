@@ -97,3 +97,29 @@ success or a later passing rerun.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-15
+
+## Documentation handoff
+
+- Pending documentation stage: update `docs/knowledge/features/config-package.md`
+  § Relay admission credentials with native setup diagnostics, the inherited/effective-group
+  distinction, deterministic full-mode coverage and byte/full-mode preservation proof.
+  Keep current observations separate from the historical cause.
+
+## Revisions
+
+- 2026-10-15, verifier finding 1: missing setgid previously suppressed unrelated chmod
+  errors, and group-assignment errors were only logged. Preserve both API observations,
+  then fail every setup error except permission (`EPERM`/`EACCES`) or unavailable-operation
+  (`ENOTSUP`/`ENOSYS`) errors when the native setgid prerequisite is also observed missing.
+  A nil-error chmod that does not retain setgid remains an observed native limitation.
+  A failure marks the test before the existing skip guard, so an I/O error cannot skip.
+  Extract the fixture runner for per-call setup injection, without shared mutable state.
+  `TestRelayAdmissionStorageSetupFailure` re-executes the test binary with a 15-second
+  context bound for each chmod/chown EIO case; require child failure, both API observations
+  and no skip. This adds bounded child processes, each joined by `CombinedOutput`, to the
+  concurrency model; no new goroutines or identity state. `TestAdmissionSetgidUnavailable`
+  covers the recognized errors and rejects I/O, missing-path, invalid-argument and
+  read-only-filesystem errors. Production security checks remain unchanged. Self-review:
+  setup injection is child-local, diagnostics remain synthetic, and errors fail closed.
+  Total planned written work remains below 450 lines, with zero exported types or
+  consumer migrations; no concurrent feature branch changes the admission test file.

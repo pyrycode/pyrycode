@@ -1,15 +1,18 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -185,6 +188,11 @@ func TestRelayAdmissionFieldBoundaries(t *testing.T) {
 
 func TestRelayAdmissionStorage(t *testing.T) {
 	t.Parallel()
+	testRelayAdmissionStorage(t, os.Chmod, os.Chown)
+}
+
+func testRelayAdmissionStorage(t *testing.T, parentChmod func(string, os.FileMode) error, parentChown func(string, int, int) error) {
+	t.Helper()
 	for _, tc := range []struct {
 		name             string
 		file, dir        os.FileMode
@@ -216,9 +224,9 @@ func TestRelayAdmissionStorage(t *testing.T) {
 			var groupErr error
 			if tc.effectiveGroup {
 				admissionStorageMetadata(t, path, tc.file, 0o700)
-				groupErr = os.Chown(filepath.Dir(path), -1, os.Getegid())
+				groupErr = parentChown(filepath.Dir(path), -1, os.Getegid())
 			}
-			chmodErr := os.Chmod(filepath.Dir(path), tc.dir)
+			chmodErr := parentChmod(filepath.Dir(path), tc.dir)
 			file, parent := admissionStorageMetadata(t, path, tc.file, tc.dir)
 			missingSetgid := tc.dir&os.ModeSetgid != 0 && parent.Mode() == os.ModeDir|0o700 &&
 				file.Mode() == 0o600 && file.Sys().(*syscall.Stat_t).Uid == uint32(os.Geteuid()) &&
@@ -229,8 +237,13 @@ func TestRelayAdmissionStorage(t *testing.T) {
 			t.Logf("effective_group_requested=%v group_setup=%v parent_chmod=%v setgid_established=%v; Load: error=%v zero_config=%v admission_present=%v; UpdateMemory: error=%v",
 				tc.effectiveGroup, groupErr, chmodErr, parent.Mode()&os.ModeSetgid != 0,
 				loadErr, reflect.DeepEqual(cfg, Config{}), cfg.RelayAdmissionTokens != nil, updateErr)
-			if chmodErr != nil && !missingSetgid {
-				t.Error(chmodErr)
+			for _, setup := range []struct {
+				operation string
+				err       error
+			}{{"group assignment", groupErr}, {"parent chmod", chmodErr}} {
+				if setup.err != nil && !(missingSetgid && admissionSetgidUnavailable(setup.err)) {
+					t.Errorf("unexpected %s setup error: %v", setup.operation, setup.err)
+				}
 			}
 			if parent.Mode() != os.ModeDir|tc.dir && !missingSetgid {
 				t.Errorf("native prerequisite: requested parent mode %v, actual %v", os.ModeDir|tc.dir, parent.Mode())
@@ -263,6 +276,83 @@ func TestRelayAdmissionStorage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Only permission and unsupported-operation errors describe unavailable native prerequisites.
+func admissionSetgidUnavailable(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENOSYS)
+}
+
+func TestAdmissionSetgidUnavailable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		err         error
+		unavailable bool
+	}{
+		{syscall.EPERM, true}, {syscall.EACCES, true}, {syscall.ENOTSUP, true}, {syscall.ENOSYS, true},
+		{syscall.EIO, false}, {syscall.ENOENT, false}, {syscall.EINVAL, false}, {syscall.EROFS, false},
+	} {
+		t.Run(tc.err.Error(), func(t *testing.T) {
+			err := &os.PathError{Op: "setup", Path: "synthetic", Err: tc.err}
+			if got := admissionSetgidUnavailable(err); got != tc.unavailable {
+				t.Errorf("unavailable=%v, want %v: %v", got, tc.unavailable, err)
+			}
+		})
+	}
+}
+
+func TestRelayAdmissionStorageSetupFailure(t *testing.T) {
+	t.Parallel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ operation, leaf, diagnostic string }{
+		{"chmod", "setgid_parent", "unexpected parent chmod setup error"},
+		{"chown", "setgid_parent_effective_group", "unexpected group assignment setup error"},
+	} {
+		t.Run(tc.operation, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "-test.v", "-test.run=^TestRelayAdmissionStorageSetupHelperProcess$/^"+tc.leaf+"$")
+			cmd.Env = append(os.Environ(), "GO_TEST_RELAY_ADMISSION_SETUP_ERROR="+tc.operation)
+			output, err := cmd.CombinedOutput()
+			t.Logf("injected %s EIO: error=%v\n%s", tc.operation, err, output)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Errorf("setup I/O error must fail the native test: %v", err)
+			}
+			for _, want := range []string{"Load: error=", "UpdateMemory: error=", "input/output error", tc.diagnostic, "--- FAIL:"} {
+				if !strings.Contains(string(output), want) {
+					t.Errorf("missing observation %q", want)
+				}
+			}
+			if strings.Contains(string(output), "--- SKIP:") {
+				t.Error("setup I/O error was skipped")
+			}
+		})
+	}
+}
+
+func TestRelayAdmissionStorageSetupHelperProcess(t *testing.T) {
+	operation := os.Getenv("GO_TEST_RELAY_ADMISSION_SETUP_ERROR")
+	if operation == "" {
+		return
+	}
+	chmod, chown := os.Chmod, os.Chown
+	switch operation {
+	case "chmod":
+		chmod = func(path string, _ os.FileMode) error {
+			return &os.PathError{Op: operation, Path: path, Err: syscall.EIO}
+		}
+	case "chown":
+		chown = func(path string, _, _ int) error {
+			return &os.PathError{Op: operation, Path: path, Err: syscall.EIO}
+		}
+	default:
+		t.Fatalf("unknown setup operation %q", operation)
+	}
+	testRelayAdmissionStorage(t, chmod, chown)
 }
 
 func admissionStorageMetadata(t *testing.T, path string, fileMode, parentMode os.FileMode) (os.FileInfo, os.FileInfo) {
