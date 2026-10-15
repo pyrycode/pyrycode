@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"cmp"
 	"encoding/json"
 	"slices"
 )
@@ -29,7 +30,13 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 			after = append(after, f.items[i])
 		}
 	}
-	before, err := renderShared(before, c.recipes, f.source)
+	before, err := renderSharedLookup(before, c.recipes, f.source, func(id uint64) (Item, bool) {
+		i, ok := slices.BinarySearchFunc(f.items, id, func(item Item, id uint64) int { return cmp.Compare(item.ID, id) })
+		if !ok || i >= len(c.slots) || c.slots[i] == nil {
+			return Item{}, false
+		}
+		return *c.slots[i], true
+	})
 	if err != nil {
 		return nil, Observation{}, err
 	}
@@ -65,7 +72,7 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 			}
 			item := f.items[i]
 			slots[i] = &item
-			if r := f.recipes[item.ID]; r.creating != 0 {
+			if r := f.recipes[item.ID]; r.creating != 0 || len(r.fields) != 0 {
 				c.recipes[item.ID] = r
 			}
 		}

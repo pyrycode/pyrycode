@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"cmp"
 	"encoding/json"
 	"maps"
 	"slices"
@@ -15,7 +16,6 @@ type entrySource interface {
 }
 
 // Recipe fields are copy-on-write; text IDs are append-only with snapshot lengths.
-// Only parent_ending may carry a copied payload until its lifecycle conversion.
 type contentRecipe struct {
 	creating uint64
 	delivery uint64
@@ -24,8 +24,10 @@ type contentRecipe struct {
 }
 
 type recipeField struct {
-	entry uint64
-	value json.RawMessage
+	entry    uint64
+	item     uint64
+	revision uint64
+	value    json.RawMessage
 }
 
 func (f *Fold) referenceItem(index int, e history.Entry) {
@@ -51,10 +53,15 @@ func (f *Fold) referenceField(index int, key string, value recipeField) {
 }
 
 func (f *Fold) setOutcome(index int, outcome *mainOutcome) {
-	if f.recipes[f.items[index].ID].creating != 0 {
-		f.referenceField(index, outcome.field, recipeField{entry: outcome.id})
+	if f.source != nil {
+		// Foreground shells retain launch evidence separately, but terminal
+		// content uses the same history recipe as ordinary tools.
+		if f.recipes[f.items[index].ID].creating == 0 {
+			f.referenceItem(index, history.Entry{ID: f.items[index].ID})
+		}
+		f.referenceField(index, outcome.field, recipeField{entry: outcome.content})
 	} else {
-		f.setContent(index, outcome.field, outcome.raw)
+		f.setContent(index, outcome.field, f.legacyOutcomes[outcome.content])
 	}
 }
 
@@ -104,23 +111,62 @@ func (f *Fold) render(items []Item) ([]Item, error) {
 // renderShared borrows content owned by the fold or its private history source.
 // Those bytes are immutable: subsequent folding replaces Content allocations.
 func (f *Fold) renderShared(items []Item) ([]Item, error) {
-	return renderShared(items, f.recipes, f.source)
+	return renderShared(items, f.recipes, f.source, f.items)
 }
 
-// renderShared resolves one immutable recipe set, independent of subsequent Feed.
-func renderShared(items []Item, recipes map[uint64]contentRecipe, source entrySource) ([]Item, error) {
+// renderShared resolves dependencies from the same item/recipe view as the
+// selected output. No ancestor is fetched from a mutable external fold.
+func renderShared(selected []Item, recipes map[uint64]contentRecipe, source entrySource, view []Item) ([]Item, error) {
+	return renderSharedLookup(selected, recipes, source, func(id uint64) (Item, bool) {
+		index, ok := slices.BinarySearchFunc(view, id, func(item Item, id uint64) int { return cmp.Compare(item.ID, id) })
+		if !ok {
+			return Item{}, false
+		}
+		return view[index], true
+	})
+}
+
+// lookup resolves ancestors from the selected view and makes their recipes
+// available in recipes before returning. Rendering never consults another view.
+func renderSharedLookup(selected []Item, recipes map[uint64]contentRecipe, source entrySource, lookup func(uint64) (Item, bool)) ([]Item, error) {
+	items := slices.Clone(selected)
+	seen := make(map[uint64]bool, len(items))
+	for _, item := range items {
+		seen[item.ID] = true
+	}
+	for i := 0; i < len(items); i++ {
+		for _, field := range recipes[items[i].ID].fields {
+			if field.item == 0 {
+				continue
+			}
+			if field.item >= items[i].ID {
+				return nil, ErrUnavailable
+			}
+			if seen[field.item] {
+				continue
+			}
+			ancestor, ok := lookup(field.item)
+			if !ok {
+				return nil, ErrUnavailable
+			}
+			items = append(items, ancestor)
+			seen[field.item] = true
+		}
+	}
+	slices.SortFunc(items, func(a, b Item) int { return cmp.Compare(a.ID, b.ID) })
 	var ids []uint64
 	for _, item := range items {
-		if r := recipes[item.ID]; r.creating != 0 {
+		r := recipes[item.ID]
+		if r.creating != 0 {
 			ids = append(ids, r.creating)
 			if r.delivery != 0 {
 				ids = append(ids, r.delivery)
 			}
 			ids = append(ids, r.text...)
-			for _, field := range r.fields {
-				if field.entry != 0 {
-					ids = append(ids, field.entry)
-				}
+		}
+		for _, field := range r.fields {
+			if field.entry != 0 {
+				ids = append(ids, field.entry)
 			}
 		}
 	}
@@ -135,14 +181,18 @@ func renderShared(items []Item, recipes map[uint64]contentRecipe, source entrySo
 			entries[e.ID] = e
 		}
 	}
+	rendered := make(map[uint64]Item, len(items))
 	for i := range items {
 		item := &items[i]
-		if r := recipes[item.ID]; r.creating != 0 {
+		r := recipes[item.ID]
+		if r.creating != 0 || len(r.fields) != 0 {
 			e, ok := entries[r.creating]
-			if !ok {
+			if r.creating != 0 && (!ok || !decode(e.Payload, &struct{}{})) {
 				return nil, ErrUnavailable
 			}
-			item.Content = e.Payload
+			if r.creating != 0 {
+				item.Content = e.Payload
+			}
 			if r.delivery != 0 {
 				delivery, ok := entries[r.delivery]
 				if !ok || !decode(e.Payload, &struct{}{}) || !decode(delivery.Payload, &struct{}{}) {
@@ -172,6 +222,13 @@ func renderShared(items []Item, recipes map[uint64]contentRecipe, source entrySo
 				}
 				for key, field := range r.fields {
 					raw := field.value
+					if field.item != 0 {
+						ancestor, ok := rendered[field.item]
+						if !ok {
+							return nil, ErrUnavailable
+						}
+						raw = ancestor.Content
+					}
 					if field.entry != 0 {
 						e, ok := entries[field.entry]
 						if !ok {
@@ -211,8 +268,12 @@ func renderShared(items []Item, recipes map[uint64]contentRecipe, source entrySo
 				}
 			}
 		}
+		rendered[item.ID] = *item
 	}
-	return items, nil
+	for i := range selected {
+		selected[i] = rendered[selected[i].ID]
+	}
+	return selected, nil
 }
 
 const recentEntryBudget = 1 << 20

@@ -54,6 +54,9 @@ type agentTask struct {
 }
 type agentReport struct {
 	id              uint64
+	content         uint64
+	turn            string
+	foreground      bool
 	status, field   string
 	raw             json.RawMessage
 	durable, mapped bool
@@ -536,6 +539,12 @@ func (g *agentGroup) insertTaskID(call, id string) {
 // Companion evidence counts once; the earliest entry owns terminal order while
 // the mapped report supplies content. Equal later reports do not replace it.
 func (g *agentGroup) addReport(reports *[]*agentReport, e history.Entry, status, field string, durable bool) {
+	var turn string
+	var foreground bool
+	if !durable && (field == "result" || field == "denial") {
+		id, _, _, _, valid := mainDecode(e)
+		turn, foreground = id.TurnID, valid
+	}
 	for _, r := range *reports {
 		g.count(1)
 		if r.status == status && r.field == field && ((durable && r.mapped && !r.durable) || (!durable && r.durable && !r.mapped)) {
@@ -543,11 +552,12 @@ func (g *agentGroup) addReport(reports *[]*agentReport, e history.Entry, status,
 			r.durable, r.mapped = true, true
 			if !durable {
 				r.raw = append(json.RawMessage(nil), e.Payload...)
+				r.content, r.turn, r.foreground = e.ID, turn, foreground
 			}
 			return
 		}
 	}
-	*reports = append(*reports, &agentReport{id: e.ID, status: status, field: field, raw: append(json.RawMessage(nil), e.Payload...), durable: durable, mapped: !durable})
+	*reports = append(*reports, &agentReport{id: e.ID, content: e.ID, turn: turn, foreground: foreground, status: status, field: field, raw: append(json.RawMessage(nil), e.Payload...), durable: durable, mapped: !durable})
 }
 func agentTerminal(status string) bool {
 	return status != "" && status != "stopping"
@@ -607,7 +617,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	var final *agentReport
 	for _, r := range reports {
 		g.count(1)
-		if c.ordinary != nil && r.mapped && !shellReportMatches(r, item.Turn, f.ingestCounts) {
+		if c.ordinary != nil && r.mapped && !shellReportMatches(r, item.Turn) {
 			continue
 		}
 		if r.field == "result" {
@@ -656,6 +666,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 			f.saveChild(c.item, g.key, c.parent)
 		}
 		target := &f.items[c.item]
+		delete(f.recipes, target.ID)
 		target.Content, target.Status, target.Active, target.EndedOrder, target.Rev = raw, status, active, ended, max(item.ID, rev)
 		f.markAffected(c.item)
 		if c.ordinary == nil {
