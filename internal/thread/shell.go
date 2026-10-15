@@ -24,6 +24,7 @@ func (f *Fold) registerShell(e history.Entry, id string, call *mainCall) {
 	c.item, c.launch = call.item, append(json.RawMessage(nil), e.Payload...)
 	var p agentFact
 	_ = json.Unmarshal(e.Payload, &p)
+	f.countIngestion(len(e.Payload))
 	c.parent = p.ParentCall
 	if c.parent == "" {
 		c.parent = p.Parent
@@ -117,14 +118,14 @@ func (f *Fold) promoteShellEvidence(key agentKey) []string {
 
 // Ordinary mapped results keep the source turn validation used by mainWork;
 // lifecycle reports have no main-turn identity and remain independently scoped.
-func shellReportMatches(r *agentReport, turn string) bool {
+func shellReportMatches(r *agentReport, turn string, counts ...*ingestionWorkCounts) bool {
 	typ := "tool_result"
 	if r.field == "denial" {
 		typ = "tool_denied"
 	} else if r.field != "result" {
 		return true
 	}
-	id, _, _, _, valid := mainDecode(history.Entry{Type: typ, Payload: r.raw})
+	id, _, _, _, valid := mainDecode(history.Entry{Type: typ, Payload: r.raw}, counts...)
 	return valid && id.TurnID == turn
 }
 
@@ -139,7 +140,7 @@ func (f *Fold) applyShellForeground(c *agentCall) {
 		if f.agentCounts != nil {
 			f.agentCounts.work++
 		}
-		if r.mapped && (r.field == "result" || r.field == "denial") && shellReportMatches(r, f.items[c.item].Turn) && (first == nil || r.id < first.id) {
+		if r.mapped && (r.field == "result" || r.field == "denial") && shellReportMatches(r, f.items[c.item].Turn, f.ingestCounts) && (first == nil || r.id < first.id) {
 			first = r
 		}
 	}

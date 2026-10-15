@@ -99,6 +99,7 @@ func (p agentFact) lost(fields ...string) bool {
 // agentLaunchIsChild consults only the launch's recorded source and active
 // lifetime or legacy scope. Saved parent evidence cannot cross those boundaries.
 func (f *Fold) agentLaunchIsChild(e history.Entry, call string) bool {
+	decode := f.decode
 	var p protocol.ToolUsePayload
 	if e.Type != protocol.TypeToolUse || !decode(e.Payload, &p) || (p.Name != "Agent" && p.Name != "Task") {
 		return false
@@ -120,6 +121,7 @@ func (f *Fold) agentLaunchIsChild(e history.Entry, call string) bool {
 // agentWork preserves results separately from task endings so late links can
 // reclassify provisional foreground completion without changing item identity.
 func (f *Fold) agentWork(e history.Entry) bool {
+	decode := f.decode
 	durable := strings.HasPrefix(e.Type, "agent_call_") || e.Type == "agent_ended_with_session" || slices.Contains([]string{"background_task_observed", "background_task_linked", "background_task_outcome", "background_task_gone"}, e.Type)
 	mapped := slices.Contains([]string{protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskProgress, protocol.TypeBackgroundTaskRoster}, e.Type)
 	if !durable && !mapped {
@@ -171,6 +173,7 @@ func (f *Fold) agentWork(e history.Entry) bool {
 	// when the recovery fact has a usable lifetime or a different append scope.
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(e.Payload, &fields)
+	f.countIngestion(len(e.Payload))
 	referenced := false
 	var original *agentGroup
 	for _, ref := range []struct {
@@ -397,6 +400,7 @@ func (f *Fold) agentWork(e history.Entry) bool {
 		if typ == protocol.TypeToolUse && c.item < 0 {
 			var dto protocol.ToolUsePayload
 			_ = json.Unmarshal(e.Payload, &dto)
+			f.countIngestion(len(e.Payload))
 			c.launch = append(json.RawMessage(nil), e.Payload...)
 			c.item = f.addItem(e, Item{ID: e.ID, Order: e.ID, Rev: e.ID, Kind: "agent", Turn: p.Turn, Status: "running", Active: true, Shown: true, Summary: p.Name + ": " + dto.InputSummary})
 			f.childAgents[c.item] = childParentKey{key, call}
@@ -560,8 +564,12 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	}
 	var content map[string]json.RawMessage
 	_ = json.Unmarshal(c.launch, &content)
+	f.countIngestion(len(c.launch))
 	delete(content, "ended_order")
-	put := func(key string, value any) { content[key], _ = json.Marshal(value) }
+	put := func(key string, value any) {
+		content[key], _ = json.Marshal(value)
+		f.countIngestion(len(content[key])*2 + 1)
+	}
 	if c.parent != "" {
 		put("parent_tool_call_id", c.parent)
 	}
@@ -599,7 +607,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 	var final *agentReport
 	for _, r := range reports {
 		g.count(1)
-		if c.ordinary != nil && r.mapped && !shellReportMatches(r, item.Turn) {
+		if c.ordinary != nil && r.mapped && !shellReportMatches(r, item.Turn, f.ingestCounts) {
 			continue
 		}
 		if r.field == "result" {
@@ -641,6 +649,7 @@ func (f *Fold) applyAgent(g *agentGroup, id string, c *agentCall, rev uint64) {
 		put("ended_order", ended)
 	}
 	raw, _ := json.Marshal(content)
+	f.countIngestion(2*len(raw) + min(len(raw), len(item.Content)))
 	if !bytes.Equal(item.Content, raw) || item.Status != status || item.Active != active || item.EndedOrder != ended {
 		f.restoreChild(c.item)
 		if c.ordinary == nil && c.parent != "" {
