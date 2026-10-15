@@ -232,11 +232,12 @@ child traffic and tool reports alone do not split text. Saved text retains its
 recorded whitespace; only the summary is normalized.
 
 Main and child text and normalized summaries are maintained incrementally by
-`appendText` and `appendSummary`, with amortized work proportional to the incoming
-suffix. Owned JSON buffers grow geometrically, encoding only new text and moving
-fixed trailing fields; the summary builder carries pending whitespace across
-deltas instead of rescanning accumulated text. Output remains byte-identical to
-the former decode/concatenate/re-encode path: the creating payload keeps its
+`appendText` and `appendSummary`. Unpublished appends reuse private capacity with
+amortized work proportional to the incoming suffix. Private JSON buffers grow
+geometrically, encoding only new text and moving fixed trailing fields; the
+summary builder carries pending whitespace across deltas instead of rescanning
+accumulated text. Output remains byte-identical to the former
+decode/concatenate/re-encode path: the creating payload keeps its
 original formatting until enrichment or a nonempty append, then JSON keys are
 sorted with unknown creating fields and `encoding/json` escaping preserved,
 including HTML-sensitive characters. Summary whitespace/control handling and
@@ -245,6 +246,18 @@ is decoded independently, preserving UTF-8 replacement behavior rather than
 recombining invalid byte fragments across entries. Empty appends leave content,
 revision and `LastShownVersion` unchanged. Creating visibility is retained;
 input payloads and returned snapshots remain detached through buffer growth.
+
+`publicationCapture.capture` borrows Content bytes without copying them and marks
+the exposed row's text buffers shared before publication. `growText` detaches
+shared storage before writing any suffix or closing JSON bytes, even when spare
+capacity suffices: it copies the existing prefix into a new private allocation,
+preserving capacity unless growth is needed. Retained publications and query
+roots therefore keep immutable, valid JSON while the serialized fold worker
+feeds later text and queries read outside the store lock. This also preserves
+the previous text used by `itemDifference`, so a pure append yields exactly its
+suffix without a spurious Content replacement. Allocation, prefix copying and
+the capture ownership hook are included in ingestion work counters. See
+[immutable publication](thread-package-background-store.md#snapshots-and-retry).
 
 Parent-attributed text and tools fold in [child lanes](thread-package-agents-and-background-work.md#parent-repair), without
 opening or closing main turns, closing main calls or splitting/coalescing main
@@ -307,9 +320,14 @@ Child text keeps separate owned intrinsic and ancestor-derived JSON buffers.
 buffers incrementally on text appends; a late background link removes only the
 provisional closure, preserving text and normalized summary received while
 inactive. Intrinsic `ending` evidence still prevents reopening independently
-closed work. Previously returned snapshots retain their bytes across closure,
-append and reopening. Optimizing `foldWork` alone would leave quadratic child
-serialization and equality work: a proven nonempty append bypasses accumulated
+closed work. Publication capture marks both intrinsic and derived buffers shared,
+conservatively protecting either side of provisional closure. Reusing cached
+`parent_ending` content preserves its shared flag; newly built enrichment buffers
+start private. Subsequent appends detach each shared buffer before writing, so
+retained internal publications and query roots, as well as detached public
+snapshots, keep their bytes across closure, append and reopening. Optimizing
+`foldWork` alone would leave quadratic child serialization and equality work:
+a proven nonempty append bypasses accumulated
 content comparison, while empty deltas reuse cached closure content even before
 append-buffer initialization. See [ancestor closure and parent repair](thread-package-agents-and-background-work.md#parent-repair).
 
@@ -516,8 +534,18 @@ open/close cycles and empty closure. See the related
 map-based append, including case variants, escapes, control characters,
 per-payload UTF-8 replacement and input/snapshot ownership.
 `TestTextAppendChildren` and `TestTextEmptyProvisionalClosure` check append and
-empty-delta behavior through provisional closure and reopening. The fixed-size
-scenarios in `testFoldCorpus` alone cannot detect quadratic work within one long
+empty-delta behavior through provisional closure and reopening.
+`TestAffectedPublicationOwnership` and `TestAffectedPublicationTextLifecycle`
+retain internal publications and query roots after append-buffer initialization,
+then check immutable JSON, borrowed Content, exact suffix changes, concurrent
+reads and detached public results through later appends and child reopening.
+Capturing only before initialization misses mutable-buffer corruption because
+the first nonempty append replaces the creating payload's allocation; retaining
+only detached `Fold.Items` output cannot prove internal publication ownership.
+`TestTextBufferPublicationOwnership` forces spare capacity and growth, checks
+detachment before writes and subsequent private reuse, and requires the
+allocation/copy work to be counted. The fixed-size scenarios in `testFoldCorpus`
+alone cannot detect quadratic work within one long
 reply. `TestTextAppendScaling` therefore grows delta counts from 256 to 1,024 in
 one main run and child runs while open, provisionally closed, reopened and across
 all three phases; `TestFoldIngestionScaling` grows the corpus from 1,000 to 4,000
