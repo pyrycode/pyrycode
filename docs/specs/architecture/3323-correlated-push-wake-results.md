@@ -91,11 +91,12 @@ The 5-second feedback budget includes queue/writer wait, preventing the existing
 
 ## Documentation handoff
 
-**Status: pending for the documentation stage.** Publish the complete contract
+**Status: published in [the canonical protocol](../../protocol-mobile.md#push_wake_result).**
+The publication carries the complete contract
 below in `docs/protocol-mobile.md`, **Routing envelope (binary↔relay leg)** /
-**push_wake**, before #3323 closes or either companion implements it. Preserve
+**push_wake**, before #3323 closes or either companion implements it. It preserves
 the legacy request, unknown-field tolerance and payload-free FCM wake semantics.
-Under **Wire shapes**, distinguish the phone-addressed `{conn_id, frame, ...}`
+Under **Wire shapes**, it distinguishes the phone-addressed `{conn_id, frame, ...}`
 wrapper from the relay-addressed request and daemon-addressed result, linking
 both subsections. The result is an outer routing envelope, never an inner type.
 
