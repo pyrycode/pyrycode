@@ -177,10 +177,11 @@ Production assistant text and ordinary child tools use the same
 as main work. Their items and intrinsic/previous copies retain creating/text IDs
 and enrichment recipes, with assistant summaries derived only when rendered.
 They retain no inline payload, accumulated text, assistant summary or append
-buffer. Lifecycle selection still excludes Claude/legacy shell calls and agents;
-Codex tools remain ordinary calls even with shell/agent names. Those deferred
-inline conversions, private pending outcome payloads and copied `parent_ending`
-JSON remain [#3334](https://github.com/pyrycode/pyrycode/issues/3334).
+buffer. Codex tools remain ordinary calls even with shell/agent names. Agents and
+linked Claude/legacy shells still retain inline launch/link/report content, whose
+conversion remains [#3453](https://github.com/pyrycode/pyrycode/issues/3453).
+Foreground shell terminal content uses history recipes too; pending outcomes and
+inherited endings retain references rather than payload copies.
 
 `resolveChildren` requires the parent item's immutable `Kind` to be `agent`
 and its creating ID to be strictly less than the child's, in this conversation
@@ -226,23 +227,27 @@ pin these cases.
 
 **Retain early ordinary reports independently of main-turn slots.** An explicit
 main opening replaces its turn state; storing an early result only there would
-lose it before child creation. `childReports` keeps copied first-result/denial
-evidence by original source/lifetime-or-legacy-scope, turn and call, including
-reports whose parent is not yet known. A new producer lifetime reusing turn/call
-IDs therefore cannot have its report suppressed by, or replaced with, a
+lose it before child creation. `childReports` keeps first-result/denial IDs and
+decoded status/field facts by original source/lifetime-or-legacy-scope, turn and
+call, including reports whose parent is not yet known. A new producer lifetime
+reusing turn/call IDs cannot have its report suppressed by, or replaced with, a
 predecessor terminal.
 For an uncreated child call, adoption compares that evidence only with its own
 lane ending, excluding main-turn closure. Results wait for creation, retain the
 call's original input, and produce `done`, `failed` or `denied` in place for
 foreground work. The first terminal wins;
 later conflicting reports cannot change its outcome. An earlier report floors
-revision at creation, and pending payloads remain detached from caller input.
+revision at creation. Production `childReports` retains no report JSON;
+rendering resolves the saved content-source ID. Only legacy `New` folds populate
+the detached compatibility payload map. See
+[pending outcomes](thread-package-main-thread-folding.md#scoped-joins-pending-outcomes-and-closure)
+for distinct terminal-order and content-source IDs on companion reports.
 
 A parent-attributed `turn_end` creates no row. It closes matching child text as
-`done` and unfinished foreground ordinary calls as `interrupted`, retaining raw
-`ending` evidence on the text and calls it closes. An ending received before creation
-remains effective for later calls in that lane. Already terminal outcomes stay
-fixed, and neither this ending nor a main-turn ending completes a nested agent
+`done` and unfinished foreground ordinary calls as `interrupted`, rendering raw
+`ending` evidence from its history ID on the text and calls it closes. An ending
+received before creation remains effective for later calls in that lane. Already
+terminal outcomes stay fixed, and neither this ending nor a main-turn ending completes a nested agent
 or linked background shell.
 
 **Derive ancestor closure from genuine agent finals, keeping intrinsic child
@@ -255,23 +260,37 @@ received in the same entry. Unrelated children retain their derived state.
 schedules dependents only on actual changes, including ending-content enrichment.
 Foreground shell results use the same targeted ordinary mutation hooks.
 
-Intrinsic and previous recipes are independent value snapshots: text-ID lists
-keep their own lengths and enrichment maps use copy-on-write. A single mutable
+Intrinsic and previous recipes are independent value snapshots, including on
+inline agents with derived reference fields: text-ID lists keep their own
+lengths and enrichment maps use copy-on-write. A single mutable
 recipe would carry provisional `parent_ending` into the intrinsic base and keep
 it after reopening. Resolution compares recipe state as well as item metadata,
 without history reads during ingestion; rendering later resolves creating, text
-and terminal references through the shared source. The deferred `parent_ending`
-field still carries copied ancestor JSON, even on a reference-backed child.
-Removing only that derived field preserves late text and genuine child endings.
+and terminal references through the shared source. Production `parent_ending`
+fields name the original ending ancestor item; neither recipes nor child ending
+caches copy its JSON. Converted child items and their intrinsic/previous copies
+retain no `Content`; `legacyChildEnding` serialization caches exist only for
+legacy folds.
+Removing only the derived field preserves late text and genuine child endings.
+
+**An ancestor ID alone cannot detect ending-content enrichment.** The inherited
+reference also carries the ancestor's revision as a private equality fact, so
+late enrichment advances affected descendants' revisions without reading history
+during ingestion. Content still resolves solely through the ancestor item ID.
+`renderShared` obtains that item's content from the same item/recipe view as the
+child, even when the ancestor is outside selected output. A deferred inline agent
+can supply that content at render time without becoming a separate copied ending
+store; missing dependencies withhold the whole candidate. See
+[reference resolution and retry](thread-package-main-thread-folding.md#scoped-joins-pending-outcomes-and-closure).
 
 `saveChild` indexes relationships by original `agentKey` and parent call,
 including unresolved links; reparenting removes the old edge. After each entry,
 `resolveChildren` expands the dirty set through indexed agent descendants and
 processes only those children in creation order, resolving ancestors first.
-Cached inherited endings avoid walking unrelated ancestors; intrinsic parent
-finals supply their current ending content directly. Parent/link repair,
-closure, reopening and ending enrichment therefore revisit the affected tree
-without inspecting independent trees, even within the same agent group.
+`Fold.childEndings` caches ancestor item/revision references to avoid walking
+unrelated ancestors; intrinsic parent finals supply their own reference.
+Parent/link repair, closure, reopening and ending enrichment revisit the affected
+tree without inspecting independent trees, even within the same agent group.
 Unrelated standalone/main-only entries perform zero child-resolution work.
 Replace `childDirty` after resolution: clearing or later ranging over a reused
 map can inspect capacity retained from a former large closure, even with few
@@ -283,9 +302,12 @@ parent/link enrichment and lifecycle changes. These bounds cover agent and
 child bookkeeping; observation and Store publication costs remain separate.
 
 An ancestor ending makes unfinished text/tools `interrupted` and
-inactive, retaining `parent_ending`; unfinished nested agents become inactive
-without changing their intrinsic status or inventing `EndedOrder`. Closure
-propagates through nested agents and preserves already terminal children.
+inactive, rendering the ancestor's content under `parent_ending`; unfinished
+nested agents become inactive without changing their intrinsic status or
+inventing `EndedOrder`. Closure
+propagates the original ending ancestor through provisionally closed nested
+agents, rather than treating each intermediate agent as a new ending. Already
+terminal children retain their own outcomes.
 A late background task link can reclassify a provisional foreground result as
 launch evidence, remove its derived closure and reopen still-unfinished
 children. Independently closed text and terminal calls remain closed. Eagerly
