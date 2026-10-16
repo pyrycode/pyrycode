@@ -171,3 +171,47 @@ record. No test retry, widened wait, sleep or skipped assertion was added.
 The ordinary `make check` aggregate is pending the dispatcher-owned gate; it
 has not been claimed green. Other operating systems are outside verification
 scope. The documentation handoff remains pending the documentation stage.
+
+### 2026-10-16 — verifier finding 1: complete aggregate rerun handoff
+
+The verifier reviewed `8520bd3069922657298261b65d7434c5e5e37f9b` and found
+no transport implementation or security defect. Its dispatcher `make check`
+exited 2: `internal/thread` timed out at 600.199 s in
+`TestCheckpointResumeCorpus`, with eight cuts still running. Vet passed and
+the race tier reported 54 successful packages, including transport at 1.625 s,
+but staticcheck, substrate-guard, fake-daemon e2e and the subsequent
+`make build` never ran. That aggregate is failed/incomplete; its nonverbose
+output establishes package outcomes only, not named test counts.
+
+The dispatcher has since merged main into this branch at
+`cdd691085e2bceb846949f4bcf68d9a857503581`. This includes the separate #3494
+runtime repair merged by PR #3497 at `f314c499`; #3494 is closed.
+There is no transport source change since the reviewed head and no further
+thread change in this rework. The earlier failure matches the baseline
+timeout tracked by #3494, but does not prove scheduling causation or a pass
+on the merged candidate.
+
+Builder-owned Linux checks at `cdd69108`:
+
+| Command | Executed | Passed | Failed | Skipped | Seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `go test -race -json -count=100 -run '^TestClientSendContextAcceptedCancellation$' ./internal/transport` | 400 | 400 | 0 | 0 | 12.378 |
+| `go test -race -json -count=20 ./internal/transport` | 1620 | 1620 | 0 | 0 | 13.431 |
+
+Each mode executed and passed 100 times in the named batch and 20 times in
+the package batch. Counts include parents and subtests; timings are JSON
+package elapsed values. Environment: Linux/amd64, Go 1.26.9, eight online
+logical CPUs, GOMAXPROCS and GOFLAGS unset, default `-p` and `-parallel`.
+The batches ran concurrently with `go vet ./...` and
+`go build -o /tmp/builder-3496-rework-pyry ./cmd/pyry`, both of which exited
+zero. Raw output is retained under `/tmp/builder-3496-rework-*` for this run.
+
+Mandatory handoff to the next dispatcher/verifier stage: run the complete
+ordinary `make check`, followed by `make build`, on the merged candidate
+before approval. Retain the full race suite, staticcheck, substrate-guard and
+fake-daemon e2e coverage and Go's default timeout; focused passes above do
+not substitute for this aggregate. The dispatcher runs configured pre-verifier
+gates again after this builder handoff; failed gates are not reusable passes.
+The full rerun result remains pending, so verifier finding 1 remains open
+until that evidence is available. Documentation remains pending its owning
+stage; other operating systems remain outside this ticket's scope.
