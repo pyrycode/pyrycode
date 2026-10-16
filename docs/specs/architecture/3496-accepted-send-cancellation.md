@@ -523,3 +523,91 @@ Additional documentation handoff, pending documentation stage: in the thread
 overview's **Validation and testing**, record measured worker preparation/buffer
 reuse, clearing between restorations and independent fresh decoded/imported/full
 inventory proof. Do not attribute prior timeouts to unmeasured host contention.
+
+### 2026-10-16 — worker repair measured; builder checks complete
+
+Implementation `c15e2183` follows the preceding recovery design. Each
+`testResumeWorker.prepare` imports its base once and advances only its own prefix;
+`testResumeWorker.check` exports and restores each cut independently.
+`testResumeJSON.roundTrip` retains deep equality and zero decoded destinations.
+Full `testResumeProof.update` clears row signatures and the aggregate before
+fresh rendering. No rendered result/signature survives into the next full proof.
+
+The new `TestCheckpointProofRestorationReuse` failed on unchanged sources at
+`05c6f7ed`: one executed/failed record, zero passes/skips, 0.012 s, reporting a
+prior restoration retained in the full proof. After repair, the focused proof,
+JSON, preparation and resume command (`go test -race -json -count=1 -run
+'^(TestCheckpointProof|TestCheckpointJSONReuse|TestCheckpointWorkerPreparation|TestCheckpointResumeFocused|TestCheckpointResumeCompanions)'
+./internal/thread`) passed 259/259 records, zero failures/skips, 23.100 s.
+The controls cover removed rows/private facts, nil/empty maps and slices, exact
+Content, increasing cuts, stable preparation identity, fresh-prefix export
+equality and detached suffix replay. Existing negative controls remain intact.
+
+Environment: build-fractal-2 worker, Linux/amd64, Go 1.26.9, i7-3770, eight logical
+CPUs, `cpu.max=800000 100000`, GOMAXPROCS/GOFLAGS unset, default `-p`, `-parallel`
+and package timeout. Large tests and measurements ran sequentially; unrelated
+host activity was uncontrolled. The brief intentional red control overlapped the
+baseline phase benchmark; no other builder test job overlapped either large run.
+
+Matched phase command before/after: `go test -race -count=1 -run '^$' -bench
+'^BenchmarkCheckpointResumePhases$' -benchtime=1x -cpuprofile <scratch>/<side>.cpu
+-memprofile <scratch>/<side>.mem -o <scratch>/<side>.test ./internal/thread`.
+Before has unchanged sources at `05c6f7ed` (binary build ID identical to the
+retained `3b7c1689` candidate); after is `c15e2183`. These unchanged phases serve
+as controls, not claims that worker reuse accelerates feed/render internals.
+
+| Phase | Before s | After s | Before MB/op | After MB/op |
+| --- | ---: | ---: | ---: | ---: |
+| Feed | 13.120 | 12.853 | 297.004 | 296.996 |
+| Both JSON round trips | 1.879 | 1.931 | 65.845 | 65.841 |
+| Full render | 1.346 | 1.390 | 60.131 | 60.035 |
+| Fresh full proof | 1.994 | 2.040 | 81.195 | 81.633 |
+
+Matched phase profiles sampled 34.82/35.11 total CPU-seconds. The additional
+same-binary `-bench '^BenchmarkCheckpointWorkerLifecycle$' -benchtime=1x`
+comparison executes 25 increasing cuts from 29,801: fresh/reused preparation
+measured 2.481/0.135 s, 456,083,080/18,551,856 B/op and
+1,714,651/71,611 allocations. Fresh/reused full proof measured 1.961/1.910 s and
+75,989,288/73,619,608 B/op. One-shot JSON samples were inconsistent with an
+allocation benefit (37.8/80.8 MB/op); the fixed matched `-bench
+'^BenchmarkCheckpointWorkerLifecycle/(fresh|reused)/json$' -benchtime=5x`
+measurement was 2.127/2.137 s and 64.762/67.341 MB/op. No JSON microbenchmark
+speed/allocation gain is claimed; encoder-pool/GC effects are not isolated here.
+
+The retained/new complete thread profiles sampled 2456.18/2357.59 CPU-seconds
+and 56.92/51.97 GB allocated (pprof units). Preparation imports shrink from the
+retained approximately 3.46 GB to 0.15 GB; new complete preparation is 0.16 GB
+and 1.51 sampled CPU-seconds. Complete JSON paths remain approximately
+447.57/447.34 sampled CPU-seconds, with allocations 15.52/14.02 GB. These
+whole-package observations include three new controls, not identical benchmark
+workloads; the matched preparation benchmark isolates the removed repeated work.
+They do not establish historical contention causation or a latency guarantee.
+
+| Uncached race command at `c15e2183` | Run/pass/fail/skip/unterminated | Package seconds |
+| --- | --- | --- |
+| `go test -race -json -count=1 -cpuprofile <scratch>/isolated.cpu -memprofile <scratch>/isolated.mem -o <scratch>/isolated.test ./internal/thread` | 1940/1939/0/1/0 | PASS 518.337 |
+| `go test -race -json -count=1 ./cmd/pyry ./internal/relay ./internal/thread` | 20044/20040/0/4/0 | PASS: cmd/pyry 316.351, relay 63.856, thread 508.616 |
+| `go test -race -json -count=100 -run '^TestClientSendContextAcceptedCancellation$' ./internal/transport` | 400/400/0/0/0 | PASS 12.047 |
+| `go test -race -json -count=20 ./internal/transport` | 1620/1620/0/0/0 | PASS 13.116 |
+
+Both thread runs completed all 201 cuts and 50,101 comparisons. Isolated
+fixture/baseline/prefix/workers took 2.071/49.587/13.031/260.034 s; joint took
+2.049/56.284/13.072/263.045 s. Shell elapsed was 518.962/510.468 s, respectively.
+Existing skips: `TestReferenceDiskHeap`, plus joint-only
+`TestRunAgentRun_RealClaude`, `TestMemoryPathsCaseInsensitive` and
+`TestPushWakeFeedbackExpiryIntegration`. The real socket expiry proof remains
+in the slow release checks and is not claimed passed here. Every transport mode
+executed/passed 100 and 20 repetitions; shell times were 12.728/13.910 s.
+Those transport batches ran concurrently with `go vet ./...` and
+`go build -o <scratch>/pyry ./cmd/pyry`; all exited zero after the joint run.
+Raw JSON, profiles, benchmark logs, timings and summarizer are retained under
+`/tmp/builder-3496-workers/`.
+
+Every historical failed gate above remains failed. Verifier finding 1 remains
+open until the dispatcher completes fresh uncached full-module race coverage,
+the complete ordinary `make check`, subsequent `make build` and normal review
+before approval. Those are mandatory later-stage checks, not passed results in
+this builder leg; staticcheck, substrate-guard and fake-daemon e2e remain pending.
+No timeout, sleep, retry, skip or corpus reduction was added. Both documentation
+handoffs remain pending their owning stage; other operating systems remain
+outside this ticket's verification scope. All builder checks have joined.
