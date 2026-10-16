@@ -1,10 +1,12 @@
 package thread
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,56 +26,100 @@ func TestAffectedPublicationOracle(t *testing.T) {
 		testChild(8, "assistant_delta", "deep", `,"text":""`),
 		testEntry(9, "ignored", `{}`), testEntry(10, "banner", `{`),
 	}} {
-		for _, chunk := range []int{1, 2, 3, 4, 7, 31, 113, 1000} {
-			t.Run(fmt.Sprintf("%d/%d", scenario, chunk), func(t *testing.T) {
+		t.Run(fmt.Sprint(scenario), func(t *testing.T) {
+			type run struct {
+				chunk, start int
+				fold         *Fold
+				source       *recentSource
+				capture      publicationCapture
+				before       Snapshot
+			}
+			var runs []run
+			for _, chunk := range []int{1, 2, 3, 4, 7, 31, 113, 1000} {
 				f, source := testReferenceFold(entries)
 				f.captureSet = make(map[int]struct{})
-				var capture publicationCapture
-				before := Snapshot{State: StateUsable}
-				for start := 0; start < len(entries); start += chunk {
-					end := min(start+chunk, len(entries))
-					source.chunk = entries[start:end]
-					testFeed(t, f, source.chunk...)
-					items, got, err := capture.capture(f)
+				runs = append(runs, run{chunk: chunk, fold: f, source: source, before: Snapshot{State: StateUsable}})
+			}
+			// Render the independent complete oracle once per entry boundary.
+			// Each batch size still owns a separate fold, source and capture,
+			// and compares at every boundary it visited in its standalone run.
+			oracle, source := testReferenceFold(entries)
+			comparisons := 0
+			for end := 1; end <= len(entries); end++ {
+				source.chunk = entries[end-1 : end]
+				testFeed(t, oracle, source.chunk...)
+				after := oracle.Observe().Snapshot
+				metadata := slices.Clone(after.Items)
+				for _, item := range oracle.items {
+					after.Active = after.Active || item.Active
+				}
+				for i := range metadata {
+					r := oracle.recipes[metadata[i].ID]
+					if r.creating == 0 && len(r.fields) != 0 {
+						index, found := slices.BinarySearchFunc(oracle.items, metadata[i].ID, func(item Item, id uint64) int { return cmp.Compare(item.ID, id) })
+						if !found {
+							t.Fatal("rendered item absent from inventory")
+						}
+						metadata[i].Content = oracle.items[index].Content
+					}
+					if r.creating != 0 {
+						metadata[i].Content = nil
+						if metadata[i].Kind == "user_message" || metadata[i].Kind == "assistant_message" {
+							metadata[i].Summary = ""
+						}
+					}
+				}
+				for i := range runs {
+					r := &runs[i]
+					if end%r.chunk != 0 && end != len(entries) {
+						continue
+					}
+					r.source.chunk = entries[r.start:end]
+					testFeed(t, r.fold, r.source.chunk...)
+					items, got, err := r.capture.capture(r.fold)
 					if err != nil {
 						t.Fatal(err)
 					}
-					after := f.Observe().Snapshot
-					for _, item := range f.items {
-						after.Active = after.Active || item.Active
-					}
-					want := difference(before, after)
+					want := difference(r.before, after)
 					if !reflect.DeepEqual(got, want) {
-						t.Fatalf("version %d: changes differ\ngot %#v\nwant %#v", after.Version, got, want)
+						t.Fatalf("chunk %d version %d: changes differ\ngot %#v\nwant %#v", r.chunk, end, got, want)
 					}
-					metadata := copyItems(after.Items)
-					for i := range metadata {
-						if r := f.recipes[metadata[i].ID]; r.creating == 0 && len(r.fields) != 0 {
-							for _, item := range f.items {
-								if item.ID == metadata[i].ID {
-									metadata[i].Content = item.Content
-									break
-								}
-							}
-						}
-						if f.recipes[metadata[i].ID].creating != 0 {
-							metadata[i].Content = nil
-							if metadata[i].Kind == "user_message" || metadata[i].Kind == "assistant_message" {
-								metadata[i].Summary = ""
-							}
-						}
+					if !testPublicationItemsEqual(items, metadata) || got.Active != after.Active {
+						t.Fatalf("chunk %d version %d: capture differs", r.chunk, end)
 					}
-					if !sameItems(detachPublication(items), metadata) || got.Active != after.Active {
-						t.Fatalf("version %d: capture differs", after.Version)
-					}
-					before = after
-					if len(f.captureSet) != 0 || len(f.captureAffected) != 0 {
+					if len(r.fold.captureSet) != 0 || len(r.fold.captureAffected) != 0 {
 						t.Fatal("candidates retained after capture")
 					}
+					r.before, r.start = after, end
+					comparisons++
 				}
-			})
-		}
+			}
+			expected := 0
+			for _, r := range runs {
+				expected += (len(entries) + r.chunk - 1) / r.chunk
+			}
+			if comparisons != expected {
+				t.Fatalf("compared %d of %d batch boundaries", comparisons, expected)
+			}
+			t.Logf("checked %d batch boundaries across %d independent folds", comparisons, len(runs))
+		})
 	}
+}
+
+// Compare every row and exact content without serializing or copying payloads.
+// The expected inventory still comes from the independent full-render oracle.
+func testPublicationItemsEqual(slots []*Item, want []Item) bool {
+	index := 0
+	for _, item := range slots {
+		if item == nil {
+			continue
+		}
+		if index == len(want) || !reflect.DeepEqual(*item, want[index]) {
+			return false
+		}
+		index++
+	}
+	return index == len(want)
 }
 
 func TestAffectedPublicationOwnership(t *testing.T) {

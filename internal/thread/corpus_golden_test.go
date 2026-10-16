@@ -88,7 +88,93 @@ func testFoldDigest(t testing.TB, f *Fold) testFoldCheckpoint {
 		h.Write(frame[:])
 		h.Write(item.Content)
 	}
-	return testFoldCheckpoint{o.Version, o.LastShownVersion, len(o.Items), testSHA(testJSON(t, o.Items)), fmt.Sprintf("%x", h.Sum(nil))}
+	return testFoldCheckpoint{o.Version, o.LastShownVersion, len(o.Items), testFoldItemsDigest(t, o.Items), fmt.Sprintf("%x", h.Sum(nil))}
+}
+
+// Encode one canonically ordered row at a time. Only Content needs generic JSON
+// normalization; metadata stays typed instead of building a second object tree.
+// The resulting stream is identical to testJSON on the complete item slice.
+func testFoldItemsDigest(t testing.TB, items []Item) string {
+	t.Helper()
+	h := sha256.New()
+	if items == nil {
+		h.Write([]byte("null"))
+	} else {
+		h.Write([]byte("["))
+		for i, item := range items {
+			if i > 0 {
+				h.Write([]byte(","))
+			}
+			var content any
+			if item.Content != nil {
+				if !json.Valid(item.Content) {
+					t.Fatal("invalid item content")
+				}
+				d := json.NewDecoder(bytes.NewReader(item.Content))
+				d.UseNumber()
+				if err := d.Decode(&content); err != nil {
+					t.Fatal(err)
+				}
+			}
+			raw, err := json.Marshal(struct {
+				Active     bool
+				Agent      string
+				Content    any
+				EndedOrder uint64
+				ID         uint64
+				Kind       string
+				NoChild    bool
+				Order      uint64
+				Parent     uint64
+				Rev        uint64
+				Session    string
+				Shown      bool
+				Status     string
+				Subtype    string
+				Summary    string
+				Turn       string
+			}{item.Active, item.Agent, content, item.EndedOrder, item.ID,
+				item.Kind, item.NoChild, item.Order, item.Parent, item.Rev, item.Session,
+				item.Shown, item.Status, item.Subtype, item.Summary, item.Turn})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.Write(raw)
+		}
+		h.Write([]byte("]"))
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func TestFoldItemsDigestCanonical(t *testing.T) {
+	for _, items := range [][]Item{nil, {}, {{Content: json.RawMessage(` { "z": [1.00, {"b":true,"a":"<>&"}], "a":null } `)}}} {
+		if testFoldItemsDigest(t, items) != testSHA(testJSON(t, items)) {
+			t.Fatal("canonical digest differs")
+		}
+	}
+	// Every metadata field, including fields added to Item later, must affect
+	// the exact same canonical bytes as the independent generic encoder.
+	var item Item
+	value := reflect.ValueOf(&item).Elem()
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Field(i)
+		switch field.Kind() {
+		case reflect.String:
+			field.SetString("<>&\"\\\n" + value.Type().Field(i).Name)
+		case reflect.Uint64:
+			field.SetUint(uint64(i + 1))
+		case reflect.Bool:
+			field.SetBool(true)
+		case reflect.Slice:
+			field.SetBytes([]byte(`{"z":2,"a":1}`))
+		default:
+			t.Fatalf("add a canonical encoding case for %s", value.Type().Field(i).Name)
+		}
+		items := []Item{item, {Content: json.RawMessage(`null`)}}
+		if testFoldItemsDigest(t, items) != testSHA(testJSON(t, items)) {
+			t.Fatalf("canonical digest omits or changes %s", value.Type().Field(i).Name)
+		}
+	}
 }
 
 func testFoldGoldenCheck(t *testing.T, path, conv, identity string, input []byte, entries []history.Entry, versions []int) {
