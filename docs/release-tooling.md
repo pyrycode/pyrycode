@@ -254,12 +254,17 @@ Its production ceiling remains 70 seconds.
 `make test-slow` also exercises the public operation through the full ceiling and the
 supervisor's real token-read deadline. It also runs
 `TestPushWakeFeedbackExpiryIntegration` through the complete 60-second feedback
-lifetime over real sockets. `make preship` includes this tier.
+lifetime over real sockets. The delayed metadata-readiness proof runs real replay
+chunks beyond the twenty-second inactivity interval in this tier too.
+`make preship` includes this tier.
 
 Ordinary checks use Go's `testing/synctest` virtual clock for
 `TestReplyFallbackLookupBudget`, lock-based `TestMemoryCredentialCancellation`
 cases and the silent-expiry consumer in `TestPushWakeFeedbackExpiry`. Their
-production durations and cancellation checks remain unchanged. The relay's
+production durations and cancellation checks remain unchanged. Metadata-readiness
+checks use the virtual clock to prove progress renewal, complete publication and
+the independent caller deadline. The real stalled-replay check stays in ordinary
+tests. The relay's
 `TestWakeFeedbackBounds` independently checks the exact expiry boundary and
 late-result rejection. Credential stdin polling retains its real OS descriptor
 and ten-second operation deadline; its isolated cases may run concurrently.
