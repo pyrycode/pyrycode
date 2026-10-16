@@ -267,7 +267,29 @@ func (d foldDecoder) decode(raw json.RawMessage, dst any, required ...string) bo
 			return false
 		}
 	}
-	return d.validRecordedFields(raw, reflect.TypeOf(dst).Elem())
+	typ := reflect.TypeOf(dst).Elem()
+	if typ.Kind() == reflect.Struct && typ != reflect.TypeOf(time.Time{}) {
+		d.count(1) // inspect the root using the fields already decoded above
+		return d.validRecordedObject(fields, typ)
+	}
+	return d.validRecordedFields(raw, typ)
+}
+
+// validRecordedObject validates recorded fields from an already decoded object.
+// Typed unmarshalling remains responsible for JSON types and custom decoders.
+func (d foldDecoder) validRecordedObject(fields map[string]json.RawMessage, typ reflect.Type) bool {
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := strings.Split(field.Tag.Get("json"), ",")[0]
+		for key, value := range fields {
+			d.count(len(key) + len(name) + 1)
+			// Match the case-insensitive field names accepted by encoding/json.
+			if strings.EqualFold(key, name) && !d.validRecordedFields(value, field.Type) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (d foldDecoder) validRecordedFields(raw json.RawMessage, typ reflect.Type) bool {
@@ -287,17 +309,7 @@ func (d foldDecoder) validRecordedFields(raw json.RawMessage, typ reflect.Type) 
 		if json.Unmarshal(raw, &fields) != nil {
 			return false
 		}
-		for i := 0; i < typ.NumField(); i++ {
-			field := typ.Field(i)
-			name := strings.Split(field.Tag.Get("json"), ",")[0]
-			for key, value := range fields {
-				d.count(len(key) + len(name) + 1)
-				// Match the case-insensitive field names accepted by encoding/json.
-				if strings.EqualFold(key, name) && !d.validRecordedFields(value, field.Type) {
-					return false
-				}
-			}
-		}
+		return d.validRecordedObject(fields, typ)
 	case reflect.Map:
 		var values map[string]json.RawMessage
 		if json.Unmarshal(raw, &values) != nil {
