@@ -119,6 +119,7 @@ API adds no peer authorization or loading.
   unrelated bodies; a larger preparation fixture exceeded its readiness deadline.
   The API and capture contracts are unchanged.
 - 2026-10-17: Read `internal/thread/catch_up_test.go` → `TestCatchUpIsolation`.
+  Also read `internal/thread/queries_test.go` → `TestStoreQueriesRetirementIsolation`.
   Counting rendering lookups also exposes snapshot metadata visits to its barrier.
-  Disarm the barrier after the intended query reaches it, preserving its held
+  Disarm each barrier after the intended query reaches it, preserving its held
   query and publication/unload/reload assertions without pausing other readers.
