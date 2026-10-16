@@ -23,9 +23,10 @@ func TestDaemonThreadDemandIdleReadKeepsConnection(t *testing.T) {
 	w, mgr := testDaemonThreadQueryWire(t, s, nil)
 	w.open("phone", false, protocol.CapabilityThread)
 	s.start()
-	_, e := w.read()
-	if e.Type != protocol.TypeThreadItemAdded {
-		t.Fatalf("initial publication: %s", e.Type)
+	testDaemonThreadRequest(t, w, "phone", 449, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID})
+	initial, typ := testDaemonThreadReply(t, w, 449)
+	if typ != protocol.TypeThreadItems || !initial.Final || initial.Version != 1 {
+		t.Fatalf("initial recovery: %s", typ)
 	}
 	idle.Store(true)
 	for attempt := range 3 {

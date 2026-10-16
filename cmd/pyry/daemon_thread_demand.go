@@ -61,14 +61,15 @@ func (s *threadShadow) queryThread(ctx context.Context, id conversations.Convers
 	}
 	d.count++
 	s.queryDone.Add(1)
-	// Discovery normally enrolls nonempty histories. Empty chats need the same
-	// coordinator so their zero checkpoint is also retired after the request ends.
-	if s.workers[id] == nil && store.Status(id).State == thread.StateNotLoaded {
+	// Queries share the conversation coordinator even before discovery has
+	// enrolled a loaded or empty conversation.
+	if s.workers[id] == nil {
 		workerCtx, stop := context.WithCancel(s.ctx)
 		w := &shadowConversation{cancel: stop, done: make(chan struct{})}
 		s.workers[id] = w
 		go s.follow(workerCtx, id, w)
 	}
+	w := s.workers[id]
 	s.mu.Unlock()
 	err := store.Load(s.ctx, id)
 	s.quietMu.Unlock()
@@ -96,6 +97,14 @@ func (s *threadShadow) queryThread(ctx context.Context, id conversations.Convers
 		}
 		switch store.Status(id).State {
 		case thread.StateUsable:
+			// Establish the live boundary before a query can certify its capture.
+			// Later commits must be delivered from it or force reconciliation.
+			if !s.publish(ctx, id, w) {
+				if err := ctx.Err(); err != nil {
+					return thread.QueryResult{}, err
+				}
+				return thread.QueryResult{}, thread.ErrUnavailable
+			}
 			result, err := query(ctx)
 			if ctx.Err() != nil {
 				return thread.QueryResult{}, ctx.Err()

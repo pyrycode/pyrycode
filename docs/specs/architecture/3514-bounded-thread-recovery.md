@@ -82,3 +82,9 @@ None.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+
+- 2026-10-16: `TestDaemonThreadRecoveryCommit` separately controls the replay barrier and covers commits after the replay bound was captured. `TestDaemonThreadBoundedRecovery` additionally walks all older pages, comparing reconstructed rows with the authoritative snapshot. The idle held-delivery assertion now proves retirement and explicit query recovery of the intervening commit, because emitting that unproven addition would violate the new boundary contract. `TestDaemonThreadRetirement` also proves another conversation's recipient receives its new update while delivery is held. No wire or store contract changes were needed; total written work remains below 800 lines.
+- 2026-10-16: Also read `cmd/pyry/daemon_thread_demand_test.go` → `TestDaemonThreadDemandIdleReadKeepsConnection`; its initial unsolicited-addition expectation must use an explicit completed query. Preserve all three same-checkpoint idle cycles and their connection-survival assertions.
+- 2026-10-16: Replace the proposed publication mutex with a lazily initialized, cancelable channel gate. A query canceled while another publication holds the conversation must return without waiting for that publication; `TestDaemonThreadPublicationCancellation` covers the held-gate case. The ownership and lock order remain unchanged, and no goroutine is added.

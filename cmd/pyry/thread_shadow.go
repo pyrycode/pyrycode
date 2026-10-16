@@ -20,16 +20,30 @@ type shadowStore interface {
 	Shutdown() error
 }
 type shadowConversation struct {
-	cancel        context.CancelFunc
-	done          chan struct{}
-	version       uint64
-	complete      bool
-	idleUnloaded  bool // successful coordinator-owned retirement; not a publication gap
-	publisher     *daemonThreadPublisher
-	threadEpoch   string
-	threadVersion uint64
-	threadPeers   map[string]bool
+	publicationOnce sync.Once
+	publicationGate chan struct{} // serializes following with query boundary acquisition
+	cancel          context.CancelFunc
+	done            chan struct{}
+	version         uint64
+	complete        bool
+	idleUnloaded    bool // successful coordinator-owned retirement; not a publication gap
+	publisher       *daemonThreadPublisher
+	threadEpoch     string
+	threadVersion   uint64
+	threadPeers     map[string]bool
 }
+
+func (w *shadowConversation) lockPublication(ctx context.Context) bool {
+	w.publicationOnce.Do(func() { w.publicationGate = make(chan struct{}, 1) })
+	select {
+	case w.publicationGate <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (w *shadowConversation) unlockPublication() { <-w.publicationGate }
 
 // threadShadow coordinates optional publication. Discovery includes all history
 // writers without adding replay or cache I/O to their commit paths.
