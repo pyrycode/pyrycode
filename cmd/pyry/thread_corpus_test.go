@@ -129,6 +129,9 @@ func TestThreadRecordedBaselines(t *testing.T) {
 				versions = append(versions, i+1)
 			}
 			testFoldGoldenCheck(t, "testdata/"+tc.file+".golden", testConvID, "recorded-normalization-v1/synthetic-shell-context-v1", raw, entries, versions)
+			t.Run("checkpoint_resume", func(t *testing.T) {
+				testRecordedCheckpointResume(t, entries)
+			})
 		})
 	}
 }
