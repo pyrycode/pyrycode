@@ -37,3 +37,7 @@ Add `TestStoreCertificateTemporaryCleanup` with success, failed replacement and 
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+
+- 2026-10-16: The combined thread race run exhausted Go's default ten-minute package timeout during `TestCheckpointResumeCorpus`, with the cleanup regression and other tests already passing. Follow the existing Makefile split: run `go test -race -run '^TestCheckpointResumeCorpus$' ./internal/thread` and `go test -race -skip '^TestCheckpointResumeCorpus$' ./internal/thread/...` separately, giving the complete corpus its own timeout budget. No implementation contract changes.
