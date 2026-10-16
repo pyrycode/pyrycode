@@ -33,6 +33,8 @@ func TestDaemonThreadQueriesReadiness(t *testing.T) {
 	}
 	stop := startDaemonThreadPublisher(t.Context(), s, &relay.V2SessionManager{})
 	defer stop()
+	// This readiness fixture has no running relay owner to answer active-peer queries.
+	s.publisher.active = func(context.Context, string) []relay.ActiveConn { return nil }
 	if !cfg.ThreadReady() {
 		t.Fatal("complete installation not ready")
 	}
@@ -58,13 +60,11 @@ func TestDaemonThreadQueriesReadiness(t *testing.T) {
 		return cfg.ThreadPage(t.Context(), protocol.ThreadPagePayload{ConversationID: testConvID, Limit: 1})
 	}} {
 		got, err := query()
-		if err != nil || got.State != thread.StateNotLoaded || got.Items != nil || got.Epoch != "" {
-			t.Fatalf("nonusable result changed: %#v %v", got, err)
+		if err != nil || got.State != thread.StateUsable || len(got.Items) != 0 || got.Epoch == "" {
+			t.Fatalf("empty conversation not recovered: %#v %v", got, err)
 		}
 	}
-	if store.Snapshot(testConvID).State != thread.StateNotLoaded {
-		t.Fatal("query loaded conversation")
-	}
+	testShadowWait(t, func() bool { return store.Status(testConvID).State == thread.StateNotLoaded })
 	installDaemonThreadRelay(&cfg, nil)
 	if cfg.ThreadReady != nil || cfg.ThreadCatchUp != nil || cfg.ThreadPage != nil || cfg.ThreadLastShownVersion != nil {
 		t.Fatal("stale installation retained")
@@ -460,7 +460,10 @@ func TestDaemonThreadQueriesReset(t *testing.T) {
 				want = protocol.TypeThreadItems
 			}
 			if scenario == "not loaded" {
-				want = protocol.TypeError
+				if typ != protocol.TypeThreadReset || result.Epoch == "" || result.Version != 0 {
+					t.Fatal("cold empty thread did not reset the stale checkpoint")
+				}
+				return
 			}
 			if typ == protocol.TypeThreadReset && (result.Epoch != q.Epoch || result.Version != q.Version) {
 				t.Fatal("reset publication metadata lost")

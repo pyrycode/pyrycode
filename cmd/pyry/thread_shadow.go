@@ -33,24 +33,28 @@ type shadowConversation struct {
 // threadShadow coordinates optional publication. Discovery includes all history
 // writers without adding replay or cache I/O to their commit paths.
 type threadShadow struct {
-	history      *history.Store
-	registry     *conversations.Registry
-	store        shadowStore
-	publisher    *daemonThreadPublisher
-	log          *slog.Logger
-	mu           sync.Mutex
-	workers      map[conversations.ConversationID]*shadowConversation
-	removed      map[conversations.ConversationID]bool
-	quietMu      sync.Mutex
-	quiet        func(conversations.ConversationID) bool
-	ctx          context.Context
-	cancel       context.CancelFunc
-	done         chan struct{}
-	finish       chan struct{}
-	once         sync.Once
-	shutdownOnce sync.Once
-	shutdownDone chan struct{}
-	err          error
+	history       *history.Store
+	registry      *conversations.Registry
+	store         shadowStore
+	publisher     *daemonThreadPublisher
+	log           *slog.Logger
+	mu            sync.Mutex
+	workers       map[conversations.ConversationID]*shadowConversation
+	removed       map[conversations.ConversationID]bool
+	quietMu       sync.Mutex
+	quiet         func(conversations.ConversationID) bool
+	queryDemands  map[conversations.ConversationID]*threadQueryDemand // guarded by quietMu
+	queryRetiring map[conversations.ConversationID]chan struct{}      // guarded by quietMu
+	queryDone     sync.WaitGroup
+	queryStopping bool // guarded by quietMu
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan struct{}
+	finish        chan struct{}
+	once          sync.Once
+	shutdownOnce  sync.Once
+	shutdownDone  chan struct{}
+	err           error
 }
 
 func newThreadShadow(h *history.Store, reg *conversations.Registry, store shadowStore, log *slog.Logger) *threadShadow {
@@ -173,7 +177,15 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 						return
 					}
 					s.quietMu.Lock()
-					quiet := !snapshot.Active && s.quiet(id)
+					quiet := !snapshot.Active && s.quiet(id) && s.queryDemands[id] == nil
+					var retired chan struct{}
+					if quiet {
+						retired = make(chan struct{})
+						if s.queryRetiring == nil {
+							s.queryRetiring = make(map[conversations.ConversationID]chan struct{})
+						}
+						s.queryRetiring[id] = retired
+					}
 					s.quietMu.Unlock()
 					if quiet {
 						// Save the consumed boundary before retirement. A racing append exceeds
@@ -184,6 +196,10 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 						if err := s.store.Unload(id); err != nil {
 							s.failure(id, "unload")
 						}
+						s.quietMu.Lock()
+						delete(s.queryRetiring, id)
+						close(retired)
+						s.quietMu.Unlock()
 					}
 				}
 			}
@@ -206,6 +222,7 @@ func (s *threadShadow) remove(id conversations.ConversationID) {
 		w.cancel()
 	}
 	s.mu.Unlock()
+	s.cancelThreadDemand(id)
 	if w != nil {
 		<-w.done
 	}
@@ -226,6 +243,7 @@ func (s *threadShadow) shutdown() error {
 		return nil
 	}
 	s.shutdownOnce.Do(func() {
+		s.stopThreadDemands()
 		s.start()
 		// Discover final new conversations before sealing background admission.
 		complete := s.discover()
