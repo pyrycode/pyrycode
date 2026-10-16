@@ -146,10 +146,12 @@ func TestStreamRunnerFactory_QuestionHandlerAvailable(t *testing.T) {
 					return answerable
 				})
 				shown := make(chan protocol.QuestionShownPayload, 1)
+				askingSessions := make(chan string, 1)
 				retired := make(chan struct{}, 1)
 				surface := &approvalSurfaceReport{}
 				surface.set(func(req permbridge.Request) func() {
 					retire := f.bridge.Surface(req)
+					askingSessions <- req.SessionID
 					shown <- lastQuestionShown(t, bcast.snapshot())
 					return func() { retire(); retired <- struct{}{} }
 				})
@@ -183,24 +185,28 @@ func TestStreamRunnerFactory_QuestionHandlerAvailable(t *testing.T) {
 						t.Error("runner did not stop")
 					}
 				}()
-				awaitShown := func() protocol.QuestionShownPayload {
+				awaitShown := func(sessionID string) protocol.QuestionShownPayload {
 					select {
 					case batch := <-shown:
+						if got := <-askingSessions; got != sessionID {
+							t.Fatalf("asking session = %q, want %q", got, sessionID)
+						}
 						return batch
 					case <-time.After(5 * time.Second):
 						t.Fatal("factory-installed handler did not surface a question")
 						return protocol.QuestionShownPayload{}
 					}
 				}
-				first := awaitShown()
-				// Replace a child while its question is parked, then reuse its request IDs.
-				r.Restart(args)
+				first := awaitShown("question-session")
+				// Replace the session/child while its question is parked, then reuse
+				// the child's request IDs under a different routing identity.
+				r.RestartFresh("replacement-session")
 				select {
 				case <-retired:
 				case <-time.After(5 * time.Second):
 					t.Fatal("old question did not retire")
 				}
-				second := awaitShown()
+				second := awaitShown("replacement-session")
 				if first.QuestionBatchID == second.QuestionBatchID {
 					t.Fatal("replacement reused the batch ID")
 				}
@@ -263,7 +269,7 @@ func TestStreamRunnerFactory_QuestionHandlerAvailable(t *testing.T) {
 					<-checked
 				}
 				r.Restart(args)
-				third := awaitShown()
+				third := awaitShown("replacement-session")
 				select {
 				case answerable := <-checked:
 					if !answerable {
