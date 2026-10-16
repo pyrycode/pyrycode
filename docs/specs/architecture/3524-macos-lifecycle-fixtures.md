@@ -124,3 +124,17 @@ limits. Preserve positive-retirement and persistent-uncertainty distinctions.
   These are demonstrated fixture expiry weaknesses, not historical root-cause
   attribution. In particular the historical candidate-validation failure remains
   unattributed; fixed-label command diagnostics now distinguish that phase.
+- 2026-10-17: response delay can consume the delayed observer's initial sleep
+  before a probe finishes. Observe completed failure count first, then pause
+  beyond three ordinary intervals and recheck the same count and probe total.
+  This preserves the intended idle-observer proof with delayed replies.
+- 2026-10-17: native acceptance resolved the second open question without an
+  additional production failure. Final source `69ca9dd2` passed the focused
+  race family (5 parents, 26 leaves, no failures/skips) and complete package
+  (108 parents passed; 925 leaves started, 921 passed, 4 filesystem EILSEQ skips,
+  no failures; 549.283 seconds). All required families passed without skips.
+  The earlier full package also passed in 398.616 seconds. Vet and CLI build
+  passed. `internal/apps/testdata/3524-macos-results.json` records all six attempts,
+  redacted raw-output checksums, native toolchain/environment and attribution limits.
+  Total authored plan, tests and evidence summary remain below 650 lines;
+  exported types, production consumers and new production reject branches remain zero.
