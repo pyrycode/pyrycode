@@ -44,10 +44,10 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	countRecipe := func(r contentRecipe) {
 		recipeBytes += int(unsafe.Sizeof(r)) + len(r.text)*8
 		for key, field := range r.fields {
-			recipeBytes += len(key) + int(unsafe.Sizeof(field))
+			recipeBytes += len(key) + int(unsafe.Sizeof(field)) + len(field.value)
 			if key == "parent_ending" {
 				parentEndings += len(field.value)
-			} else if len(field.value) != 0 {
+			} else if len(field.value) != 0 && key != "task_id" && key != "parent_tool_call_id" && key != "ended_order" {
 				t.Fatal("unexpected copied enrichment")
 			}
 		}
@@ -71,12 +71,17 @@ func TestReferenceRetainedBytes(t *testing.T) {
 			if state := f.children[i]; state != nil {
 				old := legacy.children[i]
 				childBefore += len(old.base.Content) + len(old.previous.Content)
+				if item.Kind == "assistant_message" {
+					assistantBefore += len(old.base.Summary) + len(old.previous.Summary)
+				}
+				if state.childSnapshot == nil {
+					continue
+				}
 				childAfter += len(state.base.Content) + len(state.previous.Content)
 				if state.legacyEnding != nil {
 					t.Fatal("production retained legacy ending cache")
 				}
 				if item.Kind == "assistant_message" {
-					assistantBefore += len(old.base.Summary) + len(old.previous.Summary)
 					assistantAfter += len(state.base.Summary) + len(state.previous.Summary)
 				}
 				countRecipe(state.baseRecipe)
@@ -117,6 +122,9 @@ func TestReferenceRetainedBytes(t *testing.T) {
 		countOutcome(o)
 	}
 	for i, state := range f.children {
+		if state.childSnapshot == nil {
+			continue
+		}
 		if state.legacyEnding != nil {
 			t.Fatal("production child cache retained payload", i)
 		}
@@ -128,6 +136,23 @@ func TestReferenceRetainedBytes(t *testing.T) {
 	if private != 0 || parentEndings != 0 || len(f.legacyOutcomes) != 0 {
 		t.Fatal("production copied outcomes or ancestor endings", private, parentEndings)
 	}
+	testNoLifecyclePayload(t, f)
+	if deferred != 0 {
+		t.Fatal("unconverted item payload", deferred)
+	}
+	var legacyEvidence, lifecycleFacts int
+	for _, raw := range legacy.legacyOutcomes {
+		legacyEvidence += len(raw)
+	}
+	for _, g := range f.agentGroups {
+		for _, c := range g.calls {
+			lifecycleFacts += int(unsafe.Sizeof(*c)) + len(c.reports.entries())*int(unsafe.Sizeof(agentReport{}))
+		}
+		for _, task := range g.tasks {
+			lifecycleFacts += int(unsafe.Sizeof(*task)) + len(task.reports.entries())*int(unsafe.Sizeof(agentReport{}))
+		}
+	}
+	t.Logf("lifecycle compatibility payload before=%d after=%d; logical call/task/report facts=%d (includes fingerprints, excludes map/slice/string overhead)", legacyEvidence, private, lifecycleFacts)
 	t.Logf("generated entries=%d converted Content before=%d after=%d child-copy Content before=%d after=%d assistant Summary (including child copies) before=%d after=%d user Summary before=%d after=%d; recipes=%d logical recipe bytes=%d (includes child slots, excludes map/slice overhead, may share ID storage); bounded recent cache=%d; deferred private outcomes=%d inline parent-ending bytes across recipe slots=%d inline item Content=%d; Store snapshots excluded", len(entries), before, after, childBefore, childAfter, assistantBefore, assistantAfter, summaryBefore, summaryAfter, len(f.recipes), recipeBytes, source.bytes, private, parentEndings, deferred)
 }
 
@@ -392,13 +417,34 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 					end-- // Resolve the send only after its source entries are evicted.
 				}
 				entries = append(entries, testStoreAppend(t, h, testStoreA, slices.Clone(initial[1:end])...)...)
+				forward := s.forward
+				s.forward = func(id conversations.ConversationID) (storeReader, error) {
+					r, err := forward(id)
+					if err != nil {
+						return nil, err
+					}
+					return testStoreReader{storeReader: r, walk: func(ctx context.Context, bound uint64, feed func([]history.Entry) error) error {
+						return r.Walk(ctx, bound, func(entries []history.Entry) error {
+							// Keep replay's last chunk out of the dependency's ID range.
+							// Padding evicts the FIFO, but cannot evict a borrowed chunk.
+							for chunk := range slices.Chunk(entries, 256) {
+								if err := feed(chunk); err != nil {
+									return err
+								}
+							}
+							return nil
+						})
+					}}, nil
+				}
 				var armed atomic.Bool
+				var failures atomic.Uint64
 				armed.Store(phase == "replay")
 				base := s.lookup
 				s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
 					if !armed.Load() || !slices.Contains(ids, target) {
 						return base(ctx, id, ids)
 					}
+					failures.Add(1)
 					if failure == "missing" {
 						resolved, err := base(ctx, id, ids)
 						return slices.DeleteFunc(resolved, func(e history.Entry) bool { return e.ID == target }), err
@@ -406,35 +452,29 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 					return nil, errors.New("private unreadable source")
 				}
 				if phase == "tail" {
+					started := time.Now()
 					if err := s.Load(context.Background(), testStoreA); err != nil {
 						t.Fatal(err)
 					}
 					testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries)))
+					t.Logf("initial replay wait=%s", time.Since(started))
 					armed.Store(true)
 				}
-				// Later facts evict the creating message; neither the current feed
-				// chunk nor the recent cache can mask the failed authoritative read.
-				padding := history.MaxPageEntries
-				if deferredSend {
-					padding = 256 // Fill the FIFO before appending the terminal fact.
-				}
+				// Fill the recent FIFO without depending on history's page size.
+				padding := 256
+				started := time.Now()
 				for range padding {
 					entries = append(entries, testStoreAppend(t, h, testStoreA, testEntry(0, "ignored", `{}`))...)
 				}
+				t.Logf("padding appends=%d duration=%s", padding, time.Since(started))
 				if phase == "tail" {
+					started = time.Now()
+					testReferenceRetryStatus(t, s, StateUsable, uint64(len(entries)))
+					t.Logf("padding worker wait=%s", time.Since(started))
+					if failures.Load() != 0 {
+						t.Fatal("source failed before terminal event")
+					}
 					if deferredSend {
-						// Observe metadata while output lookup failure is armed.
-						deadline := time.Now().Add(5 * time.Second)
-						for {
-							status := s.Status(testStoreA)
-							if status.State == StateUsable && status.Version == uint64(len(entries)) {
-								break
-							}
-							if status.State == StateUnavailable || time.Now().After(deadline) {
-								t.Fatal("padding did not publish before terminal failure", status)
-							}
-							time.Sleep(time.Millisecond)
-						}
 						entries = append(entries, testStoreAppend(t, h, testStoreA, initial[len(initial)-1])...)
 					} else {
 						// Unchanged publications need no source reread. A delivery join
@@ -447,10 +487,16 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 						}
 					}
 				}
+				started = time.Now()
 				if err := s.Load(context.Background(), testStoreA); err != nil {
 					t.Fatal(err)
 				}
-				snap := testStoreWait(t, s, testStoreA, StateUnavailable, 0)
+				testReferenceRetryStatus(t, s, StateUnavailable, 0)
+				t.Logf("failure worker wait=%s authoritative failures=%d", time.Since(started), failures.Load())
+				if failures.Load() == 0 {
+					t.Fatal("worker did not reach failed authoritative dependency")
+				}
+				snap := s.Snapshot(testStoreA)
 				if snap.Err != ErrUnavailable || snap.Items != nil || snap.Version != 0 || snap.LastShownVersion != 0 || snap.Epoch != "" {
 					t.Fatal("unsafe partial publication", snap)
 				}
@@ -459,11 +505,29 @@ func testStoreReferenceRetry(t *testing.T, initial []history.Entry, missing uint
 				s.mu.Unlock()
 				<-done
 				armed.Store(false)
+				started = time.Now()
 				if err := s.Retry(context.Background(), testStoreA); err != nil {
 					t.Fatal(err)
 				}
 				testStoreEqual(t, testStoreWait(t, s, testStoreA, StateUsable, uint64(len(entries))), testStoreA, entries)
+				t.Logf("repair retry and equality=%s", time.Since(started))
 			})
 		}
+	}
+}
+
+// Status polling leaves source failures to the worker and never renders a view.
+func testReferenceRetryStatus(t *testing.T, s *Store, state SnapshotState, version uint64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status := s.Status(testStoreA)
+		if status.State == state && status.Version == version {
+			return
+		}
+		if status.State == StateUnavailable || time.Now().After(deadline) {
+			t.Fatalf("worker did not reach %v/%d: %#v", state, version, status)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

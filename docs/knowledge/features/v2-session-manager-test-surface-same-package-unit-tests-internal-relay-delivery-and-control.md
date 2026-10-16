@@ -13,6 +13,15 @@ Server-initiated push (#571; backpressure + drop policy #610) — all `t.Paralle
 
 \#610 backpressure tests (added): the drop policy is a pure unit surface — `TestPushQueue_Enqueue_*` (helpers `pqEnv` / `fillDeltas` / `assertQueue`) cover under-cap retention, drop-oldest-delta (AC#2), control-evicts-delta (AC#3), `message`-is-never-drop, control-never-dropped-when-deltas-present, order-preserved-across-drops (AC#4), and the all-control soft overflow. The end-to-end non-blocking guarantee (AC#1) is `TestV2Session_Push_NonBlockingUnderStall`: a stalling outbound double wedges the `Run` forward, every `Push` still returns within a tight deadline, the drop counter engages past `pushQueueCap`, and after release the survivors decrypt **in order** under the phone's `recv` state (proving drop-before-seal left no nonce gap). See [`codebase/610.md`](../codebase/610.md).
 
+`TestV2Session_Push_HoldGatedOnProbeNotSendError` depends on both
+[completed fixture admission](v2-session-manager-test-surface-same-package-unit-tests-internal-relay.md)
+before its first push and the send-decision counter before either transport flag
+changes. Queue consumption alone precedes the outbound decision and cannot order
+the flags. Probe-up/send-failure must consume the head without recording delivery;
+probe-down must retain it unsealed with only the handshake recorded. Keep the
+[probe/send distinction](v2-session-manager-state-machine-transport-down-hold-on-the-push-drain.md)
+and both synchronization points when changing this fixture.
+
 ## Capabilities and connection enumeration
 
 Capability negotiation (#626) — `buildHelloEarlyDataCaps` / `driveToOpenCaps` variants carry the advertised set without changing the `buildHelloEarlyData` (5 callers) / `driveToOpen` (30 callers) signatures; the handshake tests capture the hello_ack early-data (which `driveToOpen` discards) via `Initiator.ReadResp` → decode `Envelope` → `HelloAckPayload`:

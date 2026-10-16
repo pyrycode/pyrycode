@@ -1569,7 +1569,7 @@ These v2 types stay outside `inboundAppTypeSet`; `thread_catch_up` and
 `thread_page` are intercepted by the authenticated relay dispatch switch.
 The contract follows
 [ADR 042](knowledge/decisions/042-daemon-built-thread.md#update-messages) and the
-[backend bounded-query semantics](knowledge/features/thread-package-background-store.md#bounded-queries).
+[backend bounded-query semantics](knowledge/features/thread-package-background-store-queries.md#bounded-queries).
 
 #### Requests
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -433,39 +434,52 @@ func TestRunner_QueryAppliedSettings_ContextEndsBlockedWrite(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			p := NewParser(func(turnevent.Event) {}, discardLogger())
-			w := newBlockingAppliedSettingsWriter()
-			r := mcpStatusQueryRunner(t, p, w, false)
-			ctx, cancel := tc.ctx()
-			defer cancel()
-			done := queryAppliedSettingsAsync(ctx, r)
-			select {
-			case <-w.started:
-			case <-time.After(3 * time.Second):
-				t.Fatal("applied settings write did not start")
-			}
-			if tc.name == "cancellation" {
-				cancel()
-			}
-
-			select {
-			case got := <-done:
-				if got.ok {
-					t.Fatalf("blocked write returned success after %s: %+v", tc.name, got)
+			// The deadline must follow write readiness even when the host is busy.
+			synctest.Test(t, func(t *testing.T) {
+				p := NewParser(func(turnevent.Event) {}, discardLogger())
+				w := newBlockingAppliedSettingsWriter()
+				r := mcpStatusQueryRunner(t, p, w, false)
+				ctx, cancel := tc.ctx()
+				defer cancel()
+				done := queryAppliedSettingsAsync(ctx, r)
+				select {
+				case <-w.started:
+				case <-time.After(3 * time.Second):
+					t.Fatal("applied settings write did not start")
 				}
-			case <-time.After(500 * time.Millisecond):
-				_ = w.Close()
-				<-done
-				t.Fatalf("blocked write did not honor caller %s", tc.name)
-			}
-			select {
-			case <-w.release:
-			default:
-				t.Fatalf("blocked writer remained live after caller %s", tc.name)
-			}
-			if r.Stdin() != nil {
-				t.Fatalf("child binding remained live after caller %s interrupted its write", tc.name)
-			}
+				if err := ctx.Err(); err != nil {
+					t.Fatalf("caller context ended before write readiness: %v", err)
+				}
+				if tc.name == "cancellation" {
+					cancel()
+				}
+
+				select {
+				case got := <-done:
+					if got.ok {
+						t.Fatalf("blocked write returned success after %s: %+v", tc.name, got)
+					}
+				case <-time.After(500 * time.Millisecond):
+					_ = w.Close()
+					<-done
+					t.Fatalf("blocked write did not honor caller %s", tc.name)
+				}
+				select {
+				case <-w.release:
+				default:
+					t.Fatalf("blocked writer remained live after caller %s", tc.name)
+				}
+				if r.Stdin() != nil {
+					t.Fatalf("child binding remained live after caller %s interrupted its write", tc.name)
+				}
+				wantErr := context.Canceled
+				if tc.name == "deadline" {
+					wantErr = context.DeadlineExceeded
+				}
+				if ctx.Err() != wantErr {
+					t.Fatalf("caller error = %v, want %v", ctx.Err(), wantErr)
+				}
+			})
 		})
 	}
 }

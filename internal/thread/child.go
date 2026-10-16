@@ -24,8 +24,15 @@ type childCall struct {
 	call   *mainCall
 }
 type childState struct {
-	group                      agentKey
-	parent                     string
+	group  agentKey
+	parent string
+	final  bool // Independent completion; never inferred from ancestor closure.
+	*childSnapshot
+}
+
+// childSnapshot retains reversible intrinsic and derived projections. Final
+// children use the public item/recipe and keep only their scoped parent marker.
+type childSnapshot struct {
 	base, previous             Item
 	baseRecipe, previousRecipe contentRecipe
 	restored                   bool
@@ -117,9 +124,10 @@ func (f *Fold) childWork(e history.Entry) bool {
 			if mainKey.tagged {
 				mainKey.scope = 0
 			}
-			if main := f.turns[mainKey]; main != nil && main.calls[id.ToolUseID] != nil && main.calls[id.ToolUseID].group == group {
-				call = main.calls[id.ToolUseID]
-				delete(main.calls, id.ToolUseID)
+			if main := f.turns[mainKey]; main != nil {
+				if ordinary := main.takeMainCall(id.ToolUseID, group); ordinary != nil {
+					call = ordinary
+				}
 			}
 			if call.item < 0 {
 				// A main-turn ending cannot close an uncreated child call.
@@ -151,6 +159,9 @@ func (f *Fold) childWork(e history.Entry) bool {
 	}
 	if id.ToolUseID != "" && saved.call.item >= 0 {
 		f.saveChild(saved.call.item, group, parent)
+		if saved.call.terminal != nil && saved.call.shell == nil && !saved.call.launcher {
+			f.children[saved.call.item].final = true
+		}
 	}
 	return true
 }
@@ -169,7 +180,8 @@ func (f *Fold) saveChild(index int, group agentKey, parent string) {
 		// A first registration is already intrinsic, including mutations made
 		// later in this entry before its first derived resolution.
 		r := f.recipes[f.items[index].ID]
-		state = &childState{base: f.items[index], previous: f.items[index], baseRecipe: r, previousRecipe: r, restored: true}
+		state = &childState{childSnapshot: &childSnapshot{base: f.items[index], previous: f.items[index], baseRecipe: r, previousRecipe: r, restored: true}}
+		state.final = state.base.Kind == "assistant_message" && !state.base.Active
 		f.children[index] = state
 	} else {
 		f.restoreChild(index)
@@ -191,7 +203,20 @@ func (f *Fold) saveChild(index int, group agentKey, parent string) {
 func (f *Fold) restoreChild(index int) {
 	f.countPublicWork(1) // include unchanged/non-child skips at mutation hooks
 	state := f.children[index]
-	if state == nil || state.restored {
+	if state == nil {
+		return
+	}
+	if state.childSnapshot == nil {
+		f.countPublicWork(4) // public item/recipe, temporary snapshot and dirty membership
+		if f.childCounts != nil {
+			f.childCounts.baseCopies++
+		}
+		item := f.items[index]
+		r := f.recipes[item.ID]
+		state.childSnapshot = &childSnapshot{base: item, previous: item, baseRecipe: r, previousRecipe: r, restored: true}
+		f.childDirty[index] = struct{}{}
+	}
+	if state.restored {
 		return
 	}
 	if f.childCounts != nil {
@@ -339,7 +364,7 @@ func (f *Fold) resolveChildren(rev uint64) {
 			if f.appendedText != index && len(previous.Content) == len(current.Content) && len(current.Content) != 0 && &previous.Content[0] != &current.Content[0] {
 				f.countIngestion(len(current.Content))
 			}
-			if f.appendedText == index || !reflect.DeepEqual(previous, current) || !reflect.DeepEqual(state.previousRecipe, f.recipes[item.ID]) {
+			if f.appendedText == index || !reflect.DeepEqual(previous, current) || !equalRecipe(state.previousRecipe, f.recipes[item.ID]) {
 				item.Rev = max(item.ID, rev)
 			} else {
 				item.Rev = state.previous.Rev
@@ -355,6 +380,9 @@ func (f *Fold) resolveChildren(rev uint64) {
 			} else {
 				delete(f.childEndings, index)
 			}
+		}
+		if f.source != nil && state != nil && state.final && !item.Active {
+			state.childSnapshot = nil
 		}
 	}
 	f.countPublicWork(len(f.childDirty))

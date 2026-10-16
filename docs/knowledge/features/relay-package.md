@@ -276,6 +276,12 @@ completion wait without exercising partial-reply cutoff. The shared
 `testThreadQueryInterrupted` scenarios for catch-up and pages enforce this order;
 see [query/live completion fencing](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
 
+Successful handshake capture also precedes completed manager admission. Readiness
+for a first push requires the [shared fixture's bounded `ActiveConns` barrier](v2-session-manager-test-surface-same-package-unit-tests-internal-relay.md).
+The [controlled response hold](v2-session-manager-test-surface-same-package-unit-tests-internal-relay-handshake-and-rekey.md#admission-readiness)
+records before signaling, excludes teardown while observing the absent queue,
+and releases outbound before joining held work on every failure path.
+
 Admission proofs must enter through `Connect` using `AllowInsecureScheme` for
 loopback sockets. `newTestConnection` wraps a prebuilt transport through
 `connectWithClient`, bypassing admission validation, header construction and
