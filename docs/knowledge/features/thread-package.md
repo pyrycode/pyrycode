@@ -530,8 +530,17 @@ racing retirement. Repeated/concurrent lifecycle calls preserve their results.
 See [isolation and lifecycle](thread-package-background-store-lifecycle.md#isolation-and-lifecycle).
 
 [ADR 045](../decisions/045-thread-index-over-history.md) proposes resumable private
-fold checkpoints and a persistent index as future work. These certificates do
-not resume folding or implement that checkpoint schedule. Callers still finish
+fold checkpoints and a persistent index. Reference folds now provide the in-memory
+`Fold.ExportCheckpoint` API: detached, separately JSON-encodable `CheckpointState`
+and creation-ordered `[]CheckpointItem` metadata/recipes, including hidden,
+unresolved and delivery-suppressed internal rows. Export runs at a completed
+`Feed` boundary under serialized ownership without history reads or rendering.
+See the [export contract and encoded-size measurements](thread-package-main-thread-folding-validation.md#validation-and-testing)
+for schema/rules versions, completeness and shared identities. Restoration and
+synthetic resume equivalence (#3490), recorded-history proofs (#3491), and file
+persistence/Store checkpoint loading (#3336) remain follow-ups. Store loading
+still replays from entry 1; the existing scalar certificates neither resume
+folding nor implement the proposed checkpoint schedule. Callers still finish
 producer draining and tail catch-up before `Store.Shutdown`.
 
 Epoch reuse establishes compatible item identity; retained change-range
