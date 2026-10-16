@@ -33,6 +33,8 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 	switch e.Type {
 	case "send_accepted":
 		status = "queued"
+	case "send_written":
+		status = "written"
 	case "send_delivered":
 		status = "delivered"
 	case "send_dropped":
@@ -60,6 +62,7 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 		}
 	}
 	validReason := (status == "queued" && p.Reason == "") ||
+		(status == "written" && p.Reason == "written" && p.DeliveryEntryID == 0) ||
 		(status == "delivered" && p.Reason == "delivered") ||
 		(status == "dropped" && (p.Reason == "removed" || p.Reason == "give_up")) ||
 		(status == "lost" && p.Reason == "daemon_restart")
@@ -72,7 +75,11 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 	}
 	index, ok := f.accepted[p.AcceptedEntryID]
 	f.countPublicWork(1) // acceptance lookup, including rejected outcomes
-	if !ok || p.AcceptedEntryID >= e.ID || f.items[index].Status != "queued" {
+	if !ok || p.AcceptedEntryID >= e.ID {
+		return true, nil
+	}
+	prior := f.items[index].Status
+	if prior != "queued" && !(prior == "written" && (status == "delivered" || status == "lost")) {
 		return true, nil
 	}
 	item := &f.items[index]
@@ -105,9 +112,9 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 		f.messages[p.DeliveryEntryID] = -1
 		f.markAffected(delivery)
 	} else {
-		item.Shown = status == "lost"
+		item.Shown = status == "lost" || status == "written"
 	}
-	item.Status, item.Active, item.Rev = status, false, e.ID
+	item.Status, item.Active, item.Rev = status, status == "written", e.ID
 	if f.recipes[item.ID].creating != 0 {
 		f.referenceField(index, "outcome", recipeField{entry: e.ID})
 	} else {

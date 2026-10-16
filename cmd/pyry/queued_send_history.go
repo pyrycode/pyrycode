@@ -15,6 +15,7 @@ import (
 
 const (
 	historySendAccepted  = "send_accepted"
+	historySendWritten   = "send_written"
 	historySendDelivered = "send_delivered"
 	historySendDropped   = "send_dropped"
 	historySendLost      = "send_lost"
@@ -37,7 +38,7 @@ type queuedSendFact struct {
 
 func queuedSendHistoryType(typ string) bool {
 	switch typ {
-	case historySendAccepted, historySendDelivered, historySendDropped, historySendLost:
+	case historySendAccepted, historySendWritten, historySendDelivered, historySendDropped, historySendLost:
 		return true
 	default:
 		return false
@@ -68,6 +69,8 @@ func validQueuedSendFact(convID, typ string, raw json.RawMessage) bool {
 		return false
 	}
 	switch typ {
+	case historySendWritten:
+		return p.DeliveryEntryID == 0 && p.Reason == "written"
 	case historySendDelivered:
 		return p.DeliveryEntryID != 0 && p.Reason == "delivered"
 	case historySendDropped:
@@ -84,8 +87,11 @@ type queuedSendKey struct {
 	queueID uint64
 }
 type queuedSendReference struct {
-	ready chan struct{}
-	id    *uint64
+	mu        sync.Mutex // Serializes only this acceptance's write/placement facts.
+	written   bool
+	completed bool
+	ready     chan struct{}
+	id        *uint64
 }
 
 // References exist only for this daemon run. A placement may arrive before the
@@ -181,6 +187,12 @@ func (h *queuedSendHistory) delivered(c string, id uint64, ref *queuedSendRefere
 	if h == nil {
 		return nil
 	}
+	ref.mu.Lock()
+	defer ref.mu.Unlock()
+	if ref.completed {
+		return nil
+	}
+	ref.completed = true
 	var receipt *operatorMessage
 	if ref.id != nil && deliveryID != nil {
 		p := queuedSendFact{ConversationID: c, AcceptedEntryID: *ref.id, DeliveryEntryID: *deliveryID, OccurredAt: at, Reason: string(msgqueue.TerminalDelivered)}
@@ -201,6 +213,9 @@ func (h *queuedSendHistory) forget(c string, id uint64) {
 // queue arbitrates delivery versus removal; only actual drops arrive here.
 func (h *queuedSendHistory) terminal(c string, m msgqueue.QueuedMessage, outcome msgqueue.TerminalOutcome) {
 	if outcome == msgqueue.TerminalDelivered {
+		if m.SentNow {
+			h.written(c, m)
+		}
 		return
 	}
 	source := h.observedSource(c)
@@ -212,4 +227,28 @@ func (h *queuedSendHistory) terminal(c string, m msgqueue.QueuedMessage, outcome
 		h.notify(h.receipt(historySendDropped, p, at, entryID))
 	}
 	h.forget(c, m.ID)
+}
+
+// written records physical stdin delivery, never consumption or final placement.
+// No global coordinator lock spans I/O. The per-acceptance leaf lock keeps this
+// optional intermediate fact ordered with its final placement and deduplicates it.
+func (h *queuedSendHistory) written(c string, m msgqueue.QueuedMessage) {
+	h.mu.Lock()
+	ref := h.refs[queuedSendKey{c, m.ID}]
+	h.mu.Unlock()
+	if ref == nil {
+		return
+	} // A fast echo already completed and forgot the owner.
+	<-ref.ready
+	source := h.observedSource(c)
+	ref.mu.Lock()
+	defer ref.mu.Unlock()
+	if ref.completed || ref.written || ref.id == nil {
+		return
+	}
+	at := time.Now().UTC()
+	p := queuedSendFact{ConversationID: c, AcceptedEntryID: *ref.id, OccurredAt: at, Reason: "written"}
+	if h.append(historySendWritten, p, at, source) != nil {
+		ref.written = true
+	}
 }
