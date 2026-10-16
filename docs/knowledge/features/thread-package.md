@@ -582,6 +582,18 @@ sync before returning `ErrPersistence`, so readable clean evidence is invalidate
 where possible. Errors contain no content, payloads or host paths; metadata
 operations preserve history bytes and its existing append durability contract.
 
+Deferred temporary cleanup in `writeCacheFile` requires a fresh successful
+`history.Store.LogDir` lookup equal to the original directory before attempting
+removal. If replacement fails after that directory is renamed and its old path
+redirected outside, the write returns `ErrPersistence`; cleanup intentionally
+retains the temporary in the renamed original directory and preserves any
+outside file with the same leaf name. These path rechecks do not provide
+descriptor-relative atomicity between the check and removal.
+`TestStoreCertificateTemporaryCleanup` checks unchanged outside marker, history,
+certificate and retained temporary bytes after redirection. Its success and
+contained replacement-failure controls require no leftover temporaries; the
+failure control also preserves the existing certificate and history bytes.
+
 Only after the first durable certificate write does `removeLegacy` remove this
 conversation's regular `thread-cache.json`, `thread-recovery.json` and allow-listed
 `thread-run-<token>.json` leaves. It rechecks containment, rejects redirects and
