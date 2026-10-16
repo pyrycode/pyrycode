@@ -16,6 +16,8 @@ import (
 
 const testFoldBaselineCommit = "a920b90cc6bfd2f1fb8461e9f85ce6f19934afa6"
 
+// Output digests include recorded assistant message times (folding rules 4).
+// The original corpus identities and raw-history fingerprints stay unchanged.
 // Explicit generation: go test ./internal/thread -run '^TestFoldBaselines$'
 // -args -write-fold-baselines. Ordinary tests only read committed expectations.
 // Canonical JSON uses sorted encoding/json map keys, UseNumber (no float64

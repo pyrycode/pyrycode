@@ -206,8 +206,12 @@ func (f *Fold) addItem(e history.Entry, item Item) int {
 		}
 		f.recipes[item.ID] = r
 	} else {
-		item.Content = append(json.RawMessage(nil), e.Payload...)
-		f.countIngestion(len(e.Payload))
+		if item.Kind == "assistant_message" {
+			item.Content = assistantMessageContent(e)
+		} else {
+			item.Content = append(json.RawMessage(nil), e.Payload...)
+		}
+		f.countIngestion(len(e.Payload) + len(item.Content))
 	}
 	f.countIngestion(len(item.Summary)*3 + 1)
 	if len(f.items) == cap(f.items) {
