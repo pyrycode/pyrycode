@@ -215,3 +215,50 @@ gates again after this builder handoff; failed gates are not reusable passes.
 The full rerun result remains pending, so verifier finding 1 remains open
 until that evidence is available. Documentation remains pending its owning
 stage; other operating systems remain outside this ticket's scope.
+
+### 2026-10-16 — recovery: reduce repeated proof serialization
+
+The recovery brief explicitly extends this rework to the shared proof's runtime;
+the second aggregate at `b275c8e5` also failed at 600.159 s. Both historical gates
+remain failed. Read `internal/thread/checkpoint_resume_test.go` (`testResumeProof.update`),
+`checkpoint_benchmark_test.go` (`BenchmarkCheckpointResumePhases`), `render.go`
+(`Fold.renderShared`), `checkpoint_export.go` (`checkpointRecord`) and
+`docs/knowledge/features/thread-package-main-thread-folding-validation.md`
+**Validation and testing**: every import must independently render/hash all rows,
+and JSON RawMessage alone cannot prove exact Content bytes. QMD found #3494's
+plan; its validation optimization is already present but did not clear this host.
+No other remote feature branch touches the two proposed test files.
+
+Keep all production code and corpus scheduling unchanged. Measure the uncached
+full-module race tier and isolated corpus, retaining phase logs, CPU/allocation
+profiles, CPU quota and Go concurrency. Replace only proof bookkeeping: borrow
+immutable rendered bytes through `renderShared`, serialize the complete rendered
+metadata and checkpoint/private facts once into worker-owned scratch, and append
+a length-delimited exact-content component. Preserve nil-versus-empty Content
+identity. No rendered row or hash is reused across imports. Reuse selection and
+encoding storage within one proof owner; clear or overwrite it before reuse.
+Keep both per-cut JSON round trips, 30,000 entries, 201 cuts, 50,101 comparisons,
+eight joined workers and the default timeout. Measure the same phases before/after.
+
+Add proof sensitivity cases before implementation: every Item metadata field,
+recipe/private publication facts, exact Content and length boundaries must affect
+the proof; scratch reuse must match fresh full recomputation. Retain the existing
+exact-byte negative control. Run focused race checks, uncached thread and joint
+checks, and the required transport batches; the dispatcher still owns fresh
+`make check` followed by `make build` and normal review.
+
+Sizing recheck: one runtime-proof deliverable within the existing acceptance
+criteria; approximately 250 additional lines (under 800 total branch-written
+lines), zero exported types, zero consumer API changes and no new reject branch.
+Security review PASS for this revision: test-only synthetic data, no I/O or
+credential/protocol changes; private facts and exact-byte distinctions stay in
+the hash. Each existing worker exclusively owns scratch; no new goroutine,
+shared cache or cancellation lifetime. Lifecycle coverage remains the existing
+resume/cancellation race tests, with scratch reuse checked by the new proof test.
+
+Additional documentation handoff, pending documentation stage: in
+`docs/knowledge/features/thread-package-main-thread-folding-validation.md`,
+**Validation and testing**, describe the demonstrated proof cost reduction and
+worker-owned scratch/length-delimited Content encoding. Retain the independent
+per-import full inventory, both JSON round trips and corpus/comparison counts;
+distinguish measured runtime from unproved historical contention attribution.
