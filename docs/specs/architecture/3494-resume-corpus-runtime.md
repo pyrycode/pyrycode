@@ -1,0 +1,125 @@
+# Synthetic checkpoint-resume runtime on Linux
+
+## Files read
+
+- `internal/thread/checkpoint_resume_test.go` → `testCheckpointResume`, `testCheckpointResumeCut`, `testResumeProof.update`: baseline preparation, eight joined workers and complete per-import inventory proof.
+- `internal/thread/render_test.go` → `testReferenceFold`: immutable history lookup with a worker-owned recent source.
+- `internal/thread/render.go` → `renderSharedLookup`: repeated object validation during exact-content reconstruction.
+- `internal/thread/fold.go` → `foldDecoder.decode`, `validRecordedFields`: object validation decodes a field map, DTO and recursive field map even for an empty DTO.
+- `internal/thread/checkpoint_export.go` → `checkpointRecord`: creation metadata and recipes included in the proof.
+- `internal/thread/corpus_test.go` → `TestFoldCorpus`: unchanged 30,000-entry fixture and independent semantic assertions.
+- `docs/knowledge/features/thread-package-main-thread-folding-validation.md` § Validation and testing: complete inventory checks and raw Content bytes must remain independent at each import.
+- `docs/knowledge/features/development-verification.md` § Prove that tests distinguish the change: require a controlled regression and matched measurements.
+
+## Context
+
+The complete synthetic resume proof can exceed the default ten-minute Linux
+package race timeout, including when isolated. The timeout stack establishes
+active work, not a cause. Measure the unchanged corpus before selecting the
+repair. No decision record is needed for a local validation optimization.
+
+Sizing: one deliverable (retain the proof within the default gate), three
+acceptance criteria, approximately 300–450 written lines including this plan,
+zero new exported types, no signature changes, and at most one new reject guard.
+Remote feature branches were checked; none touches the proposed files.
+
+## Design
+
+Profile the unchanged race corpus and measure fixture, uninterrupted baseline,
+prefix preparation, cut export/JSON/import, rendering and proof separately with
+focused benchmarks. Keep package scheduling, test parallelism and eight cut
+workers unchanged for matched runs. Record Go version, CPU/quota and commands.
+
+The candidate local optimization is the empty DTO object-validation case in
+`foldDecoder.decode`: with destination `*struct{}` and no required fields, the
+contract is exactly one syntactically valid JSON object. Check that contract
+without allocating and decoding field maps three times. Keep typed DTO and
+required-field validation on their existing paths. Select this repair only if
+the profile/benchmarks establish its contribution; otherwise revise the plan
+before implementing a different repair.
+
+Keep the resume proof algorithm, fixture, independent full-inventory hash after
+each import, both JSON round trips, all suffix comparisons, exact raw content
+hashing and private checkpoint facts intact. Add phase benchmarks and concise
+phase/completion diagnostics to make the retained work observable. Do not cache
+rendered proof rows across imports or change worker admission to obtain a pass.
+
+## Concurrency model
+
+No new production goroutines or shared mutable state. Existing test workers each
+own their folds and history source; immutable prefix state is shared read-only.
+The existing jobs close, abort signal and WaitGroup join remain authoritative.
+
+## State transitions and identity reuse
+
+None: the proposed validation fast path has no lifecycle or identity state.
+Existing `TestCheckpointResumeCorpus`, `TestCheckpointResumeFocused` and the
+checkpoint lifecycle tests continue to cover restored identities under race
+detection with the unchanged proof.
+
+## Error handling
+
+Malformed JSON, null, arrays/scalars, trailing data and non-JSON whitespace must
+remain rejected. Unknown object fields remain inert, including unknown nulls.
+Required fields and recursively typed null rejection remain on the old path.
+Rendering still withholds the entire result on source validation failure.
+
+## Testing strategy
+
+Write differential object-validation cases and a zero-allocation regression
+first; observe the allocation regression fail against the old implementation.
+Compare against decoding a map and empty DTO for valid/invalid JSON, duplicate
+keys, nested values, whitespace, malformed/trailing input and required fields.
+Retain `TestCheckpointProofContentBytes` unchanged. Use phase benchmarks before
+and after, plus matched isolated CPU profiles and corpus completion counts.
+
+Run uncached default-timeout race checks on `internal/thread`, then jointly on
+`internal/thread`, `cmd/pyry` and `internal/relay`; run `go vet ./...` and
+`go build -o /tmp/builder-3494/pyry ./cmd/pyry`. The verifier owns the uncached
+`make check` full-module gate. Linux is the verification OS; macOS is outside
+this ticket's verification scope.
+
+## Open questions
+
+- Does empty DTO validation account for enough CPU/allocation cost? Resolve from
+  the unchanged profile and focused phase benchmarks before implementation.
+- How much of observed elapsed time comes from host contention? Report CPU
+  samples and phase timings separately; do not attribute all wall time to it.
+
+## Documentation handoff
+
+Pending for documentation stage: in
+`docs/knowledge/features/thread-package-main-thread-folding-validation.md`,
+under **Validation and testing**, update the paragraph describing
+`TestCheckpointResumeCorpus` with the repaired execution strategy and measured
+Linux runtime findings. Retain the 201-cut/50,101-comparison contract and
+distinguish measured cost from scheduling hypotheses; update the
+eight-worker/parallel description if it changes.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] `foldDecoder.decode` still validates untrusted history JSON.
+  MUST preserve object-only acceptance; differential rejection cases and existing
+  typed-null tests are required before handoff. The fast path only accepts an
+  empty DTO with no required fields.
+- [Tokens/secrets] No credential handling changes; synthetic fixtures contain no
+  live secrets and profiling records symbol/time data only.
+- [File operations] No production file I/O changes; benchmark/profile output is
+  scratch data, not checkpoint persistence.
+- [Subprocesses] No new subprocess execution in production or test helpers.
+- [Cryptography] Existing SHA-256 proof aggregation and raw Content-byte hashing
+  stay unchanged; no cryptographic trust or authentication is inferred.
+- [Network and I/O] No network admission, protocol, size limit or deadline changes.
+- [Errors/logging] Validation still returns false; diagnostics contain phase
+  durations/counts rather than history payloads.
+- [Concurrency] No shared validation cache or mutable global state; existing
+  worker ownership and joins remain unchanged.
+- [Threat model] This is an offline validation cost repair. Typed DTO validation,
+  required-field checks and fail-closed rendering remain existing boundaries.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-10-16
