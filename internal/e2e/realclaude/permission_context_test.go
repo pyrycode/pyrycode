@@ -25,9 +25,12 @@ import (
 // Only selected source fields cross this test-only socket. They stay in memory,
 // never enter diagnostic logs, and are observed before the daemon reads stdout.
 type permissionObservation struct {
-	Type      string `json:"type"`
-	RequestID string `json:"request_id"`
-	Request   struct {
+	Type           string   `json:"type"`
+	Subtype        string   `json:"subtype,omitempty"`
+	Tools          []string `json:"tools,omitempty"`
+	PermissionMode string   `json:"permissionMode,omitempty"`
+	RequestID      string   `json:"request_id"`
+	Request        struct {
 		Subtype   string `json:"subtype"`
 		ToolName  string `json:"tool_name"`
 		ToolUseID string `json:"tool_use_id"`
@@ -104,6 +107,7 @@ func runPermissionObserver() int {
 	// permanently once full, so an unconditional third arm could silently end their
 	// observation (#2474).
 	posture := os.Getenv("PYRY_PERMISSION_OBSERVER_POSTURE") == "1"
+	questions := os.Getenv("PYRY_PERMISSION_OBSERVER_QUESTIONS") == "1"
 	reader := bufio.NewReader(stdout)
 	for {
 		line, readErr := reader.ReadBytes('\n')
@@ -111,7 +115,8 @@ func runPermissionObserver() int {
 		if json.Unmarshal(line, &observed) == nil &&
 			((observed.Type == "control_request" && observed.Request.Subtype == "can_use_tool") ||
 				observed.Type == "result" ||
-				(posture && observed.Type == "control_response")) {
+				(posture && observed.Type == "control_response") ||
+				(questions && observed.Type == "system" && observed.Subtype == "init")) {
 			conn, err := net.DialTimeout("tcp", os.Getenv("PYRY_PERMISSION_OBSERVER_ADDR"), 5*time.Second)
 			if err != nil {
 				return 94
