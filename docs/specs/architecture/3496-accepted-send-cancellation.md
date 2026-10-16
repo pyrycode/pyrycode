@@ -382,3 +382,34 @@ Additional scratch-state coverage in the final diff:
 | --- | --- |
 | Selection/encoding storage reused after successive feeds | `TestCheckpointProofReuse`, `TestCheckpointProofScratch` |
 | Fresh independently rendered inventory after every import | `TestCheckpointResumeFocused`; corpus incomplete in the aggregate above |
+
+### 2026-10-16 — recovery: reuse decoded root fields
+
+The recovery brief authorizes a production decoder repair: `foldDecoder.decode`
+already parses the root into `fields`, but `validRecordedFields` parses that same
+root again. Reuse that map for root struct validation through a shared object
+validator. Keep typed unmarshalling, exact required-key lookup, recursive field
+validation, case-insensitive recorded-field matching, nullable containers and
+inert unknown fields. Non-struct roots retain the existing recursive path.
+Read `internal/thread/fold.go` (decoder and validator), `decode_object_test.go`
+(empty-object controls), `checkpoint_benchmark_test.go` (matched phases), and
+the thread validation overview (independent full-inventory proof requirements).
+No other remote feature branch touches the proposed files.
+
+Before implementation, add differential acceptance/output controls against the
+existing root-reparse decoder and a relative allocation regression that must
+fail without reuse. Measure both decoder paths together, then matched complete
+feed/render/proof phases. Preserve every corpus assertion and scheduling choice,
+both JSON round trips, exact Content bytes, 30,000 entries, 201 cuts and 50,101
+comparisons. Run uncached Linux isolated thread, joint cmd/pyry+relay+thread and
+full-module race checks at default concurrency/timeout, plus transport batches,
+vet and build. Dispatcher still owns fresh complete `make check`, `make build`
+and normal review; no historical failed gate becomes a pass.
+
+Security review PASS: the untrusted JSON boundary retains all existing rejects;
+no I/O, secrets, crypto, errors or logging change. No state or goroutine is added,
+and each decode owns its map; successive independent calls are covered by
+`TestDecodeRecordedFields`. No exported type or consumer contract changes.
+Sizing: approximately 150 additional code/test lines and this revision; no new
+reject branches. Documentation handoff additionally records root-map reuse and
+its measured costs in the thread overview's **Validation and testing** section.
