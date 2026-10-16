@@ -100,3 +100,16 @@ None.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+
+### 2026-10-16 — validation runtime
+
+The default three-package race command passed `cmd/pyry` (402.072s) and
+`internal/relay` (60.576s), but the unchanged `TestCheckpointResumeCorpus` hit the
+thread package's ten-minute timeout (600.179s). No thread files changed in this
+ticket. Track that existing gate-runtime problem in #3494 (Backlog, priority:low).
+Complete the same thread assertions separately with `go test -race -timeout 20m
+./internal/thread`; record its result in the PR without treating a longer limit
+as a repair of #3494. The recorded proof independently passed all three histories:
+60 cuts and 687 immediate/suffix comparisons. No design or coverage changes.
