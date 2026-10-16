@@ -116,6 +116,10 @@ func startDaemonThreadPublisher(base context.Context, s *threadShadow, m *relay.
 }
 
 func (s *threadShadow) publish(ctx context.Context, id conversations.ConversationID, w *shadowConversation) bool {
+	return s.publishThread(ctx, id, w, false)
+}
+
+func (s *threadShadow) publishThread(ctx context.Context, id conversations.ConversationID, w *shadowConversation, initialOnly bool) bool {
 	if !w.lockPublication(ctx) {
 		return false
 	}
@@ -144,6 +148,9 @@ func (s *threadShadow) publish(ctx context.Context, id conversations.Conversatio
 		w.publisher = p
 		w.threadEpoch = ""
 		w.threadPeers = nil
+	}
+	if initialOnly && w.threadEpoch != "" {
+		return true
 	}
 	p.publish(operation, id, w)
 	return w.threadEpoch != ""

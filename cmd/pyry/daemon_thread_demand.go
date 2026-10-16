@@ -99,7 +99,7 @@ func (s *threadShadow) queryThread(ctx context.Context, id conversations.Convers
 		case thread.StateUsable:
 			// Establish the live boundary before a query can certify its capture.
 			// Later commits must be delivered from it or force reconciliation.
-			if !s.publish(ctx, id, w) {
+			if !s.publishThread(ctx, id, w, true) {
 				if err := ctx.Err(); err != nil {
 					return thread.QueryResult{}, err
 				}
