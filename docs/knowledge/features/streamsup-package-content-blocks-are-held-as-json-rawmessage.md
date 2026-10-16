@@ -279,7 +279,7 @@ detail green. `TestParser_SidecarMultiBlockSendsNoCount`, `TestParser_SyntheticU
 and `TestParser_ParentToolUseID_LeavesTheUserSidecarIntact` therefore use Edit fixtures with non-empty
 details. The single-block control proves the same sidecar can compose a count before the multi-block
 case checks suppression; synthetic-user and hostile-parent-ID controls prove their guards preserve the
-supported detail. See [development verification](development-verification.md#prove-that-tests-distinguish-the-change).
+supported detail. See [development verification](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 **The plausible-wrong edit-arm implementation was caught only by mutation, not by review.** A hunk's
 `oldLines`/`newLines` are its *spans*, context lines included; differencing them looks like it should

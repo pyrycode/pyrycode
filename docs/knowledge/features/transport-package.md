@@ -344,7 +344,7 @@ with that pump's sanitizer removed. The ping/send cases in
 `TestSafePumpDiagnostics` have this coverage limitation; a controlled test of
 each boundary must fail when its sanitizer is removed. The classification
 helper's independent test proves reason removal but cannot prove every caller
-uses it. See [verification practices](development-verification.md#prove-that-tests-distinguish-the-change) and the
+uses it. See [verification practices](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change) and the
 [review finding](https://github.com/pyrycode/pyrycode/pull/3219#issuecomment-6115369696).
 
 `internal/transport/wssclient_test.go` (~520 LOC, stdlib + `coder/websocket`):

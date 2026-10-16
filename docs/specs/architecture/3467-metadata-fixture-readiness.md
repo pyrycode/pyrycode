@@ -65,7 +65,7 @@ joined before ordinary suite runs. The verifier owns the full-module test gate.
   recorded after execution; historical scheduling attribution remains unknown.
 
 ## Documentation handoff
-- Satisfied in [development verification](../../knowledge/features/development-verification.md#diagnosing-startup-recovery-runtime):
+- Satisfied in [development verification](../../knowledge/features/development-verification-test-execution-and-artifact-survival.md#diagnosing-startup-recovery-runtime):
   documented the metadata fixture's
   complete-publication invariant (usable status and snapshot, consumed and shown
   versions 1,024, and 1,024 complete items), twenty-second progress/inactivity

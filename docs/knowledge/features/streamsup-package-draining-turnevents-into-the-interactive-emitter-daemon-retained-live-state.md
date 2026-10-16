@@ -229,7 +229,7 @@ finds the supported parser boundary, checks owner admission and complete reading
 clear envelopes with hostile escaping and maximum metadata, and resolves answer
 and refusal through the original batch ID. A raw cap alone would admit input
 whose encoded envelope cannot fit. See
-[protocol boundary testing](development-verification.md#protocol-boundaries).
+[protocol boundary testing](development-verification-protocol-boundaries.md#protocol-boundaries).
 MCP's enabled `TestDaemonLiveMappedInventoryBounds` assertion is separate evidence.
 
 ## Relay delivery
@@ -262,7 +262,7 @@ immediately; a missing replacement fails the bounded wire read. The publisher
 hold escapes on release or cancellation, and deferred idempotent release precedes
 fixture cleanup joining the publisher. Awaiting only the Noise response would
 allow the first snapshot to capture valid `old` and falsely fail this proof; see
-[snapshot synchronization](development-verification.md#prove-that-tests-distinguish-the-change).
+[snapshot synchronization](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 Recipient lookup and `PushLiveState` run outside source/owner locks, so held
 publication cannot block stream/history writers. Handoff overflow retires thread

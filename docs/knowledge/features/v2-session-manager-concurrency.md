@@ -46,7 +46,7 @@ logs, but cannot overtake preceding held output. See
 [ordered delivery](#hosted-discovery-and-ordered-delivery),
 [switch publication and exclusion](conversation-session-binding.md#switching-to-the-other-agent-2672), the
 [presence contract](protocol-package-types-session-settings-payloads.md#agent-switch-presence-and-round-trip-testing)
-and [completion-test barriers](development-verification.md#prove-that-tests-distinguish-the-change).
+and [completion-test barriers][verification-tests].
 
 A control reply can overtake undrained source pushes. Before using one as a
 trailing sentinel for absent stale patches or extra completion frames, await
@@ -253,7 +253,7 @@ The snapshot cannot prevent later teardown.
 the helper returns and an early push finds no queue while `Run` cannot tear down.
 Admission expires while held, then succeeds after release. The hold honors
 cancellation and deferred release precedes fixture joins. This proves a
-sufficient ordering; see the [experiment and unresolved historical attribution](development-verification.md#prove-that-tests-distinguish-the-change).
+sufficient ordering; see the [experiment and unresolved historical attribution][verification-tests].
 
 ## Hosted discovery and ordered delivery
 
@@ -489,7 +489,7 @@ marker check for trailing duplicate or terminal output beyond the source fence.
 admitted clear while its fresh reading still waits outside the lane; ordinary
 FIFO ordering alone would miss that violation. `TestHostedPushCapacityDelivery`
 and `TestHostedPushCapacityTeardown` cover resume, disconnect and caller
-cancellation. See [completion-test barriers](development-verification.md#prove-that-tests-distinguish-the-change).
+cancellation. See [completion-test barriers][verification-tests].
 
 Checking the original session on completion does not fence a delayed terminal
 close addressed by connection ID. `hostedCloseContext` gives it a cancellable
@@ -594,3 +594,5 @@ otherwise a fence could report completion between clear and fresh. Retaining
 fresh state after a failed clear would create an endlessly re-signaled pending
 read, blocking unrelated queued and snapshot state; see
 [complete-envelope validation](protocol-package-types-envelope.md#live-state-session-metadata).
+
+[verification-tests]: development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change

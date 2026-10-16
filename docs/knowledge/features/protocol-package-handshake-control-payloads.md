@@ -140,6 +140,6 @@ DTO, checks the marshalled key's omission or verbatim value, and decodes it agai
 BEL values to prove control-character preservation in a DTO test. A terminal
 colour escape literal can pass Go tests while failing `substrate-guard`, because
 terminal substrate vocabulary is restricted to the TUI driver. See
-[protocol verification](development-verification.md#protocol-boundaries).
+[protocol verification](development-verification-protocol-boundaries.md#protocol-boundaries).
 
 Sibling payload slices not yet landed: messaging (`send_message` / `message`), conversations (`list_conversations` / `conversations` / `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated`), push (`register_push_token`).
