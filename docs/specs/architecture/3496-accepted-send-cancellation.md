@@ -262,3 +262,123 @@ Additional documentation handoff, pending documentation stage: in
 worker-owned scratch/length-delimited Content encoding. Retain the independent
 per-import full inventory, both JSON round trips and corpus/comparison counts;
 distinguish measured runtime from unproved historical contention attribution.
+
+### 2026-10-16 — reproduced runtime obstruction and proof controls
+
+On build-fractal-2 (Intel i7-3770, Linux/amd64, Go 1.26.9, eight logical CPUs,
+`cpu.max=800000 100000`, GOMAXPROCS/GOFLAGS unset, default `-p`/`-parallel`),
+the unchanged `b275c8e5` implementation reproduced the aggregate obstruction:
+`go test -race -json -count=1 ./...` exited 1, with thread timing out at
+600.193 s. Its eight workers were active in rendering/proof/JSON work; 185 cuts
+completed, eight were active and eight had not started. Named records across
+the module: 27,888 run, 27,855 passed, zero terminal test-fail records, 24 skipped,
+nine unterminated (the corpus parent and eight cuts). Package outcomes were
+54 passed, one no-tests skip and one failed. This is a failed aggregate, despite
+the absence of individual fail records from the killed tests. Shell timing was
+681.233 s real, 3,235.369 s user and 169.864 s system, including cold compilation.
+The unchanged-source phase benchmarks, proof controls, transport batches and
+vet/build briefly overlapped this diagnostic run; this is not a controlled
+measurement of unrelated host contention. Both earlier dispatcher gates remain
+failed as recorded above.
+
+After joining that run, the prebuilt unchanged race binary ran alone through
+`go tool test2json -t -p github.com/pyrycode/pyrycode/internal/thread
+<scratch>/before.test -test.v -test.count=1 -test.timeout=10m0s
+-test.run '^TestCheckpointResumeCorpus$' -test.cpuprofile=<scratch>/before-isolated.cpu
+-test.memprofile=<scratch>/before-isolated.mem`. All 202 named records passed,
+zero failed/skipped: 201 cuts and 50,101 comparisons. Package elapsed was
+415.415 s; test/profile duration 413.17 s, with 2,209.83 sampled CPU-seconds.
+Fixture/baseline-proof/prefix/workers took 0.901/70.008/19.142/323.112 s.
+The failed aggregate's corresponding completed preparation phases were
+2.109/81.795/21.414 s. This establishes substantial executed work even in
+isolation; it does not assign the historical difference entirely to scheduling.
+The isolated CPU profile attributed 446.14 cumulative seconds to proof update,
+268.73 to detached rendering, and 490.39 to JSON unmarshal (inclusive, not
+additive). Allocation sampling attributed 26,763.17 MB to proof update out of
+56,622.69 MB overall, including 14,006.42 MB under detached rendering.
+
+The new `TestCheckpointProofScratch` failed on the old helper: a 65,547-byte
+payload allocated 592,402 B/op. After repair it passed at 2,415 B/op. The 245
+named proof/focused-resume records all passed, zero failed/skipped (45.867 s).
+They include every Item field, recipe/publication/touch/watermark distinctions,
+nil/empty Content and exact bytes, and incremental scratch reuse against fresh
+full recomputation. The original `TestCheckpointProofContentBytes` is unchanged.
+An initial draft borrowed `f.items` as the render selection; the reuse and
+focused tests caught that `renderShared` replaces selection metadata. The final
+helper owns its selection slice and only borrows immutable Content bytes.
+
+Matched phase command: `go test -race -count=1 -run '^$' -bench
+'^BenchmarkCheckpointResumePhases$' -benchtime=1x -cpuprofile <scratch>/<side>.cpu
+-memprofile <scratch>/<side>.mem -o <scratch>/<side>.test ./internal/thread`.
+Both samples overlapped the same unchanged full-module run, sequentially;
+they are individual observations, not latency guarantees. Before uses the
+unchanged helper; after uses the exact helper committed as `3aa22ebe`.
+
+| Phase | Before seconds | After seconds | Before B/op | After B/op |
+| --- | ---: | ---: | ---: | ---: |
+| Feed | 20.707 | 19.986 | 432,979,176 | 432,976,008 |
+| Both JSON round trips | 2.230 | 2.048 | 83,354,472 | 66,575,744 |
+| Full render | 1.489 | 1.476 | 60,965,544 | 60,648,888 |
+| Full proof including render | 2.691 | 2.181 | 124,756,008 | 81,730,088 |
+
+Proof allocations fell from 498,057 to 479,111; sampled cumulative proof
+allocation fell from 124.73 MB to 73.77 MB. The proof now avoids a detached
+Content clone plus normalized and base64 payload serializations. Stable render
+cost and the payload allocation negative control isolate the removed work;
+changes in unchanged JSON/feed phases are not attributed to this repair.
+Each import still independently renders/hashes its entire inventory; no hash
+or rendered row crosses imports. No sleep, retry, widened bound, reduced corpus
+or skipped assertion was introduced. Scratch artifacts live under
+`/tmp/builder-3496-runtime/`; this revision retains the durable counts/diagnosis.
+
+### 2026-10-16 — candidate aggregate remains failed; finding 1 unresolved
+
+At pushed implementation `3aa22ebe`, `go test -race -json -count=1 -exec
+/tmp/builder-3496-runtime/profile-thread.sh ./...` exited 1. The scratch exec
+wrapper only copies the thread binary and appends CPU/memory profile output
+paths; other packages execute unchanged. Concurrency, test selection and the
+default timeout remain unchanged. No other test job overlapped this run.
+Thread timed out after ten minutes and reported package elapsed 602.497 s.
+All 201 cuts started; 199 finished and cuts 29,999/30,000 remained active.
+The expected final 50,101-comparison completion assertion was not reached.
+This is a failed/incomplete aggregate, not a pass or proof of reliability.
+
+Named module records: 27,927 run, 27,900 passed, zero terminal test-fail records,
+24 skipped and three unterminated (the corpus parent and two cuts). Package
+outcomes: 54 passed, one no-tests skip, one failed. Skips remain the existing
+platform, opt-in, ownership and unavailable Node/SQLite fixture cases; no skip
+was added. Shell timing: 637.201 s real, 3,039.903 s user, 169.294 s system.
+Fixture/baseline-proof/prefix phases took 1.716/62.518/21.323 s. Corpus fixture
+completion was logged about 244.5 s into the thread package, versus 214.8 s in the
+baseline aggregate; a faster proof alone did not clear the full timeout.
+
+The complete candidate thread profile spans 600.02 s and 2,612.29 sampled
+CPU-seconds, with 391.26 cumulative CPU-seconds in proof updates. Allocations
+sampled 61.37 GB overall and 17.16 GB under proof updates. This profile includes
+all thread tests, unlike the isolated baseline profile; do not treat their totals
+as a matched before/after workload or infer the cause of the later corpus start.
+The matched phase allocation control establishes removed redundant work, but
+this aggregate establishes that the runtime obstruction remains unresolved.
+
+Builder checks at `3aa22ebe`, Linux/Go/concurrency as above:
+
+| Command | Run | Pass | Fail | Skip | Package seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `go test -race -json -count=100 -run '^TestClientSendContextAcceptedCancellation$' ./internal/transport` | 400 | 400 | 0 | 0 | 13.017 |
+| `go test -race -json -count=20 ./internal/transport` | 1620 | 1620 | 0 | 0 | 14.923 |
+
+Each cancel/deadline/shutdown mode passed 100/100 and 20/20, respectively.
+`go vet ./...` and `go build -o /tmp/builder-3496-runtime/final-pyry ./cmd/pyry`
+each exited zero after the aggregate finished. They do not complete `make check`.
+The ordinary dispatcher `make check`, followed by `make build`, has not passed
+on this repair; staticcheck, substrate-guard and fake-daemon e2e remain unproved.
+Further runtime repair and those fresh gates are required. Verifier finding 1
+is **not fixed**. Documentation remains pending its owning stage; other OSes
+remain outside this ticket's verification scope.
+
+Additional scratch-state coverage in the final diff:
+
+| Event | Race-detector coverage |
+| --- | --- |
+| Selection/encoding storage reused after successive feeds | `TestCheckpointProofReuse`, `TestCheckpointProofScratch` |
+| Fresh independently rendered inventory after every import | `TestCheckpointResumeFocused`; corpus incomplete in the aggregate above |
