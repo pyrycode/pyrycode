@@ -429,3 +429,54 @@ Sampled cumulative decoder CPU fell 16.42→10.66 s and allocation 636.09→367.
 
 Required transport commands at the same revision: `go test -race -json -count=100 -run '^TestClientSendContextAcceptedCancellation$' ./internal/transport` passed 400/400 records in 12.201 s; `go test -race -json -count=20 ./internal/transport` passed 1620/1620 in 13.247 s, zero failures/skips/unterminated records. Each mode passed 100 and 20 times, respectively. These two batches and vet/build overlapped each other, before the full-module run. `go vet ./...` and `go build -o /tmp/builder-3496-decoder/pyry ./cmd/pyry` completed successfully.
 Scratch JSON, phase logs, profiles, skip reasons and summarizer remain in `/tmp/builder-3496-decoder/`; previous gate evidence was retrieved under `/tmp/builder-3496-decoder-evidence/`. The heap probe skips unless explicitly armed; joint also skips the live-Claude opt-in and case-insensitive-filesystem test. Every historical failed gate remains failed. Finding 1 is not fixed: the measured production repair and isolated pass do not clear the failed joint aggregate. Fresh complete dispatcher `make check`, then `make build` and normal review remain required before approval; no staticcheck, substrate-guard or fake-daemon e2e pass is claimed. Both documentation handoffs remain pending their owning stage; other operating systems remain outside scope.
+
+### 2026-10-16 — current-main candidate retains a joint timeout
+
+Current main `00066e73` (PR #3499) is merged at `3b7c1689`; a fresh fetch and
+`git merge origin/main` confirmed it is current before these checks. This
+includes the test-cost reductions and sibling-app readiness correction.
+The decoder, transport and checkpoint proof changes are preserved unchanged.
+There is no new design departure or production change in this diagnostic leg.
+
+Environment: build-fractal-2, Linux/amd64, Go 1.26.9, i7-3770, eight logical CPUs,
+`cpu.max=800000 100000`, GOMAXPROCS/GOFLAGS unset, default `-p`, `-parallel`
+and ten-minute package timeout. The joint and isolated runs were sequential,
+without another builder test job overlapping either; unrelated host activity
+was uncontrolled. Counts include named parents and subtests.
+
+| Command at `3b7c1689` | Run/pass/fail/skip/unterminated | Package seconds |
+| --- | --- | --- |
+| `go test -race -json -count=1 ./cmd/pyry ./internal/relay ./internal/thread` | 19992/19979/0/4/9 | **FAIL**: thread 600.191; cmd/pyry PASS 353.021, relay PASS 66.699 |
+| `go test -race -json -count=1 -cpuprofile /tmp/builder-3496-combined/isolated.cpu -memprofile /tmp/builder-3496-combined/isolated.mem -o /tmp/builder-3496-combined/isolated.test ./internal/thread` | 1937/1936/0/1/0 | PASS 586.399 |
+| `go test -race -json -count=100 -run '^TestClientSendContextAcceptedCancellation$' ./internal/transport` | 400/400/0/0/0 | PASS 11.829 |
+| `go test -race -json -count=20 ./internal/transport` | 1620/1620/0/0/0 | PASS 12.826 |
+
+The joint run completed 144 cuts, with eight active and 49 unstarted when killed;
+its final comparison assertion was unreached. Zero terminal test-fail records
+does not make this aggregate pass. Shell elapsed was 629.820 s. Existing skips:
+`TestRunAgentRun_RealClaude`, `TestMemoryPathsCaseInsensitive`,
+`TestReferenceDiskHeap` and `TestPushWakeFeedbackExpiryIntegration`; the real
+socket expiry proof remains in the slow release checks, not claimed passed here.
+
+The isolated corpus completed all 201 cuts and 50,101 comparisons in 383.22 s.
+Fixture/baseline-proof/prefix/workers took 2.912/68.629/18.117/293.565 s;
+workers and GOMAXPROCS remained eight. Shell elapsed was 587.342 s. Its sole
+skip was the existing opt-in heap probe. The allocation regression again reported
+42 versus 28 allocations. This is an isolated pass, not aggregate acceptance.
+The full thread profile samples 2456.18 CPU-seconds and 56.92 GB allocated;
+it is not a matched workload against earlier corpus-only or pre-merge profiles.
+
+Both transport batches and `go vet ./...` plus
+`go build -o /tmp/builder-3496-combined/pyry ./cmd/pyry` then ran together and
+exited zero. Each cancellation mode passed 100 and 20 repetitions, respectively;
+transport shell times were 12.612 and 13.444 s. JSON, stderr, profiles and environment
+records are retained under `/tmp/builder-3496-combined/`. No tests remain running.
+
+**Finding 1 remains not fixed.** Main's merged optimizations and the measured
+decoder repair did not clear this fresh joint gate. Every earlier failed gate
+remains failed; the prior separate full-module pass is retained without being
+substituted for this result. Fresh complete dispatcher `make check`, subsequent
+`make build` and normal review remain required before approval. No fresh
+full-module, staticcheck, substrate-guard or fake-daemon e2e pass is claimed in
+this leg. Both documentation handoffs remain pending their owning stage;
+other operating systems remain outside scope.
