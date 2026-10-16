@@ -271,10 +271,16 @@ func TestChildPageCaptureLifecycle(t *testing.T) {
 		t.Fatal(want, e)
 	}
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	var once, cleanup sync.Once
+	var first atomic.Bool
+	var cleanup sync.Once
 	defer cleanup.Do(func() { close(release) })
 	s.mu.Lock()
-	s.workers[testStoreA].query.work = func(bool) { once.Do(func() { close(entered); <-release }) }
+	s.workers[testStoreA].query.work = func(bool) {
+		if first.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+	}
 	s.mu.Unlock()
 	var got ChildPageResult
 	var err error
@@ -283,6 +289,16 @@ func TestChildPageCaptureLifecycle(t *testing.T) {
 		got, err = s.ChildPage(context.Background(), testStoreA, snap.Epoch, 1, 1, 10, nil)
 	}()
 	testStoreSignal(t, entered)
+	var concurrent Snapshot
+	snapshotDone := make(chan struct{})
+	go func() {
+		defer close(snapshotDone)
+		concurrent = s.Snapshot(testStoreA)
+	}()
+	testStoreSignal(t, snapshotDone)
+	if !reflect.DeepEqual(concurrent, snap) {
+		t.Fatalf("concurrent snapshot: %#v, want %#v", concurrent, snap)
+	}
 	testStoreAppend(t, h, testStoreA, testChild(0, "assistant_delta", "parent", `,"text":"new"`))
 	testStoreWait(t, s, testStoreA, StateUsable, 3)
 	if e := s.Unload(testStoreA); e != nil {

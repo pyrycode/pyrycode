@@ -58,3 +58,6 @@ Pending documentation stage: `docs/knowledge/features/thread-package-background-
 **Date:** 2026-10-16
 
 Sizing recheck: approximately 760 written lines (280 production, 410 tests, 70 plan), three exported types, zero migrated consumers, five criteria and fewer than ten distinct rejection branches.
+
+## Revisions
+- 2026-10-16, verifier finding 1: `TestChildPageCaptureLifecycle` must pause only the first metadata visit without serializing other readers behind the pause. Replace the blocking `sync.Once` hook with an atomic first-entry barrier, and require a concurrent `Snapshot` of the same publication to finish before appending history. Preserve publication, unload, replacement, captured-result equality and stale-continuation assertions. Production contracts and the security review remain unchanged.
