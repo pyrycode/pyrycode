@@ -583,6 +583,20 @@ complete gate. Retain named execution/pass/fail/skip counts and skip reasons for
 each test tier; aggregate green gates without named results cannot prove that a
 particular regression ran.
 
+`testThreadMetadataFixture` waits for usable status and a usable snapshot, both
+with consumed `Version` and `LastShownVersion` 1,024, and 1,024 complete items
+(4,096 text bytes each). Chunk progress renews a twenty-second inactivity watchdog;
+an independent two-minute cap bounds readiness. Progress cannot certify usability.
+A chunk plus final publication exceeded ten seconds under contention, so watchdog
+headroom must cover that work. These are fixture bounds, not latency guarantees.
+Cleanup joins `Store.Shutdown` before cancelling the independent load context.
+
+`TestDaemonThreadMetadataReadiness` delays five real replay chunks by five seconds
+each, defeating even a twenty-second total deadline. The stalled regression proves
+bounded failure and joined cleanup. This [controlled comparison](../../specs/architecture/3467-metadata-fixture-readiness.md#revisions)
+establishes the total-deadline dependency; historical scheduling attribution
+remains unknown. Phase timings stay outside benchmark measurements.
+
 Fixture cost depends on encoded bytes. JSON escaping can multiply padding size,
 and paging decodes whole segments repeatedly. Measure on-disk bytes and assert
 raw pagination and physical rollover independently before accepting smaller
