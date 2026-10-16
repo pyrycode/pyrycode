@@ -148,3 +148,63 @@ The helper now logs fixture, baseline/proof, prefix and joined-worker phases,
 and checks the expected comparison count as well as completed cuts. Its only
 signature change is accepting `testing.TB` for use by phase benchmarks; proof
 hashing and all per-cut work are unchanged.
+
+### 2026-10-16 — matched Linux measurements
+
+Before: `4d98f07513f04fa36fa55714b31ecf09e1cb34c2`. Production candidate:
+`d0ca0353be7f835a238bd317301913475fcc0b61`. Both used Go 1.26.9 linux/amd64
+on an Intel i7-8700 (6 cores/12 logical CPUs), cgroup `cpu.max=800000 100000`
+(eight CPU quota), default GOMAXPROCS=8, default test parallelism=8, eight
+joined corpus workers, and no GOMAXPROCS/GOFLAGS override.
+
+The matched corpus command was `go test -race -count=1 -run
+'^TestCheckpointResumeCorpus$' -v -cpuprofile <scratch>/run.cpu -o
+<scratch>/run.test ./internal/thread`, with the default timeout. Both retained
+201 cuts and 50,101 comparisons. Before/after package elapsed was
+250.728s/220.544s; test/profile duration was 249.13s/219.02s; sampled CPU time
+was 1,538.41s/1,350.93s. Cumulative CPU seconds (inclusive) were:
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| `foldDecoder.decode` | 139.57 | 50.15 |
+| `Fold.render` | 246.83 | 159.26 |
+| `testResumeProof.update` | 327.72 | 239.27 |
+| `json.Marshal` | 150.81 | 150.63 |
+| State JSON round trip | 175.40 | 171.82 |
+| Item JSON round trip | 93.75 | 92.80 |
+
+Phase benchmarks used `go test -race -count=1 -run '^$' -bench
+'^BenchmarkCheckpointResumePhases$' -benchtime=1x ./internal/thread` (before
+production modification, then after). These are individual observations, not
+statistical latency guarantees:
+
+| 30,000-entry phase | Before seconds | After seconds |
+| --- | ---: | ---: |
+| Fixture | 1.241 | 0.594 |
+| Feed | 12.806 | 11.917 |
+| Export | 0.138 | 0.130 |
+| Both JSON round trips | 1.479 | 1.379 |
+| Import | 0.075 | 0.061 |
+| Full internal render | 1.709 | 0.993 |
+| Full proof (includes render) | 2.291 | 1.644 |
+
+Render allocations fell from 899,714 to 415,397 and proof allocations from
+981,995 to 498,697. The before fixture/initial preparation overlapped the tail
+of the corpus run: the unchanged fixture's timing difference illustrates why
+wall times alone cannot establish the repair. The profile's rendering reduction
+and unchanged JSON costs identify the repaired work separately from scheduling.
+Package scheduling/worker settings were not changed; other host activity was
+not controlled, and the cause of the earlier machine's timeout is not inferred.
+
+The in-process control `BenchmarkDecodeEmptyObject` uses a named empty DTO to
+exercise the unchanged generic decoder with the identical input. Command:
+`go test -race -count=1 -run '^TestDecodeEmptyObject' -bench
+'^BenchmarkDecodeEmptyObject$' -benchtime=1s ./internal/thread`. It passed:
+generic 26,406 ns/op, 1,712 B/op, 32 allocs/op; object 3,060 ns/op, 32 B/op,
+1 alloc/op. This controlled comparison resolves validation's contribution
+without relying on between-run host scheduling.
+
+Candidate phase diagnostics: fixture 0.545s, uninterrupted baseline feed/proof
+37.760s, prefix feed/export 12.208s, joined workers 168.499s. The remaining
+default-timeout full-package checks and verifier-owned full-module gate are
+recorded in the PR testing handoff.

@@ -52,11 +52,22 @@ func TestDecodeEmptyObjectAllocations(t *testing.T) {
 
 func BenchmarkDecodeEmptyObject(b *testing.B) {
 	raw := []byte(`{"text":"retained source","unknown":{"nested":[1,2,null]}}`)
-	var dst struct{}
-	b.ReportAllocs()
-	for b.Loop() {
-		if !decode(raw, &dst) {
-			b.Fatal("valid object rejected")
-		}
+	// A named empty DTO keeps the generic decoding path as a matched control.
+	type genericDTO struct{}
+	for _, tc := range []struct {
+		name string
+		dst  any
+	}{
+		{"generic", &genericDTO{}},
+		{"object", &struct{}{}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if !decode(raw, tc.dst) {
+					b.Fatal("valid object rejected")
+				}
+			}
+		})
 	}
 }
