@@ -108,3 +108,13 @@ API adds no peer authorization or loading.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: Read `internal/thread/render_endings_test.go` → `testEndingEntries`
+  and `TestStoreCapturedInheritedEnding` for the inherited-reference proof.
+  A completed ordinary child uses its own result without an inherited ending;
+  bounded tests instead select a nested Task interrupted by its root's ending.
+  Measure requests after preparation over 10/120 descendants and 16/4096-byte
+  unrelated bodies; a larger preparation fixture exceeded its readiness deadline.
+  The API and capture contracts are unchanged.
