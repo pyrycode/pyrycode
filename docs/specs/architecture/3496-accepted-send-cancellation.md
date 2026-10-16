@@ -480,3 +480,46 @@ substituted for this result. Fresh complete dispatcher `make check`, subsequent
 full-module, staticcheck, substrate-guard or fake-daemon e2e pass is claimed in
 this leg. Both documentation handoffs remain pending their owning stage;
 other operating systems remain outside scope.
+
+### 2026-10-16 — recovery: worker preparation and scratch lifetime
+
+The recovery brief authorizes this bounded test-only repair. Current main is
+already merged at `e9517930`. Read `testCheckpointResume`,
+`testCheckpointResumeCut`, `testResumeProof.update`, `testCheckpointJSON`,
+`testReferenceFold`, `ExportCheckpoint` and `BenchmarkCheckpointResumePhases`,
+plus the thread overview's **Validation and testing** invariant. No other remote
+feature branch touches the proposed test files. Retained candidate profiles
+identify repeated preparation imports and JSON/proof allocation as executed work.
+
+Each of the eight joined workers will import the shared base once, then advance
+its private preparation fold through increasing assigned cuts. Cut zero uses an
+independent empty fold. Preparation never receives restored suffix feeds. Each
+cut still exports both complete parts, independently JSON-round-trips them into
+fresh decoded values with deep equality checks, imports a detached fold, freshly
+renders/hashes its full inventory, then feeds only its suffix. No rendered result
+or signature crosses restorations. Reuse a worker-owned encoding buffer and
+proof storage; full proof reset clears row hashes, aggregate and prior selections.
+
+Write fresh-versus-reused controls first: removed rows/private facts, nil/empty
+values, exact Content bytes, earlier/later cuts and preparation detachment.
+Measure matched race phase CPU/allocation and worker preparation on this host.
+Keep 30,000 entries, 201 cuts, 50,101 comparisons, eight workers, completion
+counters, all negative controls and the default timeout. Run uncached isolated
+thread and joint cmd/pyry+relay+thread checks; the dispatcher owns the complete
+full-module race gate, `make check`, subsequent `make build` and normal review.
+Every historical failed gate remains failed until fresh evidence completes it.
+
+Security review PASS: synthetic test data only; no production boundary, network,
+filesystem, subprocess, credential, crypto or diagnostic contract changes. Each
+worker exclusively owns its mutable fold/buffer/proof; existing close-and-join
+shutdown remains. MUST FIX in the design: clear signatures on every full update
+and decode into zero values, avoiding removed-fact and nil/empty contamination.
+Race lifecycle coverage: `TestCheckpointProofRestorationReuse` and
+`TestCheckpointResumeFocused`; corpus completion still proves all cuts/counts.
+Approximately 200 additional code/test lines, zero exported types or consumers,
+no new production reject branches; this bounded recovery preserves prior work.
+
+Additional documentation handoff, pending documentation stage: in the thread
+overview's **Validation and testing**, record measured worker preparation/buffer
+reuse, clearing between restorations and independent fresh decoded/imported/full
+inventory proof. Do not attribute prior timeouts to unmeasured host contention.
