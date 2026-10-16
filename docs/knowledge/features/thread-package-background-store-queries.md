@@ -127,7 +127,8 @@ epoch/version and rendering use one publication through later feed, replacement
 or retirement. Failure, unload and shutdown release worker references without
 invalidating readers. Reset and nonusable results resolve no references.
 
-Metadata selection is `O(log N + selected range + active rows + unique parents)`;
+Page/window/catch-up metadata selection is
+`O(log N + selected range + active rows + unique parents)`;
 rendering adds selected-reference lookup/decoding and returned content work.
 Catch-up selects touched rows by version; active extras apply to catch-up and
 newest windows. Selection scans no unrelated rows or full baseline. Index
@@ -158,3 +159,68 @@ and `TestStoreSelectedLookup` constrain selected references and metadata visits.
 Allocation ceilings cannot isolate selection from selected-segment decoding;
 assert exact allowed reference IDs, including accepted-send terminal outcomes.
 These bounds exclude background recovery and publisher baseline preparation.
+
+### Revision-scoped tool bodies
+
+`Store.ToolBody(ctx, conversationID, expectedEpoch, itemID, expectedRev)
+(ToolBodyResult, error)` reads one public `tool_call` or `agent` body from the
+named conversation. Public membership is the same `Fold.Items` membership used
+by the other bounded queries: hidden and dropped rows remain public, while
+unresolved private children and claimed standalone delivery rows are absent.
+Public rows of other kinds still fail the body-kind check. Callers must already
+be authorized; this API adds no peer authorization, conversation loading or
+recovery wait. Relay/daemon expansion wiring is separate from this Store API.
+
+`ToolBodyResult` carries `State`, `ID`, `Rev`, `Content`, `Epoch`, consumed
+`Version` and `Err`. Only `StateUsable` carries identity and content. Its detached
+`Content` is identical to the existing complete renderer's content for that row,
+including input, output and unknown fields. Available empty input/output is
+successful content, distinguishable from refusal by the usable state. No parent,
+descendant, active-extra or unrelated row is returned. The expected epoch and item
+revision must match the captured publication; an unrelated consumed-version
+advance alone does not invalidate a matching body. `Version` reports the captured
+consumed progress and is not an expected-version condition.
+
+An already cancelled context returns its context error first. Otherwise canonical
+conversation-ID validation and the nonempty epoch/nonzero item/revision checks
+precede capture. Nonusable captures return their lifecycle state immediately;
+usable captures check epoch, public membership, revision and kind in that order.
+Validation/refusal errors return a zero `ToolBodyResult` and a separate Go error:
+
+| Condition | Separate error |
+| --- | --- |
+| Noncanonical conversation ID | `history.ErrInvalidID` |
+| Empty expected epoch, zero item ID or zero expected revision | `ErrInvalidBodyScope` |
+| Mismatched epoch or revision | `ErrStaleBody` |
+| Missing or nonpublic ID in that conversation | `ErrBodyNotFound` |
+| Matching public row is neither `tool_call` nor `agent` | `ErrBodyKind` |
+
+Rebuilding returns `StateRebuilding`; unloaded, retiring or closed stores return
+`StateNotLoaded`. Unavailable captures or missing, unreadable or malformed
+required content return `StateUnavailable` with only `ErrUnavailable` in the
+result's `Err` and a nil separate error. Nonusable results carry no body,
+ID/revision, epoch or version, and expose no underlying source error. Cancellation
+during rendering returns a zero result and the context error, discarding partial
+work without retiring a healthy worker or cancelling independent readers.
+
+`captureQuery` captures the snapshot scalars and immutable index together under
+`Store.mu`. `queryIndex.lookup` selects only the requested public ID;
+`renderItems` and `renderSharedLookup` use recipes from that captured root, never
+the mutating worker Fold. History lookup/rendering runs outside the mutex.
+Feed, newer publications, unload or replacement cannot mix identities or recipes
+into that read. An already captured read can finish after unload/replacement if
+its references remain available. A render failure uses `Store.withdraw`'s worker
+identity and cancellation guards: an old failed reader cannot retire a
+replacement worker.
+
+Only the selected body's creating/enrichment references and inherited recipe
+dependencies are resolved. A required ancestor can be resolved and rendered
+internally without returning its row; descendants and unrelated rows are neither
+selected nor rendered. Metadata selection and reference discovery do not grow
+with unrelated/descendant inventory or body sizes. Rendering can scale with the
+requested body and required dependencies. `TestStoreToolBodyBounded` counts exact
+history-reference IDs and metadata visits after preparation: two visits for its
+root body and three for its inherited body as unrelated/descendant inventory and
+payload sizes grow. These request bounds exclude recovery and publication work;
+see the [Store verification guidance](thread-package-background-store-verification.md#store-verification)
+for parity and inherited-dependency fixture traps.
