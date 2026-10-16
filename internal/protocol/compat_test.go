@@ -16,6 +16,7 @@ func TestIsKnownAppType(t *testing.T) {
 		TypeDeleteConversation, TypeConversationDeleted,
 		TypeArchiveConversation, TypeUnarchiveConversation,
 		TypeSetConversationMuted, TypeMarkConversationRead,
+		TypeSetConversationPinned,
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
 		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
@@ -258,6 +259,7 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 		TypeDeleteConversation, TypeConversationDeleted,
 		TypeArchiveConversation, TypeUnarchiveConversation,
 		TypeSetConversationMuted, TypeMarkConversationRead,
+		TypeSetConversationPinned,
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
 		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
@@ -267,7 +269,7 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 		TypeRenameWorkspace, TypeWorkspaceUpdated,
 		TypeRegisterPushToken,
 	}
-	if got, want := len(all), 31; got != want {
+	if got, want := len(all), 32; got != want {
 		t.Fatalf("type-list length: got %d, want %d", got, want)
 	}
 	if got, want := len(inboundAppTypeSet), len(all); got != want {
@@ -464,6 +466,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeDeleteConversation, TypeConversationDeleted,
 		TypeArchiveConversation, TypeUnarchiveConversation,
 		TypeSetConversationMuted, TypeMarkConversationRead,
+		TypeSetConversationPinned,
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
 		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
@@ -610,6 +613,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeServerBinaryBusy":            CodeServerBinaryBusy,
 		"CodeConversationNotFound":        CodeConversationNotFound,
 		"CodeConversationAlreadyPromoted": CodeConversationAlreadyPromoted,
+		"CodeConversationNotPromoted":     CodeConversationNotPromoted,
 		"CodeMessageTooLong":              CodeMessageTooLong,
 		"CodeRelayNoServer":               CodeRelayNoServer,
 		"CodeRelayServerIDConflict":       CodeRelayServerIDConflict,
@@ -642,6 +646,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeServerBinaryBusy":            "server.binary_busy",
 		"CodeConversationNotFound":        "conversation.not_found",
 		"CodeConversationAlreadyPromoted": "conversation.already_promoted",
+		"CodeConversationNotPromoted":     "conversation.not_promoted",
 		"CodeMessageTooLong":              "message.too_long",
 		"CodeRelayNoServer":               "relay.no_server",
 		"CodeRelayServerIDConflict":       "relay.server_id_conflict",

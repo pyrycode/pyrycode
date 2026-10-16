@@ -77,3 +77,7 @@ Pending for the documentation stage in `docs/protocol-mobile.md`:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+
+- 2026-10-16: The protocol race run exposed another complete conversation-row wire assertion in `internal/protocol/thread_metadata_test.go` → `TestConversationLastShownVersion`. Include `pinned_at:null` in that input so typed re-encoding retains the required key while preserving the existing watermark assertions. The wire contract and sizing remain unchanged.
