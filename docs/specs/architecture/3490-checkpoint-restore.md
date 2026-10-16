@@ -62,3 +62,9 @@ None; performance of synthetic equivalence preparation will determine whether in
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+- 2026-10-16: production API is `NewReference`, `ImportCheckpoint` and `HistorySource`, with typed `CheckpointCompatibilityError`. Restoration lives in `checkpoint_import.go`; no existing production call sites change. Validation also enforces reciprocal ordinary-shell owners, older-only ancestor dependencies and scalar-only recipe literals.
+- The reusable `testCheckpointResume` helper prepares one uninterrupted baseline. It retains exact per-item JSON/SHA-256 signatures and updates their aggregate through the existing post-join candidate capture, comparing at every suffix boundary. Each import independently renders/hashes its complete internal inventory, including hidden and suppressed rows. Raw Content is additionally hashed as bytes because embedding `json.RawMessage` in JSON would normalize whitespace/escaping. A negative control proves differing rendered bytes cannot compare equal. No baseline preparation or rendering feeds a restored prefix.
+- `TestCheckpointResumeCorpus` uses 201 distinct cuts: empty plus the final 200 boundaries of `testFoldCorpus(30000)`, including the full cut. Focused histories use every cut; `TestCheckpointEqualCompanionProvenance`, `TestCheckpointLifecycleAssertions` and `TestCheckpointSnapshotIsolation` add direct semantic and ownership assertions. Genuine terminal conflicts remain unchanged; a durable-only ordinary shell first becomes foreground eligible on its mapped companion and legitimately revises then.
+- Written work is approximately 1,100 lines including plan and tests, two exported types/interfaces, zero migrated consumers and five acceptance criteria. The verified grandchild sizing exception remains applicable.
