@@ -256,6 +256,8 @@ every-boundary focused histories. The verifier's dependency-aware
 `scripts/check-restoration.py` also requires the exhaustive proof for changes to
 the restoration package, its transitive local dependencies, fixtures and build
 inputs. Missing dependency or base information requires the full proof.
+Aggregate `make check` invokes this same conditional step. Focused `make test`
+keeps its ordinary package selection.
 
 Standard test targets use `scripts/test-admission.py` to share one test place
 across native worktrees and projects on the same host. Waiting is reported

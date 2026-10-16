@@ -49,7 +49,12 @@ BIN         ?= ./pyry
 DIST        ?= ./dist
 
 .PHONY: check
-check: vet test-tools test staticcheck substrate-guard e2e
+check: vet test-tools test test-restoration staticcheck substrate-guard e2e
+
+# Keep aggregate checks safe while older workers still use make check.
+.PHONY: test-restoration
+test-restoration:
+	python3 scripts/check-restoration.py
 
 .PHONY: test-tools
 test-tools:
