@@ -8,6 +8,7 @@
 - `internal/thread/store.go` → `Store`, `checkpoint`: scalar certificates and existing replay remain separate.
 - `internal/history/sync.go` → `Sync`; `cache_dir.go` → `EnsureLogDir`: history durability and contained empty directories.
 - `internal/thread/checkpoint_resume_test.go` → `testResumeProof`: immediate and per-entry continuation oracle.
+- `cmd/pyry/daemon_thread_demand_test.go` → `TestDaemonThreadDemandWireAfterIdle`; `internal/relay/v2session_catchup.go` → `cancelThreadQuery`: initial live publication can legitimately cancel an unfinished idle reload query.
 - `docs/knowledge/features/thread-package.md` § Cache and epochs: public rows omit required private continuation state; unloaded reads remain scalar-only.
 - `docs/knowledge/features/thread-package-main-thread-folding-validation.md` § Validation and testing: reuse resume proofs.
 - `docs/knowledge/features/history-package.md`, `CODING-STYLE.md`, ADR 045: history ownership and durability order.
@@ -63,3 +64,10 @@ Pending documentation stage: update `docs/knowledge/features/thread-package.md`,
 ## Revisions
 - 2026-10-16: `commit` checks that surviving records plus supplied deltas equal the complete export before truncation. The fault fixture distinguishes retry changes since acknowledged A from the narrower C-only delta used to prove preservation of surviving B. `TestWriteCheckpointOrderAndRecipe` rejects an omitted recipe-only change without index mutation; `TestWriteCheckpointFreshFaults` covers failures before the first named state exists.
 - 2026-10-16: `TestWriteCheckpointSecurity/during-state-write` exposed deferred temporary cleanup addressing an outside leaf after directory redirection. `replaceState` now rechecks exact directory containment before cleanup, leaving the original temporary file when containment is lost.
+- 2026-10-17: Verifier finding 1 reproduced `TestDaemonThreadDemandWireAfterIdle` failing 13/50 race-enabled runs. The fixture installed its publisher after initial retirement, allowing first live publication to cancel the reload query through `cancelThreadQuery`. Install the publisher before starting discovery so the initial cursor exists before the phone connects; preserve the one-row, version-1, final-response assertion and report response metadata on failure. No production behavior changes. Rework requires complete `make check` and `make build` on macOS with `GOMAXPROCS=4`, empty `GOFLAGS` and the unchanged package timeout, in addition to focused repetition. `origin/feature/3512` touches separate scalar-certificate code; no overlap in the rework files.
+
+## Rework validation
+- macOS arm64, Go 1.26.2; `GOMAXPROCS=4`, empty `GOFLAGS`, default ten-minute package timeout.
+- `TestDaemonThreadDemandWireAfterIdle` before repair: 50 executed, 37 passed, 13 failed, zero skipped. Diagnostic repetition: 20 executed, 14 passed, six failed with an error response.
+- After repair: 50 executed, 50 passed, zero skipped under `go test -race -count=50 -json -run '^TestDaemonThreadDemandWireAfterIdle$' ./cmd/pyry`.
+- Controlled source overlays hold the provider result until the coordinator considers publication/idle retirement. With late publisher installation the query is cancelled (one executed, one failed); with early installation the identical control returns the complete final response (one executed, one passed). Neither control uses sleeps; both ran with the race detector. Scratch inputs/results: `/tmp/builder-3504/idle-control.py`, `idle-{old,fixed}-control.json`.

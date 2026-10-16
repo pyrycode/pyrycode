@@ -104,16 +104,18 @@ func TestDaemonThreadDemandWireAfterIdle(t *testing.T) {
 	s, h, reg, store := testShadow(t)
 	reg.Create(conversations.Conversation{ID: testConvID})
 	testShadowAppend(t, h, testConvID)
+	// Establish the publisher's cursor before idle retirement. Its first live
+	// publication can otherwise cancel the query that reloads the same version.
+	w, _ := testDaemonThreadQueryWire(t, s, nil)
 	s.start()
 	testShadowWait(t, func() bool {
 		return s.consumed(testConvID) == 1 && store.Status(testConvID).State == thread.StateNotLoaded
 	})
-	w, _ := testDaemonThreadQueryWire(t, s, nil)
 	w.open("phone", false, protocol.CapabilityThread)
 	testDaemonThreadRequest(t, w, "phone", 400, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID})
 	got, typ := testDaemonThreadReply(t, w, 400)
 	if typ != protocol.TypeThreadItems || got.Version != 1 || len(got.Items) != 1 || !got.Final {
-		t.Fatal("idle baseline was not certified")
+		t.Fatalf("idle baseline was not certified: type=%s version=%d rows=%d final=%t", typ, got.Version, len(got.Items), got.Final)
 	}
 }
 
