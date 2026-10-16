@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/history"
 )
@@ -19,6 +21,7 @@ import (
 // Existing semantic/golden tests remain the independent fold-behavior oracle.
 func testCheckpointResume(t *testing.T, entries []history.Entry, cuts []int) {
 	t.Helper()
+	started := time.Now()
 	baseline, _ := testReferenceFold(entries)
 	proof := testResumeProof{}
 	want := make([][32]byte, len(entries)+1)
@@ -27,13 +30,16 @@ func testCheckpointResume(t *testing.T, entries []history.Entry, cuts []int) {
 		testFeed(t, baseline, e)
 		want[i+1] = proof.update(t, baseline, false)
 	}
+	t.Logf("resume baseline feed/proof=%s", time.Since(started))
 	cuts = slices.Clone(cuts)
 	slices.Sort(cuts)
 	cuts = slices.Compact(cuts)
+	wantComparisons := 0
 	for _, cut := range cuts {
 		if cut < 0 || cut > len(entries) {
 			t.Fatal("invalid cut", cut)
 		}
+		wantComparisons += len(entries) - cut + 1
 	}
 	if len(cuts) == 0 {
 		return
@@ -42,12 +48,14 @@ func testCheckpointResume(t *testing.T, entries []history.Entry, cuts []int) {
 	if baseCut == 0 && len(cuts) > 1 {
 		baseCut = cuts[1]
 	}
+	started = time.Now()
 	prefix, _ := testReferenceFold(entries)
 	testFeed(t, prefix, entries[:baseCut]...)
 	base, baseRows, err := prefix.ExportCheckpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("resume prefix feed/export=%s", time.Since(started))
 	// Each job owns both folds and its source. The shared preparation document
 	// is immutable; import gives each worker a detached continuation graph without
 	// replaying prefix history.
@@ -60,6 +68,7 @@ func testCheckpointResume(t *testing.T, entries []history.Entry, cuts []int) {
 	if len(entries) >= 1000 {
 		workerCount = 8
 	}
+	started = time.Now()
 	for range workerCount {
 		workers.Add(1)
 		go func() {
@@ -83,6 +92,10 @@ func testCheckpointResume(t *testing.T, entries []history.Entry, cuts []int) {
 		if !t.Failed() && completed.Load() != int64(len(cuts)) {
 			t.Fatal("resume cuts were dropped")
 		}
+		if !t.Failed() && comparisons.Load() != int64(wantComparisons) {
+			t.Fatal("resume comparisons were dropped")
+		}
+		t.Logf("resume workers=%d GOMAXPROCS=%d cuts elapsed=%s", workerCount, runtime.GOMAXPROCS(0), time.Since(started))
 		t.Logf("resume: %d distinct cuts, %d immediate/suffix comparisons", completed.Load(), comparisons.Load())
 	}()
 	for _, cut := range cuts {
@@ -135,7 +148,7 @@ type testResumeProof struct {
 	sum  [32]byte
 }
 
-func (p *testResumeProof) update(t *testing.T, f *Fold, full bool) [32]byte {
+func (p *testResumeProof) update(t testing.TB, f *Fold, full bool) [32]byte {
 	t.Helper()
 	if p.rows == nil {
 		p.rows = make(map[int][32]byte)
@@ -198,7 +211,9 @@ func (p *testResumeProof) update(t *testing.T, f *Fold, full bool) [32]byte {
 
 func TestCheckpointResumeCorpus(t *testing.T) {
 	t.Parallel()
+	started := time.Now()
 	entries := testFoldCorpus(30000)
+	t.Logf("resume fixture entries=%d elapsed=%s", len(entries), time.Since(started))
 	cuts := []int{0}
 	for cut := len(entries) - 199; cut <= len(entries); cut++ {
 		cuts = append(cuts, cut)
