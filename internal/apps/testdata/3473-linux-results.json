@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "helperSanityRun": {"command": "python3 internal/apps/testdata/3473-expansion-experiment.py /tmp/builder-3473/checked-experiment", "exit": 0, "results": {"compile-baseline": {"command": ["go", "test", "-race", "-c", "-overlay=/tmp/builder-3473/checked-experiment/baseline-overlay.json", "-o", "/tmp/builder-3473/checked-experiment/baseline.test", "./internal/apps"], "exit": 0}, "compile-candidate": {"command": ["go", "test", "-race", "-c", "-overlay=/tmp/builder-3473/checked-experiment/candidate-overlay.json", "-o", "/tmp/builder-3473/checked-experiment/candidate.test", "./internal/apps"], "exit": 0}, "compile-baseline-delayed": {"command": ["go", "test", "-race", "-c", "-overlay=/tmp/builder-3473/checked-experiment/baseline-delayed-overlay.json", "-o", "/tmp/builder-3473/checked-experiment/baseline-delayed.test", "./internal/apps"], "exit": 0}, "compile-candidate-delayed": {"command": ["go", "test", "-race", "-c", "-overlay=/tmp/builder-3473/checked-experiment/candidate-delayed-overlay.json", "-o", "/tmp/builder-3473/checked-experiment/candidate-delayed.test", "./internal/apps"], "exit": 0}, "baseline": {"command": ["/tmp/builder-3473/checked-experiment/baseline.test", "-test.v", "-test.count=20", "-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$", "-test.timeout=10m"], "exit": 0, "counts": {"executed": 60, "passed": 60, "failed": 0, "skipped": 0}, "skipReasons": []}, "candidate": {"command": ["/tmp/builder-3473/checked-experiment/candidate.test", "-test.v", "-test.count=20", "-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$", "-test.timeout=10m"], "exit": 0, "counts": {"executed": 60, "passed": 60, "failed": 0, "skipped": 0}, "skipReasons": []}, "baseline-delayed": {"command": ["/tmp/builder-3473/checked-experiment/baseline-delayed.test", "-test.v", "-test.count=1", "-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$", "-test.timeout=10m"], "exit": 1, "counts": {"executed": 3, "passed": 2, "failed": 1, "skipped": 0}, "skipReasons": []}, "candidate-delayed": {"command": ["/tmp/builder-3473/checked-experiment/candidate-delayed.test", "-test.v", "-test.count=1", "-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$", "-test.timeout=10m"], "exit": 0, "counts": {"executed": 3, "passed": 3, "failed": 0, "skipped": 0}, "skipReasons": []}, "no-reuse": {"command": ["go", "test", "-race", "-count=1", "-v", "-overlay=/tmp/builder-3473/checked-experiment/no-reuse-overlay.json", "-run=^TestRetainedRepeatedExpansion$", "./internal/apps"], "exit": 1, "counts": {"executed": 1, "passed": 0, "failed": 1, "skipped": 0}, "skipReasons": []}}, "failedAttemptLogs": {"baseline-delayed": ["=== RUN   TestRetainedResolutionCancellation", "=== PAUSE TestRetainedResolutionCancellation", "=== RUN   TestRetainedRepeatedExpansion", "=== PAUSE TestRetainedRepeatedExpansion", "=== RUN   TestRetainedLongLinks", "=== PAUSE TestRetainedLongLinks", "=== CONT  TestRetainedResolutionCancellation", "=== CONT  TestRetainedRepeatedExpansion", "--- PASS: TestRetainedResolutionCancellation (0.00s)", "=== CONT  TestRetainedLongLinks", "=== NAME  TestRetainedRepeatedExpansion", "    artifact_resolution_test.go:67: validation: 8.654837ms", "--- PASS: TestRetainedLongLinks (0.02s)", "=== NAME  TestRetainedRepeatedExpansion", "    artifact_resolution_test.go:75: installation: 1.101955741s", "    artifact_resolution_test.go:77: install repeated expansion: error=apps: install retained build: apps: retained artifacts: context deadline exceeded context=context deadline exceeded", "--- FAIL: TestRetainedRepeatedExpansion (1.12s)", "FAIL"], "no-reuse": ["=== RUN   TestRetainedRepeatedExpansion", "=== PAUSE TestRetainedRepeatedExpansion", "=== CONT  TestRetainedRepeatedExpansion", "    artifact_resolution_test.go:76: fixture filesystem scan: 2.06699ms", "    artifact_resolution_test.go:92: in-memory resolution: 1.052795ms, checkpoints=512/512", "    artifact_resolution_test.go:94: bounded repeated expansion: error=context canceled context=context canceled", "--- FAIL: TestRetainedRepeatedExpansion (0.01s)", "FAIL", "FAIL\tgithub.com/pyrycode/pyrycode/internal/apps\t0.023s", "FAIL"]}},
+  "baselineRevision": "4bc9790a35943200b86946a2968e10914e74b8c7",
+  "historicalBaselineRevision": "07b6b35e14aad0de688326fb36d81c54303c691c",
+  "candidateImplementationRevision": "9c0610c825f007aaf2275be0a11490013b3da994",
+  "environment": {"platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39", "architecture": "x86_64", "go": "go version go1.26.9 linux/amd64", "environment": {"GOMAXPROCS": "2", "GOFLAGS": "-p=2"}, "childAffinity": [0, 1]},
+  "historicalAttribution": "Unknown; normal unchanged Linux tests did not time out. Controlled delay demonstrates dependency, not historical causation.",
+  "phaseColumns": ["filesystemWalk", "inMemoryResolution", "validation", "installation", "verification"],
+  "checks": [{"command": "GOMAXPROCS=2 GOFLAGS=-p=2 go vet ./...", "exit": 0, "testsExecuted": 0}, {"command": "GOMAXPROCS=2 GOFLAGS=-p=2 make build BIN=/tmp/builder-3473/final-pyry", "exit": 0, "testsExecuted": 0}, {"command": "make check", "status": "pending verifier-owned full-module gate"}, {"check": "macOS arm64 matched apps race comparison", "status": "blocked: no supplied managed recipe executes internal/apps"}],
+  "setupAttempt": {"executed": 0, "outcome": "Sandboxed Go cache was read-only; authorized escalated rerun passed."},
+  "reproduce": "python3 internal/apps/testdata/3473-expansion-experiment.py /tmp/builder-3473/final-experiment",
+  "experimentCommands": {"compile-baseline": {"command": ["go", "test", "-race", "-c", "-overlay=/tmp/builder-3473/final-experiment/baseline-overlay.json", "-o", "/tmp/builder-3473/final-experiment/baseline.test", "./internal/apps"], "exit": 0}, "compile-candidate": {"command": ["go", "test", "-race", "-c", "-overlay=/tmp/builder-3473/final-experiment/candidate-overlay.json", "-o", "/tmp/builder-3473/final-experiment/candidate.test", "./internal/apps"], "exit": 0}, "compile-baseline-delayed": {"command": ["go", "test", "-race", "-c", "-overlay=/tmp/builder-3473/final-experiment/baseline-delayed-overlay.json", "-o", "/tmp/builder-3473/final-experiment/baseline-delayed.test", "./internal/apps"], "exit": 0}, "compile-candidate-delayed": {"command": ["go", "test", "-race", "-c", "-overlay=/tmp/builder-3473/final-experiment/candidate-delayed-overlay.json", "-o", "/tmp/builder-3473/final-experiment/candidate-delayed.test", "./internal/apps"], "exit": 0}, "baseline": {"command": ["/tmp/builder-3473/final-experiment/baseline.test", "-test.v", "-test.count=20", "-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$", "-test.timeout=10m"], "exit": 0, "counts": {"executed": 60, "passed": 60, "failed": 0, "skipped": 0}, "skipReasons": []}, "candidate": {"command": ["/tmp/builder-3473/final-experiment/candidate.test", "-test.v", "-test.count=20", "-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$", "-test.timeout=10m"], "exit": 0, "counts": {"executed": 60, "passed": 60, "failed": 0, "skipped": 0}, "skipReasons": []}, "baseline-delayed": {"command": ["/tmp/builder-3473/final-experiment/baseline-delayed.test", "-test.v", "-test.count=1", "-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$", "-test.timeout=10m"], "exit": 1, "counts": {"executed": 3, "passed": 2, "failed": 1, "skipped": 0}, "skipReasons": []}, "candidate-delayed": {"command": ["/tmp/builder-3473/final-experiment/candidate-delayed.test", "-test.v", "-test.count=1", "-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$", "-test.timeout=10m"], "exit": 0, "counts": {"executed": 3, "passed": 3, "failed": 0, "skipped": 0}, "skipReasons": []}, "no-reuse": {"command": ["go", "test", "-race", "-count=1", "-v", "-overlay=/tmp/builder-3473/final-experiment/no-reuse-overlay.json", "-run=^TestRetainedRepeatedExpansion$", "./internal/apps"], "exit": 1, "counts": {"executed": 1, "passed": 0, "failed": 1, "skipped": 0}, "skipReasons": []}},
+  "experiments": [
+    {"attempt": "preliminary", "variant": "baseline", "counts": {"executed": 60, "passed": 60, "failed": 0, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       [null, null, "7.305711ms", "6.56385ms", "1.732469ms"],
+       [null, null, "4.41171ms", "8.029069ms", "1.851462ms"],
+       [null, null, "8.027535ms", "5.27836ms", "1.606517ms"],
+       [null, null, "11.555843ms", "10.713303ms", "1.439669ms"],
+       [null, null, "1.721976ms", "11.576472ms", "1.479322ms"],
+       [null, null, "1.542759ms", "8.23834ms", "1.592285ms"],
+       [null, null, "4.464179ms", "16.523056ms", "1.456411ms"],
+       [null, null, "6.035738ms", "9.316395ms", "1.378216ms"],
+       [null, null, "3.662111ms", "9.916168ms", "3.441238ms"],
+       [null, null, "6.605994ms", "6.907777ms", "1.754363ms"],
+       [null, null, "5.034945ms", "7.171058ms", "2.001995ms"],
+       [null, null, "5.960003ms", "6.695583ms", "2.985811ms"],
+       [null, null, "3.032869ms", "8.093843ms", "2.016877ms"],
+       [null, null, "4.557428ms", "12.502181ms", "3.241108ms"],
+       [null, null, "7.783883ms", "12.470375ms", "6.535537ms"],
+       [null, null, "1.631798ms", "15.446877ms", "7.712115ms"],
+       [null, null, "6.711779ms", "10.919912ms", "3.45006ms"],
+       [null, null, "4.688172ms", "11.909574ms", "3.127168ms"],
+       [null, null, "5.697907ms", "12.842868ms", "2.793982ms"],
+       [null, null, "5.634836ms", "12.954898ms", "2.870283ms"]
+     ], "diagnostics": []},
+    {"attempt": "preliminary", "variant": "candidate", "counts": {"executed": 60, "passed": 60, "failed": 0, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       ["1.114719ms", "143.749µs", "8.486888ms", "16.700735ms", "5.857018ms"],
+       ["3.452319ms", "211.478µs", "4.854276ms", "9.99121ms", "3.420488ms"],
+       ["4.124886ms", "114.922µs", "1.482295ms", "12.148636ms", "3.154918ms"],
+       ["4.361607ms", "179.483µs", "2.357943ms", "12.137377ms", "3.063123ms"],
+       ["4.549217ms", "181.192µs", "3.373799ms", "10.586402ms", "2.974214ms"],
+       ["4.343501ms", "176.778µs", "4.596213ms", "9.434006ms", "3.081536ms"],
+       ["4.163107ms", "178.891µs", "4.631278ms", "16.619379ms", "2.226411ms"],
+       ["4.186913ms", "208.83µs", "2.747788ms", "13.147071ms", "2.318568ms"],
+       ["1.482114ms", "201.202µs", "2.526698ms", "13.503614ms", "3.515897ms"],
+       ["732.291µs", "110.216µs", "1.452562ms", "8.032705ms", "1.580419ms"],
+       ["842.215µs", "106.671µs", "3.724658ms", "7.17703ms", "4.961865ms"],
+       ["1.224867ms", "104.888µs", "1.629724ms", "6.346001ms", "1.831159ms"],
+       ["783.767µs", "109.482µs", "1.60358ms", "9.085936ms", "1.847277ms"],
+       ["888.802µs", "106.295µs", "3.843066ms", "6.172746ms", "1.364131ms"],
+       ["841.375µs", "102.065µs", "4.227115ms", "15.30999ms", "1.550333ms"],
+       ["2.44854ms", "241.6µs", "2.017731ms", "11.205442ms", "1.840386ms"],
+       ["1.088408ms", "108.256µs", "1.404442ms", "8.873237ms", "1.689427ms"],
+       ["820.794µs", "101.781µs", "1.409127ms", "8.751052ms", "2.306935ms"],
+       ["1.279167ms", "197.642µs", "2.444982ms", "6.460063ms", "1.378574ms"],
+       ["1.386732ms", "199.877µs", "1.987717ms", "5.354705ms", "1.755238ms"]
+     ], "diagnostics": ["artifact_resolution_test.go:92: in-memory resolution: 143.749µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 211.478µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 114.922µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 179.483µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 181.192µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 176.778µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 178.891µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 208.83µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 201.202µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 110.216µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 106.671µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 104.888µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 109.482µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 106.295µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 102.065µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 241.6µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 108.256µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 101.781µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 197.642µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 199.877µs, checkpoints=133/512"]},
+    {"attempt": "preliminary", "variant": "baseline-delayed", "counts": {"executed": 3, "passed": 2, "failed": 1, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       [null, null, "3.452098ms", "1.100723534s", null]
+     ], "diagnostics": ["artifact_resolution_test.go:77: install repeated expansion: error=apps: install retained build: apps: retained artifacts: context deadline exceeded context=context deadline exceeded"]},
+    {"attempt": "preliminary", "variant": "candidate-delayed", "counts": {"executed": 3, "passed": 3, "failed": 0, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       ["1.245844ms", "962.234µs", "2.358618ms", "1.107294741s", "2.180441ms"]
+     ], "diagnostics": ["artifact_resolution_test.go:92: in-memory resolution: 962.234µs, checkpoints=133/512"]},
+    {"attempt": "preliminary", "variant": "no-reuse", "counts": {"executed": 1, "passed": 0, "failed": 1, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       ["1.086946ms", "453.166µs", null, null, null]
+     ], "diagnostics": ["artifact_resolution_test.go:92: in-memory resolution: 453.166µs, checkpoints=512/512", "artifact_resolution_test.go:94: bounded repeated expansion: error=context canceled context=context canceled"]},
+    {"attempt": "committed", "variant": "baseline", "counts": {"executed": 60, "passed": 60, "failed": 0, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       [null, null, "3.107033ms", "19.992997ms", "2.230824ms"],
+       [null, null, "3.081187ms", "14.539793ms", "2.245917ms"],
+       [null, null, "2.566796ms", "15.125474ms", "1.849837ms"],
+       [null, null, "3.374159ms", "25.303714ms", "3.61031ms"],
+       [null, null, "6.826254ms", "13.232369ms", "3.563531ms"],
+       [null, null, "5.772298ms", "13.788838ms", "1.935164ms"],
+       [null, null, "4.77618ms", "15.889588ms", "2.511562ms"],
+       [null, null, "2.998881ms", "13.025387ms", "3.949211ms"],
+       [null, null, "12.792251ms", "12.653317ms", "2.598898ms"],
+       [null, null, "4.222724ms", "14.043853ms", "2.927176ms"],
+       [null, null, "4.581589ms", "9.192523ms", "3.238473ms"],
+       [null, null, "6.001484ms", "14.849978ms", "3.38343ms"],
+       [null, null, "3.929334ms", "20.619873ms", "2.086713ms"],
+       [null, null, "5.895928ms", "14.902716ms", "4.100988ms"],
+       [null, null, "4.496932ms", "20.619121ms", "2.872588ms"],
+       [null, null, "4.373365ms", "20.598939ms", "2.708054ms"],
+       [null, null, "6.091633ms", "13.615532ms", "3.131859ms"],
+       [null, null, "6.715325ms", "14.522455ms", "2.74312ms"],
+       [null, null, "4.868742ms", "11.278893ms", "3.475275ms"],
+       [null, null, "5.085575ms", "17.787612ms", "2.977135ms"]
+     ], "diagnostics": []},
+    {"attempt": "committed", "variant": "candidate", "counts": {"executed": 60, "passed": 60, "failed": 0, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       ["4.562959ms", "718.884µs", "3.865498ms", "15.123243ms", "3.938851ms"],
+       ["974.891µs", "136.729µs", "5.260856ms", "12.229217ms", "2.852842ms"],
+       ["1.252697ms", "144.24µs", "5.392118ms", "13.192232ms", "2.583498ms"],
+       ["1.709475ms", "244.389µs", "3.193507ms", "13.809745ms", "2.664826ms"],
+       ["3.910874ms", "193.191µs", "5.579864ms", "17.001401ms", "1.61823ms"],
+       ["808.433µs", "435.532µs", "8.726961ms", "9.354084ms", "2.91777ms"],
+       ["1.154297ms", "139.666µs", "10.886013ms", "9.035143ms", "3.530606ms"],
+       ["1.070572ms", "196.462µs", "2.311264ms", "14.308151ms", "2.116005ms"],
+       ["1.489247ms", "175.873µs", "2.656408ms", "14.229949ms", "2.340355ms"],
+       ["13.402102ms", "183.718µs", "2.572743ms", "9.523572ms", "3.256139ms"],
+       ["2.553969ms", "210.89µs", "3.701524ms", "13.982314ms", "3.69892ms"],
+       ["2.284483ms", "117.269µs", "6.345077ms", "8.191066ms", "2.278841ms"],
+       ["2.817575ms", "195.051µs", "6.89207ms", "14.106392ms", "2.183586ms"],
+       ["1.165404ms", "137.905µs", "6.53352ms", "17.625886ms", "3.34765ms"],
+       ["4.280745ms", "243.205µs", "3.597652ms", "12.275566ms", "3.514801ms"],
+       ["4.251905ms", "483.056µs", "5.416721ms", "12.804169ms", "6.101288ms"],
+       ["7.559754ms", "228.77µs", "2.942796ms", "12.599129ms", "2.412964ms"],
+       ["1.366086ms", "133.202µs", "11.75286ms", "13.017868ms", "3.515612ms"],
+       ["3.976689ms", "196.3µs", "7.280276ms", "11.102875ms", "1.525016ms"],
+       ["903.163µs", "111.158µs", "2.984932ms", "13.405138ms", "2.052842ms"]
+     ], "diagnostics": ["artifact_resolution_test.go:92: in-memory resolution: 718.884µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 136.729µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 144.24µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 244.389µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 193.191µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 435.532µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 139.666µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 196.462µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 175.873µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 183.718µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 210.89µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 117.269µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 195.051µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 137.905µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 243.205µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 483.056µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 228.77µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 133.202µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 196.3µs, checkpoints=133/512", "artifact_resolution_test.go:92: in-memory resolution: 111.158µs, checkpoints=133/512"]},
+    {"attempt": "committed", "variant": "baseline-delayed", "counts": {"executed": 3, "passed": 2, "failed": 1, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       [null, null, "7.779764ms", "1.102729044s", null]
+     ], "diagnostics": ["artifact_resolution_test.go:77: install repeated expansion: error=apps: install retained build: apps: retained artifacts: context deadline exceeded context=context deadline exceeded"]},
+    {"attempt": "committed", "variant": "candidate-delayed", "counts": {"executed": 3, "passed": 3, "failed": 0, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       ["4.216305ms", "519.534µs", "7.425396ms", "1.108917336s", "3.488251ms"]
+     ], "diagnostics": ["artifact_resolution_test.go:92: in-memory resolution: 519.534µs, checkpoints=133/512"]},
+    {"attempt": "committed", "variant": "no-reuse", "counts": {"executed": 1, "passed": 0, "failed": 1, "skipped": 0}, "skipReasons": [],
+     "phaseTimings": [
+       ["1.669478ms", "1.064958ms", null, null, null]
+     ], "diagnostics": ["artifact_resolution_test.go:92: in-memory resolution: 1.064958ms, checkpoints=512/512", "artifact_resolution_test.go:94: bounded repeated expansion: error=context canceled context=context canceled"]}
+  ],
+  "packageChecks": [
+    {"attempt": "initial-full-apps", "command": "GOMAXPROCS=2 GOFLAGS=-p=2 go test -race -count=1 -json ./internal/apps/...", "counts": {"executed": 1007, "passed": 993, "failed": 0, "skipped": 14}, "skips": [{"test": "TestBackupNodeDirectoryIdentity", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestBackupNodeFailures/sql", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestBackupSQLiteCancellation", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestBackupSQLiteStorageErrors", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestBackupSQLiteWAL", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestCandidateSupportedTemplate", "reason": "set HOSTED_APP_NODE for supported-template acceptance; a skip supplies no evidence"}, {"test": "TestCommittedTemplateUpdateSnapshot", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestOwnerSupportedNode", "reason": "set HOSTED_APP_NODE to execute supported-runtime acceptance; an unsupported or skipped arm proves no launch"}, {"test": "TestPublishTemplate", "reason": "set supported Node/npm; skip proves no template publication"}, {"test": "TestUpdateTemplateSnapshot", "reason": "supported real Node/npm required; skips supply no initialized update evidence"}, {"test": "TestUpdateTemplateRollback", "reason": "supported real Node/npm required; skips provide no rollback evidence"}, {"test": "TestRestoreSQLiteWAL", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestRestoreSQLiteGenericAndCancellation", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestStartupTemplateRecovery", "reason": "supported real Node/npm required; skips provide no restart evidence"}], "unrelatedFailures": []},
+    {"attempt": "committed-full-apps", "command": "GOMAXPROCS=2 GOFLAGS=-p=2 go test -race -count=1 -json ./internal/apps/...", "counts": {"executed": 1007, "passed": 993, "failed": 0, "skipped": 14}, "skips": [{"test": "TestBackupNodeDirectoryIdentity", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestBackupNodeFailures/sql", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestBackupSQLiteCancellation", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestBackupSQLiteStorageErrors", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestBackupSQLiteWAL", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestCandidateSupportedTemplate", "reason": "set HOSTED_APP_NODE for supported-template acceptance; a skip supplies no evidence"}, {"test": "TestCommittedTemplateUpdateSnapshot", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestOwnerSupportedNode", "reason": "set HOSTED_APP_NODE to execute supported-runtime acceptance; an unsupported or skipped arm proves no launch"}, {"test": "TestPublishTemplate", "reason": "set supported Node/npm; skip proves no template publication"}, {"test": "TestUpdateTemplateSnapshot", "reason": "supported real Node/npm required; skips supply no initialized update evidence"}, {"test": "TestUpdateTemplateRollback", "reason": "supported real Node/npm required; skips provide no rollback evidence"}, {"test": "TestRestoreSQLiteWAL", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestRestoreSQLiteGenericAndCancellation", "reason": "set HOSTED_APP_NODE: SQL skip provides no evidence"}, {"test": "TestStartupTemplateRecovery", "reason": "supported real Node/npm required; skips provide no restart evidence"}], "unrelatedFailures": []}
+  ]
+}
