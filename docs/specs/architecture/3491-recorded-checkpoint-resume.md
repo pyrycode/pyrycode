@@ -113,3 +113,28 @@ Complete the same thread assertions separately with `go test -race -timeout 20m
 ./internal/thread`; record its result in the PR without treating a longer limit
 as a repair of #3494. The recorded proof independently passed all three histories:
 60 cuts and 687 immediate/suffix comparisons. No design or coverage changes.
+
+### 2026-10-16 — rework after inherited gate repairs
+
+The verifier found no implementation defects in this ticket, but required a
+fresh successful full Linux gate after inherited failures #3494 and #3496 were
+repaired. Both issues are now closed and their fixes are integrated by merge
+`54e792a2` from main `3faeea39`. The recorded-history proof, semantic assertions,
+synthetic shell context, committed recordings and golden expectations remain
+unchanged. No checkpoint design or coverage changes are needed for this rework.
+
+The earlier timeout and cancellation failures remain failed evidence. The
+builder reruns the required three-package race command at the default timeout,
+vet and build on Linux. The dispatcher owns the fresh full-module suite and
+complete `make check`; successful scoped checks do not replace that gate or the
+fresh verifier judgment. Both documentation handoffs remain pending their
+documentation stage.
+
+Fresh checks at `54e792a2` all passed on Linux: `go test -race
+./internal/thread ./cmd/pyry ./internal/relay` completed with thread 593.101s,
+cmd/pyry 369.508s and relay 89.527s, using the default ten-minute timeout.
+`go vet ./...` and `go build -o /tmp/builder-3491-recheck/pyry ./cmd/pyry` also
+passed. Raw logs are retained under `/tmp/builder-3491-recheck/`. All validation
+processes have joined. The thread result is close to the default timeout; it
+does not predict the pending dispatcher's full-gate runtime. No live Claude or
+other operating-system checks ran.
