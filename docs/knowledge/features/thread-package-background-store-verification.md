@@ -64,6 +64,27 @@ workers. `TestStoreOutputCancellationWhileWithdrawing` and
 `TestStoreConcurrentRetryWithdrawal` establish lock/join contention; cancellation
 during lookup alone cannot prove those boundaries.
 
+Body parity needs explicit expected public rows before comparing Store content
+with `Snapshot` and legacy `Fold.Items`: malformed tool input can make both
+outputs omit the same row and leave equality green. `TestStoreToolBodyParity`
+asserts fixture IDs/visibility before comparing detached bodies, including empty
+and unknown fields. To force inherited-reference resolution, select an
+interrupted nested Task whose ending comes from its root, as in
+`TestStoreToolBodyBounded` and `testEndingEntries`; a completed ordinary child
+uses its own result and cannot prove that dependency path. Count exact reference
+IDs and metadata visits after preparation, including recipe lookup, rather than
+inferring bounds from output size or allocation alone. The
+[body-read contract](thread-package-background-store-queries.md#revision-scoped-tool-bodies)
+permits required ancestors internally while returning only the selected body.
+
+Metadata counters used as barriers observe rendering visits as well as selection.
+Disarm a selection barrier once the intended query reaches it, keeping that query
+held while allowing independent `Snapshot` checks to render. Leaving the barrier
+armed can block the observation meant to prove reader isolation.
+`TestCatchUpIsolation` and `TestStoreQueriesRetirementIsolation` use this pattern;
+`TestStoreToolBodyCapture` instead tags the held request's content lookup so other
+readers can proceed through publication, unload/replacement and cancellation.
+
 `TestAffectedPublicationOracle` compares affected capture with whole-thread
 `difference` after single-entry and chunked corpus feeds, including private
 activity, late children, reparenting, delivery/suppression and no-op entries.
