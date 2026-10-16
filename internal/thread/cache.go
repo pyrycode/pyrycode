@@ -214,8 +214,12 @@ func (s *Store) writeCacheFile(id conversations.ConversationID, name string, val
 	if err != nil {
 		return ErrPersistence
 	}
-	defer os.Remove(f.Name()) // best-effort cleanup of unpublished temporary bytes
-	defer f.Close()           // also closes on an encode/sync failure
+	defer func() {
+		if again, err := s.history.LogDir(id); err == nil && again == dir {
+			_ = os.Remove(f.Name()) // best-effort cleanup inside the original directory
+		}
+	}()
+	defer f.Close() // also closes on an encode/sync failure
 	if f.Chmod(0o600) != nil || json.NewEncoder(f).Encode(value) != nil || f.Sync() != nil || f.Close() != nil {
 		return ErrPersistence
 	}
