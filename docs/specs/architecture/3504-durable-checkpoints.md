@@ -59,3 +59,6 @@ Pending documentation stage: update `docs/knowledge/features/thread-package.md`,
 - Threat model: local cache integrity follows existing cache admission. History-bound restoration belongs to #3337; scheduling and clean certification policy belong to #3501.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-16
+
+## Revisions
+- 2026-10-16: `commit` checks that surviving records plus supplied deltas equal the complete export before truncation. The fault fixture distinguishes retry changes since acknowledged A from the narrower C-only delta used to prove preservation of surviving B. `TestWriteCheckpointOrderAndRecipe` rejects an omitted recipe-only change without index mutation; `TestWriteCheckpointFreshFaults` covers failures before the first named state exists.
