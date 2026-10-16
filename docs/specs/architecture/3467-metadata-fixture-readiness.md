@@ -65,14 +65,13 @@ joined before ordinary suite runs. The verifier owns the full-module test gate.
   recorded after execution; historical scheduling attribution remains unknown.
 
 ## Documentation handoff
-- Pending for the documentation stage: in
-  `docs/knowledge/features/development-verification.md`, section
-  "Diagnosing startup recovery runtime", document the metadata fixture's
+- Satisfied in [development verification](../../knowledge/features/development-verification.md#diagnosing-startup-recovery-runtime):
+  documented the metadata fixture's
   complete-publication invariant (usable status and snapshot, consumed and shown
   versions 1,024, and 1,024 complete items), twenty-second progress/inactivity
   watchdog, independent two-minute cap and shutdown joined before load-context
   cancellation.
-  Preserve the distinction between controlled reproduction of the total-deadline
+  Preserved the distinction between controlled reproduction of the total-deadline
   dependency and unknown historical scheduling attribution.
 
 ## Revisions
