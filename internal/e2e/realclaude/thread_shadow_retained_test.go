@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/thread"
@@ -23,6 +24,37 @@ func TestThreadShadowRetainedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	shadowReplay(t, h, e, false)
+}
+
+func TestThreadShadowMessageTimeProjection(t *testing.T) {
+	at := time.Date(2026, 10, 16, 6, 30, 0, 0, time.UTC)
+	raw := json.RawMessage(`{"turn_id":"t","text":"first"}`)
+	h := shadowHistory{Entries: []history.Entry{{ID: 1, TS: at, Payload: raw}}}
+	for _, content := range []json.RawMessage{raw, json.RawMessage(`{"text":"first second","turn_id":"t"}`),
+		json.RawMessage(`{"text":"captured date","ts":"2026-10-15T00:00:00Z"}`)} {
+		item := thread.Item{ID: 1, Kind: "assistant_message", Content: content}
+		cp := shadowCheckpoint{Items: []thread.Item{item}}
+		got := shadowCurrentMessageTimes(t, h, cp)
+		var original, projected map[string]json.RawMessage
+		if err := json.Unmarshal(content, &original); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(got.Items[0].Content, &projected); err != nil {
+			t.Fatal(err)
+		}
+		if _, present := original["ts"]; present {
+			if !reflect.DeepEqual(got.Items[0], item) {
+				t.Fatal("rewrote an observed date")
+			}
+		} else if string(projected["ts"]) != `"2026-10-16T06:30:00Z"` {
+			t.Fatal("projection lost the recorded time")
+		}
+		delete(original, "ts")
+		delete(projected, "ts")
+		if !reflect.DeepEqual(original, projected) || !reflect.DeepEqual(cp.Items[0], item) {
+			t.Fatal("projection changed historical content or captured evidence")
+		}
+	}
 }
 
 func TestThreadShadowQueueHandleProjection(t *testing.T) {
