@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -496,7 +497,56 @@ func TestPushWakeFeedbackCapacity(t *testing.T) {
 	}
 }
 
+// The consumer treats silent expiry as channel closure. The relay package's
+// TestWakeFeedbackBounds proves the exact deadline and late-result rejection.
 func TestPushWakeFeedbackExpiry(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		p := &feedbackLeg{t: t, path: filepath.Join(t.TempDir(), "devices.json")}
+		var err error
+		p.reg, err = devices.Load(p.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot := feedbackDevice("expiry-hash")
+		p.reg.Add(snapshot)
+		if err := p.reg.Save(p.path); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(p.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		feedback, done := make(chan string), make(chan struct{})
+		w := newPushWaker(nil, p.reg, nil, slog.Default())
+		w.invalid = func(ctx context.Context, d devices.Device) {
+			clearInvalidPushRegistration(ctx, p.reg, p.path, d, slog.Default())
+		}
+		go func() {
+			w.awaitInvalid(t.Context(), feedback, snapshot)
+			close(done)
+		}()
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("feedback consumer returned before expiry")
+		default:
+		}
+		time.AfterFunc(60*time.Second, func() { close(feedback) })
+		time.Sleep(61 * time.Second)
+		<-done
+		p.unchanged(info)
+		if !reflect.DeepEqual(p.reg.List(), []devices.Device{snapshot}) || !reflect.DeepEqual(p.disk(), []devices.Device{snapshot}) {
+			t.Fatal("expired reply changed registration")
+		}
+	})
+}
+
+// Keep the complete real-socket, real-timer proof in the existing slow tier.
+func TestPushWakeFeedbackExpiryIntegration(t *testing.T) {
+	if os.Getenv("PYRY_SLOW_TESTS") != "1" {
+		t.Skip("full production feedback deadline: run make test-slow")
+	}
 	t.Parallel()
 	p := newFeedbackLeg(t, "expiry-hash")
 	id := p.request()

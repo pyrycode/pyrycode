@@ -67,6 +67,12 @@ during lookup alone cannot prove those boundaries.
 `TestAffectedPublicationOracle` compares affected capture with whole-thread
 `difference` after single-entry and chunked corpus feeds, including private
 activity, late children, reparenting, delivery/suppression and no-op entries.
+Each of the eight batch sizes owns a separate reference fold, source and capture.
+An independent reference fold renders the complete expected snapshot once at
+each entry boundary, shared by batch comparisons ending there. The generated
+and late-child scenarios retain all 2270 and 27 batch comparisons respectively.
+Expected metadata and exact content are compared directly without serializing
+or copying the captured payloads. No capture result supplies expected rows.
 `TestAffectedPublicationReplacement` checks clearing, null and mixed content
 replacement/text append. `TestAffectedPublicationOwnership` retains old
 publications, changes and query results across later feeds and concurrent reads;

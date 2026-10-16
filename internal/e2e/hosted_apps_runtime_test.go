@@ -195,10 +195,11 @@ func TestHostedAppsRuntimeFailureIsolation(t *testing.T) {
 				}
 			}
 			if mode == "start" || mode == "health" {
-				s, _ := hostedRead(t, home)
-				if s.Records[3].State != "running" {
-					t.Fatal("sibling unavailable", s)
-				}
+				// Failure and sibling readiness are independent owner observations.
+				hostedWait(t, func() bool {
+					s, _ := hostedRead(t, home)
+					return s.Records[3].State == "running"
+				})
 				hostedHealthy(t, hostedProof(t, home, seeded.Records[3].AppID))
 			}
 			h.Stop(t)
