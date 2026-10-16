@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -28,34 +30,104 @@ func testCheckpointResume(t *testing.T, entries []history.Entry, cuts []int) {
 	cuts = slices.Clone(cuts)
 	slices.Sort(cuts)
 	cuts = slices.Compact(cuts)
-	prefix, _ := testReferenceFold(entries)
-	position := 0
 	for _, cut := range cuts {
 		if cut < 0 || cut > len(entries) {
 			t.Fatal("invalid cut", cut)
 		}
-		testFeed(t, prefix, entries[position:cut]...)
-		position = cut
-		d, rows, err := prefix.ExportCheckpoint()
+	}
+	if len(cuts) == 0 {
+		return
+	}
+	baseCut := cuts[0]
+	if baseCut == 0 && len(cuts) > 1 {
+		baseCut = cuts[1]
+	}
+	prefix, _ := testReferenceFold(entries)
+	testFeed(t, prefix, entries[:baseCut]...)
+	base, baseRows, err := prefix.ExportCheckpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each job owns both folds and its source. The shared preparation document
+	// is immutable; import gives each worker a detached continuation graph without
+	// replaying prefix history.
+	jobs := make(chan int)
+	abort := make(chan struct{})
+	var failed sync.Once
+	var workers sync.WaitGroup
+	var completed, comparisons atomic.Int64
+	workerCount := 1
+	if len(entries) >= 1000 {
+		workerCount = 8
+	}
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for cut := range jobs {
+				count := 0
+				if !t.Run(fmt.Sprintf("cut-%d", cut), func(cutTest *testing.T) {
+					count = testCheckpointResumeCut(cutTest, entries, cut, baseCut, base, baseRows, want)
+				}) {
+					failed.Do(func() { close(abort) })
+					return
+				}
+				comparisons.Add(int64(count))
+				completed.Add(1)
+			}
+		}()
+	}
+	defer func() {
+		close(jobs)
+		workers.Wait()
+		if !t.Failed() && completed.Load() != int64(len(cuts)) {
+			t.Fatal("resume cuts were dropped")
+		}
+		t.Logf("resume: %d distinct cuts, %d immediate/suffix comparisons", completed.Load(), comparisons.Load())
+	}()
+	for _, cut := range cuts {
+		select {
+		case jobs <- cut:
+		case <-abort:
+			return
+		}
+	}
+}
+
+func testCheckpointResumeCut(t *testing.T, entries []history.Entry, cut, baseCut int, base CheckpointState, baseRows []CheckpointItem, want [][32]byte) int {
+	t.Helper()
+	prefix, source := testReferenceFold(entries)
+	start := 0
+	if cut >= baseCut {
+		var err error
+		prefix, err = ImportCheckpoint("a", source, base, baseRows)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, source := testReferenceFold(entries)
-		r, err := ImportCheckpoint("a", source, testCheckpointJSON(t, d), testCheckpointJSON(t, rows))
-		if err != nil {
-			t.Fatalf("cut %d: %v", cut, err)
-		}
-		actual := testResumeProof{}
-		if actual.update(t, r, true) != want[cut] {
-			t.Fatalf("cut %d: immediate mismatch", cut)
-		}
-		for i := cut; i < len(entries); i++ {
-			testFeed(t, r, entries[i])
-			if actual.update(t, r, false) != want[i+1] {
-				t.Fatalf("cut %d: mismatch after entry %d", cut, entries[i].ID)
-			}
-		}
+		start = baseCut
 	}
+	testFeed(t, prefix, entries[start:cut]...)
+	d, rows, err := prefix.ExportCheckpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ImportCheckpoint("a", source, testCheckpointJSON(t, d), testCheckpointJSON(t, rows))
+	if err != nil {
+		t.Fatalf("cut %d: %v", cut, err)
+	}
+	actual := testResumeProof{}
+	if actual.update(t, r, true) != want[cut] {
+		t.Fatalf("cut %d: immediate mismatch", cut)
+	}
+	count := 1
+	for i := cut; i < len(entries); i++ {
+		testFeed(t, r, entries[i])
+		if actual.update(t, r, false) != want[i+1] {
+			t.Fatalf("cut %d: mismatch after entry %d", cut, entries[i].ID)
+		}
+		count++
+	}
+	return count
 }
 
 type testResumeProof struct {
