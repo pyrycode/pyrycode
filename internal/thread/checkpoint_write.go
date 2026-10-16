@@ -228,8 +228,12 @@ func (w *checkpointWriter) replaceState(dir string, saved checkpointFileState) e
 	if err != nil {
 		return ErrPersistence
 	}
-	defer os.Remove(f.Name()) // best-effort cleanup of unpublished temporary bytes
-	defer f.Close()           // also close on a failed write/sync
+	defer func() {
+		if again, err := w.s.history.LogDir(w.id); err == nil && again == dir {
+			_ = os.Remove(f.Name()) // best-effort cleanup inside the original directory
+		}
+	}()
+	defer f.Close() // also close on a failed write/sync
 	if err := f.Chmod(0600); err != nil {
 		return ErrPersistence
 	}

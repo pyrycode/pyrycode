@@ -62,3 +62,4 @@ Pending documentation stage: update `docs/knowledge/features/thread-package.md`,
 
 ## Revisions
 - 2026-10-16: `commit` checks that surviving records plus supplied deltas equal the complete export before truncation. The fault fixture distinguishes retry changes since acknowledged A from the narrower C-only delta used to prove preservation of surviving B. `TestWriteCheckpointOrderAndRecipe` rejects an omitted recipe-only change without index mutation; `TestWriteCheckpointFreshFaults` covers failures before the first named state exists.
+- 2026-10-16: `TestWriteCheckpointSecurity/during-state-write` exposed deferred temporary cleanup addressing an outside leaf after directory redirection. `replaceState` now rechecks exact directory containment before cleanup, leaving the original temporary file when containment is lost.

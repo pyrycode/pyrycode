@@ -357,7 +357,7 @@ func TestWriteCheckpointFreshFaults(t *testing.T) {
 
 func TestWriteCheckpointSecurity(t *testing.T) {
 	t.Parallel()
-	for _, fault := range []string{"state-symlink", "state-directory", "state-fifo", "index-symlink", "index-directory", "index-fifo", "outside", "sibling"} {
+	for _, fault := range []string{"state-symlink", "state-directory", "state-fifo", "index-symlink", "index-directory", "index-fifo", "outside", "sibling", "during-state-write"} {
 		t.Run(fault, func(t *testing.T) {
 			w, f, entries := testCheckpointWriter(t, []history.Entry{testMessage(1), testMessage(2)})
 			testFeed(t, f, entries[0])
@@ -377,7 +377,27 @@ func TestWriteCheckpointSecurity(t *testing.T) {
 			if err := os.WriteFile(marker, before, 0600); err != nil {
 				t.Fatal(err)
 			}
-			if fault == "outside" || fault == "sibling" {
+			if fault == "during-state-write" {
+				w.step = func(stage string, action func() error) error {
+					if stage == "state-write" {
+						temps, _ := filepath.Glob(filepath.Join(dir, ".thread-*"))
+						if len(temps) != 1 {
+							t.Fatal("missing temporary state")
+						}
+						if err := os.Rename(dir, dir+"-saved"); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(outside, dir); err != nil {
+							t.Fatal(err)
+						}
+						marker = filepath.Join(outside, filepath.Base(temps[0]))
+						if err := os.WriteFile(marker, before, 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return action()
+				}
+			} else if fault == "outside" || fault == "sibling" {
 				target := outside
 				if fault == "sibling" {
 					target, err = w.s.history.EnsureLogDir(testStoreB)
@@ -414,6 +434,9 @@ func TestWriteCheckpointSecurity(t *testing.T) {
 			testFeed(t, f, entries[1])
 			if _, err := testCommitCheckpoint(t, w, f, previous, false); !errors.Is(err, ErrPersistence) {
 				t.Fatal("unsafe path admitted", err)
+			}
+			if fault == "during-state-write" {
+				dir += "-saved"
 			}
 			for _, path := range []string{marker, filepath.Join(dir, filepath.Base(segments[0]))} {
 				got, err := os.ReadFile(path)
