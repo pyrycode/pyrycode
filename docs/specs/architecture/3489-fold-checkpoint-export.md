@@ -62,3 +62,17 @@ None. Sizing sketch: approximately 790 written lines, two exported types, zero m
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+- 2026-10-16: export mirrors live in `checkpoint_document.go`, conversion in `checkpoint_export.go`, and tests in `checkpoint_export_test.go` because existing `checkpoint_test.go` owns Store certificate tests. Added `TestCheckpointLifecycleFacts` for saved lifetimes, task/report markers, inherited endings and reversible intrinsic state. Outcome pointers also use an identity table. The contract is unchanged.
+- JSON omits absent recipe literal values; encoding nil RawMessage as explicit null would decode into literal `null` bytes and alter the mirror on round trip. Actual scalar null literals remain explicit and detached.
+
+### Encoded accounting evidence
+`TestReferenceFinalReportAccounting` ran unchanged workloads under the race detector. These are actual compact JSON lengths, separate from the test's logical-memory accounting; each private size was identical at 16 and 4096 padding bytes per entry (observed difference 0, numerical bound 0 because identities/memberships are unchanged and digest hex is fixed at 64 characters).
+
+| Finished turns | Private bytes | Private bytes/turn | Separate item-record bytes | Item bytes/turn |
+| --- | ---: | ---: | ---: | ---: |
+| 16 | 51536 | 3221.00 | 31642 | 1977.62 |
+| 64 | 207070 | 3235.47 | 127498 | 1992.16 |
+
+Final written work is approximately 768 lines, two new exported types, zero consumer migrations, four acceptance criteria and one export rejection branch.

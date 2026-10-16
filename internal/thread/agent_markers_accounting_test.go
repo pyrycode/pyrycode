@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -14,6 +15,7 @@ func TestReferenceFinalReportAccounting(t *testing.T) {
 	t.Logf("host struct sizes: mutable mainCall=%d marker=%d; map slots hold pointers so sparse finished maps do not inline the larger records", reflect.TypeFor[mainCall]().Size(), reflect.TypeFor[mainCallMarker]().Size())
 	t.Logf("host child sizes: parent marker=%d reversible snapshot=%d; final markers retain no snapshot allocation", reflect.TypeFor[childState]().Size(), reflect.TypeFor[childSnapshot]().Size())
 	for _, turns := range []int{16, 64} {
+		var encodedPrivate int
 		for _, padding := range []int{16, 4096} {
 			var entries []history.Entry
 			for turn := 0; turn < turns; turn++ {
@@ -55,6 +57,29 @@ func TestReferenceFinalReportAccounting(t *testing.T) {
 				}
 			}
 			bytes := testFinalReportBytes(f)
+			state, records, err := f.ExportCheckpoint()
+			if err != nil {
+				t.Fatal(err)
+			}
+			privateJSON, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			itemsJSON, err := json.Marshal(records)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if padding == 16 {
+				encodedPrivate = len(privateJSON)
+			}
+			// The workload's identities and table memberships are fixed. Digests
+			// encode as 64 hex characters regardless of content, so the bound on
+			// a padding-induced difference is exactly zero encoded bytes.
+			difference := len(privateJSON) - encodedPrivate
+			if difference != 0 {
+				t.Fatalf("payload length changed private JSON bytes by %d; bound=0", difference)
+			}
+			t.Logf("turns=%d padding=%d JSON-encoded private=%d bytes (%.2f/finished turn), item-records=%d bytes (%.2f/turn), private difference=%d bound=0; separate from logical-memory accounting below", turns, padding, len(privateJSON), float64(len(privateJSON))/float64(turns), len(itemsJSON), float64(len(itemsJSON))/float64(turns), difference)
 			// Traverse all private indexes, so relocating snapshots cannot bypass
 			// the marker-only guard. This workload has no reversible children.
 			testChildMarkerShape(t, f)
