@@ -1,9 +1,12 @@
 package thread
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"runtime"
 	"slices"
 	"sync"
@@ -15,7 +18,7 @@ import (
 )
 
 // testCheckpointResume checks every suffix boundary against one uninterrupted
-// reference baseline. Per-item exact JSON hashes include hidden/suppressed rows,
+// reference baseline. Per-item exact hashes include hidden/suppressed rows,
 // recipes and publication facts. The affected set updates the aggregate after
 // each entry; every import starts by independently hashing the complete inventory.
 // Existing semantic/golden tests remain the independent fold-behavior oracle.
@@ -56,9 +59,8 @@ func testCheckpointResume(t *testing.T, entries []history.Entry, cuts []int) {
 		t.Fatal(err)
 	}
 	t.Logf("resume prefix feed/export=%s", time.Since(started))
-	// Each job owns both folds and its source. The shared preparation document
-	// is immutable; import gives each worker a detached continuation graph without
-	// replaying prefix history.
+	// Each worker advances its own preparation fold through increasing cuts.
+	// Restored folds and their suffixes never mutate that preparation graph.
 	jobs := make(chan int)
 	abort := make(chan struct{})
 	var failed sync.Once
@@ -73,10 +75,12 @@ func testCheckpointResume(t *testing.T, entries []history.Entry, cuts []int) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
+			_, source := testReferenceFold(entries)
+			worker := testResumeWorker{source: source}
 			for cut := range jobs {
 				count := 0
 				if !t.Run(fmt.Sprintf("cut-%d", cut), func(cutTest *testing.T) {
-					count = testCheckpointResumeCut(cutTest, entries, cut, baseCut, base, baseRows, want)
+					count = worker.check(cutTest, entries, cut, baseCut, base, baseRows, want)
 				}) {
 					failed.Do(func() { close(abort) })
 					return
@@ -107,35 +111,61 @@ func testCheckpointResume(t *testing.T, entries []history.Entry, cuts []int) {
 	}
 }
 
-func testCheckpointResumeCut(t *testing.T, entries []history.Entry, cut, baseCut int, base CheckpointState, baseRows []CheckpointItem, want [][32]byte) int {
+type testResumeWorker struct {
+	prefix   *Fold
+	source   *recentSource
+	prepared int
+	json     testResumeJSON
+	proof    testResumeProof
+}
+
+func (w *testResumeWorker) prepare(t testing.TB, entries []history.Entry, cut, baseCut int, base CheckpointState, baseRows []CheckpointItem) *Fold {
 	t.Helper()
-	prefix, source := testReferenceFold(entries)
-	start := 0
-	if cut >= baseCut {
+	if cut == 0 {
+		return newReferenceFold("a", w.source)
+	}
+	if w.prefix == nil {
 		var err error
-		prefix, err = ImportCheckpoint("a", source, base, baseRows)
+		w.prefix, err = ImportCheckpoint("a", w.source, base, baseRows)
 		if err != nil {
 			t.Fatal(err)
 		}
-		start = baseCut
+		w.prepared = baseCut
 	}
-	testFeed(t, prefix, entries[start:cut]...)
+	if cut < w.prepared {
+		t.Fatal("worker cuts must increase")
+	}
+	if err := w.prefix.Feed(entries[w.prepared:cut]); err != nil {
+		t.Fatal(err)
+	}
+	w.prepared = cut
+	return w.prefix
+}
+
+func (w *testResumeWorker) check(t *testing.T, entries []history.Entry, cut, baseCut int, base CheckpointState, baseRows []CheckpointItem, want [][32]byte) int {
+	t.Helper()
+	prefix := w.prepare(t, entries, cut, baseCut, base, baseRows)
 	d, rows, err := prefix.ExportCheckpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := ImportCheckpoint("a", source, testCheckpointJSON(t, d), testCheckpointJSON(t, rows))
+	// Zero destinations are intentional: JSON storage is reusable, decoded facts
+	// belong to this cut alone, including absent maps and nil/empty slices.
+	var decoded CheckpointState
+	var records []CheckpointItem
+	w.json.roundTrip(t, d, &decoded)
+	w.json.roundTrip(t, rows, &records)
+	r, err := ImportCheckpoint("a", w.source, decoded, records)
 	if err != nil {
 		t.Fatalf("cut %d: %v", cut, err)
 	}
-	actual := testResumeProof{}
-	if actual.update(t, r, true) != want[cut] {
+	if w.proof.update(t, r, true) != want[cut] {
 		t.Fatalf("cut %d: immediate mismatch", cut)
 	}
 	count := 1
 	for i := cut; i < len(entries); i++ {
 		testFeed(t, r, entries[i])
-		if actual.update(t, r, false) != want[i+1] {
+		if w.proof.update(t, r, false) != want[i+1] {
 			t.Fatalf("cut %d: mismatch after entry %d", cut, entries[i].ID)
 		}
 		count++
@@ -143,54 +173,102 @@ func testCheckpointResumeCut(t *testing.T, entries []history.Entry, cut, baseCut
 	return count
 }
 
+type testResumeJSON struct {
+	buffer  bytes.Buffer
+	encoder *json.Encoder
+}
+
+func (s *testResumeJSON) roundTrip(t testing.TB, value, dst any) {
+	t.Helper()
+	if s.encoder == nil {
+		s.encoder = json.NewEncoder(&s.buffer)
+	}
+	s.buffer.Reset()
+	if err := s.encoder.Encode(value); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(s.buffer.Bytes(), dst); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(value, reflect.ValueOf(dst).Elem().Interface()) {
+		t.Fatalf("JSON round trip changed %T", value)
+	}
+	s.buffer.Reset()
+}
+
 type testResumeProof struct {
-	rows map[int][32]byte
-	sum  [32]byte
+	rows     map[int][32]byte
+	sum      [32]byte
+	selected []Item
+	buffer   bytes.Buffer
+	encoder  *json.Encoder
+	row      testResumeProofRow
+}
+
+type testResumeProofRow struct {
+	Index                                                     int
+	Rendered                                                  Item
+	ContentNil                                                bool
+	Record                                                    CheckpointItem
+	Touch                                                     uint64
+	Published, Visible, Touched, PublishedValue, VisibleValue bool
 }
 
 func (p *testResumeProof) update(t testing.TB, f *Fold, full bool) [32]byte {
 	t.Helper()
 	if p.rows == nil {
 		p.rows = make(map[int][32]byte)
+		p.encoder = json.NewEncoder(&p.buffer)
 	}
 	indices := f.captureAffected
+	p.selected = p.selected[:0]
 	if full {
-		indices = make([]int, len(f.items))
-		for i := range indices {
-			indices[i] = i
+		clear(p.rows)
+		p.sum = [32]byte{}
+		p.selected = append(p.selected, f.items...)
+	} else {
+		for _, index := range indices {
+			p.selected = append(p.selected, f.items[index])
 		}
 	}
-	selected := make([]Item, len(indices))
-	for i, index := range indices {
-		selected[i] = f.items[index]
-	}
-	rendered, err := f.render(selected)
+	// Hash synchronously while the owner holds the fold; detached Content copies
+	// are unnecessary. Every full check still independently renders all rows.
+	rendered, err := f.renderShared(p.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for position, index := range indices {
+	for position, renderedItem := range rendered {
+		index := position
+		if !full {
+			index = indices[position]
+		}
 		item := f.items[index]
 		id := item.ID
 		_, published := f.published[id]
 		_, visible := f.publicVisible[id]
 		_, touched := f.touches[id]
-		raw, err := json.Marshal(struct {
-			Index                                                     int
-			Rendered                                                  Item
-			ContentBytes                                              []byte
-			Record                                                    CheckpointItem
-			Touch                                                     uint64
-			Published, Visible, Touched, PublishedValue, VisibleValue bool
-		}{index, rendered[position], []byte(rendered[position].Content), checkpointRecord(item, f.recipes[id]), f.touches[id], published, visible, touched, f.published[id], f.publicVisible[id]})
-		if err != nil {
+		content := renderedItem.Content
+		renderedItem.Content = nil
+		p.row = testResumeProofRow{index, renderedItem, content == nil, checkpointRecord(item, f.recipes[id]), f.touches[id], published, visible, touched, f.published[id], f.publicVisible[id]}
+		p.buffer.Reset()
+		if err := p.encoder.Encode(&p.row); err != nil {
 			t.Fatal(err)
 		}
-		next, previous := sha256.Sum256(raw), p.rows[index]
+		// Length-delimit exact Content after the complete metadata JSON. Feeding
+		// RawMessage through JSON would normalize whitespace; base64 would allocate
+		// and serialize the same payload again. Scratch belongs to this proof only.
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(content)))
+		p.buffer.Write(length[:])
+		p.buffer.Write(content)
+		next, previous := sha256.Sum256(p.buffer.Bytes()), p.rows[index]
 		for i := range p.sum {
 			p.sum[i] ^= previous[i] ^ next[i]
 		}
 		p.rows[index] = next
 	}
+	clear(p.selected)
+	p.row = testResumeProofRow{}
 	if f.captureSet == nil {
 		f.captureSet = make(map[int]struct{})
 	}

@@ -182,6 +182,7 @@ func (c *Client) Generation() *Generation {
 type sendRequest struct {
 	frame      []byte
 	ctx        context.Context
+	callerCtx  context.Context
 	conn       *websocket.Conn
 	done       chan error
 	generation *Generation
@@ -491,7 +492,7 @@ func (c *Client) SendGeneration(ctx context.Context, g *Generation, frame []byte
 func (c *Client) sendContext(ctx context.Context, g *Generation, frame []byte) error {
 	writeCtx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
-	req := sendRequest{frame: frame, ctx: writeCtx, done: make(chan error, 1), generation: g}
+	req := sendRequest{frame: frame, ctx: writeCtx, callerCtx: ctx, done: make(chan error, 1), generation: g}
 	if err := c.enqueueSend(writeCtx, req); err != nil {
 		return err
 	}
@@ -781,9 +782,15 @@ func (c *Client) sendPump(ctx context.Context, conn *websocket.Conn) error {
 			writeCtx, cancel := context.WithTimeout(req.ctx, c.cfg.WriteTimeout)
 			stop := context.AfterFunc(ctx, cancel)
 			c.cfg.Logger.DebugContext(writeCtx, "transport: frame accepted", "event", "transport.send.accepted")
-			// Check both contexts synchronously: the pump cancellation callback
-			// may not have run, and Write can publish with an already cancelled ctx.
-			err := writeCtx.Err()
+			// Check the original caller too: cancellation can reach derived
+			// contexts later, and Write can publish with a cancelled context.
+			var err error
+			if req.callerCtx != nil {
+				err = req.callerCtx.Err()
+			}
+			if err == nil {
+				err = writeCtx.Err()
+			}
 			if err == nil {
 				err = ctx.Err()
 			}

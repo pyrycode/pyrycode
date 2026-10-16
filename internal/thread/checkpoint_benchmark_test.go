@@ -2,6 +2,7 @@ package thread
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -87,4 +88,75 @@ func BenchmarkCheckpointResumePhases(b *testing.B) {
 			p.update(b, f, true)
 		}
 	})
+}
+
+// BenchmarkCheckpointWorkerLifecycle compares the same 25-cut preparation and
+// complete JSON/proof work with fresh storage and worker-owned reusable storage.
+func BenchmarkCheckpointWorkerLifecycle(b *testing.B) {
+	entries := testFoldCorpus(30000)
+	f, source := testReferenceFold(entries)
+	if err := f.Feed(entries[:29801]); err != nil {
+		b.Fatal(err)
+	}
+	d, rows, err := f.ExportCheckpoint()
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, reuse := range []bool{false, true} {
+		name := "fresh"
+		if reuse {
+			name = "reused"
+		}
+		b.Run(name+"/preparation", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				worker := testResumeWorker{source: source}
+				for cut := 29801; cut < 29826; cut++ {
+					if !reuse {
+						worker.prefix = nil
+					}
+					worker.prepare(b, entries, cut, 29801, d, rows)
+				}
+			}
+		})
+		b.Run(name+"/json", func(b *testing.B) {
+			scratch := testResumeJSON{}
+			var warm CheckpointState
+			scratch.roundTrip(b, d, &warm)
+			var warmRows []CheckpointItem
+			scratch.roundTrip(b, rows, &warmRows)
+			b.ReportAllocs()
+			for b.Loop() {
+				var state CheckpointState
+				var records []CheckpointItem
+				for _, part := range []struct{ value, dst any }{{d, &state}, {rows, &records}} {
+					if reuse {
+						scratch.roundTrip(b, part.value, part.dst)
+						continue
+					}
+					raw, err := json.Marshal(part.value)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if err := json.Unmarshal(raw, part.dst); err != nil {
+						b.Fatal(err)
+					}
+					if !reflect.DeepEqual(part.value, reflect.ValueOf(part.dst).Elem().Interface()) {
+						b.Fatal("JSON round trip changed value")
+					}
+				}
+			}
+		})
+		b.Run(name+"/proof", func(b *testing.B) {
+			proof := testResumeProof{}
+			proof.update(b, f, true)
+			b.ReportAllocs()
+			for b.Loop() {
+				if !reuse {
+					proof = testResumeProof{}
+				}
+				proof.update(b, f, true)
+			}
+		})
+	}
 }
