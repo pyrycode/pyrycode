@@ -69,8 +69,9 @@ joined before ordinary suite runs. The verifier owns the full-module test gate.
   `docs/knowledge/features/development-verification.md`, section
   "Diagnosing startup recovery runtime", document the metadata fixture's
   complete-publication invariant (usable status and snapshot, consumed and shown
-  versions 1,024, and 1,024 complete items), progress/inactivity watchdog,
-  independent overall cap and shutdown joined before load-context cancellation.
+  versions 1,024, and 1,024 complete items), twenty-second progress/inactivity
+  watchdog, independent two-minute cap and shutdown joined before load-context
+  cancellation.
   Preserve the distinction between controlled reproduction of the total-deadline
   dependency and unknown historical scheduling attribution.
 
@@ -265,3 +266,55 @@ After the gate exited, `env GOMAXPROCS=2 GOFLAGS=-p=2 make build BIN=/tmp/builde
 exited zero; output is `/tmp/builder-3467-rework/build.log`. All check and build
 processes were joined before handoff. No new source fix or follow-up is required
 by this successful recheck; documentation remains pending for its owning stage.
+
+### 2026-10-16 — verifier rework: complete gate at the reviewed head
+Finding 1 on `7ea3c259b44995ce420fdf41d0d3c611d9a6cf68` requires a complete
+successful gate and build after 32 named dispatcher failures and an incomplete
+daemon package. This rework retains the reviewed metadata source unchanged and
+records a fresh complete check at that exact revision. No production repair or
+new causal diagnosis is claimed.
+
+Command: `env GOMAXPROCS=2 GOFLAGS=-p=2 make check GO=/tmp/builder-3467-rework2/go-record`.
+The wrapper adds only `-json -count=1` to test commands; default ten-minute
+package timeouts and default test parallelism remain. Environment: macOS arm64,
+Go 1.26.2, no affinity. No separate builder-owned contention workload, compilation
+or suite overlaps this gate; host-wide incidental activity remains uncontrolled.
+These bounded package-parallelism settings differ from the failed dispatcher run
+and the verifier's default-settings baseline, so this is a complete successful
+recheck, not a matched comparison establishing the historical cause.
+The full command exited zero after 846.306 seconds, including vet, staticcheck
+and substrate-guard.
+
+| Complete tier | Started | Passed | Failed | Skipped |
+| --- | --- | --- | --- | --- |
+| Module race tests | 27,191 | 27,164 | 0 | 27 |
+| Fake-daemon e2e race tests | 710 | 708 | 0 | 2 |
+
+All 32 previously failing tests/subtests executed and passed without skips.
+`TestPushWakeFeedbackExpiry` also passed (61.010s); the complete daemon package
+passed in 412.103s. All six metadata/read-source checks passed without skips:
+`TestDaemonThreadMetadataReadiness` (30.950s),
+`TestDaemonThreadMetadataReadinessStalled` (1.030s),
+`TestDaemonThreadMetadataAllocations` with both allocation subtests (parent
+5.780s), and `TestThreadMetadataReadSources` (0.010s). All five hosted-app
+failure-isolation checks passed, including `start` (2.930s). Complete thread and
+fake-daemon e2e package durations were 155.533s and 223.994s. Delayed-fixture
+construction/readiness/snapshot phases were 0.467/27.424/0.987s; allocation-fixture
+phases were 0.400/2.325/1.006s. Both retained 1,024 items and 4,219,904 content bytes.
+
+Module skips: supported Node/template inputs absent (14), case-insensitive
+filesystem (3), invalid UTF-8 filenames rejected (4), and one each for deleted-cwd
+prerequisites, root-only ownership substitution, Linux-only parent death, opt-in
+slow proof, live-Claude opt-in and standalone heap measurement. E2e skips were
+`TestInnerFatalChild` (child-only harness helper) and `TestHostedAppsRecoverySQL`
+(optional Node/template inputs absent). No optional live, SQL or heap proof is
+claimed. Raw JSON, complete named counts and skip reasons are retained in
+`/tmp/builder-3467-rework2/check.log`, `summary.json` and `check-status.json`.
+
+After the gate exited, `env GOMAXPROCS=2 GOFLAGS=-p=2 make build BIN=/tmp/builder-3467-rework2/pyry`
+exited zero in 0.948s at the same revision; `build.log` and `build-status.json`
+retain its output and status. All check and build processes exited before
+handoff. The evidence establishes non-reproduction of the reported gate failures;
+their historical causes remain unknown. The dispatcher owns its next gate rerun,
+and the exact documentation requirements above remain pending for the
+documentation stage.
