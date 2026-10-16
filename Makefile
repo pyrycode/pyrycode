@@ -62,7 +62,7 @@ test:
 .PHONY: test-slow
 test-slow:
 	PYRY_SLOW_TESTS=1 $(GO) test -race -count=1 -run '^(TestUpdateWhenIdle_SilentPeerCeiling|TestAccountTokenReadDeadline)$$' ./internal/control ./internal/streamsup
-	PYRY_SLOW_TESTS=1 $(GO) test -race -count=1 -run '^TestPushWakeFeedbackExpiryIntegration$$' ./cmd/pyry
+	PYRY_SLOW_TESTS=1 $(GO) test -race -count=1 -run '^(TestPushWakeFeedbackExpiryIntegration|TestDaemonThreadMetadataReadiness)$$' ./cmd/pyry
 
 .PHONY: e2e
 e2e:
