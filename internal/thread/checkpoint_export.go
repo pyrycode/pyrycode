@@ -28,6 +28,10 @@ func (f *Fold) ExportCheckpoint() (CheckpointState, []CheckpointItem, error) {
 		Children: make(map[int]checkpointChild), ChildEndings: make(map[int]checkpointEnding), Observations: make(map[uint64][]checkpointObservation),
 	}
 	var records []CheckpointItem
+	if len(f.items) > 0 {
+		d.ItemIDs = make([]uint64, 0, len(f.items))
+		records = make([]CheckpointItem, 0, len(f.items))
+	}
 	for _, item := range f.items {
 		d.ItemIDs = append(d.ItemIDs, item.ID)
 		records = append(records, checkpointRecord(item, f.recipes[item.ID]))

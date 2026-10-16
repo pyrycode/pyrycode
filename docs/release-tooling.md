@@ -249,6 +249,21 @@ When: on the release checklist, and before touching `pyry update` code
 
 ## Full production timeout proofs
 
+`make test-exhaustive` runs the complete 30000-entry restoration proof with
+201 cuts and 50101 immediate/suffix comparisons. It is mandatory in `make preship`.
+Routine checks run a nine-cut proof on the same full-size history alongside the
+every-boundary focused histories. The verifier's dependency-aware
+`scripts/check-restoration.py` also requires the exhaustive proof for changes to
+the restoration package, its transitive local dependencies, fixtures and build
+inputs. Missing dependency or base information requires the full proof.
+
+Standard test targets use `scripts/test-admission.py` to share one test place
+across native worktrees and projects on the same host. Waiting is reported
+separately from execution. Nested wrapped commands inherit the same hold.
+Raw `go test` commands bypass this place unless explicitly wrapped. Containers
+must mount the same lock file backing and configure `PYRY_TEST_ADMISSION_LOCK`
+to participate in the host limit.
+
 `make test` checks the update decision's operation deadline with a short injected duration.
 Its production ceiling remains 70 seconds.
 `make test-slow` also exercises the public operation through the full ceiling and the
