@@ -45,6 +45,7 @@ Canonical shape (#217): UUIDv4, 36 chars, lowercase hex, dashes at positions 8/1
 | `IsArchived` | `bool` | `is_archived,omitempty` | no — absent key decodes as active (#880) |
 | `ArchivedAt` | `*time.Time` | `archived_at,omitempty` | no — absent key decodes as unstamped: active, or archived before #2698 |
 | `IsMuted` | `bool` | `is_muted,omitempty` | no — absent key decodes as not muted (#2571) |
+| `PinnedAt` | `*time.Time` | `pinned_at,omitempty` | no — absent/nil means unpinned (#3535) |
 | `ReadUpTo` | `uint64` | `read_up_to,omitempty` | no — absent key decodes as `0` (#2779) |
 | `SystemPrompt` | `*string` | `system_prompt,omitempty` | no — pointer distinguishes nil ("no prompt", the default) from `""` ("explicitly empty"); operator-set text is the third state (#2149) |
 | `LastContextUsage` | `*ContextUsageReading` | `last_context_usage,omitempty` | no — pointer distinguishes nil ("claude has never reported for this conversation") from a recorded reading (#2460) |
@@ -67,6 +68,24 @@ that flips it, and [codebase/880.md](../codebase/880.md).
 **`IsMuted` (#2571) is `IsArchived`'s field-for-field twin: same `omitempty`, same absent-key-decodes-false contract, placed directly after it.** The two wire projections (`ConversationSummary`, `ConversationUpdatedPayload` — see [`protocol-package-types-conversations-write-payloads.md`](protocol-package-types-conversations-write-payloads.md)) read it the same way they read `IsArchived`, but serialize it **without** `omitempty`: a client folding a `conversation_updated` push into its list in place needs `false` written explicitly, or a record that dropped the key would read as "not muted" and silently un-mute the row. The mutator, `Registry.SetMuted`, shipped in #2572 — see [`features/conversations-registry.md`](conversations-registry.md) § `SetMuted`. Its wire verb, `set_conversation_muted`, made the same `*bool`-vs-`bool` choice on the write side that `IsMuted`'s own field made on the storage side: the payload's `muted` key is a pointer so an absent or `null` key is rejected as malformed rather than silently decoding to `false` and unmuting the row (see [`protocol-package-types-conversations-write-payloads.md`](protocol-package-types-conversations-write-payloads.md) § `SetConversationMutedPayload`).
 
 **`ReadUpTo` (#2779) is the host operator's durable history read mark — one value per conversation, not per device or per connection.** It is stated in the same id space as `internal/history.Store`'s per-conversation entry ids: "read" means "read up to this durable entry id," never a connection envelope id or a replay `event_id`. `omitempty` carries the same contract `IsArchived`'s and `IsMuted`'s do: an absent key decodes as `0`, so a pre-#2779 row loads unchanged and a registry with no mark set anywhere re-serializes byte-identical to its pre-#2779 form. #2779 landed the field and its two read-side projections (`ConversationSummary.ReadUpTo`, `ConversationUpdatedPayload.ReadUpTo`, see [`protocol-package-types-conversations-read-payloads.md`](protocol-package-types-conversations-read-payloads.md) / [`protocol-package-types-conversations-write-payloads.md`](protocol-package-types-conversations-write-payloads.md)) with no setter, exactly as `SystemPrompt` had none before `SetSystemPrompt` existed — `Registry.Update` was the only door in between. **The dedicated setter, `Registry.AdvanceReadUpTo`, and its wire verb, `mark_conversation_read`, both landed in #2780** — see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `AdvanceReadUpTo`.
+
+**`PinnedAt` (#3535) stores the host's stable channel pin time.** Nil or an absent
+`pinned_at` key means unpinned; nil is omitted on disk, so legacy registries load
+without migration. `Registry.SetPinned(id ConversationID, pinned bool, now time.Time) error`
+records `now.UTC()` only when pinning a previously unpinned row. Repeated pinning
+preserves that instant, keeping pin order stable; unpinning clears the pointer,
+and pinning again records the newly supplied time.
+
+Pinning requires `IsPromoted`, including for archived channels. Unpinning succeeds
+on any existing row, including unpromoted, archived and already-unpinned rows.
+Lookup, promotion check and mutation share `r.mu`; an unknown ID returns
+`ErrConversationNotFound` for either operation, and an unpromoted pin attempt
+returns `ErrConversationNotPromoted`. Both are package sentinels matchable with
+`errors.Is`, carry no protocol vocabulary and leave every row unchanged on failure.
+The setter changes only `PinnedAt`, leaving `LastUsedAt` and session bindings
+intact. It performs no I/O: the caller must call `Registry.Save` to make
+the pin or clear durable. Wire declarations, relay consumers and daemon activation
+are separate work in #3536, #3537 and #3538.
 
 **`SystemPrompt` (#2149) reuses `Name`'s tri-state mechanism, not just its shape.** The
 mechanism is that `omitempty` on a `*string` tests the pointer, not the pointee: a nil
@@ -115,7 +134,16 @@ Keeps `internal/conversations` decoupled from `internal/sessions` while Phase 3 
 
 ## Concurrency
 
-None. Pure value type — no goroutines, no channels, no mutexes. Safe to copy by value. Safe to pass across goroutines provided the usual "no concurrent mutation of `SessionHistory` slice header" Go rules are followed by the future owner (#217's registry).
+The value type owns no goroutines, channels or mutexes; the registry guards mutations
+with `r.mu`. Copies share pointer pointees. `SetPinned` allocates a fresh timestamp
+for each new pin and clears or replaces the pointer without mutating an existing
+timestamp. Mutating a shared timestamp in place would change an earlier `Get` result
+or race with encoding a shallow Save snapshot even while the writer holds `r.mu`,
+because encoding happens after that lock is released. `TestRegistry_SetPinned_Transitions`
+checks that earlier timestamps survive clear/re-pin, and `TestRegistry_SetPinned_Concurrent`
+exercises snapshot encoding during mutations. See the registry's
+[Save concurrency rules](conversations-registry.md#save-concurrency-dedicated-save-mutex-serializes-the-whole-sequence-868)
+for slice and map ownership.
 
 ## Tests
 
