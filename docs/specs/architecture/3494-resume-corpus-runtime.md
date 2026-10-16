@@ -123,3 +123,28 @@ eight-worker/parallel description if it changes.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+
+### 2026-10-16 — measured repair selection and scanner allocation bound
+
+The unchanged `4d98f07513f04fa36fa55714b31ecf09e1cb34c2` corpus completed
+201 cuts/50,101 comparisons in 250.728s on this host (249.13s profiled test
+duration, 1,538.41 sampled CPU seconds). `foldDecoder.decode` accounted for
+139.57 cumulative CPU seconds, including 107.56 under rendering; full rendering
+accounted for 246.83 and proof update for 327.72 (inclusive, not additive).
+This establishes repeated validation cost; it does not establish the cause of
+the earlier host's timeout. Keep orchestration unchanged and implement the
+planned empty DTO optimization.
+
+The initial allocation regression failed with 32 allocations. `json.Valid`
+uses a pooled scanner whose values race builds may discard; permit up to four
+scanner/depth allocations for the fixed nested fixture instead of requiring
+zero total allocations. Field-map/DTO decoding still exceeds this bound. A
+nil `*struct{}` must remain rejected, as verified by a negative control against
+the initial fast-path draft. No typed DTO or required-field contract changes.
+
+The helper now logs fixture, baseline/proof, prefix and joined-worker phases,
+and checks the expected comparison count as well as completed cuts. Its only
+signature change is accepting `testing.TB` for use by phase benchmarks; proof
+hashing and all per-cut work are unchanged.
