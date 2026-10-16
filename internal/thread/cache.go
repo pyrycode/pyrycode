@@ -27,7 +27,7 @@ const (
 	foldingRules = 3
 )
 
-// ErrPersistence reports a recoverable certificate I/O failure.
+// ErrPersistence reports a recoverable cache I/O failure.
 var ErrPersistence = errors.New("thread: cache persistence unavailable")
 var errCacheAbsent = errors.New("thread: cache requires rebuilding")
 
@@ -112,43 +112,56 @@ func validToken(token string) bool {
 	return err == nil && len(decoded) == 16 && hex.EncodeToString(decoded) == token
 }
 
-// cacheLeaf allows only package-owned names, never a path from cache contents.
+// cacheLeaf admits only package-owned leaves, never directory components.
 func cacheLeaf(name string) bool {
-	if name == cacheName || name == legacyCacheName || name == recoveryName {
+	return name == cacheName || name == checkpointStateName || checkpointIndexLeaf(name) || legacyLeaf(name)
+}
+
+func legacyLeaf(name string) bool {
+	if name == legacyCacheName || name == recoveryName {
 		return true
 	}
 	const prefix = "thread-run-"
 	return len(name) == len(prefix)+32+len(".json") && name[:len(prefix)] == prefix && name[len(name)-5:] == ".json" && validToken(name[len(prefix):len(name)-5])
 }
 
-func (s *Store) readCacheFile(id conversations.ConversationID, name string, dst any) error {
+func (s *Store) openCacheFile(id conversations.ConversationID, name string) (*os.File, error) {
 	if !conversations.ValidID(string(id)) || !cacheLeaf(name) {
-		return ErrPersistence
+		return nil, ErrPersistence
 	}
 	dir, err := s.history.LogDir(id)
 	if errors.Is(err, fs.ErrNotExist) {
-		return errCacheAbsent
+		return nil, errCacheAbsent
 	}
 	if err != nil {
-		return ErrPersistence
+		return nil, ErrPersistence
 	}
 	path := filepath.Join(dir, name)
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return errCacheAbsent
+		return nil, errCacheAbsent
 	}
 	if err != nil || !info.Mode().IsRegular() {
-		return ErrPersistence
+		return nil, ErrPersistence
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return ErrPersistence
+		return nil, ErrPersistence
 	}
-	defer f.Close() // read-only close cannot change persisted bytes
 	info, err = f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		return ErrPersistence
+		_ = f.Close() // read-only close cannot change persisted bytes
+		return nil, ErrPersistence
 	}
+	return f, nil
+}
+
+func (s *Store) readCacheFile(id conversations.ConversationID, name string, dst any) error {
+	f, err := s.openCacheFile(id, name)
+	if err != nil {
+		return err
+	}
+	defer f.Close() // read-only close cannot change persisted bytes
 	decoder := json.NewDecoder(f)
 	if err := decoder.Decode(dst); err != nil {
 		if errors.Is(err, io.EOF) {
@@ -287,8 +300,8 @@ func sameItems(a, b []Item) bool {
 	return err == nil && bytes.Equal(left, right)
 }
 
-// removeLegacy runs only after durable dirty marking. Only regular package-owned
-// leaves can be removed; redirects and unrelated entries are never traversed.
+// removeLegacy runs only after durable dirty marking. Only regular legacy leaves
+// can be removed; checkpoints, redirects and unrelated entries are preserved.
 func (s *Store) removeLegacy(id conversations.ConversationID) error {
 	dir, err := s.history.LogDir(id)
 	if err != nil {
@@ -300,7 +313,7 @@ func (s *Store) removeLegacy(id conversations.ConversationID) error {
 	}
 	for _, leaf := range leaves {
 		name := leaf.Name()
-		if name == cacheName || !cacheLeaf(name) {
+		if !legacyLeaf(name) {
 			continue
 		}
 		again, err := s.history.LogDir(id)
