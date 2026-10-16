@@ -237,7 +237,7 @@ context cleanup. Received completion records the observed exit; withheld
 completion requires `wait_completed=false`, `exit_observed=false` and
 `output_observed=false`, with completion-dependent fields, including
 `result_bytes`, unknown. Both return an empty reply with `errReplyFallback` and
-request group termination. See [custom deadline-context propagation](development-verification.md#prove-that-tests-distinguish-the-change).
+request group termination. See [custom deadline-context propagation](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 `TestReplyFallbackProcessEvidence` retains success, nonzero exit, privacy and
 actual timer-driven deadlines. Its own-deadline case holds Wait through the

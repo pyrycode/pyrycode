@@ -54,7 +54,7 @@ than 104 bytes and requires `errors.Is(enoentErr, syscall.ENOENT)` before feedin
 the real `net.Dial` error to the classification table. Checking only for a non-nil
 error lets an oversized address's `EINVAL` masquerade as the intended ENOENT
 fixture. The helper still owns cleanup; the classifier still accepts only ENOENT
-and ECONNREFUSED. See [fixture regression evidence](development-verification.md#prove-that-tests-distinguish-the-change)
+and ECONNREFUSED. See [fixture regression evidence](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change)
 for the long physical and symlinked `TMPDIR` checks.
 
 `TestServerSealRetainsOwnership` uses this helper for `control.sock`. Its deferred

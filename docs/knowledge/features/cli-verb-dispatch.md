@@ -62,7 +62,7 @@ would lose an earlier fatal cause when a signal arrives during shutdown:
 the first cancellation cause wins, including over cleanup's `cancelCause(nil)`.
 
 See [relay supervisor wiring](relay-package-consumers.md#consumers-and-roadmap) for fatal
-error propagation and [verification guidance](development-verification.md#prove-that-tests-distinguish-the-change)
+error propagation and [verification guidance](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change)
 for the real-signal regression pattern.
 
 ## Memory credential persistence
@@ -180,7 +180,7 @@ observe reader completion before returning; this distinguishes an early return
 independently of child scheduling. `exec.Cmd.WaitDelay` cannot unblock an arbitrary
 reader's `Read`: this fixture cancels, releases the reader, then joins the command
 and reader during cleanup. Production callers supply finite readers. See the
-[regression verification guidance](development-verification.md#prove-that-tests-distinguish-the-change).
+[regression verification guidance](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 See the [command contract](../../guide.md#memory-credentials),
 [service-user storage requirements](../../deployment.md#memory-credentials) and

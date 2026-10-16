@@ -388,7 +388,7 @@ again:**
   [measured comparison](../../specs/architecture/3431-startup-recovery-runtime.md#revisions)
   supports reducing fixture scan cost without attributing the non-reproduced
   historical timeout to daemon recovery. See
-  [runtime diagnosis](development-verification.md#diagnosing-startup-recovery-runtime).
+  [runtime diagnosis](development-verification-test-execution-and-artifact-survival.md#diagnosing-startup-recovery-runtime).
 
   `TestAgentSessionEndings_ReportedRecovery` checks late reports and source/lifetime
   reuse. `TestAgentSessionEndings_RosterReferenceIsolation`

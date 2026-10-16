@@ -93,8 +93,10 @@ func driveHandshakeToOpenDaemonInteractiveResuming(t *testing.T, phone *fakephon
 		t.Fatalf("WriteInit: %v", err)
 	}
 	sendNoiseInit(t, phone, initMsg)
+	t.Log("interactive handshake: noise_init sent; awaiting noise_resp")
 
 	inner := readInnerFrame(t, phone, 3*time.Second)
+	t.Log("interactive handshake: response frame received")
 	if inner.Type != protocol.TypeNoiseResp {
 		t.Fatalf("handshake: got inner type %q, want %q", inner.Type, protocol.TypeNoiseResp)
 	}

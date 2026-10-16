@@ -135,7 +135,7 @@ content-free logging coverage alongside this reset proof. Passing an old test
 under bounded contention does not disprove an earlier flake or establish its
 cause; the [PR's comparison and mutation evidence](https://github.com/pyrycode/pyrycode/pull/3432)
 records both old and repaired passes with the same contention settings. See
-[verification practices](development-verification.md#prove-that-tests-distinguish-the-change).
+[verification practices](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 Stale give-up tests must establish removal before exercising the expired
 attempt. Removing on attempt two with a 1 ms deadline is scheduling-sensitive:

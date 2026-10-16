@@ -58,7 +58,7 @@ halfway/complete decryption, with timeout diagnostics reporting elapsed time and
 both received/expected and decrypted/expected counts. Keep `TestLiveStatePacing`,
 `TestLiveStateBounds`, `TestLiveStateOrdering` and retirement coverage beside this
 complete-workload proof. See [current-state pacing](v2-session-manager-concurrency.md#supplied-current-state-delivery)
-and [deadline measurements and failure controls](development-verification.md#diagnosing-reply-timeouts).
+and [deadline measurements and failure controls](development-verification-test-execution-and-artifact-survival.md#diagnosing-reply-timeouts).
 
 ## Inbound controls
 
