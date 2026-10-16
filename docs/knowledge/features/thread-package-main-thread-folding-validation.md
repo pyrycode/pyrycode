@@ -194,14 +194,10 @@ the independent empty-fold suffix. `TestCheckpointResumeFocused` still restores
 every cut in the smaller scenario vocabulary. Sampling adds a bounded routine
 proof; it does not establish exhaustive equivalence.
 
-The verifier additionally runs `scripts/check-restoration.py`. It obtains the
-current local dependency closure with `go list -deps -test` and requires the
-complete sweep for changes anywhere in those package directories, including
-test fixtures. Module, toolchain, Makefile, scripts and CI changes also require
-it. An unavailable base or dependency analysis requires the complete proof.
-The full invocation preserves all 30000 entries, 201 cuts and 50101 comparisons.
-Checkpoint export preallocates its two inventory slices when nonempty, retaining
-nil slices for empty histories while avoiding repeated growth of large exports.
+`make check` and the verifier require the complete sweep for changed restoration
+dependencies or build inputs. Unknown inputs require it too. See
+[release validation](../../release-tooling.md#full-production-timeout-proofs).
+Export preallocates nonempty inventories and retains empty nil slices.
 
 The [maintainer's Linux/amd64 report for #3503](https://github.com/pyrycode/pyrycode/pull/3506)
 at `46118afa` (Go 1.26.9) records an uncached complete `make check` in 1,046.706s:
