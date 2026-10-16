@@ -126,9 +126,13 @@ A chunk plus final publication exceeded ten seconds under contention, so watchdo
 headroom must cover that work. These are fixture bounds, not latency guarantees.
 Cleanup joins `Store.Shutdown` before cancelling the independent load context.
 
-`TestDaemonThreadMetadataReadiness` delays five real replay chunks by five seconds
-each, defeating even a twenty-second total deadline. The stalled regression proves
-bounded failure and joined cleanup. This [controlled comparison](../../specs/architecture/3467-metadata-fixture-readiness.md#revisions)
+Ordinary checks use a virtual clock to prove that progress renews the inactivity
+bound, only complete usable publication ends readiness, and progress cannot extend
+the caller deadline. `TestDaemonThreadMetadataReadiness` delays five real replay
+chunks by five seconds each, defeating even a twenty-second total deadline. It
+runs in `make test-slow`, which remains mandatory in `make preship`. The real
+stalled regression stays in ordinary checks and proves bounded failure and joined
+cleanup. This [controlled comparison](../../specs/architecture/3467-metadata-fixture-readiness.md#revisions)
 establishes the total-deadline dependency; historical scheduling attribution
 remains unknown. Phase timings stay outside benchmark measurements.
 
