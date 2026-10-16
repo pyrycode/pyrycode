@@ -95,7 +95,7 @@ The default is built into the function body (not a package-level `const`) so cal
 
 ## `stdio_permission_prompt` — interactive permission transport (#2343)
 
-This boolean selects the Claude-facing permission transport for the daemon's
+This boolean selects the Claude-facing ordinary approval transport for the daemon's
 non-bypass interactive stream children. It does not change the approval registry,
 the client-facing modal/question flow, or the permission policy.
 
@@ -107,9 +107,23 @@ the client-facing modal/question flow, or the permission policy.
 `runSupervisor` reads the config once, so changing this value takes effect only
 after a daemon restart. Set it to `false` and restart to roll back to MCP.
 
-The selector applies only to non-bypass interactive daemon spawns. YOLO continues
-to use `--dangerously-skip-permissions` in either position, and `pyry agent-run`
-keeps its independent argv construction unchanged.
+Stored bypass (YOLO) and operator bypass retain exactly one
+`--permission-prompt-tool stdio` connection with either setting, including when
+the setting is absent. Claude needs that host-response connection to offer and
+receive answers to `AskUserQuestion`. It preserves effective bypass mode without
+enabling ordinary approval prompts or injecting the daemon's MCP servers
+(`pyry_approve` and `pyry_files`). `pyry agent-run` keeps its independent argv
+construction unchanged.
+
+Argument shaping alone cannot make a question answerable. The
+[`newStreamRunnerFactory` handler](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md)
+is installed even for an initially non-bypass MCP child, because settings can later
+enter bypass without rebuilding its parser. The same shaping applies at creation,
+registry restoration and settings-driven restart/next spawn; respawns retain it.
+Leaving stored bypass without an operator bypass grant restores the configured
+non-bypass transport. The existing question bridge and authenticated remote-answer
+checks continue to apply. See the
+[post-release physical smoke checklist](../../release-tooling.md#selectable-questions-in-bypass-mode).
 
 The opt-in is backed by the [Claude Code 2.1.259 compatibility result](permission-protocol-spike.md#current-finding-claude-code-21259-2342):
 the live gate observed a correlated stdio permission request, returned a matching
