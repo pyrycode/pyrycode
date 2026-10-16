@@ -173,10 +173,13 @@ was 1,538.41s/1,350.93s. Cumulative CPU seconds (inclusive) were:
 | State JSON round trip | 175.40 | 171.82 |
 | Item JSON round trip | 93.75 | 92.80 |
 
-Phase benchmarks used `go test -race -count=1 -run '^$' -bench
-'^BenchmarkCheckpointResumePhases$' -benchtime=1x ./internal/thread` (before
-production modification, then after). These are individual observations, not
-statistical latency guarantees:
+Before-phase command: `go test -race -count=1 -run '^$' -bench
+'^BenchmarkCheckpointResumePhases$' -benchtime=1x ./internal/thread`.
+After-phase command: `go test -race -count=1 -run '^TestDecodeEmptyObject'
+-bench '^(BenchmarkDecodeEmptyObject|BenchmarkCheckpointResumePhases)$'
+-benchtime=1x ./internal/thread`. The after command also checks rejection cases
+before the phases and runs a decoder microbenchmark after them. These are
+individual observations, not statistical latency guarantees:
 
 | 30,000-entry phase | Before seconds | After seconds |
 | --- | ---: | ---: |
@@ -195,6 +198,9 @@ wall times alone cannot establish the repair. The profile's rendering reduction
 and unchanged JSON costs identify the repaired work separately from scheduling.
 Package scheduling/worker settings were not changed; other host activity was
 not controlled, and the cause of the earlier machine's timeout is not inferred.
+Sampled CPU/wall ratios were nearly equal (6.18 versus 6.17 CPUs), supporting
+reduced executed work rather than a different worker setting or simply a faster
+schedule. This does not measure the original failing host's contention.
 
 The in-process control `BenchmarkDecodeEmptyObject` uses a named empty DTO to
 exercise the unchanged generic decoder with the identical input. Command:
@@ -208,3 +214,39 @@ Candidate phase diagnostics: fixture 0.545s, uninterrupted baseline feed/proof
 37.760s, prefix feed/export 12.208s, joined workers 168.499s. The remaining
 default-timeout full-package checks and verifier-owned full-module gate are
 recorded in the PR testing handoff.
+
+### 2026-10-16 — completed builder checks
+
+The final implementation/tests are revision
+`2385022d` (subsequent edits record evidence in this plan only). Linux checks
+used the default ten-minute timeout and uncached test execution. JSON reporting
+was enabled solely to retain counts and diagnostics:
+
+| Command | Package elapsed | Passed cases | Existing skips |
+| --- | ---: | ---: | ---: |
+| `go test -race -count=1 -json ./internal/thread` | thread 337.905s | 1,887 | 1 |
+| `go test -race -count=1 -json ./internal/thread ./cmd/pyry ./internal/relay` | thread 375.708s | 1,887 | 1 |
+| Same joint command | cmd/pyry 345.521s | 16,567 | 2 |
+| Same joint command | relay 46.591s | 1,534 | 0 |
+
+Both full thread runs completed 201 cuts/50,101 comparisons and passed
+`TestCheckpointProofContentBytes`. Counts include parent tests and subtests.
+Existing skips are the opt-in heap measurement, opt-in live Claude test and a
+case-insensitive-filesystem check on this case-sensitive Linux filesystem.
+No assertion or fixture was removed. The isolated/joint package difference
+(337.905s/375.708s) measures additional suite/package scheduling cost separately
+from the controlled validator repair; joined cut workers took
+166.982s/195.230s in those respective runs.
+
+`go vet ./...` and `go build -o /tmp/builder-3494/pyry ./cmd/pyry` both passed.
+Profiles, benchmark output and JSON reports are scratch evidence under
+`/tmp/builder-3494` (`before.cpu`, `after.cpu`, `before-top.txt`, `after-top.txt`,
+`phases-before.log`, `phases-after.log`, `decode-control.log`, `thread.jsonl`
+and `packages.jsonl`); durable findings and commands are recorded above.
+
+Pending for the verifier: the uncached full-module `make check` gate, including
+its additional static and integration checks. It is not claimed as passed by
+the builder. Documentation remains pending as specified in Documentation
+handoff. No live Claude check is required. macOS is outside this Linux ticket's
+verification scope. Both original open questions are resolved by the measured
+cost attribution and the explicitly limited scheduling conclusions above.
