@@ -113,3 +113,61 @@ a reconnect.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+
+### 2026-10-16 — diagnosis resolved and Linux validation
+
+No design departure. The open question is resolved by two independent controls:
+
+- With unchanged production, the committed test's `testAcceptedPropagation`
+  holds descendant cancellation after its original caller is cancelled. Cancel
+  and deadline each returned nil and stalled retirement; shutdown passed.
+  `go test -race -json -count=1 -run
+  '^TestClientSendContextAcceptedCancellation$' ./internal/transport` executed
+  four test/subtest records: one passed, three failed, zero skipped, 6.134 s.
+  With the direct caller check, the identical control passed all four in 1.124 s.
+- A scratch Go overlay of baseline `send_accepted_test.go` numbered upgrades
+  before `Accept`, held upgrade 1 immediately after `Accept` until upgrade 2
+  registered, and retained the original post-`Accept` retirement selection.
+  `go test -race -json -overlay
+  /tmp/builder-3496/registration-overlay.json -count=1 -run
+  '^TestClientSendContextAcceptedCancellation/cancel$' ./internal/transport`
+  logged `retirement observer owns upgrade 2`, then stalled awaiting retirement.
+  Both records failed, zero skipped, 3.024 s. The fix's registration handshake
+  prevents cancellation/reconnect until the original peer owns that observer.
+
+These establish the two failure mechanisms, rather than inferring reliability
+from a passing rerun. The natural deadline gap is possible because native
+`cancelCtx.cancel` closes its own Done channel before iterating its children;
+waiting for the parent Done does not join descendant cancellation. The test
+wrapper holds that same boundary explicitly through the supported AfterFunc
+contract. Baseline native runs reproduced both the nil deadline completion and
+retirement stalls before adding the controls.
+
+Environment: Linux/amd64, Go 1.26.9, eight online logical CPUs. GOMAXPROCS and
+GOFLAGS were unset; `-p` and `-parallel` used Go defaults, with no affinity or
+injected workload. Candidate batches ran concurrently with each other and
+vet/build. Counts below include named parents and subtests; timings are the
+JSON package elapsed values, not separate shell wall-clock measurements.
+
+| Revision | Command | Executed | Passed | Failed | Skipped | Seconds |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `4d98f075` | `go test -race -json -count=20 -run '^TestClientSendContextAcceptedCancellation$' ./internal/transport` | 80 | 74 | 6 | 0 | 11.258 |
+| `85fa7ca8` | `go test -race -json -count=100 -run '^TestClientSendContextAcceptedCancellation$' ./internal/transport` | 400 | 400 | 0 | 0 | 12.734 |
+| `85fa7ca8` | `go test -race -json -count=20 ./internal/transport` | 1620 | 1620 | 0 | 0 | 13.809 |
+
+Baseline failed three parent iterations: cancel stalled once, deadline returned
+nil and stalled twice. Shutdown passed all 20 repetitions. The candidate named
+batch executed and passed cancel, deadline and shutdown 100 times each; the
+complete package batch executed and passed each mode 20 times. All original
+disposal, error, no-publication, reconnect marker and pre-admission health
+assertions remain, with an added distinct-generation assertion.
+
+`go vet ./...` and `go build -o /tmp/builder-3496/pyry ./cmd/pyry` both exited
+zero at `85fa7ca8`. Raw JSON and control overlays were retained in
+`/tmp/builder-3496/` for this run; the counts and diagnoses above are the durable
+record. No test retry, widened wait, sleep or skipped assertion was added.
+The ordinary `make check` aggregate is pending the dispatcher-owned gate; it
+has not been claimed green. Other operating systems are outside verification
+scope. The documentation handoff remains pending the documentation stage.
