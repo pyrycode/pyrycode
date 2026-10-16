@@ -119,6 +119,16 @@ unload. Reading a newer boundary after held delivery can mark an unpublished
 commit consumed and prevent its reload. `TestDaemonThreadIdleCommit` exercises
 this race; reload must still prove the publication range or retire consumers.
 
+Authenticated thread queries own temporary daemon demand: they load cold or
+idle registered conversations, wait cancelably for a usable view, and keep it
+loaded through bounded selection and rendering. Concurrent queries share the
+worker; cancellation releases only the caller's demand. Removal and shutdown
+cancel and join all demand. Unknown and unavailable conversations fail closed.
+A successful coordinator-owned idle unload retains the publication cursor while
+the cache is absent or rebuilding, so reading an unchanged checkpoint does not
+disconnect the peer. Changed publications must still prove continuity through
+`Changes`; an actual gap or failure retains the normal consumer retirement.
+
 `dropRingOnConversationDelete` retains the registry's single removal observer
 for explicit deletion and sweep, including with the relay disabled. It preserves
 ring/reply-suggestion cleanup, tombstones the ID, joins shadow coordination and
