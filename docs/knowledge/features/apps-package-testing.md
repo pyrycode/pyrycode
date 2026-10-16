@@ -149,6 +149,20 @@ specific expiry arm and restore the budget before retry. The finalization arm of
 post-activation injection plus exact phase/recovery feedback before inspecting the
 committed on-disk journal. A generic publication error is insufficient evidence.
 
+A missing ready file can mean checked preparation is still running.
+`TestPublishFixturePreparationDelay` delays installation by 5.2 seconds: the
+controlled old five-second wait expired during `ci`, after successful Node/npm
+version probes, before service startup could occur. `publishFixtureReady` allows
+one minute for preparation, migration and child readiness, while also watching
+for early Publish completion so its failure phase is reported immediately.
+`publishFixtureStart` supplies private command/wait/cleanup/cancellation
+diagnostics through `testCandidateDiagnostics`; cleanup cancels, shuts down the
+owner and joins Publish before fixture teardown, including on assertion failure.
+Diagnostics retain fixed labels and private errors without child output,
+environment or arbitrary arguments; public feedback remains static. The delayed
+regression requires a live descendant, retires both processes and checks that
+confirmed retirement clears uncertainty. Readiness alone proves no retirement.
+
 `TestPublishOrdering` inspects the persisted decision and absence of data before
 the journal. `TestPublishJournalDirectorySyncOrdering` parks directory sync before
 data preparation. `TestSnapshotDurabilityBoundary` executes real file
@@ -159,9 +173,11 @@ and unchanged data rather than treating a renamed file as durable activation.
 preparation/snapshot, so it proves fresh verification rather than cached success.
 
 `TestPublishMigrationRetirementUncertain` lets the leader exit and injects EPERM
-with a real descendant still live; it must retain the uncommitted journal and
-refuse restoration/removal. `TestPublishServiceRetirementUncertain` covers
-preactivation Stop/Remove/Shutdown. `TestGenerationRetirementErrors` covers
+with a real descendant still live; it requires recorded denied retirement signals,
+retains the uncommitted journal and refuses restoration/removal. A preparation
+failure cannot satisfy its migration-phase proof.
+`TestPublishServiceRetirementUncertain` covers preactivation Stop/Remove/Shutdown.
+`TestGenerationRetirementErrors` covers
 ordinary/published completion, replacement, repeated Shutdown and rejected then
 successful removal. Assertions inspect actual leader/descendant retirement,
 retired targets and persisted decisions; an active-release string or leader wait
@@ -331,11 +347,54 @@ require neither live Claude nor dependency-network access. See
 Polling exact transient failure counts against a freely advancing timer can
 permanently miss a count after the third failure retires the generation.
 `TestOwnerHealthFailures` releases each runtime probe only after observing the
-preceding completed result; `TestOwnerHealthFailuresDelayedObserver` pauses beyond
-three ordinary intervals and proves one actual probe per release. Both retain
-the 1/2/0/1/2/3 reset/retirement sequence and target availability checks. The optional
+preceding completed result; `TestOwnerHealthFailuresDelayedObserver` first observes
+the completed failure count, then pauses for four ordinary intervals and rechecks
+that count and the actual probe total. Sleeping before completion lets response
+latency consume the entire idle window without proving scheduling stayed paused.
+Both prove one actual probe per release and retain the 1/2/0/1/2/3 reset/retirement
+sequence and target availability checks. The optional
 pre-start `Owner.healthTicks` clock controls only runtime scheduling; production
 and startup retain real timers, and probe transport/deadlines remain real.
+
+Manual ticks do not protect startup or requests from accelerated fixture expiry.
+`healthLifecycleFixture` restores production `startupDeadline` (15 seconds) and
+`healthRequestTimeout` (one second) for non-expiry lifecycle assertions; deliberate
+expiry tests retain `healthFixture`'s short budgets. `TestOwnerLifecycleFixtureDelays`
+separately delays child startup by 900 ms and health bodies by 200 ms. Those delays
+exceeded the old 700 ms startup and 100 ms request budgets, respectively, preventing
+readiness or healthy confirmation; both controlled arms pass with the restored
+budgets. The two failure-sequence tests and `TestOwnerReconcileMetadata` retain
+both delays. Metadata updates must preserve the healthy generation/usable target,
+newer metadata and retry-reset assertions, rather than accidentally testing an
+already-expired service.
+
+The [counted macOS evidence](../../../internal/apps/testdata/3524-macos-results.json)
+at source `69ca9dd2` retains six attempts, including the three failed controlled
+leaves and the same scenarios after repair, redacted raw output/checksums, exact
+commands/environment and disjoint parent/leaf counts. On macOS 26.6.2/arm64,
+Go 1.26.2 and supported real Node 24.15.0/npm 11.12.1 selected via
+`HOSTED_APP_NODE`/`HOSTED_APP_NPM_CLI`, the final focused run with `-race -count=1`
+passed all 5 parents and 26 leaves, with zero failures/skips. All six required families
+ran completely: the two health-failure tests, metadata reconciliation, migration
+uncertainty, all four retirement-probe arms and all three stop/remove/shutdown
+service-uncertainty arms. The run also covered the delay regressions and the
+\#3418/\#3447 cleanup regressions. The complete
+`go test -race -json ./internal/apps -count=1` at normal concurrency passed in
+549.283 seconds: 108 parents executed/passed; 925 leaves executed, 921 passed,
+0 failed, 4 skipped. The skips were invalid-UTF8 filename arms rejected by the
+filesystem with EILSEQ: `TestBackupAliasedTempRoot/states/nested`,
+`TestBackupStates/nested`, `TestRestoreStates/nested` and
+`TestRetainedValidation/invalid_UTF8`. Every required family passed without skips.
+Linux is outside this macOS ticket's verification scope; no live Claude is needed.
+
+The controlled comparison demonstrates startup/request/preparation expiry
+weaknesses, without establishing a common historical cause. Historical logs lack
+request/command/kernel traces: candidate-validation failure and the exact older
+cancellation, healthy-generation replacement and missing-readiness events remain
+individually unattributed. Passing reruns cannot resolve that attribution. These
+fixture proofs complement the positive-retirement and transient-versus-persistent
+uncertainty assertions under [publication fixtures](#publication-fixtures); they
+do not relax the [writer/recovery barriers](apps-package-lifecycle-and-restart-state.md#publication-writers-and-completion).
 
 ### Reconciliation cancellation
 

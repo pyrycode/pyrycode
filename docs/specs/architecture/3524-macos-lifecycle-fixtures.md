@@ -87,10 +87,14 @@ counts. The verifier owns the full-module gate; #3525 owns final make check/buil
 
 ## Documentation handoff
 
-Pending documentation stage: update `docs/knowledge/features/apps-package-testing.md`,
-“Health-failure observations” and/or “Publication fixtures” with the demonstrated
-cause, fixture contract, counted macOS result and remaining historical-attribution
-limits. Preserve positive-retirement and persistent-uncertainty distinctions.
+Satisfied in `docs/knowledge/features/apps-package-testing.md`:
+[Health-failure observations](../../knowledge/features/apps-package-testing.md#health-failure-observations)
+records startup/request expiry, production budgets, the completed-result observer
+pause, counted macOS results and historical-attribution limits;
+[Publication fixtures](../../knowledge/features/apps-package-testing.md#publication-fixtures)
+records preparation expiry, bounded readiness with early-outcome observation,
+private diagnostics and cancellation/join cleanup. Positive-retirement proof and
+transient-versus-persistent uncertainty distinctions are preserved.
 
 ## Security review
 
