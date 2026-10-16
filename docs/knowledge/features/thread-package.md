@@ -307,6 +307,12 @@ deterministic chunks cycling through 7/31/113 entries and single-entry feeds.
 These default-build offline gates require no credentials or recapture; preserve
 the separate provenance and raw/legacy semantic assertions above. See
 [baseline writing and digest conventions](thread-package-agents-and-background-work.md#agent-validation-and-testing).
+Canonical item hashing streams individually encoded rows in sorted field order.
+Only their Content requires generic JSON normalization, avoiding a second
+complete metadata object tree. `TestFoldItemsDigestCanonical` compares this
+encoding with the independent generic encoder for every Item field, nested
+content, nil and empty slices. Existing golden bytes and the separate exact
+Content-byte hash remain unchanged.
 
 ### Full-feed benchmark
 
