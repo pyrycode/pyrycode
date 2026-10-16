@@ -158,3 +158,25 @@ and `TestStoreSelectedLookup` constrain selected references and metadata visits.
 Allocation ceilings cannot isolate selection from selected-segment decoding;
 assert exact allowed reference IDs, including accepted-send terminal outcomes.
 These bounds exclude background recovery and publisher baseline preparation.
+
+## Daemon query demand
+
+The daemon's authenticated query providers own recovery around these nonloading
+store APIs. `threadShadow.withThreadQuery` validates registry membership, retains
+per-conversation demand, starts a daemon-lifetime worker when needed, and uses
+`Store.WaitReady` to await a usable publication. Waiting and selection honor the
+request context and a 30-second upper bound. Cancellation releases only that
+query's demand; another owner can continue using the same worker.
+
+Idle retirement claims a per-conversation gate only when no query owns demand.
+Retirement and recovery I/O run outside the coordinator lock. A query arriving
+during retirement waits for the gate before loading; it cannot borrow the view
+being retired. Cold empty chats receive a certified zero-version checkpoint.
+Unavailable, canceled, removed and unknown conversations supply no fabricated
+items or fallback history. After the last owner returns, ordinary idle cleanup
+can retire the view again. `Store.WaitReady` itself never loads or retries.
+
+The direct bounded-store readiness checks remain nonloading. Daemon demand
+regressions additionally cover empty opening, idle published history, saved
+checkpoint catch-up, older paging, independent cancellation of concurrent owners,
+unavailable recovery and cleanup after the final owner releases demand.

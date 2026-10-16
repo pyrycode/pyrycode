@@ -59,10 +59,14 @@ func installDaemonThreadRelay(cfg *relay.V2SessionConfig, s *threadShadow) {
 		return o.LastShownVersion, o.State == thread.StateUsable
 	}
 	cfg.ThreadCatchUp = func(ctx context.Context, r protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
-		return store.CatchUp(ctx, conversations.ConversationID(r.ConversationID), r.Epoch, r.Version, r.Limit)
+		return s.withThreadQuery(ctx, store, conversations.ConversationID(r.ConversationID), func(ctx context.Context) (thread.QueryResult, error) {
+			return store.CatchUp(ctx, conversations.ConversationID(r.ConversationID), r.Epoch, r.Version, r.Limit)
+		})
 	}
 	cfg.ThreadPage = func(ctx context.Context, r protocol.ThreadPagePayload) (thread.QueryResult, error) {
-		return store.HistoryPage(ctx, conversations.ConversationID(r.ConversationID), r.BeforeOrder, r.Limit)
+		return s.withThreadQuery(ctx, store, conversations.ConversationID(r.ConversationID), func(ctx context.Context) (thread.QueryResult, error) {
+			return store.HistoryPage(ctx, conversations.ConversationID(r.ConversationID), r.BeforeOrder, r.Limit)
+		})
 	}
 	cfg.ThreadReady = func() bool {
 		s.mu.Lock()

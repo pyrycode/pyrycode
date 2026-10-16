@@ -95,3 +95,33 @@ func (s *Store) Changes(ctx context.Context, id conversations.ConversationID, ep
 		}
 	}
 }
+
+// WaitReady waits for an already loaded worker to finish rebuilding. It does
+// not load, retry, retain ownership or read history. The composition owner must
+// prevent idle retirement while it waits and selects a subsequent query.
+func (s *Store) WaitReady(ctx context.Context, id conversations.ConversationID) (Snapshot, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return Snapshot{}, err
+		}
+		s.mu.Lock()
+		w := s.workers[id]
+		if s.closed || w == nil || w.retiring {
+			s.mu.Unlock()
+			return Snapshot{}, nil
+		}
+		snapshot := w.snapshot
+		snapshot.Items = nil
+		if snapshot.State != StateRebuilding {
+			s.mu.Unlock()
+			return snapshot, nil
+		}
+		changed := w.changed
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return Snapshot{}, ctx.Err()
+		case <-changed:
+		}
+	}
+}

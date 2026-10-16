@@ -41,6 +41,7 @@ type threadShadow struct {
 	mu           sync.Mutex
 	workers      map[conversations.ConversationID]*shadowConversation
 	removed      map[conversations.ConversationID]bool
+	demands      map[conversations.ConversationID]*threadQueryDemand
 	quietMu      sync.Mutex
 	quiet        func(conversations.ConversationID) bool
 	ctx          context.Context
@@ -176,14 +177,7 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 					quiet := !snapshot.Active && s.quiet(id)
 					s.quietMu.Unlock()
 					if quiet {
-						// Save the consumed boundary before retirement. A racing append exceeds
-						// it and reloads on the next pass, even if it committed during Unload.
-						s.mu.Lock()
-						w.version = snapshot.Version
-						s.mu.Unlock()
-						if err := s.store.Unload(id); err != nil {
-							s.failure(id, "unload")
-						}
+						s.retireIdle(id, w, snapshot.Version)
 					}
 				}
 			}

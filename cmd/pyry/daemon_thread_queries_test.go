@@ -52,10 +52,11 @@ func TestDaemonThreadQueriesReadiness(t *testing.T) {
 	if _, err := cfg.ThreadPage(ctx, protocol.ThreadPagePayload{ConversationID: testConvID, Limit: 1}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("page context lost: %v", err)
 	}
+	// The bounded store APIs remain nonloading; the daemon wrapper now owns demand.
 	for _, query := range []func() (thread.QueryResult, error){func() (thread.QueryResult, error) {
-		return cfg.ThreadCatchUp(t.Context(), protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 1})
+		return store.CatchUp(t.Context(), conversations.ConversationID(testConvID), "", 0, 1)
 	}, func() (thread.QueryResult, error) {
-		return cfg.ThreadPage(t.Context(), protocol.ThreadPagePayload{ConversationID: testConvID, Limit: 1})
+		return store.HistoryPage(t.Context(), conversations.ConversationID(testConvID), 0, 1)
 	}} {
 		got, err := query()
 		if err != nil || got.State != thread.StateNotLoaded || got.Items != nil || got.Epoch != "" {
@@ -459,10 +460,10 @@ func TestDaemonThreadQueriesReset(t *testing.T) {
 			if scenario == "gap1024" {
 				want = protocol.TypeThreadItems
 			}
-			if scenario == "not loaded" {
-				want = protocol.TypeError
+			if scenario == "not loaded" && (result.Epoch == "" || result.Version != 0) {
+				t.Fatal("cold empty recovery lost its certified zero checkpoint")
 			}
-			if typ == protocol.TypeThreadReset && (result.Epoch != q.Epoch || result.Version != q.Version) {
+			if scenario != "not loaded" && typ == protocol.TypeThreadReset && (result.Epoch != q.Epoch || result.Version != q.Version) {
 				t.Fatal("reset publication metadata lost")
 			}
 			if typ != want {
