@@ -88,6 +88,14 @@ func (s *threadShadow) withThreadQuery(ctx context.Context, store *thread.Store,
 
 func (s *threadShadow) retireIdle(id conversations.ConversationID, w *shadowConversation, version uint64) {
 	s.mu.Lock()
+	publisher := s.publisher
+	s.mu.Unlock()
+	// A completed authenticated query joins the connection to this live view.
+	// Retiring it while that owner remains would force reconnect on every idle turn.
+	if publisher != nil && publisher.demand != nil && publisher.demand(s.ctx, string(id)) {
+		return
+	}
+	s.mu.Lock()
 	if s.demands == nil {
 		s.demands = make(map[conversations.ConversationID]*threadQueryDemand)
 	}

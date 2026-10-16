@@ -28,6 +28,7 @@ type daemonThreadPublisher struct {
 	active  func(context.Context, string) []relay.ActiveConn
 	push    func(context.Context, string, protocol.Envelope) error
 	retire  func(context.Context, string) error
+	demand  func(context.Context, string) bool
 	log     *slog.Logger
 	ctx     context.Context
 	nextID  atomic.Uint64
@@ -90,7 +91,7 @@ func startDaemonThreadPublisher(base context.Context, s *threadShadow, m *relay.
 		return func() {}
 	}
 	ctx, cancel := context.WithCancel(base)
-	p := &daemonThreadPublisher{store: store, active: m.ActiveThreadConns, push: m.Push, retire: m.RetireLiveState, log: s.log, ctx: ctx}
+	p := &daemonThreadPublisher{store: store, active: m.ActiveThreadConns, push: m.Push, retire: m.RetireLiveState, demand: m.HasThreadDemand, log: s.log, ctx: ctx}
 	s.mu.Lock()
 	if s.publisher != nil {
 		s.mu.Unlock()

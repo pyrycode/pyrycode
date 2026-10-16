@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,4 +125,32 @@ func TestDaemonThreadQueryDemandDoesNotInventUnavailableData(t *testing.T) {
 	if err == nil || result.State == thread.StateUsable || result.Items != nil || result.Epoch != "" {
 		t.Fatal("unavailable recovery supplied thread data")
 	}
+}
+
+func TestDaemonThreadQueryJoinPreventsIdleDisconnect(t *testing.T) {
+	s, h, reg, store := testShadow(t)
+	id := conversations.ConversationID(testPostID(t))
+	reg.Create(conversations.Conversation{ID: id})
+	testShadowAppend(t, h, id)
+	var owned atomic.Bool
+	owned.Store(true)
+	var observed atomic.Int32
+	s.publisher = &daemonThreadPublisher{
+		store:  store,
+		demand: func(context.Context, string) bool { observed.Add(1); return owned.Load() },
+		active: func(context.Context, string) []relay.ActiveConn { return nil },
+		ctx:    t.Context(),
+	}
+	cfg := relay.V2SessionConfig{}
+	installDaemonThreadRelay(&cfg, s)
+	result, err := cfg.ThreadCatchUp(t.Context(), protocol.ThreadCatchUpPayload{ConversationID: string(id), Limit: 2})
+	if err != nil || result.State != thread.StateUsable {
+		t.Fatal("joined query did not load")
+	}
+	testShadowWait(t, func() bool { return observed.Load() >= 3 })
+	if store.Status(id).State != thread.StateUsable {
+		t.Fatal("idle cleanup retired a joined live view")
+	}
+	owned.Store(false)
+	testShadowWait(t, func() bool { return store.Status(id).State == thread.StateNotLoaded })
 }
