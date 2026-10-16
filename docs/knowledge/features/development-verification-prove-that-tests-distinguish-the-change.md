@@ -166,6 +166,34 @@ A verifier can use Go's `-overlay` option with replacement files outside the wor
 to test a mutation without editing the branch. Assert that each replacement applied.
 Run the named test being evaluated so a neighbouring assertion cannot mask its weakness.
 
+For a graph-complexity proof backed by a disk fixture, count resolution work after
+reading the fixture and give integration its own finite elapsed allowance.
+Installation can spend that allowance on copies, syncs, repeated scans and
+descheduling before resolution observes cancellation. Resolve the deepest
+consumer with a cold cache first: warming intermediate entries can hide the
+cost of missing completed-resolution reuse. The
+[retained-build fixture](apps-package-testing.md#retained-build-fixtures) asserts
+the resolved path and equal independently checked build IDs as well as bounded
+work, so a cheap but incorrect resolution cannot satisfy the proof.
+
+Retain expected mutation failures and phase timings alongside passing runs. The
+[expansion experiment](../../../internal/apps/testdata/3473-expansion-experiment.py)
+compares unchanged and repaired race binaries under matched contention, injects
+an installation delay, and separately disables completed-cache reuse. Its
+[native evidence](../../../internal/apps/testdata/3473-macos-results.json) records
+133/512 checkpoints with memoization and cancellation at 512 without reuse.
+On macOS arm64, installation took 91–138 ms while in-memory resolution took
+0.073–0.170 ms. These elapsed measurements include scheduling and do not isolate
+individual filesystem syscall costs; checkpoint counts establish the work bound.
+
+A controlled delay can demonstrate a deadline dependency without identifying a
+historical timeout's cause. Here, a 1.1-second delay at installation's first
+cancellation checkpoint failed the unchanged test with the historical error and
+passed the repair, while 20 ordinary repetitions per arm did not reproduce the
+timeout. Preserve that distinction in conclusions; see the
+[investigation](../../specs/architecture/3473-retained-expansion-proof.md#native-recovery-evidence-2026-10-16)
+for revisions, commands, counts and failed attempts.
+
 For asynchronous state resets, acknowledge completion of result processing before
 releasing the next phase. Entry into delivery or classification can precede the
 reset itself. Also observe terminal failure while awaiting progress, so a mutation

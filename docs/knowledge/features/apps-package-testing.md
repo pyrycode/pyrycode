@@ -297,13 +297,32 @@ mask byte, inventory or digest checks, and compares rejected destinations before
 and after verification/reuse to prove no repair occurred.
 
 `TestRetainedLongLinks` distinguishes finite chains from cycles;
-`TestRetainedRepeatedExpansion` exercises repeated acyclic expansion through
-validation, installation and verification. Ordinary short-link fixtures stayed
-green while recursive expansion ignored deadlines. `TestRetainedResolutionCancellation`
-forces cancellation during traversal and after a cached resolution, then checks
-safe retry. `TestRetainedPinnedAccess` replaces the staging pathname after its
-descriptor is acquired: verification must read the pinned original bytes and
-fresh public validation must reject the replacement symlink. These local fixtures
+`TestRetainedRepeatedExpansion` keeps a parallel 20-level repeated acyclic
+symlink-expansion fixture on disk. After `artifactScan.walk` reads the fixture,
+it resolves `node_modules/use` first with a cold cache, then every symlink under
+one 512-checkpoint `testResolutionContext` budget. Visiting intermediate links
+first can warm the cache and conceal exponential cold-resolution work. The proof
+also requires the consumer to resolve to `node_modules/pkg/index.js`. Memoized
+resolution used 133 checkpoints in the retained experiment; disabling completed
+reuse in `artifactScan.resolveParts` cancels at 512 before integration begins.
+
+The test separately times the filesystem walk, in-memory resolution,
+`ValidateArtifacts`, `InstallBuild` and independent `VerifyBuild`. One 30-second
+overall context bounds these phases, while the checkpoint budget bounds graph
+work independently of I/O latency and scheduling. Validation, installation and
+verification must return equal build IDs; cleanup makes the sealed build writable
+before removal. Installation's copies, syncs and three scans make a short elapsed
+deadline unsuitable as the complexity assertion. See the
+[measurement and mutation guidance](development-verification-prove-that-tests-distinguish-the-change.md).
+
+Ordinary short-link fixtures stayed green while recursive expansion ignored
+deadlines. `TestRetainedResolutionCancellation` still forces cancellation during
+traversal, retries safely on the same scan, and rejects an already-canceled
+context even with a cached resolution. Long-chain/cycle and containment rejection
+fixtures remain separate assertions. `TestRetainedPinnedAccess` replaces the
+staging pathname after its descriptor is acquired: verification must read the
+pinned original bytes and fresh public validation must reject the replacement
+symlink. These local fixtures
 require neither live Claude nor dependency-network access. See
 [artifact boundaries](apps-package-validation-and-stored-identity.md#retained-artifact-boundaries).
 
