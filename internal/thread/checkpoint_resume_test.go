@@ -1,7 +1,9 @@
 package thread
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"runtime"
@@ -15,7 +17,7 @@ import (
 )
 
 // testCheckpointResume checks every suffix boundary against one uninterrupted
-// reference baseline. Per-item exact JSON hashes include hidden/suppressed rows,
+// reference baseline. Per-item exact hashes include hidden/suppressed rows,
 // recipes and publication facts. The affected set updates the aggregate after
 // each entry; every import starts by independently hashing the complete inventory.
 // Existing semantic/golden tests remain the independent fold-behavior oracle.
@@ -144,53 +146,76 @@ func testCheckpointResumeCut(t *testing.T, entries []history.Entry, cut, baseCut
 }
 
 type testResumeProof struct {
-	rows map[int][32]byte
-	sum  [32]byte
+	rows     map[int][32]byte
+	sum      [32]byte
+	selected []Item
+	buffer   bytes.Buffer
+	encoder  *json.Encoder
+	row      testResumeProofRow
+}
+
+type testResumeProofRow struct {
+	Index                                                     int
+	Rendered                                                  Item
+	ContentNil                                                bool
+	Record                                                    CheckpointItem
+	Touch                                                     uint64
+	Published, Visible, Touched, PublishedValue, VisibleValue bool
 }
 
 func (p *testResumeProof) update(t testing.TB, f *Fold, full bool) [32]byte {
 	t.Helper()
 	if p.rows == nil {
 		p.rows = make(map[int][32]byte)
+		p.encoder = json.NewEncoder(&p.buffer)
 	}
 	indices := f.captureAffected
+	p.selected = p.selected[:0]
 	if full {
-		indices = make([]int, len(f.items))
-		for i := range indices {
-			indices[i] = i
+		p.selected = append(p.selected, f.items...)
+	} else {
+		for _, index := range indices {
+			p.selected = append(p.selected, f.items[index])
 		}
 	}
-	selected := make([]Item, len(indices))
-	for i, index := range indices {
-		selected[i] = f.items[index]
-	}
-	rendered, err := f.render(selected)
+	// Hash synchronously while the owner holds the fold; detached Content copies
+	// are unnecessary. Every full check still independently renders all rows.
+	rendered, err := f.renderShared(p.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for position, index := range indices {
+	for position, renderedItem := range rendered {
+		index := position
+		if !full {
+			index = indices[position]
+		}
 		item := f.items[index]
 		id := item.ID
 		_, published := f.published[id]
 		_, visible := f.publicVisible[id]
 		_, touched := f.touches[id]
-		raw, err := json.Marshal(struct {
-			Index                                                     int
-			Rendered                                                  Item
-			ContentBytes                                              []byte
-			Record                                                    CheckpointItem
-			Touch                                                     uint64
-			Published, Visible, Touched, PublishedValue, VisibleValue bool
-		}{index, rendered[position], []byte(rendered[position].Content), checkpointRecord(item, f.recipes[id]), f.touches[id], published, visible, touched, f.published[id], f.publicVisible[id]})
-		if err != nil {
+		content := renderedItem.Content
+		renderedItem.Content = nil
+		p.row = testResumeProofRow{index, renderedItem, content == nil, checkpointRecord(item, f.recipes[id]), f.touches[id], published, visible, touched, f.published[id], f.publicVisible[id]}
+		p.buffer.Reset()
+		if err := p.encoder.Encode(&p.row); err != nil {
 			t.Fatal(err)
 		}
-		next, previous := sha256.Sum256(raw), p.rows[index]
+		// Length-delimit exact Content after the complete metadata JSON. Feeding
+		// RawMessage through JSON would normalize whitespace; base64 would allocate
+		// and serialize the same payload again. Scratch belongs to this proof only.
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(content)))
+		p.buffer.Write(length[:])
+		p.buffer.Write(content)
+		next, previous := sha256.Sum256(p.buffer.Bytes()), p.rows[index]
 		for i := range p.sum {
 			p.sum[i] ^= previous[i] ^ next[i]
 		}
 		p.rows[index] = next
 	}
+	clear(p.selected)
+	p.row = testResumeProofRow{}
 	if f.captureSet == nil {
 		f.captureSet = make(map[int]struct{})
 	}
