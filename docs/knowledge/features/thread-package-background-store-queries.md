@@ -180,3 +180,11 @@ The direct bounded-store readiness checks remain nonloading. Daemon demand
 regressions additionally cover empty opening, idle published history, saved
 checkpoint catch-up, older paging, independent cancellation of concurrent owners,
 unavailable recovery and cleanup after the final owner releases demand.
+
+A completed query also retains its view through the authenticated connection's
+thread join. `V2SessionManager.HasThreadDemand` reads pending queries and joins
+under the relay ownership lock; retired/canceled generations retain nothing.
+This prevents idle cleanup from repeatedly forcing reconnect at every quiet
+turn. The protocol bounds each generation to 256 joined conversations. Closing
+the generation releases its joins and permits normal idle cleanup. A pending
+query retains ownership between provider return and sealing its final marker.
