@@ -4,6 +4,52 @@
 
 ### Validation and testing
 
+`Fold.ExportCheckpoint() (CheckpointState, []CheckpointItem, error)` exports a
+reference fold at a completed `Feed` boundary under its existing serialized-owner
+contract. The two parts encode to JSON separately: private continuation state and
+metadata/unrendered recipes for every internal item. Explicit mirror structs with
+exported fields and JSON tags define the format independently of private field
+names. `checkpointSchema` is 1 and must increase when the format changes;
+`CheckpointState.Rules` separately records the current `foldingRules`, alongside
+the conversation owner and consumed version. Legacy inline `New` folds reject
+export and retain their existing behavior. Restoration and resume-equivalence
+proofs remain in #3490, recorded-history proofs in #3491 and persistence/Store
+checkpoint loading in #3336; see [Cache and epochs](thread-package.md#cache-and-epochs).
+
+Records follow internal creation-ID order, independently of public `Order` or
+visibility, including unresolved, hidden and delivery-suppressed rows.
+`CheckpointState.ItemIDs` is the complete ordered manifest: a later importer must
+compare all records against it to detect an omission even when no continuation
+reference names the missing row. Continuation state includes watermarks, touches,
+ever-published/current visibility membership, scopes and pending boundaries,
+accepted sends/delivery matching, historical turn generations and original
+openings, unfinished text, scoped child joins, agent lifetimes and observations.
+Reversible children retain intrinsic/previous metadata and recipes; final children,
+main calls and reports retain compact markers. Terminal-order and content-source
+IDs stay separate, and equality digests survive export. Derived child indexes,
+task-ID membership and text slots can be reconstructed from the retained facts.
+
+One-based identity tables (zero means nil) preserve shared turns, main/agent
+shells, outcomes and report slots while keeping independent equal values distinct.
+Item indexes remain zero-based with their existing negative sentinels. Stable root
+traversal gives reproducible table IDs. `checkpointRegistry.ref` reserves identity
+before following cyclic shell links and assigns the converted record by index
+after recursion. Keeping a slice-element address across recursive table growth
+could instead write into an obsolete backing array. Recipe fields omit absent
+`json.RawMessage` literals with `omitempty`: encoding absence as explicit `null`
+would decode into non-nil literal `null` bytes and change the document. Actual
+scalar null literals remain explicit and detached.
+
+`TestCheckpointEmpty`, `TestCheckpointRelationships`, `TestCheckpointRecords` and
+`TestCheckpointLifecycleFacts` inspect JSON-round-tripped records and identities,
+including historical openings, shared shells/report slots, pending joins and
+otherwise unreferenced rows. `TestCheckpointOwnership` mutates nested exported
+maps, slices and recipe literal bytes, checks the source fold against an
+independent replay, and verifies later feeds cannot change an earlier document.
+Export performs no history lookup or content rendering; failing lookup fixtures
+guard that boundary. The document excludes history sources/caches, legacy inline
+payload storage, counters and scratch buffers, and metadata has no `Content`.
+
 Production reference folds keep `mainTurn` as a bounded cursor for its scoped
 turn generation: recorded source/key, original opening, first ending and current
 text-coalescing position. `compactMainCall` replaces created, terminal ordinary
@@ -170,6 +216,25 @@ and allocator-level savings. See the
 [main-marker measurement](../../specs/architecture/3480-main-markers.md#offline-retention-evidence),
 [earlier agent-only measurement](../../specs/architecture/3479-final-agent-report-markers.md#offline-retention-evidence)
 and [ADR 045](../decisions/045-thread-index-over-history.md).
+
+The same unchanged `TestReferenceFinalReportAccounting` workload also measures
+actual compact `json.Marshal` lengths of both checkpoint parts, separately from
+the logical field bytes above. Each row below holds at both padding sizes:
+
+| Finished turns | Padding bytes/entry | Private JSON bytes | Private bytes/turn | Separate item-record JSON bytes | Item bytes/turn |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 16 | 16 and 4,096 | 51,536 | 3,221.00 | 31,642 | 1,977.62 |
+| 64 | 16 and 4,096 | 207,070 | 3,235.47 | 127,498 | 1,992.16 |
+
+At each turn count, increasing payload padding changes private encoded size by
+**0 bytes**, with an asserted numerical bound of **0**: identities and table
+memberships are unchanged and digests always encode as 64 hex characters.
+Decimal JSON identity widths can change with turn count. These totals describe
+the complete private continuation document, including its item manifest; the
+metadata/recipe records have the separate cost shown. They are neither a heap
+measurement nor a marker-only bound, and the finished workload retains no
+reversible child snapshots. Distinct identities, unfinished work and required
+item recipes still have their own costs.
 
 `decode` checks object shape, required discriminating fields and known DTO field
 types before items, pending pairs, scope or attribution change. Unsupported or
