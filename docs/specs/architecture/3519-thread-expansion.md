@@ -76,3 +76,12 @@ Pending for documentation stage:
 - Threat model: untrusted text stays display data. No support negotiation before real providers and thread/interactive authorization (#3523).
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+2026-10-17 — Validation: protocol race checks, vet and binary build passed on macOS.
+The command package race suite failed `TestDaemonThreadDemandWireAfterIdle` on an
+unsolicited `thread_item_added` frame, then exhausted its ten-minute package budget
+during `TestThreadRecordedBaselines`. The idle fixture repair is already on
+unmerged #3504; cumulative macOS command-suite timeouts are tracked by #3525.
+Neither runtime path changes here. Preserve these as validation blockers, without
+copying their repairs into this protocol contract ticket.
