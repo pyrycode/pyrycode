@@ -258,6 +258,8 @@ the restoration package, its transitive local dependencies, fixtures and build
 inputs. Missing dependency or base information requires the full proof.
 Aggregate `make check` invokes this same conditional step. Focused `make test`
 keeps its ordinary package selection.
+`make preship` shares the ordinary checks and runs the unconditional exhaustive
+proof once, alongside the slow and live release tiers.
 
 Standard test targets use `scripts/test-admission.py` to share one test place
 across native worktrees and projects on the same host. Waiting is reported

@@ -49,7 +49,11 @@ BIN         ?= ./pyry
 DIST        ?= ./dist
 
 .PHONY: check
-check: vet test-tools test test-restoration staticcheck substrate-guard e2e
+check: check-common test-restoration
+	@echo "All checks passed"
+
+.PHONY: check-common
+check-common: vet test-tools test staticcheck substrate-guard e2e
 
 # Keep aggregate checks safe while older workers still use make check.
 .PHONY: test-restoration
@@ -128,13 +132,13 @@ e2e-install:
 e2e-update:
 	$(TEST_ADMISSION) $(GO) test -tags e2e_update -count=1 ./cmd/pyry/...
 
-# preship is the pre-binary-swap gate: everything hermetic (via check, which
-# now runs the fake-daemon e2e suite) plus the live-claude suite and the
+# preship is the pre-binary-swap gate: shared ordinary hermetic checks plus
+# mandatory full restoration and slow proofs, the live-claude suite and the
 # live-relay round-trip. Deliberately runs the realclaude suite in FULL — the
 # operator must never be the first real-stack execution, and trimming for speed
 # is a fix-when-it-hurts decision, not a default.
 .PHONY: preship
-preship: check test-slow test-exhaustive e2e-realclaude e2e-liverelay
+preship: check-common test-slow test-exhaustive e2e-realclaude e2e-liverelay
 
 .PHONY: staticcheck
 staticcheck:

@@ -15,8 +15,26 @@ class SelectionTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         aggregate = subprocess.check_output(["make", "-n", "check"], cwd=root).decode()
         self.assertEqual(aggregate.count("python3 scripts/check-restoration.py"), 1)
+        self.assertGreater(aggregate.index('echo "All checks passed"'), aggregate.index("python3 scripts/check-restoration.py"))
+        release = subprocess.check_output(["make", "-n", "preship"], cwd=root).decode()
+        self.assertEqual(release.count("PYRY_EXHAUSTIVE_TESTS=1"), 1)
+        self.assertNotIn("scripts/check-restoration.py", release)
+        self.assertIn("PYRY_SLOW_TESTS=1", release)
+        self.assertIn("-tags e2e_realclaude", release)
+        self.assertIn("-tags e2e_liverelay", release)
+        for plan in [aggregate, release]:
+            self.assertEqual(plan.count("go vet ./..."), 1)
+            self.assertEqual(plan.count("-tags e2e -race -count=1"), 1)
         focused = subprocess.check_output(["make", "-n", "test"], cwd=root).decode()
         self.assertNotIn("scripts/check-restoration.py", focused)
+
+    def test_affected_aggregate_helper_invokes_the_full_proof_once(self):
+        with patch.object(module, "required", return_value=True), patch.object(module.subprocess, "call", return_value=0) as execute:
+            self.assertEqual(module.main(), 0)
+        execute.assert_called_once()
+        command = execute.call_args.args[0]
+        self.assertIn("^TestCheckpointResumeCorpus$", command)
+        self.assertEqual(execute.call_args.kwargs["env"]["PYRY_EXHAUSTIVE_TESTS"], "1")
 
     def test_transitive_dependencies_fixtures_and_build_inputs_require_full_proof(self):
         dependencies = {"internal/thread", "internal/history", "internal/protocol"}
