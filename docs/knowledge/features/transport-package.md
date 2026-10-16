@@ -129,9 +129,11 @@ I/O even when the caller's context remains live.
 
 Cancellation or deadline expiry before admission is local to the caller and
 does not retire an otherwise healthy socket. After acceptance, `sendPump`
-synchronously checks both the write context and pump context immediately before
-socket writing, including after `transport.send.accepted`. If either is
-cancelled before writing, the pump disposes the request without publication,
+synchronously checks the original caller context, then the bounded write and
+pump contexts and any explicit generation context immediately before socket
+writing, including after `transport.send.accepted`. Caller cancellation takes
+precedence, preserving `context.Canceled` or `context.DeadlineExceeded`. If a
+check rejects the write, the pump disposes the request without publication,
 closes that exact socket generation with `CloseNow`, acknowledges completion
 once with a non-nil sanitized error, and exits. A failed socket write likewise
 retires the socket before acknowledgement; `serve` joins all three pumps before
@@ -139,9 +141,13 @@ reconnecting. A request whose captured socket differs from the pump's socket
 completes with `ErrDisconnected` without closing the new socket.
 
 Passing an already-cancelled context to `websocket.Conn.Write` cannot itself
-fence publication. The synchronous checks cover cancellation while acceptance
-is held, and the pump-context check avoids depending on when `context.AfterFunc`
-runs. Retiring the socket after discarding a sealed frame preserves the relay's
+fence publication. A parent's `Done` closure also does not join cancellation of
+its descendants: native cancellation closes the parent channel before walking
+its children. Checking only the derived write context can therefore allow a
+write after the caller is already cancelled. `sendRequest.callerCtx` retains
+the original caller for the direct fence; the independent pump-context check
+avoids depending on when `context.AfterFunc` runs during shutdown. Retiring the
+socket after discarding a sealed frame preserves the relay's
 Noise stream boundary; session removal alone cannot stop late transport output.
 
 A separate direct socket writer can overtake a frame already accepted by
@@ -328,10 +334,28 @@ not timing-only assertions.
 
 `TestClientSendContextAcceptedCancellation` holds `transport.send.accepted`
 before writing, then cancels the caller, expires its deadline or shuts down the
-pump. It requires completion to wait for disposal, observes peer socket
-retirement before checking for zero publication, and verifies the old request
-cannot resume on reconnect. `TestClientSendContextPreAdmissionCancellation`
-requires the healthy socket to remain usable without reconnecting.
+pump. In cancel/deadline modes, `testAcceptedPropagation` uses the context
+`AfterFunc` contract to hold descendant cancellation while the original caller
+is cancelled and both derived write contexts remain live. Releasing acceptance
+must still return the caller's exact cancellation/deadline classification;
+shutdown requires a non-nil error with a live caller. The sender cannot return
+while disposal is gated. Cleanup releases and joins the cancellation callback,
+sender and connection goroutines with bounded waits.
+
+Client upgrade completion does not establish server-handler registration order:
+the first handler can finish `websocket.Accept` after a replacement handler.
+Numbering peers only after `Accept` could make the retirement observer watch the
+replacement socket and stall even when the affected socket closed. The fixture
+therefore waits for the original handler's `registered` acknowledgement before
+submitting any send that could trigger reconnect. It observes that peer's
+retirement before checking zero publication; cancel/deadline then require a
+distinct `Generation` and delivery of only the new-generation marker. The old
+request must never migrate or resume. `TestClientSendContextPreAdmissionCancellation`
+separately requires the healthy socket to remain usable without reconnecting.
+Both causes have controlled failing baselines: held descendant propagation
+returned nil and stalled cancel/deadline retirement, while delayed original-peer
+registration selected upgrade 2 and stalled its retirement observer. See the
+[diagnosis and Linux race evidence](../../specs/architecture/3496-accepted-send-cancellation.md#revisions).
 
 Diagnostic safety tests must inspect every single-error and multi-error unwrap
 branch, plus captured log attributes; checking only `Error()` can miss an

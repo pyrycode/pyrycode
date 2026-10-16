@@ -108,15 +108,41 @@ consumed/last-shown, suppression and unproven watermarks. Each import hashes its
 complete inventory, including hidden, unresolved and delivery-suppressed rows;
 post-join affected candidates update the per-item signatures after suffix feeds.
 Hashing only JSON containing `json.RawMessage` normalizes Content whitespace and
-escaping, concealing byte differences. The proof includes raw Content bytes
-separately; `TestCheckpointProofContentBytes` supplies the negative control.
+escaping, concealing byte differences. `testResumeProof.update` encodes complete
+rendered metadata, checkpoint recipes and private publication facts once, then
+appends an eight-byte big-endian Content length and the exact raw bytes. A
+separate `ContentNil` fact distinguishes nil from empty Content. It borrows
+immutable Content through `Fold.renderShared` while synchronously owning the
+fold, avoiding detached payload copies and normalized/base64 re-encoding.
+Selection metadata belongs to the proof: `renderShared` overwrites its selection,
+so borrowing `f.items` would corrupt the oracle. The proof clears its selected
+items and row scratch after use. `TestCheckpointProofContentBytes` retains the
+exact-byte negative control; `TestCheckpointProofSensitivity`,
+`TestCheckpointProofContentIdentity` and `TestCheckpointProofReuse` cover every
+Item field, private facts, nil/empty/length distinctions and incremental updates
+against fresh full recomputation. `TestCheckpointProofScratch` rejects another
+payload-sized allocation in a warmed proof.
 
 `TestCheckpointResumeCorpus` covers 201 distinct cuts of `testFoldCorpus(30000)`:
 empty plus every boundary from 29,801 through 30,000, for 50,101 immediate/suffix
-comparisons. Shared immutable prefix preparation and eight joined workers remain
-unchanged; completion counters reject both dropped cuts and dropped comparisons.
-Each cut still separately JSON-round-trips both parts, imports without prefix
-replay and independently checks the complete inventory before feeding its suffix.
+comparisons. Eight joined workers each import the shared base once and advance
+their private preparation fold through increasing assigned cuts; cut zero uses
+an independent empty fold. Restored suffix feeds never mutate preparation.
+`TestCheckpointWorkerPreparation` checks stable preparation identity/version,
+equality with freshly fed prefix exports and suffix detachment. Completion
+counters reject both dropped cuts and dropped comparisons.
+
+Each cut separately exports and JSON-round-trips both complete parts into fresh
+zero destinations, checks deep equality, imports a detached fold without prefix
+replay, and freshly renders/hashes its complete inventory before feeding its
+suffix. Worker-owned `testResumeJSON` resets encoding storage between parts;
+decoded maps/slices are never reused, preserving absent and nil/empty facts.
+A full `testResumeProof.update` clears both row signatures and the aggregate
+before recomputing: retaining either can include rows removed by the next
+restoration. No rendered result or signature is reused across restorations.
+`TestCheckpointJSONReuse` and `TestCheckpointProofRestorationReuse` compare
+reused scratch with fresh computation after removed rows/private facts and
+nil/empty/exact-Content changes; the latter fails against the uncleared helper.
 The corpus test uses `t.Parallel()` because a long sequential setup otherwise
 postpones existing parallel tests until too little package timeout remains.
 Diagnostics separate fixture preparation, uninterrupted baseline feed/proof,
@@ -161,6 +187,40 @@ Suite/package scheduling contention remains a hypothesis for the additional
 joint-run elapsed time; those runs do not isolate it or identify the historical
 timeout's cause. The complete proof remains in the ordinary offline race gate.
 macOS is outside this Linux verification scope.
+
+Further Linux measurements on an i7-3770 with eight logical CPUs/eight-CPU quota,
+Go 1.26.9 and default concurrency isolated redundant work in #3496. These are
+separate matched comparisons at successive repair stages, using race builds and
+one-iteration phase/lifecycle benchmarks:
+
+| Work measured | Before → after seconds | Before → after bytes/op |
+| --- | ---: | ---: |
+| Full proof including rendering, reduced payload serialization | 2.691 → 2.181 | 124,756,008 → 81,730,088 |
+| Complete feed, root-field map reused for validation | 19.650 → 12.537 | about 433 million → 297 million |
+| Preparation for 25 increasing cuts, worker fold reused | 2.481 → 0.135 | 456,083,080 → 18,551,856 |
+
+The 65,547-byte payload scratch control fell from 592,402 to 2,415 B/op.
+JSON encoding buffers are worker-owned for safe reuse, but the five-iteration
+matched JSON comparison measured 2.127/2.137s and 64.762/67.341 MB/op for
+fresh/reused storage: no JSON microbenchmark speed or allocation gain is
+established. The worker repair left standalone feed/render/full-proof phase
+costs roughly stable; its preparation benchmark isolates the repeated imports
+removed. Host activity was uncontrolled. These observations do not establish
+historical contention causation or a runtime ceiling.
+
+Earlier #3496 full/joint race aggregates still timed out at ten minutes, including
+after the proof and decoder reductions and after merging main's test-cost
+changes. They remain failed/incomplete results; isolated or focused passes do
+not replace them. At `c15e2183`, the final isolated/joint thread runs passed in
+518.337/508.616s with all 201 cuts/50,101 comparisons. At reviewed head
+`58729724`, the verifier's uncached full-module race run passed 27,929 of 27,954
+named records, with 25 existing skips and zero failures/unterminated records;
+thread took 511.995s and again completed all cuts/comparisons with eight workers.
+The dispatcher separately passed complete `make check` and subsequent
+`make build` at that head; its nonverbose output proves package outcomes only.
+See the [commands, profiles, measurements and failed gate history](../../specs/architecture/3496-accepted-send-cancellation.md#revisions)
+and [final verifier evidence review](https://github.com/pyrycode/pyrycode/pull/3498#issuecomment-6211726633).
+Other operating systems are outside this Linux verification scope.
 
 Focused histories use every cut across unfinished text, late tool results after
 turn end, late reports after genuine agent end, compaction followed by a divider,
@@ -379,6 +439,21 @@ case-insensitive keys, nested saved answers and map elements. Nullable pointers,
 maps and slices remain valid; their scalar elements cannot be null. Unknown
 fields stay inert. Nullable optional token counts therefore preserve absent,
 null and explicit zero source content.
+
+For struct DTO roots other than `time.Time`, `foldDecoder.decode` passes its
+already parsed root field map to `validRecordedObject`; reparsing the root in
+`validRecordedFields` duplicated scanning and payload allocation. Typed
+unmarshalling, exact required-key lookup, case-insensitive recorded-field
+matching and recursive validation remain separate requirements. Non-struct
+roots keep the recursive path, nullable containers remain valid and unknown
+fields remain inert. `TestDecodeRecordedFields` compares acceptance and accepted
+DTOs with the retained root-reparse control, including malformed/null values,
+containers, case variants and unknown fields. `TestDecodeRecordedAllocations`
+requires a relative allocation reduction; the Linux race control fell from
+42 to 28 allocations and fails without reuse. The same-binary
+`BenchmarkDecodeRecordedFields` measured reparse/reuse at 12.967/9.363 ms,
+215,856/141,224 B/op and 62/44 allocations. These isolate removed root work
+without weakening the untrusted JSON boundary.
 
 For a non-nil `*struct{}` destination with no required fields,
 `foldDecoder.decode` needs exactly one valid JSON object; decoding unknown fields
