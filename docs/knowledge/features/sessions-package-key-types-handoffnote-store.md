@@ -217,7 +217,7 @@ wrap-up deadline, before target resolution and delivery. A classification test
 with too little headroom can exhaust that deadline before its injected writer
 runs and still observe `reset.wrapup.write_failed`. Prove the intended callbacks
 ran with an unexpired context and keep deliberate wait expiry on a separate
-finite test budget; see [reset path verification](development-verification.md#prove-that-tests-distinguish-the-change).
+finite test budget; see [reset path verification](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 See [`writeMCPSettings`](sessions-package-key-types-writemcpsettings-session-settingspath.md)
 and [`writeSystemPrompt`](sessions-package-key-types-writesystemprompt-systemprompttext.md#carrying-the-conversations-handoff-note-2475)

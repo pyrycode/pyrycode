@@ -92,7 +92,7 @@ each stall episode distinguish once-per-episode emission from per-tick emission,
 and the second callback distinguishes rearming from a stuck latch. Gate waits
 are bounded; goroutine-side gates and callback delivery release on cancellation,
 with cleanup cancelling before `Wait` even after fatal assertions. See
-[test completion barriers](development-verification.md#prove-that-tests-distinguish-the-change).
+[test completion barriers](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 Retain the missed-window schedule as a control: advancing past idle before the
 poll observes activity must produce no second signal. The

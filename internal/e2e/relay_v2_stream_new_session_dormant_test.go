@@ -115,7 +115,7 @@ func TestRelayV2_StreamNewSessionAfterDaemonRestartResetsDormantConversation(t *
 	// --- The restart. Stop drops the phone conn with the daemon, so everything
 	// below is built fresh over the same $HOME and the same relay.
 	_ = phone1.Close()
-	h1.Stop(t)
+	stopDormantRelayDaemon(t, h1, fr)
 	t.Logf("[t=%s] daemon #1 stopped; conversation B's session is now a persisted entry "+
 		"the next pool will not materialise", elapsed())
 
@@ -312,7 +312,7 @@ func TestRelayV2_StreamClearAfterDaemonRestartResetsDormantConversation(t *testi
 
 	// --- The restart.
 	_ = phone1.Close()
-	h1.Stop(t)
+	stopDormantRelayDaemon(t, h1, fr)
 	h2 := RestartStreamInteractiveWithRelay(t, home, initialUUID, relayURL)
 	t.Cleanup(func() { h2.Stop(t) })
 	phone2, send2, recv2 := dialPairedPhone(t, fr, home, payload.Token, pubKey, "phone-a2")
@@ -438,6 +438,21 @@ func awaitConversationTransition(t *testing.T, next func(time.Time) (protocol.En
 	}
 }
 
+// stopDormantRelayDaemon joins daemon shutdown and observes relay deregistration
+// before a replacement can reuse the same persisted server ID.
+func stopDormantRelayDaemon(t *testing.T, h *Harness, fr *fakerelay.Server) {
+	t.Helper()
+	serverID := readPersistedServerID(t, h.HomeDir)
+	h.Stop(t)
+	t.Logf("daemon pid=%d stopped; awaiting relay deregistration", h.PID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !fr.WaitBinaryOffline(ctx, serverID) {
+		t.Fatal("retiring daemon relay registration still present after 5s")
+	}
+	t.Log("retiring relay registration absent; successor may start")
+}
+
 // dialPairedPhone dials the fake relay as an already-paired device and drives the
 // handshake, answering the phone and its two cipher states. It is a free function
 // rather than inline because this spec does it TWICE — once per daemon — which is
@@ -447,6 +462,7 @@ func dialPairedPhone(t *testing.T, fr *fakerelay.Server, home, token string, pub
 	t.Helper()
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)
+	t.Logf("%s: relay registration observed; starting phone upgrade", name)
 
 	dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -455,7 +471,9 @@ func dialPairedPhone(t *testing.T, fr *fakerelay.Server, home, token string, pub
 		t.Fatalf("%s dial: %v", name, err)
 	}
 	t.Cleanup(func() { _ = phone.Close() })
+	t.Logf("%s: phone upgrade complete; starting Noise handshake", name)
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, token)
+	t.Logf("%s: Noise handshake and interactive hello_ack verified", name)
 	return phone, send, recv
 }
 

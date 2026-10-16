@@ -64,6 +64,11 @@ Search with QMD using its current tool schema. Start with [the short index](INDE
 
 - [Hosted apps](../hosted-apps.md): v1 contract and implemented manifest validation, bundled registered source creation/inspection, durable registration/lifecycle, restart normalization, committed changes, callable committed-release process ownership, generation-bound stable response preparation and standalone React/TypeScript scaffold with responsive saved preferences, SQLite migrations, service health and generated-app browser smoke workflow/evidence; runtime/layout, encrypted resource bridge and publication/data guarantees.
 - [Development verification](features/development-verification.md): shared source-reading, protocol, capture and test-evidence practices.
+- [Check searches and citations](features/development-verification-check-searches-and-citations.md): Source searches, citations and evidence inventories.
+- [Prove that tests distinguish the change](features/development-verification-prove-that-tests-distinguish-the-change.md): Controlled regressions, ordering, cancellation and mutation checks.
+- [Protocol boundaries](features/development-verification-protocol-boundaries.md): Wire validation, round trips and compatibility assertions.
+- [Captures and live evidence](features/development-verification-captures-and-live-evidence.md): Capture provenance, live inputs and protocol artifacts.
+- [Test execution and artifact survival](features/development-verification-test-execution-and-artifact-survival.md): Gate counts, runtime diagnosis and durable test inputs.
 - [First spec scaffolding backfill preview](../specs/2929-backfill-preview.json): reviewed checkout/evidence identities, exact section ranges and retention reasons for #2929's initial mechanical application.
 
 A package overview is capped at 50000 bytes. Past that it is split into

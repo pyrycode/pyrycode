@@ -202,7 +202,7 @@ and a denied requested leaf, making an incorrectly ordered `Registry.Get`
 observable. Direct refusals and both symlink directions prove the two checks
 independently; case variants use distinct `-lower-case` and `-upper-case`
 fixture directories so macOS's case-insensitive filesystem cannot alias them.
-See [verification practices](development-verification.md#prove-that-tests-distinguish-the-change).
+See [verification practices](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 ## Related
 

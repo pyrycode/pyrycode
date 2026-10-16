@@ -121,7 +121,7 @@ states before snapshotting, while containment refusals can pass for that same
 wrong reason. `backupFixture` canonicalizes only the test-owned root;
 `TestBackupAliasedTempRoot` runs valid states alongside containment beneath a
 controlled `TMPDIR` alias. Production still rejects symlink components. See
-[fixture discrimination](development-verification.md#prove-that-tests-distinguish-the-change).
+[fixture discrimination](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 Registry refusal fixtures need the same separation: use `testRoot` for every
 valid root, including invalid-host cases, and leave relative/empty roots raw.
@@ -252,7 +252,7 @@ raw JSON with an invalid canonical value followed by a valid case alias, includi
 missing-host inputs checked against two hosts. A normal struct round-trip cannot
 produce these corrupt documents. Both tests check byte-for-byte preservation of
 rejected storage and exposed the prior decoder bug; broad green gates alone had
-missed it. See [development verification](development-verification.md#protocol-boundaries)
+missed it. See [development verification](development-verification-protocol-boundaries.md#protocol-boundaries)
 for missing/null/type and serialization checks.
 
 Valid-storage fixtures used for byte-for-byte unchanged-open assertions must

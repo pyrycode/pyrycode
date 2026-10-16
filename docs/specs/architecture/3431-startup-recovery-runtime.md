@@ -61,7 +61,7 @@ their ownership remains with #3331 / PR #3348. This fixture repair changes none
 of that proposed architecture.
 
 The verifier's fixture-cost and runtime-attribution handoff is satisfied in
-[development verification](../../knowledge/features/development-verification.md#diagnosing-startup-recovery-runtime)
+[development verification](../../knowledge/features/development-verification-test-execution-and-artifact-survival.md#diagnosing-startup-recovery-runtime)
 and [history producer verification](../../knowledge/features/history-package-producers-legacy-compatibility.md):
 measure encoded bytes, assert pagination and rollover independently, and retain
 active-test intervals separately from package elapsed time without attributing
