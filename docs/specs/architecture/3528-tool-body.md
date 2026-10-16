@@ -118,3 +118,7 @@ API adds no peer authorization or loading.
   Measure requests after preparation over 10/120 descendants and 16/4096-byte
   unrelated bodies; a larger preparation fixture exceeded its readiness deadline.
   The API and capture contracts are unchanged.
+- 2026-10-17: Read `internal/thread/catch_up_test.go` → `TestCatchUpIsolation`.
+  Counting rendering lookups also exposes snapshot metadata visits to its barrier.
+  Disarm the barrier after the intended query reaches it, preserving its held
+  query and publication/unload/reload assertions without pausing other readers.
