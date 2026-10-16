@@ -140,7 +140,8 @@ func ImportCheckpoint(conversationID string, source HistorySource, d CheckpointS
 		}
 		for id, m := range t.Finished {
 			x.index(m.Item, -2)
-			st.finished[id] = &mainCallMarker{item: m.Item, scope: m.Scope, lifetime: m.Lifetime, terminal: checkpointGet(&x, outcomes, m.Terminal)}
+			x.check(m.Item == -2 || (m.Item >= 0 && rowsKind(rows, m.Item) == "tool_call"), "finished call item")
+			st.finished[id] = &mainCallMarker{item: m.Item, scope: m.Scope, lifetime: m.Lifetime, terminal: checkpointRequired(&x, outcomes, m.Terminal)}
 		}
 	}
 	for _, r := range d.CurrentTurns {
@@ -188,9 +189,6 @@ func ImportCheckpoint(conversationID string, source HistorySource, d CheckpointS
 		_, duplicate := f.childCalls[key]
 		x.check(!duplicate, "duplicate child call")
 		call := checkpointRequired(&x, calls, r.Ref)
-		if call != nil {
-			x.check(call.group == key.group, "child call group")
-		}
 		f.childCalls[key] = &childCall{r.Parent, call}
 	}
 	for _, r := range d.ChildReports {
@@ -261,6 +259,21 @@ func ImportCheckpoint(conversationID string, source HistorySource, d CheckpointS
 	if x.err != nil {
 		return nil, x.err
 	}
+	x.turnText(f, turns)
+	for key, child := range f.childCalls {
+		call := child.call
+		if call.group == key.group {
+			continue
+		}
+		// Promotion changes the reciprocal shell owner, retaining its child route.
+		old := call.group
+		old.lifetime, old.scope = "", key.group.scope
+		group := f.agentGroups[call.group]
+		x.check(key.group.lifetime == "" && call.group.lifetime != "" && call.group.scope == 0 && old == key.group && call.shell != nil && group != nil && group.calls[key.call] == call.shell, "child call group")
+	}
+	if x.err != nil {
+		return nil, x.err
+	}
 	return f, nil
 }
 
@@ -292,6 +305,52 @@ func (x *checkpointImporter) indexID(id uint64, index, minimum int) {
 		x.check(x.ids[id] == index, "item index identity")
 	}
 }
+
+// turnText validates coalescing ownership using saved identities only. Main text
+// belongs to its opening generation; child text belongs to its scoped parent lane.
+func (x *checkpointImporter) turnText(f *Fold, turns []*mainTurn) {
+	generations := make(map[mainKey][]uint64)
+	for id, st := range f.openings {
+		generations[st.key] = append(generations[st.key], id)
+	}
+	for _, ids := range generations {
+		slices.Sort(ids)
+	}
+	children := make(map[*mainTurn]bool)
+	for key, st := range f.childTurns {
+		children[st] = true
+		x.check(st.opening == 0 && st.key == (mainKey{key.group.source, key.group.tagged, key.group.scope, key.turn}), "child turn key")
+		if st.text >= 0 {
+			child := f.children[st.text]
+			x.check(child != nil && child.group == key.group && child.parent == key.parent, "child text owner")
+		}
+	}
+	owners := make(map[int]*mainTurn)
+	for _, st := range turns {
+		if st.text < 0 {
+			continue
+		}
+		item := f.items[st.text]
+		x.check(item.Turn == st.key.turn && owners[st.text] == nil, "turn text owner")
+		owners[st.text] = st
+		if st.key.tagged {
+			source := st.key.source
+			x.check(item.Session == source.SessionID && item.Agent == recordedAgent(source.Kind) && item.NoChild == (source.Kind == "none"), "turn text source")
+		}
+		if st.opening == 0 {
+			x.check(children[st], "child text turn")
+			continue
+		}
+		x.check(!children[st] && f.children[st.text] == nil && f.openings[st.opening] == st, "main text owner")
+		ids := generations[st.key]
+		position, found := slices.BinarySearch(ids, item.ID)
+		if !found {
+			position--
+		}
+		x.check(position >= 0 && ids[position] == st.opening, "turn text generation")
+	}
+}
+
 func (x *checkpointImporter) digest(value string) (digest [32]byte) {
 	decoded, err := hex.DecodeString(value)
 	x.check(err == nil && len(decoded) == len(digest), "digest")

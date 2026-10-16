@@ -7,6 +7,7 @@
 - `internal/thread/agent.go`, `agent_markers.go`, `shell.go` → `agentGroup`, `agentReports`, `registerShell`: task membership, reciprocal ordinary owners and shared report markers.
 - `internal/thread/child.go`, `boundaries.go`, `sends.go` → `saveChild`, `boundary`, `sendFact`: derived edges, reversible snapshots, attribution and suppression.
 - `internal/thread/checkpoint_export_test.go`, `render_test.go`, lifecycle fixtures: JSON helper, independent reference baseline and existing semantic assertions.
+- `internal/thread/checkpoint_relationship_test.go` → `TestCheckpointResumeShellPromotion`, `TestCheckpointTurnTextOwnership`, `TestCheckpointFinishedMarkerValidation`: rework regressions for promoted scopes, text ownership and compacted markers.
 - `docs/knowledge/features/thread-package.md`, `thread-package-main-thread-folding-validation.md`: source-backed recipes must not retain inline payloads; settled output alone misses late provenance replacement.
 - `docs/knowledge/decisions/045-thread-index-over-history.md`, `docs/knowledge/features/development-verification.md`: checkpoint boundary and validation ownership.
 
@@ -32,6 +33,9 @@ Synchronous operations under Fold's serialized-owner contract; caller owns sourc
 | Compaction then divider, background shell after turn, scoped identity reuse | `TestCheckpointResumeFocused` |
 | Equal-content companions in both orders | `TestCheckpointResumeCompanions` |
 | Shared owners/report slots, document and fold mutation | `TestCheckpointImportOwnership` |
+| First-lifetime child-shell promotion, including after a boundary and later reports | `TestCheckpointResumeShellPromotion` |
+| Open text across turns, retained generations, sources and child lanes | `TestCheckpointTurnTextOwnership` |
+| Finished ordinary and launcher calls later claimed by children | `TestCheckpointFinishedMarkerValidation` |
 
 ## Error handling
 Compatibility errors are typed; all other malformed documents return an error and nil fold. Validate integer references before indexing and retain field-specific negative sentinels and history gaps. Errors identify structural categories without payloads. Source/render failures after restoration continue returning `ErrUnavailable` without partial results.
@@ -51,6 +55,7 @@ None; performance of synthetic equivalence preparation will determine whether in
 
 **Findings:**
 - Trust boundaries: MUST FIX addressed in design: `ImportCheckpoint` checks complete inventory, all table bounds and item relationships before exposing any graph; malformed documents cannot index unchecked memory or return a partial fold.
+- Rework trust-boundary review: `promoteShellEvidence` changes the reciprocal ordinary-shell owner's group while retaining the child-call route. Import permits that difference only from a legacy group to a named lifetime with the same source/tag and an actual shared shell in the destination group's call slot. `checkpointImporter.turnText` validates unique text ownership, turn/source, main opening generations and child group/parent lanes from saved state without history I/O. Finished markers require a tool row or exactly the -2 launcher sentinel and a non-nil terminal. The three verifier MUST FIX findings are covered by rejection tests and valid all-cut continuation scenarios; no new trust boundary, I/O or concurrency is added.
 - Tokens/secrets: no credential operations; recipes use existing scalar facts/references and no content is logged.
 - File operations: none; file integrity, containment and atomic writes are OUT OF SCOPE in #3336.
 - Subprocesses: none; source callbacks are invoked only by existing subsequent rendering/feeding.
@@ -72,3 +77,4 @@ None; performance of synthetic equivalence preparation will determine whether in
 - The bounded rerun measured roughly 20 seconds per full checkpoint cut under race instrumentation. To keep the required offline proof within the package gate, `checkpointKeys` now formats each immutable key once per export, rather than formatting both keys on every sort comparison. The comparison strings, stable ordering, two-part schema and exported bytes are unchanged; existing export/relationship/ownership tests cover the same contract.
 - Continuation: the complete 201-cut proof passed with 50,101 comparisons in 378.98 seconds, but the package later timed out in `TestAffectedPublicationOracle` at the default 600-second limit. `TestCheckpointResumeCorpus` now participates in the package's existing parallel-test scheduling so its long sequential setup no longer postpones all existing parallel tests. Its bounded workers and every comparison remain unchanged.
 - Final validation: `go test -race -json ./internal/thread ./cmd/pyry ./internal/relay` passed. Thread: 1,791 tests/subtests passed and one opt-in heap measurement skipped; CLI: 16,565 passed and two existing live/platform skips; relay: 1,534 passed. The corpus completed 201 distinct cuts and 50,101 immediate/suffix comparisons in 392.34 seconds; the complete thread package finished in 527.444 seconds within the unchanged default timeout. `go vet ./...` and the daemon build passed. Goldens are unchanged. The verifier owns `make check` and the full-module gate; documentation remains pending as listed above.
+- 2026-10-16 rework, verifier findings 1–3 at `f78f2c1f81ab`: preserve distinct saved child-route and promoted ordinary-shell scopes, validating source and destination membership instead of requiring group equality. Validate coalescing text against its turn/source, unique owner, retained main-opening generation or child group/parent. Reject finished-marker -1, non-tool rows and absent terminals while preserving -2 launchers. The focused tests first failed on all three reported causes; their valid histories use the reusable all-cut proof, including suffix entries after promotion and late child claims. Rework adds about 300 lines, no exported types or migrated consumers; the recorded grandchild sizing exception still applies. Fetched feature branches have no overlap with these changed files.
