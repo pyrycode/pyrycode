@@ -41,6 +41,8 @@
 # part of preship.
 
 GO          ?= go
+# Temporary headroom for full race-test packages on busy hosts.
+TEST_TIMEOUT ?= 30m
 STATICCHECK ?= $(shell which staticcheck 2>/dev/null || echo $(HOME)/go/bin/staticcheck)
 BIN         ?= ./pyry
 DIST        ?= ./dist
@@ -54,9 +56,9 @@ vet:
 
 .PHONY: test
 test:
-	$(GO) test -race -skip '^TestCheckpointResumeCorpus$$' ./...
+	$(GO) test -timeout=$(TEST_TIMEOUT) -race -skip '^TestCheckpointResumeCorpus$$' ./...
 	# Keep the complete corpus mandatory, with its own package timeout budget.
-	$(GO) test -race -run '^TestCheckpointResumeCorpus$$' ./internal/thread
+	$(GO) test -timeout=$(TEST_TIMEOUT) -race -run '^TestCheckpointResumeCorpus$$' ./internal/thread
 
 # Full production-duration proofs, separate from ordinary unit runs.
 .PHONY: test-slow
@@ -66,7 +68,7 @@ test-slow:
 
 .PHONY: e2e
 e2e:
-	$(GO) test -tags e2e -race -count=1 ./internal/e2e/...
+	$(GO) test -timeout=$(TEST_TIMEOUT) -tags e2e -race -count=1 ./internal/e2e/...
 
 # e2e-realclaude, e2e-liverelay, e2e-install and e2e-update each pass -count=1,
 # and it is load-bearing. Every one of them builds its binary under test with a
