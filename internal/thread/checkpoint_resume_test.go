@@ -197,6 +197,7 @@ func (p *testResumeProof) update(t *testing.T, f *Fold, full bool) [32]byte {
 }
 
 func TestCheckpointResumeCorpus(t *testing.T) {
+	t.Parallel()
 	entries := testFoldCorpus(30000)
 	cuts := []int{0}
 	for cut := len(entries) - 199; cut <= len(entries); cut++ {
