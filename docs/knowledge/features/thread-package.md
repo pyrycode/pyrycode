@@ -624,3 +624,13 @@ for full-state/active/parent closure, reset metadata and zero-version windows,
 and the
 [observation contract](thread-package-background-store-replay.md#loading-and-replay-readiness)
 for bounded retention and linked delivery suppression.
+
+### Send now before consumption (#3508)
+
+A `send_written` fact advances a queued accepted user item to `written` after
+the daemon successfully writes Send now input. It preserves identity, content
+and acceptance order and stays active until echo/idle placement supplies the
+linked message and final `send_delivered` fact. It grants no queue action and
+claims no consumption or final order. Duplicate writes are inert; delivered or
+lost items cannot become written again. A written item can become lost after
+restart, but a later removed/give-up fact cannot hide input already written.
