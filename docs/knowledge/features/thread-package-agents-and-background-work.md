@@ -227,8 +227,9 @@ and delivered user messages retain their main-text closure behavior.
 
 Production assistant text, child tools and nested agents use the same
 [history recipes and exact-byte renderer](thread-package-main-thread-folding-lifecycle.md#main-work-source-entries)
-as main work. Their items and intrinsic/previous copies retain creating/text IDs
-and enrichment recipes, with assistant summaries derived only when rendered.
+as main work. Public items/recipes and any reversible intrinsic/previous copies
+retain creating/text IDs and enrichment recipes, with assistant summaries derived
+only when rendered.
 They retain no inline payload, accumulated text, assistant summary or append
 buffer or copied agent/shell launch/link/report payload. Codex tools remain
 ordinary calls even with shell/agent names.
@@ -302,25 +303,49 @@ received before creation remains effective for later calls in that lane. Already
 terminal outcomes stay fixed, and neither this ending nor a main-turn ending completes a nested agent
 or linked background shell.
 
-**Derive ancestor closure from genuine agent finals, keeping intrinsic child
-state separate.** `restoreChild` restores only the affected child's intrinsic
-item and recipe before mutation, once per entry; resolution captures its updated
-base before deriving closure. First registration treats the live item as intrinsic
-through that entry's mutations, so late parenting cannot discard a final
-received in the same entry. Unrelated children retain their derived state.
+Production reference folds release the optional `childSnapshot` after independent
+completion: closed text, terminal ordinary non-shell calls and nested agents with
+non-result terminal evidence. This drops both intrinsic/previous `Item` snapshots,
+their recipe collections and restoration/cache facts; the public item/recipe
+already suffices. `childState` keeps its original scoped group, parent call and
+flag for independent finality, with no rendered content. Existing call/report owners
+retain first-terminal order and source references. Legacy `New` keeps its
+snapshots as the compatibility oracle.
+
+**Independent completion does not end parent repair.** Final children retain
+membership and indexed parent/reachability facts: `recordShown` and `Render` use
+that membership to omit unresolved subtrees and expose them after repair. An
+ancestor's repaired reachability can publish a final descendant without changing
+that descendant's revision. Dropping membership or edges would lose this repair
+even though the child's own outcome remains final. Late parenting, reparenting
+and enrichment temporarily reconstruct the compact child's intrinsic/previous
+snapshot from its public item/recipe; resolution releases it again when final.
+
+**Derive ancestor closure from genuine agent finals, keeping reversible child
+state separate.** Unfinished text/tools, provisional nested agents and foreground
+agent/shell completion retain resumable snapshots. A foreground result can set
+`EndedOrder` yet become launch evidence after a late task link; neither inactivity
+nor `EndedOrder` alone proves independent finality. Background shell continuation
+owners remain outside this child-snapshot compaction.
+`restoreChild` restores only the affected child's intrinsic item and recipe before
+mutation, once per entry; resolution captures its updated base before deriving
+closure. First registration treats the live item as intrinsic through that entry's
+mutations, so late parenting cannot discard a final received in the same entry.
+Unrelated children retain their derived state.
 `applyAgent` compares recomputed lifecycle state against intrinsic state and
 schedules dependents for content/state changes and provenance replacements.
 Foreground shell results use the same targeted ordinary mutation hooks.
 
-Intrinsic and previous recipes are independent value snapshots for every child:
-text-ID lists keep their own lengths and enrichment maps use copy-on-write. A single mutable
-recipe would carry provisional `parent_ending` into the intrinsic base and keep
+While a child needs reversible state, intrinsic and previous recipes are independent
+value snapshots: text-ID lists keep their own lengths and enrichment maps use
+copy-on-write. A single mutable recipe would carry provisional `parent_ending`
+into the intrinsic base and keep
 it after reopening. Resolution compares recipe state as well as item metadata,
 without history reads during ingestion; rendering later resolves creating, text
 and terminal references through the shared source. Production `parent_ending`
 fields name the original ending ancestor item; neither recipes nor child ending
-caches copy its JSON. Converted child items and their intrinsic/previous copies
-retain no `Content`; `legacyChildEnding` serialization caches exist only for
+caches copy its JSON. Converted child items and any retained intrinsic/previous
+copies retain no `Content`; `legacyChildEnding` serialization caches exist only for
 legacy folds.
 Removing only the derived field preserves late text and genuine child endings.
 
