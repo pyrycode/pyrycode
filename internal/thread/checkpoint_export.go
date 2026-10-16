@@ -106,7 +106,11 @@ func checkpointRecord(item Item, r contentRecipe) CheckpointItem {
 // map iteration. Go-syntax keys quote strings, avoiding ambiguous concatenation.
 func checkpointKeys[K comparable, V any](m map[K]V) []K {
 	keys := slices.Collect(maps.Keys(m))
-	slices.SortFunc(keys, func(a, b K) int { return cmp.Compare(fmt.Sprintf("%#v", a), fmt.Sprintf("%#v", b)) })
+	order := make(map[K]string, len(keys))
+	for _, key := range keys {
+		order[key] = fmt.Sprintf("%#v", key)
+	}
+	slices.SortFunc(keys, func(a, b K) int { return cmp.Compare(order[a], order[b]) })
 	return keys
 }
 
