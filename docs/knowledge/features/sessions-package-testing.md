@@ -63,7 +63,7 @@ Register the release cleanup after `runPoolReady`: `t.Cleanup` runs LIFO, so the
 gate opens before the helper cancels and joins the pool. Reversing registration
 makes shutdown wait on runners whose release cannot run until the join's
 15-second timeout expires. This applies even when a fatal assertion ends the
-test early. See [development verification](development-verification.md#prove-that-tests-distinguish-the-change).
+test early. See [development verification](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 ### Published model selection
 

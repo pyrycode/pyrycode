@@ -469,7 +469,7 @@ counted **1987/1987/0/27** on `b31ea7a2` merged with main `352e8b50`;
 The [#2881 full gate](https://github.com/pyrycode/pyrycode/issues/2881#issuecomment-6017651019)
 at `81c7ac78f9` counted 1635/1635/0/27. Passing cannot recover witnesses or resolve
 historical failures. Compare repeated counted runs with matching inputs; see
-[development verification](development-verification.md#test-execution-and-artifact-survival).
+[development verification](development-verification-test-execution-and-artifact-survival.md#test-execution-and-artifact-survival).
 Non-reproduction proves no fix; timeout proves no defect; evidence waives no failed gate.
 
 [fallback-history]: https://github.com/pyrycode/pyrycode/blob/25d778fbd0e54753bd82a6d4eca9a097c996f6f4/docs/specs/architecture/2882-fallback-stdout-evidence.md

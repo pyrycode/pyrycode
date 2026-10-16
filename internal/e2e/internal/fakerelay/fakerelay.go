@@ -68,6 +68,7 @@ type Server struct {
 	binaries     map[string]*binaryConn // serverID -> binary
 	phones       map[string]*phoneConn  // connID    -> phone
 	connSeq      uint64
+	binarySeq    uint64
 	wakeRequests chan json.RawMessage
 
 	// rejectNextBinaryWith4409, when true, causes the next /v1/server
@@ -85,11 +86,12 @@ type Server struct {
 }
 
 type binaryConn struct {
-	serverID string
-	conn     *websocket.Conn
-	sendCh   chan []byte
-	done     chan struct{}
-	cancel   context.CancelFunc
+	serverID   string
+	generation uint64
+	conn       *websocket.Conn
+	sendCh     chan []byte
+	done       chan struct{}
+	cancel     context.CancelFunc
 }
 
 type phoneConn struct {
@@ -273,12 +275,15 @@ func (s *Server) handleBinary(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close(websocket.StatusPolicyViolation, "server-id claimed")
 		return
 	}
+	s.binarySeq++
+	bc.generation = s.binarySeq
 	s.binaries[serverID] = bc
 	s.mu.Unlock()
 
-	s.log.Debug("fakerelay: binary connected", "server_id", serverID)
+	s.log.Debug("fakerelay: binary connected", "server_id", serverID, "generation", bc.generation)
 
 	s.serveBinary(ctx, bc)
+	s.log.Debug("fakerelay: binary pumps stopped", "server_id", serverID, "generation", bc.generation)
 
 	// Cleanup: drop the binary from the registry and tear down every
 	// phone bound to its server-id. Phones whose binary has gone away
@@ -294,12 +299,13 @@ func (s *Server) handleBinary(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Unlock()
+	s.log.Debug("fakerelay: binary deregistered", "server_id", serverID, "generation", bc.generation)
 	for _, p := range stranded {
 		p.cancel()
 		_ = p.conn.Close(websocket.StatusNormalClosure, "binary disconnected")
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "")
-	s.log.Debug("fakerelay: binary disconnected", "server_id", serverID)
+	s.log.Debug("fakerelay: binary disconnected", "server_id", serverID, "generation", bc.generation)
 }
 
 // --- /v1/client ---
@@ -609,6 +615,30 @@ func (s *Server) WaitBinary(ctx context.Context, serverID string) bool {
 			if ok {
 				return true
 			}
+		}
+	}
+}
+
+// WaitBinaryOffline waits for registration absence before ctx expires. Callers
+// must stop the old binary first and start its replacement only after success;
+// otherwise an intervening registration could hide the offline transition.
+func (s *Server) WaitBinaryOffline(ctx context.Context, serverID string) bool {
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		s.mu.Lock()
+		_, registered := s.binaries[serverID]
+		s.mu.Unlock()
+		if !registered {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
 		}
 	}
 }

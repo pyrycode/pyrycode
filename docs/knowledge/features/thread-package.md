@@ -348,9 +348,11 @@ user/assistant `Summary`. Worker progress and certificates remain scalar-only.
 Baseline reads render all public rows; bounded queries select metadata first,
 then resolve only required history references from the captured publication.
 See [snapshots and retry](thread-package-background-store-replay.md#snapshots-and-retry).
-Deferred agent/shell and inline/private payloads, including parent-ending recipe
-values, remain outside this converted-content guarantee; their conversion is
-tracked in [#3334](https://github.com/pyrycode/pyrycode/issues/3334).
+All production item kinds, including agents and linked shells, use references;
+private outcomes and parent endings retain no payload copies. Legacy `New`
+compatibility storage is unused in production. The
+[fold/source heap proof](thread-package-main-thread-folding-validation.md#validation-and-testing)
+excludes Store publications, whose structural accounting remains separate.
 The worker's recent-entry cache (256 entries, inclusive 1 MiB), history's bounded
 caches and the detached change ring (64 batches, 1 MiB encoded) are separate
 budgets. Transient rendering creates no unbounded rendered-item or entry cache.
@@ -385,10 +387,18 @@ or in-memory monotonic time. Segment-line formatting is excluded, while stored
 payload bytes remain opaque. This identifies entry V, not the whole prefix or
 resumable fold state.
 
-Every load or retry reconstructs a fresh fold from entry 1 of readable history
-with bounded `ForwardReader.Walk` chunks. Eligible metadata retains its epoch only if replay
-reaches exactly V and both the consumed entry's checksum and reconstructed
-last-shown watermark match the record. Replay continues through the surviving
+In-memory reference folds support `ImportCheckpoint` from the two JSON export
+parts, with a caller-supplied `HistorySource`, without prefix replay or history
+I/O. Restoration preserves the complete internal inventory and continuation
+graph; it does not restore a Store epoch or establish certificate eligibility.
+See [checkpoint validation and resume proof](thread-package-main-thread-folding-validation.md#validation-and-testing).
+Checkpoint persistence remains in #3336 and Store loading in #3337 under
+[ADR 045](../decisions/045-thread-index-over-history.md).
+
+`Store` loads and retries still reconstruct a fresh fold from entry 1 of
+readable history with bounded `ForwardReader.Walk` chunks. Eligible metadata
+retains its epoch only if replay reaches exactly V and both the consumed entry's
+checksum and reconstructed last-shown watermark match the record. Replay continues through the surviving
 readable bound before usability; cached fields never seed the fold.
 **Visible items are insufficient continuation state:** `Fold.Items` omits
 unresolved children, pending reports and private joins. Full replay restores
@@ -528,8 +538,17 @@ racing retirement. Repeated/concurrent lifecycle calls preserve their results.
 See [isolation and lifecycle](thread-package-background-store-lifecycle.md#isolation-and-lifecycle).
 
 [ADR 045](../decisions/045-thread-index-over-history.md) proposes resumable private
-fold checkpoints and a persistent index as future work. These certificates do
-not resume folding or implement that checkpoint schedule. Callers still finish
+fold checkpoints and a persistent index. Reference folds now provide the in-memory
+`Fold.ExportCheckpoint` API: detached, separately JSON-encodable `CheckpointState`
+and creation-ordered `[]CheckpointItem` metadata/recipes, including hidden,
+unresolved and delivery-suppressed internal rows. Export runs at a completed
+`Feed` boundary under serialized ownership without history reads or rendering.
+See the [export contract and encoded-size measurements](thread-package-main-thread-folding-validation.md#validation-and-testing)
+for schema/rules versions, completeness and shared identities. Restoration and
+synthetic resume equivalence (#3490), recorded-history proofs (#3491), and file
+persistence/Store checkpoint loading (#3336) remain follow-ups. Store loading
+still replays from entry 1; the existing scalar certificates neither resume
+folding nor implement the proposed checkpoint schedule. Callers still finish
 producer draining and tail catch-up before `Store.Shutdown`.
 
 Epoch reuse establishes compatible item identity; retained change-range

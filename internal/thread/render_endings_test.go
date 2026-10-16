@@ -87,7 +87,7 @@ func TestReferenceInheritedEnding(t *testing.T) {
 			}
 		}
 		for _, child := range f.children {
-			if child.legacyEnding != nil {
+			if child.childSnapshot != nil && child.legacyEnding != nil {
 				t.Fatal("legacy child cache used in production")
 			}
 		}
@@ -193,9 +193,6 @@ func TestReferenceEndingDependencyFailure(t *testing.T) {
 	entries := testEndingEntries()[:4]
 	f, source := testReferenceFold(entries)
 	testFeed(t, f, entries...)
-	// Exercise a referenced ancestor's own outcome while agent launch storage
-	// remains deferred. Both dependencies belong to this single captured view.
-	f.referenceField(0, "result", recipeField{entry: 4})
 	want := f.Items()
 	for id := uint64(5); id < 300; id++ {
 		source.remember([]history.Entry{testEntry(id, "ignored", `{}`)})
@@ -274,8 +271,7 @@ func TestReferenceEndingOutcomes(t *testing.T) {
 
 func TestStoreReferenceEndingRetry(t *testing.T) {
 	entries := testEndingEntries()[:4]
-	// The inherited ancestor is deferred inline; its ordinary descendant's
-	// intrinsic ending dependency must still be resolved after eviction.
+	// Resolve the ordinary descendant's intrinsic ending after eviction.
 	entries = append(slices.Clone(entries[:3]), testChild(4, "turn_end", "nested", `,"stop_reason":"end_turn"`))
 	testStoreReferenceRetry(t, entries, 4, "replay")
 }

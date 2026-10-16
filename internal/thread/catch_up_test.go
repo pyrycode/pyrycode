@@ -363,6 +363,9 @@ func TestCatchUpBoundedRecovery(t *testing.T) {
 					if item.ID == 35981 {
 						selected[35982] = true // selected child's terminal enrichment
 					}
+					if item.ID == 35980 {
+						selected[35991] = true // selected agent's terminal report
+					}
 				}
 				before := visits.Load()
 				got, err := s.CatchUp(context.Background(), testStoreA, saved.Epoch, after, 1)

@@ -73,7 +73,7 @@ production feature mapping made its attributed-report assertion fail; a test
 that duplicated the mapping would have stayed green. Inspect the named file's
 contents, since presence of the flag alone cannot prove composition. See
 [client admission and snapshots](sessions-package-key-types-writesystemprompt-systemprompttext.md#naming-the-attached-client-2148)
-and [mutation verification](development-verification.md#prove-that-tests-distinguish-the-change).
+and [mutation verification](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 When a lifecycle proof posts several turns, finding any historical `turn_end`
 can satisfy a wait with an earlier turn and allow snapshot assertions before
@@ -444,6 +444,39 @@ turn uses the fresh id; `TestRelayV2_StreamClearAfterDaemonRestartResetsDormantC
 pins the same outcome for a typed `/clear`, restarting and clearing before
 any other message.
 
+Both proofs keep the same HOME and relay, preserve the persisted sessions,
+reset dormant B before any other action on B, observe its fresh transition
+and persisted binding, and leave conversation A's binding unchanged.
+
+`stopDormantRelayDaemon` joins `Harness.Stop`, then waits up to five seconds
+for `Server.WaitBinaryOffline` before either proof starts daemon two (#3474).
+Daemon exit alone cannot establish relay deregistration: `handleBinary` can
+still hold the retiring registration after its pumps stop. The subsequent
+`dialPairedPhone` positive barrier would accept that membership. Await absence
+before `RestartStreamInteractiveWithRelay`, then let `dialPairedPhone` observe
+the replacement's registration. The registry-preserving constructor and the
+shared handshake helper signatures retain their existing contracts.
+
+`TestWaitBinaryOfflineRetiringRegistration` forces this window over real
+WebSockets using `retirementGate`, a logging handler held after both binary
+pumps join and before deregistration, outside the relay mutex. It proves stale
+membership admits an upgrade whose first handshake read fails, requires the
+offline wait to reject that state, releases retirement, and proves routing
+through a same-ID replacement. The gate has a five-second fallback and cleanup
+releases it before server shutdown joins handlers. `TestWaitBinaryOfflineBounds`
+separately proves already-absent, deadline and cancellation behavior with
+`synctest`. The regression uses JSON routing frames, not a real Noise exchange.
+
+For failures in the restart proofs, correlate daemon PID collection, relay
+generation/pump-stop/deregistration logs, the observed offline transition,
+replacement registration, phone upgrade start/completion and Noise phases.
+`driveHandshakeToOpenDaemonInteractiveResuming` logs init sent and response
+frame received; `dialPairedPhone` logs successful Noise and interactive
+`hello_ack` verification. These are content-free phase markers; a response
+frame receipt alone does not prove handshake validation. Failed handshakes
+remain fatal. See the [verification evidence](development-verification-test-execution-and-artifact-survival.md#diagnosing-dormant-relay-restart-readiness)
+for the controlled dependency and the unresolved historical EOF attribution.
+
 **"The retired id appears nowhere in the spawn line" is the wrong assertion
 for "the rotation used the fresh identity."** The per-session `--settings`
 and `--append-system-prompt-file` paths are named for the id the session was
@@ -563,7 +596,7 @@ arrival order with the same receive cipher, then delay the decoded ack's
 return to the waiter. Reordering or replaying ciphertext would instead
 violate Noise nonce order and test a different failure. A longer milestone
 deadline cannot recover an echo the ack loop has already consumed. See
-[mutation verification](development-verification.md#prove-that-tests-distinguish-the-change)
+[mutation verification](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change)
 for using scratch Go overlays without changing the branch.
 
 #### Retaining child-exit dismissals and interpreting diagnostics

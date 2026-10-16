@@ -80,7 +80,7 @@ can hit the raw guard first and leave the encoded guard untested.
 `TestParseEnvelopeBound` derives the accepted boundary for each character in
 every content field and a four-question/four-option batch, then checks the
 largest acceptance and adjacent zero-payload rejection. See
-[protocol boundary testing](development-verification.md#protocol-boundaries).
+[protocol boundary testing](development-verification-protocol-boundaries.md#protocol-boundaries).
 
 ## `Registry` — parking a surfaced batch (#1975)
 

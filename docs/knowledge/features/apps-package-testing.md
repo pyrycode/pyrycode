@@ -353,7 +353,7 @@ bounded completion assertion from running. Join event work and inspect its
 error. Register release/cancel/join cleanup after the owner fixture cleanup so
 reverse `t.Cleanup` order releases blocked work before owner shutdown, even after
 an assertion failure. See
-[cancellation fixture cleanup](development-verification.md#prove-that-tests-distinguish-the-change).
+[cancellation fixture cleanup](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 Separate fixture/phase setup, event dispatch, persistence, cancellation observation
 and SIGTERM-to-retirement observation when diagnosing timing. Observer scheduling
@@ -481,7 +481,7 @@ reproduces an invalidation error pattern, not the initiating cause of a historic
 failure; physical/symlink reruns cannot establish that cause. The
 [diagnosis and two-root evidence](../../specs/architecture/3399-api-response-verification.md#revisions)
 retain exact errors, timings, commands and assertion coverage; the
-[aggregate outcome](development-verification.md#diagnosing-api-response-gate-failures)
+[aggregate outcome](development-verification-test-execution-and-artifact-survival.md#diagnosing-api-response-gate-failures)
 has a separate verification boundary.
 
 An empty backend response has no body read to notice a stale generation.
@@ -587,7 +587,7 @@ raw JSON with an invalid canonical value followed by a valid case alias, includi
 missing-host inputs checked against two hosts. A normal struct round-trip cannot
 produce these corrupt documents. Both tests check byte-for-byte preservation of
 rejected storage and exposed the prior decoder bug; broad green gates alone had
-missed it. See [development verification](development-verification.md#protocol-boundaries)
+missed it. See [development verification](development-verification-protocol-boundaries.md#protocol-boundaries)
 for missing/null/type and serialization checks.
 
 Valid-storage fixtures used for byte-for-byte unchanged-open assertions must

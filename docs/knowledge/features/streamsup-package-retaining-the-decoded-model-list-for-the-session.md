@@ -279,7 +279,7 @@ used) would have kept passing for the wrong reason after the 64→128 KiB
 change, or silently stopped testing the boundary at all. The general rule this
 confirms: any test whose premise is "past constant X" must compute its fixture
 from X, the same way [a dropped-count fixture must differ from the retained
-list's own length](development-verification.md#prove-that-tests-distinguish-the-change)
+list's own length](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change)
 rather than merely from a sibling count — both are the same trap, a fixture
 built from a belief about a bound instead of from the bound itself.
 

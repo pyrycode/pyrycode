@@ -107,7 +107,7 @@ case variants from acceptance rows whose raw `send_accepted` omitted the field.
 It leaves recorded acceptance handles and unrelated rows unchanged.
 `TestThreadShadowQueueHandleProjection` checks legacy omission, preservation
 when present and that projection does not mutate the original checkpoint.
-This reconciles [current acceptance semantics](thread-package-main-thread-folding.md#accepted-sends-and-durable-outcomes)
+This reconciles [current acceptance semantics](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes)
 without claiming a new live capture.
 
 Generation leaves `GateReport` empty until builder recovery pins both usable

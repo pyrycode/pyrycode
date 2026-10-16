@@ -87,7 +87,7 @@ JSON `null` into `*uint64` produces nil in both cases; re-marshalling then erase
 the distinction. `TestV2Session_Reconnect_HistoryEntryID` inspects the decrypted
 authenticated replay JSON and compares durable id 8 with ring id 2 and a fresh
 history read, so a missing key, `null`, zero or a substituted ring id cannot
-satisfy the same assertions. See [protocol boundary tests](development-verification.md#protocol-boundaries).
+satisfy the same assertions. See [protocol boundary tests](development-verification-protocol-boundaries.md#protocol-boundaries).
 
 ## Live-state session metadata
 
@@ -154,7 +154,7 @@ re-marshals decoded ordinary or empty-clear payloads into their envelopes, and
 inspects emitted keys. Distinct envelope and payload session IDs prove that
 adding metadata does not overwrite the payload's own field. Checking only a
 decoded pointer, or reusing untouched raw payload bytes, would miss these
-regressions; see [protocol boundaries](development-verification.md#protocol-boundaries).
+regressions; see [protocol boundaries](development-verification-protocol-boundaries.md#protocol-boundaries).
 
 ## Native HTTP bridge semantics
 
@@ -206,7 +206,7 @@ path/query/headers, 32768 decoded body/chunk bytes and safe-integer ID/correlati
 boundaries. Producers must repeat final serialization checks as additive fields
 change; DTOs perform no admission checks. See
 [resource payload declarations](../../protocol-mobile.md#resource-payload-declarations)
-and [protocol boundary tests](development-verification.md#protocol-boundaries).
+and [protocol boundary tests](development-verification-protocol-boundaries.md#protocol-boundaries).
 
 ## Testing payload absence
 
