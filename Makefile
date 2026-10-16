@@ -42,6 +42,8 @@
 
 GO          ?= go
 TEST_ADMISSION ?= python3 scripts/test-admission.py --
+# Temporary headroom for full race-test packages on busy hosts.
+TEST_TIMEOUT ?= 30m
 STATICCHECK ?= $(shell which staticcheck 2>/dev/null || echo $(HOME)/go/bin/staticcheck)
 BIN         ?= ./pyry
 DIST        ?= ./dist
@@ -59,13 +61,13 @@ vet:
 
 .PHONY: test
 test:
-	$(TEST_ADMISSION) $(GO) test -race ./...
+	$(TEST_ADMISSION) $(GO) test -timeout=$(TEST_TIMEOUT) -race ./...
 
 # The complete 201-cut restoration sweep is mandatory before release.
 # Verifier configuration also requires it for changes to thread/history code.
 .PHONY: test-exhaustive
 test-exhaustive:
-	PYRY_EXHAUSTIVE_TESTS=1 $(TEST_ADMISSION) $(GO) test -race -count=1 -run '^TestCheckpointResumeCorpus$$' ./internal/thread
+	PYRY_EXHAUSTIVE_TESTS=1 $(TEST_ADMISSION) $(GO) test -timeout=$(TEST_TIMEOUT) -race -count=1 -run '^TestCheckpointResumeCorpus$$' ./internal/thread
 
 # Full production-duration proofs, separate from ordinary unit runs.
 .PHONY: test-slow
@@ -75,7 +77,7 @@ test-slow:
 
 .PHONY: e2e
 e2e:
-	$(TEST_ADMISSION) $(GO) test -tags e2e -race -count=1 ./internal/e2e/...
+	$(TEST_ADMISSION) $(GO) test -timeout=$(TEST_TIMEOUT) -tags e2e -race -count=1 ./internal/e2e/...
 
 # e2e-realclaude, e2e-liverelay, e2e-install and e2e-update each pass -count=1,
 # and it is load-bearing. Every one of them builds its binary under test with a

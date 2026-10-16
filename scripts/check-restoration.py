@@ -46,7 +46,7 @@ def main():
         print("Complete restoration proof not required: no restoration code, dependency or build input changed.")
         return 0
     env = dict(os.environ, PYRY_EXHAUSTIVE_TESTS="1")
-    return subprocess.call([sys.executable, str(ROOT / "scripts/test-admission.py"), "--", "go", "test", "-race", "-count=1", "-json", "-run", "^TestCheckpointResumeCorpus$", "./internal/thread"], cwd=ROOT, env=env)
+    return subprocess.call([sys.executable, str(ROOT / "scripts/test-admission.py"), "--", "go", "test", "-timeout=" + os.environ.get("TEST_TIMEOUT", "30m"), "-race", "-count=1", "-json", "-run", "^TestCheckpointResumeCorpus$", "./internal/thread"], cwd=ROOT, env=env)
 
 
 if __name__ == "__main__":
