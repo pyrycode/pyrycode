@@ -77,7 +77,7 @@ func TestReferenceWorkRendering(t *testing.T) {
 						if len(item.Content) != 0 || (item.Kind == "assistant_message" && item.Summary != "") {
 							t.Fatalf("entry %d retained converted content/summary at %d", e.ID, index)
 						}
-						if child := f.children[index]; child != nil && (len(child.base.Content) != 0 || len(child.previous.Content) != 0 || (item.Kind == "assistant_message" && (child.base.Summary != "" || child.previous.Summary != ""))) {
+						if child := f.children[index]; child != nil && child.childSnapshot != nil && (len(child.base.Content) != 0 || len(child.previous.Content) != 0 || (item.Kind == "assistant_message" && (child.base.Summary != "" || child.previous.Summary != ""))) {
 							t.Fatal("child copies retained converted bytes")
 						}
 					}

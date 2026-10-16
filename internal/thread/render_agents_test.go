@@ -37,7 +37,7 @@ func TestReferenceLifecycleGuard(t *testing.T) {
 				if typ == reflect.TypeFor[Fold]() && (field.Name == "source" || field.Name == "legacyOutcomes" || field.Name == "texts") {
 					continue // Bounded source and legacy-only compatibility boundaries.
 				}
-				if typ == reflect.TypeFor[childState]() && field.Name == "legacyEnding" {
+				if typ == reflect.TypeFor[childSnapshot]() && field.Name == "legacyEnding" {
 					continue
 				}
 				walk(field.Type, path+"."+field.Name)
@@ -56,7 +56,7 @@ func testNoLifecyclePayload(t *testing.T, f *Fold) {
 		if len(item.Content) != 0 {
 			t.Fatalf("item %d retained Content", item.ID)
 		}
-		if child := f.children[i]; child != nil && (len(child.base.Content) != 0 || len(child.previous.Content) != 0 || child.legacyEnding != nil) {
+		if child := f.children[i]; child != nil && child.childSnapshot != nil && (len(child.base.Content) != 0 || len(child.previous.Content) != 0 || child.legacyEnding != nil) {
 			t.Fatal("child intrinsic/previous state retained payload")
 		}
 	}
@@ -80,6 +80,9 @@ func testNoLifecyclePayload(t *testing.T, f *Fold) {
 		checkRecipe(r)
 	}
 	for _, child := range f.children {
+		if child.childSnapshot == nil {
+			continue
+		}
 		checkRecipe(child.baseRecipe)
 		checkRecipe(child.previousRecipe)
 	}

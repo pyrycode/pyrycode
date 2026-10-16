@@ -71,12 +71,17 @@ func TestReferenceRetainedBytes(t *testing.T) {
 			if state := f.children[i]; state != nil {
 				old := legacy.children[i]
 				childBefore += len(old.base.Content) + len(old.previous.Content)
+				if item.Kind == "assistant_message" {
+					assistantBefore += len(old.base.Summary) + len(old.previous.Summary)
+				}
+				if state.childSnapshot == nil {
+					continue
+				}
 				childAfter += len(state.base.Content) + len(state.previous.Content)
 				if state.legacyEnding != nil {
 					t.Fatal("production retained legacy ending cache")
 				}
 				if item.Kind == "assistant_message" {
-					assistantBefore += len(old.base.Summary) + len(old.previous.Summary)
 					assistantAfter += len(state.base.Summary) + len(state.previous.Summary)
 				}
 				countRecipe(state.baseRecipe)
@@ -117,6 +122,9 @@ func TestReferenceRetainedBytes(t *testing.T) {
 		countOutcome(o)
 	}
 	for i, state := range f.children {
+		if state.childSnapshot == nil {
+			continue
+		}
 		if state.legacyEnding != nil {
 			t.Fatal("production child cache retained payload", i)
 		}
