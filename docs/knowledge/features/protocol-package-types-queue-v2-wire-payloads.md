@@ -50,7 +50,7 @@ type SendQueuedNowPayload struct { // phone → binary; writes into the running 
   `1..9007199254740991`, sourced from accepted thread `item.id`, and rejects every
   payload decode error before acting. `TestQueueActionItemBindingWire` pins the
   literal wire key and omission/null preservation for both DTOs; see
-  [protocol boundary tests](development-verification.md#protocol-boundaries).
+  [protocol boundary tests](development-verification-protocol-boundaries.md#protocol-boundaries).
 - **`queued_msg_id` is a plain `uint64` per-conversation counter (≥ 1), NOT a
   nonce.** It matches `msgqueue.QueuedMessage.ID` exactly so the producer maps
   `QueuedMessage.ID → QueuedMsgID` with no translation. The mobile client (#429)

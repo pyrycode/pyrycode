@@ -208,7 +208,7 @@ deadline across reconstruction and the separate coverage marker, checks expiry b
 consuming buffered replies, and does not renew the budget per fragment. Ordinary
 `next` waits remain three seconds. Keep the oversized-item identity/order and
 byte-for-byte reconstruction assertions when adjusting timing; see
-[reply-timeout diagnosis](development-verification.md#diagnosing-reply-timeouts)
+[reply-timeout diagnosis](development-verification-test-execution-and-artifact-survival.md#diagnosing-reply-timeouts)
 for the contention evidence and bounded missing-reply/final-marker checks.
 
 **Dispatch probing must reach the owning validator.** Decoding a full `Envelope`

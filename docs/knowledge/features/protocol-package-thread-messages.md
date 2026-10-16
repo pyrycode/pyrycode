@@ -94,4 +94,4 @@ To prove encoding failure exposes no usable prefix, force an earlier batch to
 flush before injecting invalid JSON/UTF-8. A bad item behind one unflushed batch
 would leave a prefix-return bug unexercised. `TestThreadQueryErrors` uses two
 otherwise encodable large items before the invalid one. See
-[protocol boundary checks](development-verification.md#protocol-boundaries).
+[protocol boundary checks](development-verification-protocol-boundaries.md#protocol-boundaries).

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os/exec"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/streamsup"
@@ -66,21 +67,23 @@ func TestReplyFallbackTimingBudget(t *testing.T) {
 
 func TestReplyFallbackLookupBudget(t *testing.T) {
 	t.Parallel()
-	lookupDone := make(chan struct{})
-	calls := 0
-	f := replyFallback{
-		account: func(ctx context.Context) (string, streamsup.AccountTokenFailure, error) {
-			defer close(lookupDone)
-			<-ctx.Done()
-			return "", streamsup.AccountTokenReadFailure, ctx.Err()
-		},
-		command: func(context.Context, string, ...string) *exec.Cmd { calls++; return nil },
-	}
-	started := time.Now()
-	text, err := f.run(context.Background(), "user", "assistant")
-	elapsed := time.Since(started)
-	<-lookupDone
-	if text != "" || !errors.Is(err, errReplyFallback) || calls != 0 || elapsed < 29*time.Second || elapsed >= 30*time.Second {
-		t.Fatal("credential lookup did not share the finite total budget without a launch")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		lookupDone := make(chan struct{})
+		calls := 0
+		f := replyFallback{
+			account: func(ctx context.Context) (string, streamsup.AccountTokenFailure, error) {
+				defer close(lookupDone)
+				<-ctx.Done()
+				return "", streamsup.AccountTokenReadFailure, ctx.Err()
+			},
+			command: func(context.Context, string, ...string) *exec.Cmd { calls++; return nil },
+		}
+		started := time.Now()
+		text, err := f.run(context.Background(), "user", "assistant")
+		elapsed := time.Since(started)
+		<-lookupDone
+		if text != "" || !errors.Is(err, errReplyFallback) || calls != 0 || elapsed < 29*time.Second || elapsed >= 30*time.Second {
+			t.Fatal("credential lookup did not share the finite total budget without a launch")
+		}
+	})
 }

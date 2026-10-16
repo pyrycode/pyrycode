@@ -72,7 +72,7 @@ before truncation. Tool inputs, init configuration, raw stdout, result prose and
 denial payloads are excluded. Diagnostics never affect the pass predicate. A
 failure message naming only a temporary JSONL path loses the evidence needed to
 distinguish missed wording from a missing signal after fixture cleanup; a passing
-rerun cannot recover it. See [captures and live evidence](development-verification.md#captures-and-live-evidence).
+rerun cannot recover it. See [captures and live evidence](development-verification-captures-and-live-evidence.md#captures-and-live-evidence).
 
 `TestAllowedToolsRefusalSignal` accepts the observed refusal and existing
 keywords, while rejecting silent, successful and broad non-refusal text.

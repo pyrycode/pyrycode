@@ -128,7 +128,7 @@ Claude restoration requires the exact committed suffix: inactive `resetting`,
 sealing. Requiring exactly four total frames rejects valid delayed active
 statuses; accepting any prefix would hide extra committed outcomes. Codex's
 committed outcome frames remain withheld. See
-[publication barriers](development-verification.md#prove-that-tests-distinguish-the-change).
+[publication barriers](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 A short wall-clock wrap-up deadline can turn a successful fake reply into the
 previous-note fallback. `wrapUpReply.waitOutcome` selects between completion
@@ -144,7 +144,7 @@ goroutines are durably blocked, keeping machine latency out of successful
 reply cases while still expiring the deadline when the child supplies no reply.
 Keep the previous-note fallback assertion in that timeout case: removing the
 deadline or merely increasing it would weaken the proof of fallback. See
-[development verification](development-verification.md#prove-that-tests-distinguish-the-change)
+[development verification](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change)
 for other completion/cancellation ordering traps.
 
 ### Eviction is binding-neutral, by construction

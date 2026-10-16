@@ -48,11 +48,43 @@ func testAcceptedAwait[T any](t *testing.T, ch <-chan T) T {
 	}
 }
 
+// testAcceptedPropagation holds child cancellation after the parent is cancelled.
+// Value hides the native cancel context so children use the AfterFunc contract.
+type testAcceptedPropagation struct {
+	context.Context
+	registered chan struct{}
+	started    chan struct{}
+	release    chan struct{}
+	done       chan struct{}
+}
+
+func (*testAcceptedPropagation) Value(any) any { return nil }
+
+func (c *testAcceptedPropagation) AfterFunc(f func()) func() bool {
+	var finished sync.Once
+	finish := func() { finished.Do(func() { close(c.done) }) }
+	stop := context.AfterFunc(c.Context, func() {
+		defer finish()
+		close(c.started)
+		<-c.release
+		f()
+	})
+	close(c.registered)
+	return func() bool {
+		stopped := stop()
+		if stopped {
+			finish()
+		}
+		return stopped
+	}
+}
+
 func TestClientSendContextAcceptedCancellation(t *testing.T) {
 	for _, mode := range []string{"cancel", "deadline", "shutdown"} {
 		t.Run(mode, func(t *testing.T) {
 			frames := make(chan []byte, 8)
 			retired := make(chan struct{})
+			registered := make(chan struct{})
 			var generations atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				conn, err := websocket.Accept(w, r, nil)
@@ -62,6 +94,7 @@ func TestClientSendContextAcceptedCancellation(t *testing.T) {
 				defer conn.CloseNow()
 				if generations.Add(1) == 1 {
 					defer close(retired)
+					close(registered)
 				}
 				for {
 					_, frame, err := conn.Read(r.Context())
@@ -86,12 +119,33 @@ func TestClientSendContextAcceptedCancellation(t *testing.T) {
 				testAcceptedAwait(t, connectedDone)
 			})
 			testAcceptedAwait(t, c.Connected())
+			// Accept can return after the client has already observed its upgrade.
+			// Pin retirement to this peer before a send can trigger a reconnect.
+			testAcceptedAwait(t, registered)
+			original := c.Generation()
+			if original == nil {
+				t.Fatal("missing original generation")
+			}
 			callerCtx, cancelCaller := context.WithCancel(t.Context())
 			if mode == "deadline" {
 				cancelCaller()
 				callerCtx, cancelCaller = context.WithTimeout(t.Context(), 100*time.Millisecond)
 			}
 			defer cancelCaller()
+			var propagation *testAcceptedPropagation
+			if mode != "shutdown" {
+				propagation = &testAcceptedPropagation{Context: callerCtx, registered: make(chan struct{}), started: make(chan struct{}), release: make(chan struct{}), done: make(chan struct{})}
+				callerCtx = propagation
+				t.Cleanup(func() {
+					cancelCaller()
+					close(propagation.release)
+					select {
+					case <-propagation.registered:
+						testAcceptedAwait(t, propagation.done)
+					default:
+					}
+				})
+			}
 			returned := make(chan error, 1)
 			senderDone := make(chan struct{})
 			go func() {
@@ -109,6 +163,9 @@ func TestClientSendContextAcceptedCancellation(t *testing.T) {
 				want = context.DeadlineExceeded
 			case "shutdown":
 				stopPump()
+			}
+			if propagation != nil {
+				testAcceptedAwait(t, propagation.started)
 			}
 			select {
 			case <-returned:
@@ -128,6 +185,9 @@ func TestClientSendContextAcceptedCancellation(t *testing.T) {
 			}
 			if mode != "shutdown" {
 				testAcceptedAwait(t, c.Connected())
+				if fresh := c.Generation(); fresh == nil || fresh == original {
+					t.Fatal("reconnect did not establish a fresh generation")
+				}
 				if err := c.SendContext(t.Context(), []byte("new generation")); err != nil {
 					t.Fatal(err)
 				}

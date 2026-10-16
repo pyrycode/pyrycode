@@ -32,6 +32,7 @@ func (*Server) Close() error            // idempotent, always nil
 func (*Server) RejectNextBinaryWith4409()                       // arm one-shot WS 4409
 func (*Server) ForceCloseBinary(serverID string) bool           // close with 1011 (StatusInternalError)
 func (*Server) WaitBinary(ctx context.Context, serverID string) bool  // (#371) block until s.binaries[serverID] is registered
+func (*Server) WaitBinaryOffline(ctx context.Context, serverID string) bool // block until registration absence
 ```
 
 `WaitBinary` exists because `websocket.Accept` writes the 101 response —
@@ -57,6 +58,24 @@ handshake and #583 remove this harness's binary-direct hello dispatch +
 [`codebase/581.md`](../codebase/581.md), and
 [`codebase/583.md`](../codebase/583.md).
 
+`WaitBinary` checks membership, not connection generation or pump liveness.
+After stopping a binary, use **stop → `WaitBinaryOffline` → start replacement
+→ `WaitBinary` → dial phone** when reusing its server ID (#3474). Collecting
+the daemon process does not join the surviving relay's handler: its old
+registration can remain after both pumps stop. A positive membership check
+alone can therefore admit a phone whose first handshake read fails.
+Starting the replacement only after observed absence prevents its registration
+from hiding that transition, and prevents old membership from satisfying the
+subsequent positive barrier.
+
+`WaitBinaryOffline` checks cancellation before inspecting the map under `s.mu`,
+then polls every 2 ms on a ticker stopped on return. It returns true on observed
+absence and false on context cancellation or expiry; an absent ID succeeds
+immediately with a live context. Callers supply the deadline: the dormant
+restart proofs use five seconds. This observes registration absence, not
+completion of every stranded phone's cleanup. See the
+[restart helper and controlled regression](e2e-harness-stream-interactive-harness-pattern-startstreamin.md#restartstreaminteractivewithrelay-and-the-dormant-reset-specs-2521).
+
 Callers append `/v1/server` (binary upgrade) or `/v1/client` (phone
 upgrade) to `URL()`. No `Config` struct yet — every test wants "boot it,
 get a URL, close it." A future `NewWithConfig` can add overrides
@@ -75,9 +94,9 @@ Header: `x-pyrycode-server` = the claimed server-id.
 | Server is closing | HTTP 503 |
 | OK | `101 Switching Protocols`, register in `binaries[serverID]` |
 
-First-claim-wins **only while the first holder's conn is open** — there
-is no grace period; the server-id is reusable the instant the binary
-disconnects.
+First-claim-wins lasts until `handleBinary` removes the registration after
+`serveBinary` joins both pumps. There is no additional grace period, but socket
+closure alone does not establish that the server ID is reusable.
 
 ### `GET /v1/client` — phone upgrades
 
@@ -196,6 +215,15 @@ cannot be routed anywhere — keeping it open would leak goroutines under
 `go test -race`. This matches the production relay's behavior of
 dropping phones whose binary went away.
 
+The binary lifecycle logs carry `server_id` and a relay-wide monotonic
+`generation`: `binary connected` follows map insertion, `binary pumps stopped`
+follows both pump joins, `binary deregistered` follows map removal, and
+`binary disconnected` follows connection cleanup. Correlate these phases with
+daemon collection and phone upgrade/Noise logs to distinguish the retiring
+registration from its same-ID replacement. They contain no pairing tokens,
+keys or frame payloads. Log emission follows the state changes, so the barrier
+reads the map rather than waiting for log text.
+
 ## Shutdown sequence (`Server.Close`)
 
 1. Under `s.mu`: set `closed=true`, snapshot every binaryConn +
@@ -242,11 +270,12 @@ case.
 
 ```
 internal/e2e/internal/fakerelay/
-  fakerelay.go        ~565 LOC, package fakerelay, no build tag
-  fakerelay_test.go   ~490 LOC, no build tag (stdlib testing)
+  fakerelay.go        package fakerelay, no build tag
+  fakerelay_test.go   routing and lifecycle tests (stdlib testing)
+  retirement_test.go controlled retirement ordering and offline-wait bounds
 ```
 
-No build tag on either file: the package is `internal/e2e/internal/`-fenced
+No build tags on these files: the package is `internal/e2e/internal/`-fenced
 so only e2e-package code can import it, and a tiny library compiles
 under `./...` without harm.
 

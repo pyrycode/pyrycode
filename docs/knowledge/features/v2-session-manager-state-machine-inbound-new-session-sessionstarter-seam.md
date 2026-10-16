@@ -498,7 +498,7 @@ therefore waits, with a bound, until `conversationReset.begin` accepts a fresh
 claim, releases that probe claim, then sends the next frame. Delaying
 `RestartFresh` exposes the old premature-send race; removing the deferred
 release still fails the repaired test, proving the wait does not hide a stuck
-guard. See [testing asynchronous completion](development-verification.md#prove-that-tests-distinguish-the-change).
+guard. See [testing asynchronous completion](development-verification-prove-that-tests-distinguish-the-change.md#prove-that-tests-distinguish-the-change).
 
 ## Log-bounding: only the invalid-shape arm needs it
 

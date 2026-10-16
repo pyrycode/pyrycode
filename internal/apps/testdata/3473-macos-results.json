@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "reproduce": "python3 internal/apps/testdata/3473-expansion-experiment.py /tmp/builder-3473-macos/comparison-authorized",
+  "baselineRevision": "4bc9790a35943200b86946a2968e10914e74b8c7",
+  "candidateRevision": "292138abd31e785fb10a38add6a7ab4cc7dd95a7",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "architecture": "arm64",
+  "go": "go version go1.26.2 darwin/arm64",
+  "environment": {"GOMAXPROCS":"2","GOFLAGS":"-p=2"},
+  "childAffinity": null,
+  "packageTimeout": "10m (unchanged)",
+  "contention": "Baseline and candidate race binaries run concurrently with identical settings; no CPU affinity on Darwin. No other builder check overlapped the comparison; incidental host activity is uncontrolled.",
+  "experimentResults": {
+    "compile-baseline": {"command":["go","test","-race","-c","-overlay=/private/tmp/builder-3473-macos/comparison-authorized/baseline-overlay.json","-o","/private/tmp/builder-3473-macos/comparison-authorized/baseline.test","./internal/apps"],"exit":0},
+    "compile-candidate": {"command":["go","test","-race","-c","-overlay=/private/tmp/builder-3473-macos/comparison-authorized/candidate-overlay.json","-o","/private/tmp/builder-3473-macos/comparison-authorized/candidate.test","./internal/apps"],"exit":0},
+    "compile-baseline-delayed": {"command":["go","test","-race","-c","-overlay=/private/tmp/builder-3473-macos/comparison-authorized/baseline-delayed-overlay.json","-o","/private/tmp/builder-3473-macos/comparison-authorized/baseline-delayed.test","./internal/apps"],"exit":0},
+    "compile-candidate-delayed": {"command":["go","test","-race","-c","-overlay=/private/tmp/builder-3473-macos/comparison-authorized/candidate-delayed-overlay.json","-o","/private/tmp/builder-3473-macos/comparison-authorized/candidate-delayed.test","./internal/apps"],"exit":0},
+    "baseline": {"command":["/private/tmp/builder-3473-macos/comparison-authorized/baseline.test","-test.v","-test.count=20","-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$","-test.timeout=10m"],"exit":0,"counts":{"executed":60,"passed":60,"failed":0,"skipped":0},"skipReasons":[]},
+    "candidate": {"command":["/private/tmp/builder-3473-macos/comparison-authorized/candidate.test","-test.v","-test.count=20","-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$","-test.timeout=10m"],"exit":0,"counts":{"executed":60,"passed":60,"failed":0,"skipped":0},"skipReasons":[]},
+    "baseline-delayed": {"command":["/private/tmp/builder-3473-macos/comparison-authorized/baseline-delayed.test","-test.v","-test.count=1","-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$","-test.timeout=10m"],"exit":1,"counts":{"executed":3,"passed":2,"failed":1,"skipped":0},"skipReasons":[]},
+    "candidate-delayed": {"command":["/private/tmp/builder-3473-macos/comparison-authorized/candidate-delayed.test","-test.v","-test.count=1","-test.run=^TestRetained(RepeatedExpansion|ResolutionCancellation|LongLinks)$","-test.timeout=10m"],"exit":0,"counts":{"executed":3,"passed":3,"failed":0,"skipped":0},"skipReasons":[]},
+    "no-reuse": {"command":["go","test","-race","-count=1","-v","-overlay=/private/tmp/builder-3473-macos/comparison-authorized/no-reuse-overlay.json","-run=^TestRetainedRepeatedExpansion$","./internal/apps"],"exit":1,"counts":{"executed":1,"passed":0,"failed":1,"skipped":0},"skipReasons":[]}
+  },
+  "phaseTimings": {
+    "baseline": {"validation":["2.938708ms","2.496208ms","2.702667ms","1.773291ms","1.834083ms","2.014041ms","2.375042ms","1.568292ms","2.646584ms","1.93475ms","2.914ms","3.500708ms","2.957084ms","2.47175ms","2.722291ms","2.080875ms","2.413375ms","2.186167ms","1.686125ms","2.362542ms"],"installation":["105.666167ms","126.292666ms","117.957458ms","99.683875ms","103.810916ms","97.6675ms","115.685709ms","104.632958ms","105.212667ms","132.480875ms","123.309ms","125.808583ms","117.666166ms","117.174291ms","106.476708ms","127.702292ms","110.022ms","118.134041ms","116.92375ms","106.384125ms"],"verification":["2.703833ms","5.253125ms","1.343125ms","2.162917ms","1.550792ms","1.351708ms","2.94225ms","1.708ms","2.093917ms","2.240625ms","3.027ms","2.44375ms","2.593834ms","2.529708ms","2.700083ms","2.358625ms","2.692666ms","1.607959ms","1.768542ms","2.435375ms"],"checkpoints":[]},
+    "candidate": {"fixture filesystem scan":["1.611416ms","674.916µs","733.75µs","756.542µs","993.958µs","890.208µs","790.833µs","2.145208ms","1.937917ms","1.548167ms","1.141ms","1.270042ms","1.42475ms","1.047667ms","1.402792ms","1.666292ms","884.292µs","1.327292ms","1.260334ms","782.875µs"],"in-memory resolution":["101.875µs","72.834µs","79.208µs","129.959µs","123.541µs","83.833µs","150.208µs","125.834µs","169.708µs","135.041µs","128.75µs","135.292µs","124.042µs","118.458µs","118.333µs","75.708µs","77.875µs","113.833µs","146.542µs","82.833µs"],"validation":["1.710166ms","1.112417ms","1.554541ms","1.285333ms","2.176708ms","1.547625ms","1.27675ms","1.926125ms","3.327542ms","2.12075ms","2.295291ms","2.08325ms","2.264125ms","2.166042ms","2.061084ms","1.229083ms","1.4975ms","1.956875ms","2.840167ms","1.740625ms"],"installation":["125.042667ms","112.576084ms","91.391125ms","102.042292ms","99.89275ms","104.02675ms","121.459458ms","122.463584ms","116.940375ms","97.637583ms","114.150458ms","110.97825ms","115.712125ms","111.588166ms","125.004667ms","138.075792ms","131.810291ms","111.023125ms","93.662875ms","97.814375ms"],"verification":["2.834416ms","2.263625ms","1.51325ms","1.971ms","1.954209ms","1.721458ms","2.442417ms","3.140125ms","2.886084ms","2.571ms","2.50175ms","2.441291ms","2.326ms","2.306708ms","1.70925ms","1.5885ms","1.989375ms","2.161542ms","1.551917ms","1.56025ms"],"checkpoints":["133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512","133/512"]},
+    "baseline-delayed": {"validation":["1.744708ms"],"installation":["1.101744167s"],"checkpoints":[]},
+    "candidate-delayed": {"fixture filesystem scan":["1.567334ms"],"in-memory resolution":["105.042µs"],"validation":["2.598292ms"],"installation":["1.203819625s"],"verification":["1.97825ms"],"checkpoints":["133/512"]},
+    "no-reuse": {"fixture filesystem scan":["832.708µs"],"in-memory resolution":["292.333µs"],"checkpoints":["512/512"]}
+  },
+  "expectedFailureLogs": {
+    "baseline-delayed": "=== RUN   TestRetainedResolutionCancellation\n=== PAUSE TestRetainedResolutionCancellation\n=== RUN   TestRetainedRepeatedExpansion\n=== PAUSE TestRetainedRepeatedExpansion\n=== RUN   TestRetainedLongLinks\n=== PAUSE TestRetainedLongLinks\n=== CONT  TestRetainedRepeatedExpansion\n=== CONT  TestRetainedLongLinks\n=== NAME  TestRetainedRepeatedExpansion\n    artifact_resolution_test.go:67: validation: 1.744708ms\n--- PASS: TestRetainedLongLinks (0.01s)\n=== CONT  TestRetainedResolutionCancellation\n--- PASS: TestRetainedResolutionCancellation (0.00s)\n=== NAME  TestRetainedRepeatedExpansion\n    artifact_resolution_test.go:75: installation: 1.101744167s\n    artifact_resolution_test.go:77: install repeated expansion: error=apps: install retained build: apps: retained artifacts: context deadline exceeded context=context deadline exceeded\n--- FAIL: TestRetainedRepeatedExpansion (1.11s)\nFAIL\n",
+    "no-reuse": "=== RUN   TestRetainedRepeatedExpansion\n=== PAUSE TestRetainedRepeatedExpansion\n=== CONT  TestRetainedRepeatedExpansion\n    artifact_resolution_test.go:76: fixture filesystem scan: 832.708µs\n    artifact_resolution_test.go:92: in-memory resolution: 292.333µs, checkpoints=512/512\n    artifact_resolution_test.go:94: bounded repeated expansion: error=context canceled context=context canceled\n--- FAIL: TestRetainedRepeatedExpansion (0.01s)\nFAIL\nFAIL\tgithub.com/pyrycode/pyrycode/internal/apps\t0.328s\nFAIL\n"
+  },
+  "setupAttempt": {"command":"python3 internal/apps/testdata/3473-expansion-experiment.py /tmp/builder-3473-macos/comparison","exit":1,"executed":0,"compileLog":"failed to initialize build cache at /Users/juhanailmoniemi/Library/Caches/go-build: mkdir /Users/juhanailmoniemi/Library/Caches/go-build/00: operation not permitted\n","helperLog":"Traceback (most recent call last):\n  File \"/Users/juhanailmoniemi/Workspace/Projects/.pyrycode-worktrees/pyrycode/builder-3473/internal/apps/testdata/3473-expansion-experiment.py\", line 60, in <module>\n    subprocess.run(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)\n    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/homebrew/Cellar/python@3.14/3.14.4/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py\", line 578, in run\n    raise CalledProcessError(retcode, process.args,\n                             output=stdout, stderr=stderr)\nsubprocess.CalledProcessError: Command '['go', 'test', '-race', '-c', '-overlay=/private/tmp/builder-3473-macos/comparison/baseline-overlay.json', '-o', '/private/tmp/builder-3473-macos/comparison/baseline.test', './internal/apps']' returned non-zero exit status 1.\n","outcome":"Sandbox blocked Go cache initialization; authorized execution in a fresh directory succeeded. No approval rejection."},
+  "appsRace": {
+    "command": "GOMAXPROCS=2 GOFLAGS=-p=2 go test -race -count=1 -json ./internal/apps/...",
+    "exit": 0,
+    "counts": {"executed":1007,"passed":989,"failed":0,"skipped":18},
+    "elapsedSeconds": 227.771,
+    "skipReasons": [
+      {"test":"TestBackupNodeDirectoryIdentity","reasons":["backup_node_test.go:14: set HOSTED_APP_NODE: SQL skip provides no evidence"]},
+      {"test":"TestBackupNodeFailures/sql","reasons":["backup_node_test.go:76: set HOSTED_APP_NODE: SQL skip provides no evidence"]},
+      {"test":"TestBackupSQLiteCancellation","reasons":["backups_rework_test.go:114: set HOSTED_APP_NODE: SQL skip provides no evidence"]},
+      {"test":"TestBackupSQLiteStorageErrors","reasons":["backups_rework_test.go:158: set HOSTED_APP_NODE: SQL skip provides no evidence"]},
+      {"test":"TestBackupAliasedTempRoot/states/nested","reasons":["backups_test.go:71: filesystem rejects invalid UTF-8 filename (EILSEQ)"]},
+      {"test":"TestBackupStates/nested","reasons":["backups_test.go:71: filesystem rejects invalid UTF-8 filename (EILSEQ)"]},
+      {"test":"TestBackupSQLiteWAL","reasons":["backups_test.go:235: set HOSTED_APP_NODE: SQL skip provides no evidence"]},
+      {"test":"TestCandidateSupportedTemplate","reasons":["candidate_temporary_test.go:90: set HOSTED_APP_NODE for supported-template acceptance; a skip supplies no evidence"]},
+      {"test":"TestCommittedTemplateUpdateSnapshot","reasons":["committed_recovery_template_test.go:12: set HOSTED_APP_NODE: SQL skip provides no evidence"]},
+      {"test":"TestOwnerSupportedNode","reasons":["owner_test.go:118: set HOSTED_APP_NODE to execute supported-runtime acceptance; an unsupported or skipped arm proves no launch"]},
+      {"test":"TestPublishTemplate","reasons":["publication_test.go:531: set supported Node/npm; skip proves no template publication"]},
+      {"test":"TestUpdateTemplateSnapshot","reasons":["publication_update_template_test.go:34: supported real Node/npm required; skips supply no initialized update evidence"]},
+      {"test":"TestUpdateTemplateRollback","reasons":["publication_update_template_test.go:107: supported real Node/npm required; skips provide no rollback evidence"]},
+      {"test":"TestRestoreStates/nested","reasons":["restores_test.go:52: filesystem rejects invalid UTF-8 filename (EILSEQ)"]},
+      {"test":"TestRestoreSQLiteWAL","reasons":["restores_test.go:220: set HOSTED_APP_NODE: SQL skip provides no evidence"]},
+      {"test":"TestRestoreSQLiteGenericAndCancellation","reasons":["restores_test.go:280: set HOSTED_APP_NODE: SQL skip provides no evidence"]},
+      {"test":"TestStartupTemplateRecovery","reasons":["startup_recovery_template_test.go:17: supported real Node/npm required; skips provide no restart evidence"]},
+      {"test":"TestRetainedValidation/invalid_UTF8","reasons":["artifacts_test.go:126: filesystem rejects invalid UTF-8 filename (EILSEQ)"]}
+    ],
+    "unrelatedFailures": [],
+    "overlap": "Vet/build overlapped the package run, after the matched comparison finished."
+  },
+  "checks": [
+    {"command":"GOMAXPROCS=2 GOFLAGS=-p=2 go vet ./...","exit":0,"testsExecuted":0},
+    {"command":"GOMAXPROCS=2 GOFLAGS=-p=2 make build BIN=/tmp/builder-3473-macos/pyry","exit":0,"testsExecuted":0},
+    {"command":"make check","status":"pending verifier-owned complete uncached full-module gate; no candidate gate pass claimed"}
+  ],
+  "historicalFailure": {"revision":"07b6b35e14aad0de688326fb36d81c54303c691c","command":"GOMAXPROCS=2 GOFLAGS=-p=2 make check GO=/tmp/verifier-3469/go-record","wrapper":"adds only -json -count=1 to go test","status":{"exit":2,"wall":642.931853499962,"GOMAXPROCS":2,"GOFLAGS":"-p=2","head":"07b6b35e14aad0de688326fb36d81c54303c691c"},"moduleCounts":{"run":27089,"pass":27062,"skip":26,"fail":1},"testEvents":[{"Time":"2026-10-15T23:17:25.707387+03:00","Action":"run","Package":"github.com/pyrycode/pyrycode/internal/apps","Test":"TestRetainedRepeatedExpansion"},{"Time":"2026-10-15T23:17:25.707447+03:00","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/apps","Test":"TestRetainedRepeatedExpansion","Output":"=== RUN   TestRetainedRepeatedExpansion\n"},{"Time":"2026-10-15T23:17:25.70754+03:00","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/apps","Test":"TestRetainedRepeatedExpansion","Output":"=== PAUSE TestRetainedRepeatedExpansion\n"},{"Time":"2026-10-15T23:17:25.70757+03:00","Action":"pause","Package":"github.com/pyrycode/pyrycode/internal/apps","Test":"TestRetainedRepeatedExpansion"},{"Time":"2026-10-15T23:20:32.976559+03:00","Action":"cont","Package":"github.com/pyrycode/pyrycode/internal/apps","Test":"TestRetainedRepeatedExpansion"},{"Time":"2026-10-15T23:20:32.976578+03:00","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/apps","Test":"TestRetainedRepeatedExpansion","Output":"=== CONT  TestRetainedRepeatedExpansion\n"},{"Time":"2026-10-15T23:20:34.151483+03:00","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/apps","Test":"TestRetainedRepeatedExpansion","Output":"    artifact_resolution_test.go:73: install repeated expansion: error=apps: install retained build: apps: retained artifacts: context deadline exceeded context=context deadline exceeded\n"},{"Time":"2026-10-15T23:20:34.156866+03:00","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/apps","Test":"TestRetainedRepeatedExpansion","Output":"--- FAIL: TestRetainedRepeatedExpansion (1.18s)\n"},{"Time":"2026-10-15T23:20:34.156907+03:00","Action":"fail","Package":"github.com/pyrycode/pyrycode/internal/apps","Test":"TestRetainedRepeatedExpansion","Elapsed":1.18}],"review":"https://github.com/pyrycode/pyrycode/pull/3469#issuecomment-6201695401","finalReview":"https://github.com/pyrycode/pyrycode/pull/3469#issuecomment-6206459491"},
+  "conclusion": "Normal native arms pass without reproducing the historical timeout. The controlled delay demonstrates the elapsed installation deadline dependency outside graph resolution. Reuse-disabled resolution fails finitely at 512 checkpoints, versus 133 for memoized resolution. Timings include scheduling and do not isolate individual syscalls. Historical causation remains unproven.",
+  "rawLogSHA256": {
+    "/tmp/builder-3473-macos/comparison-authorized/baseline-delayed.log": "ec80239749e0d6600fa24e3c5bfa6b2f99fb6cd61fd9062c1ed8d29cf35664e0",
+    "/tmp/builder-3473-macos/comparison-authorized/baseline.log": "58d0684c6adb78d3981a16acd6e5508e138f561d1696ea69b4c7a9b14148ccae",
+    "/tmp/builder-3473-macos/comparison-authorized/candidate-delayed.log": "6c8dd7945cd0164dd8f9d862f756fb3be4db94e7e96740669e1a0d6a1b731ba3",
+    "/tmp/builder-3473-macos/comparison-authorized/candidate.log": "a8de7ea5aebd33629f1a6b1f56ded8c40a85d879cbf400d249d717398caf7de7",
+    "/tmp/builder-3473-macos/comparison-authorized/compile-baseline-delayed.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/tmp/builder-3473-macos/comparison-authorized/compile-baseline.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/tmp/builder-3473-macos/comparison-authorized/compile-candidate-delayed.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/tmp/builder-3473-macos/comparison-authorized/compile-candidate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/tmp/builder-3473-macos/comparison-authorized/no-reuse.log": "8d3ff891e479399bcbcce8e6dc2d5735816d4cae7c05ee9a9ec12c3afa6a2fad",
+    "/tmp/builder-3473-macos/apps-race.jsonl": "1830cab261499fb1d1146b9bd87eae67b61962ee1d2f6cdbfd90c43deddcab30",
+    "/tmp/builder-3473-macos/vet.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/tmp/builder-3473-macos/build.log": "3a26cd9e6b86e304dc205dbacca96f99e4e57f1d25633622b94530735b7dd555",
+    "/tmp/builder-3473-macos/comparison-output.log": "f6cde90ef6ad5289ab14bb6c20cb063c55121288e5b9c3620c490501f9b2bfb7",
+    "/tmp/builder-3473-macos/comparison/compile-baseline.log": "abd7e3976f2d838bc57e403bea7583e33d091d5255aa1deb1edc36f19e48199e"
+  }
+}

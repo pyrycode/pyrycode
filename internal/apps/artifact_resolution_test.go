@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,22 +61,57 @@ func TestRetainedRepeatedExpansion(t *testing.T) {
 		testArtifactLink(t, stage, fmt.Sprintf("node_modules/amplify%02d", i), previous+"/../"+previous)
 	}
 	testArtifactLink(t, stage, "node_modules/use", "amplify20/../amplify20/index.js")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// The integration bound covers filesystem work and scheduling. Resolution
+	// complexity has its own checkpoint budget after the fixture is read.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	dir, err := privateDir(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	scan := artifactScan{nodes: map[string]artifactEntry{}}
+	started := time.Now()
+	err = scan.walk(ctx, dir, nil, "")
+	t.Logf("fixture filesystem scan: %s", time.Since(started))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, stop := context.WithCancel(ctx)
+	defer stop()
+	const workLimit = 512
+	work := &testResolutionContext{Context: base, cancel: stop, checks: workLimit}
+	started = time.Now()
+	// Resolve the deepest consumer with a cold cache before visiting other links.
+	err = scan.resolve(work, "node_modules/use")
+	for _, entry := range scan.entries {
+		if err == nil && entry.kind == "symlink" {
+			err = scan.resolve(work, entry.path)
+		}
+	}
+	t.Logf("in-memory resolution: %s, checkpoints=%d/%d", time.Since(started), workLimit-work.checks, workLimit)
+	if err != nil || base.Err() != nil {
+		t.Fatalf("bounded repeated expansion: error=%v context=%v", err, base.Err())
+	}
+	if got := strings.Join(scan.resolved["node_modules/use"], "/"); got != "node_modules/pkg/index.js" {
+		t.Fatalf("resolved consumer: %q", got)
+	}
+	started = time.Now()
 	validated, err := ValidateArtifacts(ctx, stage, testHost, testApp)
+	t.Logf("validation: %s", time.Since(started))
 	if err != nil || ctx.Err() != nil {
 		t.Fatalf("contained repeated expansion: error=%v context=%v", err, ctx.Err())
 	}
-	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	started = time.Now()
 	installed, err := InstallBuild(ctx, root, stage, testHost, testApp)
+	t.Logf("installation: %s", time.Since(started))
 	if err != nil || ctx.Err() != nil || installed.BuildID != validated.BuildID {
 		t.Fatalf("install repeated expansion: error=%v context=%v", err, ctx.Err())
 	}
 	t.Cleanup(func() { testWritableBuild(t, filepath.Join(root, testApp, "builds", installed.BuildID)) })
-	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	started = time.Now()
 	verified, err := VerifyBuild(ctx, root, testHost, testApp, installed.BuildID)
+	t.Logf("verification: %s", time.Since(started))
 	if err != nil || ctx.Err() != nil || verified.BuildID != installed.BuildID {
 		t.Fatalf("verify repeated expansion: error=%v context=%v", err, ctx.Err())
 	}
