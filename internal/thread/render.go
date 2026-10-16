@@ -222,6 +222,9 @@ func renderSharedLookup(selected []Item, recipes map[uint64]contentRecipe, sourc
 			}
 			if r.creating != 0 {
 				item.Content = e.Payload
+				if item.Kind == "assistant_message" {
+					item.Content = assistantMessageContent(e)
+				}
 			}
 			if r.delivery != 0 {
 				delivery, ok := entries[r.delivery]

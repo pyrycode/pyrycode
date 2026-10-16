@@ -24,7 +24,9 @@ func TestTextAppendBytes(t *testing.T) {
 		f := New("a")
 		e := testEntry(1, "assistant_delta", initial)
 		testFeed(t, f, e)
-		want := append([]byte(nil), e.Payload...)
+		initialContent := []byte(strings.TrimSpace(initial))
+		initialContent = append(initialContent[:len(initialContent)-1], `,"ts":"1970-01-01T00:01:39Z"}`...)
+		want := append([]byte(nil), initialContent...)
 		oldSnapshot := f.Items()
 		for i, suffix := range []string{"", " \x1b\n", "<&>\"\\雪🙂\u2028", "\xc3", "\xa9", "\v next\x00", "", "\u00a0end "} {
 			var prior protocol.AssistantDeltaPayload
@@ -54,7 +56,7 @@ func TestTextAppendBytes(t *testing.T) {
 			}
 			item.Content[0] = '!'
 		}
-		if string(oldSnapshot[0].Content) != initial {
+		if !bytes.Equal(oldSnapshot[0].Content, initialContent) {
 			t.Fatal("prior snapshot changed")
 		}
 		e.Payload[0] = '!'

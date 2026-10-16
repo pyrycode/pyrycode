@@ -1,6 +1,7 @@
 package realclaude
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"reflect"
@@ -59,12 +60,55 @@ func shadowReplay(t *testing.T, h shadowHistory, e shadowExpected, generate bool
 			e.Checkpoints[i].Items = snapshot.Items
 		} else {
 			current := shadowCurrentSendHandles(t, h, cp)
+			current = shadowCurrentMessageTimes(t, h, current)
 			if !reflect.DeepEqual(snapshot.Items, current.Items) {
 				t.Fatal("retained expected rows or revisions differ")
 			}
 		}
 	}
 	return e
+}
+
+// Captures predating recorded bubble times remain immutable evidence. Add only
+// the creating entry's saved timestamp when comparing their rows to today's fold.
+func shadowCurrentMessageTimes(t *testing.T, h shadowHistory, cp shadowCheckpoint) shadowCheckpoint {
+	t.Helper()
+	cp.Items = slices.Clone(cp.Items)
+	for i, item := range cp.Items {
+		if item.Kind != "assistant_message" || item.ID == 0 || item.ID > uint64(len(h.Entries)) {
+			continue
+		}
+		source := h.Entries[item.ID-1]
+		if source.TS.IsZero() {
+			continue
+		}
+		var content map[string]json.RawMessage
+		if err := json.Unmarshal(item.Content, &content); err != nil {
+			t.Fatal(err)
+		}
+		if _, present := content["ts"]; present {
+			continue
+		}
+		stamp, err := json.Marshal(source.TS.UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(item.Content, source.Payload) {
+			// An untouched first delta retains its original JSON field order.
+			body := bytes.TrimSpace(item.Content)
+			raw := append([]byte(nil), body[:len(body)-1]...)
+			raw = append(raw, `,"ts":`...)
+			raw = append(raw, stamp...)
+			cp.Items[i].Content = append(raw, '}')
+		} else {
+			content["ts"] = stamp
+			cp.Items[i].Content, err = json.Marshal(content)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return cp
 }
 
 // shadowCurrentSendHandles projects historical rows to the acceptance-owned
