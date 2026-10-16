@@ -84,7 +84,7 @@ const (
 	MaxPendingChannelPostsBytes = 64 << 10
 )
 
-// Sentinel errors returned by Promote and SetSystemPrompt. Callers (CLI,
+// Sentinel errors returned by registry mutations. Callers (CLI,
 // wire-protocol layer) distinguish refusal cases via errors.Is and map to
 // user-facing codes.
 //
@@ -93,6 +93,7 @@ const (
 // reply cannot pick up a fragment of an operator's prompt from an error.
 var (
 	ErrConversationNotFound        = errors.New("conversations: conversation not found")
+	ErrConversationNotPromoted     = errors.New("conversations: conversation is not promoted")
 	ErrConversationAlreadyPromoted = errors.New("conversations: conversation already promoted")
 	ErrPromotionNameInUse          = errors.New("conversations: promotion name already in use")
 	ErrPromotionNameEmpty          = errors.New("conversations: promotion name is empty")
@@ -523,6 +524,34 @@ func (r *Registry) SetMuted(id ConversationID, muted bool) bool {
 		}
 	}
 	return false
+}
+
+// SetPinned changes only PinnedAt. Pinning requires a promoted conversation,
+// including archived channels; unpinning succeeds on any existing row. A new
+// pin records now in UTC, and repeated pinning preserves the original time.
+// Lookup, eligibility and mutation share the registry lock. Rejections return
+// ErrConversationNotFound or ErrConversationNotPromoted without changing a row.
+// Persistence is the caller's responsibility via Save.
+func (r *Registry) SetPinned(id ConversationID, pinned bool, now time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		c := &r.conversations[i]
+		if c.ID != id {
+			continue
+		}
+		if pinned && !c.IsPromoted {
+			return ErrConversationNotPromoted
+		}
+		if !pinned {
+			c.PinnedAt = nil
+		} else if c.PinnedAt == nil {
+			at := now.UTC()
+			c.PinnedAt = &at
+		}
+		return nil
+	}
+	return ErrConversationNotFound
 }
 
 // AdvanceReadUpTo raises the host read mark of the conversation whose ID equals
