@@ -368,47 +368,10 @@ func TestStreamClaudeSessionsDir_NoHome(t *testing.T) {
 	}
 }
 
-// TestWithApprovalArgs is #2065 AC 3 plus the third row of its AC 4, pinned
-// hermetically because the live-claude gate cannot see either: the rig there
-// builds a streamsup.Config by hand and never calls this function, and its base
-// args are empty so nothing there exercises the operator pass-through.
-//
-// The probe it pins used to be "does the spawn's argv name
-// --dangerously-skip-permissions". #2065 puts that flag on EVERY argv, so the
-// probe became "will this child keep the bypass it launches with", answered from
-// the stored posture and the provenance bit rather than from the argv:
-//
-//   - a downgraded child → args followed by exactly permissionArgs(false, path),
-//     minus that set's own mode pair when args already name a mode (#2043),
-//   - a child that keeps its bypass → args UNCHANGED, no duplicate flag.
-//
-// # Which subtest kills which tree
-//
-// "a downgraded child still gets the approval set" is the row that reddens on any
-// tree keying on the bare presence of the flag: its args CARRY the escalation, as
-// every #2065 argv does, and the approval set is injected anyway. On a
-// flag-presence tree it returns args unchanged and the daemon's approval gate is
-// absent for every session in the fleet.
-//
-// "the operator's pass-through keeps its bypass" is the row that reddens on any
-// tree that deletes the interlock and trusts the stored posture alone. Its args
-// and stored mode are IDENTICAL to the row above; only operatorBypass differs, so
-// the pair cannot both pass on either mistake.
-//
-// # Measured 2026-09-03, not predicted
-//
-// Both mutants applied through `go test -overlay`, so no mutated source was ever
-// written into the worktree:
-//
-//	M3  keyed on slices.Contains(args, "--dangerously-skip-permissions")
-//	    RED: "a downgraded child still gets the approval set" — and also the
-//	    unrecognised-mode and no-aliasing subtests, since that tree returns args
-//	    unchanged for every session
-//	M4  the operatorBypass clause deleted
-//	    RED: "the operator's pass-through keeps its bypass", alone
-//
-// It also pins that the input is never aliased or mutated — scfg.Args is freshly
-// owned by mapStreamsupConfig and the append runs on a clone.
+// TestWithApprovalArgs distinguishes effective posture from the escalation flag
+// every session carries. Non-bypass children keep their approval transport and
+// mode; stored/operator bypass gets a question connection without daemon MCP
+// servers. No shaping path may mutate or alias its input.
 func TestWithApprovalArgs(t *testing.T) {
 	t.Parallel()
 
@@ -461,10 +424,11 @@ func TestWithApprovalArgs(t *testing.T) {
 		// provenance differs, and it is the whole decision.
 		got := withApprovalArgs(alwaysOn, path, "default", true, false)
 
-		if !slices.Equal(got, alwaysOn) {
-			t.Fatalf("withApprovalArgs operator-bypass = %q, want unchanged %q", got, alwaysOn)
+		want := append(slices.Clone(alwaysOn), "--permission-prompt-tool", "stdio")
+		if !slices.Equal(got, want) {
+			t.Fatalf("withApprovalArgs operator-bypass = %q, want %q", got, want)
 		}
-		for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
+		for _, f := range []string{"--mcp-config", "--strict-mcp-config"} {
 			if slices.Contains(got, f) {
 				t.Errorf("operator-bypass args %q must not carry approval flag %q: the operator asked for "+
 					"a bypass child and nothing downgrades it", got, f)
@@ -482,13 +446,14 @@ func TestWithApprovalArgs(t *testing.T) {
 		in := []string{"--model", "haiku", bypass, "--settings", "p"}
 		got := withApprovalArgs(in, path, sessions.PermissionModeBypass, false, false)
 
-		if !slices.Equal(got, in) {
-			t.Fatalf("withApprovalArgs stored-escalation = %q, want unchanged %q", got, in)
+		want := append(slices.Clone(in), "--permission-prompt-tool", "stdio")
+		if !slices.Equal(got, want) {
+			t.Fatalf("withApprovalArgs stored-escalation = %q, want %q", got, want)
 		}
 		if n := countSkip(got); n != 1 {
 			t.Errorf("stored-escalation args carry %d escalation flags, want exactly 1", n)
 		}
-		for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
+		for _, f := range []string{"--mcp-config", "--strict-mcp-config"} {
 			if slices.Contains(got, f) {
 				t.Errorf("stored-escalation args %q must not carry approval flag %q", got, f)
 			}
@@ -594,29 +559,8 @@ func TestWithApprovalArgs(t *testing.T) {
 	})
 }
 
-// TestWithApprovalArgs_BypassChildGetsNoFilesServer (#2169 AC-3) pins the stated
-// boundary: a child that KEEPS the bypass it launches with carries no pyry_files
-// server, because it carries no --mcp-config at all and --strict-mcp-config means
-// the document is the only place a server can come from.
-//
-// Named for the boundary rather than folded into TestWithApprovalArgs' two
-// bypass subtests, which assert the same flag's absence for a different claim —
-// that the approval GATE is absent because there is nothing to walk this child
-// back from. #2169 needs the boundary checked rather than incidental: if those
-// subtests are ever relaxed, or a third bypass row appears, this test still says
-// what the file-transfer feature is allowed to reach.
-//
-// The boundary is about the ARGS. Whether such a child also carries
-// PYRY_SESSION_ID on its environment is deliberately unasserted and deliberately
-// unconstrained — with no server registered, nothing forks the process that would
-// read it, and a bypass child can read any session id off the daemon's own
-// registry with one unmodalled command anyway.
-//
-// Registering pyry_files for these children means appending --mcp-config INSIDE
-// withApprovalArgs' staying-in-bypass arm, whose doc is an account of how
-// presence-of-flag reasoning inverted both of the daemon's permission fail-safes
-// at #2065. That is a permission-argv change, not a file-transfer one, and it is
-// a human call rather than something this family assumes.
+// Bypass receives no daemon MCP config, including pyry_files. The stdio question
+// connection must preserve this separate server-exposure boundary.
 func TestWithApprovalArgs_BypassChildGetsNoFilesServer(t *testing.T) {
 	t.Parallel()
 
@@ -1343,10 +1287,8 @@ func TestStreamRunnerInstall_StripsBakedSessionID(t *testing.T) {
 	}
 }
 
-// TestStreamRunnerInstall_ReappliesApprovalArgs is #2446 AC 2: the same install
-// path puts the daemon's approval flags back on the argv of a session the daemon
-// downgrades in band, and injects nothing for one that keeps the bypass it
-// launches with.
+// Settings installs retain ordinary approval transport for non-bypass children
+// and the stdio question connection for children keeping bypass.
 //
 // The bypass rows are the security-relevant ones and they are split by
 // PROVENANCE, not by spelling: since #2065 claudeSettingsArgs appends
@@ -1386,17 +1328,17 @@ func TestStreamRunnerInstall_ReappliesApprovalArgs(t *testing.T) {
 				"--permission-prompt-tool", "stdio", "--mcp-config", mcpPath, "--strict-mcp-config"),
 		},
 		{
-			name: "stored escalation — nothing injected, and no second bypass flag",
+			name: "stored escalation — question transport, and no second bypass flag",
 			args: escalated,
 			mode: sessions.PermissionModeBypass,
-			want: escalated,
+			want: append(slices.Clone(escalated), "--permission-prompt-tool", "stdio"),
 		},
 		{
-			name:           "operator bypass — provenance the daemon may not walk back, so nothing injected",
+			name:           "operator bypass — question transport without walking back the posture",
 			args:           downgraded,
 			mode:           "acceptEdits",
 			operatorBypass: true,
-			want:           downgraded,
+			want:           append(slices.Clone(downgraded), "--permission-prompt-tool", "stdio"),
 		},
 		{
 			name: "unrecognised stored posture falls through to injection — the fail-safe direction",
@@ -1514,14 +1456,15 @@ func TestStreamRunnerInstall_ShapesWithTheLivePosture(t *testing.T) {
 	if len(rec.swapped) != 2 || len(rec.restarted) != 1 {
 		t.Fatalf("installed %d swaps and %d restarts, want 2 and 1", len(rec.swapped), len(rec.restarted))
 	}
-	if !slices.Equal(rec.swapped[0], escalated) {
-		t.Errorf("the escalated install injected %q, want the argv unchanged", rec.swapped[0])
+	questionArgs := append(slices.Clone(escalated), "--permission-prompt-tool", "stdio")
+	if !slices.Equal(rec.swapped[0], questionArgs) {
+		t.Errorf("the escalated install = %q, want %q", rec.swapped[0], questionArgs)
 	}
 	if want := append(slices.Clone(downgraded), approvalSet(mcpPath)...); !slices.Equal(rec.swapped[1], want) {
 		t.Errorf("the post-revoke install carries\n got %q\nwant %q — a stale bypass here is the approval gate gone", rec.swapped[1], want)
 	}
-	if !slices.Equal(rec.restarted[0], escalated) {
-		t.Errorf("the re-escalated install injected %q, want the argv unchanged", rec.restarted[0])
+	if !slices.Equal(rec.restarted[0], questionArgs) {
+		t.Errorf("the re-escalated install = %q, want %q", rec.restarted[0], questionArgs)
 	}
 }
 

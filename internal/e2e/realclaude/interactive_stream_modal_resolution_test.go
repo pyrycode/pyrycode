@@ -294,7 +294,7 @@ func startObservedPermissionHarness(t *testing.T, model string, stdioPermissionP
 	return startObservedPermissionHarnessWithOperatorBypass(t, model, stdioPermissionPrompt, configure, false)
 }
 
-func startObservedPermissionHarnessWithOperatorBypass(t *testing.T, model string, stdioPermissionPrompt bool, configure func(string) string, operatorBypass bool) (*perConvHarness, string, func()) {
+func startObservedPermissionHarnessWithOperatorBypass(t *testing.T, model string, stdioPermissionPrompt bool, configure func(string) string, operatorBypass bool, prepareHome ...func(string)) (*perConvHarness, string, func()) {
 	t.Helper()
 	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
@@ -352,6 +352,9 @@ func startObservedPermissionHarnessWithOperatorBypass(t *testing.T, model string
 	// instead of rejecting an empty binding (#678).
 	seedBootstrapRegistry(t, home, streamModalBootstrapUUID)
 	seedBoundConversation(t, home, streamModalConvID, streamModalBootstrapUUID, workdir)
+	for _, prepare := range prepareHome {
+		prepare(home)
+	}
 
 	if configure != nil {
 		claudeBin = configure(claudeBin)
