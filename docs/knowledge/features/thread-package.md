@@ -314,6 +314,25 @@ encoding with the independent generic encoder for every Item field, nested
 content, nil and empty slices. Existing golden bytes and the separate exact
 Content-byte hash remain unchanged.
 
+`TestThreadRecordedBaselines` additionally proves checkpoint resume equivalence
+for all three committed histories: `parent_tool_use_v2.1.259.json`,
+`task_notification_v2.1.259.json` and `roster_after_finish_v2.1.280.json`.
+`testRecordedCheckpointResume` covers every emitted entry cut from zero through
+full, including hidden facts and companion emissions within frames, then compares
+immediately and after every suffix entry with uninterrupted reference folding.
+Both export parts cross JSON separately; import uses the same owner and a
+prefix-limited history source, makes no history lookups and receives only suffix
+feeds. Direct comparisons retain exact Content bytes, every Item field/revision,
+the complete internal metadata/recipe inventory and exported continuation state.
+Rendered equality alone misses lost ever-published membership; JSON-normalized
+digests can conceal Content byte differences. See the
+[comparison contract and negative controls](thread-package-main-thread-folding-validation.md#validation-and-testing).
+The retained synthetic shell creation, launch-result and turn-end context is
+explicitly test-supplied. This offline gate uses the committed frames without
+credentials or recapture and adds no live-capture evidence. Existing recorded
+semantic assertions and golden expectations remain unchanged; checkpoint
+persistence and Store startup loading remain separate work (#3336/#3337).
+
 ### Full-feed benchmark
 
 `BenchmarkFoldCorpus30000` measures fresh fold construction and complete
@@ -550,10 +569,11 @@ and creation-ordered `[]CheckpointItem` metadata/recipes, including hidden,
 unresolved and delivery-suppressed internal rows. Export runs at a completed
 `Feed` boundary under serialized ownership without history reads or rendering.
 See the [export contract and encoded-size measurements](thread-package-main-thread-folding-validation.md#validation-and-testing)
-for schema/rules versions, completeness and shared identities. Restoration and
-synthetic resume equivalence (#3490), recorded-history proofs (#3491), and file
-persistence/Store checkpoint loading (#3336) remain follow-ups. Store loading
-still replays from entry 1; the existing scalar certificates neither resume
+for schema/rules versions, completeness and shared identities. `ImportCheckpoint`
+restores in-memory reference folds; synthetic and committed-recording proofs
+cover resume equivalence. File persistence (#3336) and Store checkpoint loading
+(#3337) remain follow-ups. Store loading still replays from entry 1; the existing
+scalar certificates neither resume
 folding nor implement the proposed checkpoint schedule. Callers still finish
 producer draining and tail catch-up before `Store.Shutdown`.
 
