@@ -24,6 +24,7 @@ type shadowConversation struct {
 	done          chan struct{}
 	version       uint64
 	complete      bool
+	idleUnloaded  bool // successful coordinator-owned retirement; not a publication gap
 	publisher     *daemonThreadPublisher
 	threadEpoch   string
 	threadVersion uint64
@@ -148,7 +149,14 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 			}
 		} else {
 			snapshot := s.store.Status(id)
-			s.publish(ctx, id, w)
+			// A deliberate clean unload keeps the already-published cursor. Reading
+			// that same checkpoint must not reconnect every consumer on each idle
+			// cycle. A changed usable view still has to prove retained continuity;
+			// failure and unplanned withdrawal retain the normal gap handling.
+			if !w.idleUnloaded || snapshot.State == thread.StateUsable || snapshot.State == thread.StateUnavailable {
+				s.publish(ctx, id, w)
+				w.idleUnloaded = false
+			}
 			switch snapshot.State {
 			case thread.StateNotLoaded:
 				if version > s.consumed(id) {
@@ -195,6 +203,8 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 						s.mu.Unlock()
 						if err := s.store.Unload(id); err != nil {
 							s.failure(id, "unload")
+						} else {
+							w.idleUnloaded = true
 						}
 						s.quietMu.Lock()
 						delete(s.queryRetiring, id)

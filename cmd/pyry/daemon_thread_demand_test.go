@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +13,40 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/thread"
 )
+
+func TestDaemonThreadDemandIdleReadKeepsConnection(t *testing.T) {
+	s, h, reg, store := testShadow(t)
+	reg.Create(conversations.Conversation{ID: testConvID})
+	testShadowAppend(t, h, testConvID)
+	var idle atomic.Bool
+	s.quiet = func(conversations.ConversationID) bool { return idle.Load() }
+	w, mgr := testDaemonThreadQueryWire(t, s, nil)
+	w.open("phone", false, protocol.CapabilityThread)
+	s.start()
+	_, e := w.read()
+	if e.Type != protocol.TypeThreadItemAdded {
+		t.Fatalf("initial publication: %s", e.Type)
+	}
+	idle.Store(true)
+	for attempt := range 3 {
+		testShadowWait(t, func() bool { return store.Status(testConvID).State == thread.StateNotLoaded })
+		// Let the follower observe the deliberate absence after a clean unload.
+		select {
+		case <-time.After(120 * time.Millisecond):
+		case <-t.Context().Done():
+			t.Fatal(t.Context().Err())
+		}
+		if len(mgr.ActiveConns(t.Context())) != 1 {
+			t.Fatal("clean idle retirement disconnected the reader")
+		}
+		id := uint64(450 + attempt)
+		testDaemonThreadRequest(t, w, "phone", id, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID})
+		got, typ := testDaemonThreadReply(t, w, id)
+		if typ != protocol.TypeThreadItems || got.Version != 1 || !got.Final {
+			t.Fatal("idle read lost its checkpoint")
+		}
+	}
+}
 
 func TestDaemonThreadDemandRecovery(t *testing.T) {
 	for _, mode := range []string{"empty", "newest", "checkpoint", "older"} {
