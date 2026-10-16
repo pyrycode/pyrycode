@@ -2,6 +2,7 @@
 package thread
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -248,6 +249,13 @@ func (d foldDecoder) count(n int) {
 }
 
 func (d foldDecoder) decode(raw json.RawMessage, dst any, required ...string) bool {
+	if objectDTO, empty := dst.(*struct{}); empty && len(required) == 0 {
+		// An empty DTO requires object syntax only; unknown fields stay inert.
+		// Validate the original bytes so trimming cannot admit non-JSON whitespace.
+		d.count(len(raw))
+		object := bytes.TrimSpace(raw)
+		return objectDTO != nil && len(object) > 0 && object[0] == '{' && json.Valid(raw)
+	}
 	d.count(2*len(raw) + len(required)) // object and DTO decode bytes, required-field lookups
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil || json.Unmarshal(raw, dst) != nil {

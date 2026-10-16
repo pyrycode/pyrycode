@@ -112,11 +112,56 @@ escaping, concealing byte differences. The proof includes raw Content bytes
 separately; `TestCheckpointProofContentBytes` supplies the negative control.
 
 `TestCheckpointResumeCorpus` covers 201 distinct cuts of `testFoldCorpus(30000)`:
-empty plus the final 200 boundaries, including full, for 50,101 immediate/suffix
-comparisons. Shared immutable prefix preparation and eight joined workers bound
-cost without skipping comparisons; completion counters reject dropped cuts.
+empty plus every boundary from 29,801 through 30,000, for 50,101 immediate/suffix
+comparisons. Shared immutable prefix preparation and eight joined workers remain
+unchanged; completion counters reject both dropped cuts and dropped comparisons.
+Each cut still separately JSON-round-trips both parts, imports without prefix
+replay and independently checks the complete inventory before feeding its suffix.
 The corpus test uses `t.Parallel()` because a long sequential setup otherwise
 postpones existing parallel tests until too little package timeout remains.
+Diagnostics separate fixture preparation, uninterrupted baseline feed/proof,
+prefix feed/export and joined-worker elapsed time, and report worker count,
+`GOMAXPROCS`, completed cuts and comparisons. `BenchmarkCheckpointResumePhases`
+separately measures fixture, feed, export, both JSON round trips, import, full
+internal rendering and full proof; the proof phase includes rendering.
+
+Repeated validation of inert object fields was a measured rendering cost:
+`foldDecoder.decode` now checks object syntax directly for empty DTOs. Matched
+Linux race profiles at `4d98f075` and `d0ca0353` took 250.728s and 220.544s for
+the corpus package, respectively, both completing 201 cuts/50,101 comparisons.
+Go 1.26.9 linux/amd64
+ran on an i7-8700 (6 cores/12 logical CPUs), with an eight-CPU cgroup quota,
+default `GOMAXPROCS=8` and test parallelism 8; neither eight-worker admission nor
+`t.Parallel()` changed. Cumulative sampled CPU seconds fell from 139.57 to 50.15
+in `foldDecoder.decode`, 246.83 to 159.26 in `Fold.render`, and 327.72 to 239.27
+in `testResumeProof.update` (inclusive figures, not additive). Checkpoint JSON
+round-trip CPU stayed nearly unchanged. The full-render phase fell from 1.709s
+to 0.993s and 899,714 to 415,397 allocations; full proof fell from 2.291s to
+1.644s. Sampled CPU/wall ratios stayed near 6.18/6.17 CPUs. These measurements
+identify reduced executed validation work; host activity was uncontrolled, and
+even the unchanged fixture's phase timing varied. They do not establish the
+cause of the earlier host's ten-minute timeout or guarantee a runtime ceiling.
+See the [matched measurements and commands](../../specs/architecture/3494-resume-corpus-runtime.md#revisions).
+
+Uncached Linux race checks at implementation revision `2385022d` and the
+full-module gate at `14517e33` passed with Go's default timeout:
+
+| Check | thread elapsed | cmd/pyry elapsed | relay elapsed |
+| --- | ---: | ---: | ---: |
+| `go test -race -count=1 ./internal/thread` | 337.905s | — | — |
+| `go test -race -count=1 ./internal/thread ./cmd/pyry ./internal/relay` | 375.708s | 345.521s | 46.591s |
+| Uncached `make check` | 383.920s | 331.493s | 47.689s |
+
+Both scoped thread reports confirm 201 cuts/50,101 comparisons and passing
+`TestCheckpointProofContentBytes`; the full-module gate has package results but
+no per-test counts. Its fake-daemon e2e package took 187.406s, and vet,
+staticcheck, substrate-guard and build passed. See the
+[verifier's evidence review](https://github.com/pyrycode/pyrycode/pull/3497#issuecomment-6207992285).
+Suite/package scheduling contention remains a hypothesis for the additional
+joint-run elapsed time; those runs do not isolate it or identify the historical
+timeout's cause. The complete proof remains in the ordinary offline race gate.
+macOS is outside this Linux verification scope.
+
 Focused histories use every cut across unfinished text, late tool results after
 turn end, late reports after genuine agent end, compaction followed by a divider,
 background shell completion, sends, hidden children, late task links, reversible
@@ -334,6 +379,23 @@ case-insensitive keys, nested saved answers and map elements. Nullable pointers,
 maps and slices remain valid; their scalar elements cannot be null. Unknown
 fields stay inert. Nullable optional token counts therefore preserve absent,
 null and explicit zero source content.
+
+For a non-nil `*struct{}` destination with no required fields,
+`foldDecoder.decode` needs exactly one valid JSON object; decoding unknown fields
+into maps and an empty DTO adds cost without validating anything more. It checks
+the opening object byte and calls `json.Valid` on the **original** bytes. Validating
+only trimmed bytes would admit non-JSON whitespace. Typed DTOs and required-field
+checks retain recursive validation. `TestDecodeEmptyObject` compares acceptance
+with map/DTO decoding, including malformed/trailing input, null, non-objects,
+unknown null fields and duplicate keys, and rejects a nil destination.
+
+`TestDecodeEmptyObjectAllocations` permits up to four scanner/depth allocations
+for its fixed nested fixture: `json.Valid` pools its scanner, and race builds can
+discard pooled values, so zero allocations is an unreliable assertion. The old
+field-map path took 32 allocations and fails this bound. The same-process
+`BenchmarkDecodeEmptyObject` named-empty-DTO control keeps that generic path;
+the matched Linux race observation was 26,406 versus 3,060 ns/op and 32 versus
+1 allocation/op. This isolates validation cost from between-run scheduling.
 
 `mainDecode` also validates parent fields, identity-loss markers and supplied
 opening references before changing joins or text runs. Decoding only the public
