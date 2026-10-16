@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -214,46 +215,56 @@ func TestMemoryCredentialCancellation(t *testing.T) {
 	for _, blocked := range []string{"stdin", "lock"} {
 		for _, cause := range []string{"cancel", "deadline", "operation"} {
 			t.Run(blocked+"/"+cause, func(t *testing.T) {
-				s := testMemoryStore(t)
-				ref := testMemorySet(t, s, memoryOld)
-				input := testMemoryInput(t, memoryNew)
-				var release func()
-				if blocked == "stdin" {
-					r, w, err := os.Pipe()
-					testMemoryMust(t, err)
-					input = r
-					release = func() { _ = w.Close(); _ = r.Close() }
-				} else {
-					f, err := os.Open(filepath.Join(s.home, ".pyry", "memory", "credentials"))
-					testMemoryMust(t, err)
-					testMemoryMust(t, unix.Flock(int(f.Fd()), unix.LOCK_EX))
-					release = func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN); _ = f.Close() }
+				t.Parallel()
+				check := func(t *testing.T) {
+					s := testMemoryStore(t)
+					ref := testMemorySet(t, s, memoryOld)
+					input := testMemoryInput(t, memoryNew)
+					var release func()
+					if blocked == "stdin" {
+						r, w, err := os.Pipe()
+						testMemoryMust(t, err)
+						input = r
+						release = func() { _ = w.Close(); _ = r.Close() }
+					} else {
+						f, err := os.Open(filepath.Join(s.home, ".pyry", "memory", "credentials"))
+						testMemoryMust(t, err)
+						testMemoryMust(t, unix.Flock(int(f.Fd()), unix.LOCK_EX))
+						release = func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN); _ = f.Close() }
+					}
+					defer func() { release() }()
+					ctx, cancel := context.WithCancel(context.Background())
+					if cause == "deadline" {
+						cancel()
+						ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+					} else if cause == "cancel" {
+						timer := time.AfterFunc(50*time.Millisecond, cancel)
+						defer timer.Stop()
+					}
+					defer cancel()
+					start := time.Now()
+					_, err := s.set(ctx, input)
+					limit := time.Second
+					if cause == "operation" {
+						limit = 11 * time.Second
+					}
+					testMemoryCheck(t, err != nil && time.Since(start) <= limit, "blocked operation did not stop")
+					if blocked == "lock" {
+						_, statusErr := s.status(ctx)
+						_, resolveErr := s.resolve(ctx, ref)
+						testMemoryCheck(t, !(statusErr == nil || resolveErr == nil), "cancelled read accepted")
+					}
+					release()
+					release = func() {}
+					testMemoryResolve(t, s, ref, memoryOld)
 				}
-				defer func() { release() }()
-				ctx, cancel := context.WithCancel(context.Background())
-				if cause == "deadline" {
-					cancel()
-					ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
-				} else if cause == "cancel" {
-					timer := time.AfterFunc(50*time.Millisecond, cancel)
-					defer timer.Stop()
-				}
-				defer cancel()
-				start := time.Now()
-				_, err := s.set(ctx, input)
-				limit := time.Second
-				if cause == "operation" {
-					limit = 11 * time.Second
-				}
-				testMemoryCheck(t, err != nil && time.Since(start) <= limit, "blocked operation did not stop")
 				if blocked == "lock" {
-					_, statusErr := s.status(ctx)
-					_, resolveErr := s.resolve(ctx, ref)
-					testMemoryCheck(t, !(statusErr == nil || resolveErr == nil), "cancelled read accepted")
+					// Lock retries use Go timers, so exercise the real operation deadline
+					// with virtual time. Stdin polling uses a real OS descriptor.
+					synctest.Test(t, check)
+				} else {
+					check(t)
 				}
-				release()
-				release = func() {}
-				testMemoryResolve(t, s, ref, memoryOld)
 			})
 		}
 	}
