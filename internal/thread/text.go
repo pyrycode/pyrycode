@@ -7,8 +7,26 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
+
+// The first delta's recorded time belongs to the whole bubble, including direct
+// channel posts. Payloads do not carry the history envelope's timestamp.
+func assistantMessageContent(e history.Entry) json.RawMessage {
+	if e.TS.IsZero() {
+		return append(json.RawMessage(nil), e.Payload...)
+	}
+	stamp, _ := json.Marshal(e.TS.UTC())
+	// Admission requires a nonempty JSON object (turn_id and text). Preserve its
+	// field order: duplicate/case-variant DTO keys must keep their decode order.
+	body := bytes.TrimSpace(e.Payload)
+	raw := make(json.RawMessage, 0, len(body)+len(stamp)+6)
+	raw = append(raw, body[:len(body)-1]...)
+	raw = append(raw, `,"ts":`...)
+	raw = append(raw, stamp...)
+	return append(raw, '}')
+}
 
 type ingestionWorkCounts struct{ work int }
 
