@@ -69,7 +69,8 @@ func testOwnerHealthFailures(t *testing.T, delayed bool) {
 			t.Fatalf("probe advancement timed out: expected failures=%d, observed=%d %s", expected, observed, state)
 		}
 		if delayed && step == 0 {
-			// Leave the observer idle beyond three ordinary runtime intervals.
+			// Pause after completion so response delay cannot consume the idle window.
+			healthFailureWait(t, o, g, expected)
 			time.Sleep(4 * o.runtimeInterval)
 		}
 		healthFailureWait(t, o, g, expected)
