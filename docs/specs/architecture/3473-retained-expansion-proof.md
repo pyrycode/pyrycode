@@ -111,6 +111,13 @@ feature branch touches `internal/apps/artifact_resolution_test.go`.
   commands, platform, counts and logs outside the checkout. No new runtime
   behavior. Linux children share two CPUs; Darwin reports no affinity control.
   The measured graph uses 133 checkpoints; keep the planned 512 cap.
+- 2026-10-16: Recovery runs directly on macOS arm64 with Go 1.26.2. Local
+  native execution resolves the earlier missing-route question; no fleet task
+  or second-OS run is needed. Keep the design and implementation unchanged.
+  Retain native timings, expected failures and checks in
+  `internal/apps/testdata/3473-macos-results.json`. The native evidence below
+  supersedes the earlier macOS-blocked handoff, while the full-module gate
+  remains verifier-owned.
 
 ## Investigation and validation evidence
 
@@ -195,3 +202,63 @@ Complete uncached `make check` remains pending for the verifier-owned full-modul
 gate under the builder role instructions; it has not been passed or substituted
 with the focused result. The historical complete baseline gate's apps failure
 and unrelated #3474 e2e failure are recorded in PR #3469's verifier review.
+
+## Native recovery evidence (2026-10-16)
+
+Revision `292138abd31e785fb10a38add6a7ab4cc7dd95a7`, macOS 26.6.2 arm64,
+Go 1.26.2, `GOMAXPROCS=2`, `GOFLAGS=-p=2`. The unchanged-test overlay uses
+`4bc9790a35943200b86946a2968e10914e74b8c7`; its test, resolver and installer
+match the historical baseline. The resolver and installer also match this head.
+Run: `python3 internal/apps/testdata/3473-expansion-experiment.py /tmp/builder-3473-macos/comparison-authorized`.
+The helper records every exact compile/test command. Each race binary executes
+20 repetitions without the Go result cache, retaining the ten-minute package
+timeout. Baseline/candidate pairs run concurrently with identical concurrency
+settings; Darwin provides no CPU affinity here. No other builder check overlapped
+this comparison. Host-wide incidental activity is uncontrolled.
+
+| Native experiment | Executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| Unchanged test, 20 repetitions | 60 | 60 | 0 | 0 |
+| Repaired test, 20 repetitions | 60 | 60 | 0 | 0 |
+| Unchanged test, controlled installation delay | 3 | 2 | 1 | 0 |
+| Repaired test, same controlled delay | 3 | 3 | 0 | 0 |
+| Repaired proof, cache reuse disabled | 1 | 0 | 1 | 0 |
+
+All three named tests execute in each normal repetition; there are no focused
+skips. Expected failures are retained in the native evidence, together with the
+zero-test sandbox setup failure (Go cache access); its authorized rerun succeeded.
+
+| Phase (milliseconds) | Unchanged min–max | Candidate min–max |
+| --- | --- | --- |
+| Validation | 1.568–3.501 | 1.112–3.328 |
+| Installation | 97.668–132.481 | 91.391–138.076 |
+| Verification | 1.343–5.253 | 1.513–3.140 |
+| Fixture filesystem walk | Not separately instrumented | 0.675–2.145 |
+| In-memory resolution | Not separately instrumented | 0.073–0.170 |
+
+Normal and delayed candidate resolution always uses 133/512 checkpoints.
+Disabling completed-resolution reuse fails at 512 in 0.292333ms, before
+integration. The controlled delay fails baseline installation at 1.101744167s
+with the historical error text, while candidate installation passes at
+1.203819625s. Timings include scheduling; filesystem phases perform real I/O
+and syncs, so these measurements do not isolate individual syscall costs.
+They distinguish that elapsed work from counted in-memory resolution. Ordinary
+native repetitions did not reproduce the historical timeout, whose cause remains
+unproven. The original raw baseline log is available locally and confirms the
+1.18s failure; its error wrapper locates deadline observation in `artifactScan.walk`,
+without identifying the earlier work that exhausted it. PR #3469's final PASS
+review also leaves historical scheduling attribution unknown.
+
+`GOMAXPROCS=2 GOFLAGS=-p=2 go test -race -count=1 -json ./internal/apps/...`
+passes in 227.771s: 1,007 executed, 989 passed, zero failed, 18 skipped.
+Four skips are filesystem rejection of invalid UTF-8 filenames; fourteen require
+supported Node/npm/template inputs. Exact per-test reasons are retained in the
+native JSON. There are no unrelated failures or unfinished tests. Vet and build
+overlapped this package run after the matched comparison completed.
+`GOMAXPROCS=2 GOFLAGS=-p=2 go vet ./...` and
+`GOMAXPROCS=2 GOFLAGS=-p=2 make build BIN=/tmp/builder-3473-macos/pyry`
+both exit zero (zero tests). Full uncached `make check` remains pending the
+verifier's gate, rather than being replaced by these scoped checks. No native
+task is open. Earlier Linux results are historical evidence, outside this macOS
+recovery's verification scope. Final written work remains below 800 lines,
+with zero production changes, new exports or consumer updates.
