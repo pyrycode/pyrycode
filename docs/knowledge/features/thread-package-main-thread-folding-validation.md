@@ -178,22 +178,26 @@ restoration. No rendered result or signature is reused across restorations.
 `TestCheckpointJSONReuse` and `TestCheckpointProofRestorationReuse` compare
 reused scratch with fresh computation after removed rows/private facts and
 nil/empty/exact-Content changes; the latter fails against the uncleared helper.
-The corpus test uses `t.Parallel()`; its mandatory gate invocation is now isolated
-from the remaining unit suite as described below.
+The exhaustive corpus test uses `t.Parallel()` and requires
+`PYRY_EXHAUSTIVE_TESTS=1`. `make test-exhaustive` runs it with its own package
+timeout, without using a cached pass. `make preship` always requires it.
 Diagnostics separate fixture preparation, uninterrupted baseline feed/proof,
 prefix feed/export and joined-worker elapsed time, and report worker count,
 `GOMAXPROCS`, completed cuts and comparisons. `BenchmarkCheckpointResumePhases`
 separately measures fixture, feed, export, both JSON round trips, import, full
 internal rendering and full proof; the proof phase includes rendering.
 
-`make test` (and therefore `make check`) runs two sequential, complementary race
-selections: `go test -race -skip '^TestCheckpointResumeCorpus$' ./...`, then
-`go test -race -run '^TestCheckpointResumeCorpus$' ./internal/thread`.
-The second invocation requires the complete corpus and every subtest once;
-both retain normal caching and Go's default package timeout. That timeout also
-includes serial tests before parallel tests resume, so corpus optimization alone
-does not reserve its execution budget. Isolation preserves all 30,000 entries,
-201 cuts and 50,101 comparisons while giving the corpus its own deadline.
+`make test` and `make check` retain the 30000-entry history in
+`TestCheckpointResumeRepresentativeCorpus`. It restores nine cuts around late
+links, queued delivery, shell promotion, text growth and turn closure, including
+the independent empty-fold suffix. `TestCheckpointResumeFocused` still restores
+every cut in the smaller scenario vocabulary. Sampling adds a bounded routine
+proof; it does not establish exhaustive equivalence.
+
+`make check` and the verifier require the complete sweep for changed restoration
+dependencies or build inputs. Unknown inputs require it too. See
+[release validation](../../release-tooling.md#full-production-timeout-proofs).
+Export preallocates nonempty inventories and retains empty nil slices.
 
 The [maintainer's Linux/amd64 report for #3503](https://github.com/pyrycode/pyrycode/pull/3506)
 at `46118afa` (Go 1.26.9) records an uncached complete `make check` in 1,046.706s:
