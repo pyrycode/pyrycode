@@ -1,0 +1,57 @@
+{
+  "ticket": "2939",
+  "scope": "Verifier instrument rework; fresh isolated capture does not reproduce the historical mobile rejection.",
+  "fixture": "internal/e2e/realclaude/testdata/tool_then_text_wire_stream_event_v2.1.280.json",
+  "fixture_sha256": "5e8557974dccb669d59380c7a106a96b4b8f8ff99fa3888339600263687d6511",
+  "daemon_revision": "bc6e1e9ba5c99d8ec20a4a8183a40f6df4e90bda",
+  "daemon_dirty": false,
+  "claude_version": "2.1.280 (Claude Code)",
+  "mobile_revision": "not driven; historical failure at 5de4f4459",
+  "settings": {
+    "model": "claude-sonnet-5",
+    "permissionMode": "default",
+    "effort": "unknown: absent from init; no override supplied",
+    "admission": "--allowedTools Bash; historical mobile settings unknown"
+  },
+  "rows": 30,
+  "original_rejected_rows": [],
+  "retained_replay_matches_original": true,
+  "capture_loss": {
+    "lines_dropped_over_cap": 0,
+    "bytes_dropped_over_cap": 0,
+    "partials_dropped": 0,
+    "unterminated_tail_bytes": 0
+  },
+  "counts": {
+    "offline_capture_checks": {
+      "executed": 51,
+      "passed": 51,
+      "failed": 0,
+      "skipped": 0
+    },
+    "streamsup_race_checks": {
+      "executed": 1475,
+      "passed": 1475,
+      "failed": 0,
+      "skipped": 1
+    },
+    "forced_capture": {
+      "executed": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "streamsup_skip_reason": "TestAccountTokenReadDeadline requires make test-slow; existing optional production-duration deadline probe.",
+  "checks_passed": [
+    "go test -race ./internal/streamsup/...",
+    "focused tagged capture/redaction tests under race detection",
+    "go vet ./...",
+    "go vet -tags e2e_realclaude ./internal/e2e/realclaude/...",
+    "go build -o /tmp/builder-2939/pyry ./cmd/pyry"
+  ],
+  "recovery_record": "tool_then_text_record.json; external deny-scanned recovery copy retained",
+  "legacy_capture": "tool_then_text_stream_event_v2.1.280.json retained; its normalized rows cannot establish rejecting wire shapes.",
+  "focused_mobile_proof": "pending: unchanged named mobile drive and rejecting ordered sequence/settings/revision/XML counts required",
+  "subsequent_full_live_suite": "pending: dispatcher-owned"
+}
