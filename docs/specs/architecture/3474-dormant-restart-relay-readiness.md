@@ -101,6 +101,12 @@ than ten failure branches. No in-flight dependency.
 
 - 2026-10-15: Phase instrumentation also touches `internal/e2e/handshake_interactive_helpers_test.go` → `driveHandshakeToOpenDaemonInteractiveResuming`, adding content-free init-sent/response-received logs so a failed read identifies the Noise phase. Remote branches checked: no overlap. No handshake or caller contract changes.
 - The controlled regression reproduced an accepted phone upgrade followed by normal WebSocket closure during its first handshake read, with old pumps joined and deregistration held. This demonstrates the stale-registration dependency, not the historical EOF's exact cause or close shape. The membership-only negative control failed all four new leaf scenarios.
+- 2026-10-16: The issue's testing-policy update, following dispatcher PR #286,
+  supersedes this plan's request for matched macOS execution and its native-route
+  open question. This implementation runs on Linux; macOS checks are outside
+  this ticket's verification scope and are not claimed as passed. Preserve the
+  controlled negative test, repetitions, complete Linux gates and independent
+  review. The fixture contract and security review are unchanged.
 
 ## Builder evidence
 
@@ -221,3 +227,32 @@ Linux implementation and validation are complete and published in PR #3476.
 The current role's matched macOS baseline/candidate acceptance remains blocked
 by the absence of an applicable managed execution recipe, despite the successful
 route probe; it is not a passed check or a later documentation handoff.
+
+### Linux-only scope reassessment, 2026-10-16
+
+The testing-policy revision above supersedes the preceding blocked conclusion.
+The builder stage is complete under the issue's updated acceptance criteria.
+PR #3476 remains open for the verifier's independent review and full-module gate.
+
+Reassessed the saved implementation at merged head `a4b6ec5f`: there are no
+changes under `internal/e2e/` relative to tested repair `167ea7b4`. The diff
+preserves the restart proofs' existing HOME, relay, persisted-session, reset-first,
+fresh-transition/binding, predecessor-wrap-up, successor-spawn and A-isolation
+assertions. Shared helper signatures and the sibling `/clear` proof remain intact.
+The retirement barrier is bounded and precedes replacement startup; controlled
+coverage retains same-ID reuse, deadline/cancellation and released cleanup gates.
+No additional Go changes or repeated full gate were needed for this scope update.
+
+Retrieved prior builder evidence bundle
+`74523189e0162327884201dc21040f4d534482424f2bbd68f1b4bf9a5f18af43` with
+`fleet-task.py evidence 3474 --out /tmp/builder-3474-resume/prior-evidence`.
+Its builder log confirms completed exit-zero `make check` and `make build`;
+the commands, tested revision, counts and skip reasons remain recorded above.
+The historical macOS EOF remains undiagnosed; the demonstrated dependency is
+separate from attribution, and later Linux passes do not change that conclusion.
+
+Read task `0fa055d85ee78411905ae79b2691a8ab30e5065165c7904547f0403199f60859`
+with `fleet-task.py read` into `/tmp/builder-3474-resume/native-withdrawn`.
+Its result is withdrawn before startup under the policy update: no worker ran,
+no test artifacts exist, and no native pass is claimed. The earlier platform
+probe likewise supplies no candidate test evidence. No new native task is needed.
