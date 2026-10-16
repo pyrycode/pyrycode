@@ -77,7 +77,7 @@ func TestReferenceWorkRendering(t *testing.T) {
 						if len(item.Content) != 0 || (item.Kind == "assistant_message" && item.Summary != "") {
 							t.Fatalf("entry %d retained converted content/summary at %d", e.ID, index)
 						}
-						if child := f.children[index]; child != nil && (len(child.base.Content) != 0 || len(child.previous.Content) != 0 || (item.Kind == "assistant_message" && (child.base.Summary != "" || child.previous.Summary != ""))) {
+						if child := f.children[index]; child != nil && child.childSnapshot != nil && (len(child.base.Content) != 0 || len(child.previous.Content) != 0 || (item.Kind == "assistant_message" && (child.base.Summary != "" || child.previous.Summary != ""))) {
 							t.Fatal("child copies retained converted bytes")
 						}
 					}
@@ -152,12 +152,8 @@ func TestReferenceToolClassification(t *testing.T) {
 			f, _ := testReferenceFold([]history.Entry{e})
 			testFeed(t, f, e)
 			item := f.items[0]
-			converted := sourceKind == "codex" || name == "Read"
-			if converted != (len(item.Content) == 0) {
+			if len(item.Content) != 0 {
 				t.Fatal("wrong lifecycle selection", sourceKind, name)
-			}
-			if !converted && !json.Valid(item.Content) {
-				t.Fatal("inline fallback lost payload")
 			}
 		}
 	}

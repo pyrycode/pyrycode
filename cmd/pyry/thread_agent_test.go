@@ -157,6 +157,7 @@ func TestThreadAgentRecordedReplay(t *testing.T) {
 		}
 	}
 	for split := 0; split <= len(entries); split++ {
+		testRecordedReferencePartition(t, entries, split)
 		f := thread.New(testConvID)
 		if err := f.Feed(entries[:split]); err != nil {
 			t.Fatal(err)
