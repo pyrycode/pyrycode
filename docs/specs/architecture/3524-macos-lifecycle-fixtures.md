@@ -110,3 +110,17 @@ limits. Preserve positive-retirement and persistent-uncertainty distinctions.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: controlled native comparison resolved the first open question.
+  With unchanged old budgets, 900 ms child startup produced missing readiness,
+  200 ms health-body delay prevented healthy confirmation, and a 5.2-second
+  install delay exhausted the five-second wait during `ci` (version commands
+  had already succeeded). All three same scenarios passed with the fixture repair.
+  The named health-sequence/metadata tests also retain delayed startup and bodies.
+  The new publication readiness allowance is one minute with early-outcome
+  observation; cancellation and shutdown join its worker even after assertion failure.
+  These are demonstrated fixture expiry weaknesses, not historical root-cause
+  attribution. In particular the historical candidate-validation failure remains
+  unattributed; fixed-label command diagnostics now distinguish that phase.

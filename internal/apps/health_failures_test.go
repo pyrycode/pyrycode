@@ -38,7 +38,7 @@ func healthFailureWait(t *testing.T, o *Owner, g *generation, expected int) {
 
 func testOwnerHealthFailures(t *testing.T, delayed bool) {
 	t.Helper()
-	r, o := healthFixture(t, healthReply{Body: healthyBody()})
+	r, o := healthLifecycleFixture(t, healthReply{Body: healthyBody(), StartDelay: 900 * time.Millisecond, BodyDelay: 200 * time.Millisecond})
 	ticks := make(chan time.Time)
 	o.healthTicks = ticks
 	g := healthStart(t, r, o)
@@ -58,7 +58,7 @@ func testOwnerHealthFailures(t *testing.T, delayed bool) {
 		if expected == 0 {
 			body = healthyBody()
 		}
-		healthWrite(t, r, healthReply{Body: body})
+		healthWrite(t, r, healthReply{Body: body, BodyDelay: 200 * time.Millisecond})
 		select {
 		case ticks <- time.Now():
 		case <-g.done:
@@ -77,6 +77,7 @@ func testOwnerHealthFailures(t *testing.T, delayed bool) {
 			observed, state := healthFailureState(o, g)
 			t.Fatalf("expected probes=%d, observed=%d; expected failures=%d, observed=%d %s", baseline+step+1, got, expected, observed, state)
 		}
+		t.Logf("released probe=%d completed failures=%d", step+1, expected)
 		if expected < 3 {
 			if err := healthUse(target); err != nil {
 				observed, state := healthFailureState(o, g)
