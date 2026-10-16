@@ -13,8 +13,8 @@ names. `checkpointSchema` is 1 and must increase when the format changes;
 `CheckpointState.Rules` separately records the current `foldingRules`, alongside
 the conversation owner and consumed version. Legacy inline `New` folds reject
 export and retain their existing behavior. In-memory restoration and synthetic
-resume-equivalence proofs are available; recorded-frame resume coverage follows
-in #3491, persistence in #3336 and Store loading in #3337. See
+and committed-recording resume-equivalence proofs are available; persistence
+remains in #3336 and Store loading in #3337. See
 [Cache and epochs](thread-package.md#cache-and-epochs).
 
 `HistorySource.Lookup([]uint64) ([]history.Entry, error)` supplies immutable
@@ -239,7 +239,35 @@ intermediate closure/reopening revisions and genuine endings.
 `TestCheckpointFinishedMarkerValidation` combine corruption rejection with
 valid all-cut continuation, including late child claims. These default-build
 offline tests retain the existing independent semantic assertions and unchanged
-golden expectations; recorded-frame resume proof remains with #3491.
+golden expectations.
+
+`cmd/pyry.TestThreadRecordedBaselines` also calls `testRecordedCheckpointResume`
+for `parent_tool_use_v2.1.259.json`, `task_notification_v2.1.259.json` and
+`roster_after_finish_v2.1.280.json`, derived through the real parsers/emitter by
+`testRecordedFrames` and `testNormalizeRecorded`. Each history covers cut zero
+through every emitted entry, including full, hidden facts and companion emissions
+within a frame. At each cut both export parts separately cross JSON before
+`ImportCheckpoint` restores the same owner with a prefix-limited `HistorySource`.
+Import must make zero lookups; only suffix entries are fed afterward. Comparisons
+run immediately and after every suffix entry against detached snapshots from one
+uninterrupted `NewReference` fold, without Store loading.
+
+`testRecordedCheckpointCompare` directly compares every rendered Item field and
+exact Content bytes, the complete exported item inventory (including hidden,
+unresolved and suppressed metadata/recipes), and all `CheckpointState` facts:
+touches, current visibility, ever-published membership, consumed/last-shown versions
+and suppression/unproven watermarks. **Visible equality cannot prove continuation
+state.** Clearing `Published` left rendered output unchanged but failed the state
+comparison; whitespace-only Content corruption separately failed byte equality.
+JSON-normalized item digests alone would miss the latter. Completion counters
+require every cut and comparison: the three histories emit 27/12/18 entries,
+covering 60 cuts and 687 immediate/suffix comparisons.
+
+This default-build offline regression gate retains explicitly synthetic shell
+creation, launch-result and turn-end context, unchanged semantic assertions and
+committed goldens. Only the supplied frames are captured evidence; running this
+proof adds no live Claude capture or recapture evidence. See the
+[recorded corpus and evidence limits](thread-package.md#reusable-fold-regression-corpus).
 
 Production reference folds keep `mainTurn` as a bounded cursor for its scoped
 turn generation: recorded source/key, original opening, first ending and current
