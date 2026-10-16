@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -72,6 +74,51 @@ type testCheckpointReadSource struct{ t testing.TB }
 func (s testCheckpointReadSource) Lookup([]uint64) ([]history.Entry, error) {
 	s.t.Fatal("checkpoint reader looked up history")
 	return nil, nil
+}
+
+type testCheckpointErrorReader struct{ err error }
+
+func (r testCheckpointErrorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestReadCheckpointItemsReadErrors(t *testing.T) {
+	t.Parallel()
+	f, _ := testReferenceFold([]history.Entry{testMessage(1)})
+	testFeed(t, f, testMessage(1))
+	state, rows, err := f.ExportCheckpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := testCheckpointFrame(t, rows[0])
+	index := append(bytes.Clone(frame), frame...)
+	for _, fault := range []struct {
+		name string
+		err  error
+		want error
+	}{
+		{"eio", syscall.EIO, ErrPersistence},
+		{"other-io", errors.New("read failure"), ErrPersistence},
+		{"eof", io.EOF, errCacheAbsent},
+		{"unexpected-eof", io.ErrUnexpectedEOF, errCacheAbsent},
+		{"wrapped-eof", fmt.Errorf("read: %w", io.EOF), errCacheAbsent},
+	} {
+		for _, cut := range []int{0, 3, checkpointFrameHeader, checkpointFrameHeader + 1} {
+			t.Run(fmt.Sprintf("%s/offset-%d", fault.name, cut), func(t *testing.T) {
+				// Fail in the second frame so no previously decoded row may escape.
+				reader := io.MultiReader(bytes.NewReader(index[:len(frame)+cut]), testCheckpointErrorReader{fault.err})
+				got, err := readCheckpointItems(reader, int64(len(index)), state.ItemIDs)
+				if !errors.Is(err, fault.want) || got != nil {
+					t.Fatalf("rows = %v, error = %v; want nil, %v", got, err, fault.want)
+				}
+			})
+		}
+	}
+	t.Run("crc", func(t *testing.T) {
+		index[len(frame)+7] ^= 1
+		got, err := readCheckpointItems(bytes.NewReader(index), int64(len(index)), state.ItemIDs)
+		if !errors.Is(err, errCacheAbsent) || got != nil {
+			t.Fatalf("rows = %v, error = %v; want nil, %v", got, err, errCacheAbsent)
+		}
+	})
 }
 
 func TestReadCheckpointResume(t *testing.T) {
@@ -167,13 +214,15 @@ func TestReadCheckpointInvalid(t *testing.T) {
 		"duplicate-row":      func(m map[string]any) { m["fold"].(map[string]any)["item_ids"] = []int{1, 1} },
 		"invalid-graph":      func(m map[string]any) { m["fold"].(map[string]any)["open_texts"] = []int{999} },
 	}
+	missingEvidence := make(map[string]func(map[string]any))
 	for _, section := range []struct {
 		name   string
 		fields []string
 	}{{"", []string{"valid_length", "fold", "certificate"}}, {"fold", []string{"conversation_id", "version", "last_shown"}}, {"certificate", []string{"Epoch", "Version", "LastShownVersion", "Checksum", "Clean"}}} {
 		for _, field := range section.fields {
 			for _, null := range []bool{false, true} {
-				mutations[fmt.Sprintf("%s/%s/null-%v", section.name, field, null)] = func(m map[string]any) {
+				name := fmt.Sprintf("%s/%s/null-%v", section.name, field, null)
+				missingEvidence[name] = func(m map[string]any) {
 					if section.name != "" {
 						m = m[section.name].(map[string]any)
 					}
@@ -183,29 +232,39 @@ func TestReadCheckpointInvalid(t *testing.T) {
 						delete(m, field)
 					}
 				}
+				mutations[name] = missingEvidence[name]
 			}
 		}
 	}
 	for _, name := range []string{"../thread-index-" + strings.Repeat("b", 32) + ".bin", "/tmp/thread-index-" + strings.Repeat("b", 32) + ".bin", "thread-index-" + strings.Repeat("B", 32) + ".bin", cacheName, "thread-index-short.bin"} {
 		mutations["generation/"+name] = func(m map[string]any) { m["generation"] = name }
 	}
-	for name, mutate := range mutations {
-		t.Run(name, func(t *testing.T) {
-			f, _ := testReferenceFold([]history.Entry{testMessage(1)})
-			testFeed(t, f, testMessage(1))
-			_, rows, _ := f.ExportCheckpoint()
-			s, dir, state, _ := testCheckpointFiles(t, f, rows)
-			raw, _ := json.Marshal(state)
-			var m map[string]any
-			if err := json.Unmarshal(raw, &m); err != nil {
-				t.Fatal(err)
-			}
-			mutate(m)
-			testWriteCheckpointState(t, dir, m)
-			if r, _, err := s.readCheckpoint(testStoreA, testCheckpointReadSource{t}); err == nil || r != nil {
-				t.Fatal("invalid state restored", err)
-			}
-		})
+	for _, empty := range []bool{false, true} {
+		cases := mutations
+		var entries []history.Entry
+		if empty {
+			cases = missingEvidence
+		} else {
+			entries = []history.Entry{testMessage(1)}
+		}
+		for name, mutate := range cases {
+			t.Run(fmt.Sprintf("empty-%t/%s", empty, name), func(t *testing.T) {
+				f, _ := testReferenceFold(entries)
+				testFeed(t, f, entries...)
+				_, rows, _ := f.ExportCheckpoint()
+				s, dir, state, _ := testCheckpointFiles(t, f, rows)
+				raw, _ := json.Marshal(state)
+				var m map[string]any
+				if err := json.Unmarshal(raw, &m); err != nil {
+					t.Fatal(err)
+				}
+				mutate(m)
+				testWriteCheckpointState(t, dir, m)
+				if r, _, err := s.readCheckpoint(testStoreA, testCheckpointReadSource{t}); err == nil || r != nil {
+					t.Fatal("invalid state restored", err)
+				}
+			})
+		}
 	}
 	for _, fault := range []string{"missing-state", "invalid-state", "trailing-state", "missing-index", "short-file", "short-header", "short-payload", "huge-frame", "zero-frame", "crc", "json", "null-row", "invalid-row", "committed-torn-tail", "committed-crc-tail"} {
 		t.Run(fault, func(t *testing.T) {

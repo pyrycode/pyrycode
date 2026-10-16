@@ -3,6 +3,7 @@ package thread
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"hash/crc32"
 	"io"
 
@@ -87,45 +88,64 @@ func (s *Store) readCheckpoint(id conversations.ConversationID, source HistorySo
 	if d.ValidLength > info.Size() {
 		return nil, checkpointFileState{}, errCacheAbsent
 	}
-	latest := make(map[uint64]CheckpointItem)
-	for remaining := d.ValidLength; remaining > 0; {
-		var header [checkpointFrameHeader]byte
-		if remaining < int64(len(header)) {
-			return nil, checkpointFileState{}, errCacheAbsent
-		}
-		if _, err := io.ReadFull(f, header[:]); err != nil {
-			return nil, checkpointFileState{}, errCacheAbsent
-		}
-		remaining -= int64(len(header))
-		size := int64(binary.BigEndian.Uint32(header[:4]))
-		if size == 0 || size > remaining || uint64(size) > uint64(^uint(0)>>1) {
-			return nil, checkpointFileState{}, errCacheAbsent
-		}
-		raw := make([]byte, int(size))
-		if _, err := io.ReadFull(f, raw); err != nil || crc32.Checksum(raw, checkpointCRC) != binary.BigEndian.Uint32(header[4:]) {
-			return nil, checkpointFileState{}, errCacheAbsent
-		}
-		var row CheckpointItem
-		if err := json.Unmarshal(raw, &row); err != nil || row.Metadata.ID == 0 {
-			return nil, checkpointFileState{}, errCacheAbsent
-		}
-		latest[row.Metadata.ID] = row
-		remaining -= size
-	}
-	if len(latest) != len(d.Fold.ItemIDs) {
-		return nil, checkpointFileState{}, errCacheAbsent
-	}
-	rows := make([]CheckpointItem, 0, len(latest))
-	for _, itemID := range d.Fold.ItemIDs {
-		row, ok := latest[itemID]
-		if !ok {
-			return nil, checkpointFileState{}, errCacheAbsent
-		}
-		rows = append(rows, row)
+	rows, err := readCheckpointItems(f, d.ValidLength, d.Fold.ItemIDs)
+	if err != nil {
+		return nil, checkpointFileState{}, err
 	}
 	restored, err := ImportCheckpoint(string(id), source, d.Fold, rows)
 	if err != nil {
 		return nil, checkpointFileState{}, err
 	}
 	return restored, d, nil
+}
+
+// readCheckpointItems reads a committed prefix already checked against file size.
+// Any failure discards all decoded rows before they can be imported.
+func readCheckpointItems(r io.Reader, validLength int64, itemIDs []uint64) ([]CheckpointItem, error) {
+	latest := make(map[uint64]CheckpointItem)
+	for remaining := validLength; remaining > 0; {
+		var header [checkpointFrameHeader]byte
+		if remaining < int64(len(header)) {
+			return nil, errCacheAbsent
+		}
+		if _, err := io.ReadFull(r, header[:]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, errCacheAbsent
+			}
+			return nil, ErrPersistence
+		}
+		remaining -= int64(len(header))
+		size := int64(binary.BigEndian.Uint32(header[:4]))
+		if size == 0 || size > remaining || uint64(size) > uint64(^uint(0)>>1) {
+			return nil, errCacheAbsent
+		}
+		raw := make([]byte, int(size))
+		if _, err := io.ReadFull(r, raw); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, errCacheAbsent
+			}
+			return nil, ErrPersistence
+		}
+		if crc32.Checksum(raw, checkpointCRC) != binary.BigEndian.Uint32(header[4:]) {
+			return nil, errCacheAbsent
+		}
+		var row CheckpointItem
+		if err := json.Unmarshal(raw, &row); err != nil || row.Metadata.ID == 0 {
+			return nil, errCacheAbsent
+		}
+		latest[row.Metadata.ID] = row
+		remaining -= size
+	}
+	if len(latest) != len(itemIDs) {
+		return nil, errCacheAbsent
+	}
+	rows := make([]CheckpointItem, 0, len(latest))
+	for _, itemID := range itemIDs {
+		row, ok := latest[itemID]
+		if !ok {
+			return nil, errCacheAbsent
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
 }

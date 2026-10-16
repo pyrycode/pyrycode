@@ -75,3 +75,8 @@ Pending documentation stage: update `docs/knowledge/features/thread-package.md`,
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+
+- 2026-10-16, verifier finding 1: extract `readCheckpointItems(io.Reader, validLength, itemIDs)` for injected frame-read failures. EOF and unexpected EOF remain invalid checkpoint data; other header/payload I/O failures return `ErrPersistence`, separately from CRC rejection. Discard all decoded rows on failure. File admission and pre-read size checks remain in `Store.readCheckpoint`.
+- 2026-10-16, verifier finding 2: run every absent/null evidence mutation against both version-one and empty version-zero checkpoints. Retain clean/dirty explicit-zero success coverage in `TestReadCheckpointResume`.
