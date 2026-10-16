@@ -12,14 +12,24 @@ exported fields and JSON tags define the format independently of private field
 names. `checkpointSchema` is 1 and must increase when the format changes;
 `CheckpointState.Rules` separately records the current `foldingRules`, alongside
 the conversation owner and consumed version. Legacy inline `New` folds reject
-export and retain their existing behavior. Restoration and resume-equivalence
-proofs remain in #3490, recorded-history proofs in #3491 and persistence/Store
-checkpoint loading in #3336; see [Cache and epochs](thread-package.md#cache-and-epochs).
+export and retain their existing behavior. In-memory restoration and synthetic
+resume-equivalence proofs are available; recorded-frame resume coverage follows
+in #3491, persistence in #3336 and Store loading in #3337. See
+[Cache and epochs](thread-package.md#cache-and-epochs).
+
+`HistorySource.Lookup([]uint64) ([]history.Entry, error)` supplies immutable
+entries for the conversation. `NewReference(conversationID, source) *Fold`
+constructs a reference-backed baseline;
+`ImportCheckpoint(conversationID, source, state, items) (*Fold, error)` restores
+the exported state with the expected conversation owner and a non-nil source.
+The caller serializes fold/source access and keeps the source available for
+later `Feed` and `Render`. Import neither looks up history nor renders content
+or feeds the prefix; source contents are checked when subsequently used.
 
 Records follow internal creation-ID order, independently of public `Order` or
 visibility, including unresolved, hidden and delivery-suppressed rows.
-`CheckpointState.ItemIDs` is the complete ordered manifest: a later importer must
-compare all records against it to detect an omission even when no continuation
+`CheckpointState.ItemIDs` is the complete ordered manifest: import compares
+all records against it to detect an omission even when no continuation
 reference names the missing row. Continuation state includes watermarks, touches,
 ever-published/current visibility membership, scopes and pending boundaries,
 accepted sends/delivery matching, historical turn generations and original
@@ -27,7 +37,8 @@ openings, unfinished text, scoped child joins, agent lifetimes and observations.
 Reversible children retain intrinsic/previous metadata and recipes; final children,
 main calls and reports retain compact markers. Terminal-order and content-source
 IDs stay separate, and equality digests survive export. Derived child indexes,
-task-ID membership and text slots can be reconstructed from the retained facts.
+task-ID membership and text slots are rebuilt from the retained facts; constructor
+initialization supplies runtime scratch without resolving or changing saved rows.
 
 One-based identity tables (zero means nil) preserve shared turns, main/agent
 shells, outcomes and report slots while keeping independent equal values distinct.
@@ -40,6 +51,32 @@ could instead write into an obsolete backing array. Recipe fields omit absent
 would decode into non-nil literal `null` bytes and change the document. Actual
 scalar null literals remain explicit and detached.
 
+Import allocates identity-table objects before wiring their edges. The original
+fold, document and restored fold own independent nested maps, slices, snapshots,
+recipes and literal bytes in both mutation directions. Within the restored
+graph, shared turns, reciprocal shell owners and report slots remain shared;
+equal-but-independent objects remain distinct. Value-based deduplication would
+silently couple future mutations of independent report slots.
+
+Unsupported schema or folding rules return `*CheckpointCompatibilityError`,
+identifiable with `errors.As`. Wrong ownership, incomplete/duplicate/reordered
+records, dangling references, invalid item indexes/ID relationships and malformed
+SHA-256 digests return an error and nil fold. History-ID gaps and field-specific
+negative sentinels remain valid. Equality digests do not authenticate a checkpoint;
+file integrity and recovery belong to persistence and Store loading.
+
+**An in-range index of the right kind does not establish ownership.**
+`checkpointImporter.turnText` checks unique text ownership, turn/source, retained
+main-opening generation and child group/parent lane. Swapping two valid assistant
+indexes would otherwise send later deltas into the wrong reply. Finished-call
+markers require an ordinary tool row or exactly the `-2` launcher sentinel and a
+non-nil terminal; accepting `-1` or an assistant row breaks later child claims.
+First-lifetime shell promotion can move the reciprocal ordinary owner into a
+named lifetime while retaining its original child-call route. Requiring those
+groups to be equal rejects a legitimate export: import checks the matching
+source/tag, legacy-to-lifetime transition, destination call membership and
+reciprocal shell identity instead.
+
 `TestCheckpointEmpty`, `TestCheckpointRelationships`, `TestCheckpointRecords` and
 `TestCheckpointLifecycleFacts` inspect JSON-round-tripped records and identities,
 including historical openings, shared shells/report slots, pending joins and
@@ -49,6 +86,55 @@ independent replay, and verifies later feeds cannot change an earlier document.
 Export performs no history lookup or content rendering; failing lookup fixtures
 guard that boundary. The document excludes history sources/caches, legacy inline
 payload storage, counters and scratch buffers, and metadata has no `Content`.
+
+`TestCheckpointImport` checks exact re-export and rendering after both parts
+cross JSON, with history lookup forbidden during import.
+`TestCheckpointImportInvalid` includes a missing otherwise-unreferenced row and
+a legitimate history gap. `TestCheckpointImportOwnership` and
+`TestCheckpointSnapshotIsolation` check graph identity and nested isolation under
+document mutation and later feeding in both directions.
+`TestCheckpointImportSourceFailure` uses a failing/counting source to prove zero
+import lookups, then requires `ErrUnavailable` with no partial rendered results
+or usable observation, and resumes by feeding only the suffix after repair.
+It also checks that restoration adds no inline payload cache and preserves
+legacy `New` output.
+
+The reusable same-package `testCheckpointResume(t, entries, cuts)` prepares one
+uninterrupted reference baseline. For each cut it JSON-round-trips both export
+parts, imports, and compares immediately and after **every** suffix entry. Its
+proof includes exact rendered Content bytes, every Item field/revision, internal
+creation order and recipes, touches, ever-published/current visibility and
+consumed/last-shown, suppression and unproven watermarks. Each import hashes its
+complete inventory, including hidden, unresolved and delivery-suppressed rows;
+post-join affected candidates update the per-item signatures after suffix feeds.
+Hashing only JSON containing `json.RawMessage` normalizes Content whitespace and
+escaping, concealing byte differences. The proof includes raw Content bytes
+separately; `TestCheckpointProofContentBytes` supplies the negative control.
+
+`TestCheckpointResumeCorpus` covers 201 distinct cuts of `testFoldCorpus(30000)`:
+empty plus the final 200 boundaries, including full, for 50,101 immediate/suffix
+comparisons. Shared immutable prefix preparation and eight joined workers bound
+cost without skipping comparisons; completion counters reject dropped cuts.
+The corpus test uses `t.Parallel()` because a long sequential setup otherwise
+postpones existing parallel tests until too little package timeout remains.
+Focused histories use every cut across unfinished text, late tool results after
+turn end, late reports after genuine agent end, compaction followed by a divider,
+background shell completion, sends, hidden children, late task links, reversible
+ancestor closure and reused source/lifetime/legacy identities.
+
+`TestCheckpointResumeCompanions` and `TestCheckpointEqualCompanionProvenance`
+cover both mapped/durable arrival orders and directly assert content-source
+replacement separately from terminal order, revisions and touches. Equal-content
+provenance replacement generally leaves the rendered item unchanged, but a
+durable-only shell result first becomes foreground eligible when its mapped
+companion supplies the matching turn; that transition legitimately revises and
+touches the row. `TestCheckpointLifecycleAssertions` independently checks
+intermediate closure/reopening revisions and genuine endings.
+`TestCheckpointResumeShellPromotion`, `TestCheckpointTurnTextOwnership` and
+`TestCheckpointFinishedMarkerValidation` combine corruption rejection with
+valid all-cut continuation, including late child claims. These default-build
+offline tests retain the existing independent semantic assertions and unchanged
+golden expectations; recorded-frame resume proof remains with #3491.
 
 Production reference folds keep `mainTurn` as a bounded cursor for its scoped
 turn generation: recorded source/key, original opening, first ending and current

@@ -387,10 +387,18 @@ or in-memory monotonic time. Segment-line formatting is excluded, while stored
 payload bytes remain opaque. This identifies entry V, not the whole prefix or
 resumable fold state.
 
-Every load or retry reconstructs a fresh fold from entry 1 of readable history
-with bounded `ForwardReader.Walk` chunks. Eligible metadata retains its epoch only if replay
-reaches exactly V and both the consumed entry's checksum and reconstructed
-last-shown watermark match the record. Replay continues through the surviving
+In-memory reference folds support `ImportCheckpoint` from the two JSON export
+parts, with a caller-supplied `HistorySource`, without prefix replay or history
+I/O. Restoration preserves the complete internal inventory and continuation
+graph; it does not restore a Store epoch or establish certificate eligibility.
+See [checkpoint validation and resume proof](thread-package-main-thread-folding-validation.md#validation-and-testing).
+Checkpoint persistence remains in #3336 and Store loading in #3337 under
+[ADR 045](../decisions/045-thread-index-over-history.md).
+
+`Store` loads and retries still reconstruct a fresh fold from entry 1 of
+readable history with bounded `ForwardReader.Walk` chunks. Eligible metadata
+retains its epoch only if replay reaches exactly V and both the consumed entry's
+checksum and reconstructed last-shown watermark match the record. Replay continues through the surviving
 readable bound before usability; cached fields never seed the fold.
 **Visible items are insufficient continuation state:** `Fold.Items` omits
 unresolved children, pending reports and private joins. Full replay restores
