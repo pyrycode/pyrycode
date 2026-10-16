@@ -474,10 +474,14 @@ func TestStoreQueriesRetirementIsolation(t *testing.T) {
 	snap := testStoreWait(t, s, testStoreA, StateUsable, 1)
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var gate, cleanup sync.Once
+	var armed atomic.Bool
+	armed.Store(true)
 	defer cleanup.Do(func() { close(release) })
 	s.mu.Lock()
 	s.workers[testStoreA].query.work = func(bool) {
-		gate.Do(func() { close(entered); <-release })
+		if armed.Load() {
+			gate.Do(func() { close(entered); <-release })
+		}
 	}
 	s.mu.Unlock()
 	var got QueryResult
@@ -487,6 +491,7 @@ func TestStoreQueriesRetirementIsolation(t *testing.T) {
 		got, err = s.NewestWindow(context.Background(), testStoreA, 1)
 	}()
 	testStoreSignal(t, entered)
+	armed.Store(false)
 	// A paused consumer must not hold publication or history-writer locks.
 	testStoreAppend(t, h, testStoreA, testMessage(0))
 	testStoreWait(t, s, testStoreA, StateUsable, 2)

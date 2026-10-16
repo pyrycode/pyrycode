@@ -1,17 +1,20 @@
 # Constructing a `streamRunner` — `newStreamRunnerFactory` (#1109, extended #1098, #1168)
 
-`cmd/pyry/streamsup_runner.go` also holds `newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath
-string) sessions.RunnerFactory` — returns exactly the `sessions.RunnerFactory` signature (above); #1109
+`cmd/pyry/streamsup_runner.go` also holds `newStreamRunnerFactory`, which binds the sink,
+MCP config path, model vocabulary store and `streamApprovalConfig` and returns a
+`sessions.RunnerFactory`; #1109
 delivered the constructor (as the bare `streamRunnerFactory` func, the first `streamsup.New` caller
 tree-wide), #1098 turned it into this `sink`-capturing constructor so the Parser it installs has somewhere
 to send turnevents, #1168 added the param (then `mcpApprovePath`) to inject the permission-approval flags,
 and #2169 renamed it `mcpServersPath` once the document it names carries a second server (`pyry_files`,
 [pyry-mcp-files-command.md](pyry-mcp-files-command.md)) alongside `pyry_approve`.
-Body of the returned closure: `scfg := mapStreamsupConfig(cfg)`; `scfg.Args =
-withApprovalArgs(scfg.Args, mcpServersPath, cfg.PermissionMode, cfg.OperatorBypass)`; `tag :=
-newStreamSessionTag(cfg.SessionID)` (#1133 — the live handle both fan-in lanes read); `parser, held :=
-newSessionParser(sink.sinkForTag(tag.ID), cfg.Logger)` (#1840, below); `scfg.Stdout = parser`;
-`scfg.OnChildExit = sink.exitForTag(tag.ID)`; `scfg.OnSessionRotate = tag.Rotate` — see [Session rotation
+The returned closure maps `cfg` through `mapStreamsupConfig` and shapes its args
+with `withApprovalArgs`, passing `cfg.PermissionMode`, `cfg.OperatorBypass` and
+`approval.stdio`. `newStreamSessionTag(cfg.SessionID)` supplies the live identity
+shared by both fan-in lanes and the parser's holds. `newSessionParser` receives
+the decorated session sink, and its parser becomes `scfg.Stdout`.
+`scfg.OnChildExit` retires pending stdio requests and retained tasks before reporting
+the exit through `sink.exitForSessionTag(tag)`; `scfg.OnSessionRotate = tag.Rotate` — see [Session rotation
 notification](streamsup-package-session-rotation-notification-onsessionrotate.md) for why the tag is
 minted here, ahead of both halves, rather than threaded through either signature; `scfg.OnCrashLoop =
 sink.crashLoopForTag(tag.ID)` (#2724, same live tag again) — see [Crash episode
@@ -19,12 +22,14 @@ notification](streamsup-package-crash-episode-notification-oncrashloop.md); `scf
 approval.account` (#2824 — nil unless this instance has a configured Claude account source; see [Claude
 account source](claude-account-source.md)); `streamsup.New(scfg)`;
 on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
-`streamRunner{r: r, models: held}`.
+an adapter retaining the runner, parser holds, settings installer and wrap-up capture.
 
-**`withApprovalArgs(args []string, mcpServersPath, storedMode string, operatorBypass bool) []string`
-(#1168, extended #2043, #2065)** is the interactive-stream twin of `agent_run.go`'s non-yolo
-`permissionArgs` wiring (#1106) — the first live consumer of `permissionArgs`/`writeMCPServersConfig`
-on the interactive path. Through #2043 it read `--dangerously-skip-permissions` off `args` as the
+**`withApprovalArgs` (#1168, extended #2043, #2065, #3515)** selects the interactive
+child's host-response transport using stored posture, operator bypass and
+`stdio_permission_prompt`. It shares `agent_run.go`'s non-yolo `permissionArgs`
+wiring (#1106), and was the first interactive consumer of
+`permissionArgs`/`writeMCPServersConfig`. Through #2043 it read
+`--dangerously-skip-permissions` off `args` as the
 single deterministic per-spawn yolo signal, because that flag's presence or absence *was* the
 posture. **#2065 makes the flag unconditional** (`sessions.claudeSettingsArgs` appends it to every
 argv, since the posture is now decided in-band rather than by what launches), so a predicate reading
@@ -35,9 +40,13 @@ with", which is true in exactly two cases, both decided before this function run
 rather than read off `args`: `storedMode == sessions.PermissionModeBypass` (internal/streamsup refuses
 to write that mode by non-membership, so nothing walks the child back), or `operatorBypass` — the
 escalation came from the operator's pass-through claude args, which never touch `SessionSettings`, so
-the daemon may not revoke a grant it did not make. Either → return `args` unchanged (byte-identical to
-pre-#2065 on both rows, and avoids re-emitting a flag already present). Otherwise → append the
-approval set, dropping its own `--permission-mode default` pair first when `args` already names a
+the daemon may not revoke a grant it did not make. Either bypass source gets exactly
+one `--permission-prompt-tool stdio` pair, regardless of `stdio_permission_prompt`,
+without daemon MCP-server injection or a permission-mode override. This response
+connection is required for `AskUserQuestion`; returning bypass args unchanged
+removed the tool even though ordinary permission prompts were unnecessary.
+Otherwise → append the configured MCP/stdio approval set, dropping its own
+`--permission-mode default` pair first when `args` already names a
 mode (below); this is now a child the daemon downgrades in-band before its first turn, and it needs
 the approval gate exactly as it did before #2065.
 
@@ -55,9 +64,22 @@ the old presence check specifically to confirm this row catches it.
 the settings-free base may already carry one or repeated pass-through copies while
 `sessions.claudeSettingsArgs` contributes its unconditional copy. Sessions' final
 `composeSpawnArgs` boundary preserves the first exact token and removes the rest before this
-function runs. `withApprovalArgs` still returns that argv unchanged; it does not own deduplication,
-and its `namesPermissionMode` / `dropPermissionMode` helpers continue to touch only
-`--permission-mode`.
+function runs. `withApprovalArgs` preserves that escalation flag. It separately
+normalizes split and joined `--permission-prompt-tool` flags before installing one
+selected transport, so pass-through arguments and settings recomposition cannot
+leave competing response transports. `namesPermissionMode` / `dropPermissionMode`
+continue to touch only `--permission-mode`.
+
+**Response flags and parser installation must move together (#3515).**
+`newStreamRunnerFactory` installs `stdioPermissionHandler` for every Claude runner,
+including an initially non-bypass MCP child: settings can enter bypass later
+without reconstructing the parser. The handler is dormant while MCP is selected.
+Installing only the argv pair, or gating the handler on the initial mode/toggle,
+leaves questions offered but unanswerable after a settings change. The handler
+uses the existing registry and question bridge, captures the originating stdin
+for each request, and retires pending requests on child exit. `settingsInstaller.shape`
+reuses the same transport shaping for restart and next spawn, including leaving
+bypass. See [config semantics](config-package.md#stdio_permission_prompt--interactive-permission-transport-2343).
 
 Runs inside the shared factory closure, so it covers **both** the bootstrap runner
 and per-conversation runners — a per-conversation stream session cannot silently bypass the approval
@@ -81,15 +103,15 @@ joined `--permission-mode=` forms — the operator's bootstrap pass-through args
 mirroring `stripSessionIDFlags`'s two-form handling; `dropPermissionMode` scans for the pair rather than
 slicing a known offset, so `permissionArgs`' own ordering is not load-bearing).
 
-**Rejected shortcut — a second early return, mirroring the stay-in-bypass arm above
-(`if namesPermissionMode(args) { return args }`).** This looks like the natural sibling of that
-early return but is a privilege escalation: it would spawn every mode-carrying session
+**Rejected shortcut — an early return based only on a named permission mode
+(`if namesPermissionMode(args) { return args }`).** This would spawn every mode-carrying session
 with **no** `--permission-prompt-tool`, `--mcp-config`, or `--strict-mcp-config` at all — the daemon's
 approval gate entirely absent — reachable from a stored setting alone, no operator action beyond
-setting a permission mode. The stay-in-bypass early return was safe at #2043 because the flag's
-presence meant the child had no approval gate to lose in the first place; since #2065 that early
-return is keyed on `storedMode`/`operatorBypass` rather than the flag (above) for exactly this
-reason — a mode-carrying child (`plan`, `acceptEdits`, `auto`, `dontAsk`) still needs the gate, and
+setting a permission mode. The former bypass early return was safe for ordinary
+approvals at #2043 because the flag's presence meant the child had no approval gate
+to lose; since #2065 the bypass branch is keyed on `storedMode`/`operatorBypass`
+rather than the flag (above) for exactly this reason — a mode-carrying child
+(`plan`, `acceptEdits`, `auto`, `dontAsk`) still needs the gate, and
 the flag alone can no longer tell the two apart. Caught in the #2043 spec's mandated security review before any code shipped; a test asserts
 the three approval flags survive a mode-carrying spawn.
 
@@ -207,3 +229,16 @@ posture cell moves, and it moves through `SetSpawnPermissionMode`, never by insp
 
 Neither #1109 nor #1098 wired the factory into production on their own — that was #1081's scope (below).
 See [codebase/1109.md](../codebase/1109.md).
+
+## Testing host-response lifecycle
+
+`TestStreamRunnerFactory_QuestionHandlerAvailable` exercises the installed parser
+handler through the real question bridge. `RestartFresh` replaces the asking
+session, while a following `Restart` respawns within the replacement session;
+both children deliberately reuse request/tool IDs to expose late-answer routing
+mistakes. Its broadcaster must synchronize pushes, connection state and snapshots:
+old-child retirement can overlap replacement-child question surfacing, so the
+plain synchronous `fakeInteractiveBcast` is unsafe in this fixture. A connected
+answerer keeps the question parked through an expiry check; disconnect then lets
+timeout retire it. Assertions check refusal, retired state, one dismissal per
+replaced/refused batch and rejection of late answers.

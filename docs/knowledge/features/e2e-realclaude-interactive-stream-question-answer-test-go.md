@@ -34,7 +34,26 @@ to avoid. `spawnPermissionDaemon` and `startStreamModalResolutionHarness` both
 took a `model` parameter to carry it, constrained to a compile-time constant
 at every call site since it lands in claude's argv.
 
-## Lessons that outlive this ticket
+## Testing question round trips
+
+- **A bypass harness must let the daemon supply the response transport.**
+  `spawnPermissionDaemon` formerly supplied `--permission-prompt-tool stdio`
+  for operator bypass, masking production's missing argument. The
+  `TestInteractiveStreamBypassQuestions` matrix leaves that shaping to the daemon,
+  seeds stored bypass before registry loading, and checks real init tool
+  availability and effective bypass alongside actual requests, remote answers,
+  dismissals and completed continuations. A harmless ordinary-tool witness also
+  proves bypass still executes without host approval. Tool-list presence and a
+  deny-only capture cannot establish a successful answer round trip. See
+  [transport selection](config-package.md#stdio_permission_prompt--interactive-permission-transport-2343).
+- **An empty observation channel is not an end-of-stream signal.**
+  `startPermissionObserver` forwards observations on a separate goroutine, so a
+  nonblocking `default` drain can stop before init, question requests or terminal
+  results arrive. The bypass test's final drain still has this limitation, noted
+  in [review](https://github.com/pyrycode/pyrycode/pull/3518#issuecomment-6225403140):
+  it can falsely fail complete exchanges. An evidence collector needs a bounded
+  wait for its expected observations rather than treating temporary emptiness as
+  completion.
 
 - **Durable-answer assertions must select history segments before opening
   files.** `readPromptAnswerHistory` follows `history.parseSegmentName` and
