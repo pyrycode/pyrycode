@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/pyrycode/pyrycode/internal/conversations"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 )

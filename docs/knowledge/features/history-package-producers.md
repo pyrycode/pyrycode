@@ -181,6 +181,7 @@ or drop. Outcomes carry `conversation_id`, `occurred_at` and `reason`.
 | Fact | Link and meaning | Raw visibility and source |
 | --- | --- | --- |
 | `send_accepted` | Durable identity for a successful enqueue, with the fields above. | Shown; bound session captured at acceptance observation. |
+| `send_written` | `accepted_entry_id`; reason `written` after successful Send now stdin delivery. No final placement link. | Shown; bound session observed at the successful write callback. |
 | `send_delivered` | `accepted_entry_id` plus `delivery_entry_id` naming the existing operator `message`; reason `delivered` for ordinary and send-now delivery. | Shown; captured receiving session, shared with the operator message. |
 | `send_dropped` | `accepted_entry_id`; reason `removed` or `give_up` only after actual removal or abandonment. | Hidden; bound session captured at terminal observation. |
 | `send_lost` | `accepted_entry_id`; reason `daemon_restart` for a surviving acceptance without a durable outcome. | Shown; original acceptance's source. |
@@ -189,7 +190,7 @@ An actually empty binding is explicit `kind: none` with no session ID. Unknown
 or unavailable source facts remain absent. Delivery retains the
 [receiving-session snapshot](#operator-delivery-provenance-2983), even after
 rebinding; startup never substitutes a replacement session for the acceptance.
-Hidden drops do not raise the raw displayable watermark. All four raw payloads
+Hidden drops do not raise the raw displayable watermark. The original four raw payloads
 stay off legacy history, live publication and reconnect replay. After a
 successful append, `legacyRuntimeReceipt` projects validated facts as empty
 info banners at their original durable IDs and timestamps (#3167). Acceptance
@@ -257,6 +258,16 @@ that missing durable resolution; the existing
 means it cannot prove the agent never received the bytes. This is no durable
 backlog or gap-free crash guarantee. Failure logs use fixed event/reason
 discriminants without raw errors, message content, sender keys or host paths.
+
+`send_written` is an additional intermediate fact (#3508). Only successful Send
+now queue delivery emits it; failed writes retain the backlog. Its native item
+is visible and active with status `written`, at its unchanged acceptance order.
+Echo/idle placement alone supplies final delivery chronology. A per-acceptance
+leaf lock deduplicates write callbacks and orders them before a racing final
+outcome without holding the global reference-map lock across history I/O.
+This fact has no legacy runtime receipt. It does not resolve a surviving
+acceptance at startup: restart marks unconsumed written input lost and never
+replays it. A late/duplicate write cannot regress delivered or lost state.
 
 ### Resolved remote prompt answers (#2973)
 
