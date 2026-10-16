@@ -79,3 +79,8 @@ None. Real Claude bypass question semantics remain a required dispatcher live ga
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-16
+
+## Revisions
+
+- 2026-10-16: The live harness needs a pre-spawn home preparation hook to seed the existing bootstrap ID with persisted bypass, and opt-in init metadata in `permissionObservation` to observe the actual tool list/posture. Added those local test seams rather than a new capture infrastructure or fixture. Removed the operator harness's injected stdio argument so the daemon supplies the tested connection. Updated the related running-permission test comment to reflect that ownership.
+- 2026-10-16: The installed-handler lifecycle test uses a synchronized broadcaster because old-child retirement and replacement-child surfacing may overlap. It drives a connected expiry check followed by disconnect and timeout, in addition to replacement/refusal and late-answer rejection. The original implementation fails all bypass argument rows and the two toggle-false factory rows with the corrected helper launcher; the fixed startup group passes under the race detector. Security findings above are addressed by the design and implementation; no unresolved MUST FIX remains.
