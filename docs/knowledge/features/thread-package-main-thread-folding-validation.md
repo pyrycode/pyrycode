@@ -13,8 +13,9 @@ names. `checkpointSchema` is 1 and must increase when the format changes;
 `CheckpointState.Rules` separately records the current `foldingRules`, alongside
 the conversation owner and consumed version. Legacy inline `New` folds reject
 export and retain their existing behavior. In-memory restoration and synthetic
-and committed-recording resume-equivalence proofs are available; persistence
-remains in #3336 and Store loading in #3337. See
+and committed-recording resume-equivalence proofs are available, along with the
+persisted package reader. Durable writing belongs to #3504, scheduling to #3501
+and Store restoration to #3337; Store loading still replays history. See
 [Cache and epochs](thread-package.md#cache-and-epochs).
 
 `HistorySource.Lookup([]uint64) ([]history.Entry, error)` supplies immutable
@@ -99,6 +100,40 @@ or usable observation, and resumes by feeding only the suffix after repair.
 It also checks that restoration adds no inline payload cache and preserves
 legacy `New` output.
 
+`Store.readCheckpoint` reads the independently versioned state envelope and
+generation index described in [Cache and epochs](thread-package.md#cache-and-epochs).
+It requires explicit non-null committed length, clean flag, fold owner/version/
+last-shown and certificate epoch/version/watermark/checksum evidence. Explicit
+zero progress and `Clean: false` are valid. Schema/rules, epoch/checksum shape,
+owner and certificate/export version/watermark must agree before import. Missing
+state, unsafe generations, short files, invalid lengths, malformed frame JSON,
+CRC-32C failures within committed bytes and inconsistent inventories/graphs
+return no restored fold. EOF/UnexpectedEOF mean invalid checkpoint data;
+other header/payload I/O failures retain `ErrPersistence`. Previously decoded
+rows never escape an error. CRC detects corruption, not authenticity, and this
+reader performs no history-bound/checksum equality check or epoch decision.
+
+`TestReadCheckpointResume` writes reverse-ordered snapshots with repeated changed
+IDs, requiring last-record selection and manifest ordering. It uses the synthetic
+corpus, send-delivery and unresolved-child fixtures at empty, early, middle and
+full cuts, with both clean and dirty evidence. `testResumeProof` compares the
+restored fold immediately and after every suffix feed, including hidden,
+unresolved and delivery-suppressed rows. Restoration forbids history lookup and
+prefix replay. Complete newer and torn uncommitted tails remain ignored and
+byte-for-byte unchanged.
+
+`TestReadCheckpointInvalid` applies absent/null evidence mutations to both
+version-one and empty version-zero fixtures: nonzero value mismatches alone
+could conceal a broken presence check. It also exercises compatibility,
+manifests/graphs and committed framing corruption. `TestReadCheckpointItemsReadErrors`
+injects header and payload failures after a decoded row to distinguish EOF,
+non-EOF I/O and CRC errors while asserting no partial output.
+`TestReadCheckpointSecurity` rejects redirected directories, symlink/directory/FIFO
+leaves and generation escapes while preserving history and outside bytes.
+`TestCheckpointLeavesSurviveLegacyCleanup` proves that read admission does not
+authorize deletion of checkpoint leaves. Scalar certificate compatibility and
+bounded unloaded lookup remain separate from checkpoint restoration.
+
 The reusable same-package `testCheckpointResume(t, entries, cuts)` prepares one
 uninterrupted reference baseline. For each cut it JSON-round-trips both export
 parts, imports, and compares immediately and after **every** suffix entry. Its
@@ -143,13 +178,31 @@ restoration. No rendered result or signature is reused across restorations.
 `TestCheckpointJSONReuse` and `TestCheckpointProofRestorationReuse` compare
 reused scratch with fresh computation after removed rows/private facts and
 nil/empty/exact-Content changes; the latter fails against the uncleared helper.
-The corpus test uses `t.Parallel()` because a long sequential setup otherwise
-postpones existing parallel tests until too little package timeout remains.
+The corpus test uses `t.Parallel()`; its mandatory gate invocation is now isolated
+from the remaining unit suite as described below.
 Diagnostics separate fixture preparation, uninterrupted baseline feed/proof,
 prefix feed/export and joined-worker elapsed time, and report worker count,
 `GOMAXPROCS`, completed cuts and comparisons. `BenchmarkCheckpointResumePhases`
 separately measures fixture, feed, export, both JSON round trips, import, full
 internal rendering and full proof; the proof phase includes rendering.
+
+`make test` (and therefore `make check`) runs two sequential, complementary race
+selections: `go test -race -skip '^TestCheckpointResumeCorpus$' ./...`, then
+`go test -race -run '^TestCheckpointResumeCorpus$' ./internal/thread`.
+The second invocation requires the complete corpus and every subtest once;
+both retain normal caching and Go's default package timeout. That timeout also
+includes serial tests before parallel tests resume, so corpus optimization alone
+does not reserve its execution budget. Isolation preserves all 30,000 entries,
+201 cuts and 50,101 comparisons while giving the corpus its own deadline.
+
+The [maintainer's Linux/amd64 report for #3503](https://github.com/pyrycode/pyrycode/pull/3506)
+at `46118afa` (Go 1.26.9) records an uncached complete `make check` in 1,046.706s:
+366.048s for ordinary units, 420.980s for all 201 corpus cuts/50,101 comparisons,
+and 205.027s for configured fake-daemon e2e; subsequent `make build` passed.
+The final verifier accepted separate green dispatcher gates; those gate receipts
+have no per-test counts and do not independently recount the maintainer report.
+macOS is outside this Linux ticket's verification scope. These measurements
+establish completion for that run, not a runtime ceiling.
 
 Repeated validation of inert object fields was a measured rendering cost:
 `foldDecoder.decode` now checks object syntax directly for empty DTOs. Matched

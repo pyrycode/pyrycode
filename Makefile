@@ -54,7 +54,9 @@ vet:
 
 .PHONY: test
 test:
-	$(GO) test -race ./...
+	$(GO) test -race -skip '^TestCheckpointResumeCorpus$$' ./...
+	# Keep the complete corpus mandatory, with its own package timeout budget.
+	$(GO) test -race -run '^TestCheckpointResumeCorpus$$' ./internal/thread
 
 # Full production-duration proofs, separate from ordinary unit runs.
 .PHONY: test-slow

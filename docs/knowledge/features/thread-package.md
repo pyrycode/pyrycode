@@ -340,8 +340,9 @@ digests can conceal Content byte differences. See the
 The retained synthetic shell creation, launch-result and turn-end context is
 explicitly test-supplied. This offline gate uses the committed frames without
 credentials or recapture and adds no live-capture evidence. Existing recorded
-semantic assertions and golden expectations remain unchanged; checkpoint
-persistence and Store startup loading remain separate work (#3336/#3337).
+semantic assertions and golden expectations remain unchanged. The
+[persisted package reader](#cache-and-epochs) has a separate proof; durable
+writing (#3504) and Store startup restoration (#3337) remain follow-ups.
 
 ### Full-feed benchmark
 
@@ -427,8 +428,38 @@ parts, with a caller-supplied `HistorySource`, without prefix replay or history
 I/O. Restoration preserves the complete internal inventory and continuation
 graph; it does not restore a Store epoch or establish certificate eligibility.
 See [checkpoint validation and resume proof](thread-package-main-thread-folding-validation.md#validation-and-testing).
-Checkpoint persistence remains in #3336 and Store loading in #3337 under
-[ADR 045](../decisions/045-thread-index-over-history.md).
+
+The package reader `Store.readCheckpoint` implements the persisted format from
+[ADR 045](../decisions/045-thread-index-over-history.md). Its
+`thread-index-state.json` envelope uses `checkpointFileSchema` 1, independently
+of the exported fold schema. It contains `schema`, `generation`, `valid_length`,
+`certificate` evidence and the complete `fold` (`CheckpointState`), including
+private maps and the ordered `ItemIDs` manifest. Generation leaves are exactly
+`thread-index-<32 lowercase hex>.bin`. Each append-only index record has an
+eight-byte header: big-endian uint32 JSON payload length, then big-endian uint32
+CRC-32C (Castagnoli) of one `CheckpointItem` payload.
+
+Only complete frames within the committed `valid_length` participate. The reader
+checks that boundary against file size, then each header/payload length against
+remaining committed bytes before allocation or reading. Extra bytes, including
+a complete newer record or torn final frame, are ignored without truncation.
+For repeated item IDs the last record in file order wins; the complete inventory
+must match `CheckpointState.ItemIDs` and is reordered by that manifest before
+`ImportCheckpoint` validates the graph. Missing, corrupt or inconsistent state
+returns no fold. Both clean and dirty checkpoints, including explicit empty
+version-zero checkpoints, can restore exactly the saved boundary without history
+lookup. This validates persisted consistency only: history-bound/checksum equality,
+epoch reuse and fallback remain with Store restoration in #3337.
+
+Checkpoint state/index reads share `openCacheFile` admission with scalar
+certificates: `cacheLeaf` accepts only package-owned leaves, history supplies exact
+directory containment, and Lstat, no-follow/nonblocking open and descriptor Stat
+require regular files. `removeLegacy` selects its own legacy leaf family; widening
+read admission must never widen deletion to checkpoint state or generations.
+`thread-certificate.json` stays separate and scalar. Unloaded metadata opens at
+most that one certificate, reads no checkpoint/index or history segments and
+starts no worker. Durable writing belongs to #3504 and scheduling to #3501;
+this reader performs no writes, truncation, compaction or generation cleanup.
 
 `Store` loads and retries still reconstruct a fresh fold from entry 1 of
 readable history with bounded `ForwardReader.Walk` chunks. Eligible metadata
@@ -554,8 +585,8 @@ operations preserve history bytes and its existing append durability contract.
 Only after the first durable certificate write does `removeLegacy` remove this
 conversation's regular `thread-cache.json`, `thread-recovery.json` and allow-listed
 `thread-run-<token>.json` leaves. It rechecks containment, rejects redirects and
-special files without following them, preserves history/unrelated files and
-syncs the directory after cleanup. Cleanup failure withholds usability.
+special files without following them, preserves checkpoints, history and unrelated
+files, and syncs the directory after cleanup. Cleanup failure withholds usability.
 Legacy-only startup rotates once; the next clean reopen retains the new epoch.
 Rollback to pyry 0.39 finds no legacy cache, refolds history and mints a new epoch.
 
@@ -581,10 +612,11 @@ unresolved and delivery-suppressed internal rows. Export runs at a completed
 See the [export contract and encoded-size measurements](thread-package-main-thread-folding-validation.md#validation-and-testing)
 for schema/rules versions, completeness and shared identities. `ImportCheckpoint`
 restores in-memory reference folds; synthetic and committed-recording proofs
-cover resume equivalence. File persistence (#3336) and Store checkpoint loading
-(#3337) remain follow-ups. Store loading still replays from entry 1; the existing
-scalar certificates neither resume
-folding nor implement the proposed checkpoint schedule. Callers still finish
+cover resume equivalence. The package reader adds persisted round-trip proofs;
+durable writing (#3504), scheduling (#3501) and Store checkpoint loading (#3337)
+remain follow-ups under #3336. Store loading still replays from entry 1; the
+existing scalar certificates neither resume folding nor implement the proposed
+checkpoint schedule. Callers still finish
 producer draining and tail catch-up before `Store.Shutdown`.
 
 Epoch reuse establishes compatible item identity; retained change-range
