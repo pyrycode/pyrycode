@@ -3,8 +3,6 @@ package thread
 import (
 	"context"
 	"errors"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -18,7 +16,9 @@ var (
 )
 
 // ChildSummary is detached metadata. DetailOmitted distinguishes absent detail
-// from an available empty body. Headline is plain valid UTF-8, at most 256 bytes.
+// from an available empty body. Headline/error are plain text of at most 200
+// Unicode code points. Nil facts are unknown; known counts include public hidden
+// and dropped rows. SubtreeVersion is epoch-scoped freshness independent of Rev.
 type ChildSummary struct {
 	ID, Order, Rev                uint64
 	EndedOrder                    uint64
@@ -30,6 +30,10 @@ type ChildSummary struct {
 	Active, Shown                 bool
 	Headline                      string
 	DetailOmitted                 bool
+	ErrorSummary                  *string
+	PublicChildCount              *uint64
+	HasPublicChildren             *bool
+	SubtreeVersion                *uint64
 }
 
 // ChildCursor is a position within one exact publication and parent revision.
@@ -116,7 +120,9 @@ func (s *Store) ChildPage(ctx context.Context, id conversations.ConversationID, 
 	stop := start + min(min(limit, MaxQueryItems), end-start)
 	if err := q.visit(ctx, q.children, start, stop, func(row queryRow) {
 		i := row.item
-		p.Items = append(p.Items, ChildSummary{ID: i.ID, Order: i.Order, Rev: i.Rev, EndedOrder: i.EndedOrder, Kind: i.Kind, Subtype: i.Subtype, Session: i.Session, Agent: i.Agent, NoChild: i.NoChild, Turn: i.Turn, Parent: i.Parent, Status: i.Status, Active: i.Active, Shown: i.Shown, Headline: childHeadline(i.Summary, i.Kind), DetailOmitted: true})
+		summary := ChildSummary{ID: i.ID, Order: i.Order, Rev: i.Rev, EndedOrder: i.EndedOrder, Kind: i.Kind, Subtype: i.Subtype, Session: i.Session, Agent: i.Agent, NoChild: i.NoChild, Turn: i.Turn, Parent: i.Parent, Status: i.Status, Active: i.Active, Shown: i.Shown, DetailOmitted: true}
+		row.header.apply(&summary)
+		p.Items = append(p.Items, summary)
 	}); err != nil {
 		return ChildPageResult{}, err
 	}
@@ -129,9 +135,13 @@ func (s *Store) ChildPage(ctx context.Context, id conversations.ConversationID, 
 
 // childRank counts tuples before the position, including it when inclusive.
 func (q *queryIndex) childRank(parent, order, id uint64, inclusive bool) int {
+	return q.childRankWork(parent, order, id, inclusive, false)
+}
+
+func (q *queryIndex) childRankWork(parent, order, id uint64, inclusive, preparing bool) int {
 	rank := 0
 	for n := q.children; n != nil; {
-		q.count(false)
+		q.count(preparing)
 		c := compareQueryKey(parent, order, id, n)
 		if c < 0 || c == 0 && !inclusive {
 			n = n.left
@@ -141,26 +151,4 @@ func (q *queryIndex) childRank(parent, order, id uint64, inclusive bool) int {
 		}
 	}
 	return rank
-}
-
-func childHeadline(summary, kind string) string {
-	bounded := func(s string) string {
-		s = plainSummary(s[:min(len(s), 256)])
-		end := 0
-		for at, r := range s {
-			size := utf8.RuneLen(r)
-			if at+size > 256 {
-				break
-			}
-			end = at + size
-		}
-		return strings.Clone(s[:end])
-	}
-	if text := bounded(summary); text != "" {
-		return text
-	}
-	if text := bounded(strings.ReplaceAll(kind[:min(len(kind), 256)], "_", " ")); text != "" {
-		return text
-	}
-	return "item"
 }

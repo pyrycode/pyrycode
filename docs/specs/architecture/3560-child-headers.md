@@ -60,3 +60,6 @@ Pending documentation stage: update `docs/knowledge/features/thread-package-back
 **Date:** 2026-10-17
 
 Sizing: one deliverable, approximately 720 written lines (280 production, 370 tests/edits, 70 plan), zero new exported types/interfaces, eight internal publication callers updated, four acceptance criteria, zero new reject branches. Rechecked before plan commit.
+
+## Revisions
+- 2026-10-17: Publication integration passes the prepared capture through eight `publish` callers and two `advance` callers (10 existing consumers total). Header diagnostics use the explicitly allowed own-status fallback, avoiding content parsing and descendant attribution. Pointer-copy counters include the two additional header string pointers. Final work remains below 500 added/edited lines, with no exported type or rejection-class additions.

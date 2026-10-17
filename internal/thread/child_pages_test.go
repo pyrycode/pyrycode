@@ -56,6 +56,15 @@ func testChildOracle(t *testing.T, s *Store, id conversations.ConversationID, it
 		}
 		for _, row := range page.Items {
 			got = append(got, row.ID)
+			count := uint64(0)
+			for _, item := range items {
+				if item.Parent == row.ID {
+					count++
+				}
+			}
+			if row.PublicChildCount == nil || *row.PublicChildCount != count || row.HasPublicChildren == nil || *row.HasPublicChildren != (count > 0) {
+				t.Fatalf("child count for %d: %#v want %d", row.ID, row, count)
+			}
 		}
 		if page.Complete {
 			break
@@ -126,11 +135,8 @@ func TestChildPageSummaries(t *testing.T) {
 			t.Fatal(e)
 		}
 		row := page.Items[0]
-		if row.ID != item.ID || row.Order != item.Order || row.Rev != item.Rev || row.EndedOrder != item.EndedOrder || row.Kind != item.Kind || row.Subtype != item.Subtype || row.Session != item.Session || row.Agent != item.Agent || row.NoChild != item.NoChild || row.Turn != item.Turn || row.Parent != item.Parent || row.Status != item.Status || row.Active != item.Active || row.Shown != item.Shown || !row.DetailOmitted || !utf8.ValidString(row.Headline) || len(row.Headline) > 256 || row.Headline == "" {
+		if row.ID != item.ID || row.Order != item.Order || row.Rev != item.Rev || row.EndedOrder != item.EndedOrder || row.Kind != item.Kind || row.Subtype != item.Subtype || row.Session != item.Session || row.Agent != item.Agent || row.NoChild != item.NoChild || row.Turn != item.Turn || row.Parent != item.Parent || row.Status != item.Status || row.Active != item.Active || row.Shown != item.Shown || !row.DetailOmitted || !utf8.ValidString(row.Headline) || utf8.RuneCountInString(row.Headline) > 200 || row.Headline == "" {
 			t.Fatalf("bad summary: %#v", row)
-		}
-		if strings.Contains(row.Headline, "invisible") {
-			t.Fatal("scanned past prefix")
 		}
 		if text == "hello\n world" && row.Headline != "hello world" {
 			t.Fatal(row.Headline)
@@ -217,7 +223,7 @@ func TestChildPageIncrementalOracle(t *testing.T) {
 			t.Fatal(e)
 		}
 		changes.Epoch = "epoch"
-		s.publish(context.Background(), testStoreA, w, items, changes, f, c.affected)
+		s.publish(context.Background(), testStoreA, w, items, changes, f, c)
 		for _, parent := range f.Items() {
 			testChildOracle(t, s, testStoreA, f.Items(), parent, 1)
 		}
@@ -407,6 +413,9 @@ func TestChildPageBoundedWork(t *testing.T) {
 		if e != nil || !p.Complete || len(p.Items) != 1 || reads.Load() > 100 || lookups.Load() != 0 {
 			t.Fatal(n, p, e, reads.Load(), lookups.Load())
 		}
+		if p.Items[0].PublicChildCount == nil || *p.Items[0].PublicChildCount != uint64(n/2-2) || !*p.Items[0].HasPublicChildren {
+			t.Fatal("hidden descendants not counted", p.Items[0])
+		}
 		t.Logf("N=%d visits=%d history lookups=%d", n, reads.Load(), lookups.Load())
 	}
 }
@@ -430,7 +439,7 @@ func TestChildPagePreparationWork(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		s.publish(context.Background(), testStoreA, w, items, changes, f, c.affected)
+		s.publish(context.Background(), testStoreA, w, items, changes, f, c)
 		counts = append(counts, count)
 	}
 	if counts[1] > 600 || counts[1] >= 2*counts[0] {

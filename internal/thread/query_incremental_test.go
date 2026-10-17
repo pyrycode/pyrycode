@@ -26,7 +26,7 @@ func testPublicationFixture(n int) (*Fold, *publicationCapture, *Store, *convers
 	w := &conversationWorker{changed: make(chan struct{})}
 	s.workers[testStoreA] = w
 	items, changes, _ := c.capture(f)
-	s.publish(context.Background(), testStoreA, w, items, changes, f, c.affected)
+	s.publish(context.Background(), testStoreA, w, items, changes, f, c)
 	return f, c, s, w
 }
 
@@ -46,7 +46,7 @@ func BenchmarkStorePublication(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				s.publish(context.Background(), testStoreA, w, items, changes, f, c.affected)
+				s.publish(context.Background(), testStoreA, w, items, changes, f, c)
 			}
 			b.ReportMetric(float64(len(f.publicVisible)), "items")
 		})
@@ -86,7 +86,7 @@ func TestPublicationPreparationGrowth(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s.publish(context.Background(), testStoreA, w, items, changes, f, c.affected)
+			s.publish(context.Background(), testStoreA, w, items, changes, f, c)
 			counts = append(counts, count)
 			t.Logf("%s public=%d semantic=%d copied-pointers=%d", mode, len(f.publicVisible), count, copies)
 		}
@@ -138,7 +138,7 @@ func TestIncrementalQueryOracle(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				s.publish(context.Background(), testStoreA, w, items, changes, f, c.affected)
+				s.publish(context.Background(), testStoreA, w, items, changes, f, &c)
 				fresh := newQueryIndex(f.Items(), nil)
 				fresh.prepareCatchUp(f)
 				ref := NewStore(nil)
@@ -192,7 +192,7 @@ func TestIncrementalTreeOwnership(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.publish(context.Background(), testStoreA, w, items, changes, f, c.affected)
+		s.publish(context.Background(), testStoreA, w, items, changes, f, c)
 		for _, root := range []*queryTree{w.query.ordered, w.query.active, w.query.touched} {
 			var validate func(*queryTree) (int, int)
 			validate = func(n *queryTree) (int, int) {

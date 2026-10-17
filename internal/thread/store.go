@@ -314,7 +314,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		changes.Snapshot = snapshot
 		progress, progressChecksum = snapshot, checksum
 		complete = true
-		s.publish(ctx, id, w, items, changes, fold, capture.affected)
+		s.publish(ctx, id, w, items, changes, fold, &capture)
 		return nil
 	}
 	if err := publish(); err != nil {
@@ -336,7 +336,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	}
 }
 
-func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, items []*Item, changes Observation, fold *Fold, affected []int) {
+func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, items []*Item, changes Observation, fold *Fold, capture *publicationCapture) {
 	s.mu.Lock()
 	before := w.snapshot
 	index := w.query
@@ -344,8 +344,13 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 	if index == nil {
 		index = newPublicationIndex(items, s.queryWork)
 		index.prepareCatchUp(fold)
+		for id, header := range capture.headers {
+			row, _ := index.lookup(id, true)
+			row.header = header
+			index.refreshHeader(row, fold.version)
+		}
 	} else {
-		index = index.advance(items, affected, fold, s.queryWork, s.queryCopies)
+		index = index.advance(items, capture.affected, fold, s.queryWork, s.queryCopies, capture.headers)
 	}
 	index.worker = w
 	var batch changeBatch

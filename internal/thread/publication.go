@@ -14,6 +14,7 @@ type publicationCapture struct {
 	active   map[int]bool
 	version  uint64
 	affected []int
+	headers  map[uint64]childHeader // only this capture's affected public rows
 	copied   func(int)
 }
 
@@ -43,6 +44,10 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 	after, err = f.renderShared(after)
 	if err != nil {
 		return nil, Observation{}, err
+	}
+	c.headers = make(map[uint64]childHeader, len(after))
+	for _, item := range after {
+		c.headers[item.ID] = prepareChildHeader(item)
 	}
 	slots := make([]*Item, len(f.items))
 	copy(slots, c.slots)
