@@ -36,6 +36,7 @@ type queryIndex struct {
 	worker                   *conversationWorker
 	byID                     [256]map[uint64]queryRow
 	ordered, active, touched *queryTree
+	children                 *queryTree
 	work                     func(bool)
 	copied                   func(int) // copied pointers/index positions, separate from semantic visits
 	invalidTouches           int
