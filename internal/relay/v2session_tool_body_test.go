@@ -337,7 +337,7 @@ func TestThreadToolBodyFullQuerySlot(t *testing.T) {
 		in.threadJoins = make(map[string]threadJoin)
 	}
 	for i := range maxThreadJoins {
-		in.threadJoins[fmt.Sprint(i)] = threadJoin{"epoch", 10}
+		in.threadJoins[fmt.Sprint(i)] = threadJoin{"epoch", 10, ""}
 	}
 	p.mgr.hostedMu.Unlock()
 	p.request(42, protocol.TypeThreadReadToolBody, testBodyPayload)
