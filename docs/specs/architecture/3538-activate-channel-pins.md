@@ -121,3 +121,18 @@ channel-only pin/any-row unpin and older-host compatibility behavior.
   reply, identical uncorrelated pushes to both clients, idempotence, reload and
   restart persistence, and re-pin timestamps. Wire ordering remains unproved
   pending #3545; no shared dispatch/relay production code changes here.
+
+- 2026-10-17 (rework, verifier finding 1): Merged main with #3545's
+  reply-processing fence and preserved its unrelated thread dispatch inventory
+  entries. Read `routeAppFrame` and `forwardToRun` in
+  `internal/relay/v2session_appframe.go`, plus the concurrency contracts in
+  `docs/knowledge/features/dispatch-package.md` and
+  `v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md`.
+  Enable `TestRelayV2_ChannelPinsReplyOrdering` without a skip: its strict
+  path rejects a matching requester push before the correlated pin/unpin reply.
+  Keep the functional sibling's timestamp/null, idempotence, reload, restart
+  and re-pin scenarios unchanged. Both named tests must execute and pass;
+  the functional sibling's buffering supplies no ordering proof. The earlier
+  deferral is superseded, and the documentation handoff must describe activation
+  with the completed reply-before-push guarantee. No further production changes
+  or security-boundary changes are needed.

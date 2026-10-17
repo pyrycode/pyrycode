@@ -23,7 +23,6 @@ func TestRelayV2_ChannelPins(t *testing.T) {
 }
 
 func TestRelayV2_ChannelPinsReplyOrdering(t *testing.T) {
-	t.Skip("blocked on #3545: shared relay can broadcast before its buffered correlated reply")
 	testRelayV2ChannelPins(t, true)
 }
 
