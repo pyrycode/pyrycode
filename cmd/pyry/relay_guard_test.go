@@ -270,6 +270,8 @@ var excludedTypes = map[string]string{
 	"TypeThreadToolBody":     "reply (declared ahead of handlers)",
 	"TypeThreadChildren":     "reply (declared ahead of handlers)",
 
+	"TypeSetConversationPinned": "request (declared; handler pending #3538)",
+
 	"TypeAppAssetRequest":   "request (declared; handler pending #3247)",
 	"TypeAppAPIRequest":     "request (declared; handler pending #3247)",
 	"TypeAppResponseCredit": "request (declared; handler pending #3247)",

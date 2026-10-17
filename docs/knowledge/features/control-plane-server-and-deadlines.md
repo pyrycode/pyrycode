@@ -18,7 +18,7 @@ Joining the message queue does not join control handlers that can still write
 history or schedule work. In `runSupervisor`, shutdown first seals/joins channel
 post callbacks and their consumer, then calls `ctrl.Seal` before joining the
 remaining producers and draining the [shadow fold's final committed
-versions](thread-package.md#shadow-lifecycle-and-evidence). The detached control
+versions](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence). The detached control
 context keeps the listener bound through `Store.Shutdown` persistence. Only
 after that cleanup does the daemon cancel control serving, call `Close` and join
 `ctrlDone`. Releasing ownership earlier could admit a replacement daemon while

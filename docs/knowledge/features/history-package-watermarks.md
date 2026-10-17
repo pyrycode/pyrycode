@@ -48,7 +48,7 @@ a metadata lookup must never initiate history recovery; substituting
 `LatestEntryID` silently adds cold segment reads. A saved thread certificate's
 consumed version cannot establish current raw progress, because hidden appends
 advance the raw cursor without raising the shown watermark. See
-[unloaded certificate eligibility](thread-package.md#cache-and-epochs).
+[unloaded certificate eligibility](thread-package-cache-and-epochs.md#cache-and-epochs).
 `TestCachedLatestEntryID` measures zero segment opens/bytes for warm, cold and
 empty reads; `TestCachedLatestEntryIDConcurrent` checks reads alongside appends.
 
@@ -132,7 +132,7 @@ item/live-state updates advance consumed progress without raising shown progress
 a hidden append invalidates stale unloaded evidence, and an unavailable reading
 stays unavailable until ordinary loading/folding restores it. Never substitute
 the raw cursor or maximum final item revision for `last_shown_version`; see
-[thread shown-watermark recovery](thread-package.md#cache-and-epochs).
+[thread shown-watermark recovery](thread-package-cache-and-epochs.md#cache-and-epochs).
 
 Within the raw store, after `load`, the first filtered lookup walks `listSegments`
 newest-first and each `readSegment`'s entries backwards until a qualifying entry

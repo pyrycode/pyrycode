@@ -106,6 +106,11 @@ type Conversation struct {
 	// rows is byte-identical to its pre-#2571 form.
 	IsMuted bool `json:"is_muted,omitempty"`
 
+	// PinnedAt is the stable UTC pin time set by Registry.SetPinned. Nil or an
+	// absent JSON key means unpinned. Repeated pinning preserves the time;
+	// unpinning clears it, so a later pin records a new time.
+	PinnedAt *time.Time `json:"pinned_at,omitempty"`
+
 	// ReadUpTo is the host operator's durable history entry read mark.
 	ReadUpTo uint64 `json:"read_up_to,omitempty"`
 

@@ -21,6 +21,10 @@ import (
 // Resolution failures return an empty path and wrap the underlying error,
 // preserving errors.Is identity, including fs.ErrNotExist and fs.ErrPermission.
 func Resolve(path string) (string, error) {
+	return resolve(path, os.ReadDir)
+}
+
+func resolve(path string, readDir func(string) ([]os.DirEntry, error)) (string, error) {
 	// Retain ResolveWorkdir's error context during the consumer migration.
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -30,7 +34,7 @@ func Resolve(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("agentrun: resolve workdir %q: %w", path, err)
 	}
-	return canonicalCase(resolved), nil
+	return canonicalCaseReadDir(resolved, readDir), nil
 }
 
 // canonicalCase improves the casing of an absolute, symlink-free path without
@@ -38,12 +42,19 @@ func Resolve(path string) (string, error) {
 // filesystems, while consumers such as Claude's trust lookup use on-disk case.
 // Linux and macOS roots are bare separators; Windows is out of scope.
 func canonicalCase(path string) string {
+	return canonicalCaseReadDir(path, os.ReadDir)
+}
+
+func canonicalCaseReadDir(path string, readDir func(string) ([]os.DirEntry, error)) string {
+	if canonical, ok := nativePath(path); ok {
+		return canonical
+	}
 	canonical := string(os.PathSeparator)
 	for _, component := range strings.Split(strings.TrimPrefix(path, canonical), string(os.PathSeparator)) {
 		if component == "" {
 			continue
 		}
-		entries, err := os.ReadDir(canonical)
+		entries, err := readDir(canonical)
 		if err != nil {
 			// Best-effort: resolution already succeeded. An execute-only
 			// ancestor, for example, can prevent a case probe without

@@ -155,10 +155,9 @@ func TestPublishServiceRetirementUncertain(t *testing.T) {
 				return err
 			}
 			testArtifactWrite(t, r.root, testApp+"/data/sentinel", "before")
-			done := make(chan error, 1)
-			go func() { _, err := o.Publish(context.Background(), testHost, testApp, tools); done <- err }()
+			done := publishFixtureStart(t, o, tools)
 			data := filepath.Join(r.root, testApp, "data")
-			waitFile(t, filepath.Join(data, "ready"))
+			publishFixtureReady(t, r, done)
 			o.mu.Lock()
 			g := o.generations[testApp]
 			o.mu.Unlock()

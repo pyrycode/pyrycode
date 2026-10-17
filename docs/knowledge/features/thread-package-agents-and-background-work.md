@@ -375,7 +375,7 @@ Unrelated standalone/main-only entries perform zero child-resolution work.
 Replace `childDirty` after resolution: clearing or later ranging over a reused
 map can inspect capacity retained from a former large closure, even with few
 current children. Counting only yielded keys would hide that historical cost;
-see the related [public-touch capacity regression](thread-package.md#cache-and-epochs).
+see the related [public-touch capacity regression](thread-package-cache-and-epochs.md#cache-and-epochs).
 Agent evidence separately recomputes only affected calls and their indexed
 tasks/reports, retaining these targeted descendant-repair hooks for late
 parent/link enrichment and lifecycle changes. These bounds cover agent and
@@ -403,7 +403,7 @@ An inactive child or ancestor therefore cannot authorize report reduction by
 itself: derived closure and foreground results must remain reversible. Only
 genuine non-result terminal evidence permits bounded final markers, with pending
 continuation evidence retained separately. See the
-[marker validation and accounting](thread-package-main-thread-folding-validation.md#validation-and-testing).
+[marker validation and accounting](thread-package-main-thread-folding-validation-retention.md#continuation-retention-and-accounting).
 
 ### Agent validation and testing
 
@@ -508,7 +508,7 @@ finished nested Agent/Task rows against parent calls derived independently from
 raw facts; it rejects zero and wrong older parents and a main tool gaining one.
 `TestThreadShadowRawOwnerLateRepair` preserves supported report-only repair.
 These synthetic controls complement the
-[retained authenticated checkpoints](thread-package.md#shadow-lifecycle-and-evidence);
+[retained authenticated checkpoints](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence);
 Store/full-replay equality alone cannot detect a shared parenting error.
 
 `cmd/pyry.TestThreadAgentRecordedReplay` runs offline in the standard gate. It
@@ -551,7 +551,7 @@ replay, every partition and single-entry feeds agree. These recordings prove
 shell completion and omission behavior; they supply no agent-gone proof. See
 [the producer's narrower gone evidence](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
 
-The [reusable long-history corpus](thread-package.md#reusable-fold-regression-corpus)
+The [reusable long-history corpus](thread-package-shadow-lifecycle-and-evidence.md#reusable-fold-regression-corpus)
 adds compact golden checkpoints without replacing these independent semantic
 and provenance assertions. `testFoldGoldenCheck` in each test package pins the
 production baseline commit `a920b90cc6bfd2f1fb8461e9f85ce6f19934afa6`, input

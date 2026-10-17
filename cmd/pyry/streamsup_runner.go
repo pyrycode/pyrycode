@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -177,9 +176,8 @@ func newSettingsInstaller(target spawnArgvInstaller, mcpServersPath string, stdi
 // today — but the strip has to run on the pool's composition rather than on an
 // argv already carrying injected flags, which is the order stated here.
 //
-// The returned slice aliases neither args nor spawnBase: stripSessionIDFlags
-// always allocates, and withApprovalArgs either returns that fresh slice or a
-// clone of it.
+// Both shaping steps allocate, so the returned slice aliases neither args nor
+// spawnBase.
 func (s *settingsInstaller) shape(args []string) []string {
 	s.mu.Lock()
 	mode := s.mode
@@ -612,8 +610,9 @@ func mapStreamState(s streamsup.State) sessions.State {
 // factory is never built, so mcpServersPath is "" and unused there. The live
 // wire is exercised end-to-end by TestInteractiveStreamModalResolution (#1154).
 
-// streamApprovalConfig carries the optional stdio transport's daemon-singleton
-// dependencies into each per-session handler. A zero value preserves the MCP path.
+// streamApprovalConfig carries daemon-singleton host-response dependencies into
+// each session's handler. stdio selects ordinary non-bypass approval transport;
+// bypass always uses stdio for questions. A zero value selects MCP for non-bypass.
 //
 // account is the instance's Claude account token provider (#2824). It rides here
 // because this is the one daemon-singleton argument every Claude runner already
@@ -775,7 +774,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		scfg.Args = withApprovalArgs(scfg.Args, mcpServersPath, cfg.PermissionMode, cfg.OperatorBypass, approval.stdio)
 		// The same path that withApprovalArgs may put on the child argv is the
 		// provenance anchor for automatic MCP status. The runner compares it with
-		// each completed spawn argv, so bypass children whose args stayed unchanged
+		// each completed spawn argv, so bypass children without that MCP config
 		// remain ineligible.
 		scfg.MCPStatusConfigPath = mcpServersPath
 		scfg.AccountTokenProvider = approval.account
@@ -825,17 +824,15 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 			exitSink()
 		}
 		var r *streamsup.Runner
-		if approval.stdio {
-			handler := newStdioPermissionHandler(approval.registry, approval.timeout, approval.surface, tag)
-			parser.SetCanUseToolHandler(func(req streamsup.CanUseToolRequest) {
-				handler.handle(req, r.Stdin())
-			})
-			scfg.OnChildExit = func() {
-				handler.childExited()
-				onChildExit()
-			}
-		} else {
-			scfg.OnChildExit = onChildExit
+		// Keep host responses available across permission-mode changes. MCP
+		// children leave this handler dormant; bypass children use it for questions.
+		handler := newStdioPermissionHandler(approval.registry, approval.timeout, approval.surface, tag)
+		parser.SetCanUseToolHandler(func(req streamsup.CanUseToolRequest) {
+			handler.handle(req, r.Stdin())
+		})
+		scfg.OnChildExit = func() {
+			handler.childExited()
+			onChildExit()
 		}
 		scfg.OnSessionRotate = tag.Rotate
 		// #2724: a crash episode reaches clients as session.child_crashing through the
@@ -882,98 +879,41 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 	}
 }
 
-// withApprovalArgs injects claude's permission-approval flags onto a stream
-// spawn's args unless the spawn's child will actually RUN in bypass (#1168, and
-// #2065 for how that question is now answered). It is the interactive-stream twin
-// of agent_run.go's non-yolo permissionArgs wiring — the first live consumer of
-// permissionArgs on the interactive path.
+// withApprovalArgs selects one host response transport without changing the
+// child's permission posture. Stored/operator bypass uses stdio for questions
+// and receives no daemon MCP servers. Other children retain their configured
+// MCP/stdio approval transport and any permission mode already named by args.
 //
-// # Why the flag's presence stopped being the signal
-//
-// Until #2065 yolo was expressed to claude as exactly one flag,
-// --dangerously-skip-permissions, both entry points funnelled through it — the
-// operator's bootstrap pass-through claude args (main.go) and
-// internal/sessions.claudeSettingsArgs, which appended it for a set YOLO bit — and
-// so its presence in the spawn's args WAS the single deterministic yolo signal.
-//
-// #2065 makes claudeSettingsArgs append it to EVERY argv, because the posture is
-// now decided by an in-band write rather than by the launch argv. A predicate
-// reading the flag therefore answers "yolo" for every session, the approval set
-// stops being injected anywhere, and the daemon's approval gate quietly
-// disappears for every non-bypass session. So the question moved: not "is the flag
-// there" but "will this child KEEP the bypass it launches with", which is true in
-// exactly two cases, both of them decided before this function runs:
-//
-//   - storedMode is the escalation — internal/streamsup's SPAWN path writes no
-//     posture for it, so nothing walks the child back. Still by non-membership,
-//     but since #2066 the predicate is permissionModeSpawnWritable rather than the
-//     writer's allow-list, which admits the escalation now so that a LIVE child can
-//     be escalated in band. The verdict on this row is unchanged; only the
-//     mechanism behind it moved, and it is worth naming precisely because this
-//     function decides whether the daemon's approval gate reaches the argv.
-//   - operatorBypass — the escalation came from the operator's pass-through claude
-//     args, which never touch SessionSettings; the daemon may not revoke a bypass
-//     it did not grant, so again nothing walks the child back. This is
-//     sessions.RunnerConfig.OperatorBypass, derived there from the settings-free
-//     spawnBase, and it is the same provenance bit streamsup's spawnAndWait reads.
-//
-// Everything else is a child the daemon downgrades in-band before its first turn,
-// and it needs the approval gate on its argv exactly as it did before this ticket.
-// So:
-//
-//   - staying in bypass → return args UNCHANGED. The flag is already in args;
-//     injecting nothing keeps this byte-identical to pre-#2065 behaviour on both
-//     of those rows and avoids a duplicate --dangerously-skip-permissions. Do NOT
-//     call permissionArgs(true, …) here — that would re-emit the flag already
-//     present.
-//   - otherwise → append permissionArgs(false, mcpServersPath): the
-//     --permission-prompt-tool / --mcp-config / --strict-mcp-config /
-//     --permission-mode default set that routes every non-allowlisted tool use
-//     through the daemon approval registry.
-//
-// # The mode-pair drop, now the common case
-//
-// Since #2043 the spawn's own args can already name a permission mode: a session
-// storing one composes --permission-mode <mode> through claudeSettingsArgs, and
-// this function runs at runner CONSTRUCTION on top of that — the path a daemon
-// restart takes to rebuild a session out of the registry. Injecting the set
-// unmodified would spawn it as "--permission-mode plan … --permission-mode
-// default", so the injected set drops its own mode pair in that case. #2065 makes
-// every non-escalated posture name itself, so this arm is now the common case
-// rather than the exception; the reasoning is unchanged, only its frequency.
-//
-// It drops ONLY that pair. Returning args unchanged instead — the shape the
-// staying-in-bypass arm uses — would spawn every mode-carrying session with no
-// permission-prompt tool and no mcp-config, i.e. with the daemon's approval gate
-// entirely absent, reachable from a stored setting. That arm used to be justified
-// by "a bypass child has no approval gate to lose", and THAT SENTENCE STOPS
-// HOLDING at #2065: every child now launches in bypass, so the sentence is only
-// true of the children this function still returns unchanged — the ones nothing
-// downgrades. For every other child the gate is very much there to lose.
-//
-// # Polarity, deliberately not symmetric with streamsup's predicate
-//
-// An unrecognised or empty storedMode falls THROUGH to injection here, where the
-// same value makes spawnAndWait write nothing. Each is the fail-safe direction for
-// its own consumer: an unexpected value here leaves the approval gate present, and
-// there it asserts no posture and so leaves every construction site outside the
-// interactive daemon byte-identical. sessions guarantees a canonical mode at this
-// seam either way (TestRunnerConfigPermissionModeIsAlwaysKnown).
-//
-// The append runs on a clone so the caller's args (scfg.Args, freshly owned by
-// mapStreamsupConfig) is never aliased or mutated.
+// Posture comes from storedMode and operatorBypass, never from the escalation
+// flag: every session argv carries that flag before its in-band posture write.
+// Unknown stored modes retain the non-bypass approval gate. The returned slice
+// never aliases args.
 func withApprovalArgs(args []string, mcpServersPath, storedMode string, operatorBypass, stdioPermissionPrompt bool) []string {
+	// One response transport owns the child. Operator-supplied prompt flags can
+	// use either spelling, and settings installs recompose from that same base.
+	shaped := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--permission-prompt-tool" {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+				i++
+			}
+			continue
+		}
+		if !strings.HasPrefix(args[i], "--permission-prompt-tool=") {
+			shaped = append(shaped, args[i])
+		}
+	}
 	if storedMode == sessions.PermissionModeBypass || operatorBypass {
-		return args
+		return append(shaped, "--permission-prompt-tool", "stdio")
 	}
 	extra := permissionArgs(false, mcpServersPath)
 	if stdioPermissionPrompt {
 		extra[1] = "stdio"
 	}
-	if namesPermissionMode(args) {
+	if namesPermissionMode(shaped) {
 		extra = dropPermissionMode(extra)
 	}
-	return append(slices.Clone(args), extra...)
+	return append(shaped, extra...)
 }
 
 // namesPermissionMode reports whether args already carry a --permission-mode

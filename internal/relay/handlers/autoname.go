@@ -192,6 +192,7 @@ func autoNameConversation(reg ConversationAutoNamer, registryPath string, announ
 			IsPromoted: cv.IsPromoted,
 			IsArchived: cv.IsArchived, // preserved: naming is not un-archiving
 			IsMuted:    cv.IsMuted,
+			PinnedAt:   cv.PinnedAt,
 			ReadUpTo:   cv.ReadUpTo,
 			Name:       &title,
 			Cwd:        cv.Cwd,

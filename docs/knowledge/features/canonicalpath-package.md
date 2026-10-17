@@ -21,16 +21,31 @@ start goroutines. The supported platforms are Linux and macOS.
 
 ## Path and error contract
 
-`Resolve` applies `filepath.Abs`, then `filepath.EvalSymlinks`, then the private
-`canonicalCase` walk. Directory and file symlinks are followed, including macOS
-aliases such as `/var` to `/private/var`. Both directory components and a file
-leaf use the same casing rule.
+`Resolve` applies `filepath.Abs`, then `filepath.EvalSymlinks`, then best-effort
+case correction. Directory and file symlinks are followed, including macOS
+aliases such as `/var` to `/private/var`.
 
-For each component, `matchEntry` selects an exact-case directory entry first.
-Without an exact match, only a unique `strings.EqualFold` match changes spelling.
-Absent or ambiguous matches preserve the input component. If `os.ReadDir` cannot
-read an ancestor, the walk retains that component and continues. These probes
-never turn a successful absolute-path and symlink resolution into an error.
+On macOS, `nativePath` opens the resolved path with
+`O_EVTONLY | O_NONBLOCK | O_CLOEXEC` and asks `F_GETPATH` for its current on-disk
+spelling. A successful probe avoids enumerating every ancestor, for both files
+and directories. The descriptor supplies metadata without reading file contents.
+`O_EVTONLY` alone can still wait on a FIFO without a peer; `O_NONBLOCK` is also
+required so special leaves cannot stall resolution. FIFO and socket leaves use
+the portable fallback if the native probe is unavailable.
+
+`descriptorPath` checks close on every successfully opened descriptor, including
+when the query fails or returns an invalid path. Open, query or close failure,
+or an empty or relative result, declines the native probe. It adds no resolution
+error or log. Descriptors belong to individual calls, with no shared cache,
+locks or goroutines.
+
+Linux always uses the portable component walk; macOS uses it when the native
+probe declines. For each directory component and file leaf, `matchEntry` selects
+an exact-case directory entry first. Without an exact match, only a unique
+`strings.EqualFold` match changes spelling. Absent or ambiguous matches preserve
+the input component. If `os.ReadDir` cannot read an ancestor, the walk retains
+that component and continues. These probes never turn a successful absolute-path
+and symlink resolution into an error.
 
 Case correction happens after symlink resolution succeeds. A wrong-case path on
 a case-sensitive filesystem can therefore fail with `fs.ErrNotExist` before the
@@ -54,9 +69,16 @@ Claude's cwd, so pre-marking trust had no effect. See
 [trust key shape](agentrun-trust-subpackage.md#key-shape--realpath-on-disk-case-not-abspath).
 `tuidriver.EncodeCwd` supplies a dashed JSONL directory name, a different contract.
 
-Resolution is a best-effort metadata walk, not a stable file handle. Filesystem
-changes between resolution and use remain possible; consumers must enforce their
-confinement policy when using the result.
+Each call observes the filesystem afresh, without a path-string cache. Subsequent
+resolutions reflect a case-only rename, an ancestor replaced under the same
+pathname or a symlink retargeted to a different object. A missing target still
+returns the existing wrapped missing-path error. An old spelling remains usable
+after a case-only rename only where the filesystem accepts it.
+
+Resolution is a best-effort metadata operation, not a stable file handle. The
+native descriptor is closed before returning a path. Filesystem changes during
+resolution or between resolution and use remain possible; consumers must enforce
+their confinement policy when using the result.
 
 ## Migration
 
@@ -90,3 +112,37 @@ case-insensitive volume, where case-differing siblings cannot coexist.
 absent and Unicode fold assertions run on every filesystem. Keep these portable
 checks alongside the filesystem-dependent resolver tests: a skipped integration
 case does not establish that the selection rule works.
+
+The macOS runtime regressions cover freshness, special leaves and descriptor
+ownership. `TestResolveFreshIdentity` checks case-only rename, ancestor
+replacement, symlink retargeting and a subsequently missing target.
+`TestResolveSpecialLeaves` resolves a FIFO without a peer and a Unix socket in
+bounded helper processes, so a blocking open fails instead of hanging the suite.
+`TestNativePathDescriptors` compares descriptor counts around 256 successful and
+256 missing-path probes, then injects open/query/close failures and empty/relative
+results, checking flags and exactly one close after a successful open. Its
+`/dev/fd` inventory uses `Readdirnames`, with checked cleanup: Darwin `os.ReadDir`
+can fail while statting descriptor entries, obscuring the leak check itself.
+
+`TestResolveAncestorFanout` resolves a private `Workspace/Child` 16 times before
+and after adding 35,000 sibling files. Its per-call directory-reader parameter
+counts scans and entries for that private ancestor without a mutable global
+hook; each state permits at most one full enumeration and checks the exact
+current path through both the internal and public resolver. The native path
+recorded zero scans in both states. The unchanged-source diagnostic and the
+optimization-disabled control each demonstrated 16 scans, including 560,016
+entries in the wide state. Operation counts are the regression oracle; elapsed
+time alone could hide amplification behind a faster host or a narrow directory.
+The portable fallback retains its ancestor enumeration cost. See the
+[runtime spec and retained evidence](../../specs/architecture/3525-canonicalpath-runtime.md#native-macos-evidence)
+for the controls and complete command-suite comparison; those passing runs do
+not establish the cause of historical package timeouts.
+
+Filesystem prerequisites limit integration evidence: a case-insensitive volume
+cannot create case-differing siblings; a case-sensitive volume cannot resolve a
+wrong-case input; effective permissions may not deny listing/traversal; and some
+systems still resolve a deleted cwd. Each corresponding test skips explicitly
+when its prerequisite is unavailable. Such skips prove none of the omitted
+behavior and do not replace portable `TestMatchEntry` coverage. The macOS
+runtime tests are Darwin-only; their native evidence does not establish a Linux
+test result.

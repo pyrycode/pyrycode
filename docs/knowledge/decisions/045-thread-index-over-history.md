@@ -14,7 +14,7 @@ The current thread refolds from entry 1 on load, retains all content, copies
 whole threads for publication and has saved whole threads per append. Its
 public items cannot restore the private state needed to continue unfinished work
 or reconstruct the last shown version from final revisions alone. See
-[cache and epochs](../features/thread-package.md#cache-and-epochs).
+[cache and epochs](../features/thread-package-cache-and-epochs.md#cache-and-epochs).
 
 The supplied measurements from the Mac on 2026-10-14, pyry 0.39.0, show the cost:
 folding 28767 entries took about 8 minutes of CPU; publication allocated about

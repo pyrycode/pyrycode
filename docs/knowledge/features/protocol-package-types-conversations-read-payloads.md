@@ -16,6 +16,7 @@ type ConversationSummary struct {
     CurrentSessionID string  `json:"current_session_id"` // no omitempty (#940): stored binding, "" when unbound; no liveness guarantee.
     IsArchived     bool      `json:"is_archived"` // no omitempty (#880): a client counts active vs. archived, so it must read the flag on active rows too.
     IsMuted        bool      `json:"is_muted"` // no omitempty (#2571): mirrors IsArchived; see write-payloads doc for the direct-marshal test this field needed.
+    PinnedAt       *time.Time `json:"pinned_at"` // no omitempty: timestamp or explicit null, including unpinned rows.
     ReadUpTo       uint64    `json:"read_up_to"` // no omitempty (#2779): the stored durable read mark, including 0.
     LatestEntryID  uint64    `json:"latest_entry_id"` // no omitempty: newest displayable durable entry id, 0 if none; exclusions below.
     LastShownVersion *uint64 `json:"last_shown_version,omitempty"` // declared thread watermark; nil omits, pointer to zero emits 0.
@@ -34,7 +35,7 @@ const (
 ```
 
 - **`ListConversationsPayload` is `struct{}`.** Spec shows `{}` on the wire; the type exists so the dispatcher can decode into a concrete value rather than `json.RawMessage`.
-- **`ConversationSummary.Name` is `*string` WITHOUT `omitempty` — same discipline as `SessionTransitionPayload.WorkspaceCwd`.** Spec example shows literal `"name": null` on one of the two rows (an unnamed scratch conversation). `*string` distinguishes a null value (nil pointer) from an empty string, but decoding alone cannot distinguish null from an absent key; without `omitempty`, a nil pointer marshals as an explicit `null`. The AC body said "`*T` + `omitempty`"; honouring that literally would silently break the byte-equivalent round-trip the same AC requires — spec wire shape wins. The field comment records the explicit-null contract. `TestConversationsPayload_RoundTrip` checks decoded names, but its envelope byte comparison does not test DTO serialization; see the raw-payload caveat below. The fixture carries both branches (one row `name=<string>`, one row `name=null`) so the round-trip exercises both.
+- **`ConversationSummary.Name` is `*string` WITHOUT `omitempty` — same discipline as `SessionTransitionPayload.WorkspaceCwd`.** Spec example shows literal `"name": null` on one of the two rows (an unnamed scratch conversation). `*string` distinguishes a null value (nil pointer) from an empty string, but decoding alone cannot distinguish null from an absent key; without `omitempty`, a nil pointer marshals as an explicit `null`. The AC body said "`*T` + `omitempty`"; honouring that literally would silently break the byte-equivalent round-trip the same AC requires — spec wire shape wins. The field comment records the explicit-null contract. `TestConversationsPayload_RoundTrip` checks decoded names and marshals the decoded DTO back into the envelope before comparing bytes; see the fixture completeness requirement below. The fixture carries both branches (one row `name=<string>`, one row `name=null`) so the round-trip exercises both.
 - **`CurrentSessionID` is the stored binding, not a process check (#940).**
   `ListConversationsWithAgents` copies each emitted row's own
   `Conversation.CurrentSessionID` directly, including `""` when unbound; the wire
@@ -65,7 +66,7 @@ const (
   and restart/sleep dividers do not raise it; valid receipts provide accounting
   without establishing content visibility. Missing/empty or hidden-only logs
   yield `0`; see [visible-content clamping](../../protocol-mobile.md#marking-a-conversation-read).
-  [`MarkConversationRead`](relay-package-handlers.md#markconversationread-cannot-copy-setconversationmuteds-best-effort-save-2780)
+  [`MarkConversationRead`](relay-package-handlers-mark-conversation-read.md#markconversationread-cannot-copy-setconversationmuteds-best-effort-save-2780)
   uses the same target for `max(held, min(up_to, latest))`. Reading the newest
   visible entry clears unread despite hidden tails; reading an older entry leaves
   newer content unread. Higher held marks never decrease, even at latest zero.
@@ -76,7 +77,16 @@ const (
   Both fields are `uint64` without `omitempty`: clients read explicit zero,
   rather than interpreting a missing key as unknown. A lookup failure on any
   surviving row fails the whole correlated reply with retryable
-  `history.unavailable`; see [the list handler](relay-package-handlers.md#listconversations-gains-a-third-required-parameter-the-history-dependency-is-not-optional-2779).
+  `history.unavailable`; see [the list handler](relay-package-handlers-list-conversations.md#listconversations-gains-a-third-required-parameter-the-history-dependency-is-not-optional-2779).
+- **`PinnedAt` uses `*time.Time` without `omitempty` on both list and update DTOs.**
+  Nil must serialize as explicit `null` so an unpin can clear a client's cached
+  stamp; decoding an absent key from an older host also means unpinned.
+  `TestConversationPinnedAt` marshals decoded DTOs directly and inspects literal
+  `pinned_at` output for timestamp, null and absent inputs on both types.
+  Pins are host-local and clients merge hosts by pin time, without a new
+  capability. This declaration does not project stored pins: production handling
+  and projection remain pending #3537/#3538. See the
+  [request contract](../../protocol-mobile.md#set_conversation_pinned).
 - **`ArchivedAt` (#2698) is the archive-time stamp, projected verbatim from `Conversation.ArchivedAt` by `ListConversationsWithAgents`.** Pointer without `omitempty`, the same discipline as `WorkspaceLabel`: the key is always serialized, and `nil` is genuinely ambiguous on the wire between "active" and "archived before this field existed" — a client resolves that ambiguity by falling back to `LastUsedAt` for ordering, not by asking the daemon to disambiguate. Re-archiving a row never invents a stamp for it (see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `SetArchived`): stamping a legacy archived row on re-archive would reorder it to the top of every client's Archive screen, which is exactly the bug the registry-level test `TestRegistry_SetArchived_LegacyArchivedStaysUnstamped` exists to catch before it reaches this payload.
 - **`LastShownVersion` is an authoritative optional thread watermark.**
   Adding a shown item or appending text to one raises it; taking the maximum
@@ -104,18 +114,29 @@ const (
   and [the summary contract](../../protocol-mobile.md#conversations).
 - **`WorkspaceLabel` (#2208) is resolved per row from that row's own `Cwd`, never inherited.** It belongs to the workspace, not the conversation — N rows sharing one `Cwd` carry one label — and is filled by `internal/relay/handlers.ListConversations` via a `ConversationLister.WorkspaceLabel(cwd string) (string, bool)` read method, widened onto the narrow interface for this handler alone. Presence comes from that method's second return, never from `label != ""`: the registry keeps a stored empty label distinct from an absent one (see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `WorkspaceLabel`), and deriving the pointer from the string would collapse the two into the same `null`.
 - **`Agent` (#2643) is gated by `multi_agent`, independently of the thread watermark.** It names the agent running the conversation's bound session — `AgentClaude` or `AgentCodex`, a closed two-value wire vocabulary — and is `""` (so `omitempty` drops the key) unless the requesting conn negotiated `protocol.CapabilityMultiAgent`. For a negotiating client the value is never empty: `internal/relay/handlers.AgentOf` (exported for a second caller in #2644, see below) reads the session's harness through a `SessionHarnessFunc` (built over `sessions.Pool.HarnessFor`, #2629) and falls back to `AgentClaude` for a conversation with no bound session, a nil reader, or a session id the pool doesn't hold — fail-open, so a harness miss still shows the row rather than hiding it. **For a non-negotiating client the row is not merely unlabelled — a `conversations` reply omits every row whose agent is `AgentCodex` entirely**, so the list such a client sees is byte-identical to the one it saw before Codex conversations existed; that filtering, not just the empty `agent` key, is what "detection only" does not cover for this capability (see [handshake payloads](protocol-package-handshake-control-payloads.md)). `ListConversations(reg, hist)` is a thin wrapper over `ListConversationsWithAgents(reg, nil, hist)`, so a caller with no session pool gets the agent-blind reply without a `SessionHarnessFunc` to supply; the filtered history reader is required in both forms; a nil `harnessFor` makes `AgentOf` read every row as `AgentClaude`, which is exactly the pre-#2643 shape. See [`dispatch-package.md`](dispatch-package.md) for where the negotiated decision is carried per-conn (`Conn.MultiAgent()`), and [ADR 039](../decisions/039-capability-belongs-to-agent-and-model-together.md) for the general "resolve the session's own agent through `Pool.HarnessFor` first" pattern this handler follows. #2644 reuses the identical resolution rule to withhold *pushed* frames (not just this reply) about a Codex conversation from a non-negotiating conn — see [Capability negotiation on the handshake](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md).
-- **Fixture key order does not prove DTO serialization.** Go's `encoding/json`
-  emits struct fields in declaration order, but `TestConversationsPayload_RoundTrip`
-  re-sends the fixture's original `Envelope.Payload`. The fixture still lacks
-  `is_muted` and `current_session_id`; its envelope comparison stays green.
-  `TestConversationReadStateSerialization` proves `read_up_to` / `latest_entry_id`
-  emission at zero and above 2^63. `TestConversationsPayload_CurrentSessionID`
-  decodes two distinct nonempty bindings and an unbound row, then marshals that
-  decoded DTO and checks each raw JSON string, including the present empty key.
+- **Typed fixture round trips require the complete serialized DTO shape.**
+  `TestConversationsPayload_RoundTrip` marshals the decoded `ConversationsPayload`
+  into `Envelope.Payload` before re-encoding the envelope. Its fixture includes
+  the always-present `is_muted` and `current_session_id` keys, even at false and
+  empty-string values. Leaving the original `json.RawMessage` untouched had let
+  both omissions pass; weakening the byte comparison would hide that mismatch
+  again. Field order follows the DTO declaration because the comparison uses
+  `json.Compact`, which removes whitespace without sorting keys.
+  `TestConversationReadStateSerialization` separately proves zero and above-2^63
+  watermarks; `TestConversationsPayload_CurrentSessionID` checks distinct bindings
+  and the present empty key on an unbound row.
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to `RegisterPushTokenPayload` and the messaging slice. `internal/relay/handlers.ListConversations` maps each `Conversation` row to a `ConversationSummary` and sends a `conversations` envelope with `in_reply_to` set to the request id — registry-to-payload mapping is a downstream concern, not this package's.
 
-Golden round-trip tests in `conversations_read_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against `testdata/list_conversations.json` / `testdata/conversations.json`. `TestConversationsPayload_RoundTrip` asserts all three rows: row 0 has a non-nil `Name` pointer and a stamped `ArchivedAt`; row 1 has `Name == nil` (NOT `*c1.Name == ""` — would panic on nil deref AND be the wrong check) and `ArchivedAt == nil` (active); row 2 (#2698) is archived with `ArchivedAt == nil` — archived before the stamp existed, distinguishing "active" from "legacy archived" is exactly why the fixture needed a third row. The `conversations.json` envelope rides with `in_reply_to: 3`, the first protocol fixture pinning `in_reply_to` alongside an array-carrying payload.
+Golden round-trip tests in `conversations_read_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against `testdata/list_conversations.json` / `testdata/conversations.json`. `TestConversationsPayload_RoundTrip` asserts all three rows: row 0 has a non-nil `Name` pointer and stamped `ArchivedAt` / `PinnedAt`; row 1 has `Name == nil` (NOT `*c1.Name == ""` — would panic on nil deref AND be the wrong check) and `ArchivedAt == nil` (active); row 2 (#2698) is archived with `ArchivedAt == nil` — archived before the stamp existed, distinguishing "active" from "legacy archived" is exactly why the fixture needed a third row. The `conversations.json` envelope rides with `in_reply_to: 3`, the first protocol fixture pinning `in_reply_to` alongside an array-carrying payload.
 
-**A round-trip test through `Envelope` cannot see a payload struct's fields at all (#2208, recurred at #2698).** `Envelope.Payload` is a `json.RawMessage`, so re-marshalling writes the fixture's *original* payload bytes back rather than re-encoding the decoded struct — the byte comparison stays green whatever a struct field gained or lost, and would have stayed green with `WorkspaceLabel` (or `ArchivedAt`) added to the struct and never added to the fixture. Decoded per-row assertions check input values; testing output tags requires marshalling the decoded DTO and inspecting its JSON keys and values, as `TestConversationsPayload_CurrentSessionID` does. A future field needs both checks, not just a fixture update. `ArchivedAt` added a third row to the fixture instead of reusing the first two specifically so it could cover both `null` shapes — active and legacy-archived — that a two-row fixture couldn't distinguish.
+**Re-encode the decoded DTO, not the fixture's original raw payload.**
+`Envelope.Payload` is `json.RawMessage`; merely marshalling the original envelope
+cannot detect a missing field or a wrong DTO tag. The list and
+[`conversation_updated`](protocol-package-types-conversations-write-payloads.md)
+round trips now replace that raw payload with `json.Marshal(decodedPayload)`.
+The list fixture includes both stamped and null `pinned_at` values; the update
+fixtures exercise each separately. Complete required-field fixtures make these
+comparisons useful, while direct key assertions distinguish null from omission.
+See [protocol test boundaries](development-verification-protocol-boundaries.md).
 
-**A nullable-and-present key (no `omitempty`) needs a raw-bytes assertion, not a decoded one.** A decoded `*string` reads `nil` identically whether the key arrived as `"workspace_label":null` or was dropped entirely by an `omitempty` that should not be there — the regression the missing tag would cause is invisible to every struct-level check, decoded-pointer or round-trip alike. `internal/relay/handlers`' `TestListConversations_UnlabelledWorkspaceSendsExplicitNull` instead counts literal `"workspace_label":null` occurrences in the raw reply bytes. The same trap applies to `Name` above and to a required empty string: decoded `CurrentSessionID == ""` cannot distinguish a present `"current_session_id":""` from an omitted key. Inspect the JSON produced by marshalling the decoded DTO, rather than the untouched raw envelope payload.
+**A nullable-and-present key (no `omitempty`) needs a raw-bytes assertion, not a decoded one.** A decoded `*string` reads `nil` identically whether the key arrived as `"workspace_label":null` or was dropped entirely by an `omitempty` that should not be there — decoded-field checks alone cannot see the regression. A typed round trip or direct DTO marshal must inspect the emitted bytes. `internal/relay/handlers`' `TestListConversations_UnlabelledWorkspaceSendsExplicitNull` instead counts literal `"workspace_label":null` occurrences in the raw reply bytes. The same trap applies to `Name` above and to a required empty string: decoded `CurrentSessionID == ""` cannot distinguish a present `"current_session_id":""` from an omitted key. Inspect the JSON produced by marshalling the decoded DTO, rather than the untouched raw envelope payload.

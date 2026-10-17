@@ -136,6 +136,17 @@ type SetConversationMutedPayload struct {
 	Muted          *bool  `json:"muted"`
 }
 
+// SetConversationPinnedPayload is the phone-to-host set_conversation_pinned
+// request. Both keys are required: consumers must reject an empty conversation
+// ID or nil Pinned as protocol.malformed. The pointer preserves missing/null
+// separately from false. Pinning requires a promoted conversation; unpinning
+// remains allowed. The response reuses ConversationUpdatedPayload.
+// Production handling is pending #3537/#3538.
+type SetConversationPinnedPayload struct {
+	ConversationID string `json:"conversation_id"`
+	Pinned         *bool  `json:"pinned"`
+}
+
 // MarkConversationReadPayload is the body of a mark_conversation_read frame
 // (#2780). Phone → binary. It names a target conversation and the durable
 // history entry id the operator has read up to.
@@ -240,6 +251,10 @@ type ConversationUpdatedPayload struct {
 	// this record into its list in place, so a record that dropped the key
 	// would read as not muted and a rename would silently unmute the channel.
 	IsMuted bool `json:"is_muted"`
+
+	// PinnedAt is the host-local pin time, or null when unpinned. Always
+	// serialized; an absent field from an older host also decodes as unpinned.
+	PinnedAt *time.Time `json:"pinned_at"`
 
 	// ReadUpTo is the stored durable history read mark, including zero.
 	ReadUpTo uint64  `json:"read_up_to"`

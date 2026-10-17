@@ -62,7 +62,12 @@ Mutation evidence (run over `go test -overlay`, no worktree writes) for the thre
 
 ## Out of scope, still
 
-**A child that stays in bypass gets no `pyry_files` at all.** `withApprovalArgs` returns a bypass spawn's args unchanged, so it carries no `--mcp-config` and sees no MCP server — `send_file` included. Deliberate, pinned by a test, and not revisited by #2169: mixing a permission-argv change into a file-transfer feature was judged the wrong trade for a posture nobody has asked to send a file from.
+**A child that stays in bypass gets no daemon-injected `pyry_files`.**
+`withApprovalArgs` supplies a stdio host-response connection for selectable
+questions, but injects neither the daemon's `--mcp-config` nor its MCP servers,
+including `send_file`. Operator-provided MCP configuration is separate. This
+exposure boundary remains pinned by `TestWithApprovalArgs_BypassChildGetsNoFilesServer`;
+see [bypass transport semantics](config-package.md#stdio_permission_prompt--interactive-permission-transport-2343).
 
 **The shell-path bypass remains open.** Nothing stops `pyry mcp-files` being run directly with a hand-picked `PYRY_SESSION_ID` — the daemon bounds the damage (the id must name one of the operator's own live sessions; see `TestFileAttacher_DestinationIsCallerSession`) rather than defending against it. Closing it means authenticating the forked child to the daemon, which no ticket in this family has taken on.
 

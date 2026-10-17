@@ -98,6 +98,7 @@ func TestBoundQueueActionsRestart(t *testing.T) {
 				c.QueueRemover = q
 				c.QueueSender = suggestionQueueSender{inner: q}
 			})
+			testDaemonThreadCursor(s)
 			w.open("phone", false, protocol.CapabilityThread)
 			testBoundAction(t, w, typ, 7, 100)
 			if len(q.Snapshot(testConvID)) != 1 || len(h.refs) != 1 {
@@ -152,6 +153,7 @@ func TestBoundQueueActionsDevices(t *testing.T) {
 			q.EnqueueIdentified(testConvID, "shared", "two", "two", nil, "device-two", "", "", time.Time{})
 			testDaemonThreadLoad(t, store, 2)
 			w, _ := testDaemonThreadQueryWire(t, s, func(c *relay.V2SessionConfig) { c.QueueRemover = q; c.QueueSender = q })
+			testDaemonThreadCursor(s)
 			w.open("phone", false, protocol.CapabilityThread)
 			testBoundAction(t, w, typ, 2, 1)
 			testBoundAction(t, w, typ, 1, 2)

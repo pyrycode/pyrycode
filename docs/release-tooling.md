@@ -158,6 +158,57 @@ compiles it, and it is the one to run after deleting or moving test files —
 a deleted test file takes its shared helpers with it, and other tests may be
 calling them.
 
+## Selectable questions in bypass mode
+
+After deploying a release containing #3515, smoke-test Desktop on the Mac and
+Mobile against pyrybox using the deployed daemon and a paired, authorized client.
+Physical results remain **pending** until these checks are performed:
+
+| Deployment | Physical smoke status |
+|------------|-----------------------|
+| Desktop on the Mac | Pending |
+| Mobile on pyrybox | Pending |
+
+1. Record the client version, deployed daemon revision, Claude version and
+   `stdio_permission_prompt` value. Inspect the actual Claude child's arguments
+   under each deployed daemon: stored/operator bypass must retain exactly one
+   `--permission-prompt-tool stdio` pair with the setting absent/false or true.
+   Confirm the running child's effective mode is `bypassPermissions` through
+   session settings or init metadata; the escalation flag alone cannot establish
+   it, because non-bypass children also launch with that flag. Check that the
+   daemon has not injected its `pyry_approve` or `pyry_files` MCP servers.
+2. Elicit a single-choice question in the client. Select an offered option and
+   confirm the originating session resumes to a completed turn reflecting it.
+   Repeat with a fresh question and a free-text answer.
+3. Elicit a multiselect question. Select at least two offered options, include
+   free text, and confirm the completed continuation reflects all answer values.
+4. Elicit fresh single-choice and multiselect questions and cancel each. Confirm
+   one dismissal for each batch, that the originating child resumes and completes
+   the turn without treating the cancellation as a selection, and that the client
+   clears the pending question. Reopen/reconnect the client and confirm retired
+   questions do not reappear; late answers must not resolve a later batch.
+5. Run a harmless ordinary tool action, such as writing a unique marker in a
+   temporary file. Verify the action actually executes, with no ordinary approval
+   prompt, and confirm the child still reports bypass mode. After answers and
+   cancellations, check that no pending question or spinner remains and that a
+   subsequent turn works.
+
+Repeat for stored and operator bypass and both transport-setting values; changing
+`stdio_permission_prompt` requires a daemon restart. Record pass/fail, observed
+arguments/mode and any missing evidence for each deployment and combination.
+Tool-list presence alone proves availability: retain the actual question request,
+correlated answer/cancellation and dismissal, and completed continuation when
+recording the result.
+
+The Linux credentialed daemon cases `TestInteractiveStreamBypassQuestions` cover
+stored/operator bypass crossed with both setting values, single-choice and
+multiselect answers, free text and an ordinary-tool witness. Automated daemon
+evidence does not mark these physical client checks complete. This post-release
+checklist does not require a second OS suite for #3515; macOS suite execution is
+outside this Linux ticket's verification scope. See
+[transport semantics](knowledge/features/config-package.md#stdio_permission_prompt--interactive-permission-transport-2343)
+and the [question-answer harness](knowledge/features/e2e-realclaude-interactive-stream-question-answer-test-go.md).
+
 ## Live-relay smoke test
 
 `make e2e-liverelay` proves the daemon ↔ **real** `pyrycode-relay` pairing with
@@ -249,17 +300,41 @@ When: on the release checklist, and before touching `pyry update` code
 
 ## Full production timeout proofs
 
+`make test-exhaustive` runs the complete 30000-entry restoration proof with
+201 cuts and 50101 immediate/suffix comparisons. It is mandatory in `make preship`.
+Routine checks run a nine-cut proof on the same full-size history alongside the
+every-boundary focused histories. The verifier's dependency-aware
+`scripts/check-restoration.py` also requires the exhaustive proof for changes to
+the restoration package, its transitive local dependencies, fixtures and build
+inputs. Missing dependency or base information requires the full proof.
+Aggregate `make check` invokes this same conditional step. Focused `make test`
+keeps its ordinary package selection.
+`make preship` shares the ordinary checks and runs the unconditional exhaustive
+proof once, alongside the slow and live release tiers.
+
+Standard test targets use `scripts/test-admission.py` to share one test place
+across native worktrees and projects on the same host. Waiting is reported
+separately from execution. Nested wrapped commands inherit the same hold.
+Raw `go test` commands bypass this place unless explicitly wrapped. Containers
+must mount the same lock file backing and configure `PYRY_TEST_ADMISSION_LOCK`
+to participate in the host limit.
+
 `make test` checks the update decision's operation deadline with a short injected duration.
 Its production ceiling remains 70 seconds.
 `make test-slow` also exercises the public operation through the full ceiling and the
 supervisor's real token-read deadline. It also runs
 `TestPushWakeFeedbackExpiryIntegration` through the complete 60-second feedback
-lifetime over real sockets. `make preship` includes this tier.
+lifetime over real sockets. The delayed metadata-readiness proof runs real replay
+chunks beyond the twenty-second inactivity interval in this tier too.
+`make preship` includes this tier.
 
 Ordinary checks use Go's `testing/synctest` virtual clock for
 `TestReplyFallbackLookupBudget`, lock-based `TestMemoryCredentialCancellation`
 cases and the silent-expiry consumer in `TestPushWakeFeedbackExpiry`. Their
-production durations and cancellation checks remain unchanged. The relay's
+production durations and cancellation checks remain unchanged. Metadata-readiness
+checks use the virtual clock to prove progress renewal, complete publication and
+the independent caller deadline. The real stalled-replay check stays in ordinary
+tests. The relay's
 `TestWakeFeedbackBounds` independently checks the exact expiry boundary and
 late-result rejection. Credential stdin polling retains its real OS descriptor
 and ten-second operation deadline; its isolated cases may run concurrently.

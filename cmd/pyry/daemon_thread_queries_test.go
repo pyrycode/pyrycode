@@ -584,7 +584,7 @@ func TestDaemonThreadQueriesJoin(t *testing.T) {
 		}
 	})
 	// Establish the real publisher cursor before admitting this reconnecting app.
-	cursor := &shadowConversation{}
+	cursor := testDaemonThreadCursor(s)
 	s.publisher.publish(t.Context(), testConvID, cursor)
 	w.open("phone", false, protocol.CapabilityThread)
 	w.open("legacy", false)

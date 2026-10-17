@@ -64,6 +64,32 @@ workers. `TestStoreOutputCancellationWhileWithdrawing` and
 `TestStoreConcurrentRetryWithdrawal` establish lock/join contention; cancellation
 during lookup alone cannot prove those boundaries.
 
+Body parity needs explicit expected public rows before comparing Store content
+with `Snapshot` and legacy `Fold.Items`: malformed tool input can make both
+outputs omit the same row and leave equality green. `TestStoreToolBodyParity`
+asserts fixture IDs/visibility before comparing detached bodies, including empty
+and unknown fields. To force inherited-reference resolution, select an
+interrupted nested Task whose ending comes from its root, as in
+`TestStoreToolBodyBounded` and `testEndingEntries`; a completed ordinary child
+uses its own result and cannot prove that dependency path. Count exact reference
+IDs and metadata visits after preparation, including recipe lookup, rather than
+inferring bounds from output size or allocation alone. The
+[body-read contract](thread-package-background-store-queries.md#revision-scoped-tool-bodies)
+permits required ancestors internally while returning only the selected body.
+
+Metadata counters used as barriers observe rendering visits as well as selection.
+Disarm a selection barrier once the intended query reaches it, keeping that query
+held while allowing independent `Snapshot` checks to render. Leaving the barrier
+armed can block the observation meant to prove reader isolation.
+`TestCatchUpIsolation` and `TestStoreQueriesRetirementIsolation` use this pattern;
+`TestStoreToolBodyCapture` instead tags the held request's content lookup so other
+readers can proceed through publication, unload/replacement and cancellation.
+Do not block inside `sync.Once.Do`: its mutex also blocks later visitors while
+the callback waits. Use an atomic first-entry guard to hold only the intended
+reader. `TestChildPageCaptureLifecycle` requires a concurrent `Snapshot` of the
+same publication to finish before advancing history; advancing first can replace
+the hooked index and conceal a deadlocking barrier.
+
 `TestAffectedPublicationOracle` compares affected capture with whole-thread
 `difference` after single-entry and chunked corpus feeds, including private
 activity, late children, reparenting, delivery/suppression and no-op entries.
@@ -80,7 +106,7 @@ it checks pointer reuse, borrowed content and mutation of detached results.
 Retain internal pointers after text-buffer initialization to prove borrowed
 Content ownership; detached `Fold.Items` snapshots can stay correct while
 reusable buffers corrupt old publications. See the
-[text-buffer ownership checks](thread-package-main-thread-folding-validation.md#validation-and-testing).
+[text-buffer ownership checks](thread-package-main-thread-folding-validation-replay.md#replay-rendering-and-ingestion-validation).
 `BenchmarkPublicationPhases` isolates capture/comparison from replay, checkpoint
 I/O, query preparation and output encoding; see the
 [bounded comparison evidence](../../specs/architecture/3388-immutable-publication.md#performance-evidence).
@@ -94,6 +120,17 @@ result metadata, disregarding only item order (align independently generated
 Store epochs). `TestIncrementalTreeOwnership` retains lookup buckets and roots
 through concurrent reads and later membership/order updates, checking AVL
 ordering, balance and subtree sizes.
+
+Synthetic withdrawal fixtures must keep `Fold.publicVisible` consistent with
+child ownership and claimed-delivery evidence. `Fold.Render`, and therefore the
+independent `Fold.Items` oracle, derives membership from those facts rather than
+that visibility map. Changing only the map compares an impossible publication
+against a still-public row. `TestChildPageIncrementalOracle` updates both the
+map and `Fold.messages` suppression evidence, then filters/sorts `Fold.Items`
+independently for direct-parent pages; it also exercises late child resolution
+through real feed entries. See the
+[child-page contract](thread-package-background-store-queries.md#revision-scoped-direct-child-summaries)
+for strict tuple limits and publication-bound continuation.
 
 `BenchmarkStorePublication` measures state-changing additions and fixed appends
 with 50,000 prepared public items, including affected capture, Changes

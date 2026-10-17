@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"cmp"
 	"context"
 	"maps"
 )
@@ -11,12 +12,13 @@ type queryRow struct {
 	recipe contentRecipe
 }
 
-// queryTree is a persistent AVL tree ordered by (key, item ID). Subtree sizes
+// queryTree is a persistent AVL tree ordered by (group, key, item ID). Subtree sizes
 // support bounded rank selection; updates never mutate a borrowed node.
 type queryTree struct {
 	left, right  *queryTree
 	row          queryRow
 	key          uint64
+	group        uint64
 	height, size int
 }
 
@@ -56,21 +58,36 @@ func (q *queryIndex) rotate(n *queryTree, left bool) *queryTree {
 
 // treePut inserts/replaces row, or deletes (key,id) when row.item is nil.
 func (q *queryIndex) treePut(n *queryTree, key, id uint64, row queryRow) *queryTree {
+	return q.treePutGroup(n, 0, key, id, row)
+}
+
+func compareQueryKey(group, key, id uint64, n *queryTree) int {
+	if c := cmp.Compare(group, n.group); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(key, n.key); c != 0 {
+		return c
+	}
+	return cmp.Compare(id, n.row.item.ID)
+}
+
+func (q *queryIndex) treePutGroup(n *queryTree, group, key, id uint64, row queryRow) *queryTree {
 	q.count(true)
 	if n == nil {
 		if row.item == nil {
 			return nil
 		}
-		return &queryTree{key: key, row: row, height: 1, size: 1}
+		return &queryTree{group: group, key: key, row: row, height: 1, size: 1}
 	}
 	c := *n
 	if q.copied != nil {
 		q.copied(3)
 	}
-	if key < n.key || key == n.key && id < n.row.item.ID {
-		c.left = q.treePut(n.left, key, id, row)
-	} else if key > n.key || key == n.key && id > n.row.item.ID {
-		c.right = q.treePut(n.right, key, id, row)
+	comparison := compareQueryKey(group, key, id, n)
+	if comparison < 0 {
+		c.left = q.treePutGroup(n.left, group, key, id, row)
+	} else if comparison > 0 {
+		c.right = q.treePutGroup(n.right, group, key, id, row)
 	} else if row.item != nil {
 		c.row = row
 	} else {
@@ -85,8 +102,8 @@ func (q *queryIndex) treePut(n *queryTree, key, id uint64, row queryRow) *queryT
 			q.count(true)
 			next = next.left
 		}
-		c.key, c.row = next.key, next.row
-		c.right = q.treePut(n.right, next.key, next.row.item.ID, queryRow{})
+		c.group, c.key, c.row = next.group, next.key, next.row
+		c.right = q.treePutGroup(n.right, next.group, next.key, next.row.item.ID, queryRow{})
 	}
 	c.fix()
 	if treeHeight(c.left)-treeHeight(c.right) > 1 {
@@ -187,6 +204,7 @@ func (q *queryIndex) membership(row queryRow, remove bool) {
 		q.active = q.treePut(q.active, item.ID, item.ID, value)
 	}
 	q.touched = q.treePut(q.touched, row.touch, item.ID, value)
+	q.children = q.treePutGroup(q.children, item.Parent, item.Order, item.ID, value)
 	if row.touch == 0 {
 		if remove {
 			q.invalidTouches--

@@ -41,12 +41,28 @@
 # part of preship.
 
 GO          ?= go
+TEST_ADMISSION ?= python3 scripts/test-admission.py --
+# Temporary headroom for full race-test packages on busy hosts.
+TEST_TIMEOUT ?= 30m
 STATICCHECK ?= $(shell which staticcheck 2>/dev/null || echo $(HOME)/go/bin/staticcheck)
 BIN         ?= ./pyry
 DIST        ?= ./dist
 
 .PHONY: check
-check: vet test staticcheck substrate-guard e2e
+check: check-common test-restoration
+	@echo "All checks passed"
+
+.PHONY: check-common
+check-common: vet test-tools test staticcheck substrate-guard e2e
+
+# Keep aggregate checks safe while older workers still use make check.
+.PHONY: test-restoration
+test-restoration:
+	python3 scripts/check-restoration.py
+
+.PHONY: test-tools
+test-tools:
+	python3 -m unittest discover -s scripts -p 'test_*.py'
 
 .PHONY: vet
 vet:
@@ -54,19 +70,23 @@ vet:
 
 .PHONY: test
 test:
-	$(GO) test -race -skip '^TestCheckpointResumeCorpus$$' ./...
-	# Keep the complete corpus mandatory, with its own package timeout budget.
-	$(GO) test -race -run '^TestCheckpointResumeCorpus$$' ./internal/thread
+	$(TEST_ADMISSION) $(GO) test -timeout=$(TEST_TIMEOUT) -race ./...
+
+# The complete 201-cut restoration sweep is mandatory before release.
+# Verifier configuration also requires it for changes to thread/history code.
+.PHONY: test-exhaustive
+test-exhaustive:
+	PYRY_EXHAUSTIVE_TESTS=1 $(TEST_ADMISSION) $(GO) test -timeout=$(TEST_TIMEOUT) -race -count=1 -run '^TestCheckpointResumeCorpus$$' ./internal/thread
 
 # Full production-duration proofs, separate from ordinary unit runs.
 .PHONY: test-slow
 test-slow:
-	PYRY_SLOW_TESTS=1 $(GO) test -race -count=1 -run '^(TestUpdateWhenIdle_SilentPeerCeiling|TestAccountTokenReadDeadline)$$' ./internal/control ./internal/streamsup
-	PYRY_SLOW_TESTS=1 $(GO) test -race -count=1 -run '^TestPushWakeFeedbackExpiryIntegration$$' ./cmd/pyry
+	PYRY_SLOW_TESTS=1 $(TEST_ADMISSION) $(GO) test -race -count=1 -run '^(TestUpdateWhenIdle_SilentPeerCeiling|TestAccountTokenReadDeadline)$$' ./internal/control ./internal/streamsup
+	PYRY_SLOW_TESTS=1 $(TEST_ADMISSION) $(GO) test -race -count=1 -run '^(TestPushWakeFeedbackExpiryIntegration|TestDaemonThreadMetadataReadiness)$$' ./cmd/pyry
 
 .PHONY: e2e
 e2e:
-	$(GO) test -tags e2e -race -count=1 ./internal/e2e/...
+	$(TEST_ADMISSION) $(GO) test -timeout=$(TEST_TIMEOUT) -tags e2e -race -count=1 ./internal/e2e/...
 
 # e2e-realclaude, e2e-liverelay, e2e-install and e2e-update each pass -count=1,
 # and it is load-bearing. Every one of them builds its binary under test with a
@@ -81,7 +101,7 @@ e2e:
 # runs on every `make check`.
 .PHONY: e2e-realclaude
 e2e-realclaude:
-	$(GO) test -tags e2e_realclaude -count=1 ./internal/e2e/realclaude/...
+	$(TEST_ADMISSION) $(GO) test -tags e2e_realclaude -count=1 ./internal/e2e/realclaude/...
 
 # e2e-liverelay proves the daemon ↔ real pyrycode-relay pairing with one
 # round-trip against a locally built relay binary. Offline-capable and
@@ -89,7 +109,7 @@ e2e-realclaude:
 # ../pyrycode-relay checkout. See docs/release-tooling.md § Live-relay smoke test.
 .PHONY: e2e-liverelay
 e2e-liverelay:
-	$(GO) test -tags e2e_liverelay -count=1 ./internal/e2e/liverelay/...
+	$(TEST_ADMISSION) $(GO) test -tags e2e_liverelay -count=1 ./internal/e2e/liverelay/...
 
 # e2e-install runs the real install round-trip (opt-in tag e2e_install). The
 # darwin/linux build tags mean only the host platform's install test compiles
@@ -99,7 +119,7 @@ e2e-liverelay:
 # untouched. See docs/release-tooling.md § Install & update e2e suites.
 .PHONY: e2e-install
 e2e-install:
-	$(GO) test -tags e2e_install -count=1 ./internal/e2e/...
+	$(TEST_ADMISSION) $(GO) test -tags e2e_install -count=1 ./internal/e2e/...
 
 # e2e-update runs the full `pyry update` flow (opt-in tag e2e_update): fetch →
 # verify → atomic binary replace → daemon restart, against an in-process fake
@@ -110,15 +130,15 @@ e2e-install:
 # internal/e2e. See docs/release-tooling.md § Install & update e2e suites.
 .PHONY: e2e-update
 e2e-update:
-	$(GO) test -tags e2e_update -count=1 ./cmd/pyry/...
+	$(TEST_ADMISSION) $(GO) test -tags e2e_update -count=1 ./cmd/pyry/...
 
-# preship is the pre-binary-swap gate: everything hermetic (via check, which
-# now runs the fake-daemon e2e suite) plus the live-claude suite and the
+# preship is the pre-binary-swap gate: shared ordinary hermetic checks plus
+# mandatory full restoration and slow proofs, the live-claude suite and the
 # live-relay round-trip. Deliberately runs the realclaude suite in FULL — the
 # operator must never be the first real-stack execution, and trimming for speed
 # is a fix-when-it-hurts decision, not a default.
 .PHONY: preship
-preship: check test-slow e2e-realclaude e2e-liverelay
+preship: check-common test-slow test-exhaustive e2e-realclaude e2e-liverelay
 
 .PHONY: staticcheck
 staticcheck:

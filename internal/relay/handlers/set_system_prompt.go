@@ -227,6 +227,7 @@ func SetSystemPrompt(reg ConversationSystemPromptSetter, registryPath string, lo
 			IsPromoted: cv.IsPromoted,
 			IsArchived: cv.IsArchived,
 			IsMuted:    cv.IsMuted,
+			PinnedAt:   cv.PinnedAt,
 			ReadUpTo:   cv.ReadUpTo,
 			Name:       cv.Name,
 			Cwd:        cv.Cwd,
