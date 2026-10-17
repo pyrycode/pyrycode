@@ -28,19 +28,27 @@ providers and starts `startDaemonThreadPublisher` before connection admission.
 `installDaemonThreadRelay` binds `ThreadCatchUp`/`ThreadPage` to
 `Store.CatchUp`/`Store.HistoryPage` and `ThreadToolBody`/`ThreadChildren` to
 `Store.ToolBody`/`Store.ChildPage` on the publisher's actual `thread.Store`.
+`ThreadCompactCatchUp`/`ThreadCompactPage` bind `Store.CompactCatchUp`/
+`Store.CompactHistoryPage` on that same Store through `queryDaemonThread`;
+version-zero compact catch-up selects the newest public root window.
 Adapters preserve the request context, named conversation and each captured
 result, including body kind, epoch/version and revision. Child requests pass
 the normalized limit and every cursor field; no adapter selects twice or reads a
-full `Snapshot`/`Observe` baseline. Installation clears all four query callbacks
-before checking the Store, preventing stale providers after clearing.
+full `Snapshot`/`Observe` baseline. Installation clears all six query callbacks
+and `ThreadCompactReady` before checking the Store, preventing stale providers
+or readiness after clearing a reused config.
 `ThreadReady` requires both complete queries, the authoritative watermark lookup,
 `ThreadLiveState`/`LiveStateCurrent` delivery and a running publisher on that
 same Store. Expansion additionally requires both expansion providers and client
 `thread_expansion`/`thread`/`interactive` capabilities; missing either provider
 withholds expansion while complete-thread negotiation still works. Readiness
-does not promise that every conversation has completed replay. Complete
-history/live delivery remains in use; compact publication (#3517) and client
-adoption are later work. See the
+does not promise that every conversation has completed replay.
+`ThreadCompactReady` additionally requires both compact queries and both
+expansion reads; production grants `thread_compact` only alongside the granted
+`thread`/`interactive`/`thread_expansion` capabilities. A stopped publisher or
+missing expansion provider withholds it. Complete history/live delivery remains
+the default; compact publication is installed, with Desktop #2080 and Mobile
+\#2200 adoption downstream. See the
 [expansion wire contract](../../protocol-mobile.md#bounded-expansion-reads).
 Authenticated queries load cold or idle registered conversations and wait
 cancelably for readiness; unavailable views fail with `thread.query_failed`
@@ -101,6 +109,38 @@ consumers before replacement even if withdrawal/reload races the status read.
 See [observation readiness](thread-package-background-store-replay.md#loading-and-replay-readiness)
 and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection).
 
+Recipient projection is per connection and conversation. `ActiveThreadConns`
+captures `ActiveConn.View` and `PendingView` together under `hostedMu`, with
+the negotiated `ThreadCompact` flag. Complete-only deployments do no
+`CompactChanges` work. Unjoined compact-capable peers participate in both
+families' query cancellation, but the relay withholds compact frames until a
+compact join exists. During a projection switch, both completed and pending
+families participate. Selecting only the completed join loses updates: the
+other family's frame cannot cancel a stale pending capture, which could then
+certify while the publisher cursor moves past the change. A later query
+admission crosses the publication gate before Store capture. Relay membership,
+projection and cancellation checks remain authoritative immediately before
+sealing; the daemon snapshot grants no content access. See
+[query/live fencing](../../protocol-mobile.md#querylive-ordering).
+
+For compact recipients, an advanced same-epoch observation permits one
+`Store.CompactChanges` call under the operation context. Calling when the
+cursor equals the current version would block; status and captured progress
+must establish advancement first. Each interval yields one final replacement
+per affected public root (tool/agent header or full non-tool/agent item), or
+one consumed-progress update if no root changed. `threadShadow.follow`'s
+existing 50 ms publication tick is the flush schedule, plus the pass's work.
+The following changed pass flushes final state after activity stops, and an
+unchanged pass emits nothing. Pending compact work is proportional to affected
+roots, with no per-hidden-event queue. Oversized full root items can still
+fragment. Complete update content and order remain unchanged.
+Compact read errors leave the cursor for retry; unusable/reset results retire
+through `gap`/`RetireLiveState`, as do complete continuity failures. Neither
+acquisition nor retirement publishes a baseline. Compact recovery remains an
+explicit query, even when compact catch-up can survive a lost complete
+publication range. The publication gate and publisher wait group own both
+families; publisher stop cancels and joins in-flight publication and reads.
+
 `daemonThreadUpdates` maps exported fold field names through `ThreadItem`'s JSON
 tags. Copying `EndedOrder` or `NoChild` directly would produce unusable wire
 patches instead of `ended_order` or `no_child`. A combined field/text change
@@ -129,7 +169,7 @@ unload. Reading a newer boundary after held delivery can mark an unpublished
 commit consumed and prevent its reload. `TestDaemonThreadIdleCommit` exercises
 this race; reload must still prove the publication range or retire consumers.
 
-All four authenticated thread reads share `queryDaemonThread`'s temporary
+All six authenticated thread reads share `queryDaemonThread`'s temporary
 daemon demand; `threadShadow.queryThread` remains the complete-query wrapper.
 They load cold or idle registered conversations, wait cancelably for a usable
 view, and keep it loaded through bounded selection and rendering. Concurrent
@@ -231,6 +271,60 @@ wire fixture uses a different client for complete catch-up, so its green alone
 cannot prove same-client checkpoint invariance around expansion with an existing
 join. Similarly, separate question/approval tests prove established channel
 behavior but do not prove coexistence with installed expansion in that fixture.
+
+Installed authenticated compact evidence uses the real Store and relay:
+`TestDaemonThreadCompactInstallation` and `TestDaemonThreadCompactNegotiation`
+check callback clearing, cancellation, readiness and capability refusals.
+`TestDaemonThreadCompactBoundary` refuses a stale compact query racing live
+publication, then compares retry headers with the Store.
+`TestDaemonThreadCompactSwitch` exercises both projection switches, with capture
+before publication and admission after the recipient snapshot.
+`TestDaemonThreadCompactRecovery` checks retained-checkpoint reconnect and a
+fetched child page invalidated by newer root `subtree_version`, then verifies a
+fresh bounded read. Source `rev` alone cannot detect every nested change.
+`TestDaemonThreadCompactRetirement` forces loss of 65 separately consumed
+complete change batches and actual Store epoch replacement while compact-joined;
+both retire without a baseline before explicit compact recovery.
+`TestDaemonThreadCompactConversationIsolation` puts opposite complete/compact
+joins on two conversations for the same peers and compares independent live
+content, order and checkpoints with each Store projection.
+`TestDaemonThreadCompactProgress` checks one hidden-only progress envelope and
+silence on the following idle pass.
+
+`TestDaemonThreadCompactWire` holds publication across nested bursts behind
+fixed visible roots. Hidden children grow from 5 to 8333, tool/error bodies
+from 64 to 4096 bytes, and bursts from 3 to 25 children, each with a tool use
+and error result. Queries and final live headers match the Store and exclude
+hidden identities/payloads. The final
+[Linux verifier evidence for #3563](https://github.com/pyrycode/pyrycode/pull/3581#issuecomment-6240626533)
+records physical envelopes / fully stamped bytes after publication completion
+and ordered-lane drain:
+
+| Compact delivery | Small history | 8333-child history |
+| --- | ---: | ---: |
+| Newest window | 2 / 1484 | 2 / 1511 |
+| Older page | 2 / 1018 | 2 / 1040 |
+| Catch-up | 2 / 1006 | 2 / 1025 |
+| Live burst | 1 / 497 | 1 / 506 |
+
+Frame counts stay 2/2/2/1 across both scales; byte totals vary slightly with
+wire stamps and versions. These are bounded-root fixtures, not a constant-byte
+promise for arbitrary top-level messages. `testCompactRead` preserves fragment
+assembly across drain markers and counts every continuation envelope; resetting
+assembly at a marker drops oversized complete items, while counting only
+reassembled updates undercounts frames. Its drain goroutine allows wire output
+to be consumed while flushing, and is cancelled and joined on every return.
+
+Real prompt producers, the send-message handler and live-state publisher deliver
+questions, approvals, correlated send acknowledgements and main-turn state while
+publication is held halfway through each burst. The final verifier observed
+11.72 ms and 7.69 ms, within the asserted three-second bound; the bound is checked
+after wire reads as well as before them so a late batch cannot pass. Establish
+the running producer before capturing prompt ownership: starting it afterwards
+retires the captured prompt generation and tests the wrong lifecycle.
+`TestDaemonThreadCompactLiveChannels` and both wire scale cases plus their parent
+executed and passed in the Linux race gate (4 passed, zero failed/skipped).
+No live Claude is involved; macOS is outside this ticket's verification scope.
 
 Epoch replacement can legitimately retire the previous peer. Authenticated wire
 helpers must consume that peer's close frame before decoding a replacement
