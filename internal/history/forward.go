@@ -14,11 +14,13 @@ import (
 // ForwardReader consumes raw committed entries chronologically. Its methods must
 // be called serially. It retains only scalar progress, never decoded entries.
 type ForwardReader struct {
-	store   *Store
-	convID  conversations.ConversationID
-	afterID uint64
-	segment uint64
-	sealed  bool
+	store      *Store
+	convID     conversations.ConversationID
+	afterID    uint64
+	segment    uint64
+	sealed     bool
+	selective  bool
+	positioned bool
 
 	// Last validated stored ID preceding the first segment the next walk reads.
 	// An unsealed segment is reread, so its own IDs are excluded from this bound.
@@ -35,7 +37,7 @@ func (s *Store) Forward(convID conversations.ConversationID, afterID uint64) (*F
 	if s == nil {
 		return nil, fmt.Errorf("history: store is unavailable")
 	}
-	return &ForwardReader{store: s, convID: convID, afterID: afterID}, nil
+	return &ForwardReader{store: s, convID: convID, afterID: afterID, selective: afterID != 0}, nil
 }
 
 // LastEntryID returns the exclusive resume ID after successful delivery.
@@ -53,7 +55,7 @@ func (r *ForwardReader) Walk(ctx context.Context, throughID uint64, consume func
 	if r.afterID >= throughID {
 		return nil
 	}
-	segs, err := r.store.forwardSegments(r.convID)
+	segs, err := r.forwardSegments(ctx)
 	if errors.Is(err, fs.ErrNotExist) && r.segment == 0 {
 		return nil
 	}
@@ -75,7 +77,7 @@ func (r *ForwardReader) Walk(ctx context.Context, throughID uint64, consume func
 		boundaryID := previous
 		// Check the stored order before using IDs as resume boundaries.
 		for _, e := range entries {
-			if e.entry.ID <= previous {
+			if e.entry.ID <= previous || (seg.nextID != 0 && e.entry.ID >= seg.nextID) {
 				return fmt.Errorf("%w: non-increasing entry IDs", ErrCorruptSegment)
 			}
 			previous = e.entry.ID
@@ -150,14 +152,94 @@ func (r *ForwardReader) Tail(ctx context.Context, consume func([]Entry) error) e
 	}
 }
 
-func (s *Store) forwardSegments(convID conversations.ConversationID) ([]segmentRef, error) {
+type forwardRange struct {
+	segmentRef
+	firstID uint64
+	nextID  uint64
+}
+
+func (r *ForwardReader) forwardSegments(ctx context.Context) ([]forwardRange, error) {
+	s := r.store
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	dir, err := s.resolveDir(convID, false)
+	dir, err := s.resolveDir(r.convID, false)
 	if err != nil {
 		return nil, err
 	}
-	return listSegments(dir)
+	segs, err := listSegments(dir)
+	if err != nil {
+		return nil, err
+	}
+	c := s.convs[r.convID]
+	if c == nil && r.selective {
+		c = &convLog{}
+		s.convs[r.convID] = c
+	}
+	var ranges []forwardRange
+	previous := r.boundaryID
+	current := make(map[uint64]bool, len(segs))
+	for _, seg := range segs {
+		current[seg.num] = true
+		if seg.num < r.segment || (seg.num == r.segment && r.sealed) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		item := forwardRange{segmentRef: seg}
+		if r.selective {
+			bound, err := s.lookupSegmentBound(c, dir, seg)
+			if err != nil {
+				return nil, err
+			}
+			item.firstID = bound.firstID
+			if item.firstID != 0 {
+				if item.firstID <= previous {
+					return nil, fmt.Errorf("%w: non-increasing segment first IDs", ErrCorruptSegment)
+				}
+				previous = item.firstID
+			}
+		}
+		ranges = append(ranges, item)
+	}
+	if !r.selective {
+		return ranges, nil
+	}
+	for num := range c.lookupBounds {
+		if !current[num] {
+			delete(c.lookupBounds, num)
+		}
+	}
+	nextID := uint64(0)
+	for i := len(ranges) - 1; i >= 0; i-- {
+		ranges[i].nextID = nextID
+		if ranges[i].firstID != 0 {
+			nextID = ranges[i].firstID
+		}
+	}
+	if !r.positioned && len(ranges) > 0 {
+		selected := -1
+		var boundary uint64
+		for i, seg := range ranges {
+			if seg.firstID == 0 {
+				continue
+			}
+			if selected >= 0 && seg.firstID > r.afterID {
+				break
+			}
+			if selected >= 0 {
+				boundary = ranges[selected].firstID
+			}
+			selected = i
+		}
+		if selected >= 0 {
+			ranges = ranges[selected:]
+			r.segment = ranges[0].num
+			r.boundaryID = boundary
+		}
+		r.positioned = true
+	}
+	return ranges, nil
 }
 
 func (s *Store) forwardSegment(convID conversations.ConversationID, name string) ([]segEntry, bool, error) {
