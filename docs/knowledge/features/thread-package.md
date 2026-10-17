@@ -35,8 +35,10 @@ covers discovery, query/live ordering, retirement and recorded regression corpor
 covers scalar certificates, incremental checkpoint transactions, retry authority,
 the 30-second changed-version cadence, joined final certification, public touches
 and catch-up continuity. Only item-record appends are incremental; state-file
-replacements are complete. Store loading still fully replays history pending
-checkpoint restoration in #3337.
+replacements are complete. Load/Retry restores a complete validated checkpoint
+and folds only its surviving suffix. Clean state retains its epoch; dirty state
+resumes with a new epoch. Absent/rejected or scalar-only state refolds with a
+new epoch, while actual history/persistence failures withhold usability.
 
 ### Send now before consumption (#3508)
 
