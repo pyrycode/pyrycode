@@ -12,6 +12,14 @@ const (
 	TypeThreadReset       = "thread_reset"
 )
 
+// Expansion vocabulary is declared ahead of handlers and capability activation.
+const (
+	TypeThreadReadToolBody = "thread_read_tool_body"
+	TypeThreadToolBody     = "thread_tool_body"
+	TypeThreadReadChildren = "thread_read_children"
+	TypeThreadChildren     = "thread_children"
+)
+
 // Error codes: wire values for the "code" field of an ErrorPayload
 // (docs/protocol-mobile.md § Error codes, which publishes each code's
 // retryability). Names follow Code<Category><Reason> for the dotted
