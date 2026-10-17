@@ -85,3 +85,8 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: `refreshHeader` now removes the stored row rather than the row it is passed. `publish`'s first-index path applies the capture header before calling it, so removal keyed by the replacement header's `subtreeVersion` missed the `rootTouches` entry and left one stale entry per row. Stale keys sat at or below `compactFrom` and were never selected, but they made request rank/visit work grow with inventory (`TestCompactIntervalWork`: 35 vs 59 visits before, 11 vs 11 after). Contract unchanged; other trees' keys are identical between the two rows.
+- Final measure: ~95 production, ~480 test, ~120 plan lines; zero new exported types; native verification on Linux.

@@ -256,6 +256,9 @@ func (q *queryIndex) advance(items []*Item, affected []int, f *Fold, work func(b
 		next.count(true)
 		cloneBucket(f.items[i].ID)
 		if old, ok := next.lookup(f.items[i].ID, true); ok {
+			if old.item.Parent == 0 && (items[i] == nil || items[i].Parent != 0) {
+				next.compactLost = f.version
+			}
 			next.membership(old, true)
 		}
 		if items[i] != nil {
