@@ -1169,7 +1169,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`thread_item_added`** | binary → phone | no | **Production emitted (#3164).** Full daemon-built item with `conversation_id`, `epoch`, `version`; oversized updates use bounded assembly parts (#3073). Delivered only to eligible authenticated interactive connections that negotiated `thread`. See [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 | **`thread_item_changed`** | binary → phone | no | **Production emitted (#3164).** In-place field replacements with `item_id`, `base_rev`, `rev`, `changes` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_item_changed`](#thread_item_changed). |
 | **`thread_text_append`** | binary → phone | no | **Production emitted (#3164).** Message text suffix with `item_id`, `base_rev`, `rev`, `text` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_text_append`](#thread_text_append). |
-| **`thread_compact_update`** | binary → phone | no | **Declared only (#3559); no production publication or negotiation.** Scoped compact root replacement or hidden-only consumed progress; oversized rows use bounded assembly. See [Compact projection](#compact-projection-declared). |
+| **`thread_compact_update`** | binary → phone | no | Production compact root replacement or hidden-only consumed progress (#3563), gated by a negotiated compact join per conversation. Oversized rows use bounded assembly. See [Compact projection](#compact-projection-declared). |
 | **`thread_catch_up`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3253).** Request current full items after an unsigned history `version`, or a newest window at zero; carries `conversation_id`, `epoch` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
 | **`thread_page`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3235).** Request an older ordered window below exclusive unsigned `before_order`, including zero; carries explicit `conversation_id` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation and shares catch-up's unfinished-query slot and completion fence. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
 | **`thread_items`** | binary → phone | no | **Production emitted (#3236).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
@@ -1580,9 +1580,11 @@ both providers plus existing thread readiness and client capabilities; missing
 an expansion provider still permits complete-thread negotiation. These reads
 return only the requested body or direct-child summaries, with expansion-only
 completion; see [Bounded expansion reads](#bounded-expansion-reads). Complete
-history/live delivery remains the default. The [compact contract](#compact-projection-declared)
-is declared only (#3559); Store projection (#3560/#3561), authenticated selection
-(#3562), daemon activation (#3563) and client adoption follow separately.
+history/live delivery remains the default. Production also installs compact
+catch-up/pages on the same Store through the shared cancellable query demand,
+and grants `thread_compact` when query/live readiness and both expansion reads
+are present (#3563). See the [compact contract](#compact-projection-declared).
+Desktop #2080 and Mobile #2200 adoption remain downstream work.
 
 Initial publisher acquisition and continuity repair acquire a usable live
 boundary without broadcasting historical inventories, even to clients already
@@ -1598,19 +1600,25 @@ The contract follows
 [ADR 042](knowledge/decisions/042-daemon-built-thread.md#update-messages) and the
 [backend bounded-query semantics](knowledge/features/thread-package-background-store-queries.md#bounded-queries).
 
-#### Compact projection (declared)
+<a id="compact-projection-declared"></a>
 
-**Query admission and live delivery are implemented in the relay (#3573,
-#3574); production activation remains pending.** `thread_compact` is a
-distinct capability from `thread_expansion`. `admitThreadQuery`/`runThreadQuery`
+#### Compact projection
+
+**Production grants `thread_compact` and publishes compact updates (#3563).**
+It is a distinct capability from `thread_expansion`, granted only alongside
+`thread`, `interactive` and `thread_expansion` with both compact query providers
+and a true `ThreadCompactReady` attestation. The daemon's attestation requires
+`ThreadReady` (including a running publisher on the same Store) and both
+expansion providers; a stopped publisher or missing expansion provider withholds
+compact support. `admitThreadQuery`/`runThreadQuery`
 negotiate it and answer `thread_catch_up`/`thread_page` with a compact
 projection when a session holds the capability, and `DeliverThread` accepts
 `thread_compact_update`, the live-delivery half, through the same
 authenticated ordered lane as a scoped root replacement or hidden-only
-progress. The daemon does not yet install compact providers or grant
-`thread_compact` in production (#3563), so every real connection still
-negotiates complete-only and gets complete delivery until that lands. The
-complete schemas below apply unless the explicitly selected projection says
+progress. `ThreadCompactCatchUp` and `ThreadCompactPage` call the real publisher
+Store's `CompactCatchUp` and `CompactHistoryPage` through the same cancellable
+demand and publication boundary as complete queries. The complete schemas below
+apply unless the explicitly selected projection says
 otherwise; compact selection uses these additive fields:
 
 | Request | Compact selection |
@@ -1659,7 +1667,7 @@ recorded compact join's version in its epoch, and it cancels an in-flight
 compact query of its conversation rather than a complete one. See
 [query/live ordering](#querylive-ordering) for the full fencing contract.
 
-These declared request excerpts show initialization, older paging and a later
+These request excerpts show initialization, older paging and a later
 matching reconnect checkpoint (connection stamps omitted):
 
 ```json
@@ -1702,7 +1710,7 @@ sizing with maximum stamps. `continuation.final` completes only assembly, never
 query coverage. Fully stamped envelopes retain the `MaxThreadEnvelopeBytes` cap;
 encoding failure returns no usable prefix, even after an earlier batch could fit.
 
-Declared `thread_compact_update` carries required projection/conversation/epoch,
+`thread_compact_update` carries required projection/conversation/epoch,
 unsigned `from_version` and `version` with `from_version < version`, and explicit
 boolean `progress`. Exactly one of full `item`, tool/agent `header` or
 `progress: true` is supplied. Row replacements have `progress: false`; hidden-only
@@ -1712,6 +1720,18 @@ consumed progress has neither row. These are source intervals, not event IDs:
 {"type":"thread_compact_update","payload":{"projection":"compact-v1","conversation_id":"conv","epoch":"e","from_version":41,"version":43,"header":{"id":17,"kind":"tool_call","order":17,"rev":23,"parent":0,"status":"done","active":false,"shown":true,"headline":"Read file","detail_omitted":true,"subtree_version":43},"progress":false}}
 {"type":"thread_compact_update","payload":{"projection":"compact-v1","conversation_id":"conv","epoch":"e","from_version":43,"version":44,"progress":true}}
 ```
+
+The daemon coalesces `CompactChanges` once per conversation publication pass,
+scheduled by `threadShadow.follow` every **50 ms**, plus the pass's own work.
+Each pass emits one final replacement per affected visible root: a bounded
+tool/agent header or a full non-tool/agent item. If consumed history advances
+without changing a root, it emits one progress update. Hidden child events add
+no per-child queue or updates for a compact recipient; pending compact work is
+bounded by affected roots. Oversized top-level items can still require multiple
+physical assembly envelopes. After activity stops, the following pass flushes
+the final changed state; a subsequent unchanged pass emits nothing. Complete
+recipients retain their existing update content and order. This schedule bounds
+coalescing, not replay, encoding or network delivery time.
 
 Apply replacements by source identity only after initialization in matching scope.
 Intervals can overlap when one consumed entry changes several roots; do not drop
@@ -1741,7 +1761,7 @@ A scoped reset requires a fresh version-zero newest window, for example:
 #### Requests
 
 These are the installed complete-view request shapes; compact additions are
-[declared above](#compact-projection-declared).
+[described above](#compact-projection-declared).
 
 | Type | Payload fields | Meaning |
 |---|---|---|
@@ -1845,14 +1865,15 @@ Neither outcome certifies partial items or advances a completed checkpoint.
 
 #### Query/live ordering
 
-Before capturing a complete query, the daemon establishes a missing publisher
-boundary under the same cancelable per-conversation gate used by live publication.
+Before capturing a complete or compact query, the daemon establishes a missing
+publisher boundary under the same cancelable per-conversation gate used by live
+publication.
 A completed query cannot then be followed by initial acquisition silently skipping
 intervening commits. An existing publisher cursor remains owned by following;
 query preparation does not force changed publication. The publisher boundary
 alone never certifies a client's recovery checkpoint.
 
-Catch-up, complete-thread pages, tool-body reads and child pages share one
+Complete/compact catch-up and pages, tool-body reads and child pages share one
 unfinished-query slot per connection: a competing request fails with
 `thread.query_failed` before provider access. Provider, full-item mapping and
 codec work run off the manager's `Run` loop. Every batch and assembly part must receive successful ordered
@@ -1894,9 +1915,18 @@ final records the join, never live delivery, so two different roots consumed
 at one version both pass rather than fencing each other. A coalesced update
 carrying neither `item` nor `header` (`progress: true`) is delivered as
 consumed progress, the same as any other compact row. Body and children reads
-neither cancel nor are cancelled by compact live delivery. Production
-activation — daemon installation, burst coalescing and flush scheduling — is
-#3563; see [compact projection](#compact-projection-declared).
+neither cancel nor are cancelled by compact live delivery.
+
+Production recipient selection captures both the completed join and an admitted
+items query's pending projection together under `hostedMu`. During a projection
+switch, publication prepares both families so a live update of the pending
+projection cancels a stale capture, even while the completed join names the
+other view. A query admitted after that snapshot crosses the same publication
+gate before Store capture, so it sees the published change. Unjoined peers can
+participate in cancellation, but receive no compact live frame until a compact
+query final records their join. Late relay membership/projection checks remain
+the authority before sealing. See the
+[coalescing and final-flush schedule](#compact-projection-declared).
 
 Tool-body and child-page delivery use the same serial ordered lane and late
 recipient checks, including every data/assembly frame and the separate completion
@@ -3219,7 +3249,7 @@ Defined capability strings:
 | `stop_background_task` | The daemon supports stopping one named background task through the [`stop_background_task`](#stop-background-task-v2) verb (#2797). **Detection only: this string grants no access.** Clients advertise it and draw a per-task stop button only when `hello_ack.payload.capabilities` echoes it. Advertising it alone leaves the connection non-interactive; the verb requires `interactive` alone, and an interactive client can use it without advertising this detection string. |
 | `claude_usage` | The daemon answers [`request_claude_usage`](#claude-usage-allowance-reading) with its latest Claude usage allowance reading (#3575). **Detection only: this string grants no access and gates nothing** — `request_claude_usage` is answered through authenticated paired-client map dispatch whether or not a client advertised it, the same posture `request_claude_account` already has. A client advertises it only to know the daemon understands the verb before it asks. |
 | `thread_expansion` | **Production-installed (#3523/#3550).** Bounded body and direct-child reads; negotiated only with both providers, thread readiness and client `thread_expansion`, `thread` and `interactive`. See [Bounded expansion reads](#bounded-expansion-reads). |
-| `thread_compact` | **Relay-side negotiation implemented (#3573); not granted in production.** Separate compact root projection and freshness contract; installed expansion support does not imply compact support. Granted only when the client advertises it, `thread`, `interactive` and `thread_expansion` are all granted in the same negotiation, and the daemon has installed both compact query providers plus a true compact-readiness attestation. Missing any one of those withholds only `thread_compact`; every other grant in the same `hello_ack` is unaffected. Production does not yet install the compact providers (#3563), so no real connection negotiates it today. See [Compact projection](#compact-projection-declared). |
+| `thread_compact` | **Granted in production (#3563).** Separate compact root projection and freshness contract. Requires client advertisement, `thread`, `interactive` and `thread_expansion` granted in the same negotiation, both compact query providers and a true compact-readiness attestation. The daemon requires complete query/live readiness, a running publisher on the same Store and both expansion reads; expansion support alone does not imply compact support. Missing a compact prerequisite withholds `thread_compact` without changing other grants. Selection remains explicit per connection/conversation. See [Compact projection](#compact-projection-declared). |
 | `thread` | Per-connection daemon-built thread delivery (#3081), echoed only when advertised and supplied complete readiness is true. It grants neither `interactive` nor `multi_agent` access. **Production live publication and bounded catch-up/pages are installed (#3164/#3236)**; see [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 
 `thread` requires daemon-supplied readiness confirming installation of both
@@ -8524,6 +8554,17 @@ epoch replacement retires affected consumers, including clients initialized
 solely through queries, before replacement output. Reconnect and recover each
 open conversation explicitly; the publisher's boundary is separate from a
 client's certified checkpoint. Subsequent proven changes continue live.
+Production compact clients use the same explicit recovery path, with
+`projection: "compact-v1"` on catch-up and pages and a checkpoint matching the
+conversation, projection and epoch. Version zero selects public root rows only;
+it adds no hidden descendants or expanded bodies. Retirement through `gap` and
+`RetireLiveState` pushes no baseline: reconnect and request compact catch-up,
+then acquire a new zero-version window if a scoped reset requires it. Loss of
+the complete publication range can retire a compact join even when compact
+catch-up can still prove its interval. A fetched body or child page certifies
+only its bounded read; changed `rev` or epoch-scoped `subtree_version` makes
+cached detail stale and requires explicit refresh. Expansion does not advance
+the compact recovery checkpoint or subscribe descendants to live delivery.
 This per-connection replacement preserves simultaneous
 legacy peers; daemon-wide removal of replaced events, the replay buffer, resync
 and raw history pages belongs to

@@ -100,8 +100,13 @@ detail; its bounded headline and metadata cannot stand in for a full item.
 An available empty body is distinct from omitted detail or a refused read.
 
 The separate [compact projection contract](../../protocol-mobile.md#compact-projection-declared)
-is declared only; `thread_compact` vocabulary installs neither negotiation nor
-handlers. Complete query/live delivery stays the default. Compact checkpoints
+is production-active (#3563): the daemon installs both compact queries on the
+publisher Store, with readiness requiring complete query/live wiring and both
+expansion reads. Authenticated relay selection gates `thread_compact_update`
+per connection and conversation. Complete query/live delivery stays the default.
+Compact publication coalesces final root replacements on the existing 50 ms
+pass, or emits consumed progress; oversized full roots retain bounded assembly.
+Client adoption remains downstream. Compact checkpoints
 are scoped by conversation/projection/epoch and certify only root windows or
 source intervals. Complete-view evidence cannot initialize compact coverage;
 incompatible scope requires version-zero initialization. Expansion proves only
