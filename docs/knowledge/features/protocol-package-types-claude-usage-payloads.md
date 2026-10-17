@@ -1,4 +1,4 @@
-# Claude usage allowance payloads (#3575)
+# Claude usage allowance payloads (#3575, pushed #3576)
 
 Wire vocabulary only, in `internal/protocol/claude_usage.go` — the request a
 paired client sends to ask for the daemon's latest Claude usage allowance
@@ -6,9 +6,12 @@ reading, and the daemon's reply. Mirrors the [Claude account
 payloads](protocol-package-types-claude-account-payloads.md) shape: declared
 and wired in the same ticket, both read-only, both answered by authenticated
 paired-client map dispatch with no conversation lookup and no `interactive`
-gate. See [claude-usage-reading.md](claude-usage-reading.md) for the daemon
-store this reply projects. Published contract: [`docs/protocol-mobile.md` §
-Claude usage allowance
+gate. `ClaudeUsagePayload` is also the frame the daemon pushes, uncorrelated,
+to every open connection each time it stores a new reading (#3576) — the
+reply and the push share one struct and one builder, so they can never drift
+apart in shape. See [claude-usage-reading.md](claude-usage-reading.md) for
+the daemon store this reply projects and the push that rides on it.
+Published contract: [`docs/protocol-mobile.md` § Claude usage allowance
 reading](../../protocol-mobile.md#claude-usage-allowance-reading).
 
 ```go

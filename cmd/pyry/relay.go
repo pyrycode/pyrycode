@@ -185,6 +185,10 @@ type relayWiring struct {
 	// claudeUsage reports the daemon-wide latest Claude usage allowance reading;
 	// nil answers state none.
 	claudeUsage handlers.ClaudeUsageSource
+	// claudeUsageFeed is the same store as claudeUsage, read for its new
+	// readings: startRelayV2 pushes each one to every open connection. nil
+	// pushes nothing.
+	claudeUsageFeed *claudeUsageStore
 	// workspaceBase is the immutable service workspace base resolved at startup.
 	// Empty is supplied explicitly so the handshake cannot re-resolve HOME.
 	workspaceBase string
@@ -1860,6 +1864,10 @@ func startRelayV2(
 	// unconditionally whenever the v2 manager exists.
 	streamSessionErrCleanup := startSessionErrorStreamV2(ctx, w.sessionErr, mgr)
 
+	// Push each new Claude usage reading, uncorrelated, to every open connection.
+	// The feed's hook is installed only here, where a manager drains it.
+	streamClaudeUsageCleanup := startClaudeUsageStreamV2(ctx, w.claudeUsageFeed, mgr, logger)
+
 	// Wire the resetting producer (#2478): hand the pre-built emitter this leg's
 	// fan-out surface so a conversation reset's two phases and its falling edge reach
 	// capability-gated interactive phones. No Run goroutine and no ctx — this producer
@@ -1887,6 +1895,7 @@ func startRelayV2(
 		streamQueueStateCleanup()
 		streamOperatorMessageCleanup()
 		streamSessionErrCleanup()
+		streamClaudeUsageCleanup()
 		streamResettingCleanup()
 		streamReplySuggestionsCleanup()
 		stopLivePublication()
