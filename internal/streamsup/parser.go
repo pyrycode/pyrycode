@@ -590,6 +590,11 @@ type Parser struct {
 	// this field carries no mutex where postureGate does — that one is genuinely
 	// touched from another goroutine and this one must not be.
 	canUseTool func(CanUseToolRequest)
+
+	// usageWindows receives every rate_limit_event's allowance windows. A seam
+	// with canUseTool's contract: installed by SetUsageWindowsHandler before the
+	// parser reaches a runner, read only on the forwarder goroutine.
+	usageWindows func(fiveHour, sevenDay *UsageWindow)
 }
 
 var _ io.Writer = (*Parser)(nil)

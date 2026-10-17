@@ -182,6 +182,9 @@ type relayWiring struct {
 	// claudeAccount reports the instance's Claude account source and its latest
 	// read state (#2839); it cannot start a read.
 	claudeAccount handlers.ClaudeAccountSource
+	// claudeUsage reports the daemon-wide latest Claude usage allowance reading;
+	// nil answers state none.
+	claudeUsage handlers.ClaudeUsageSource
 	// workspaceBase is the immutable service workspace base resolved at startup.
 	// Empty is supplied explicitly so the handshake cannot re-resolve HOME.
 	workspaceBase string
@@ -1183,6 +1186,7 @@ func startRelayV2(
 			protocol.TypeRequestHostSystemPrompt: handlers.RequestHostSystemPrompt(w.hostSystemPrompt, logger),
 			protocol.TypeSetHostSystemPrompt:     handlers.SetHostSystemPrompt(w.hostSystemPrompt, logger),
 			protocol.TypeRequestClaudeAccount:    handlers.RequestClaudeAccount(w.claudeAccount, logger),
+			protocol.TypeRequestClaudeUsage:      handlers.RequestClaudeUsage(w.claudeUsage, logger),
 			protocol.TypeCreateWorkspaceFolder:   handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger),
 			protocol.TypeRecentWorkspaces:        handlers.RecentWorkspaces(w.convReg),
 			protocol.TypeRegisterPushToken:       handlers.RegisterPushToken(registry, resolveDevicesPath(w.instanceName), logger),

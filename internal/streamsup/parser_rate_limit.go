@@ -278,6 +278,10 @@ type rateLimitInfo struct {
 // with, and the one value on this line a future claude could make arbitrarily long
 // or arbitrarily revealing.
 func (p *Parser) emitRateLimit(line []byte) {
+	// Every line's usage windows, independent of the gate below and decoded on
+	// their own so they cannot change what this line does to rate_limited.
+	p.readUsageWindows(line)
+
 	var rl rateLimitEventLine
 	if err := json.Unmarshal(line, &rl); err != nil {
 		p.log.Debug(rateLimitDropMsg, "reason", rateLimitDropUndecodable)

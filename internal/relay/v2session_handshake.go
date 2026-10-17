@@ -91,6 +91,8 @@ type InnerFrameV2Decoded struct {
 // s.interactive gates.
 // protocol.CapabilityStopBackgroundTask (#2797) detects the stop verb only:
 // dispatchAppFrame still gates it on s.interactive alone.
+// protocol.CapabilityClaudeUsage detects request_claude_usage only; that verb
+// is answered for every authenticated client, negotiated or not.
 //
 // New members are APPENDED, never inserted. negotiateCapabilities emits in this
 // slice's order and both of its test tables compare with slices.Equal, so the
@@ -100,7 +102,7 @@ type InnerFrameV2Decoded struct {
 // Read-only after package init and read on the manager's Run goroutine; it is a
 // var only because a slice cannot be const. Nothing may assign to it or to its
 // backing array at runtime.
-var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent, protocol.CapabilityStopBackgroundTask}
+var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent, protocol.CapabilityStopBackgroundTask, protocol.CapabilityClaudeUsage}
 
 // negotiateCapabilities intersects advertisements with supported capabilities,
 // in supported-set order, then grants thread, hosted apps, expansion and compact
