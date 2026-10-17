@@ -1,6 +1,7 @@
 package codexsup
 
 import (
+	"bytes"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ var (
 		"item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
 		"thread/tokenUsage/updated", "turn/completed", "item/started", "item/completed",
 		"model/rerouted", "warning", "configWarning",
+		"turn/moderationMetadata",
 	}
 	// ignoredMethods carry no turn meaning, following streamsup's
 	// ignoredLineTypes precedent.
@@ -69,7 +71,7 @@ var (
 		"externalAgentConfig/import/progress", "externalAgentConfig/import/completed",
 		"fs/changed", "model/verification",
 		"modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted",
-		"turn/moderationMetadata", "model/safetyBuffering/updated",
+		"model/safetyBuffering/updated",
 		"guardianWarning", "deprecationNotice",
 		"fuzzyFileSearch/sessionUpdated", "fuzzyFileSearch/sessionCompleted",
 		"thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
@@ -194,11 +196,31 @@ func (t *Translator) Translate(method string, params json.RawMessage) []turneven
 		return t.reroute(params)
 	case "warning", "configWarning":
 		return warningBanner(method, params)
+	case "turn/moderationMetadata":
+		return moderationMetadata(params)
 	}
 	if ignoredSet[method] {
 		return nil
 	}
 	return []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexMethod, method, params)}
+}
+
+// moderationMetadata suppresses only absent, null or empty-container metadata.
+// Every other opaque JSON value retains the original bounded params for display.
+func moderationMetadata(params json.RawMessage) []turnevent.Event {
+	var p map[string]json.RawMessage
+	if json.Unmarshal(params, &p) != nil || p == nil {
+		return undecodable(params)
+	}
+	metadata := bytes.TrimSpace(p["metadata"])
+	if len(metadata) == 0 || bytes.Equal(metadata, []byte("null")) {
+		return nil
+	}
+	// Unmarshal validated the full JSON, so these containers have matching ends.
+	if (metadata[0] == '{' || metadata[0] == '[') && len(bytes.TrimSpace(metadata[1:len(metadata)-1])) == 0 {
+		return nil
+	}
+	return []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexMethod, "turn/moderationMetadata", params)}
 }
 
 // warningBanner carries prose only: targeting and location metadata have no
