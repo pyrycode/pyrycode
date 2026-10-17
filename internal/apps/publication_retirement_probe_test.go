@@ -61,10 +61,9 @@ func TestPublishRetirementProbeSequence(t *testing.T) {
 				}
 				return err
 			}
-			done := make(chan error, 1)
-			go func() { _, err := o.Publish(context.Background(), testHost, testApp, tools); done <- err }()
+			done := publishFixtureStart(t, o, tools)
 			data := filepath.Join(r.root, testApp, "data")
-			leader, err := strconv.Atoi(string(waitFile(t, filepath.Join(data, "ready"))))
+			leader, err := strconv.Atoi(string(publishFixtureReady(t, r, done)))
 			if err != nil || leader < 1 {
 				t.Fatal(leader, err)
 			}
