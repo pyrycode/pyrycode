@@ -1600,13 +1600,15 @@ The contract follows
 
 #### Compact projection (declared)
 
-**Query admission is implemented in the relay (#3573); production activation and
-live delivery remain pending.** `thread_compact` is a distinct capability from
-`thread_expansion`. `admitThreadQuery`/`runThreadQuery` now negotiate it and
-answer `thread_catch_up`/`thread_page` with a compact projection when a session
-holds the capability; `thread_compact_update`, the live-delivery half, stays
-declared only (#3574). The daemon does not yet install compact providers or
-grant `thread_compact` in production (#3563), so every real connection still
+**Query admission and live delivery are implemented in the relay (#3573,
+#3574); production activation remains pending.** `thread_compact` is a
+distinct capability from `thread_expansion`. `admitThreadQuery`/`runThreadQuery`
+negotiate it and answer `thread_catch_up`/`thread_page` with a compact
+projection when a session holds the capability, and `DeliverThread` accepts
+`thread_compact_update`, the live-delivery half, through the same
+authenticated ordered lane as a scoped root replacement or hidden-only
+progress. The daemon does not yet install compact providers or grant
+`thread_compact` in production (#3563), so every real connection still
 negotiates complete-only and gets complete delivery until that lands. The
 complete schemas below apply unless the explicitly selected projection says
 otherwise; compact selection uses these additive fields:
@@ -1651,9 +1653,11 @@ While a conversation's recorded join is compact, an unsolicited complete live
 item update for it is withheld before sealing rather than mixed into the
 compact view; the compact query in flight is never cancelled by it. A complete
 live update still cancels an in-flight *complete* re-initialization of that
-conversation, the same as before. Compact live delivery itself —
-`thread_compact_update` — is #3574; this slice only prevents complete rows
-from leaking into a conversation that is loading or holds a compact checkpoint.
+conversation, the same as before. `thread_compact_update` itself — the
+live-delivery half — is implemented (#3574): delivered only above the
+recorded compact join's version in its epoch, and it cancels an in-flight
+compact query of its conversation rather than a complete one. See
+[query/live ordering](#querylive-ordering) for the full fencing contract.
 
 These declared request excerpts show initialization, older paging and a later
 matching reconnect checkpoint (connection stamps omitted):
@@ -1871,6 +1875,28 @@ capture are withheld, including fragments, preventing stale patches from
 overwriting full items. Updates above the captured version retain source order,
 including multiple patches sharing a later version. Supplied transient live-state
 reconciliation remains independent of this item join.
+
+Compact live delivery (`thread_compact_update`, #3574) shares this cut but
+keys its own fence on projection rather than item type. `DeliverThread` admits
+it through the identical ordered lane; immediately before sealing, the frame
+is withheld unless the recipient negotiated `thread_compact`, still has a
+hosted inbox, remains a member of the conversation, and holds a compact join
+of the frame's epoch strictly below the frame's version — withheld frames
+spend no nonce and never advance or replace another conversation's or
+connection's join. The check applies regardless of `in_reply_to`, since a
+compact update is never actually a reply, unlike the complete branch above,
+which exempts a frame carrying one. A compact update admitted or already
+queued for the same conversation cancels an in-flight *compact* query exactly
+as a complete update cancels an in-flight complete one; a load of the other
+projection is withheld instead of being cancelled, so a complete load in
+flight keeps its view and a compact load keeps its. Only a successful query
+final records the join, never live delivery, so two different roots consumed
+at one version both pass rather than fencing each other. A coalesced update
+carrying neither `item` nor `header` (`progress: true`) is delivered as
+consumed progress, the same as any other compact row. Body and children reads
+neither cancel nor are cancelled by compact live delivery. Production
+activation — daemon installation, burst coalescing and flush scheduling — is
+#3563; see [compact projection](#compact-projection-declared).
 
 Tool-body and child-page delivery use the same serial ordered lane and late
 recipient checks, including every data/assembly frame and the separate completion

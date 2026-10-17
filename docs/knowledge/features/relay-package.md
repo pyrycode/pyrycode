@@ -289,14 +289,14 @@ failure, hiding invalid input that reached provider work.
 provider calls for invalid requests. Enforce the legacy signed-int ceiling
 before clamping; otherwise an overflowing legacy limit becomes an accepted
 request. Test the child uint64 allowance separately; see
-[expansion admission](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+[expansion admission](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection).
 
 A held transport fixture must record its accepted prefix before signaling the
 cancellation gate, and signal callback exit on every return (for example with a
 `defer`). Otherwise cancellation can beat the recording callback and strand the
 completion wait without exercising partial-reply cutoff. The shared
 `testThreadQueryInterrupted` scenarios for catch-up and pages enforce this order;
-see [query/live completion fencing](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+see [query/live completion fencing](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection).
 
 Successful handshake capture also precedes completed manager admission. Readiness
 for a first push requires the [shared fixture's bounded `ActiveConns` barrier](v2-session-manager-test-surface-same-package-unit-tests-internal-relay.md).
