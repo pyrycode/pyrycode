@@ -2,253 +2,18 @@
 
 Split out of [`relay-package.md`](relay-package.md) (parent doc — see there for the connection/transport layers this sub-package sits behind). This child covers the `handlers/` sub-package itself: its first inhabitant in depth, and the conventions later handlers in the package are expected to follow.
 
-## Handlers: per-envelope-type processors (`handlers/`, #250)
+## Detailed handler contracts
 
-Sub-package `internal/relay/handlers`. Each handler is a pure function: routing envelope in, routing envelope out, plus side effects on the registries it is passed. The dispatcher (future, in `internal/relay`) owns conn state, per-conn id allocation, and conn lifecycle; handlers know only payload semantics.
-
-First inhabitant: `register_push_token` (`register_push_token.go`). #319 rewrote the original #250 pure handler against `dispatch.Handler`
-and registered it in `cmd/pyry/relay.go` alongside
-`list_conversations`. The pre-#319 `Handle` signature (routing-envelope
-in/out, self-stamping `id`/`ts`/`in_reply_to`, sentinel
-`ErrMalformedFrame`) is gone.
-
-```go
-package handlers
-
-func RegisterPushToken(reg *devices.Registry, registryPath string,
-                       logger *slog.Logger) dispatch.Handler
-```
-
-The returned closure has signature
-`func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error`.
-`reg`, `registryPath`, and `logger` are captured — no globals; the
-third argument diverges from `ListConversations`'s two-arg shape
-because this handler logs on every branch. The authenticated device is
-read via `c.Auth()` (populated by the gate per #318); the dispatcher
-allocates the response id via `c.NextID()` (called inside `c.Reply`)
-and stamps `in_reply_to` from `env.ID` and `ts` from `time.Now().UTC()`.
-The handler never touches those fields itself.
-
-### Behavioural contract
-
-| Input case | Response envelope | Side effect |
-|---|---|---|
-| `c.Auth() == nil` (dispatcher routed an unauth conn here — bug; defence-in-depth) | `error`: `Code=auth.invalid_token`, `Retryable=false` | none |
-| `env.Payload` not JSON-decodable as `RegisterPushTokenPayload` | `error`: `Code=protocol.malformed`, `Retryable=false`, static message (decode-error text NOT echoed) | none |
-| `DeviceName` over `protocol.MaxDeviceNameBytes`, or `DeviceName`/`Platform` carries a C0 control (LF/CR/ESC included), DEL, or a C1 control (#2219) | `error`: `Code=protocol.malformed`, `Retryable=false`, static per-branch message (value NOT echoed) | none — checked before the dedupe comparison, see § below |
-| Payload `(Platform, Token, DeviceName)` equals snapshot `(Platform, PushToken, Name)` | `ack` | **none — does NOT call `UpdatePushRegistration`, does NOT call `Save` (the dedupe contract); takes no lock** |
-| In-region reload drops this conn's device (revoked mid-conn, #1532) so `reg.UpdatePushRegistration` reports no match | `error`: `Code=auth.invalid_token`, `Retryable=false` (same UX as unauth) | none — no `Save` runs |
-| The devices lock is not acquired within `pushRegistryLockWait` (#1532) | `error`: `Code=server.binary_busy`, `Retryable=true` | none — `fn` never runs; `devices.json` untouched, not even opened |
-| `reg.Save` (or the sidecar mkdir/open) fails inside the acquired region | `error`: `Code=server.binary_busy`, `Retryable=true` | **in-memory IS mutated (reload + `UpdatePushRegistration` already ran); disk is not** (phone retries; the retry genuinely re-attempts the write — see § below) |
-| Triple differs, no concurrent revoke, and `Save` succeeds | `ack` | in-memory + disk both updated |
-
-The outer-frame malformed branch is gone from the contract — the
-dispatcher's `handleOne` decodes `env protocol.Envelope` from the
-routing frame before invoking the handler and replies
-`protocol.malformed` upstream. Only the **inner-payload** decode
-remains the handler's responsibility.
-
-**Reconcile, mutation and save run as one `devices.WithLock` region (#1532),
-acquired before the reconcile's read.** Before #1532 this handler was the last
-`devices.json` writer that did not hold the cross-process lock: it called
-`Reload` and then `Save` with nothing held between them, so a `pyry pair`
-committing in that window was erased by the handler's whole-file `Save` —
-permanently, since `Reload` reconciles memory *from* disk. See
-[`features/devices-registry-reload.md`](devices-registry-reload.md) § *Two-writer clobber
-guard* for the full cross-process picture and
-[ADR 029](../decisions/029-devices-registry-reload-at-handshake.md) § *Superseded
-(2026-09-15, #1532)* for why the reload is not redundant under the lock: the
-lock excludes a writer from committing *during* the region, but says nothing
-about one that already committed between this conn's handshake reload and this
-acquisition.
-
-**The reconcile now runs before the mutation**, which is what makes the
-gone-mid-conn row above reachable for a revoke that lands *during* this
-handler's lifetime, not just before it — the reload drops the revoked row,
-`UpdatePushRegistration` reports no match, and nothing is saved. The dedupe row
-and the three display-safety rows all stay *outside* the locked region and take
-no lock at all, so a deduped or refused frame creates no `.lock` sidecar
-either — a strictly stronger "the region was never entered" witness than "no
-`Save` ran" (`devices.WithLock` creates the sidecar before running anything
-handed to it).
-
-### Dedupe is load-bearing
-
-Spec § Phone background behaviour has the phone re-register on every WS connect (~100 bytes, self-heals registry drift). Without dedupe, every WS connect rewrites `devices.json` — flash wear and i/o churn for what's typically a no-op. The handler's "no write occurred" contract is structurally enforced: the dedupe branch returns the ack **before** calling `UpdatePushRegistration` or `Save`. Test pinpoints this via `errors.Is(os.Stat(path), fs.ErrNotExist)` with the file pre-state set to "never existed" — if dedupe were broken, Save would have created it.
-
-### `Name` is part of the triple
-
-The protocol's `device_name` makes the phone the source of truth for self-reported name (an iOS Settings rename should propagate). So the dedupe comparison is `(Platform, PushToken, Name)`, not just `(Platform, PushToken)`. The registry mutator (`devices.Registry.UpdatePushRegistration`) overwrites all three fields together — see [`features/devices-registry.md`](devices-registry.md).
-
-### Save-failure leaves in-memory mutated; a busy lock leaves nothing touched
-
-Documented post-condition, mirroring `Validate`'s `LastSeenAt` pattern: in-memory is the runtime source of truth; the next successful Save catches disk up. Test pins `reg.FindByTokenHash(...).PushToken == "new-fcm"` after the failed call. This holds only for a failure *inside* the region (the reload and mutation already ran before `Save` failed); a failure to acquire the lock at all means `fn` never ran, so neither memory nor disk is touched — the two retryable-error rows in the contract table above share a reply but not a post-condition, and only the log event (`save_failed` vs. `lock_busy`) tells them apart.
-
-**The retry genuinely re-attempts the write — this handler's doc comment said the opposite until #1532.** `msgBinaryBusy`'s comment used to claim a retry costs nothing because in-memory is already updated by the time the phone re-sends. That conflates the dedupe comparison with the connection's auth snapshot: dedupe compares the payload against `dev := c.Auth()`, which is `s.device` in `internal/relay/v2session_handshake.go` — taken once at handshake and never updated by any write on that connection. A retry therefore does not dedupe away regardless of what the registry now holds, which is exactly what makes a busy-lock refusal *meaningfully* retryable rather than a no-op: the contending writer holds a sub-millisecond region (every other production `WithLock` caller does), so the retry typically finds the lock free.
-
-### Display-safety gate on `device_name` and `platform` (#2219)
-
-`Device.Name` is remote-authored — the phone sets its own name via this frame, and
-`UpdatePushRegistration` (see [`devices-registry.md`](devices-registry.md#phase-3-foundation-250))
-assigns it verbatim. Nothing checked its shape until #2219, so a device naming itself
-`"kitchen\nfake log line"` could forge a line in the daemon's log, an `audit.Entry.DeviceLabel`
-entry, or a `pyry pair list` row. Three guards run **after decode and before the dedupe
-comparison**:
-
-1. `len(p.DeviceName) > protocol.MaxDeviceNameBytes` → refuse.
-2. `DeviceName` carries a C0 control (including LF, CR, ESC), DEL, or a C1 control (U+0080–U+009F) → refuse.
-3. `Platform` carries the same character classes → refuse (no byte bound — `platform` has none to anchor; its ceiling stays the ~65519-byte application-envelope cap).
-
-**The predicate is a third restatement, not a shared import.** `internal/relay` →
-`mintLabelIsDisplaySafe` (see
-[the mint-pairing seam](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md))
-already refuses the identical set, and `internal/sessions` → `admissibleClientField` refuses
-a superset (adds `"` and invalid-UTF-8, for reasons specific to a system-prompt rendering).
-Importing either was rejected: `handlers` importing `internal/relay` puts a child
-package's dependency on its own parent in place for a six-line loop, and exporting the
-predicate from `internal/protocol` would break that package's pure-DTO posture (see
-`RegisterPushTokenPayload` below). The three copies must move together — the refused set
-is specified once, by `mintLabelIsDisplaySafe`'s doc block, and the other two restate it.
-
-**The ordering is load-bearing, not stylistic.** The dedupe branch acks without writing
-when the payload triple equals the stored one. A device whose name was stored *before*
-this gate existed could otherwise repeat that unsafe name forever and be acked — never
-reaching a guard — if the guards ran after the comparison. Running them first makes "an
-unsafe value is refused" true of every frame, not just every *changed* frame. This is the
-one property in the file no other test can distinguish (see Test surface below).
-
-**A test value spelling a C0 control must not also spell a substrate escape sequence.**
-The first draft's ESC rows embedded a full CSI run (`\x1b[31m`, an SGR color code) to look
-like a realistic terminal-injection payload. `cmd/substrate-guard` bans the ESC-then-`[`
-source byte sequence outside a two-path allowlist that a handlers test file does not
-join, so both rows reddened the merge gate — after every test tier and `staticcheck` had
-already passed. The predicate refuses ESC as a C0 control on its own; the CSI tail
-exercised no additional branch, so the fix drops it (`kitchen\x1bpad`, not
-`kitchen\x1b[31mpad`) with no loss of coverage. The `\u`-escape spelling of ESC also clears
-the scan, and was rejected for the same reason a passing-for-the-wrong-reason test is
-rejected elsewhere in this file: it evades the gate rather than satisfying it.
-
-Storage stays verbatim on the accept path — no truncation, escaping or repair — matching
-`MintPairingPayload`'s refuse-never-truncate posture for the same label
-(see [`protocol-package-types-pairing-payloads.md`](protocol-package-types-pairing-payloads.md)).
-The published contract is in
-[`docs/protocol-mobile.md` § Application message types](../../protocol-mobile.md#application-message-types).
-
-**Closing this door is not the same as making `Device.Name` display-safe as a type
-invariant**, and the `pairingMinterV2.MintPairing` seam comment this ticket corrects makes
-exactly that distinction rather than flipping to "handled": a name written to
-`devices.json` before this gate existed is read back unchecked (out of scope), and
-`pyry pair --name` stays deliberately ungated — `mintLabelIsDisplaySafe`'s own doc block
-states why that check does not live in the shared mint step. See
-[the mint-pairing seam doc](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md)
-for the full correction.
-
-### Sub-package isolation
-
-`handlers` uses consumer-declared interfaces for registry and session access; `SetHostSystemPrompt` also imports `internal/sessions` to translate its validation sentinels. **It does NOT import `internal/relay`.** The new `internal/dispatch` edge (added #319) is cycle-free because `internal/dispatch`'s only handler-direction dependency is the `Handler` function type, which `handlers` consumes structurally. `auth.go` stays in `internal/relay` proper alongside the live Noise_IK handshake that now consumes its two WS close-code constants (see [`relay-package.md` § Auth](relay-package.md#auth-ws-close-code-constants-authgo)) — it is no longer a per-type handler or a dispatch gate.
-
-The `wrap(connID, inReplyTo, nextID, envType, payload)` file-local helper from #250 is gone — `c.Reply(ctx, env, type, payloadJSON)` is the central stamping path now (#319). Two file-local helpers (`replyAck`, `replyError`) marshal the payload and call `c.Reply`.
-
-### Logging discipline
-
-| Event | Level | Fields |
-|---|---|---|
-| `relay: register_push_token write` | Info | `event=register_push_token.write`, `conn_id`, `device_name=payload.DeviceName`, `platform` |
-| `relay: register_push_token dedupe` | Debug | `event=register_push_token.dedupe`, `conn_id`, `device_name=device.Name` |
-| `relay: register_push_token reload failed` | Warn | `event=register_push_token.reload_failed`, `conn_id`, `device_name`, `path` — **never `err`** (#1532; the in-region reload is best-effort, see § below) |
-| `relay: register_push_token save failed` | Warn | `event=register_push_token.save_failed`, `conn_id`, `device_name`, `err` |
-| `relay: register_push_token devices lock busy` | Warn | `event=register_push_token.lock_busy`, `conn_id`, `path`, `err` — **no `device_name`** (#1532; a brand-new branch takes #2219's strict posture, not this handler's older one) |
-| `relay: register_push_token device gone mid-conn` | Warn | `event=register_push_token.gone_mid_conn`, `conn_id`, `device_name` |
-| `relay: register_push_token unauth` | Warn | `event=register_push_token.unauth`, `conn_id`, `code=auth.invalid_token` |
-| `relay: register_push_token malformed` | Warn | `event=register_push_token.malformed`, `conn_id` — **no `err` field (#2219)** |
-| `relay: register_push_token unsafe field` (3 branches: oversize name, unsafe name, unsafe platform) | Warn | `event`, `conn_id` only — no field value, no length, no bound |
-
-Push token (FCM/APNs registration id) is opaque infrastructure data, not a secret on par with the phone-side device token — but is still NOT logged (no operational signal worth the noise). Device-side token from auth is NEVER read or logged. Device name IS logged on every path that has one (write/dedupe/save-failed/reload-failed/gone-mid-conn) — the inverse of #249's reject-path discipline, because the handler runs post-auth: the caller has already cleared the auth gate, so there is nothing to enumerate. Unauth (`device == nil`) by definition has no name to log. The one exception is the new `lock_busy` branch (#1532), which deliberately withholds `device_name` even though the connection is authenticated — it is new code, so it inherits #2219's strict posture instead of grandfathering in the older branches' habit of logging the pre-gate residual.
-
-**Lock-busy gets a distinct log event for an identical reply, on purpose.** A busy lock, a sidecar mkdir/open failure and a `Save` failure all map to the same retryable `server.binary_busy` reply — the phone cannot act on the distinction, so nothing about the wire contract changes. The distinct `lock_busy` event exists for the operator reading the log, who can tell "another writer held it" from "the disk write itself failed" for free, since a log event is not a reply.
-
-**Why `Reload`'s failure never logs `err`.** `readDevicesFile` wraps a decode failure that can echo `devices.json` bytes, and a corrupt registry may carry a `token_hash` — the same SECURITY rule #782 established for this handler's pre-#1532 reload. The failure is consumed *inside* the locked closure and never returned from it, so it structurally cannot reach a log field; what the closure *can* return is `devices.WithLock`'s own errors (which name only the lock path, by its documented contract), `Save`'s wraps (a path or a fixed step word), and the static `errPushDeviceGone` — a closed set, safe to log unconditionally on the `save failed` branch.
-
-**The malformed branch lost its `err` field in #2219, and the three new reject branches were never given one.** `encoding/json` quotes offending input into its error text, and a type error midway through a well-formed object returns an error with fields already populated from supplied bytes — so logging the decode error was itself a display-safety hole, on the exact branch meant to catch unsafe input. The three unsafe-field branches name neither the field, the value, its length, nor the bound: which field failed is not an oracle worth withholding value over, but distinguishing them buys the client nothing it did not already hold, since it authored both fields — the same reasoning `pairing.not_permitted` publishes for its own refusal.
-
-### Test surface (rewritten #319, extended #2219, locked #1532)
-
-`internal/relay/handlers/register_push_token_test.go` — stdlib only, package `handlers`, all under `-race`. The fixture uses `dispatch.NewTestConn(testConnID, out, dev)` to build a `*dispatch.Conn` with a buffered outbound channel the test drains; `_ = c.NextID()` is called once after construction so the first handler reply observes `id=2` (mirroring the gate's `hello_ack=1` accounting). The lock-timing tests are deliberately **not** `t.Parallel()` — they retune or read `pushRegistryLockWait` and rely on a grace window, and Go resumes a package's parallel tests only after the sequential ones finish.
-
-- `TestRegisterPushToken_FirstTimeRegister_WritesAndAcks` — happy-path write + reload via `devices.Load` and assert the triple.
-- `TestRegisterPushToken_ReregisterIdentical_NoWriteAndAcks` — dedupe spy: file deliberately not pre-Saved, asserts `errors.Is(os.Stat, fs.ErrNotExist)` after the call.
-- `TestRegisterPushToken_ReregisterChanged_WritesAndAcks` — pre-Save, change one field, content-equality post-call (sidesteps CI mtime-resolution flakes).
-- `TestRegisterPushToken_ReloadPreventsClobberOfNewlyPairedDevice` — the non-racing reload case (a device added to disk since this conn's handshake is preserved by the in-region reload); kept passing untouched by #1532.
-- `TestRegisterPushToken_SurvivesWriteCommittedWhileParkedOnLock` (#1532) — the flagship interleaving test, covering both directions at once: park a lock holder, start the handler, assert it has *not* completed after a grace (proving a live holder actually blocks it), commit a second write from under the holder (adds one device, revokes another), release, then assert the handler's own device survived with its push registration, the concurrently added device is present, and the concurrently revoked one is not. Reddens on the mutant that narrows the region to `Save` alone — verified by mutation-check, not assumed: with `Reload` and `UpdatePushRegistration` hoisted outside the lock, both directions fail at once (the added device is erased, the revoked one is resurrected) while the grace assertion alone still passes, which is the concrete proof a busy-lock-only test could not have caught it.
-- `TestRegisterPushToken_ReconcileDropsDevice_RefusedNotAcked` (#1532) — memory has this conn's device, disk does not (revoked out from under the conn); asserts the non-retryable `auth.invalid_token` reply and a back-dated mtime proving no `Save` ran. This is the one test that tells reconcile-before-mutate apart from the old mutate-before-reconcile ordering, which would ack and write instead.
-- `TestRegisterPushToken_LockBusy_EmitsServerBinaryBusyWithoutWriting` (#1532) — park a holder, run the handler, let `pushRegistryLockWait` elapse; asserts `server.binary_busy`/`Retryable=true`, a back-dated mtime, the distinct `register_push_token.lock_busy` log event, and — the no-leak half — that the captured log contains neither the plain token nor its hash.
-- `TestRegisterPushToken_GoneMidConn_EmitsAuthInvalidToken` — `dev`'s TokenHash absent from the registry forces `UpdatePushRegistration` to return false; asserts `auth.invalid_token`, `Retryable=false`.
-- `TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy` — **repaired in #1532.** Before #1532 this blocked `Save` with a regular file at the parent (`MkdirAll` failure); wrapping the region in `WithLock` would have made that fail at the sidecar open instead, one layer earlier, and stay green while no longer exercising `Save`. The repair pre-creates the `.lock` sidecar at `0600` before `chmod 0500`-ing the parent directory (`O_CREATE` on an existing file needs only `x` on the directory, so the lock still opens), and asserts the captured log contains `Save`'s own step word, `registry: create temp` — the assertion that stops the test re-hollowing silently. `cmd/pyry`'s `TestRunPairRevoke_SaveFailure` was repaired identically; see [`pyry-pair-command.md`](pyry-pair-command.md) § *Tests*.
-- `TestRegisterPushToken_UnauthenticatedConn_EmitsAuthInvalidTokenNoWrite` — `auth=nil`; asserts `auth.invalid_token` shape + no file + unchanged registry.
-- `TestRegisterPushToken_MalformedPayload_EmitsProtocolMalformed` — `env.Payload = []byte("not-json")`; asserts `Code=protocol.malformed`, `Retryable=false`. New case; replaces the deleted `TestHandle_MalformedFrame_ReturnsSentinel` (the dispatcher owns the malformed-frame path now).
-- `TestRegisterPushToken_UnsafeFieldValues_EmitProtocolMalformedNoWrite`, `TestRegisterPushToken_DeviceNameByteBound_RefusesOverAcceptsAt`, `TestRegisterPushToken_UnsafeNameMatchingStored_RefusedNotDeduped`, `TestRegisterPushToken_AdmissibleFieldValues_StoredVerbatim` (#2219) — the display-safety gate table, its byte-bound boundary, and the ordering test proving a stored-then-repeated unsafe name is refused rather than deduped.
-
-Every reject/dedupe/malformed test above creates no `.lock` sidecar — asserted directly (`assertNoSidecar`, folded into a shared `assertRejectedNoWrite` helper) as the strictly stronger claim that the fast paths never enter the locked region at all (#1532).
-
-`newTestConn(t, dev)`, `makeRequest(t, payload)`, `capturePushLogger()` and `holdPushLock` (the lock-timing tests' background-holder idiom, mirroring `holdLock` in `internal/devices/lock_test.go`) are the file-local helpers; the `assertEnvelopeShape` / `equalRouting` / `makeRegisterRouting` helpers from #250 are gone with the sentinel.
-
-#### Display-safety gate tests (#2219)
-
-Table-driven additions covering the three new reject branches: every C0 control (LF, CR,
-ESC included), DEL, and every C1 control, each on both `device_name` and `platform`; the
-`MaxDeviceNameBytes` boundary (exactly at the bound stored, one byte over refused); the
-character-set edges (U+001F refused / U+0020 accepted, U+007E accepted / U+007F refused,
-U+009F refused / U+00A0 accepted, `"` accepted — the last pins that the predicate does
-**not** inherit `admissibleClientField`'s extra quote rule); and the ordering test, an
-unsafe `Name` already stored pre-gate that repeats verbatim in the payload, which must be
-refused rather than deduped. Four mutants — guards moved after the dedupe comparison, the
-byte-bound off-by-one, the predicate copy-pasting `admissibleClientField`'s `"` rule, and
-a C1-range off-by-one — were each confirmed to redden exactly the test row written for it,
-via `go test -overlay` (no worktree writes).
-
-#### e2e (`internal/e2e/register_push_token_test.go`, new #319)
-
-Build tag `e2e`. `TestRelay_RegisterPushToken_AckAndPersists` pairs a device via `RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")`, decodes the plaintext token via `decodePairPayload`, boots the daemon against a `fakerelay` with `PYRY_ALLOW_INSECURE_RELAY=1`, dials a `fakephone` with the paired token, sends `hello` → expects `hello_ack` (`*InReplyTo == 1`), sends `register_push_token` with `ID: 2` → expects `ack` (`*InReplyTo == 2`, `env.ID >= 2` — strictly-greater leaves room for future dispatcher-side replies between `hello_ack` and this ack), then reloads `~/.pyry/test/devices.json` and asserts the `(Platform, PushToken, Name)` triple is persisted.
-
-## `send_message` grows a sixth seam: conversation auto-naming (#2159)
-
-`SendMessage` widened again — `reg ConversationAutoNamer, announce ConversationAnnouncer` — to derive and store a conversation's name from its first accepted message, then push the updated row through the existing `conversation_updated` fan-out. See [`conversation-session-binding-routing.md` § Enqueue-and-ack (#721)](conversation-session-binding-routing.md#enqueue-and-ack-721) for the ordering lesson this ticket produced: the step runs *after* `replyAck`, not before, because anything sitting between `EnqueueAttached` and the ack races the drain goroutine it just handed the turn to.
-
-**A narrow interface earns a separate name even when its method set is identical to a sibling's.** `ConversationAutoNamer` (`Update` + `Save` + `WorkspaceLabel`) has the exact method set of `ConversationRenamer`, and this package already tolerates that kind of overlap (`ConversationPromoter`, `ConversationArchiver`, `ConversationRenamer` all share most of their shape). It is still declared as its own type rather than reused, because the doc comment on a consumer-declared interface carries that *consumer's* contract, not just its shape: `ConversationAutoNamer`'s comment records "writes `Name` only over a nil one," which `ConversationRenamer` must never claim. A reviewer pattern-matching on method sets alone will read the duplication as redundant; it isn't — the two interfaces document two different promises about the same registry method.
-
-### `send_message` grows a seventh write: the `LastUsedAt` bump (#2438)
-
-`SendMessage` gained a `ConversationToucher` (`Update` + `Save`) alongside `ConversationAutoNamer` — a strict subset of that interface's method set, satisfied by the same `reg` parameter with no signature change and no adapter, the general case the #2159 lesson above names. `touchConversation` stamps `cv.LastUsedAt = time.Now().UTC()` and persists it once `EnqueueAttached` returns non-zero, so a message that is later refused for an unresolvable attachment or a full backlog — both of which pass `router.Route` — never counts as a use. See [`conversations-auto-archive.md` § How it works](conversations-auto-archive.md#how-it-works) for why the bump exists: it is the only writer that keeps a conversation in daily use out of the 30-day idle sweep.
-
-It runs after `replyAck`, for the ordering reason above, and — new here — *before* `autoNameConversation`, not after: the `conversation_updated` record the naming step snapshots must carry the just-written instant, not one that is stale the moment it is announced. Placing a same-message registry write in front of a step that reads and broadcasts the row is the general rule the ordering lesson extends to: when two post-ack steps touch the same row, the one whose output is read by the other must run first.
-
-### `send_message` grows an eighth seam: the `/clear` intercept (#2456)
-
-`SendMessage` widened again — `reset ConversationResetter` (`StartNewSession(conversationID string) error`), eighth parameter, after `announce` and before `logger` — to route a message whose trimmed text has `/clear` as its first whitespace-delimited token into the same conversation-reset entry point (`relay.SessionStarter`, reached through `cmd/pyry`'s `activeSessionStarter.start`) a `new_session` naming that conversation uses. An interface value satisfies both roles with no adapter: `relay.SessionStarter` and `handlers.ConversationResetter` share the one method, so `cmd/pyry` passes its existing seam value straight through, the same zero-cost split `ConversationToucher` already uses over the registry value.
-
-**The intercept sits between `router.Route` and `resolveAttachments`, and each boundary buys a specific acceptance criterion.** Below `Route`, so the conversation id crossing the seam is registry-validated and the existing `conversation.not_found` / `server.binary_offline` reject arms answer an unknown or unbound conversation exactly as before the match is ever consulted — no new reject branch needed. Above `resolveAttachments`, so a `/clear` naming attachment ids never resolves them: no `attachment.not_found` can be answered for a `/clear`, and no directory read happens on its behalf. Above `EnqueueAttached`, so nothing is queued and the queue's own observer emits no `queue_state` item — a structural property, not one asserted downstream. Above `touchConversation` and `autoNameConversation`, so an intercepted `/clear` stamps no `LastUsedAt` and never becomes the conversation's auto-name — matching the `new_session` route into the same reset, which stamps neither either.
-
-**Order inside the intercept is ack-then-reset, not reset-then-ack**, for the same reason `touchConversation`'s post-ack placement exists: every arm of this handler runs inline on the calling goroutine except the reset's own wrap-up, which hands off to its own goroutine inside `resetThenRotate` regardless of caller. A `nil` seam still drops the message rather than falling through to enqueue — fail-closed, because reachability to claude is the exact thing this ticket removes, and an unwired seam must not quietly restore it. Every seam outcome (dropped as already-resetting, inert on no live child, rotation failed, workspace refused, no seam wired) answers the identical plain `ack`; the client cannot discriminate daemon state from the reply, and `payload.Text` is never logged, matching every existing branch.
-
-**The match is one fixed, case-sensitive, first-position token, and stays that way on purpose.** `isClearCommand` is `strings.TrimSpace` (a subslice, not a copy) + `strings.HasPrefix("/clear")` + a boundary check that the next rune, if any, is `unicode.IsSpace` — deliberately not `strings.Fields`, which allocates one string header per token. The predicate runs on every inbound `send_message` under the transport's 1 MiB WS read ceiling, so the naive form buys a remote client on the order of 500k allocations per frame for a predicate that only ever needs the first token. The boundary check uses the same `unicode.IsSpace` `TrimSpace` itself uses, so it fails in the safe direction on invalid UTF-8 (`DecodeRuneInString` → `RuneError`, not a space — the text is delivered as an ordinary message rather than swallowed). **A matcher landing on a path every inbound frame crosses is worth checking for this class of cost even when the code "obviously" reads fine.**
-
-### `resolveAttachments` grows a second return: the resolved ids (#2596)
-
-`resolveAttachments` (`send_message.go`) used to return only `(paths []string, ok bool)`; it now returns `(resolved, paths []string, ok bool)`. `resolved` is not new work — it's the same first-occurrence-deduplicated, canonical-shape-checked ids the function already walked to build `paths`, just also kept. `SendMessage` passes `resolved` to `Enqueuer.EnqueueAttached` as its own argument, never folded into `delivery` (the composed prompt naming on-host paths), so the history log can later store *which* attachments a turn named without the producer having any field that could leak *where* they're stored. One id failing the resolver still refuses the whole message (unchanged): nothing is enqueued, so `resolved` is never partially trusted.
-
-**Adding a slice field to a test-recorder struct makes it non-comparable, silently.** `fakeEnqueuer`'s recorded-call type (`enqueueCall`) gained an `attachmentIDs []string` field alongside the widened `EnqueueAttached`; several `send_message_test.go` assertions had compared `enqueueCall` values with `==`/`!=`, which is a compile error the moment any field is a slice. `reflect.DeepEqual` (or a field-by-field comparison) replaces them. Check for `==`/`!=` on any recorder struct before widening it with a slice — the compiler catches it here, but the same shape without a comparison operator (e.g. a map key, or a struct copied into another comparable struct) can fail at runtime or in a build tag `make check` doesn't compile.
-
-### `send_message` grows a ninth seam: sender identity and tap time (#2704)
-
-`connSender(c)` reads `StaticKey`, `Name` and the admitted `ClientVersion` from `dispatch.Conn.Auth()` (#2971); absent authentication returns three empty strings. The bound Noise public key supplies stable identity separately from a changeable or shared name and the verbatim app message id. An empty key has no fallback, and payload fields cannot override sender metadata. `parseClientSentAt` supplies UTC tap time or zero. `SendMessage` calls optional `EnqueueIdentified` when supported, otherwise legacy `EnqueueSent`, exactly once: zero from either rejects the backlog without trying the other API. Both paths keep safe text separate from attachment delivery paths. Daemon wrapper/history adoption belongs to #2972; see [history producers](history-package-producers.md#producers-2114-2115) and [queue APIs](msgqueue-package-api.md#exported-surface).
-
-**Handler-only tests miss stale authentication snapshots.** `routeAppFrame` passes `s.device` to `dispatch.NewConn`; registry writes do not refresh that value. `handleNoiseInit` sets the current admitted version after `recordClientVersion`, preserving its write-only-on-change comparison (#2704), and copies the authenticated peer key after both successful binding outcomes (#2971). Refreshing only `BindNewlyBound` misses another same-key connection binding after `Validate`. `TestV2Session_StaticKey_DispatchedSnapshot` observes handler authentication through encrypted first-binding and renamed-reconnect sends; a fabricated handler snapshot cannot prove this boundary. See [handshake snapshots](v2-session-manager-state-machine-noise-init-happy-and-failure-path.md).
-
-**`client_sent_at` never reaches claude or the log, by construction rather than by filter.** `parseClientSentAt` is the one function that touches the raw `json.RawMessage` — see [`protocol-package-types-messaging-payloads.md`](protocol-package-types-messaging-payloads.md) for why the field is raw bytes and not a `string`, and for the UTC-year bound that keeps the daemon's re-formatting itself valid RFC 3339. Past that function the handler, the queue and the history producer all hold a `time.Time` (or the device name / client version strings); there is no code path left that could log or forward the client's original bytes. The enqueue log line (`send_message.enqueued`) appends `device_name` and `client_version` only when non-empty — the same append-if-present shape `attachment_count` does not need, since a count is always meaningful — and never appends a tap-time key at all.
+| Topic | Coverage |
+|---|---|
+| [Push-token registration](relay-package-handlers-register-push-token.md) | Authentication, display safety, dedupe, persistence, logging and tests. |
+| [Message delivery and auto-naming](relay-package-handlers-send-message.md) | Post-ack ordering, reset interception, attachments and sender metadata. |
+| [Conversation read marks](relay-package-handlers-mark-conversation-read.md) | Durable advancement, rollback, history targets and announcement ordering. |
+| [Conversation list history](relay-package-handlers-list-conversations.md) | Required history dependency, typed-nil handling and filtering before lookup. |
 
 ## `SetConversationMuted` reuses `send_message`'s auto-naming push (#2572)
 
-`SetConversationMuted` (`set_conversation_muted.go`) sets or clears `IsMuted` (#2571) through `Registry.SetMuted` (mirroring `ArchiveConversation`'s `SetArchived` + `Get`-read-back + eager `Save` shape), then replies `conversation_updated`. **Unlike `ArchiveConversation`, that reply is also fanned out**: the same record is pushed, uncorrelated, through the identical `ConversationAnnouncer` the auto-naming push above uses. `cmd/pyry/relay.go` hoists the closure the `send_message` wiring already built into a named local (`announceConversationHook`) and passes it to both handlers, rather than adding a second fan-out loop — mute needs every paired client to stop alerting without a re-list, which a requester-only reply (archive's posture) can't do.
+`SetConversationMuted` (`set_conversation_muted.go`) sets or clears `IsMuted` (#2571) through `Registry.SetMuted` (mirroring `ArchiveConversation`'s `SetArchived` + `Get`-read-back + eager `Save` shape), then replies `conversation_updated`. **Unlike `ArchiveConversation`, that reply is also fanned out**: the same record is pushed, uncorrelated, through the identical `ConversationAnnouncer` the [auto-naming push](relay-package-handlers-send-message.md) uses. `cmd/pyry/relay.go` hoists the closure the `send_message` wiring already built into a named local (`announceConversationHook`) and passes it to both handlers, rather than adding a second fan-out loop — mute needs every paired client to stop alerting without a re-list, which a requester-only reply (archive's posture) can't do.
 
 **The reject-path log discipline diverges from the `ArchiveConversation` template it otherwise copies.** Archive's not-found branch logs the decoded `conversation_id` as a structured field, on the theory that it's a resolved id, not raw request bytes. This ticket's AC requires that no byte of the payload reach the log on *any* reject branch, and an unknown `conversation_id` is still client-supplied bytes — so both `SetConversationMuted` not-found branches (an outright miss, and the narrower case where `Get` misses after `SetMuted` already hit, i.e. a row deleted in between) log `conn_id` only, matching the malformed branch. Only the success and `Save`-failure branches, reached solely for an id the registry has already confirmed real, log `conversation_id`. **Copying a sibling handler's log fields is not safe by default — recheck each field against the copying ticket's own AC, not just against the template's precedent.**
 
@@ -256,30 +21,54 @@ Ordering is reply, then push, then return the reply's error: the push must still
 
 **No interactive gate, deliberately asymmetric with `new_session`'s.** `handleNewSession` is intercepted ahead of `dispatch.Route` and gated on the negotiated `interactive` capability; `dispatch.Conn` (what `SendMessage` runs behind) carries no such flag, and plumbing one in would be new machinery for no authorization gain — pairing is the authorization boundary, and `new_session` is already published as exempt from the privileged per-device gate (#702, which since #2605 covers only minting a pairing and MCP actuation). A non-interactive client's `/clear` still resets; it simply does not see the `resetting` frames reporting it. See `docs/protocol-mobile.md`'s `send_message` row for the wire-facing statement of this asymmetry, including the one client-visible gap it produces: a client's own optimistic echo of `/clear` never finds a matching row in history, since the daemon never delivers the message.
 
-## `MarkConversationRead` cannot copy `SetConversationMuted`'s best-effort `Save` (#2780)
+## Conversation pins (#3537)
 
-`MarkConversationRead` (`mark_conversation_read.go`) raises `Conversation.ReadUpTo` (#2779) through `Registry.AdvanceReadUpTo` ([`conversations-registry-crud.md`](conversations-registry-crud.md) § `AdvanceReadUpTo`), which — unlike every other setter this package calls — persists the advance itself, reverting on a failed save. **The template this handler would naturally copy, `SetConversationMuted`'s "mutate under `mu`, then a separate best-effort `Save`," cannot satisfy this ticket's AC.** If the mark advanced in memory and the caller's own subsequent `Save` then failed, a client retrying the identical request would find the mark already at the value it's asking for and read that as a no-op: it would reply with success and never actually persist or push the advance. The registry method has to own both the compare and the persist, with the lock held across the revert, for a retry to mean anything after a save failure.
+`SetConversationPinned` implements the package handler for
+[`set_conversation_pinned`](../../protocol-mobile.md#set_conversation_pinned).
+Daemon registration and command-package projections remain pending #3538.
+`ConversationPinner` exposes registry metadata and persistence only; pinning
+performs no session operation.
 
-Resolution order matters for the same reason `ListConversationsWithAgents` fixed in #2779: `reg.Get` runs **before** `hist.LatestDisplayableEntryID`, so an unknown or empty `conversation_id` never reaches the history store and never reads as `history.unavailable`. The same typed-nil `*history.Store` normalization that handler's constructor applies is repeated here rather than shared — a second one-line guard, not a factored helper, since the two call sites don't share a constructor.
+`Registry.SetPinned` checks eligibility and mutates under one lock. Pinning
+requires a promoted conversation, including an archived channel. A new pin
+stores the host's current UTC time; repeated pinning preserves that timestamp.
+Unpinning clears `PinnedAt` on any existing row, including unpromoted, archived
+and already-unpinned rows. Only the pin changes; re-pinning after an unpin
+records a new time.
 
-Refusal-to-code mapping has one branch worth citing by name: a *concurrent delete* between `reg.Get`'s success and `AdvanceReadUpTo`'s own scan surfaces as `AdvanceReadUpTo`'s `ErrConversationNotFound`, and the handler re-maps it to the same `conversation.not_found` the initial miss gets — truthful, not a generic "something changed" code, because by the time the reply is built the row genuinely isn't there anymore.
+The handler finishes decoding and checks the required pointer bool before any
+mutation. Malformed JSON/types or missing/null `pinned` return non-retryable
+`protocol.malformed`; an empty/unknown ID returns `conversation.not_found`.
+Pinning an unpromoted row returns `conversation.not_promoted` with the fixed
+message `conversation not promoted`. Refusals neither save nor announce, and
+rejection logs/replies contain no supplied IDs, payload bytes or decoder error
+text. A decode error may leave a valid target ID populated: that partial value
+must never reach the mutation, as `TestSetConversationPinned_Rejects` proves.
 
-Production list/read share `legacyHistoryReader` and the producer's
-`historyEntryShown(type, payload)` content policy (#3463). Explicit `Shown == false`
-vetoes content; absent metadata uses the same classifier, and true cannot promote
-metadata or unknown types. Unknown types default to non-content. Hidden statuses,
-context usage, successful endings, nonvisual info banners and restart/sleep
-dividers do not raise the target. Receipt validity establishes accounting only.
-Empty/hidden-only logs yield `0`. Mark-read persists
-`max(held, min(up_to, latest))`, preserving higher held marks even at latest zero.
-Reading the newest visible ID clears unread despite hidden tails; older reads
-leave newer content unread. Hidden restart reconciliation preserves that result;
-visible interruption/loss notices may raise unread. All IDs remain in the durable
-history space. See [watermarks and accounting](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
+After mutation, `Get` supplies one stored snapshot. A concurrent deletion that
+makes it miss returns not-found before saving or announcing, matching mute.
+Every success, including a no-op, eagerly attempts `Save`. A successful save
+survives a fresh `Load`; a failed save logs the error and retains the in-memory
+change, still replying and announcing. The correlated `conversation_updated`
+reply is attempted before `ConversationAnnouncer` receives the same record;
+the announcement still runs if the reply fails. `pinned_at` is the stored
+timestamp or explicit JSON null; other projected fields come from that snapshot.
 
-Reply-then-push-then-return-the-reply's-error is the same ordering `SetConversationMuted` uses above, with one difference: the push is conditional on `advanced`, not unconditional. A no-op request still gets its correlated `conversation_updated` reply — a client that asked always learns the mark actually on disk — but nothing is pushed to anyone else, because nothing changed for them to learn.
+### Pin-preserving projections and regression tests
 
-**Test lesson: comparing two `ConversationUpdatedPayload` values with `==` fails even when they're logically equal, because `Name` is a `*string`.** Two independently-read copies of the same stored row carry two distinct pointers to equal strings (or two `nil`s, which do compare equal — the trap only bites once a conversation has a name). The handler's tests compare the **marshalled JSON bytes** of the replied and the pushed payload instead, which is also what proves they're reporting the literal value now on disk rather than two slightly different snapshots.
+`ListConversationsWithAgents`, `RenameConversation`, `autoNameConversation`,
+`PromoteConversation`, `ArchiveConversation` in both directions,
+`ChangeWorkspace`, `SetSystemPrompt`, `SetConversationMuted` and
+`MarkConversationRead` all copy stored `PinnedAt`. List visibility, capability
+filtering and ordering keep their existing semantics.
+
+**Valid serialization alone cannot prove pin preservation.** Omitting the
+stored value from a payload builder still emits valid `"pinned_at":null`, which
+silently clears the client's pin during an unrelated edit.
+`TestConversationPinProjections` seeds a non-null pin on all ten paths (counting
+archive/unarchive separately), checks its exact timestamp, and separately
+requires an explicit null on unpinned records. See the
+[protocol boundary testing guidance](development-verification-protocol-boundaries.md).
 
 ## Daemon-wide instructions and durable acknowledgement
 
@@ -311,7 +100,7 @@ requester-only correlation. See the
 
 `agentOf` was exported to `AgentOf` for #2644, which reuses this exact resolution rule as the push-side capability gate (`internal/relay/v2session_agentgate.go`) rather than re-implementing it — see [Capability negotiation on the handshake](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md).
 
-**This is the same shape `SendMessage`'s repeated widenings above avoid by not reusing a full signature change, generalised one step further: when the call-site count itself is the obstacle, add a new constructor that the old one delegates to, rather than touching the old one's signature at all.** The nil/no-op default (`nil` seam, `nil` registry method, or here a `nil` `SessionHarnessFunc`) is what makes the delegation exact rather than approximate — `ListConversations(reg)` is not a simplified or legacy form of the new handler, it is the literal value the new handler produces when there is no session pool to ask.
+**This is the same shape [`SendMessage`'s repeated widenings](relay-package-handlers-send-message.md) avoid by not reusing a full signature change, generalised one step further: when the call-site count itself is the obstacle, add a new constructor that the old one delegates to, rather than touching the old one's signature at all.** The nil/no-op default (`nil` seam, `nil` registry method, or here a `nil` `SessionHarnessFunc`) is what makes the delegation exact rather than approximate — `ListConversations(reg)` is not a simplified or legacy form of the new handler, it is the literal value the new handler produces when there is no session pool to ask.
 
 `ConversationSummary.CurrentSessionID` reads the registry binding directly,
 independently of `AgentOf`'s pool lookup: a missing harness cannot erase a stored
@@ -324,22 +113,3 @@ and decoded-DTO serialization. A single bound row would miss accidental reuse
 of another row's ID, while decoded empty-string checks alone would miss
 `omitempty`. See [conversations-read payloads](protocol-package-types-conversations-read-payloads.md)
 and the [wire contract](../../protocol-mobile.md#application-message-types).
-
-## `ListConversations` gains a third, required parameter: the history dependency is not optional (#2779)
-
-`ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarnessFunc,
-hist historyLatestReader)` requires history; `ListConversations(reg, hist)` delegates
-with a nil harness reader. A nil harness is a legitimate no-pool answer, but a
-missing history reader cannot establish unread state and fails the whole reply
-with `history.unavailable`. `startRelayV2` supplies the same `legacyHistoryReader`
-over `w.hist` to list and mark-read, keeping their visible-content targets aligned.
-
-**`historyLatestReader` requires `LatestDisplayableEntryID`, not raw `LatestEntryID`, through a consumer-owned, one-method interface** — the plan's own revision from the architect's first sketch. `*history.Store` satisfies it structurally; existing handler tests built around a synthetic registry keep using small fakes that return whatever id they want (including a non-canonical one, since the interface itself doesn't reject it — only the real store's `ValidID` check does), which is what keeps 17 pre-existing tests from having to stand up a real `history.Store` just to pass the new parameter.
-
-**A nil `*history.Store` boxed into a `historyLatestReader` is not a nil interface — this is the trap the PR's own lessons-learned flagged, and the same one `history-package.md`'s "the store is nil-tolerant and a concrete pointer, never an interface" note already warns about for `appendConversationHistory`.** `ListConversationsWithAgents` normalizes it explicitly: `if store, ok := hist.(*history.Store); ok && store == nil { hist = nil }` runs before the handler closure is even built, so a daemon that wires a typed-nil store — including for an otherwise-empty registry that would never reach the per-row lookup — still answers `history.unavailable` rather than silently succeeding. Without this normalization, `hist != nil` (the interface-level check) would be true for a typed nil, and the handler would call a method on a nil receiver or, worse, read a success it shouldn't report.
-
-Missing, empty and hidden-only history yields `latest_entry_id: 0`; the shared
-producer content policy and explicit-false veto match `MarkConversationRead` above.
-Raw store watermark APIs and legacy receipt delivery/accounting remain separate.
-
-**The filtered lookup runs only after `multi_agent` filtering, and the whole reply is built before anything is sent.** A row a non-negotiating client's filter already dropped (an `AgentCodex` conversation) is never looked up at all, so a corrupt or unreadable history log behind a filtered-out row cannot fail a list that client was always going to receive in full. On a surviving row, a lookup error returns `history.unavailable` (retryable, the fixed message `msgListHistoryUnavailable`) immediately — there is no partially-built `ConversationsPayload` sent before or after the failing row, because the `out` slice is only marshalled and sent once the loop finishes without error.

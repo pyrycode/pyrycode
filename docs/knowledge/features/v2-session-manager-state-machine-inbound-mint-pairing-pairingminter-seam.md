@@ -133,7 +133,7 @@ test written to cover it proves nothing about the property it names.
 **Resolved.** `RegisterPushToken` now runs the same character-class check
 `mintLabelIsDisplaySafe` runs here, before `UpdatePushRegistration` and before the dedupe
 comparison — see [`relay-package-handlers.md` § Display-safety
-gate](relay-package-handlers.md#display-safety-gate-on-device_name-and-platform-2219). The
+gate](relay-package-handlers-register-push-token.md#display-safety-gate-on-device_name-and-platform-2219). The
 paragraph below is kept as written because the mistake it documents (a security review's
 "no prior actor could do X" premise) is the reusable lesson; the fix it names is done.
 
