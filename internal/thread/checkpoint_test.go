@@ -41,6 +41,9 @@ func testCheckpointStore(t *testing.T) (*Store, *history.Store, *testCheckpointC
 		if err := os.Rename(from, to); err != nil {
 			return err
 		}
+		if filepath.Base(to) != cacheName {
+			return nil
+		}
 		id := conversations.ConversationID(filepath.Base(filepath.Dir(filepath.Dir(to))))
 		c.writes[id] = append(c.writes[id], record)
 		return nil

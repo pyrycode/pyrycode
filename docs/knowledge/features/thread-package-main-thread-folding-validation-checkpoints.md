@@ -16,9 +16,9 @@ names. `checkpointSchema` is 1 and must increase when the format changes;
 the conversation owner and consumed version. Legacy inline `New` folds reject
 export and retain their existing behavior. In-memory restoration and synthetic
 and committed-recording resume-equivalence proofs are available, along with the
-persisted package reader and durable transaction. Scheduling/final Store
-certification belongs to #3501 and Store restoration/history-bound validation to
-\#3337; Store loading still replays history. See
+persisted package reader, durable transaction and worker checkpoint cadence.
+Store restoration/history-bound validation remains #3337; Store loading still
+replays history. See
 [Cache and epochs](thread-package-cache-and-epochs.md#cache-and-epochs).
 
 `HistorySource.Lookup([]uint64) ([]history.Entry, error)` supplies immutable
@@ -178,10 +178,11 @@ file with the temporary's own leaf name: checking containment only before creati
 would miss unsafe deferred cleanup. Legacy-cleanup and scalar unloaded-read
 bounds remain covered by the separate reader/Store tests above.
 
-These package-local proofs leave worker scheduling/final Store certification to
-[#3501](https://github.com/pyrycode/pyrycode/issues/3501) and Store checkpoint
-loading/history-bound validation to #3337. Store loading still replays history;
-scalar certificates remain separate. Native acceptance evidence is recorded in
+Worker scheduling and final Store certification have separate
+[cadence and lifecycle proofs](thread-package-cache-and-epochs.md#worker-checkpoint-cadence-and-retained-changes).
+Store checkpoint loading/history-bound validation remains #3337; Store loading
+still replays history and scalar certificates remain separate. Native transaction
+acceptance evidence is recorded in
 the [transaction plan](../../specs/architecture/3504-durable-checkpoints.md#rework-validation).
 
 ### Resume oracle and exhaustive corpus
@@ -381,4 +382,3 @@ creation, launch-result and turn-end context, unchanged semantic assertions and
 committed goldens. Only the supplied frames are captured evidence; running this
 proof adds no live Claude capture or recapture evidence. See the
 [recorded corpus and evidence limits](thread-package-shadow-lifecycle-and-evidence.md#reusable-fold-regression-corpus).
-

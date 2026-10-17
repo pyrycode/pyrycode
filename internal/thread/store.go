@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -64,20 +65,23 @@ type conversationWorker struct {
 // Store follows raw history for caller-authorized conversations. Construct it
 // with NewStore; all public methods are safe for concurrent use.
 type Store struct {
-	mu           sync.Mutex
-	history      *history.Store
-	forward      func(conversations.ConversationID) (storeReader, error)
-	lookup       func(context.Context, conversations.ConversationID, []uint64) ([]history.Entry, error)
-	beforeFold   func(context.Context, conversations.ConversationID) error
-	queryWork    func(bool) // optional work counter: true for preparation, false for requests
-	queryCopies  func(int)  // optional pointer-copy counter for index preparation
-	workers      map[conversations.ConversationID]*conversationWorker
-	closed       bool
-	records      map[conversations.ConversationID]progressRecord
-	shutdownDone chan struct{}
-	shutdownErr  error
-	replace      func(string, string) error
-	syncDir      func(string) error
+	mu             sync.Mutex
+	history        *history.Store
+	forward        func(conversations.ConversationID) (storeReader, error)
+	lookup         func(context.Context, conversations.ConversationID, []uint64) ([]history.Entry, error)
+	beforeFold     func(context.Context, conversations.ConversationID) error
+	queryWork      func(bool) // optional work counter: true for preparation, false for requests
+	queryCopies    func(int)  // optional pointer-copy counter for index preparation
+	workers        map[conversations.ConversationID]*conversationWorker
+	closed         bool
+	records        map[conversations.ConversationID]progressRecord
+	shutdownDone   chan struct{}
+	shutdownErr    error
+	replace        func(string, string) error
+	syncDir        func(string) error
+	checkpointStep func(string, func() error) error
+	newTimer       func() checkpointTimer
+	log            *slog.Logger
 }
 
 // NewStore creates a background cache owner; history is the durable source.
@@ -91,11 +95,13 @@ func NewStore(h *history.Store, beforeFold ...func(context.Context, conversation
 	}
 	return &Store{
 		history: h, beforeFold: barrier,
-		records: make(map[conversations.ConversationID]progressRecord),
-		replace: os.Rename,
-		syncDir: syncCacheDir,
-		workers: make(map[conversations.ConversationID]*conversationWorker),
-		forward: func(id conversations.ConversationID) (storeReader, error) { return h.Forward(id, 0) },
+		records:  make(map[conversations.ConversationID]progressRecord),
+		replace:  os.Rename,
+		syncDir:  syncCacheDir,
+		newTimer: newCheckpointTimer,
+		log:      slog.Default(),
+		workers:  make(map[conversations.ConversationID]*conversationWorker),
+		forward:  func(id conversations.ConversationID) (storeReader, error) { return h.Forward(id, 0) },
 		lookup: func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -174,14 +180,16 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	var progress Snapshot
 	var checksum, progressChecksum string
 	var capture publicationCapture
+	var checkpoint *workerCheckpoint
+	complete := false
 	capture.copied = s.queryCopies
 	defer func() {
 		s.mu.Lock()
 		retiring := w.retiring
 		renderFailed := w.renderFailed
 		s.mu.Unlock()
-		if retiring && !renderFailed && w.parent.Err() == nil && progress.State == StateUsable && errors.Is(result, context.Canceled) {
-			result = s.checkpoint(id, progress, progressChecksum, true)
+		if retiring && !renderFailed && complete && w.parent.Err() == nil && progress.State == StateUsable && errors.Is(result, context.Canceled) {
+			result = checkpoint.commit(progress, progressChecksum, true)
 		}
 		w.cancel()
 		s.mu.Lock()
@@ -237,6 +245,10 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		result = err
 		return
 	}
+	if err := s.dirtyCheckpoint(id); err != nil {
+		result = err
+		return
+	}
 	if err := s.removeLegacy(id); err != nil {
 		result = err
 		return
@@ -247,6 +259,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	}
 	source := newRecentSource(func(ids []uint64) ([]history.Entry, error) { return s.lookup(ctx, id, ids) })
 	fold := newReferenceFold(string(id), source)
+	checkpoint = &workerCheckpoint{writer: checkpointWriter{s: s, id: id, source: source, fullRefold: true, step: s.checkpointStep}, parent: w.parent, fold: fold, pending: make(map[uint64]bool)}
 	fold.captureSet = make(map[int]struct{})
 	feed := func(entries []history.Entry) error {
 		if s.beforeFold != nil {
@@ -254,6 +267,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 				return err
 			}
 		}
+		complete = false
 		source.chunk = entries
 		err := fold.Feed(entries)
 		source.remember(entries)
@@ -299,6 +313,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		snapshot.Epoch = epoch
 		changes.Snapshot = snapshot
 		progress, progressChecksum = snapshot, checksum
+		complete = true
 		s.publish(ctx, id, w, items, changes, fold, capture.affected)
 		return nil
 	}
@@ -306,7 +321,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		result = err
 		return
 	}
-	result = reader.Tail(ctx, func(entries []history.Entry) error {
+	result = s.tailCheckpoints(ctx, reader, checkpoint, func() (Snapshot, string) { return progress, progressChecksum }, func(entries []history.Entry) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -319,10 +334,6 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	if result == nil {
 		result = ErrUnavailable
 	}
-}
-
-func (s *Store) checkpoint(id conversations.ConversationID, snapshot Snapshot, checksum string, clean bool) error {
-	return s.writeCacheFile(id, cacheName, cacheRecord{Schema: cacheSchema, Rules: foldingRules, Epoch: snapshot.Epoch, Version: snapshot.Version, LastShownVersion: snapshot.LastShownVersion, Checksum: checksum, Clean: clean})
 }
 
 func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, items []*Item, changes Observation, fold *Fold, affected []int) {
