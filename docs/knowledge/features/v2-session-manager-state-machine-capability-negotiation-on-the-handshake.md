@@ -97,7 +97,7 @@ is withheld; otherwise legacy replies could reuse `hello_ack`'s sender ID before
 the first unsupported app request. A first hosted request on an existing legacy
 connection also has to preserve previously accepted transport output. Neither
 lane selection nor a capability echo authorizes discovery. See
-[sender IDs and delivery ordering](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery)
+[sender IDs and delivery ordering](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery)
 and [transport admission](transport-package.md#lifecycle-and-goroutines).
 
 ### Thread delivery and summary projection
@@ -164,7 +164,7 @@ boundaries; [`runThreadQuery`](../../../internal/relay/v2session_catchup.go)
 delivers serially and stops on any error before its separate success marker.
 See [ordered delivery and eligibility](../../protocol-mobile.md#ordered-delivery-and-eligibility)
 for withholding, failure, retirement and cancellation outcomes, and
-[lane ownership](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery)
+[lane ownership](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery)
 for capacity and detached input.
 
 [`admitThreadQuery`](../../../internal/relay/v2session_catchup.go) validates field

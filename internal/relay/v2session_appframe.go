@@ -92,19 +92,13 @@ const (
 	appFrameThreadQuery
 )
 
-// appFrameWorker is the per-conn sub-actor that runs application handlers
-// off the Run goroutine (#965). Exactly one is spawned per session in
-// handleNoiseInit's open tail; it processes s.appFrames in strict FIFO
-// arrival order — one frame fully routed (Route returned, all its replies
-// forwarded to Run) before the next is dequeued — so no two handlers for
-// the same conn run concurrently and their sealed replies emit in arrival
-// order (AC-2). It terminates when s.done is closed (per-session teardown
-// in closeWith) or ctx (runCtx) is cancelled (Run exit) — leaving no
-// goroutine behind under conn churn or shutdown.
+// appFrameWorker runs application handlers off Run, one worker per session.
+// It processes appFrames in FIFO order: Route returns and Run processes every
+// synchronous reply before the next job begins. Session teardown or manager
+// cancellation ends the worker and its connection-scoped context.
 //
-// TWO EXCEPTIONS to that ordering: a request_context_usage (#2563) and an
-// mcp_status_request (#2702) are checked here but their seam wait and reply
-// run on a goroutine of their own, so that reply can emit after replies to
+// request_context_usage and mcp_status_request are checked here but their wait
+// and reply run on a goroutine of their own, so that reply can emit after replies to
 // frames that arrived later. Clients correlate it on in_reply_to. connCtx is
 // what ends those goroutines and settings enrichment: a separate watcher cancels
 // it on s.done even while a handler holds the worker. Run cancellation propagates
@@ -112,10 +106,8 @@ const (
 // Each verb has its own semaphore bounding how many one conn can hold: asks
 // (maxContextUsageAsksPerConn) and mcpAsks (maxMCPStatusAsksPerConn).
 //
-// The worker NEVER touches s.send / s.recv / keys / session state: it only
-// runs Route → handler → c.Send (a marshal + channel push, no AEAD) and
-// posts replies to m.appReply for Run to seal. That is the load-bearing
-// single-owner-cipher invariant (AC-3).
+// The worker never touches session ciphers or mutable state. Send marshals
+// plaintext and waits for Run; only Run seals or drops each reply.
 func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 	connCtx, cancelConn := context.WithCancel(ctx)
 	watchDone := make(chan struct{})
@@ -156,8 +148,8 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				m.handleSendQueuedNow(s, job.plaintext)
 			case appFrameAttachmentChunk:
 				// The upload path (#1897). Runs here rather than in
-				// routeAppFrame because it neither builds an outbound channel
-				// nor calls dispatch.Route — it emits its own replies straight
+				// routeAppFrame because it does not call dispatch.Route — it
+				// emits its own replies straight
 				// through forwardToRun. Being on this goroutine is what
 				// discharges attachments.Intake.Receive's single-feeder
 				// precondition: strictly FIFO, one frame fully handled before
@@ -222,88 +214,62 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// through forwardToRun, so nothing seals under s.send off Run.
 				m.handleRequestContextUsage(connCtx, s, asks, job.plaintext, job.thread)
 			case appFrameRoute:
-				// The v1 application dispatch chain, unchanged: build the outbound
-				// channel, call dispatch.Route, forward its replies to Run.
-				m.routeAppFrame(ctx, s, job.plaintext)
+				// The shared application dispatch chain waits for Run to process
+				// each reply before the handler continues.
+				m.routeAppFrame(connCtx, s, job.plaintext)
 			default:
 				// Unreachable — every appFrameKind has an arm above, and Go cannot
 				// check that for us. A kind added without one lands here and takes
 				// the v1 chain, which answers an unrecognised type with
 				// protocol.unsupported; the alternative to keeping this arm is
 				// dropping such a frame in silence.
-				m.routeAppFrame(ctx, s, job.plaintext)
+				m.routeAppFrame(connCtx, s, job.plaintext)
 			}
 		}
 	}
 }
 
-// routeAppFrame runs dispatch.Route for one application frame on the
-// worker goroutine and forwards each reply the handler emits back to Run
-// (via m.appReply) for sealing. Preserves #909's concurrent-drain shape:
-// Route runs on its own short-lived goroutine while this goroutine drains
-// the per-frame outbound channel, so a handler emitting more than
-// handlerOutboundBuf replies cannot fill outbound and deadlock Route inside
-// c.Send. A single sender (the handler) + this single receiver preserves
-// FIFO emission order, and forwardToRun's blocking send onto the FIFO
-// m.appReply channel preserves it across the seam.
-//
-// Only Route (→ handler → c.Send: a marshal + channel push, no AEAD) runs
-// here; the seal (forwardAppReply → s.send.Encrypt) happens on Run. The
-// outbound channel is deliberately NOT closed — a misbehaving handler that
-// forks a sender after Route returns writes into a leaked but
-// capacity-bounded channel the GC reclaims once the goroutine exits;
-// closing here would panic such a sender (#446).
-//
-// ctx.Done() is not an arm of the Route-drain select for the same reason
-// as #909: the handler observes cancellation through c.Send's own ctx arm
-// (ctx is runCtx), so a shutdown drives Route to return and fires routeDone
-// naturally. forwardToRun DOES honor ctx / s.done so a worker parked on a
-// reply send unblocks on teardown.
+// routeAppFrame runs Route on the connection worker. Each Send waits for Run
+// to process its reply before the handler can announce a subsequent update.
+// No per-frame buffer or drain goroutine separates that completion boundary
+// from the handler. Arbitrarily long reply bursts apply bounded backpressure
+// without holding Run, and every Noise operation remains on Run.
 func (m *V2SessionManager) routeAppFrame(ctx context.Context, s *V2Session, plaintext []byte) {
-	outbound := make(chan protocol.RoutingEnvelope, handlerOutboundBuf)
-	conn := dispatch.NewConn(s.connID, outbound, s.device)
-	conn.SetMultiAgent(s.multiAgent)
-
-	routeDone := make(chan struct{})
-	go func() {
-		defer close(routeDone)
-		dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)
-	}()
-	for {
-		select {
-		case reply := <-outbound:
-			if !m.forwardToRun(ctx, s, reply) {
-				return
-			}
-		case <-routeDone:
-			// Route returned (no further c.Send in flight); drain any residual
-			// buffered replies in FIFO order, then return.
-			for {
-				select {
-				case reply := <-outbound:
-					if !m.forwardToRun(ctx, s, reply) {
-						return
-					}
-				default:
-					return
-				}
-			}
+	conn := dispatch.NewConnWithSender(s.connID, func(ctx context.Context, reply protocol.RoutingEnvelope) error {
+		if m.forwardToRun(ctx, s, reply) {
+			return nil
 		}
-	}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return ErrConnNotFound
+	}, s.device)
+	conn.SetMultiAgent(s.multiAgent)
+	dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)
 }
 
-// forwardToRun blocks until reply is handed to Run's m.appReply arm (which
-// seals it under s.send), or the session/manager tears down. Returns true
-// on a successful hand-off, false if ctx (runCtx, Run exiting) or s.done
-// (this conn's closeWith) fired first — in which case routeAppFrame
-// abandons the remaining drain (the Route goroutine still unwinds via
-// c.Send's own ctx arm, and any reply already past this point is dropped by
-// forwardAppReply's V2StateOpen gate). The blocking send is what applies
-// backpressure onto the worker so replies never accumulate unbounded.
+// forwardToRun waits for Run to process reply, not merely receive it. Processing
+// means legacy forwarding, admission to the ordered plaintext lane (possibly
+// deferred upstream under bounded backpressure), or an existing drop decision.
+// It does not promise transport receipt. Both waits escape on teardown or
+// cancellation; Run checks cancellation and original session identity before
+// touching the cipher. This method must only be called off Run.
 func (m *V2SessionManager) forwardToRun(ctx context.Context, s *V2Session, reply protocol.RoutingEnvelope) bool {
+	m.cfg.Logger.DebugContext(ctx, "relay: app reply ready for Run", "event", "v2.app_reply.ready", "conn_id", s.connID)
+	if ctx.Err() != nil {
+		return false
+	}
+	processed := make(chan struct{})
 	select {
-	case m.appReply <- appReplyMsg{s: s, reply: reply}:
-		return true
+	case m.appReply <- appReplyMsg{s: s, reply: reply, ctx: ctx, processed: processed}:
+	case <-s.done:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+	select {
+	case <-processed:
+		return ctx.Err() == nil
 	case <-s.done:
 		return false
 	case <-ctx.Done():
