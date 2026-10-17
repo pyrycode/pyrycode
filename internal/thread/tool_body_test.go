@@ -44,7 +44,7 @@ func TestStoreToolBodyParity(t *testing.T) {
 		testQueryItems(t, snap.Items, f.Items())
 		for _, item := range snap.Items {
 			got, err := s.ToolBody(context.Background(), id, snap.Epoch, item.ID, item.Rev)
-			if err != nil || got.State != StateUsable || got.ID != item.ID || got.Rev != item.Rev || got.Epoch != snap.Epoch || got.Version != snap.Version || !reflect.DeepEqual(got.Content, item.Content) {
+			if err != nil || got.State != StateUsable || got.ID != item.ID || got.Kind != item.Kind || got.Rev != item.Rev || got.Epoch != snap.Epoch || got.Version != snap.Version || !reflect.DeepEqual(got.Content, item.Content) {
 				t.Fatalf("body %d differs from complete renderer: %+v, %v", item.ID, got, err)
 			}
 			got.Content[0] = '!'
@@ -279,7 +279,7 @@ func TestStoreToolBodyCapture(t *testing.T) {
 					t.Fatal(got)
 				}
 			default:
-				if got.err != nil || got.result.Version != snap.Version || got.result.Epoch != snap.Epoch || got.result.Rev != 1 || !reflect.DeepEqual(got.result.Content, snap.Items[0].Content) {
+				if got.err != nil || got.result.Kind != snap.Items[0].Kind || got.result.Version != snap.Version || got.result.Epoch != snap.Epoch || got.result.Rev != 1 || !reflect.DeepEqual(got.result.Content, snap.Items[0].Content) {
 					t.Fatal("capture changed", got)
 				}
 			}

@@ -47,7 +47,7 @@ func (m *V2SessionManager) deliverThread(ctx context.Context, connID string, env
 	m.hostedMu.Lock()
 	in := m.hostedInboxes[connID]
 	m.hostedMu.Unlock()
-	if in == nil {
+	if in == nil || query != nil && query.inbox != in {
 		return ErrConnNotFound
 	}
 	done := make(chan error, 1)
@@ -105,7 +105,7 @@ func (o *hostedOutput) finish(err error) {
 }
 
 func threadContent(typ string) bool {
-	return threadItemUpdate(typ) || typ == protocol.TypeThreadItems || typ == protocol.TypeThreadReset
+	return threadItemUpdate(typ) || typ == protocol.TypeThreadItems || typ == protocol.TypeThreadReset || typ == protocol.TypeThreadToolBody
 }
 
 func threadDeliveryError(err error) error {

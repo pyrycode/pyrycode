@@ -17,6 +17,8 @@ type threadQuery struct {
 	conversation string
 	request      protocol.ThreadCatchUpPayload
 	page         *protocol.ThreadPagePayload
+	body         *protocol.ThreadExpansionRequest
+	inbox        *hostedInbox
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
@@ -55,13 +57,25 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 	}
 	var payload map[string]json.RawMessage
 	page := env.Type == protocol.TypeThreadPage
+	body := env.Type == protocol.TypeThreadReadToolBody
 	if json.Unmarshal(env.Payload, &p) != nil || json.Unmarshal(env.Payload, &payload) != nil || p.Conversation == nil {
 		fail()
 		return
 	}
 	var beforeOrder, version *uint64
 	var epoch *string
-	if page {
+	var expansion *protocol.ThreadExpansionRequest
+	if body {
+		var itemID, rev *uint64
+		_, cursor := payload["cursor"]
+		if cursor || json.Unmarshal(payload["epoch"], &epoch) != nil || epoch == nil || *epoch == "" ||
+			json.Unmarshal(payload["item_id"], &itemID) != nil || itemID == nil || *itemID == 0 ||
+			json.Unmarshal(payload["expected_rev"], &rev) != nil || rev == nil || *rev == 0 {
+			fail()
+			return
+		}
+		expansion = &protocol.ThreadExpansionRequest{ConversationID: *p.Conversation, Epoch: *epoch, ItemID: *itemID, ExpectedRev: *rev}
+	} else if page {
 		if json.Unmarshal(payload["before_order"], &beforeOrder) != nil || beforeOrder == nil {
 			fail()
 			return
@@ -78,8 +92,8 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 		return
 	}
 	limit, err := protocol.NormalizeThreadQueryLimit(limit)
-	providerMissing := page && m.cfg.ThreadPage == nil || !page && m.cfg.ThreadCatchUp == nil
-	if err != nil || !conversations.ValidID(*p.Conversation) || !s.thread || m.liveWithheld(s, *p.Conversation) || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
+	providerMissing := body && m.cfg.ThreadToolBody == nil || !body && (page && m.cfg.ThreadPage == nil || !page && m.cfg.ThreadCatchUp == nil)
+	if err != nil || !conversations.ValidID(*p.Conversation) || s.state != V2StateOpen || m.liveWithheld(s, *p.Conversation) || !s.thread || !s.interactive || body && !s.threadExpansion || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
 		fail()
 		return
 	}
@@ -89,16 +103,16 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 	in := s.hosted.inbox
 	m.hostedMu.Lock()
 	_, joined := in.threadJoins[*p.Conversation]
-	if in.query != nil || !joined && len(in.threadJoins) >= maxThreadJoins {
+	if in.query != nil || !body && !joined && len(in.threadJoins) >= maxThreadJoins {
 		m.hostedMu.Unlock()
 		fail()
 		return
 	}
 	queryCtx, cancel := context.WithCancel(in.ctx)
-	q := &threadQuery{id: *id, conversation: *p.Conversation, ctx: queryCtx, cancel: cancel}
+	q := &threadQuery{id: *id, conversation: *p.Conversation, ctx: queryCtx, cancel: cancel, inbox: in, body: expansion}
 	if page {
 		q.page = &protocol.ThreadPagePayload{ConversationID: *p.Conversation, BeforeOrder: *beforeOrder, Limit: limit}
-	} else {
+	} else if !body {
 		q.request = protocol.ThreadCatchUpPayload{ConversationID: *p.Conversation, Epoch: *epoch, Version: *version, Limit: limit}
 	}
 	in.query = q
@@ -107,6 +121,10 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 }
 
 func (m *V2SessionManager) runThreadQuery(ctx context.Context, s *V2Session, q *threadQuery) {
+	if q.body != nil {
+		m.runThreadToolBody(ctx, s, q)
+		return
+	}
 	defer q.cancel()
 	fail := func() { _ = m.deliverThread(ctx, s.connID, threadQueryError(q.id), q) } // best effort terminal refusal; retirement cannot receive it.
 	if q.ctx.Err() != nil {
@@ -215,6 +233,16 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 	}
 	if env.Type == protocol.TypeError || env.Type == protocol.TypeThreadReset {
 		in.query = nil
+		return nil
+	}
+	if q := o.query; q.body != nil && env.Type == protocol.TypeThreadToolBody {
+		var body protocol.ThreadToolBodyPayload
+		if json.Unmarshal(env.Payload, &body) == nil && body.Final {
+			if err := q.ctx.Err(); err != nil {
+				return err
+			}
+			in.query = nil
+		}
 		return nil
 	}
 	var p protocol.ThreadItemsPayload

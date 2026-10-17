@@ -119,10 +119,18 @@ thread-only replay/resync bypass are installed. Readiness attests complete
 wiring, not that every conversation has completed replay. See
 [daemon publication and lifecycle](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
+`ThreadToolBody` supplies bodies to the authenticated handler, but neither
+that callback nor `ThreadReady` grants `thread_expansion`. `s.threadExpansion`
+defaults false and handshake negotiation withholds it until both expansion reads
+are ready (#3550); production providers/activation remain uninstalled pending
+\#3523. Authenticated synthetic tests enable the recipient flag on `Run` without
+advertising it. Existing `thread` negotiation remains independent.
+
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
 replies, but `threadWithheld` independently gates live additions/changes/text
 appends and their continuations, plus correlated `thread_items` batches, assembly
-parts/completion, the separate final marker and `thread_reset`. Upstream checks
+parts/completion, `thread_tool_body` data/assembly/finals and `thread_reset`. Body
+frames additionally require the recipient's expansion flag. Upstream checks
 at `forwardEnvelope` and `forwardAppReply` cannot authorize a later queued send:
 `hostedDeliver` rechecks the selected unsealed thread-content head immediately
 before Noise sealing. The connection must still be open/authenticated, currently
@@ -186,6 +194,22 @@ and requests over 36,000 entries are covered by `TestDaemonThreadQueriesReadines
 `TestDaemonThreadQueriesBounded`. See the
 [wire query contract](../../protocol-mobile.md#thread-query-messages).
 
+Body admission also requires `thread_expansion`, a nonempty string epoch and
+nonzero unsigned 64-bit item ID/expected revision; any cursor key is refused,
+including null. `ThreadToolBody` must enforce public ownership in the named
+conversation and honor cancellation. `runThreadToolBody` rejects nonusable/error
+results and passes the captured identity, kind and content to
+`EncodeThreadToolBody`, which refuses stale/mismatched identity or wrong kind.
+There is no active-conversation or other-client fallback. Empty rendered
+input/output is available content; missing/private/unavailable bodies are errors.
+See [bounded expansion reads](../../protocol-mobile.md#bounded-expansion-reads).
+
+**Validate the final raw field, not a retained scalar value.** JSON null decoded
+into a scalar DTO can leave an earlier duplicate-key value intact. Body admission
+reads the final raw epoch/item/revision fields into pointers, rejecting a trailing
+null instead of accepting earlier valid scope. `TestThreadToolBodyAdmission`
+exercises these duplicate keys through authenticated dispatch before provider work.
+
 `ThreadPage` receives required unsigned `before_order`, including zero, and the
 normalized limit. `runThreadQuery` forwards every supplied full item and all four
 backend page fields through `EncodeThreadReply`; only the separate empty final
@@ -214,9 +238,10 @@ for the contention evidence and bounded missing-reply/final-marker checks.
 **Dispatch probing must reach the owning validator.** Decoding a full `Envelope`
 just to identify a query type rejects wrong-type IDs before `admitThreadQuery`
 can apply its connection-close policy. `dispatchAppFrame` probes the type
-independently for both query kinds; other malformed types keep their existing
-fallback. `TestThreadPageAdmission` sends malformed IDs through the authenticated
-wire, because direct admission tests would miss this bypass.
+independently for catch-up, page and tool-body requests; other malformed types
+keep their existing fallback. `TestThreadPageAdmission` and
+`TestThreadToolBodyAdmission` send malformed IDs through the authenticated wire,
+because direct admission tests would miss this bypass.
 
 **A refusal must preserve the legacy delivery path.** An Outbound-only peer has
 no cancellable ordered sender. Initializing a lane merely to deny an unnegotiated
@@ -228,12 +253,14 @@ the cancellable ordered sender. `TestThreadCatchUpLegacyRefusal` and
 retains its cursor, disk reads and delivery behavior.
 
 **Completion must fence live admission.** One generation-specific query token
-owns each connection's unfinished catch-up or page; both use the same slot.
+owns each connection's unfinished catch-up, page or tool-body read; all share
+the slot.
 `cancelThreadQuery` cancels it when a live item update for that conversation is
 admitted; `threadQueryGate` catches already queued updates immediately before sealing. No extra live buffer is
-introduced. At the separate success marker, cancellation checking and capture
-watermark installation share `hostedMu`; checking them separately could let a
-live patch cross the completion cut and be overwritten by older full items.
+introduced. For complete queries, cancellation checking and capture watermark
+installation at the separate success marker share `hostedMu`; checking them
+separately could let a live patch cross the completion cut and be overwritten
+by older full items.
 Matching-epoch updates at or below the captured version are withheld, including
 fragments. Later updates retain source order, even when distinct patches share
 one consumed version; the capture watermark is not advanced for each patch.
@@ -246,7 +273,19 @@ carry a join into a reused connection ID. The catch-up and page variants of
 pins cross-query slot contention and the join cap. Both requested-scope tests
 pair gap-producing thread and legacy handshakes with named requests.
 
-A racing query may fail explicitly; retry from the last completed checkpoint.
+Body finals take a separate `threadQueryGate` branch: cancellation checking and
+release of that query share `hostedMu`, without writing `threadJoins`. Thus body
+completion cannot advance full-thread coverage, replace an existing join or
+suppress unrelated live rows; body admission also bypasses the join-count cap.
+`deliverThread` binds even late refusals to the captured inbox generation, so a
+reused connection ID cannot receive old work. Cleanup compares the query token
+before releasing the slot, including when a refusal is withheld; it cannot clear
+a later read. `TestThreadToolBodyResults`, `TestThreadToolBodySharedSlot`,
+`TestThreadToolBodyFullQuerySlot` and `TestThreadToolBodyGenerationFence` pin those
+boundaries. Failed/withheld data or final delivery cannot grant success; held
+providers and cancellation remain independent across connections.
+
+A racing complete query may fail explicitly; retry from the last completed checkpoint.
 Only fully assembled batches followed by the separate successful marker advance
 that checkpoint. A terminal refusal can arrive before already queued live
 updates; correlate retry replies by `in_reply_to` while continuing to handle
