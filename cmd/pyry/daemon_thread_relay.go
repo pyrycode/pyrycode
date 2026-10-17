@@ -40,6 +40,8 @@ func installDaemonThreadRelay(cfg *relay.V2SessionConfig, s *threadShadow) {
 	cfg.ThreadLastShownVersion = nil
 	cfg.ThreadCatchUp = nil
 	cfg.ThreadPage = nil
+	cfg.ThreadToolBody = nil
+	cfg.ThreadChildren = nil
 	if s == nil || s.registry == nil {
 		return
 	}
@@ -65,6 +67,20 @@ func installDaemonThreadRelay(cfg *relay.V2SessionConfig, s *threadShadow) {
 	cfg.ThreadPage = func(ctx context.Context, r protocol.ThreadPagePayload) (thread.QueryResult, error) {
 		return s.queryThread(ctx, conversations.ConversationID(r.ConversationID), store, func(ctx context.Context) (thread.QueryResult, error) {
 			return store.HistoryPage(ctx, conversations.ConversationID(r.ConversationID), r.BeforeOrder, r.Limit)
+		})
+	}
+	cfg.ThreadToolBody = func(ctx context.Context, r protocol.ThreadExpansionRequest) (thread.ToolBodyResult, error) {
+		return queryDaemonThread(ctx, s, conversations.ConversationID(r.ConversationID), store, func(ctx context.Context) (thread.ToolBodyResult, error) {
+			return store.ToolBody(ctx, conversations.ConversationID(r.ConversationID), r.Epoch, r.ItemID, r.ExpectedRev)
+		})
+	}
+	cfg.ThreadChildren = func(ctx context.Context, r protocol.ThreadExpansionRequest) (thread.ChildPageResult, error) {
+		var cursor *thread.ChildCursor
+		if c := r.Cursor; c != nil {
+			cursor = &thread.ChildCursor{ConversationID: conversations.ConversationID(c.ConversationID), Epoch: c.Epoch, Parent: c.ItemID, ParentRev: c.Rev, Version: c.Version, Order: c.Order, ID: c.ID}
+		}
+		return queryDaemonThread(ctx, s, conversations.ConversationID(r.ConversationID), store, func(ctx context.Context) (thread.ChildPageResult, error) {
+			return store.ChildPage(ctx, conversations.ConversationID(r.ConversationID), r.Epoch, r.ItemID, r.ExpectedRev, r.Limit, cursor)
 		})
 	}
 	cfg.ThreadReady = func() bool {

@@ -63,3 +63,6 @@ None.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+- 2026-10-17: publisher retirement now admits and joins query callbacks through the existing publisher wait group as well as canceling their contexts. This ensures stop returns only after demand release; `TestDaemonThreadExpansionTeardown` covers it. Cold/idle recovery and unavailable history have their dedicated `TestDaemonThreadExpansionIdleAndUnavailable` proof. Final sizing is approximately 710 added lines, with no new exported types or interfaces.
