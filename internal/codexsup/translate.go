@@ -14,6 +14,8 @@ import (
 // maxModelWindowID.
 const (
 	maxUnrecognizedRaw = 16 << 10
+	maxMCPToolText     = 16 << 10
+	maxMCPToolTitle    = 256
 	maxBannerText      = 4 << 10
 	maxStopField       = 256
 	maxModelID         = 256
@@ -50,6 +52,7 @@ var (
 		// ToolUpdate; turnbridge makes every ToolUpdate a tool_result frame, so a
 		// delta each would give one row several results.
 		"item/commandExecution/outputDelta", "item/fileChange/outputDelta",
+		"item/mcpToolCall/progress",
 		// Completed items already carry these diffs and command results.
 		"turn/diff/updated", "item/fileChange/patchUpdated", "item/commandExecution/terminalInteraction",
 		// Thread bookkeeping for operations pyry does not request.
@@ -77,7 +80,6 @@ var (
 	// silent.
 	unrecognizedMethods = []string{
 		"error", "hook/started", "hook/completed", "turn/plan/updated", "item/plan/delta",
-		"item/mcpToolCall/progress",
 		"model/verification",
 		"modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted",
 		"model/safetyBuffering/updated",
@@ -88,14 +90,14 @@ var (
 // Item-type lanes, the same three-way classification over ThreadItem types;
 // TestItemTypesClassified checks them against the schema.
 var (
-	mappedItemTypes = []string{"contextCompaction", "commandExecution", "fileChange"}
+	mappedItemTypes = []string{"contextCompaction", "commandExecution", "fileChange", "mcpToolCall"}
 	// ignoredItemTypes carry no new turn meaning: a user message echoes the
 	// prompt, and agentMessage and reasoning text already arrived as deltas.
 	ignoredItemTypes = []string{"userMessage", "agentMessage", "reasoning"}
 	// unrecognizedItemTypes become Unrecognized on the codex_item lane, once
 	// per item, on item/started.
 	unrecognizedItemTypes = []string{
-		"hookPrompt", "functionCallOutput", "plan", "mcpToolCall", "dynamicToolCall",
+		"hookPrompt", "functionCallOutput", "plan", "dynamicToolCall",
 		"collabAgentToolCall", "subAgentActivity", "webSearch", "imageView", "sleep",
 		"imageGeneration", "enteredReviewMode", "exitedReviewMode",
 	}
@@ -389,6 +391,8 @@ func (t *Translator) item(method string, params json.RawMessage) []turnevent.Eve
 		return commandItem(method, params)
 	case typ == "fileChange":
 		return fileChangeItem(method, params)
+	case typ == "mcpToolCall":
+		return mcpToolCallItem(method, params)
 	case ignoredItemSet[typ], mappedItemSet[typ]:
 		return nil
 	case method == "item/completed":
@@ -396,6 +400,62 @@ func (t *Translator) item(method string, params json.RawMessage) []turnevent.Eve
 		return nil
 	}
 	return []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexItem, typ, params)}
+}
+
+// mcpToolCallItem carries opaque input and text-only output as untrusted display
+// data. Progress is ignored; completion supplies the call's only result.
+func mcpToolCallItem(method string, params json.RawMessage) []turnevent.Event {
+	var p struct {
+		Item struct {
+			ID        *string         `json:"id"`
+			Server    *string         `json:"server"`
+			Tool      *string         `json:"tool"`
+			Status    *string         `json:"status"`
+			Arguments json.RawMessage `json:"arguments"`
+			Result    *struct {
+				Content []json.RawMessage `json:"content"`
+			} `json:"result"`
+			Error *struct {
+				Message *string `json:"message"`
+			} `json:"error"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return undecodable(params)
+	}
+	it := p.Item
+	if it.ID == nil || it.Server == nil || it.Tool == nil || it.Status == nil || len(it.Arguments) == 0 ||
+		(it.Result != nil && it.Result.Content == nil) || (it.Error != nil && it.Error.Message == nil) {
+		return undecodable(params)
+	}
+	if method == "item/started" {
+		return []turnevent.Event{turnevent.ToolStart{
+			ToolCallID: *it.ID, Title: cut(*it.Server+"/"+*it.Tool, maxMCPToolTitle),
+			Kind: turnevent.ToolKindOther, RawInput: it.Arguments,
+		}}
+	}
+	var text string
+	if it.Error != nil {
+		text = *it.Error.Message
+	} else if it.Result != nil {
+		var b strings.Builder
+		for _, raw := range it.Result.Content {
+			var block struct {
+				Type string  `json:"type"`
+				Text *string `json:"text"`
+			}
+			// Content elements are unrestricted JSON; only typed text is displayable.
+			if json.Unmarshal(raw, &block) == nil && block.Type == "text" && block.Text != nil {
+				b.WriteString(*block.Text)
+			}
+		}
+		text = b.String()
+	}
+	update := turnevent.ToolUpdate{ToolCallID: *it.ID, Status: toolStatus(*it.Status)}
+	if text = cut(text, maxMCPToolText); text != "" {
+		update.Content = turnevent.TextContent{Text: text}
+	}
+	return []turnevent.Event{update}
 }
 
 // commandItem maps a commandExecution item: its item/started to a ToolStart
