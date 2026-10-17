@@ -7,10 +7,11 @@ import (
 )
 
 type queryRow struct {
-	item   *Item
-	touch  uint64
-	recipe contentRecipe
-	header childHeader
+	item         *Item
+	touch        uint64
+	recipe       contentRecipe
+	header       childHeader
+	activeBranch bool // own activity or activity in a public descendant
 }
 
 // queryTree is a persistent AVL tree ordered by (group, key, item ID). Subtree sizes
@@ -206,6 +207,7 @@ func (q *queryIndex) membership(row queryRow, remove bool) {
 	}
 	q.touched = q.treePut(q.touched, row.touch, item.ID, value)
 	q.children = q.treePutGroup(q.children, item.Parent, item.Order, item.ID, value)
+	q.compactMembership(row, value)
 	if row.touch == 0 {
 		if remove {
 			q.invalidTouches--
@@ -276,6 +278,7 @@ func (q *queryIndex) advance(items []*Item, affected []int, f *Fold, work func(b
 			next.refreshHeader(row, f.version)
 		}
 	}
+	next.refreshRootActivity(dirty)
 	next.evidence(f)
 	return &next
 }
