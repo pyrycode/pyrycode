@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"runtime"
 	"slices"
@@ -288,6 +289,9 @@ func (p *testResumeProof) update(t testing.TB, f *Fold, full bool) [32]byte {
 }
 
 func TestCheckpointResumeCorpus(t *testing.T) {
+	if os.Getenv("PYRY_EXHAUSTIVE_TESTS") != "1" {
+		t.Skip("complete restoration sweep: run make test-exhaustive")
+	}
 	t.Parallel()
 	started := time.Now()
 	entries := testFoldCorpus(30000)
@@ -297,6 +301,15 @@ func TestCheckpointResumeCorpus(t *testing.T) {
 		cuts = append(cuts, cut)
 	}
 	testCheckpointResume(t, entries, cuts)
+}
+
+// The full-size history exercises retained state across hundreds of scenarios.
+// Focused tests restore every boundary of the scenario vocabulary; these cuts
+// add large-inventory restoration around late links, delivery and turn closure.
+func TestCheckpointResumeRepresentativeCorpus(t *testing.T) {
+	t.Parallel()
+	entries := testFoldCorpus(30000)
+	testCheckpointResume(t, entries, []int{0, 29801, 29901, 29916, 29923, 29928, 29933, 29999, 30000})
 }
 
 func TestCheckpointProofContentBytes(t *testing.T) {

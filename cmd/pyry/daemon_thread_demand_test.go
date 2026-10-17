@@ -104,8 +104,9 @@ func TestDaemonThreadDemandWireAfterIdle(t *testing.T) {
 	s, h, reg, store := testShadow(t)
 	reg.Create(conversations.Conversation{ID: testConvID})
 	testShadowAppend(t, h, testConvID)
-	// Establish the publisher's cursor before idle retirement. Its first live
-	// publication can otherwise cancel the query that reloads the same version.
+	// Install publication before the follower consumes the initial history.
+	// No phone is admitted until that publication and idle retirement finish.
+	// A live update admitted during a query correctly cancels its baseline.
 	w, _ := testDaemonThreadQueryWire(t, s, nil)
 	s.start()
 	testShadowWait(t, func() bool {

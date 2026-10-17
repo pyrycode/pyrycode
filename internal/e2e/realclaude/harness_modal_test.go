@@ -218,10 +218,7 @@ func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, mod
 		// exercise and the single line that differs from spawnBootstrapDaemon.
 	}
 	if operatorBypass {
-		args = append(args,
-			"--dangerously-skip-permissions",
-			"--permission-prompt-tool", "stdio",
-		)
+		args = append(args, "--dangerously-skip-permissions")
 	}
 	cmd := exec.Command(bin, args...)
 	// HOME is set explicitly rather than inherited, so the harness also runs under

@@ -34,7 +34,7 @@ func (s *Store) renderItems(ctx context.Context, id conversations.ConversationID
 	recipes := make(map[uint64]contentRecipe, len(items))
 	if q != nil {
 		for _, item := range items {
-			row := q.byID[item.ID%uint64(len(q.byID))][item.ID]
+			row, _ := q.lookup(item.ID, false)
 			if row.recipe.creating != 0 || len(row.recipe.fields) != 0 {
 				recipes[item.ID] = row.recipe
 			}
@@ -45,7 +45,7 @@ func (s *Store) renderItems(ctx context.Context, id conversations.ConversationID
 		if q == nil {
 			return Item{}, false
 		}
-		row, ok := q.byID[id%uint64(len(q.byID))][id]
+		row, ok := q.lookup(id, false)
 		if !ok || row.item == nil {
 			return Item{}, false
 		}

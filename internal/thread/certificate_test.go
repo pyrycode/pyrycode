@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,89 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 )
+
+func TestStoreCertificateTemporaryCleanup(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"success", "failure", "redirect"} {
+		t.Run(mode, func(t *testing.T) {
+			s, h := testThreadStore(t)
+			testStoreAppend(t, h, testStoreA, testMessage(1))
+			dir, err := h.LogDir(testStoreA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := cacheRecord{Schema: cacheSchema, Epoch: strings.Repeat("a", 32)}
+			if err := s.writeCacheFile(testStoreA, cacheName, old); err != nil {
+				t.Fatal(err)
+			}
+			segments, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+			if err != nil || len(segments) != 1 {
+				t.Fatal("expected one history segment", segments, err)
+			}
+			preserved := make(map[string][]byte)
+			for _, leaf := range []string{filepath.Base(segments[0]), cacheName} {
+				raw, err := os.ReadFile(filepath.Join(dir, leaf))
+				if err != nil {
+					t.Fatal(err)
+				}
+				preserved[leaf] = raw
+			}
+			next := old
+			next.Clean = true
+			encoded, err := json.Marshal(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded = append(encoded, '\n')
+			outside, actualDir, tempLeaf := t.TempDir(), dir, ""
+			s.replace = func(from, to string) error {
+				tempLeaf = filepath.Base(from)
+				if mode == "success" {
+					return os.Rename(from, to)
+				}
+				if mode == "redirect" {
+					actualDir = dir + "-saved"
+					if err := os.Rename(dir, actualDir); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(outside, dir); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(outside, tempLeaf), []byte("outside marker"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return errors.New("injected replacement failure")
+			}
+			wantErr := error(ErrPersistence)
+			if mode == "success" {
+				wantErr = nil
+				preserved[cacheName] = encoded
+			}
+			if err := s.writeCacheFile(testStoreA, cacheName, next); !errors.Is(err, wantErr) {
+				t.Fatalf("replacement error = %v, want %v", err, wantErr)
+			}
+			if tempLeaf == "" {
+				t.Fatal("replacement hook was not reached")
+			}
+			wantFiles := make(map[string][]byte)
+			for leaf, raw := range preserved {
+				wantFiles[filepath.Join(actualDir, leaf)] = raw
+			}
+			if mode == "redirect" {
+				wantFiles[filepath.Join(outside, tempLeaf)] = []byte("outside marker")
+				wantFiles[filepath.Join(actualDir, tempLeaf)] = encoded
+			} else if temps, err := filepath.Glob(filepath.Join(actualDir, ".thread-*")); err != nil || len(temps) != 0 {
+				t.Error("temporary files remain", temps, err)
+			}
+			for path, want := range wantFiles {
+				if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+					t.Errorf("file %s: got %q, want %q, error %v", path, got, want, err)
+				}
+			}
+		})
+	}
+}
 
 func TestStoreCertificateWrites(t *testing.T) {
 	t.Parallel()
