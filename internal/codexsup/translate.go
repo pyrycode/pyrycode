@@ -53,33 +53,37 @@ var (
 		// delta each would give one row several results.
 		"item/commandExecution/outputDelta", "item/fileChange/outputDelta",
 		"item/mcpToolCall/progress",
+		// Completed items already carry these diffs and command results.
+		"turn/diff/updated", "item/fileChange/patchUpdated", "item/commandExecution/terminalInteraction",
+		// Thread bookkeeping for operations pyry does not request.
+		"thread/archived", "thread/deleted", "thread/unarchived", "thread/closed",
+		"thread/reverted", "thread/attachment/updated", "thread/goal/updated",
+		"thread/goal/cleared", "thread/queue/changed", "project/changed",
+		"thread/project/updated", "thread/environment/connected", "thread/environment/disconnected",
+		// Output of command/exec and process requests pyry does not make.
+		"command/exec/outputDelta", "process/outputDelta", "process/exited",
+		// Features outside text chat; realtime names enumerate the pinned schema.
+		"thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
+		"thread/realtime/item/transcript/delta", "thread/realtime/item/completed",
+		"thread/realtime/transcript/delta", "thread/realtime/transcript/done",
+		"thread/realtime/outputAudio/delta", "thread/realtime/sdp", "thread/realtime/error",
+		"thread/realtime/closed", "fs/changed",
+		"fuzzyFileSearch/sessionUpdated", "fuzzyFileSearch/sessionCompleted",
+		"mcpServer/oauthLogin/completed", "mcpServer/event/stream/notification",
+		"externalAgentConfig/import/progress", "externalAgentConfig/import/completed",
+		"windows/worldWritableWarning", "windowsSandbox/setupCompleted", "account/login/completed",
+		"item/autoApprovalReview/started", "item/autoApprovalReview/completed",
+		"autoApprovalReview/strictReviewRequired",
 	}
 	// unrecognizedMethods become Unrecognized on the codex_method lane: seen,
 	// but with no mapping yet. model/verification is here so it is never
 	// silent.
 	unrecognizedMethods = []string{
-		"error", "thread/archived", "thread/deleted", "thread/unarchived", "thread/closed",
-		"thread/reverted", "thread/attachment/updated", "thread/goal/updated",
-		"thread/goal/cleared", "thread/queue/changed", "project/changed",
-		"thread/project/updated", "thread/environment/connected",
-		"thread/environment/disconnected", "hook/started", "hook/completed",
-		"turn/diff/updated", "turn/plan/updated", "item/autoApprovalReview/started",
-		"item/autoApprovalReview/completed", "autoApprovalReview/strictReviewRequired",
-		"item/plan/delta", "command/exec/outputDelta", "process/outputDelta", "process/exited",
-		"item/commandExecution/terminalInteraction", "item/fileChange/patchUpdated",
-		"mcpServer/oauthLogin/completed", "mcpServer/event/stream/notification",
-		"externalAgentConfig/import/progress", "externalAgentConfig/import/completed",
-		"fs/changed", "model/verification",
+		"error", "hook/started", "hook/completed", "turn/plan/updated", "item/plan/delta",
+		"model/verification",
 		"modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted",
 		"model/safetyBuffering/updated",
 		"guardianWarning", "deprecationNotice",
-		"fuzzyFileSearch/sessionUpdated", "fuzzyFileSearch/sessionCompleted",
-		"thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
-		"thread/realtime/item/transcript/delta", "thread/realtime/item/completed",
-		"thread/realtime/transcript/delta", "thread/realtime/transcript/done",
-		"thread/realtime/outputAudio/delta", "thread/realtime/sdp", "thread/realtime/error",
-		"thread/realtime/closed", "windows/worldWritableWarning",
-		"windowsSandbox/setupCompleted", "account/login/completed",
 	}
 )
 
