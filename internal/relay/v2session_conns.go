@@ -65,6 +65,8 @@ func retainedClientField(v string, maxBytes int) string {
 // for which live update family to deliver; delivery rechecks it before sealing.
 // ThreadCompact, also set only by ActiveThreadConns, reports a negotiated
 // thread_compact, so an unjoined conn may be loading either projection.
+// PendingView is an admitted items query for the same conversation, captured
+// with View; switching projections requires live cancellation for both views.
 type ActiveConn struct {
 	ConnID          string
 	Interactive     bool
@@ -74,6 +76,7 @@ type ActiveConn struct {
 	ClientFeatures  string
 	DeviceTokenHash string
 	View            ThreadView
+	PendingView     ThreadView // admitted items query; Unjoined when no query is pending
 	ThreadCompact   bool
 }
 
@@ -150,7 +153,7 @@ func (m *V2SessionManager) handleConnSnapshot(req snapshotReq) []ActiveConn {
 	for _, conn := range conns {
 		s := m.sessions[conn.ConnID]
 		if s.thread && !m.liveWithheld(s, *req.threadConversation) && !m.pushRetired(conn.ConnID) {
-			conn.View = m.threadView(s, *req.threadConversation)
+			conn.View, conn.PendingView = m.threadViews(s, *req.threadConversation)
 			conn.ThreadCompact = s.threadCompact
 			eligible = append(eligible, conn)
 		}
@@ -158,21 +161,28 @@ func (m *V2SessionManager) handleConnSnapshot(req snapshotReq) []ActiveConn {
 	return eligible
 }
 
-// threadView reads the recorded join under hostedMu, never nested with pushMu.
-func (m *V2SessionManager) threadView(s *V2Session, conversation string) ThreadView {
+// threadViews captures the completed join and admitted query together under
+// hostedMu, never nested with pushMu. Both projections need live cancellation.
+func (m *V2SessionManager) threadViews(s *V2Session, conversation string) (joined, pending ThreadView) {
 	if s.hosted == nil || s.hosted.inbox == nil {
-		return ThreadViewUnjoined
+		return
 	}
 	m.hostedMu.Lock()
 	defer m.hostedMu.Unlock()
 	j, ok := s.hosted.inbox.threadJoins[conversation]
+	if q := s.hosted.inbox.query; q != nil && q.conversation == conversation && q.body == nil && !q.children {
+		pending = ThreadViewComplete
+		if q.projection == protocol.ThreadProjectionCompact {
+			pending = ThreadViewCompact
+		}
+	}
 	switch {
 	case !ok:
-		return ThreadViewUnjoined
+		return ThreadViewUnjoined, pending
 	case j.projection == protocol.ThreadProjectionCompact:
-		return ThreadViewCompact
+		return ThreadViewCompact, pending
 	default:
-		return ThreadViewComplete
+		return ThreadViewComplete, pending
 	}
 }
 

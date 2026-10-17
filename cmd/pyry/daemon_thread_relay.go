@@ -249,18 +249,18 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 	}
 	// Recipient selection follows observation capture. Reconnect history belongs
 	// to catch-up; this publisher does not initialize peers admitted later.
-	// An unjoined peer that negotiated thread_compact gets both families, so a
-	// frame of its own projection cancels whichever load is in flight; the relay
-	// withholds the other family. Other unjoined peers get complete frames only.
+	// Both the completed and pending projections need their cancellation frames.
+	// Admission after this snapshot captures only after acquiring this publication
+	// gate, so its result includes this pass. Delivery rechecks the current join.
 	var completePeers, compactPeers []string
 	for _, peer := range p.active(ctx, string(id)) {
 		if !peer.Interactive || !peer.Thread {
 			continue
 		}
-		if peer.View != relay.ThreadViewCompact {
+		if peer.View != relay.ThreadViewCompact || peer.PendingView == relay.ThreadViewComplete {
 			completePeers = append(completePeers, peer.ConnID)
 		}
-		if peer.View == relay.ThreadViewCompact || peer.View == relay.ThreadViewUnjoined && peer.ThreadCompact {
+		if peer.View == relay.ThreadViewCompact || peer.PendingView == relay.ThreadViewCompact || peer.View == relay.ThreadViewUnjoined && peer.ThreadCompact {
 			compactPeers = append(compactPeers, peer.ConnID)
 		}
 	}
