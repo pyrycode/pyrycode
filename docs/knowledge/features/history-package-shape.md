@@ -172,6 +172,15 @@ Per-conversation `convLog.lookupBounds` retains segment first IDs and sizes,
 never resolved paths. Unknown or resized segments discover their first IDs from
 bounded header/first-entry prefixes through `segmentFirstID`; empty/header-only
 segments and torn first entries have no range until a complete entry exists.
+`lookupSegmentBound` shares these checks with nonzero Forward resumes. A zero
+first-ID bound needs provenance: `load` can remember zero from a complete invalid
+entry, so a recovery-derived zero bound larger than the header must be
+rediscovered. Prefix discovery certifies that no complete first entry exists;
+that certificate is reusable while regular-file membership and size remain
+valid. Rediscovering every zero bound would reread an unchanged torn first entry
+to EOF on every warm call. Resizing invalidates certification, so completing a
+zero-ID entry still returns `ErrCorruptSegment`.
+
 Successful appends and rolls keep known bounds current. Lookup avoids append-cursor
 recovery through `load`, which would fully decode an unrelated newest segment.
 Lookup groups requested IDs by these ranges and fully reads/decodes only selected
@@ -211,14 +220,28 @@ decoded data, rather than total process memory or temporary reads/results.
 ### Lookup verification
 
 `readStats` includes successful discovery opens and actual prefix read bytes,
-including buffered read-ahead, as well as selected full reads. A warm lookup
-served entirely from cached segments adds no segment opens or bytes, while
-still checking filesystem membership. `TestLookupSelectiveReads` uses segments
-longer than the discovery buffer and corrupts an unselected segment after its
-first entry: a tiny fixture can be read entirely by buffering without proving
-that full decoding was avoided. `TestLookupRoundTrip` seals the metadata segment
-before mutating returned data, so a later answer proves cache detachment rather
-than merely rereading fresh disk bytes. `TestLookupCacheAccounting` exercises
+including buffered read-ahead, as well as selected full reads. Discovery decodes
+at most the header and first entry, bounded by `segmentCeiling`; a long torn
+first entry can require reading to EOF. Prefix discovery does not certify the
+unread remainder of an unselected segment.
+
+A warm lookup served entirely from cached segments adds no segment opens or
+bytes, while still checking filesystem membership. A warm Forward resume with
+valid unchanged bounds reads only selected full segments; Forward retains no
+decoded cache. `TestLookupSelectiveReads` and `TestForwardResumeSelectiveReads`
+use segments longer than discovery read-ahead and corrupt an unselected segment
+after its valid first entry. A tiny fixture can be read entirely by buffering,
+and correct callbacks alone cannot prove selective I/O. The Forward test counts
+construction plus Walk on a fresh reopened Store without watermark or lookup
+priming, then checks warm bounds separately: cold reads include all discovery
+bytes/opens plus selected full reads; warm reads exclude old segments entirely.
+
+`TestForwardResumeTornFirstEntryReads` checks both Forward and Lookup against an
+unselected torn first entry, asserting exact cold/warm bytes and opens and
+rejection after resizing completes a zero-ID entry. This catches needless warm
+rediscovery even when delivery remains correct. `TestLookupRoundTrip` seals the
+metadata segment before mutating returned data, so a later answer proves cache
+detachment rather than merely rereading fresh disk bytes. `TestLookupCacheAccounting` exercises
 unused array/payload capacity, pointed-to metadata and timestamp locations.
 
 ## Forward consumption
@@ -234,6 +257,27 @@ Every entry retains its type, opaque payload, timestamp and optional session
 and visibility metadata, including hidden and unknown types. Payload interpretation
 and thread reduction remain the consumer's responsibility
 ([ADR 042](../decisions/042-daemon-built-thread.md)).
+
+`Forward` construction performs no I/O. On the first useful Walk with a nonzero
+resume ID V, `forwardSegments` uses current regular-file membership and
+size-checked `convLog.lookupBounds`, refreshing unknown or resized bounds through
+prefix discovery. Filenames encode segment sequence numbers, not entry IDs, so
+a cold Store must discover prefixes before selecting a range. Nonempty first
+IDs must be nonzero and strictly increasing. Selection chooses the last first
+ID <= V; a gap uses its predecessor range, and V before the log uses the earliest
+nonempty range. V beyond the readable end retains the final range so later
+appends greater than V remain consumable. Zero-start readers keep sequential
+reading and validation; H <= V delivers nothing and performs no segment I/O.
+
+Only the selected boundary segment and subsequent segments needed for the walk
+are fully read/decoded. The boundary read can include entries <= V. Before
+delivery, every complete entry in a fully read segment is validated, including
+entries filtered at or below V or above H: zero, duplicate/decreasing IDs and
+overlap into the next known nonempty range return `ErrCorruptSegment`. Unselected old
+segments receive prefix discovery, not full integrity validation; corruption
+after their valid first entry does not prevent suffix replay. Bounds are
+ephemeral; no persistent index, segment-format change or consumer migration is
+required ([ADR 045](../decisions/045-thread-index-over-history.md#decision)).
 
 Callbacks receive at most `MaxPageEntries`. A successful callback advances
 `LastEntryID`; an error is returned and leaves that chunk retryable, so callbacks
@@ -265,11 +309,11 @@ waiting run outside the store mutex (see [Concurrency](history-package.md#concur
 `Forward` validates conversation-ID shape and shares the authenticated-conversation
 precondition above. Each listing and segment read re-resolves directory containment;
 listing filters regular files and the read rechecks the leaf. Read/listing failures,
-containment violations, oversized segments, corrupt complete entries, non-increasing
-or zero stored IDs, and unknown versions return explicit errors. A positioned log
+containment violations, oversized reads, corruption in discovered prefixes or
+fully read segments, and unknown versions return explicit errors. A positioned log
 that disappears returns a read error. `decodeSegment` retains its trailing-write
 tolerance, including an incomplete header or final entry; complete corruption is
-never skipped to report successful completion.
+never skipped within a fully read segment to report successful completion.
 
 Committed/durable in the reader retains the append contract: completed writes
 and recovered complete entries survive process restart. Reading performs no
@@ -288,6 +332,16 @@ reread or retryable, then includes it once sealed and consumed. Using the last
 delivered ID instead would reject valid rereads or miss corruption below an
 arbitrary resume ID. `TestForwardOrderingAcrossCalls` and
 `TestForwardOrderingResumeAndRetry` cover both sides of this boundary.
+
+Initial selective positioning seeds `boundaryID` from the preceding nonempty
+range's first ID, never V; subsequent calls retain the stored-order boundary.
+`TestForwardResumeRejects` covers invalid first-ID ranges, filtered entries and
+overlap beyond H. `TestForwardResumeRanges` and `TestForwardResumeFreshness`
+exercise missing IDs, empty/torn segments and changed membership/sizes.
+`TestForwardPositionedContinuity` carries the same reader through callback retry,
+successive Walk calls and Tail, including beyond-end resumes and appends before
+registration and during catch-up. Successful deliveries are neither omitted nor
+duplicated.
 
 `TestForwardBoundedChunksAndPosition` damages every completed segment, including
 the sealed final segment: damaging only the oldest leaves a needless reread of
