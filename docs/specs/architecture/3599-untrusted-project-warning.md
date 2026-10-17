@@ -107,3 +107,13 @@ observed live, distinguishing isolated startup evidence from authenticated proof
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: the isolated Codex 0.159.2 probe also started a thread and attempted
+  a turn. It observed the unstable-feature warning on `warning.params.message`
+  with `agent_message_board=true` and suppression unset. The trust warning was
+  observed on `configWarning.params.summary` with null `details`. Both method
+  assignments are now observed, not inferred. Authentication was absent and
+  the turn failed on transport access, so final conversation/matcher acceptance
+  remains pending for the dispatcher live gate. The implementation design is unchanged.
