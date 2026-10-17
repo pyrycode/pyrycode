@@ -62,3 +62,6 @@ Pending documentation stage:
 - Concurrency: SHOULD FIX addressed by design: bind query delivery to the original inbox so a reused connection ID cannot accept stale work; cleanup compares query identity.
 - Threat model: encrypted output remains inert untrusted content (client rendering sanitization unchanged); malicious relay cannot decrypt/misroute authenticated bodies. OUT OF SCOPE: production installation #3523 and both-read negotiation #3550.
 **Reviewer:** builder self-review. **Date:** 2026-10-17.
+
+## Revisions
+- 2026-10-17: Strict admission decodes required expansion scalars from the raw field map into pointers, so duplicate keys ending in null cannot retain an earlier valid scalar. Added explicit full-query/body contention, join-cap, held-provider shutdown and generation-fence scenarios in `TestThreadToolBodyFullQuerySlot`, `TestThreadToolBodyProviderShutdown` and `TestThreadToolBodyGenerationFence`; the design and production activation boundary are unchanged. Large body reconstruction shares one absolute 15-second deadline, following the owning capability overview's large-query timing lesson.
