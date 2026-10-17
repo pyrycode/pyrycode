@@ -9,6 +9,7 @@
 - `internal/thread/render.go` → `renderSharedLookup`: captured recipes resolve terminal evidence before publication.
 - `internal/protocol/thread_expansion.go` → `ThreadSummary`, `threadHeadline`: semantic bounds only; thread remains independent of protocol.
 - `internal/thread/child_pages_test.go`, `query_incremental_test.go`: independent membership oracle, immutable capture barriers and separate preparation/read counters.
+- `internal/thread/store_resume_test.go` → `testStoreResumeSeed`: exercise complete and suffix checkpoint restoration without replaying the prefix.
 - `docs/knowledge/features/thread-package-background-store-queries.md` and `thread-package-background-store-verification.md`: Shown is not membership; synthetic withdrawal must also suppress the independent Fold oracle.
 
 ## Context
@@ -31,6 +32,7 @@ The existing serial fold worker prepares metadata outside Store.mu and installs 
 | Reparent and withdrawal invalidate both chains; late public appearance counts only once | TestChildHeaderFreshness, TestChildPageIncrementalOracle |
 | Unrelated/no-item publication preserves branch freshness | TestChildHeaderFreshness |
 | New publication, unload/replacement and caller mutation preserve old captures | TestChildPageCaptureLifecycle, TestChildHeaderFreshness |
+| Initial publication from restored checkpoint, with or without a suffix | TestChildHeaderInitialProgress |
 
 ## Error handling
 Existing request refusals and cancellation precedence remain unchanged. Header preparation adds no I/O or request rejection. Unknown terminal evidence stays nil; a failure/denial is never represented as known empty. Numeric overflow is represented as unknown rather than wrapping or changing source revisions.
@@ -63,3 +65,4 @@ Sizing: one deliverable, approximately 720 written lines (280 production, 370 te
 
 ## Revisions
 - 2026-10-17: Publication integration passes the prepared capture through eight `publish` callers and two `advance` callers (10 existing consumers total). Header diagnostics use the explicitly allowed own-status fallback, avoiding content parsing and descendant attribution. Pointer-copy counters include the two additional header string pointers. Final work remains below 500 added/edited lines, with no exported type or rejection-class additions.
+- 2026-10-17: Merged #3553 restores public checkpoint rows without marking the prefix affected. Initial `Store.publish` now initializes every public row's freshness to consumed progress, using captured rendered headers for affected rows and restored metadata otherwise. `TestChildHeaderInitialProgress` failed for both restored-prefix cases before this repair. Prefix replay and request hydration remain unnecessary; no authoritative fields or checkpoint formats change. Total written work remains below 600 lines.

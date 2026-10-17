@@ -201,3 +201,51 @@ func TestChildHeaderReferenceOutcomes(t *testing.T) {
 		}
 	}
 }
+
+func TestChildHeaderInitialProgress(t *testing.T) {
+	entries := []history.Entry{
+		testMain(1, "tool_use", `,"tool_use_id":"parent","name":"Agent"`),
+		testChild(2, "tool_use", "parent", `,"tool_use_id":"child","name":"Read"`),
+		testChild(3, "tool_result", "parent", `,"tool_use_id":"child","is_error":true`),
+		testEntry(4, "unsupported", `{}`),
+	}
+	for _, cut := range []int{0, 3, 4} {
+		t.Run(string(rune('0'+cut)), func(t *testing.T) {
+			s, _, _, _ := testStoreResumeSeed(t, entries, cut, true)
+			snap := testCheckpointLoad(t, s, testStoreA, 4)
+			p, err := s.ChildPage(context.Background(), testStoreA, snap.Epoch, 1, snap.Items[0].Rev, 10, nil)
+			if err != nil || len(p.Items) != 1 {
+				t.Fatal(p, err)
+			}
+			r := p.Items[0]
+			if r.SubtreeVersion == nil || *r.SubtreeVersion != snap.Version || r.Rev != 3 || r.Headline != "Read:" || r.ErrorSummary == nil || *r.ErrorSummary == "" || r.PublicChildCount == nil || *r.PublicChildCount != 0 {
+				t.Fatalf("initial progress after checkpoint cut %d: %#v", cut, r)
+			}
+		})
+	}
+}
+
+func TestChildHeaderUnknownFreshness(t *testing.T) {
+	f, c, s, w := testPublicationFixture(2)
+	f.items[1].Parent = 1
+	f.items[1].Kind, f.items[1].Summary = "agent", ""
+	f.items[1].Status, f.items[1].Active = "done", true
+	for _, version := range []uint64{1<<53 - 1, 1 << 53} {
+		f.version = version
+		f.captureAffected = append(f.captureAffected, 1)
+		items, changes, err := c.capture(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changes.Epoch = "epoch"
+		s.publish(context.Background(), testStoreA, w, items, changes, f, c)
+		p, err := s.ChildPage(context.Background(), testStoreA, "epoch", 1, 1, 1, nil)
+		if err != nil || len(p.Items) != 1 {
+			t.Fatal(p, err)
+		}
+		r := p.Items[0]
+		if (r.SubtreeVersion != nil) != (version < 1<<53) || r.SubtreeVersion != nil && *r.SubtreeVersion != version || r.ErrorSummary != nil || r.Headline != "Agent" {
+			t.Fatal("unknown outcome/freshness or kind fallback", r)
+		}
+	}
+}

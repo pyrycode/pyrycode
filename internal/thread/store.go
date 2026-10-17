@@ -351,9 +351,14 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 	if index == nil {
 		index = newPublicationIndex(items, s.queryWork)
 		index.prepareCatchUp(fold)
-		for id, header := range capture.headers {
-			row, _ := index.lookup(id, true)
-			row.header = header
+		for _, item := range items {
+			if item == nil {
+				continue
+			}
+			row, _ := index.lookup(item.ID, true)
+			if header, ok := capture.headers[item.ID]; ok {
+				row.header = header
+			}
 			index.refreshHeader(row, fold.version)
 		}
 	} else {
