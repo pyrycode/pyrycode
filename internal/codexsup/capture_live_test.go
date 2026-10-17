@@ -43,6 +43,20 @@ type captureScenario struct {
 // PYRY_CODEX_CAPTURE_HOME (an isolated CODEX_HOME holding only a minimal
 // config and the sign-in). It spends Codex allowance.
 func TestCaptureLive(t *testing.T) {
+	captureLive(t, false)
+}
+
+// TestCaptureLiveWebSearch records only a web-search turn:
+//
+//	go test -tags codex_capture -run '^TestCaptureLiveWebSearch$' -v ./internal/codexsup/
+//
+// It uses the same isolated-home environment guards as TestCaptureLive.
+func TestCaptureLiveWebSearch(t *testing.T) {
+	captureLive(t, true)
+}
+
+func captureLive(t *testing.T, webSearchOnly bool) {
+	t.Helper()
 	bin, home := os.Getenv("PYRY_CODEX_CAPTURE_BIN"), os.Getenv("PYRY_CODEX_CAPTURE_HOME")
 	if bin == "" || home == "" {
 		t.Skip("set PYRY_CODEX_CAPTURE_BIN and PYRY_CODEX_CAPTURE_HOME to capture live Codex frames")
@@ -80,6 +94,9 @@ func TestCaptureLive(t *testing.T) {
 				return ok && allUnder(cwd, paths)
 			}},
 		{name: "interrupted", prompt: "Write the numbers from 1 to 300, one per line.", interrupt: true},
+	}
+	if webSearchOnly {
+		scenarios = []captureScenario{{name: "web_search", prompt: "Use your web search tool to search for the official Go programming language release notes. Summarize the result in one sentence. Do not use shell commands or edit files."}}
 	}
 
 	notes := make(chan captureFrame, 4096)
@@ -155,8 +172,44 @@ func TestCaptureLive(t *testing.T) {
 		mu.Lock()
 		got := frames
 		mu.Unlock()
+		if sc.name == "web_search" {
+			requireWebSearchPair(t, got)
+		}
 		writeCapture(t, sc.name, got, cwd, home)
 	}
+}
+
+// requireWebSearchPair rejects a capture that proves no completed web search.
+// Its diagnostics contain counts and field presence, never peer text.
+func requireWebSearchPair(t *testing.T, frames []captureFrame) {
+	t.Helper()
+	started := map[string]bool{}
+	for _, f := range frames {
+		if f.Method != "item/started" && f.Method != "item/completed" {
+			continue
+		}
+		var p struct {
+			Item struct {
+				Type   string          `json:"type"`
+				ID     string          `json:"id"`
+				Query  string          `json:"query"`
+				Action json.RawMessage `json:"action"`
+			} `json:"item"`
+		}
+		if err := json.Unmarshal(f.Params, &p); err != nil {
+			t.Fatal("invalid item JSON in web-search capture")
+		}
+		if p.Item.Type != "webSearch" || p.Item.ID == "" {
+			continue
+		}
+		if f.Method == "item/started" {
+			started[p.Item.ID] = true
+		} else if started[p.Item.ID] {
+			t.Logf("webSearch pair observed: completion query nonempty=%v, action populated=%v", p.Item.Query != "", len(p.Item.Action) > 0 && string(p.Item.Action) != "null")
+			return
+		}
+	}
+	t.Fatalf("no webSearch started/completed pair: %d frames, %d webSearch starts", len(frames), len(started))
 }
 
 // captureTurn starts a thread and runs one turn on it until turn/completed,
@@ -166,6 +219,9 @@ func captureTurn(ctx context.Context, t *testing.T, c *Client, cwd string, sc ca
 	threadParams := map[string]any{
 		// untrusted prompts for every command outside Codex's read-only allowlist.
 		"cwd": cwd, "sandbox": "read-only", "model": captureModel, "approvalPolicy": "untrusted",
+	}
+	if sc.name == "web_search" {
+		threadParams["config"] = map[string]string{"web_search": "live"}
 	}
 	var tr threadResult
 	if err := c.call(ctx, methodThreadStart, threadParams, &tr); err != nil {

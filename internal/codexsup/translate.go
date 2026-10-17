@@ -13,6 +13,7 @@ import (
 // maxModelWindowID.
 const (
 	maxUnrecognizedRaw = 16 << 10
+	maxWebSearchText   = 16 << 10
 	maxBannerText      = 4 << 10
 	maxStopField       = 256
 	maxModelID         = 256
@@ -82,7 +83,7 @@ var (
 // Item-type lanes, the same three-way classification over ThreadItem types;
 // TestItemTypesClassified checks them against the schema.
 var (
-	mappedItemTypes = []string{"contextCompaction", "commandExecution", "fileChange"}
+	mappedItemTypes = []string{"contextCompaction", "commandExecution", "fileChange", "webSearch"}
 	// ignoredItemTypes carry no new turn meaning: a user message echoes the
 	// prompt, and agentMessage and reasoning text already arrived as deltas.
 	ignoredItemTypes = []string{"userMessage", "agentMessage", "reasoning"}
@@ -90,7 +91,7 @@ var (
 	// per item, on item/started.
 	unrecognizedItemTypes = []string{
 		"hookPrompt", "functionCallOutput", "plan", "mcpToolCall", "dynamicToolCall",
-		"collabAgentToolCall", "subAgentActivity", "webSearch", "imageView", "sleep",
+		"collabAgentToolCall", "subAgentActivity", "imageView", "sleep",
 		"imageGeneration", "enteredReviewMode", "exitedReviewMode",
 	}
 )
@@ -363,6 +364,8 @@ func (t *Translator) item(method string, params json.RawMessage) []turnevent.Eve
 		return commandItem(method, params)
 	case typ == "fileChange":
 		return fileChangeItem(method, params)
+	case typ == "webSearch":
+		return webSearchItem(method, params)
 	case ignoredItemSet[typ], mappedItemSet[typ]:
 		return nil
 	case method == "item/completed":
@@ -370,6 +373,68 @@ func (t *Translator) item(method string, params json.RawMessage) []turnevent.Eve
 		return nil
 	}
 	return []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexItem, typ, params)}
+}
+
+// webSearchItem carries queries, URLs and patterns as inert display text. Starts
+// have no input; only completion supplies the call's single result. Opaque
+// results are never decoded or emitted.
+func webSearchItem(method string, params json.RawMessage) []turnevent.Event {
+	var p struct {
+		Item struct {
+			ID     string `json:"id"`
+			Query  string `json:"query"`
+			Action *struct {
+				Type    string   `json:"type"`
+				Queries []string `json:"queries"`
+				Query   string   `json:"query"`
+				URL     string   `json:"url"`
+				Pattern string   `json:"pattern"`
+			} `json:"action"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return undecodable(params)
+	}
+	it := p.Item
+	if method == "item/started" {
+		return []turnevent.Event{turnevent.ToolStart{
+			ToolCallID: it.ID, Title: "web_search", Kind: turnevent.ToolKindFetch,
+		}}
+	}
+	var parts []string
+	add := func(s string) {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if a := it.Action; a != nil {
+		switch a.Type {
+		case "search":
+			for _, q := range a.Queries {
+				add(q)
+			}
+			if len(parts) == 0 {
+				add(a.Query)
+			}
+			if len(parts) == 0 {
+				add(it.Query)
+			}
+		case "openPage":
+			add(a.URL)
+		case "findInPage":
+			add(a.URL)
+			add(a.Pattern)
+		default:
+			add(it.Query)
+		}
+	} else {
+		add(it.Query)
+	}
+	update := turnevent.ToolUpdate{ToolCallID: it.ID, Status: turnevent.ToolStatusCompleted}
+	if text, _ := truncate(strings.Join(parts, "\n"), maxWebSearchText); text != "" {
+		update.Content = turnevent.TextContent{Text: text}
+	}
+	return []turnevent.Event{update}
 }
 
 // commandItem maps a commandExecution item: its item/started to a ToolStart

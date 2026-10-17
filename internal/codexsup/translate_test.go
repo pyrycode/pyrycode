@@ -369,7 +369,7 @@ func TestTranslateUnrecognizedLanes(t *testing.T) {
 		site turnevent.UnrecognizedSite
 		kind string
 	}{
-		{"unmapped_item", turnevent.UnrecognizedCodexItem, "webSearch"},
+		{"unmapped_item", turnevent.UnrecognizedCodexItem, "imageView"},
 		{"model_verification", turnevent.UnrecognizedCodexMethod, "model/verification"},
 	} {
 		got := only[turnevent.Unrecognized](replay(t, filepath.Join("testdata", "handbuilt", tc.name+".jsonl"), ""))

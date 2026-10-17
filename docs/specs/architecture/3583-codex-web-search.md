@@ -115,3 +115,17 @@ Pending for the documentation stage in `docs/knowledge/features/codexsup-package
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: Focused capture invocation on Linux was compiled and selected:
+  `python3 scripts/test-admission.py -- go test -timeout=30m -tags codex_capture -run '^TestCaptureLiveWebSearch$' -v ./internal/codexsup/`.
+  It skipped because both `PYRY_CODEX_CAPTURE_BIN` and `PYRY_CODEX_CAPTURE_HOME`
+  are unset. The installed CLI reports 0.159.2, while the schema remains pinned
+  to 0.156.1. Zero live turns ran and no pair/artifact was obtained. The open
+  question is resolved as unavailable evidence on this host, not confirmation.
+  Completion population/timing of top-level `query`, `action.type`, search
+  `queries`/`query`, open-page `url`, and find-in-page `url`/`pattern` remain
+  schema-based assumptions. If the dispatcher later obtains a usable pair,
+  return it to the builder to commit `testdata/capture/web_search.jsonl` with
+  a mandatory offline replay and observed version/field assertions.
