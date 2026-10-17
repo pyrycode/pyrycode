@@ -84,8 +84,12 @@ returns `ErrConversationNotPromoted`. Both are package sentinels matchable with
 `errors.Is`, carry no protocol vocabulary and leave every row unchanged on failure.
 The setter changes only `PinnedAt`, leaving `LastUsedAt` and session bindings
 intact. It performs no I/O: the caller must call `Registry.Save` to make
-the pin or clear durable. Wire declarations, relay consumers and daemon activation
-are separate work in #3536, #3537 and #3538.
+the pin or clear durable. The activated
+[relay handler](relay-package-handlers.md#conversation-pins-3537) performs
+that best-effort save, replies, then broadcasts the stored pin/null to paired
+interactive clients. Wire DTOs always emit `pinned_at`, unlike on-disk storage;
+every metadata producer must copy the stored value or an unrelated update can
+silently clear a client's pin.
 
 **`SystemPrompt` (#2149) reuses `Name`'s tri-state mechanism, not just its shape.** The
 mechanism is that `omitempty` on a `*string` tests the pointer, not the pointee: a nil

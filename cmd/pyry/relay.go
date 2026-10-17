@@ -1083,17 +1083,8 @@ func startRelayV2(
 	// startRelayV2's nor startRelay's signature changes.
 	var announceWorkspace func(protocol.WorkspaceUpdatedPayload, string)
 
-	// The conversation_updated fan-out hook shared by send_message's auto-naming
-	// (#2159) and set_conversation_muted (#2572). It is a nil-guarded closure over
-	// announceConversation — THIS FUNCTION'S OWN NAMED RETURN, which #2156 fills
-	// from its emitter below, after mgr exists and before mgr.Run starts — so it
-	// reads the variable at call time, not here. One closure over one emitter:
-	// neither verb adds a fan-out loop of its own.
-	//
-	// The nil guard covers the window between this line and that assignment:
-	// unreachable in practice, since no frame can dispatch until mgr.Run starts,
-	// but a hook read from a dispatch goroutine is not a place to rely on an
-	// argument.
+	// Metadata handlers share one conversation_updated emitter. The closure reads
+	// the named return at call time; it is assigned before the manager starts.
 	announceConversationHook := func(p protocol.ConversationUpdatedPayload) {
 		if announceConversation == nil {
 			return
@@ -1177,7 +1168,8 @@ func startRelayV2(
 			// set_conversation_muted (#2572) takes no session surface: muting only
 			// changes what clients do with alerts. Unlike archive it fans its record
 			// out, through the same hook send_message's auto-naming uses.
-			protocol.TypeSetConversationMuted: handlers.SetConversationMuted(w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
+			protocol.TypeSetConversationMuted:  handlers.SetConversationMuted(w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
+			protocol.TypeSetConversationPinned: handlers.SetConversationPinned(w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
 			// mark_conversation_read (#2780) likewise takes no session surface. It
 			// clamps to w.hist's newest entry and fans out only an actual advance,
 			// through the same hook.
