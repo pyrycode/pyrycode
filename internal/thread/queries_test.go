@@ -504,7 +504,11 @@ func TestStoreQueriesRetirementIsolation(t *testing.T) {
 	retiring, finish := make(chan struct{}), make(chan struct{})
 	var finishOnce sync.Once
 	replace := s.replace
-	s.replace = func(old, new string) error { close(retiring); <-finish; return replace(old, new) }
+	var retireOnce sync.Once
+	s.replace = func(old, new string) error {
+		retireOnce.Do(func() { close(retiring); <-finish })
+		return replace(old, new)
+	}
 	defer finishOnce.Do(func() { close(finish) })
 	unloaded := make(chan struct{})
 	var unloadErr error

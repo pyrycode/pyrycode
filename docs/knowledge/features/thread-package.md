@@ -33,8 +33,10 @@ covers discovery, query/live ordering, retirement and recorded regression corpor
 
 [Cache durability, recovery and epochs](thread-package-cache-and-epochs.md#cache-and-epochs)
 covers scalar certificates, incremental checkpoint transactions, retry authority,
-Store replay, public touches and catch-up continuity. Worker scheduling and final
-Store checkpoint certification are owned by #3501; Store loading still replays history.
+the 30-second changed-version cadence, joined final certification, public touches
+and catch-up continuity. Only item-record appends are incremental; state-file
+replacements are complete. Store loading still fully replays history pending
+checkpoint restoration in #3337.
 
 ### Send now before consumption (#3508)
 

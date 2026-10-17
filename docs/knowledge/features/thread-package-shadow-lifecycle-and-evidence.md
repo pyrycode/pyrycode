@@ -360,8 +360,9 @@ explicitly test-supplied. This offline gate uses the committed frames without
 credentials or recapture and adds no live-capture evidence. Existing recorded
 semantic assertions and golden expectations remain unchanged. The
 [persisted reader and durable transaction](thread-package-main-thread-folding-validation-checkpoints.md#durable-transaction-round-trip-and-fault-proof)
-have separate round-trip and interruption/retry proofs. Scheduling/final Store
-certification (#3501) and Store startup restoration (#3337) remain follow-ups.
+have separate round-trip and interruption/retry proofs, supplemented by
+[worker cadence and joined certification](thread-package-cache-and-epochs.md#worker-checkpoint-cadence-and-retained-changes).
+Store startup restoration remains #3337; loading still fully replays history.
 
 ### Full-feed benchmark
 
@@ -383,4 +384,3 @@ accepted-send handle and targeted child-repair fixes); the committed test
 harness was `92c58fe5a596c5ed056c8216caf2d7baa8412565`. This was one measured
 iteration with other builder checks running concurrently on the same machine;
 retain that load qualification when comparing later measurements.
-

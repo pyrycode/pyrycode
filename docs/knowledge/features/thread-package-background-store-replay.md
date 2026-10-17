@@ -26,9 +26,11 @@ for no entries. **A warm append cursor is not a recovery boundary:**
 `LatestEntryID` can remain ahead after history truncation. Recovery rejects
 certificates ahead of H and rotates their epoch even on unload/reload in one
 lifetime. Before replay, it durably writes `thread-certificate.json` with
-`Clean: false` and removes only allow-listed regular legacy metadata leaves;
-failed dirty marking or cleanup withholds usability. The worker then creates
-`history.Store.Forward(conversationID, 0)` and feeds raw entries through H into a
+`Clean: false`, marks any existing readable checkpoint state dirty while
+preserving its saved boundary, and removes only allow-listed regular legacy
+metadata leaves. Failed dirty marking on either surface, including replacement
+or directory-sync failure, or failed cleanup withholds usability. The worker
+then creates `history.Store.Forward(conversationID, 0)` and feeds raw entries through H into a
 private `Fold` using `ForwardReader.Walk`. Each chunk contains at most
 `history.MaxPageEntries`, including hidden facts and continuation evidence.
 For eligible compact recovery metadata at V, replay must first reach exactly V
@@ -37,8 +39,9 @@ watermark before reusing the epoch. Invalid or mismatched evidence rotates the
 epoch; replay continues through H either way. Eligibility requires a compatible
 clean per-conversation certificate with valid fields and V within readable H;
 legacy-only startup rotates once. Cached fields never seed the fold. Full replay
-remains required; [ADR 045's resumable checkpoints and persistent index](../decisions/045-thread-index-over-history.md)
-are future work. There is no shared-run eligibility or coordinator certificate.
+remains required: [ADR 045's checkpoints and persistent index](../decisions/045-thread-index-over-history.md)
+are now persisted, but Store restoration from them remains #3337. There is no
+shared-run eligibility or coordinator certificate.
 Readiness requires durable dirty marking (including directory sync), successful
 replay and `Fold.Version() == H`; partial replay publishes no usable view.
 Recovery stays `StateRebuilding` until these conditions hold. A missing or empty
@@ -51,14 +54,23 @@ The same reader then runs `ForwardReader.Tail`. Registration precedes catch-up,
 so entries committed during replay or the handoff are consumed exactly once in
 ID order; later commits converge through buffered notifications. Successful tail
 chunks publish updated items, consumed version, last-shown watermark and epoch
-together without certificate writes. Changing or unchanged tail progress,
-active-to-idle transitions and elapsed intervals perform no persistence; the
-checkpoint timer is removed. Checksum and watermark evidence advance in memory
-only with successfully folded and captured progress; a partially failed or
-interrupted feed cannot advance retirement evidence. Dirty-write failure leaves
+together without scalar-certificate writes. After initial replay the worker
+arms a 30-second checkpoint timer, serialized with completed feed/capture steps.
+Deadlines persist changed consumed versions, including version-only changes
+and changes followed by silence; publications cannot postpone them. Unchanged
+periodic progress causes no write. A failed periodic checkpoint retains pending
+latest internal records across publications, emits one fixed content-free
+warning and retries at the next interval while usability and publication
+continue. Only item-record appends are incremental; state-file replacements
+include the complete manifest/private maps. Active-to-idle transitions do not
+flush. Checksum and watermark evidence advance in memory only with successfully
+folded and captured progress; a partially failed or interrupted feed cannot
+advance retirement evidence. Dirty-write failure leaves
 `StateUnavailable` with generic `ErrUnavailable`; `Retry` reconstructs from
-history and writes dirty again. Joined retirement writes clean once, including
-unchanged progress. See [cache and epochs](thread-package-cache-and-epochs.md#cache-and-epochs)
+history and writes dirty again. Successful joined retirement commits the final
+eligible boundary and certifies both checkpoint state and scalar certificate
+clean, including unchanged and empty version-zero progress. See
+[cache and epochs](thread-package-cache-and-epochs.md#cache-and-epochs)
 for certificate fields, durability, migration/rollback and persistence errors.
 Notifications cover commits through the supplied history
 store only; another store or external writer supplies no wakeup. See
@@ -225,12 +237,15 @@ watermark or epoch. `Snapshot` preserves this State/Err failure channel.
 `withdraw` checks the captured worker's identity under `Store.mu`; an old read
 cannot invalidate a Retry replacement. Context-taking requests discard cancelled
 output without withdrawing the worker. Recheck cancellation under the mutex:
-a check before lock acquisition becomes stale while waiting. A history/cache
-read or write failure, unsafe cache leaf, failed fold, incomplete replay through H
-or worker-context cancellation withdraws any usable publication and leaves the conversation
-unavailable. `Snapshot.Err` remains `ErrUnavailable`; `Unload` reports
-`ErrPersistence` for certificate/legacy-cleanup I/O failure and `ErrUnavailable`
-for failed or incomplete recovery. Raw errors are neither exposed, retained nor logged:
+a check before lock acquisition becomes stale while waiting. A history read,
+reference-rendering or load-time cache I/O failure, unsafe cache leaf, failed
+fold, incomplete replay through H or worker-context cancellation withdraws any
+usable publication and leaves the conversation unavailable. `Snapshot.Err`
+remains `ErrUnavailable`; `Unload` reports
+`ErrPersistence` for dirty marking, final checkpoint/certificate or legacy-cleanup
+I/O failure and `ErrUnavailable` for failed or incomplete recovery. Periodic
+checkpoint failures preserve usability and retry on the next interval. Raw errors
+are neither exposed, retained nor logged:
 diagnostics contain no conversation content, raw payloads or host paths.
 
 `Retry(ctx, conversationID) error` replaces only an unavailable worker with fresh
