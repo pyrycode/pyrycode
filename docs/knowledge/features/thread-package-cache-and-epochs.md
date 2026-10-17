@@ -52,7 +52,8 @@ append invalidates the unloaded reading even if it would not raise
 progress can substitute for H. Ordinary loading/folding and clean retirement
 can restore eligibility. This metadata read validates checksum syntax only;
 it proves neither replay/checksum equality nor catch-up continuity. Epoch reuse
-still requires the full replay validation below.
+requires the validated checkpoint recovery below; the scalar certificate alone
+cannot authorize it.
 
 `entryChecksum` hashes the stored entry at V with SHA-256. Its ordered input is
 ID, type byte length, type bytes, timestamp Unix seconds, timestamp nanoseconds,
@@ -91,7 +92,8 @@ must match `CheckpointState.ItemIDs` and is reordered by that manifest before
 returns no fold. Both clean and dirty checkpoints, including explicit empty
 version-zero checkpoints, can restore exactly the saved boundary without history
 lookup. This validates persisted consistency only: history-bound/checksum equality,
-epoch reuse and fallback remain with Store restoration in #3337.
+epoch selection and fallback belong to `Store.resumeCheckpoint`, described
+below. The reader alone never authorizes generation mutation or publication.
 
 Checkpoint state/index reads share `openCacheFile` admission with scalar
 certificates: `cacheLeaf` accepts only package-owned leaves, history supplies exact
@@ -149,9 +151,12 @@ cleanup retain package-leaf admission, exact history-directory containment and
 no-follow regular-file checks. Deferred temporary cleanup must revalidate the
 original directory before removal; after redirection it leaves the original
 temporary in place rather than removing an outside file with the same leaf.
-These checks do not provide descriptor-relative atomicity. The transaction
-neither writes `thread-certificate.json` nor compacts or removes old generations.
-The worker coordinates that separate scalar certificate with final certification.
+These checks do not provide descriptor-relative atomicity. After state
+replacement, `cleanGenerations` removes obsolete admitted generation leaves,
+preserving the newly named generation. Cleanup failure fails the attempt
+without advancing acknowledgement. The transaction does not compact the retained
+generation or write `thread-certificate.json`; the worker coordinates that separate
+scalar certificate with final certification.
 
 ### Worker checkpoint cadence and retained changes
 
@@ -174,9 +179,13 @@ multiple publications and failed attempts cannot lose the latest hidden,
 unresolved, suppressed or recipe-only records. Public revisions alone cannot
 detect these changes. The first checkpoint of each full-refold worker writes
 the entire inventory into a fresh generation, even if a previous worker left
-valid state. Subsequent attempts reconcile surviving named state before
-appending pending latest records; a renamed state surviving failed directory
-sync must not be rolled back to an in-memory acknowledgement.
+valid state. A resumed worker instead acknowledges every saved internal row,
+including
+hidden and recipe-only inventory, plus the saved version and writer state, so
+unchanged rows need no append even on no-suffix retirement. Subsequent attempts
+reconcile surviving named state before appending pending latest records; a
+renamed state surviving failed directory sync must not be rolled back to an
+in-memory acknowledgement.
 
 Only item-record appends are incremental. Export, comparison and validation
 may inspect every row, and `thread-index-state.json` is replaced in full,
@@ -192,18 +201,48 @@ suffix-feed equivalence across publications and failed attempts.
 
 ### Store replay and public touches
 
-`Store` loads and retries still reconstruct a fresh fold from entry 1 of
-readable history with bounded `ForwardReader.Walk` chunks. Eligible metadata
-retains its epoch only if replay reaches exactly V and both the consumed entry's
-checksum and reconstructed last-shown watermark match the record. Replay continues through the surviving
-readable bound before usability; cached fields never seed the fold. Store
-checkpoint loading and history-bound validation remain with #3337.
+`Store.run` uses the same validated recovery path for Load and Retry. Its order is:
+
+1. Read `history.Store.Page(id, "", 1)` to establish the surviving readable bound
+   H, then create the worker's bounded recent source. An append cursor can exceed
+   surviving history and cannot substitute for this probe, even at H zero.
+2. `Store.readCheckpoint` validates/imports the complete saved graph without
+   history reads. Require saved V <= H; for nonzero V, look up the stored entry
+   at exactly V and compare `entryChecksum`. A missing or changed V rejects the
+   checkpoint, including reused IDs whose visible items are unchanged. Accepted
+   state seeds complete durable row/version/writer acknowledgements.
+3. Select the epoch from the original checkpoint clean flag, then durably dirty
+   the scalar certificate and any existing readable state without advancing the
+   saved fold boundary. Absent state needs no eager checkpoint transaction.
+4. For accepted state, reconcile its selected generation through a contained,
+   no-follow/nonblocking regular-file descriptor to exactly `valid_length`.
+   Check descriptor Stat, containment/admission again before descriptor Truncate,
+   then Sync and Close. Any failure withholds publication. Complete or torn
+   trailing frames have no effect on restoration and are discarded here.
+5. `cleanGenerations` confirms the surviving state still names that generation,
+   then removes only other exact `thread-index-<32 lowercase hex>.bin` leaves.
+   Recheck containment and regular-leaf admission before each removal and sync
+   the directory after removals. Preserve named state/index, history, unrelated
+   files and redirected targets; unsafe leaves/directories fail closed. On
+   fallback, preserve the old named generation until fresh replacement state
+   commits; successful writer commits repeat this cleanup.
+6. Remove admitted legacy metadata, position production
+   `history.Store.Forward(id, V)` and seed immutable publication slots, recipes
+   and activity from the restored fold. Feed only `(V, H]`
+   in bounded chunks, requiring `Fold.Version() == H` before first publication.
+   Query metadata includes restored rows even with no suffix. Full-refold paths
+   instead start at zero and force a complete fresh generation on checkpointing,
+   retaining that policy across failed persistence attempts.
+
 **Visible items are insufficient continuation state:** `Fold.Items` omits
-unresolved children, pending reports and private joins. Full replay restores
-unfinished text, queued sends and that hidden evidence before usability. The
-same reader then tails history, consuming commits during recovery/handoff once
-in order and converging on later commits through the supplied history store's
-notifications. See [loading and replay readiness](thread-package-background-store-replay.md#loading-and-replay-readiness).
+unresolved children, pending reports and private joins. Import restores these
+facts, touches, visibility/suppression and the last-shown watermark before suffix
+folding. `publicationCapture.restore` seeds validated metadata directly; treating
+all restored rows as initial changes would render the entire prefix only to
+classify changes the initial publication does not use. Only suffix candidates
+need that classification. The same reader then tails commits during recovery
+and handoff once in order. See
+[loading and replay readiness](thread-package-background-store-replay.md#loading-and-replay-readiness).
 
 Within each entry, `markAffected` deduplicates stable indexes for additions,
 intrinsic changes, reparenting, newly publishable descendants and suppression.
@@ -223,9 +262,10 @@ deduplication alone does not make enumeration affected-only after a large replay
 `TestPublicTouchHistoricalPeakWork` checks fixed appends and duplicate
 registration after unrelated repaired trees grow from 4,096 to 16,384 children.
 
-Replay also reconstructs `Snapshot.LastShownVersion` entry by entry, independent
-of replay chunking. It is the history entry ID that most recently made a shown
-item first appear in `Fold.Items`, after private joins resolve, or appended
+Full replay reconstructs `Snapshot.LastShownVersion` entry by entry, independent
+of replay chunking; checkpoint resume restores that fact and advances it through
+the suffix by the same rules. It is the history entry ID that most recently made
+a shown item first appear in `Fold.Items`, after private joins resolve, or appended
 nonempty message text to an already publishable shown item. An unresolved child
 counts only when it first becomes publishable. Hidden additions, empty appends,
 status/activity/visibility-only changes, delivery/order-only changes, live state
@@ -234,40 +274,108 @@ hiding or dropping a row never replace or lower the earlier watermark.
 
 **Final item revisions cannot reconstruct unread state.** A queued send can
 first appear shown, then be dropped with a newer `Rev` and `Shown == false`;
-the earlier shown watermark still applies. Every load/retry reconstructs it
-from history rather than the cached watermark or the maximum final shown `Rev`.
+the earlier shown watermark still applies. Load/Retry restores it from validated
+private continuation state or reconstructs it through full replay; neither the scalar watermark nor maximum final shown
+`Rev` can reconstruct it.
 A usable empty conversation has both `Version` and `LastShownVersion` zero.
 Consumers determine unread with `LastShownVersion > ReadUpTo`, using the
 existing single read mark in the same history-ID space; the fold/store does
 not persist read marks. See
 [ADR 042's read marks](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
 
+#### Resume tests and history-read accounting
+
+`TestStoreResumeCuts` compares initial results, subsequent appends and retirement
+with full replay across zero, unfinished/private and no-suffix cuts, both clean
+and dirty. It reuses `testResumeProof` for exact content and private continuation.
+`TestStoreResumeReject` covers migration/rejection and fresh-generation recovery;
+`TestStoreResumeReconcile` checks excess frames, unsafe leaves and descriptor
+Truncate/Sync/Close failure followed by repair and Retry. Existing reader/writer
+and `TestStoreCheckpointDirty` matrices cover persistence failure boundaries.
+
+A checkpoint covering all history bypasses fold hooks entirely. Barrier/failure
+fixtures must leave an uncheckpointed suffix to exercise recovery folding;
+epoch-replacement fixtures must invalidate checkpoint authority as well as the
+scalar certificate. Otherwise the intended failure/assertion may be unreachable.
+See the [resume-aware daemon fixture review](https://github.com/pyrycode/pyrycode/pull/3566#issuecomment-6231086763).
+
+No prefix **folding** does not imply no older history **reads**. The
+[selective Forward contract](history-package-shape.md#forward-consumption) allows
+bounded cold segment discovery; Page probes H, Lookup validates the checksum at
+V, and requested rendering can resolve older references. `TestThreadResumeReadAccounting`
+combines actual history segment counters with real Store suffix-feed assertions,
+using a test-only adapter rather than a production diagnostics API. Its separate
+6010-entry fixture saves V=6000 with suffix=10 across 13 segments/12,792,700 bytes.
+The [builder evidence](https://github.com/pyrycode/pyrycode/pull/3566) records:
+
+| Operation | Cold bytes / opens | Warm bytes / opens |
+| --- | ---: | ---: |
+| Forward first-entry discovery | 28,408 / 13 | 0 / 0 |
+| Forward selected suffix segments | 198,039 / 1 | 198,039 / 1 |
+| Page readable-bound probe | 198,039 / 1 | 198,039 / 1 |
+| Checksum-at-V Lookup | 226,447 / 14 | 198,039 / 1 |
+| Store load total | 820,564 / 17 | 792,156 / 4 |
+| Requested snapshot rendering interval | 1,049,137 / 1 | 0 / 0 |
+
+These are distinct probes/intervals, not additive phases; load/render intervals
+may include Tail's initial recheck. Checkpoint-file reads are outside history
+segment counters. Both real Store loads fed one suffix chunk. Keep validation,
+discovery and rendering costs separate from the proof that no entry <= V enters
+the resumed fold.
+
+For the same synthetic 30000-entry warm history on Linux/amd64, Go 1.26.9 with
+race instrumentation, saved V=29990/suffix=10, the matched builder run measured
+resume **8.918240486s** versus full refold **19.599243459s**, one versus eleven
+fold chunks. Command:
+
+```sh
+python3 scripts/test-admission.py -- go test -timeout=30m -race -v -run '^(TestStoreResume.*|TestThreadResumeReadAccounting|TestForwardResumeSelectiveReads)$' ./internal/thread ./internal/history
+```
+
+The boundary is `Store.Load` admission through first usable `Status`, including
+validation, dirty marking, suffix folding and publication preparation; requested
+snapshot rendering is excluded and its reads are reported separately above.
+The [final verifier evidence](https://github.com/pyrycode/pyrycode/pull/3566#issuecomment-6231086763)
+reports 11.061243097s versus 22.414381521s in the full race unit gate on the same
+30000-entry shape. Measurements establish observations, not an absolute timing
+threshold or a millisecond-readiness guarantee. macOS is outside this Linux
+ticket's verification scope.
+
 ### Epoch recovery and scalar certificate lifecycle
 
 Each usable `Snapshot.Epoch` is a 128-bit random identifier encoded as 32 hex
-characters, separate from deterministic item equality. Reuse requires this
-conversation's compatible clean certificate and matching checksum/watermark at
-exactly V in readable history. Missing, corrupt, dirty or incompatible evidence,
-invalid fields, mismatches or V beyond surviving history require a new epoch.
-Other conversations' recovery and retirement cannot authorize or invalidate it.
+characters, separate from deterministic item equality. A compatible, completely
+validated clean checkpoint retains its epoch, including when later history
+supplies a suffix. Valid dirty state restores the same fold without prefix
+folding but receives a new epoch. Select from the original clean flag before
+dirty marking. The standalone scalar certificate cannot authorize restoration,
+retain an epoch by itself or override dirty/rejected checkpoint state.
+
+Absent pieces, committed corruption, inconsistent graphs, wrong ownership,
+changed rules, incompatible file/fold schemas (including newer schemas), V > H
+or missing/changed entry V require a full refold and new epoch. Scalar-only
+installations migrate with that same one-time refold/new epoch; the next
+successful checkpoint establishes a complete fresh generation. Other
+conversations' recovery and retirement cannot authorize or invalidate this one.
 Folding semantics changes must increment `foldingRules`.
 
-Before replay, every successful load/retry replaces the scalar certificate with
-`Clean: false`, using the candidate epoch/progress or a fresh epoch at zero,
-then durably marks any existing readable checkpoint state dirty without changing
-its saved fold boundary. Temporary-file sync/close, atomic replacement and
-containing-directory sync must succeed on both surfaces before usability.
-Otherwise a machine crash could restore an older clean claim over lost
-published history. Replay can still reject the candidate and rotate its epoch
-in memory; disk evidence remains dirty until joined retirement. Failure on
-either dirty-marking surface withholds usability.
+Before suffix/full replay, each load/retry replaces the scalar certificate with
+`Clean: false`, using validated saved progress and the selected epoch or a fresh
+epoch at zero, then durably marks existing readable checkpoint state dirty
+without changing its saved fold boundary. Temporary-file sync/close, atomic
+replacement and containing-directory sync must succeed on both surfaces before
+usability. This prevents a crash from restoring an older clean claim over lost
+published history. Failure on either surface withholds usability; after repair,
+Retry repeats validation and dirty marking. Absent state is not eagerly created.
 
 **Version bounds and item equality cannot detect replaced tail entries.** A lost
 unsupported entry can be replaced at the same ID without changing folded items.
-`TestStoreCacheReplacedTail` deliberately preserves item equality, requiring the
-checksum mismatch to rotate the epoch. `TestStoreCacheChecksumAtVersion` checks
-the saved V rather than a newer replay bound, so ordinary later appends retain
-an eligible epoch.
+`TestStoreResumeReject` changes an unsupported entry at V while preserving
+visible equality and requires epoch rotation and a fresh generation.
+`TestStoreResumeCuts` retains clean epochs across suffix appends. Resume fixtures
+must checksum the entry returned by history Lookup: JSON escaping can change
+stored payload bytes without changing rendered content, silently turning an
+intended resume proof into a full-refold fallback.
 
 Empty-history evidence must explicitly contain non-null `Version`,
 `LastShownVersion` and `Checksum`. Ordinary JSON scalar decoding otherwise turns
@@ -287,12 +395,14 @@ semantics use rules revision 3; caches from revisions 1 or 2 rebuild from raw
 history and cannot hide recorded handles.
 
 Recovery remains `StateRebuilding` until durable dirty marking, legacy cleanup
-and full replay through the readable bound succeed. Missing or invalid evidence
-rebuilds from history; genuinely missing or empty history gives an empty usable
+and suffix or full replay through the readable bound succeed. Missing or invalid
+evidence rebuilds from history; genuinely missing or empty history gives an empty usable
 view at version zero. Unreadable or incomplete history never yields a cache-only
-view. History/certificate I/O, containment and unsafe-leaf failures leave
-`StateUnavailable` with generic `ErrUnavailable`; repair followed by `Retry`
-creates a new reader and fold. Lifecycle persistence failures retain
+view. Actual history/checkpoint/certificate I/O, containment and unsafe-leaf
+failures leave `StateUnavailable` with generic `ErrUnavailable`; repair followed by `Retry`
+recreates the reader/source and revalidates persisted state rather than reusing
+a partially failed fold. Missing/invalid checkpoint data permits fallback;
+actual I/O or containment errors never do. Lifecycle persistence failures retain
 `ErrPersistence`.
 
 Publication and active-to-idle transitions perform no persistence. The periodic
@@ -308,8 +418,8 @@ the checksum with the version and watermark of the last successfully folded and
 captured progress; a failed or interrupted chunk cannot advance it. Public
 snapshots, observations and queries still detach their results; see
 [snapshots and retry](thread-package-background-store-replay.md#snapshots-and-retry).
-After an unclean stop, full replay restores pending child/report evidence and
-subsequent tail parity, while the epoch rotates for each still-loaded conversation.
+After an unclean stop, valid dirty state restores pending child/report evidence
+and resumes its suffix with a new epoch. Absent/rejected state instead refolds.
 
 Writes use synced, closed `0600` temporary files, atomic replacement and directory
 sync; reads use no-follow regular-file checks. Each operation validates IDs,
@@ -370,10 +480,9 @@ for schema/rules versions, completeness and shared identities, and the
 restores in-memory reference folds; synthetic and committed-recording proofs
 cover resume equivalence. The package reader, durable transaction and worker
 cadence add persisted round-trip, interruption/retry and final-certification
-proofs. Store checkpoint loading/history-bound validation remains a follow-up
-in #3337 under #3336. Store loading still replays from entry 1; scalar
-certificates do not resume folding. Callers still finish producer draining and
-tail catch-up before `Store.Shutdown`.
+proofs. Store validates the readable bound and stored checksum at V before
+resuming only the suffix; scalar certificates do not resume folding. Callers
+still finish producer draining and tail catch-up before `Store.Shutdown`.
 
 ### Catch-up continuity
 
@@ -394,15 +503,18 @@ pages as needed; `Store.Observe` remains a complete-baseline API for other calle
 and the current fold. Clean epoch reuse supports persisted nonzero versions
 within `MaxCatchUpGap = 1024` history IDs only after recovery becomes usable
 and the requested range passes coverage/suppression checks. Compatible
-unload/reload offers the same reconstructed continuity without retained live
-batches; epoch equality alone remains insufficient. Saved versions need not
-coincide with publication boundaries. Catch-up evidence and indexes remain
-disposable, history-derived query data, reconstructed on every load/retry;
-compact recovery evidence never establishes the range or seeds continuation.
+unload/reload offers the same continuity from restored private facts and suffix
+folding without retained live batches; epoch equality alone remains insufficient.
+Saved versions need not coincide with publication boundaries. Catch-up indexes
+remain disposable query data rebuilt on every load/retry from the validated fold. Checkpoints preserve touches, current/ever-public membership,
+suppression and unproven-gap watermarks; suffix feeds extend them. The scalar
+certificate establishes no range. Dirty/fallback recovery rotates the epoch,
+requiring reset regardless of item equality. Coverage, gap and suppression rules
+still apply after clean recovery, including when no suffix was fed.
 
-Recovery records public touches and appearances entry by entry, independently
-of replay chunks. A public item receives a touch at the current consumed version
-when it has no retained touch or its `Rev` matches that entry. A child's first
+Checkpoint recovery restores public touches and appearances; suffix/full replay
+records them entry by entry, independently of replay chunks. A public item
+receives a touch at the current consumed version when it has no retained touch or its `Rev` matches that entry. A child's first
 public appearance may follow its final `Rev`, so revision-only selection loses
 it after restart. Withdrawal, including claimed delivery-row suppression, deletes
 the row's retained touch and advances the suppression boundary without lowering

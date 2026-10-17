@@ -152,6 +152,9 @@ func TestStoreCacheEpochs(t *testing.T) {
 			if err := json.Unmarshal(raw, &c); err != nil {
 				t.Fatal(err)
 			}
+			if mode != "clean" && mode != "unloaded-clean" && mode != "unclean" && mode != "truncated-history" {
+				testScalarMigration(t, s)
+			}
 			switch mode {
 			case "missing":
 				err = os.Remove(path)
