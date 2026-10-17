@@ -324,7 +324,16 @@ func TestIsMuted_AlwaysSerialized(t *testing.T) {
 }
 
 func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
-	raw := readFixture(t, "conversation_updated.json")
+	for _, fixture := range []string{"conversation_updated.json", "conversation_updated_unpinned.json"} {
+		t.Run(fixture, func(t *testing.T) {
+			testConversationUpdatedPayloadRoundTrip(t, fixture)
+		})
+	}
+}
+
+func testConversationUpdatedPayloadRoundTrip(t *testing.T, fixture string) {
+	t.Helper()
+	raw := readFixture(t, fixture)
 
 	var env Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -340,6 +349,14 @@ func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
 	}
 	if p.ReadUpTo != 17 {
 		t.Fatalf("fixture read mark = %d, want 17", p.ReadUpTo)
+	}
+	if fixture == "conversation_updated.json" {
+		want := time.Date(2026, 5, 8, 10, 30, 0, 0, time.UTC)
+		if p.PinnedAt == nil || !p.PinnedAt.Equal(want) {
+			t.Errorf("PinnedAt = %v, want %v", p.PinnedAt, want)
+		}
+	} else if p.PinnedAt != nil {
+		t.Errorf("PinnedAt = %v, want nil", p.PinnedAt)
 	}
 
 	if p.ID != "c2..." {
@@ -357,11 +374,6 @@ func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
 	if p.Cwd != "/Users/juhana/pyry-workspace/weekly-planning" {
 		t.Errorf("Cwd: got %q", p.Cwd)
 	}
-	// The re-marshal below cannot see WorkspaceLabel at all: Envelope.Payload is
-	// a json.RawMessage, so marshalling env writes the fixture's own payload
-	// bytes back and the byte comparison passes whatever the struct gained or
-	// lost. This decoded assertion is the only thing holding the field to the
-	// fixture. The sibling conversation_created fixture carries the null case.
 	if p.WorkspaceLabel == nil || *p.WorkspaceLabel != "Weekly planning" {
 		t.Errorf("WorkspaceLabel: got %v, want pointer to %q", p.WorkspaceLabel, "Weekly planning")
 	}
@@ -373,6 +385,10 @@ func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
 		t.Errorf("LastUsedAt: got %v, want %v", p.LastUsedAt, wantTS)
 	}
 
+	env.Payload, err = json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal decoded payload: %v", err)
+	}
 	out, err := json.Marshal(env)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
