@@ -1171,10 +1171,10 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`thread_page`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3235).** Request an older ordered window below exclusive unsigned `before_order`, including zero; carries explicit `conversation_id` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation and shares catch-up's unfinished-query slot and completion fence. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
 | **`thread_items`** | binary → phone | no | **Production emitted (#3236).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
 | **`thread_reset`** | binary → phone | no | **Production emitted (#3236).** Correlated terminal catch-up reset carrying current `conversation_id`, `epoch`, `version`, with no items or coverage; it never advances a completed checkpoint. See [Thread query messages](#thread-query-messages). |
-| **`thread_read_tool_body`** | phone → binary | no | **Authenticated handler and conditional expansion negotiation implemented (#3549, #3550); production inactive pending #3523.** Request one public tool/agent-launch body at an expected epoch/revision. See [Bounded expansion reads](#bounded-expansion-reads). |
-| **`thread_tool_body`** | binary → phone | no | **Implemented; conditional `thread_expansion` required.** Correlated rendered body, optionally assembled from parts, followed by a separate success marker. Production provider installation/advertisement awaits #3523. See [Bounded expansion reads](#bounded-expansion-reads). |
-| **`thread_read_children`** | phone → binary | no | **Authenticated handler and conditional expansion negotiation implemented (#3550); production inactive pending #3523.** Request a bounded page of direct public child summaries at an expected parent epoch/revision. See [Bounded expansion reads](#bounded-expansion-reads). |
-| **`thread_children`** | binary → phone | no | **Implemented; conditional `thread_expansion` required.** Correlated summary page and separate success marker with authoritative `more` and optional cursor. Production provider installation/advertisement awaits #3523. See [Bounded expansion reads](#bounded-expansion-reads). |
+| **`thread_read_tool_body`** | phone → binary | no | **Production-installed (#3523); authenticated `thread_expansion` required.** Request one public tool/agent-launch body at an expected epoch/revision. See [Bounded expansion reads](#bounded-expansion-reads). |
+| **`thread_tool_body`** | binary → phone | no | **Production-installed; negotiated `thread_expansion` required.** Correlated rendered body, optionally assembled from parts, followed by a separate expansion-only success marker. See [Bounded expansion reads](#bounded-expansion-reads). |
+| **`thread_read_children`** | phone → binary | no | **Production-installed (#3523); authenticated `thread_expansion` required.** Request a bounded page of direct public child summaries at an expected parent epoch/revision. See [Bounded expansion reads](#bounded-expansion-reads). |
+| **`thread_children`** | binary → phone | no | **Production-installed; negotiated `thread_expansion` required.** Correlated summary page and separate expansion-only success marker with authoritative `more` and optional cursor. See [Bounded expansion reads](#bounded-expansion-reads). |
 
 Payload shapes inherited from v1 are preserved in git history (the v1 doc has them); additive fields and declared contracts are documented here. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -1570,6 +1570,16 @@ and bounded requests over 36,000 committed entries after recovery becomes usable
 Request cost includes selected/touched rows, active/parent extras and content
 bytes; recovery and publication preparation are measured separately.
 
+Production also installs `ThreadToolBody` and `ThreadChildren` on that same Store
+(#3523), sharing temporary query demand and publication-boundary acquisition
+with complete queries. Their additive `thread_expansion` capability requires
+both providers plus existing thread readiness and client capabilities; missing
+an expansion provider still permits complete-thread negotiation. These reads
+return only the requested body or direct-child summaries, with expansion-only
+completion; see [Bounded expansion reads](#bounded-expansion-reads). Complete
+history/live delivery remains in use. Compact publication (#3517) and
+Desktop/Mobile adoption are later work.
+
 Initial publisher acquisition and continuity repair acquire a usable live
 boundary without broadcasting historical inventories, even to clients already
 connected. Historical items arrive through explicit per-conversation catch-up
@@ -1827,19 +1837,38 @@ Existing legacy caller/provider signatures and reply behavior are preserved.
 
 #### Bounded expansion reads
 
-**Both authenticated handlers and conditional negotiation are implemented;
-production expansion remains inactive.** `thread_read_tool_body` /
+**Bounded expansion is installed in production (#3523).** `thread_read_tool_body` /
 `thread_tool_body` (#3549) and `thread_read_children` / `thread_children`
 (#3550) use request handlers intercepted by the v2 switch, outside `inboundAppTypeSet`.
-With both handlers and encoders compiled, the handshake negotiates and records
-`thread_expansion` only when `ThreadToolBody` **and** `ThreadChildren` providers
-are installed, existing `ThreadReady` returns true, and the client advertises
-**all three** of `thread_expansion`, `thread` and `interactive`.
-Missing either provider or any required capability withholds expansion;
-existing `thread` negotiation remains independent. Authenticated synthetic
-providers exercise this contract through actual handshakes. Production installs
-neither expansion callback, so production advertisement remains withheld until
-both reads are wired to the real Store in #3523. Compact projection remains #3517.
+`installDaemonThreadRelay` binds `ThreadToolBody` and `ThreadChildren` to
+`Store.ToolBody` and `Store.ChildPage` on the publisher's actual Store. It
+forwards the named conversation, request context, epoch and item/parent revision,
+plus normalized child limit and every cursor field, preserving each captured
+result, including body kind, without a second selection. Every installation
+attempt clears both callbacks first, so an absent installation retains no stale
+expansion providers.
+
+The handshake negotiates and records `thread_expansion` only when **both**
+providers are installed, existing `ThreadReady` returns true, and the client
+advertises **all three** of `thread_expansion`, `thread` and `interactive`.
+Readiness requires complete-query, publisher, retained live-state and watermark
+wiring on the same Store; it does not promise every history is already usable.
+Missing either expansion provider or any required capability withholds expansion;
+existing `thread` negotiation remains independent. Installed authenticated
+synthetic-history tests exercise these reads and partial-provider negotiation.
+Complete history/live delivery remains in use; compact publication (#3517) and
+Desktop/Mobile adoption are later work.
+
+Both reads share complete queries' temporary daemon demand: cold or idle
+registered conversations load and wait cancelably for usable history, retaining
+demand through bounded selection and rendering. Readers share the worker with
+independent demand counts; canceling one releases only its demand. The same
+conversation coordinator acquires the initial publication boundary before capture,
+preserving complete-query/live ordering. Caller cancellation releases its read;
+conversation removal and shutdown cancel and join affected readers. Publisher
+retirement withdraws readiness, cancels and joins admitted readers before
+releasing the installation. Unavailable history fails closed; registry checks
+and tombstones prevent removed conversations from reopening.
 
 Both requests use `ThreadExpansionRequest`: required string `conversation_id`,
 required **nonempty** string `epoch`, unsigned 64-bit `item_id` and
@@ -1959,10 +1988,10 @@ cannot retain an earlier valid value.
 The cursor binds conversation, epoch, parent ID/revision, captured consumed
 version and last emitted `(order, id)`; resume **strictly after** that tuple,
 including within order ties. It conveys no authority. Any scope, epoch,
-parent-revision or consumed-version mismatch MUST refuse and require a fresh
-first page, even if the parent revision stayed unchanged while the consumed
-version advanced. Check current Store facts; retaining old snapshots between
-requests is unnecessary.
+parent-revision or consumed-version mismatch MUST refuse with correlated
+`thread.query_failed`, without partial success, and require a fresh first page,
+even if the parent revision stayed unchanged while the consumed version advanced.
+Check current Store facts; retaining old snapshots between requests is unnecessary.
 
 `EncodeThreadChildren` packs a detached ascending candidate prefix; it performs
 no Store I/O. Its caller supplies authoritative evidence of rows beyond the
@@ -2016,8 +2045,9 @@ marker completes the requested expansion body/page at that capture. Fragment
 `continuation.final`, partial delivery, errors and cancellation certify no
 request completion. Neither expansion `version` nor its success marker grants
 full-thread coverage, advances a full-thread recovery checkpoint or changes a
-live join watermark. Existing complete-query and live-update contracts remain
-unchanged.
+live join watermark. Successful expansion releases only its relay query slot;
+it never writes `threadJoins`, including when a complete-thread join already
+exists. Existing complete-query and live-update contracts remain unchanged.
 
 ### `conversations`
 
