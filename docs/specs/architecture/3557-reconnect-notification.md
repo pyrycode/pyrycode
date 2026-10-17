@@ -76,6 +76,13 @@ the verifier; the historical failure remains failed evidence.
 
 None; the controlled test must confirm the causal ordering before acceptance.
 
+## Documentation handoff
+
+- Pending documentation stage: update `docs/knowledge/features/relay-package.md`
+  § Reconnect-state accessors and `docs/knowledge/features/transport-package.md`
+  § Lifecycle and goroutines to describe independent relay event observation,
+  the serial forwarding worker and its cancellation/join before Frames closes.
+
 ## Security review
 
 **Verdict:** PASS
@@ -92,3 +99,25 @@ None; the controlled test must confirm the causal ordering before acceptance.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: The controlled barrier confirmed the proposed ordering on the old
+  implementation: both token variants installed a replacement while forwarding
+  was held, then failed waiting for its notification (3 executed/failed including
+  the parent). The same regression and shutdown tests passed after the change
+  (6 executed/passed). No design departure. Added the documentation-stage handoff
+  for the finalized worker lifecycle.
+- Linux validation: admitted `go test -timeout=30m -race -count=30 -json -run
+  '^(TestAdmissionHeadersAndReconnect|TestReconnectWhileForwardingPaused|TestReconnectForwardingShutdown)$'
+  ./internal/relay` passed 270/270 test/subtest results: 90 per family, including
+  30 runs of each token subtest. Admitted `go test -timeout=30m -race -count=1
+  -json ./internal/relay/... ./internal/transport/...` passed 2370/2370 results.
+  Both had zero skips/failures. `go vet ./...` and `go build -o
+  /tmp/builder-3557/pyry ./cmd/pyry` passed. All test commands were prefixed by
+  `python3 scripts/test-admission.py --`.
+- Evidence: `/tmp/builder-3557/{controlled-before,controlled-after,repeated-race,packages-race}.jsonl`
+  and their matching `.stderr` files; vet/build output in
+  `/tmp/builder-3557/{vet,build}.{stdout,stderr}`. The verifier owns the full
+  gate. macOS is outside this ticket's verification scope, and the historical
+  Linux failure remains failed evidence.
