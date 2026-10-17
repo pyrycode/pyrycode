@@ -1,0 +1,273 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay"
+)
+
+func TestDaemonThreadCompactInstallation(t *testing.T) {
+	s, _, reg, _ := testShadow(t)
+	reg.Create(conversations.Conversation{ID: testConvID})
+	b := testControlBindings(t, testConvID, "a")
+	cfg := relay.V2SessionConfig{}
+	installDaemonLiveRelay(&cfg, relayWiring{streamSink: b.sink}, nil)
+	installDaemonThreadRelay(&cfg, s)
+	if cfg.ThreadCompactCatchUp == nil || cfg.ThreadCompactPage == nil || cfg.ThreadCompactReady == nil {
+		t.Fatal("compact providers not installed")
+	}
+	if cfg.ThreadCompactReady() {
+		t.Fatal("compact ready without a live publisher")
+	}
+	stop := startDaemonThreadPublisher(t.Context(), s, &relay.V2SessionManager{})
+	s.publisher.active = func(context.Context, string) []relay.ActiveConn { return nil }
+	if !cfg.ThreadCompactReady() {
+		t.Fatal("complete installation not compact ready")
+	}
+	for _, remove := range []func(){func() { cfg.ThreadToolBody = nil }, func() { cfg.ThreadChildren = nil }, func() { cfg.ThreadCompactPage = nil }, func() { cfg.ThreadCompactCatchUp = nil }, func() { cfg.ThreadPage = nil }} {
+		saved := cfg
+		remove()
+		if cfg.ThreadCompactReady() {
+			t.Fatal("incomplete installation granted compact")
+		}
+		cfg = saved
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := cfg.ThreadCompactCatchUp(ctx, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Epoch: "e", Limit: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("compact catch-up context lost: %v", err)
+	}
+	if _, err := cfg.ThreadCompactPage(ctx, protocol.ThreadPagePayload{ConversationID: testConvID, Epoch: "e", Limit: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("compact page context lost: %v", err)
+	}
+	stop()
+	if cfg.ThreadCompactReady() {
+		t.Fatal("retired publisher left compact ready")
+	}
+	installDaemonThreadRelay(&cfg, nil)
+	if cfg.ThreadCompactCatchUp != nil || cfg.ThreadCompactPage != nil || cfg.ThreadCompactReady != nil {
+		t.Fatal("cleared installation retained compact callbacks")
+	}
+}
+
+// testCompactFrame is one decrypted, reassembled thread frame and its stamped size.
+type testCompactFrame struct {
+	peer  string
+	env   protocol.Envelope
+	bytes int
+}
+
+// testCompactRead reassembles frames for any peer until each listed peer has
+// delivered the sentinel error pushed after the publication lane drained.
+func testCompactRead(t *testing.T, w *switchWire, mgr *relay.V2SessionManager, peers ...string) []testCompactFrame {
+	t.Helper()
+	if err := mgr.FlushPushes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, peer := range peers {
+		if err := mgr.Push(t.Context(), peer, protocol.Envelope{Type: protocol.TypeError, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out []testCompactFrame
+	fragments := map[string]string{}
+	sizes := map[string]int{}
+	waiting := len(peers)
+	for waiting > 0 {
+		routing, err := testDaemonThreadFrame(w, time.Now().Add(30*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		peer, e := w.decode(routing)
+		raw, _ := json.Marshal(e)
+		if len(raw) > protocol.MaxThreadEnvelopeBytes {
+			t.Fatal("frame over cap")
+		}
+		if e.Type == protocol.TypeError && e.InReplyTo == nil {
+			waiting--
+			continue
+		}
+		var part protocol.ThreadUpdatePart
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(e.Payload, &fields) == nil {
+			if c := bytes.TrimSpace(fields["continuation"]); len(c) > 0 && c[0] == '{' && json.Unmarshal(e.Payload, &part) == nil && part.Continuation != nil {
+				key := peer + "/" + part.Continuation.UpdateID
+				fragments[key] += part.Data
+				sizes[key] += len(raw)
+				if !part.Continuation.Final {
+					continue
+				}
+				e.Payload, raw = json.RawMessage(fragments[key]), make([]byte, sizes[key])
+				delete(fragments, key)
+				delete(sizes, key)
+			}
+		}
+		out = append(out, testCompactFrame{peer, e, len(raw)})
+	}
+	return out
+}
+
+func testCompactQuery(t *testing.T, w *switchWire, mgr *relay.V2SessionManager, peer string, id uint64, typ string, p any) (protocol.ThreadItemsPayload, int, int) {
+	t.Helper()
+	testDaemonThreadRequest(t, w, peer, id, typ, p)
+	var got protocol.ThreadItemsPayload
+	size, frames := 0, 0
+	for {
+		for _, f := range testCompactRead(t, w, mgr, peer) {
+			if f.env.InReplyTo == nil || *f.env.InReplyTo != id {
+				continue
+			}
+			if f.env.Type != protocol.TypeThreadItems {
+				t.Fatalf("query %d refused: %s %s", id, f.env.Type, f.env.Payload)
+			}
+			size += f.bytes
+			frames++
+			var r protocol.ThreadItemsPayload
+			if json.Unmarshal(f.env.Payload, &r) != nil {
+				continue // a complete row split across parts; only its size is counted
+			}
+			got.Items, got.Headers = append(got.Items, r.Items...), append(got.Headers, r.Headers...)
+			if r.Final {
+				r.Items, r.Headers = got.Items, got.Headers
+				return r, size, frames
+			}
+		}
+	}
+}
+
+// Compact recipients get bounded root headers for initial load, pages and a
+// barrier-controlled live burst; complete recipients keep per-change items.
+func TestDaemonThreadCompactWire(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		children, descendants, big int
+	}{{"small", 5, 3, 64}, {"large", 8333, 40, 4096}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, store, items := testDaemonExpansionFixture(t, tc.children, tc.descendants, tc.big)
+			w, mgr := testDaemonThreadQueryWire(t, s, nil)
+			w.open("phone", false, protocol.CapabilityThread, protocol.CapabilityThreadExpansion, protocol.CapabilityThreadCompact)
+			w.open("legacy", false, protocol.CapabilityThread)
+			roots := map[uint64]bool{}
+			for _, i := range items {
+				if i.Parent == 0 && i.Order != 0 {
+					roots[i.ID] = true
+				}
+			}
+			hidden := func(raw []byte) bool {
+				return bytes.Contains(raw, []byte("unopened-")) || bytes.Contains(raw, []byte(`<\\\"`))
+			}
+			compact, size, frames := testCompactQuery(t, w, mgr, "phone", 1, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Epoch: "e", Limit: 256, Projection: protocol.ThreadProjectionCompact})
+			if compact.Projection != protocol.ThreadProjectionCompact || len(compact.Items) != 0 || len(compact.Headers) != len(roots) {
+				t.Fatalf("compact window rows: %d items %d headers, %d roots", len(compact.Items), len(compact.Headers), len(roots))
+			}
+			for _, h := range compact.Headers {
+				if !roots[h.ID] || !h.DetailOmitted {
+					t.Fatal("compact window carried a hidden identity or detail")
+				}
+			}
+			if hidden(mustQueryJSON(t, compact)) {
+				t.Fatal("compact window carried hidden payload")
+			}
+			page, pageSize, pageFrames := testCompactQuery(t, w, mgr, "phone", 2, protocol.TypeThreadPage, protocol.ThreadPagePayload{ConversationID: testConvID, Epoch: compact.Epoch, BeforeOrder: *compact.UpperOrder, Limit: 2, Projection: protocol.ThreadProjectionCompact})
+			if len(page.Headers) == 0 || hidden(mustQueryJSON(t, page)) {
+				t.Fatal("compact page lost roots or carried hidden payload")
+			}
+			full, fullSize, fullFrames := testCompactQuery(t, w, mgr, "legacy", 3, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 256})
+			if len(full.Headers) != 0 || full.Projection != "" {
+				t.Fatal("complete window carried compact rows")
+			}
+			t.Logf("newest window compact bytes=%d frames=%d complete bytes=%d frames=%d; compact page bytes=%d frames=%d", size, frames, fullSize, fullFrames, pageSize, pageFrames)
+			if size >= fullSize {
+				t.Fatal("compact window not smaller than complete")
+			}
+
+			// Barrier: hold the publication gate across the burst so one pass
+			// observes every hidden child event.
+			cw := s.workers[testConvID]
+			if !cw.lockPublication(t.Context()) {
+				t.Fatal("publication gate")
+			}
+			const burst = 25
+			for i := range burst {
+				testDaemonThreadAppend(t, s.history, "tool_use", fmt.Sprintf(`{"turn_id":"t","parent_tool_use_id":"root","tool_use_id":"burst%d","name":"Read","input":{"secret":"unopened-burst"}}`, i))
+			}
+			latest, _ := s.history.LatestEntryID(testConvID)
+			testShadowWait(t, func() bool { return store.Status(testConvID).Version >= latest })
+			cw.unlockPublication()
+			testShadowWait(t, func() bool {
+				if !cw.lockPublication(t.Context()) {
+					return false
+				}
+				defer cw.unlockPublication()
+				return cw.threadVersion >= latest
+			})
+			live := testCompactRead(t, w, mgr, "phone", "legacy")
+			want, err := store.CompactNewestWindow(t.Context(), testConvID, 256)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var root uint64
+			for _, i := range items {
+				var f map[string]json.RawMessage
+				if json.Unmarshal(i.Content, &f) == nil && string(f["tool_use_id"]) == `"root"` {
+					root = i.ID
+				}
+			}
+			compactLive, compactBytes, completeLive := 0, 0, 0
+			seen := map[uint64]int{}
+			for _, f := range live {
+				switch f.env.Type {
+				case protocol.TypeThreadCompactUpdate, protocol.TypeThreadItemAdded, protocol.TypeThreadItemChanged, protocol.TypeThreadTextAppend:
+				default:
+					continue // live session state travels its established channel
+				}
+				raw := mustQueryJSON(t, f.env)
+				switch {
+				case f.peer == "phone" && f.env.Type == protocol.TypeThreadCompactUpdate:
+					var u protocol.ThreadCompactUpdatePayload
+					if err := json.Unmarshal(f.env.Payload, &u); err != nil {
+						t.Fatal(err)
+					}
+					if hidden(raw) || u.Item != nil && u.Item.Parent != 0 || u.Header != nil && u.Header.Parent != 0 {
+						t.Fatal("compact live carried hidden payload or identity")
+					}
+					if u.Header != nil {
+						seen[u.Header.ID]++
+						for _, h := range want.Headers {
+							if h.ID == u.Header.ID && (h.Rev != u.Header.Rev || !equalCount(h.SubtreeVersion, u.Header.SubtreeVersion) || !equalCount(h.PublicChildCount, u.Header.PublicChildCount)) {
+								t.Fatal("final compact header differs from Store")
+							}
+						}
+					}
+					compactLive++
+					compactBytes += f.bytes
+				case f.peer == "phone":
+					t.Fatalf("compact recipient got %s", f.env.Type)
+				case f.peer == "legacy" && f.env.Type == protocol.TypeThreadCompactUpdate:
+					t.Fatal("complete recipient got compact output")
+				default:
+					completeLive++
+				}
+			}
+			if seen[root] != 1 || compactLive > 2 {
+				t.Fatalf("burst not coalesced: root headers=%d compact frames=%d", seen[root], compactLive)
+			}
+			if completeLive < burst {
+				t.Fatalf("complete recipient lost per-change items: %d", completeLive)
+			}
+			t.Logf("live burst of %d hidden children: compact frames=%d bytes=%d, complete frames=%d", burst, compactLive, compactBytes, completeLive)
+		})
+	}
+}
+
+func equalCount(a, b *uint64) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
