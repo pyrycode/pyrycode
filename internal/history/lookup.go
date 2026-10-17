@@ -37,6 +37,31 @@ func (c *convLog) rememberLookupBound(segment uint64, size int64, first uint64) 
 	c.lookupBounds[segment] = lookupBound{firstID: first, size: size}
 }
 
+// lookupSegmentBound refreshes unknown or resized bounds after leaf admission.
+// Callers hold Store.mu and resolve the containing directory on every call.
+func (s *Store) lookupSegmentBound(c *convLog, dir string, seg segmentRef) (lookupBound, error) {
+	path := filepath.Join(dir, seg.name)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return lookupBound{}, fmt.Errorf("history: stat lookup segment: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return lookupBound{}, fmt.Errorf("%w: lookup segment is not regular", ErrCorruptSegment)
+	}
+	bound, known := c.lookupBounds[seg.num]
+	// Recovery can remember zero from an invalid first entry. Only discovery
+	// certifies that a larger-than-header zero bound really contains no entry.
+	if !known || bound.size != info.Size() || (bound.firstID == 0 && info.Size() > int64(len(segmentHeaderLine))) {
+		first, err := s.segmentFirstID(path)
+		if err != nil {
+			return lookupBound{}, err
+		}
+		c.rememberLookupBound(seg.num, info.Size(), first)
+		bound = c.lookupBounds[seg.num]
+	}
+	return bound, nil
+}
+
 // Lookup returns exact stored entries in requested order, with detached payloads
 // and metadata. IDs must be ascending and unique; zero is missing. Any error
 // returns no partial result. An absent log creates nothing. Like Append, convID
@@ -79,24 +104,11 @@ func (s *Store) Lookup(convID conversations.ConversationID, ids []uint64) ([]Ent
 	current := make(map[uint64]bool, len(segs))
 	var previous uint64
 	for _, seg := range segs {
-		path := filepath.Join(dir, seg.name)
-		info, err := os.Lstat(path)
+		bound, err := s.lookupSegmentBound(c, dir, seg)
 		if err != nil {
-			return nil, fmt.Errorf("history: stat lookup segment: %w", err)
-		}
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("%w: lookup segment is not regular", ErrCorruptSegment)
+			return nil, err
 		}
 		current[seg.num] = true
-		bound, known := c.lookupBounds[seg.num]
-		if !known || bound.size != info.Size() {
-			first, err := s.segmentFirstID(path)
-			if err != nil {
-				return nil, err
-			}
-			c.rememberLookupBound(seg.num, info.Size(), first)
-			bound = c.lookupBounds[seg.num]
-		}
 		if bound.firstID == 0 {
 			continue
 		}

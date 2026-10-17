@@ -98,3 +98,10 @@ distinguish consumed-range validation from prefix discovery.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: `load` can remember a zero first ID from an invalid complete
+  entry, so size equality alone cannot certify an empty range. The shared bound
+  helper rediscovers zero bounds larger than the header; `TestForwardResumeRejects`
+  covers recovery followed by positioning. This preserves torn-first-entry tolerance.
