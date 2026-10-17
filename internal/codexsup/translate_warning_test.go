@@ -27,7 +27,7 @@ func TestTranslateWarnings(t *testing.T) {
 		{"config empty details", "configWarning", `{"summary":"notice","details":""}`, "notice"},
 		{"config empty summary", "configWarning", `{"summary":"","details":"guidance"}`, "\nguidance"},
 		{"config empty", "configWarning", `{"summary":""}`, ""},
-		{"guardian targeted", "guardianWarning", `{"message":"notice\n界\u001b[31m","threadId":"other-thread"}`, "notice\n界\x1b[31m"},
+		{"guardian targeted", "guardianWarning", `{"message":"notice\n界","threadId":"other-thread"}`, "notice\n界"},
 		{"guardian empty", "guardianWarning", `{"message":"","threadId":"other-thread"}`, ""},
 		{"deprecation absent", "deprecationNotice", `{"summary":"notice"}`, "notice"},
 		{"deprecation null", "deprecationNotice", `{"summary":"notice","details":null}`, "notice"},

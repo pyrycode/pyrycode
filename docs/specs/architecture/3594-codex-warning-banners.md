@@ -58,3 +58,11 @@ The verifier owns the complete suite.
 **Findings:** No MUST FIX or SHOULD FIX findings.
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: Verifier finding 1 identified a forbidden terminal escape in
+  `TestTranslateWarnings`'s guardian fixture. Remove it from the input and
+  expected prose while retaining exact Unicode and newline preservation.
+  The mapping contract and security review remain unchanged; validate with
+  `make substrate-guard` and the focused warning tests under `-race`.
