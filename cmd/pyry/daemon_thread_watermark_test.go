@@ -278,6 +278,10 @@ func TestDaemonThreadLastShownUnavailable(t *testing.T) {
 	if _, ok := cfg.ThreadLastShownVersion(testConvID); !ok || folds.Load() != 0 {
 		t.Fatal("fallback started fold or lost certificate")
 	}
+	// Keep the unloaded certificate check above, then require suffix folding.
+	if _, err := h.Append(testConvID, "unsupported", []byte(`{}`), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Load(t.Context(), testConvID); err != nil {
 		t.Fatal(err)
 	}

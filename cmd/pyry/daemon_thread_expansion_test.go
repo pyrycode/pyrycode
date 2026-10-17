@@ -313,8 +313,10 @@ func TestDaemonThreadExpansionRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(dir, "thread-certificate.json")); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"thread-certificate.json", "thread-index-state.json"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	testDaemonThreadLoad(t, store, page.Version+1)
 	if store.Status(testConvID).Epoch == r.Epoch {
@@ -488,6 +490,11 @@ func TestDaemonThreadExpansionIdleAndUnavailable(t *testing.T) {
 			}
 		}
 	}
+	// A suffix after joined retirement must reach the failed Store's fold hook.
+	if err := store.Unload(testConvID); err != nil {
+		t.Fatal(err)
+	}
+	testDaemonThreadAppend(t, s.history, "unknown", `{}`)
 	failed := thread.NewStore(s.history, func(context.Context, conversations.ConversationID) error {
 		return errors.New("fixture unavailable history")
 	})

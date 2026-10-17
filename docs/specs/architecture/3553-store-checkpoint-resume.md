@@ -110,3 +110,12 @@ Pending documentation stage:
 - 2026-10-17: Fixture certificates checksum the actual stored entry returned by
   Lookup: history JSON escaping can change raw payload bytes without changing
   rendered content, which would otherwise make the supposed resume test refold.
+- 2026-10-17: Verifier findings 1–4 require daemon integration fixtures to account
+  for restoration. Epoch-replacement fixtures remove checkpoint state as well as
+  the scalar certificate. Unavailable expansion, recovery-commit and unavailable
+  watermark fixtures leave an uncheckpointed suffix to reach their fold hooks;
+  the watermark fixture first verifies unloaded scalar-certificate eligibility.
+  Preserve stale scope/cursor rejection, both unavailable expansion results,
+  commit-during-recovery/catch-up and hidden rebuilding/unavailable watermarks.
+  Validate the four named tests with admitted race checks on Linux; production
+  restoration and the security review's boundaries are unchanged.

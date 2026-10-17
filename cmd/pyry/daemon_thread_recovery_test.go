@@ -139,12 +139,17 @@ func TestDaemonThreadBoundedRecovery(t *testing.T) {
 							if err != nil {
 								t.Fatal(err)
 							}
-							if err := os.Remove(filepath.Join(dir, "thread-certificate.json")); err != nil {
-								t.Fatal(err)
+							for _, name := range []string{"thread-certificate.json", "thread-index-state.json"} {
+								if err := os.Remove(filepath.Join(dir, name)); err != nil {
+									t.Fatal(err)
+								}
 							}
 						}
 						v = testShadowAppend(t, h, testConvID)
 						testDaemonThreadLoad(t, store, v)
+						if event == "epoch" && store.Status(testConvID).Epoch == before.Epoch {
+							t.Fatal("fixture did not replace epoch")
+						}
 					}
 					p.publish(t.Context(), testConvID, cursor)
 					closed := wire.await()
@@ -306,6 +311,8 @@ func TestDaemonThreadRecoveryCommit(t *testing.T) {
 	if err := old.Unload(testConvID); err != nil {
 		t.Fatal(err)
 	}
+	// The saved prefix leaves a suffix that must pass the recovery barrier.
+	testShadowAppend(t, h, testConvID)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	var releaseOnce sync.Once
@@ -326,16 +333,16 @@ func TestDaemonThreadRecoveryCommit(t *testing.T) {
 	wire.open("phone", false, protocol.CapabilityThread)
 	testDaemonThreadRequest(t, wire, "phone", 420, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 8})
 	awaitSwitchPublication(t, entered)
-	testShadowAppend(t, h, testConvID)
+	committed := testShadowAppend(t, h, testConvID)
 	unblock()
 	got, typ := testDaemonThreadReply(t, wire, 420)
 	if typ != protocol.TypeThreadItems || !got.Final {
 		t.Fatal("store recovery did not complete")
 	}
 	// Replay may first publish its captured bound; explicit catch-up covers the tail.
-	testDaemonThreadLoad(t, store, 129)
+	testDaemonThreadLoad(t, store, committed)
 	s.publisher.publish(t.Context(), testConvID, cursor)
-	if got.Version < 129 {
+	if got.Version < committed {
 		_, e := wire.read()
 		if e.Type != protocol.TypeThreadItemAdded {
 			t.Fatal("recovery tail was not delivered")
@@ -343,7 +350,7 @@ func TestDaemonThreadRecoveryCommit(t *testing.T) {
 	}
 	testDaemonThreadRequest(t, wire, "phone", 421, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Epoch: got.Epoch, Version: got.Version, Limit: 8})
 	tail, typ := testDaemonThreadReply(t, wire, 421)
-	if typ != protocol.TypeThreadItems || !tail.Final || tail.Version != 129 {
+	if typ != protocol.TypeThreadItems || !tail.Final || tail.Version != committed {
 		t.Fatal("recovery commit lost")
 	}
 	rows := map[uint64]protocol.ThreadItem{}
