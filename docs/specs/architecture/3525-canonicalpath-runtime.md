@@ -17,7 +17,7 @@ Repeated sorted ancestor enumeration amplifies filesystem fanout on macOS. The r
 
 ## Design
 
-Keep the public `Resolve(string) (string, error)` contract. After Abs/EvalSymlinks succeeds, macOS asks the kernel for the current descriptor path using F_GETPATH. Open with O_EVTONLY and O_CLOEXEC: metadata access must neither wait on FIFO peers nor read file contents. Check close even when the probe fails; any native failure falls back to the existing component walk. Other platforms always use that portable walk. No cache or exported API is added. A private read-directory parameter allows operation-count tests without mutable global hooks. Selection remains exact first, then unique EqualFold, otherwise unchanged.
+Keep the public `Resolve(string) (string, error)` contract. After Abs/EvalSymlinks succeeds, macOS asks the kernel for the current descriptor path using F_GETPATH. Open with O_EVTONLY, O_NONBLOCK and O_CLOEXEC: metadata access must neither wait on FIFO peers nor read file contents. Check close even when the probe fails; any native failure falls back to the existing component walk. Other platforms always use that portable walk. No cache or exported API is added. A private read-directory parameter allows operation-count tests without mutable global hooks. Selection remains exact first, then unique EqualFold, otherwise unchanged.
 
 Fetch/feature diff review found no unmerged canonicalpath changes. #3504 consumes this repair; its checkpoint work is not a dependency or part of this diff.
 
@@ -51,7 +51,7 @@ First retain the old operation-count failure with the unchanged-source overlay, 
 
 ## Documentation handoff
 
-Pending documentation stage: update `docs/knowledge/features/canonicalpath-package.md`, “Path and error contract” and “Testing”, to describe the implemented macOS resolution path, fallback and descriptor lifecycle, rename/replacement freshness, wide-directory operation-count proof and filesystem-dependent skip limits. Preserve the exact/unique/ambiguous casing rules and the statement that resolution does not enforce confinement or provide a stable file handle.
+Satisfied in [canonicalpath's Path and error contract](../../knowledge/features/canonicalpath-package.md#path-and-error-contract) and [Testing](../../knowledge/features/canonicalpath-package.md#testing): implemented macOS resolution, portable fallback, checked descriptor lifecycle, rename/replacement/retarget freshness, wide-directory operation-count proof and filesystem-dependent skip limits. Exact/unique/ambiguous casing rules and the limitations on confinement and stable handles remain explicit. The verifier's additional evidence handoff is satisfied below.
 
 ## Security review
 
@@ -112,4 +112,46 @@ Failed native attempt: `TestNativePathDescriptors` failed on `/dev/fd` listing, 
 
 Open questions resolved: native descriptor cleanup, FIFO/socket liveness, freshness and deterministic scan coverage pass; the complete matched ordinary suite passes. Historical attribution remains limited as above. All transcript ownership/terminal/chunking and fallback deadline/cancellation/evidence/secrecy/reaping source assertions are unchanged.
 
-Pending verifier-owned acceptance: complete macOS `make check`, including staticcheck, substrate guard and fake-daemon e2e, followed by `make build`; require `make test-exhaustive` if that gate does not invoke the full corpus. The builder role explicitly reserves the full-module gate for verification. None of those unrun later tiers is reported passed here. The builder separately completed `GOMAXPROCS=4 GOFLAGS=-json make test-exhaustive TEST_TIMEOUT=10m`. Documentation remains pending as specified above. Linux, live Claude and installation are outside this run.
+The builder separately completed `GOMAXPROCS=4 GOFLAGS=-json make test-exhaustive TEST_TIMEOUT=10m`. The verifier subsequently completed the configured macOS gate and its own full corpus invocation, as recorded below. Linux, live Claude and installation are outside this ticket's verification scope.
+
+## Completed verifier gate
+
+[Verifier PASS](https://github.com/pyrycode/pyrycode/pull/3543#issuecomment-6227455003) covers native macOS arm64 at `9f2ac65ef703d596ee1db4778b426f17e0f3ea1f`. The dispatcher completed every `make check` component and subsequent `make build`; its receipt records completion at `2026-10-17T00:34:36.761Z`. These were individually configured steps, rather than a single aggregate `make check` command:
+
+| Step | Command | Result |
+| --- | --- | --- |
+| 1 | `$AGENTS_REPO_PATH/bin/pyrycode-tool cite-guard` | exit 0 |
+| 2 | `$AGENTS_REPO_PATH/bin/pyrycode-tool docs-guard` | exit 0 |
+| 3 | `make vet` | exit 0 |
+| 4 | `make test-tools` | exit 0; 11 Python tests passed |
+| 5 | `python3 scripts/test-admission.py -- go test -timeout=30m -race -json ./...` | exit 0 |
+| 6 | `python3 scripts/check-restoration.py` | exit 0; full sweep correctly declined by dependency selection |
+| 7 | `make staticcheck` | exit 0 |
+| 8 | `make substrate-guard` | exit 0 |
+| 9 | `python3 scripts/test-admission.py -- go test -timeout=30m -tags e2e -race -count=1 -json ./internal/e2e/...` | exit 0 |
+| 10 | `make build` | exit 0 |
+
+The verifier then ran `GOMAXPROCS=4 GOFLAGS=-json /usr/bin/time -p make test-exhaustive TEST_TIMEOUT=10m`, using host admission. This discharged the full-corpus requirement without changing conditional restoration selection. It passed all 201 distinct cuts and 50,101 immediate/suffix comparisons, with package time 232.791 seconds and wall time 233.18 seconds. The configured gate's build preceded this separate corpus invocation. No green configured gate was rerun.
+
+Recounted raw JSON results include named parents and subtests; skips are included in the executed column:
+
+| Run | Executed | Passed | Failed | Skipped | Package outcomes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Dispatcher race unit gate | 28,087 | 28,057 | 0 | 30 | 55 passed; one package has no tests |
+| Dispatcher fake-daemon e2e | 716 | 714 | 0 | 2 | seven passed |
+| Verifier full checkpoint corpus | 202 | 202 | 0 | 0 | one passed |
+
+There are no cache hits or unfinished named tests in those streams. Unit JSON spans 350.670 seconds from first to last event; e2e spans 203.223 seconds. These spans exclude any pre-stream build/admission wait. The resolver package passed in 10.315 seconds (38 named passes/two skips), and `cmd/pyry` passed in 350.646 seconds (16,657 named passes/four skips). `TestResolveAncestorFanout`, `TestResolveFreshIdentity`, `TestNativePathDescriptors`, `TestResolveSpecialLeaves` and every portable `TestMatchEntry` arm executed and passed. Command execution includes `TestMemoryPathValidation` (0.41s), `TestWithWorkdirReadFolder` (0.08s), `TestMemoryTranscriptReplyOwnershipControls` (0.47s) and `TestReplyFallbackProcessEvidence`, including `own_deadline` (29.91s). Guards, vet, staticcheck and build have successful nonverbose outcomes, without named Go-test counts. Individual wall times for those nonverbose steps and dispatcher concurrency/environment settings were not recorded in the receipt; builder settings are not inferred for them.
+
+Unit skips: three case-differing-sibling prerequisites, one deleted-cwd prerequisite, one root-only ownership probe, one Linux-only parent-death probe, fourteen supported-Node/SQL prerequisites, four EILSEQ filename prerequisites, three intentional slow-tier proofs, one opt-in heap measurement, one live-Claude opt-in and the exhaustive corpus opt-in. The separate exhaustive invocation discharges the last omission. E2e skips: child-only fatal helper and supported-Node/template SQL acceptance. These skips establish none of the omitted behavior; exact names and reasons are retained in the raw streams and `verifier/gate-skips.json`.
+
+The [committed verifier evidence archive](3525-verifier-evidence.tar.gz), SHA256 `4eb419226f5b088fc24fa9738728a6556caa0ccea520e46f6032ca575a56010e`, retains the full stdout/stderr pairs for all ten steps, the pass/prefix receipts, verifier verdict, exhaustive stdout/stderr/exit status and a recounted `summary.json`. Its `SHA256SUMS.json` verifies all 28 other members. Primary raw-log hashes:
+
+| Archive member | SHA256 |
+| --- | --- |
+| `gate/verifier-gate_#3525_5.log` | `e46d935956859f3fcf841b094ed11c79fc6f54fe772b8f93c79683adc5e006c0` |
+| `gate/verifier-gate_#3525_9.log` | `dfd1cdd8d964ccd6f7af093ae522d064275a2cc8d1ca1936bcae1b544c515f38` |
+| `verifier/exhaustive.json` | `b507c7205f4792dd1c7c3ab55febe39453d4d0f2ea853fa848783822dba91995` |
+| `verifier/exhaustive.stderr` | `a2ac56726b354404d3f2cb3708db6ee8cdaa562034bd9a6d27df8643ff5292d2` |
+
+The dispatcher also retains verifier bundle `ff21cfa633438031f582bd35e71fc33bab47eb485b57127b588dd132a7e9c715`; its large gate logs are tails, whereas the committed archive above preserves the complete streams. Failed native attempts and unchanged-source/optimization-disabled controls remain in the builder archive linked above. The original historical timeout attempts remain failures, not passes inferred from later runs. Historical timeout causation remains unproven. The existing separate slow tier was not run; its assertions and routing are unchanged. Live Claude and installation were not run, and Linux is outside this macOS ticket's verification scope.
