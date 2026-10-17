@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
 func TestDaemonThreadCompactInstallation(t *testing.T) {
@@ -270,4 +272,72 @@ func TestDaemonThreadCompactWire(t *testing.T) {
 
 func equalCount(a, b *uint64) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
+// A compact load captured before a nested change is cancelled by the compact
+// live frame its unjoined connection receives; the retry converges on the Store.
+func TestDaemonThreadCompactBoundary(t *testing.T) {
+	s, store, _ := testDaemonExpansionFixture(t, 3, 1, 64)
+	captured, release, published := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once, delivered sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	w, mgr := testDaemonThreadQueryWire(t, s, func(c *relay.V2SessionConfig) {
+		query := c.ThreadCompactCatchUp
+		first := true
+		c.ThreadCompactCatchUp = func(ctx context.Context, r protocol.ThreadCatchUpPayload) (thread.CompactQueryResult, error) {
+			q, err := query(ctx, r)
+			if first {
+				first = false
+				close(captured)
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			}
+			return q, err
+		}
+	})
+	push := s.publisher.push
+	s.publisher.push = func(ctx context.Context, peer string, e protocol.Envelope) error {
+		err := push(ctx, peer, e)
+		if e.Type == protocol.TypeThreadCompactUpdate {
+			delivered.Do(func() { close(published) })
+		}
+		return err
+	}
+	w.open("phone", false, protocol.CapabilityThread, protocol.CapabilityThreadExpansion, protocol.CapabilityThreadCompact)
+	request := protocol.ThreadCatchUpPayload{ConversationID: testConvID, Epoch: "e", Limit: 256, Projection: protocol.ThreadProjectionCompact}
+	testDaemonThreadRequest(t, w, "phone", 10, protocol.TypeThreadCatchUp, request)
+	awaitSwitchPublication(t, captured)
+	testDaemonThreadAppend(t, s.history, "tool_use", `{"turn_id":"t","parent_tool_use_id":"root","tool_use_id":"late","name":"Read","input":{}}`)
+	awaitSwitchPublication(t, published)
+	unblock()
+	failed := false
+	for _, f := range testCompactRead(t, w, mgr, "phone") {
+		if f.env.InReplyTo != nil && *f.env.InReplyTo == 10 {
+			if f.env.Type != protocol.TypeError {
+				t.Fatal("racing compact load certified a stale capture")
+			}
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatal("racing compact load was not refused")
+	}
+	got, _, _ := testCompactQuery(t, w, mgr, "phone", 11, protocol.TypeThreadCatchUp, request)
+	want, err := store.CompactNewestWindow(t.Context(), testConvID, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != want.Version || len(got.Headers) != len(want.Headers) {
+		t.Fatalf("retry did not converge: version %d/%d headers %d/%d", got.Version, want.Version, len(got.Headers), len(want.Headers))
+	}
+	for _, h := range want.Headers {
+		for _, g := range got.Headers {
+			if g.ID == h.ID && (g.Rev != h.Rev || !equalCount(g.SubtreeVersion, h.SubtreeVersion) || !equalCount(g.PublicChildCount, h.PublicChildCount)) {
+				t.Fatal("retried header differs from Store")
+			}
+		}
+	}
 }
