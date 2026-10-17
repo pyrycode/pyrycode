@@ -42,8 +42,11 @@ progress. See the
 Measure the whole escaped envelope: fragment strings escape logical JSON again,
 so an ordinary-payload size check can leave continuations over cap. Reserve
 later numeric/timestamp/boolean stamps and supply variable `ConversationID` and
-`SessionID` before encoding. If repeated metadata leaves no fragment room,
-return a content-free error and no partial sequence. See the
+`SessionID` before encoding. Compact `Projection` must also repeat on
+`ThreadUpdatePart` before sizing: stamping only the logical batch leaves
+oversized fragments ambiguous and underbudgets their envelopes. If repeated
+metadata leaves no fragment room, return a content-free error and no partial
+sequence. See the
 [measured budgets](../../protocol-mobile.md#thread-update-byte-budgets).
 
 ## Query replies and coverage
@@ -89,13 +92,32 @@ supplied before encoding and preserved, as must request correlation. Errors
 return nil output, including failure after an earlier batch could fit.
 
 The [bounded expansion reads](../../protocol-mobile.md#bounded-expansion-reads)
-include an authenticated switch-intercepted `thread_read_tool_body` handler and
-`thread_tool_body` replies. Child handling and both-read readiness negotiation
-remain pending #3550; production provider installation remains #3523. Capability
-`thread_expansion` stays withheld until both real Store reads and normal
-thread/interactive authorization are installed. `ThreadSummary` explicitly
-omits detail; its bounded headline and metadata cannot stand in for a full item.
+are installed: #3523 binds both real Store providers, and #3549/#3550 supply
+authenticated switch-intercepted body/child handling. `thread_expansion`
+negotiation requires both providers, existing thread readiness and client
+`thread_expansion`, `thread` and `interactive`. `ThreadSummary` explicitly omits
+detail; its bounded headline and metadata cannot stand in for a full item.
 An available empty body is distinct from omitted detail or a refused read.
+
+The separate [compact projection contract](../../protocol-mobile.md#compact-projection-declared)
+is declared only; `thread_compact` vocabulary installs neither negotiation nor
+handlers. Complete query/live delivery stays the default. Compact checkpoints
+are scoped by conversation/projection/epoch and certify only root windows or
+source intervals. Complete-view evidence cannot initialize compact coverage;
+incompatible scope requires version-zero initialization. Expansion proves only
+its requested body/page, and assembly final proves only assembly. None substitutes
+for a successful query marker or certifies downloaded subtree detail.
+
+Ancestor `subtree_version` can change while source `rev` stays fixed: using only
+revision equality would keep stale child knowledge open. Invalidate cached
+subtree knowledge on changed freshness and explicitly refresh demanded bodies
+and pages; absent freshness proves nothing. `ThreadSummary.NoChild` records
+attribution, so it cannot replace optional public-child existence/count facts.
+The same header facts fit explicitly requested child summaries. Expansion does
+not select a view or subscribe descendants to full live updates. Body cache
+identity includes conversation/epoch/item/source revision, while child cursors
+also bind the consumed capture version. See the linked compact and expansion
+contracts for omission, text bounds and stale refusal.
 
 Expansion completion certifies only the requested body or child page at its
 captured epoch/version and item/parent revision. A fragment final completes

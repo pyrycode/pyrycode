@@ -311,6 +311,7 @@ var v2OnlyTypes = map[string]bool{
 	TypeThreadPage:          true,
 	TypeThreadItems:         true,
 	TypeThreadReset:         true,
+	TypeThreadCompactUpdate: true,
 	TypeThreadReadToolBody:  true,
 	TypeThreadToolBody:      true,
 	TypeThreadReadChildren:  true,
@@ -482,6 +483,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		// v2 thread live updates.
 		TypeThreadItemAdded, TypeThreadItemChanged, TypeThreadTextAppend,
 		TypeThreadCatchUp, TypeThreadPage, TypeThreadItems, TypeThreadReset,
+		TypeThreadCompactUpdate,
 		TypeThreadReadToolBody, TypeThreadToolBody, TypeThreadReadChildren, TypeThreadChildren,
 		// v2 control types.
 		TypeRekeyRequest,

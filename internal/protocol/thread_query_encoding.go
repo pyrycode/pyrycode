@@ -18,6 +18,9 @@ func EncodeThreadReply(env Envelope, reply any) ([][]byte, error) {
 	}
 	switch p := reply.(type) {
 	case ThreadResetPayload:
+		if !threadProjectionScope(p.Projection, p.ConversationID, p.Epoch) {
+			return nil, ErrInvalidThreadUpdate
+		}
 		env.Type = TypeThreadReset
 		return threadEncodePayload(env, p, nil)
 	case ErrorPayload:
@@ -25,24 +28,36 @@ func EncodeThreadReply(env Envelope, reply any) ([][]byte, error) {
 		return threadEncodePayload(env, p, nil)
 	case ThreadItemsPayload:
 		env.Type = TypeThreadItems
-		if !p.Final || !threadQueryCoverage(p) {
+		if !p.Final || !threadQueryCoverage(p) || !threadProjectionScope(p.Projection, p.ConversationID, p.Epoch) || (p.Projection == "" && len(p.Headers) > 0) {
 			return nil, ErrInvalidThreadUpdate
 		}
 		marker := p
 		marker.Items = []ThreadItem{}
+		marker.Headers = nil
 		final, err := threadEncodePayload(env, marker, nil)
 		if err != nil {
 			return nil, err
 		}
-		batch := ThreadItemsPayload{ConversationID: p.ConversationID, Epoch: p.Epoch, Version: p.Version}
+		batch := ThreadItemsPayload{ConversationID: p.ConversationID, Epoch: p.Epoch, Version: p.Version, Projection: p.Projection}
 		var result, pending [][]byte
-		for _, item := range p.Items {
-			batch.Items = append(batch.Items, item)
+		for index := 0; index < len(p.Items)+len(p.Headers); index++ {
+			appendRow := func() (uint64, uint64) {
+				if index < len(p.Items) {
+					item := p.Items[index]
+					batch.Items = append(batch.Items, item)
+					return item.ID, item.Rev
+				}
+				header := p.Headers[index-len(p.Items)]
+				batch.Headers = append(batch.Headers, header)
+				return header.ID, header.Rev
+			}
+			id, rev := appendRow()
 			encoded, err := threadEncodePayload(env, batch, nil)
 			if errors.Is(err, ErrThreadUpdateMetadataTooLarge) {
 				result = append(result, pending...)
-				batch.Items = []ThreadItem{item}
-				part := ThreadUpdatePart{ConversationID: p.ConversationID, Epoch: p.Epoch, Version: p.Version, ItemID: item.ID, Rev: item.Rev}
+				batch.Items, batch.Headers = nil, nil
+				appendRow()
+				part := ThreadUpdatePart{Projection: p.Projection, ConversationID: p.ConversationID, Epoch: p.Epoch, Version: p.Version, ItemID: id, Rev: rev}
 				encoded, err = threadEncodePayload(env, batch, &part)
 			}
 			if err != nil {
@@ -52,6 +67,7 @@ func EncodeThreadReply(env Envelope, reply any) ([][]byte, error) {
 				result = append(result, encoded...)
 				pending = nil
 				batch.Items = nil
+				batch.Headers = nil
 			} else {
 				pending = encoded
 			}
@@ -61,6 +77,10 @@ func EncodeThreadReply(env Envelope, reply any) ([][]byte, error) {
 	default:
 		return nil, ErrInvalidThreadUpdate
 	}
+}
+
+func threadProjectionScope(projection, conversation, epoch string) bool {
+	return projection == "" || (projection == ThreadProjectionCompact && conversation != "" && epoch != "")
 }
 
 func threadQueryCoverage(p ThreadItemsPayload) bool {
