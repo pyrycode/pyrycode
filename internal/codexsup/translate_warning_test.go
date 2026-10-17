@@ -204,3 +204,139 @@ func TestWarningMethodLanes(t *testing.T) {
 		}
 	}
 }
+
+const testUntrustedWarning = "project is marked as untrusted in the effective configuration"
+
+func testWarningParams(summary, details string) json.RawMessage {
+	params, _ := json.Marshal(map[string]string{"summary": summary, "details": details})
+	return params
+}
+
+func testWarningBanner(t *testing.T, tr *Translator, method string, params json.RawMessage, text string) {
+	t.Helper()
+	bounded, truncated := truncate(text, maxBannerText)
+	want := []turnevent.Event{turnevent.Banner{Level: "warning", Text: bounded, Truncated: truncated}}
+	if got := tr.Translate(method, params); !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s: want one bounded warning banner; got %#v", method, got)
+	}
+}
+
+func TestTranslateUntrustedWarningLifetime(t *testing.T) {
+	t.Parallel()
+	tr, control := NewTranslator("m"), NewTranslator("m")
+	params := testWarningParams(testUntrustedWarning, "guidance")
+	testWarningBanner(t, tr, "configWarning", params, testUntrustedWarning+"\nguidance")
+	for range 2 {
+		for _, translator := range []*Translator{tr, control} {
+			translator.SetModel("next-model")
+			translator.Translate("model/rerouted", json.RawMessage(`{"turnId":"t","toModel":"other-model"}`))
+			translator.Translate("thread/tokenUsage/updated", json.RawMessage(`{"turnId":"t","tokenUsage":{"total":{"inputTokens":10,"outputTokens":5},"last":{"inputTokens":10,"outputTokens":5},"modelContextWindow":1000}}`))
+		}
+		if got := tr.Translate("configWarning", params); len(got) != 0 {
+			t.Fatalf("repeat during turn = %#v, want no events", got)
+		}
+		completed := json.RawMessage(`{"turn":{"id":"t","status":"completed"}}`)
+		if got, want := tr.Translate("turn/completed", completed), control.Translate("turn/completed", completed); !reflect.DeepEqual(got, want) {
+			t.Fatalf("warning changed turn output: got %#v, want %#v", got, want)
+		}
+		if got := tr.Translate("configWarning", params); len(got) != 0 {
+			t.Fatalf("repeat between turns = %#v, want no events", got)
+		}
+	}
+	testWarningBanner(t, NewTranslator("m"), "configWarning", params, testUntrustedWarning+"\nguidance")
+}
+
+func TestTranslateUntrustedWarningIdentity(t *testing.T) {
+	t.Parallel()
+	for _, first := range []string{
+		testUntrustedWarning,
+		testUntrustedWarning + strings.Repeat("界", maxBannerText),
+		strings.Repeat("界", maxBannerText) + testUntrustedWarning,
+	} {
+		tr := NewTranslator("m")
+		params := testWarningParams(first, "guidance")
+		testWarningBanner(t, tr, "configWarning", params, first+"\nguidance")
+		for range 2 {
+			for _, distinct := range []string{first + " changed", first + "界"} {
+				testWarningBanner(t, tr, "configWarning", testWarningParams(distinct, "guidance"), distinct+"\nguidance")
+			}
+			testWarningBanner(t, tr, "configWarning", testWarningParams(first, "different guidance"), first+"\ndifferent guidance")
+			// The identity is assembled prose, independent of its field split or metadata.
+			repeat := testWarningParams(first+"\nguidance", "")
+			if got := tr.Translate("configWarning", repeat); len(got) != 0 {
+				t.Fatalf("distinct warning replaced the first identity: %#v", got)
+			}
+		}
+	}
+	tr := NewTranslator("m")
+	testWarningBanner(t, tr, "configWarning", testWarningParams("notice", testUntrustedWarning), "notice\n"+testUntrustedWarning)
+	if got := tr.Translate("configWarning", testWarningParams("notice", testUntrustedWarning)); len(got) != 0 {
+		t.Fatalf("matching details repeat = %#v", got)
+	}
+}
+
+func TestTranslateUntrustedWarningNonmatches(t *testing.T) {
+	t.Parallel()
+	tr := NewTranslator("m")
+	for _, matched := range []bool{false, true} {
+		if matched {
+			testWarningBanner(t, tr, "configWarning", testWarningParams(testUntrustedWarning, ""), testUntrustedWarning)
+		}
+		for range 2 {
+			for _, text := range []string{
+				"unrelated warning",
+				strings.Replace(testUntrustedWarning, "is marked", "Is marked", 1),
+				strings.Replace(testUntrustedWarning, "untrusted", "un-trusted", 1),
+				strings.TrimSuffix(testUntrustedWarning, "n"),
+			} {
+				testWarningBanner(t, tr, "configWarning", testWarningParams(text, ""), text)
+			}
+			// Matching metadata is inert and does not make unrelated prose a match.
+			metadata, _ := json.Marshal(map[string]any{"summary": "notice", "path": testUntrustedWarning, "range": false, "threadId": []int{1}})
+			testWarningBanner(t, tr, "configWarning", metadata, "notice")
+			other, _ := json.Marshal(map[string]string{"message": testUntrustedWarning})
+			testWarningBanner(t, tr, "warning", other, testUntrustedWarning)
+			want := []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexMethod, "futureWarning", other)}
+			if got := tr.Translate("futureWarning", other); !reflect.DeepEqual(got, want) {
+				t.Fatalf("unknown method handling = %#v, want %#v", got, want)
+			}
+		}
+	}
+	params := json.RawMessage(`{"summary":"` + testUntrustedWarning + `","path":"other","threadId":"other","range":42}`)
+	if got := tr.Translate("configWarning", params); len(got) != 0 {
+		t.Fatalf("nonmatch changed first identity: %#v", got)
+	}
+}
+
+func TestTranslateUntrustedWarningMalformed(t *testing.T) {
+	t.Parallel()
+	for _, params := range []string{
+		`{"summary":"` + testUntrustedWarning + `","details":42}`,
+		`{"summary":"` + testUntrustedWarning + `","details":{}}`,
+		`{"summary":"` + testUntrustedWarning + `","details":[]}`,
+		`{"summary":"` + testUntrustedWarning + `","details":true}`,
+		`{"summary":null,"details":"` + testUntrustedWarning + `"}`,
+		`{"details":"` + testUntrustedWarning + `"}`,
+		`{"summary":42,"details":"` + testUntrustedWarning + `"}`,
+		`{"summary":"` + testUntrustedWarning + `"} trailing`,
+		`{"summary":"` + testUntrustedWarning + strings.Repeat("界", maxUnrecognizedRaw) + `","details":42}`,
+	} {
+		tr := NewTranslator("m")
+		for _, afterValid := range []bool{false, true} {
+			if afterValid {
+				testWarningBanner(t, tr, "configWarning", testWarningParams(testUntrustedWarning, ""), testUntrustedWarning)
+			}
+			before := *tr
+			for range 2 {
+				got := tr.Translate("configWarning", json.RawMessage(params))
+				want := undecodable(json.RawMessage(params))
+				if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(*tr, before) {
+					t.Fatal("malformed target changed state or bounded undecodable handling")
+				}
+			}
+		}
+		if got := tr.Translate("configWarning", testWarningParams(testUntrustedWarning, "")); len(got) != 0 {
+			t.Fatalf("malformed target replaced the valid identity: %#v", got)
+		}
+	}
+}
