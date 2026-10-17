@@ -43,7 +43,7 @@ After joins settle, `recordShown` visits affected indexes in creation order,
 requiring each child's older parent to be publicly reachable and reusing cached
 reachability for unrelated parents. This captures late first appearances and
 descendant withdrawal without scanning independent trees. See
-[public touches and read marks](thread-package.md#cache-and-epochs).
+[public touches and read marks](thread-package-cache-and-epochs.md#cache-and-epochs).
 
 Hidden supported facts still create items. Visibility cannot admit an excluded
 source type: open permission/question prompts and live readings never create

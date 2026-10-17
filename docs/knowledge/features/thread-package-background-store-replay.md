@@ -11,7 +11,7 @@ return promptly or honor cancellation, and failure withdraws the view. This
 lets daemon tests pause real fold work rather than merely delaying `Load`
 admission, and lets removal cancel and join that paused work. History remains
 the only durable source, and store processing never writes history bytes. See
-[cache and epochs](thread-package.md#cache-and-epochs) for on-disk recovery records.
+[cache and epochs](thread-package-cache-and-epochs.md#cache-and-epochs) for on-disk recovery records.
 `Load(ctx, conversationID) error` starts one background worker and returns
 without waiting for history I/O or replay. Duplicate loads preserve the existing
 worker, including an unavailable view; recovery requires `Retry`. The context
@@ -58,7 +58,7 @@ only with successfully folded and captured progress; a partially failed or
 interrupted feed cannot advance retirement evidence. Dirty-write failure leaves
 `StateUnavailable` with generic `ErrUnavailable`; `Retry` reconstructs from
 history and writes dirty again. Joined retirement writes clean once, including
-unchanged progress. See [cache and epochs](thread-package.md#cache-and-epochs)
+unchanged progress. See [cache and epochs](thread-package-cache-and-epochs.md#cache-and-epochs)
 for certificate fields, durability, migration/rollback and persistence errors.
 Notifications cover commits through the supplied history
 store only; another store or external writer supplies no wakeup. See
@@ -121,7 +121,7 @@ as its only item source: full additions from a usable baseline, then ordered
 changes from its saved epoch/version. It never reconstructs items from legacy
 emitter facts. Field replacements are translated to `ThreadItem` JSON keys;
 combined replacements/text become consecutive changed/append messages with the
-same final revision. See [daemon publication](thread-package.md#shadow-lifecycle-and-evidence).
+same final revision. See [daemon publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
 **A fresh baseline cannot repair an existing consumer silently.** Unload/reload
 and retry release retained live batches even if cache validation preserves the
@@ -131,7 +131,7 @@ publisher forgets its cursor and obtains a fresh usable `Observe`. Pending
 dependent deltas are quarantined immediately, rather than drained while gap
 teardown waits on relay Run. No `base_rev` is guessed and no partial recovery
 is published. `Store.CatchUp` proves a separate reconstructed query range;
-the [installed daemon providers](thread-package.md#shadow-lifecycle-and-evidence)
+the [installed daemon providers](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
 serve catch-up/pages from this same store. Reconnect initialization requires
 explicit requests for each open conversation.
 
@@ -153,8 +153,8 @@ Captured recipes remain stable across later feeds, including equal-content
 companion replacements that change provenance without public revisions/touches.
 All production item kinds retain references; legacy `New` remains inline.
 Store publication/query recipes and the detached change ring are separate from
-the [fold/source heap measurement](thread-package-main-thread-folding-validation.md#validation-and-testing);
-that ratio excludes publications. See [cache and epochs](thread-package.md#cache-and-epochs).
+the [fold/source heap measurement](thread-package-main-thread-folding-validation-replay.md#replay-rendering-and-ingestion-validation);
+that ratio excludes publications. See [cache and epochs](thread-package-cache-and-epochs.md#cache-and-epochs).
 Private or withdrawn slots are nil; `detachPublication` skips them and preserves
 nil `Items` when no public row survives. Slot count is not public item count.
 
@@ -209,13 +209,13 @@ Only `StateUsable` carries versions/epoch, including an empty usable conversatio
 only `StateUnavailable` carries `ErrUnavailable`, and every other state has nil `Err`.
 `Status.Active` preserves private activity even with no public items, so nil
 `Items` cannot establish inactivity or readiness. The last-shown watermark follows
-the [history-reconstructed rule](thread-package.md#cache-and-epochs), and unread
+the [history-reconstructed rule](thread-package-cache-and-epochs.md#cache-and-epochs), and unread
 is `LastShownVersion > ReadUpTo`. The random epoch is independent of
-deterministic item equality and follows the [recovery compatibility rules](thread-package.md#cache-and-epochs).
+deterministic item equality and follows the [recovery compatibility rules](thread-package-cache-and-epochs.md#cache-and-epochs).
 An active-index set tracks affected private/public rows without a whole-fold
 scan. `TestStorePrivateActiveWork` checks an invisible active child and its later
 closure; an empty public list cannot establish unload eligibility. Retirement also
-requires [producer quiescence](thread-package.md#shadow-lifecycle-and-evidence).
+requires [producer quiescence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
 A missing/unreadable reference during baseline, query or live-change rendering
 discards the whole output, even after successful partial lookup. Withdrawal

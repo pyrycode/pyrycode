@@ -117,7 +117,7 @@ a running publisher on that same store, and becomes false before publisher
 teardown. Production negotiation, live publication, bounded queries and
 thread-only replay/resync bypass are installed. Readiness attests complete
 wiring, not that every conversation has completed replay. See
-[daemon publication and lifecycle](thread-package.md#shadow-lifecycle-and-evidence).
+[daemon publication and lifecycle](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
 replies, but `threadWithheld` independently gates live additions/changes/text
