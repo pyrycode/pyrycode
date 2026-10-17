@@ -59,7 +59,7 @@ cannot override it, and identity and credentials stay out of logs.
 The production `suggestionEnqueuer` wrapper and daemon/history adoption belong
 to [#2972](https://github.com/pyrycode/pyrycode/issues/2972). This seam adds no
 deduplication, new wire field or sender identity to legacy event payloads.
-See [relay sender metadata](relay-package-handlers.md#send_message-grows-a-ninth-seam-sender-identity-and-tap-time-2704)
+See [relay sender metadata](relay-package-handlers-send-message.md#send_message-grows-a-ninth-seam-sender-identity-and-tap-time-2704)
 and [ADR 042's item model](../decisions/042-daemon-built-thread.md#item-model).
 
 Channel posts are a fourth writer: `channelDelivery.deliver` bypasses the

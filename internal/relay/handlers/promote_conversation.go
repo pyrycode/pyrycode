@@ -180,6 +180,7 @@ func PromoteConversation(reg ConversationPromoter, registryPath string, logger *
 			IsPromoted: got.IsPromoted,
 			IsArchived: got.IsArchived,
 			IsMuted:    got.IsMuted,
+			PinnedAt:   got.PinnedAt,
 			ReadUpTo:   got.ReadUpTo,
 			Name:       got.Name,
 			Cwd:        got.Cwd, // the row's pre-existing (already-confined) cwd — payload Cwd is NOT consumed
