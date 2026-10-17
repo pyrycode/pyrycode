@@ -42,6 +42,10 @@ type ConversationSummary struct {
 	// as not muted only because an older daemon cannot send it.
 	IsMuted bool `json:"is_muted"`
 
+	// PinnedAt is the host-local pin time, or null when unpinned. Always
+	// serialized; an absent field from an older host also decodes as unpinned.
+	PinnedAt *time.Time `json:"pinned_at"`
+
 	// ReadUpTo is the stored durable history read mark, including zero.
 	ReadUpTo uint64 `json:"read_up_to"`
 	// LatestEntryID is the newest durable history entry excluding turn_state,

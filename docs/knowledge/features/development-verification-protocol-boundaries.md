@@ -7,6 +7,14 @@ field swaps. To distinguish an absent key from a present null or empty string,
 inspect the JSON produced by marshalling the decoded DTO too; decoded zero
 values alone cannot prove a required key was emitted.
 
+Typed re-encoding requires fixtures to include every always-serialized field,
+including false booleans and empty strings. The list/update fixtures had omitted
+`is_muted: false` and the list's `current_session_id: ""` while raw-envelope
+comparisons stayed green. Their round trips now marshal decoded DTOs back into
+the envelope; fix incomplete fixture bytes rather than weaken that comparison.
+See [conversation reads](protocol-package-types-conversations-read-payloads.md)
+and [writes](protocol-package-types-conversations-write-payloads.md).
+
 Pin public request keys in raw JSON, independently of production DTOs. A test
 and handler can agree on the same wrong struct tag while the required client
 key is ignored and an optional guard acts unbound. For `accepted_item_id`,
