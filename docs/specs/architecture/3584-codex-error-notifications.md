@@ -54,6 +54,7 @@ None. The suppression rule follows the existing `turnCompleted` variants; retry 
 ## Documentation handoff
 
 - Pending documentation stage: `docs/knowledge/features/codexsup-package.md`, section “The translator's three-list partition”: describe `error` mapping to active/inactive `ApiRetry` and bounded non-stopping error banners, including the two suppressed completion-owned categories.
+- Pending documentation stage, same path and section: describe zero retry counters, optional details, the 4096-byte UTF-8-safe cap and `Truncated`, malformed-input fallback and unchanged terminal reporting. State that the new notification examples are schema-derived, not live captures.
 
 ## Security review
 
@@ -69,3 +70,7 @@ None. The suppression rule follows the existing `turnCompleted` variants; retry 
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: The current issue body spells out the documentation handoff in more detail than the dispatch prompt. Carried those exact pending topics above; the implementation contract is unchanged. Final sizing is about 355 written lines, zero new exported types and zero consumer changes, five acceptance criteria and fewer than ten distinct new decision/reject branches, within all limits.

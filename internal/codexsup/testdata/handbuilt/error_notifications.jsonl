@@ -1,0 +1,4 @@
+{"kind":"notification","method":"error","params":{"threadId":"th","turnId":"t","willRetry":true,"error":{"message":"stream disconnected","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":502}}}}}
+{"kind":"notification","method":"item/agentMessage/delta","params":{"threadId":"th","turnId":"t","itemId":"msg","delta":"resumed"}}
+{"kind":"notification","method":"error","params":{"threadId":"th","turnId":"t","willRetry":false,"error":{"message":"connection failed","additionalDetails":"retry exhausted","codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":502}}}}}
+{"kind":"notification","method":"turn/completed","params":{"threadId":"th","turn":{"id":"t","items":[],"status":"failed","error":{"message":"connection failed","codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":502}}}}}}
