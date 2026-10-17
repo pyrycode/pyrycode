@@ -140,8 +140,19 @@ Only the digest is retained; there is no growing cache or retained warning text.
 The identity lasts for the `Translator` lifetime, across completed turns and
 model changes. `codexRunner.runOnce` creates a new translator for each app-server
 spawn, including respawn, so that boundary permits the warning again.
-The workspace deliberately remains untrusted to isolate Codex from project-local
-config, hooks and exec policies; deduplication changes no trust or configuration.
+
+`codexHomeConfig` in `cmd/pyry/codex_home.go` sets the top-level
+`suppress_unstable_features_warning = true` before `[features]` (#3598),
+suppressing the unstable-feature warning caused by pyry enabling
+`default_mode_request_user_input`. The feature remains enabled in the isolated,
+daemon-owned home. The workspace deliberately stays untrusted to isolate Codex
+from project-local config, hooks and exec policies, preserving
+[ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md).
+`TestPrepareCodexHome` checks that the true assignment precedes the first TOML
+table and rejects project/trust entries, alongside the existing feature,
+posture, permissions and auth-preservation checks.
+
+Trust-warning deduplication changes no trust or configuration.
 Unrelated warnings still banner on every occurrence. Case/fragment nonmatches,
 matching text on `warning` or other methods, and the method partition retain
 their handling; genuinely unknown methods still emit `UnrecognizedCodexMethod`.
