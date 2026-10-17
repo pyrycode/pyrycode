@@ -38,6 +38,9 @@ const (
 	// Conversation errors.
 	CodeConversationNotFound        = "conversation.not_found"
 	CodeConversationAlreadyPromoted = "conversation.already_promoted"
+	// CodeConversationNotPromoted is a non-retryable refusal to pin an
+	// unpromoted conversation. Unpinning remains allowed.
+	CodeConversationNotPromoted = "conversation.not_promoted"
 
 	// Host system prompt storage failures are retryable. Malformed requests use
 	// CodeProtocolMalformed (non-retryable).
@@ -231,6 +234,9 @@ const (
 	// record to every interactive conn, so other clients stop alerting without
 	// re-listing.
 	TypeSetConversationMuted = "set_conversation_muted"
+	// TypeSetConversationPinned declares a phone-to-host pin/unpin request.
+	// Production handling is pending #3538; replies reuse conversation_updated.
+	TypeSetConversationPinned = "set_conversation_pinned"
 	// TypeMarkConversationRead is a phone → binary write verb that raises a
 	// conversation's host-local read mark (ReadUpTo) toward the payload's
 	// required up_to, clamped to the newest durable history entry and never

@@ -92,9 +92,9 @@ func TestInteractiveStreamSessionSettingsReportsConfirmedPermissionMode(t *testi
 		t.Fatalf("permission switch respawned the child: pid %d -> %d", pid, got)
 	}
 
-	// Reuse #2474's exact enforcement case on the same process. The operator
-	// supplied the stdio prompt tool at launch because operator-owned bypass makes
-	// the daemon correctly skip injecting an approval gate of its own.
+	// Reuse the outside-workspace enforcement case on the same process. The
+	// daemon's bypass question connection also handles ordinary approvals after
+	// this live child is downgraded in band.
 	token := mintPostureProbeToken(t)
 	notePath := writeHandoffShapedNote(t, h.home, convID, token)
 	prompt := "Use the Read tool once to read the file at " + notePath +

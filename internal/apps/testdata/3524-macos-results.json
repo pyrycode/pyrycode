@@ -1,0 +1,326 @@
+{
+  "ticket": 3524,
+  "revision": "69ca9dd2e4c546bb84bacb2ba780e3998122d714",
+  "base_revision": "d256e705bf7fe4ca0618a9cc7c0ddc11791d3017",
+  "baseline_fixture_identity": "git diff ef41c46842871700ed9ca3e4661634ceba4e4f63..d256e705 -- the seven original test files is empty; controlled old budgets match the historical fixtures, without establishing historical attribution.",
+  "platform": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+  "architecture": "arm64",
+  "go": "go version go1.26.2 darwin/arm64",
+  "node": "v24.15.0",
+  "npm": "11.12.1",
+  "environment": {
+    "PATH": "/opt/homebrew/Caskroom/codex/0.159.2/codex-path:/Users/juhanailmoniemi/.fly/bin:/Users/juhanailmoniemi/Library/Android/sdk/cmdline-tools/latest/bin:/Users/juhanailmoniemi/Library/Android/sdk/platform-tools:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/opt/homebrew/bin:/Users/juhanailmoniemi/.codex/tmp/arg0/codex-arg0GOZl2M:/opt/homebrew/Caskroom/codex/0.159.2/codex-path:/opt/homebrew/sbin:/Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-path:/Users/juhanailmoniemi/.codex/tmp/arg0/codex-arg0bcvaZP:/Users/juhanailmoniemi/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/Users/juhanailmoniemi/.unity/bin:/Users/juhanailmoniemi/.fly/bin:/Users/juhanailmoniemi/Library/Android/sdk/cmdline-tools/latest/bin:/Users/juhanailmoniemi/Library/Android/sdk/platform-tools:/Users/juhanailmoniemi/.local/bin:/Applications/Obsidian.app/Contents/MacOS:/Users/juhanailmoniemi/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/Applications/ChatGPT.app/Contents/Resources:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS:/Applications/Obsidian.app/Contents/MacOS",
+    "GOMAXPROCS": null,
+    "GOFLAGS": null,
+    "GORACE": null,
+    "CGO_ENABLED": null,
+    "GOTOOLCHAIN": null,
+    "TMPDIR": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/"
+  },
+  "go_environment": {
+    "CGO_ENABLED": "1",
+    "GOARCH": "arm64",
+    "GOFLAGS": "",
+    "GOOS": "darwin",
+    "GOTOOLCHAIN": "auto"
+  },
+  "concurrency": "Normal test concurrency, no -p/-parallel overrides; acceptance tests run sequentially, no overlapping validation from this builder.",
+  "counting": "Disjoint named parents/leaves: a parent has a descendant name in that attempt. Every run/pass/fail/skip event counted; package verdict separately recorded. No partial run is a package pass.",
+  "redaction": "Retained raw output replaces the home directory prefix with <user-home>; PATH records the inherited environment. No child output, credentials or environment dumps captured by private command diagnostics.",
+  "diagnosis": [
+    "Controlled startup=900ms exceeds old fixture startup=700ms: child readiness never arrives before generation cancellation; repaired non-expiry fixture uses production 15s startup.",
+    "Controlled health body=200ms exceeds old fixture request=100ms: readiness fails despite valid matching health; repaired non-expiry fixture uses production 1s request budget.",
+    "Controlled install delay=5.2s exceeds old whole-publication ready wait=5s: node/npm version probes passed but ci was still running. Repaired observation allows 1min and reports early Publish outcome/phase, with cancellation and joined shutdown.",
+    "Named health sequences additionally run 900ms delayed startup and 200ms bodies, preserving one probe per released tick and 1/2/0/1/2/3. Metadata proof retains the same delayed healthy generation.",
+    "Migration uncertainty records actual denied retirement signals and live writer/journal/data barriers; service/probe families retain post-kill/native, transient/persistent and joined cleanup assertions."
+  ],
+  "attribution_limits": "Controlled comparisons demonstrate fixture weaknesses, not a common historical cause. Original logs lack request/command/kernel traces; historical validation failure and exact cancellation/replacement/ready-missing events remain unattributed. No claim that every old failure was request/startup expiry or exited-group bookkeeping. Production health, signal/probe policy and all security barriers unchanged.",
+  "historical": [
+    {
+      "source": "/tmp/verifier-3513/baseline-check.log",
+      "source_sha256": "e2c39a89acbe322836ad2e1ccc3b08badf4017f4a3a85ce2a2530f1af52edcc6",
+      "apps_result": "fail",
+      "historical_revision": "ef41c46842871700ed9ca3e4661634ceba4e4f63",
+      "excerpts": {"path": "3524-historical-baseline-check.log.gz", "sha256": "15e41b2de76eb6de96bdf2e0acaa118173c709285e324f3241d33a423e38948d"},
+      "counts": null,
+      "count_limit": "Nonverbose historical gate output does not enumerate executed tests; no counts inferred."
+    },
+    {
+      "source": "/tmp/verifier-3513/check.log",
+      "source_sha256": "e60c921b95c792781bbfba7b9d5a40dc0affde9ff21b85730add32835e992d35",
+      "apps_result": "fail",
+      "historical_revision": "PR #3513 run; not inferred from this nonverbose log",
+      "excerpts": {"path": "3524-historical-check.log.gz", "sha256": "4d634a8e0a398d08bb6408ec130b0ab1b49747242ec37e2fa177238015ca4258"},
+      "counts": null,
+      "count_limit": "Nonverbose historical gate output does not enumerate executed tests; no counts inferred."
+    }
+  ],
+  "attempts": [
+    {
+      "name": "controlled-before",
+      "revision": "4576fe1d48b0bf2dbd8f0192ab347f184bf3d3a7",
+      "working_tree": "new controlled regressions before repair",
+      "source_variant": "healthReply.StartDelay and the two delay regressions added; healthLifecycleFixture delegates to unchanged healthFixture; publication regression awaits the original waitFile before Stop; cancellable joined launcher and private diagnostics active",
+      "command": "go test -race -json ./internal/apps -run '^(TestOwnerLifecycleFixtureDelays|TestPublishFixturePreparationDelay)$' -count=1",
+      "environment_overrides": {},
+      "exit_code": 1,
+      "package_result": "fail",
+      "package_elapsed_seconds": 15.199,
+      "event_window": [
+        "2026-10-17T02:01:54.23524+03:00",
+        "2026-10-17T02:02:09.433963+03:00"
+      ],
+      "counts": {
+        "parents": {"executed": 1, "pass": 0, "fail": 1, "skip": 0},
+        "leaves": {"executed": 3, "pass": 0, "fail": 3, "skip": 0}
+      },
+      "failed_tests": [
+        "TestOwnerLifecycleFixtureDelays/startup",
+        "TestOwnerLifecycleFixtureDelays/request",
+        "TestOwnerLifecycleFixtureDelays",
+        "TestPublishFixturePreparationDelay"
+      ],
+      "skips": [],
+      "events": {"path": "3524-controlled-before.jsonl.gz", "sha256": "632a573d8233fc6728721809ad8b3829da053db7c11b094ef801ac657be2fbb6"},
+      "stderr": {"path": "3524-controlled-before.stderr.gz", "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"}
+    },
+    {
+      "name": "controlled-after",
+      "revision": "4576fe1d48b0bf2dbd8f0192ab347f184bf3d3a7",
+      "working_tree": "initial fixture repair before final additional assertions",
+      "source_variant": "same controlled delays; production startup/request budgets and phase-aware readiness helper installed; later added explicit live-descendant/retirement assertions were not present",
+      "command": "go test -race -json ./internal/apps -run '^(TestOwnerLifecycleFixtureDelays|TestPublishFixturePreparationDelay)$' -count=1",
+      "environment_overrides": {},
+      "exit_code": 0,
+      "package_result": "pass",
+      "package_elapsed_seconds": 9.56,
+      "event_window": [
+        "2026-10-17T02:02:45.107532+03:00",
+        "2026-10-17T02:02:54.667084+03:00"
+      ],
+      "counts": {
+        "parents": {"executed": 1, "pass": 1, "fail": 0, "skip": 0},
+        "leaves": {"executed": 3, "pass": 3, "fail": 0, "skip": 0}
+      },
+      "failed_tests": [],
+      "skips": [],
+      "events": {"path": "3524-controlled-after.jsonl.gz", "sha256": "6c8d87449073b5201eaf489d9c80656428433642e8b02e111bdc7d00a036667d"},
+      "stderr": {"path": "3524-controlled-after.stderr.gz", "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"}
+    },
+    {
+      "name": "focused-initial",
+      "revision": "b770fafb981d9893832292c2b5689a9ba73159f3",
+      "working_tree": "clean implementation commit",
+      "source_variant": null,
+      "command": "go test -race -json ./internal/apps -run '^(TestOwnerHealthFailures|TestOwnerHealthFailuresDelayedObserver|TestOwnerReconcileMetadata|TestPublishMigrationRetirementUncertain|TestPublishRetirementProbeSequence|TestPublishServiceRetirementUncertain|TestOwnerLifecycleFixtureDelays|TestPublishFixturePreparationDelay|TestOwnerCleanupProbeRecovery|TestCandidateCleanupProbeRecovery|TestCandidateBuildProbeRecovery)$' -count=1",
+      "environment_overrides": {
+        "HOSTED_APP_NODE": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node",
+        "HOSTED_APP_NPM_CLI": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js"
+      },
+      "exit_code": 0,
+      "package_result": "pass",
+      "package_elapsed_seconds": 23.533,
+      "event_window": [
+        "2026-10-17T02:03:26.073183+03:00",
+        "2026-10-17T02:03:49.605869+03:00"
+      ],
+      "counts": {
+        "parents": {"executed": 5, "pass": 5, "fail": 0, "skip": 0},
+        "leaves": {"executed": 26, "pass": 26, "fail": 0, "skip": 0}
+      },
+      "failed_tests": [],
+      "skips": [],
+      "events": {"path": "3524-focused-initial.jsonl.gz", "sha256": "e197ec1d138f862135507f45dce7c037973c5753617bfb49f24ff5815e0d585d"},
+      "stderr": {"path": "3524-focused-initial.stderr.gz", "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"}
+    },
+    {
+      "name": "package-initial",
+      "revision": "b770fafb981d9893832292c2b5689a9ba73159f3",
+      "working_tree": "clean implementation commit",
+      "source_variant": null,
+      "command": "go test -race -json ./internal/apps -count=1",
+      "environment_overrides": {
+        "HOSTED_APP_NODE": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node",
+        "HOSTED_APP_NPM_CLI": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js"
+      },
+      "exit_code": 0,
+      "package_result": "pass",
+      "package_elapsed_seconds": 398.616,
+      "event_window": [
+        "2026-10-17T02:03:56.738756+03:00",
+        "2026-10-17T02:10:35.355592+03:00"
+      ],
+      "counts": {
+        "parents": {"executed": 108, "pass": 108, "fail": 0, "skip": 0},
+        "leaves": {"executed": 925, "pass": 921, "fail": 0, "skip": 4}
+      },
+      "failed_tests": [],
+      "skips": [
+        {
+          "test": "TestBackupAliasedTempRoot/states/nested",
+          "output": "=== RUN   TestBackupAliasedTempRoot/states/nested\n    backups_test.go:71: filesystem rejects invalid UTF-8 filename (EILSEQ)\n--- SKIP: TestBackupAliasedTempRoot/states/nested (0.00s)\n"
+        },
+        {
+          "test": "TestBackupStates/nested",
+          "output": "=== RUN   TestBackupStates/nested\n    backups_test.go:71: filesystem rejects invalid UTF-8 filename (EILSEQ)\n--- SKIP: TestBackupStates/nested (0.00s)\n"
+        },
+        {
+          "test": "TestRestoreStates/nested",
+          "output": "=== RUN   TestRestoreStates/nested\n    restores_test.go:52: filesystem rejects invalid UTF-8 filename (EILSEQ)\n--- SKIP: TestRestoreStates/nested (0.00s)\n"
+        },
+        {
+          "test": "TestRetainedValidation/invalid_UTF8",
+          "output": "=== RUN   TestRetainedValidation/invalid_UTF8\n    artifacts_test.go:126: filesystem rejects invalid UTF-8 filename (EILSEQ)\n--- SKIP: TestRetainedValidation/invalid_UTF8 (0.20s)\n"
+        }
+      ],
+      "events": {"path": "3524-package-initial.jsonl.gz", "sha256": "db93b1d894b7b664c91e89be1ffc9cc4bd4cb174bff7449d110a2e970551e23c"},
+      "stderr": {"path": "3524-package-initial.stderr.gz", "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"}
+    },
+    {
+      "name": "focused",
+      "revision": "69ca9dd2e4c546bb84bacb2ba780e3998122d714",
+      "working_tree": "clean implementation commit",
+      "source_variant": null,
+      "command": "go test -race -json ./internal/apps -run '^(TestOwnerHealthFailures|TestOwnerHealthFailuresDelayedObserver|TestOwnerReconcileMetadata|TestPublishMigrationRetirementUncertain|TestPublishRetirementProbeSequence|TestPublishServiceRetirementUncertain|TestOwnerLifecycleFixtureDelays|TestPublishFixturePreparationDelay|TestOwnerCleanupProbeRecovery|TestCandidateCleanupProbeRecovery|TestCandidateBuildProbeRecovery)$' -count=1",
+      "environment_overrides": {
+        "HOSTED_APP_NODE": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node",
+        "HOSTED_APP_NPM_CLI": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js"
+      },
+      "exit_code": 0,
+      "package_result": "pass",
+      "package_elapsed_seconds": 28.921,
+      "event_window": [
+        "2026-10-17T02:10:56.667615+03:00",
+        "2026-10-17T02:11:25.588551+03:00"
+      ],
+      "counts": {
+        "parents": {"executed": 5, "pass": 5, "fail": 0, "skip": 0},
+        "leaves": {"executed": 26, "pass": 26, "fail": 0, "skip": 0}
+      },
+      "failed_tests": [],
+      "skips": [],
+      "events": {"path": "3524-focused.jsonl.gz", "sha256": "7c482a647ca2a851b189e37cb5fe2b1114f0e1c333fd0820575473f6339c1f49"},
+      "stderr": {"path": "3524-focused.stderr.gz", "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"},
+      "required_families": {
+        "TestOwnerHealthFailures": {
+          "parents": {"executed": 0, "pass": 0, "fail": 0, "skip": 0},
+          "leaves": {"executed": 1, "pass": 1, "fail": 0, "skip": 0}
+        },
+        "TestOwnerHealthFailuresDelayedObserver": {
+          "parents": {"executed": 0, "pass": 0, "fail": 0, "skip": 0},
+          "leaves": {"executed": 1, "pass": 1, "fail": 0, "skip": 0}
+        },
+        "TestOwnerReconcileMetadata": {
+          "parents": {"executed": 0, "pass": 0, "fail": 0, "skip": 0},
+          "leaves": {"executed": 1, "pass": 1, "fail": 0, "skip": 0}
+        },
+        "TestPublishMigrationRetirementUncertain": {
+          "parents": {"executed": 0, "pass": 0, "fail": 0, "skip": 0},
+          "leaves": {"executed": 1, "pass": 1, "fail": 0, "skip": 0}
+        },
+        "TestPublishRetirementProbeSequence": {
+          "parents": {"executed": 1, "pass": 1, "fail": 0, "skip": 0},
+          "leaves": {"executed": 4, "pass": 4, "fail": 0, "skip": 0}
+        },
+        "TestPublishServiceRetirementUncertain": {
+          "parents": {"executed": 1, "pass": 1, "fail": 0, "skip": 0},
+          "leaves": {"executed": 3, "pass": 3, "fail": 0, "skip": 0}
+        }
+      }
+    },
+    {
+      "name": "package",
+      "revision": "69ca9dd2e4c546bb84bacb2ba780e3998122d714",
+      "working_tree": "clean implementation commit",
+      "source_variant": null,
+      "command": "go test -race -json ./internal/apps -count=1",
+      "environment_overrides": {
+        "HOSTED_APP_NODE": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/bin/node",
+        "HOSTED_APP_NPM_CLI": "/tmp/builder-3404/node-v24.15.0-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js"
+      },
+      "exit_code": 0,
+      "package_result": "pass",
+      "package_elapsed_seconds": 549.283,
+      "event_window": [
+        "2026-10-17T02:11:31.518696+03:00",
+        "2026-10-17T02:20:40.814341+03:00"
+      ],
+      "counts": {
+        "parents": {"executed": 108, "pass": 108, "fail": 0, "skip": 0},
+        "leaves": {"executed": 925, "pass": 921, "fail": 0, "skip": 4}
+      },
+      "failed_tests": [],
+      "skips": [
+        {
+          "test": "TestBackupAliasedTempRoot/states/nested",
+          "output": "=== RUN   TestBackupAliasedTempRoot/states/nested\n    backups_test.go:71: filesystem rejects invalid UTF-8 filename (EILSEQ)\n--- SKIP: TestBackupAliasedTempRoot/states/nested (0.00s)\n"
+        },
+        {
+          "test": "TestBackupStates/nested",
+          "output": "=== RUN   TestBackupStates/nested\n    backups_test.go:71: filesystem rejects invalid UTF-8 filename (EILSEQ)\n--- SKIP: TestBackupStates/nested (0.00s)\n"
+        },
+        {
+          "test": "TestRestoreStates/nested",
+          "output": "=== RUN   TestRestoreStates/nested\n    restores_test.go:52: filesystem rejects invalid UTF-8 filename (EILSEQ)\n--- SKIP: TestRestoreStates/nested (0.00s)\n"
+        },
+        {
+          "test": "TestRetainedValidation/invalid_UTF8",
+          "output": "=== RUN   TestRetainedValidation/invalid_UTF8\n    artifacts_test.go:126: filesystem rejects invalid UTF-8 filename (EILSEQ)\n--- SKIP: TestRetainedValidation/invalid_UTF8 (0.10s)\n"
+        }
+      ],
+      "events": {"path": "3524-package.jsonl.gz", "sha256": "80040a835d20fe67f9bcd6f9eef4917eb586be4b047be0482e3ba9336db250e4"},
+      "stderr": {"path": "3524-package.stderr.gz", "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"},
+      "required_families": {
+        "TestOwnerHealthFailures": {
+          "parents": {"executed": 0, "pass": 0, "fail": 0, "skip": 0},
+          "leaves": {"executed": 1, "pass": 1, "fail": 0, "skip": 0}
+        },
+        "TestOwnerHealthFailuresDelayedObserver": {
+          "parents": {"executed": 0, "pass": 0, "fail": 0, "skip": 0},
+          "leaves": {"executed": 1, "pass": 1, "fail": 0, "skip": 0}
+        },
+        "TestOwnerReconcileMetadata": {
+          "parents": {"executed": 0, "pass": 0, "fail": 0, "skip": 0},
+          "leaves": {"executed": 1, "pass": 1, "fail": 0, "skip": 0}
+        },
+        "TestPublishMigrationRetirementUncertain": {
+          "parents": {"executed": 0, "pass": 0, "fail": 0, "skip": 0},
+          "leaves": {"executed": 1, "pass": 1, "fail": 0, "skip": 0}
+        },
+        "TestPublishRetirementProbeSequence": {
+          "parents": {"executed": 1, "pass": 1, "fail": 0, "skip": 0},
+          "leaves": {"executed": 4, "pass": 4, "fail": 0, "skip": 0}
+        },
+        "TestPublishServiceRetirementUncertain": {
+          "parents": {"executed": 1, "pass": 1, "fail": 0, "skip": 0},
+          "leaves": {"executed": 3, "pass": 3, "fail": 0, "skip": 0}
+        }
+      }
+    }
+  ],
+  "checks": {
+    "vet": {
+      "command": [
+        "go",
+        "vet",
+        "./..."
+      ],
+      "revision": "69ca9dd2e4c546bb84bacb2ba780e3998122d714",
+      "exit_code": 0,
+      "output": {"path": "3524-vet.log.gz", "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"}
+    },
+    "build": {
+      "command": [
+        "go",
+        "build",
+        "-o",
+        "/tmp/builder-3524/pyry",
+        "./cmd/pyry"
+      ],
+      "revision": "69ca9dd2e4c546bb84bacb2ba780e3998122d714",
+      "exit_code": 0,
+      "output": {"path": "3524-build.log.gz", "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"}
+    }
+  },
+  "verification_scope": "Native macOS only; Linux outside ticket scope. Verifier full-module gate and #3525 final make check/build remain later work; no live Claude required."
+}

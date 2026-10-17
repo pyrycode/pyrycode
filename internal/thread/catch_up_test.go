@@ -414,6 +414,7 @@ func TestCatchUpIsolation(t *testing.T) {
 			var queryErr error
 			go func() { defer close(done); got, queryErr = s.CatchUp(ctx, testStoreA, snap.Epoch, 1, 1) }()
 			testStoreSignal(t, reached)
+			armed.Store(false)
 			if cancelQuery {
 				cancel()
 			}

@@ -129,7 +129,7 @@ func TestOwnerRetryTimings(t *testing.T) {
 	}
 }
 func TestOwnerReconcileMetadata(t *testing.T) {
-	r, o := healthFixture(t, healthReply{Body: healthyBody()})
+	r, o := healthLifecycleFixture(t, healthReply{Body: healthyBody(), StartDelay: 900 * time.Millisecond, BodyDelay: 200 * time.Millisecond})
 	g := healthStart(t, r, o)
 	target := healthTarget(t, o)
 	o.mu.Lock()

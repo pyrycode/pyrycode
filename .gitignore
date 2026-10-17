@@ -63,3 +63,6 @@ agents/
 # else's commit. Already-tracked files are unaffected; this only stops new ones.
 internal/e2e/realclaude/testdata/permission_protocol_v*.json
 !internal/e2e/realclaude/testdata/permission_protocol_v*_*.json
+# Python test helpers must not dirty verifier worktrees.
+__pycache__/
+*.py[cod]
