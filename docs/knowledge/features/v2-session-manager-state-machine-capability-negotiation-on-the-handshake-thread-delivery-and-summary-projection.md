@@ -26,14 +26,16 @@ existing `ThreadReady` is also true and the client advertises all three of
 rekey preserves it. Either provider alone withholds expansion while preserving
 existing `thread` negotiation. `TestThreadExpansionHandshake` covers the
 provider/readiness/client-capability matrix through real authenticated
-handshakes, including successful child dispatch. Production installs neither
-expansion callback, so advertisement remains withheld pending real Store
-installation/activation in #3523. `negotiateCapabilities` grants
+handshakes, including successful child dispatch. Production installs both
+expansion callbacks on the publisher's Store (#3523). `negotiateCapabilities` grants
 `CapabilityThreadCompact` (#3573) only alongside a `thread_expansion` grant in
 the same call, with `thread_compact` advertised and a fourth readiness true;
 `s.threadCompact` is set beside `s.threadExpansion` from that negotiated slice.
-Production installs none of the compact providers, so it stays withheld
-pending #3563.
+Production installs both compact providers through `queryDaemonThread` (#3563).
+`ThreadCompactReady` requires complete thread readiness, a running publisher on
+that same Store, both compact providers and both expansion reads. Clearing the
+installation resets compact callbacks and readiness; publisher stop withdraws
+readiness before cancelling and joining in-flight work.
 
 **A conversation's join records projection, not just epoch/version, and owns
 that conversation's view per connection.** `threadJoin{epoch, version, projection}`
@@ -71,8 +73,10 @@ could receive a compact frame unchecked. `TestThreadCompactLiveRouting`,
 `TestThreadCompactLiveFencing`, `TestThreadCompactLiveQueryRace` and
 `TestThreadCompactLiveScope` (`v2session_compact_live_test.go`) cover routing,
 fencing, the query race on both `DeliverThread` and Push, and epoch
-reset/reconnect scope. Production activation (daemon installation, burst
-coalescing and flush scheduling) is #3563; see
+reset/reconnect scope. Production `daemonThreadPublisher.publish` selects the
+recipient family before encoding and coalesces compact root replacements on
+each 50 ms publication pass, with one progress update for hidden-only consumed
+intervals and a final changed-state flush after activity stops (#3563). See
 [compact projection](../../protocol-mobile.md#compact-projection-declared) and
 [query/live ordering](../../protocol-mobile.md#querylive-ordering).
 
@@ -138,8 +142,10 @@ either coverage or reset from item revisions. Missing/nonusable/erroring
 providers and codec failures return a content-free `thread.query_failed` error;
 reset and failure cannot certify partial items. A page result with reset state
 fails instead of emitting catch-up-only `thread_reset`. Nonusable views fail
-explicitly even with complete production wiring; queries do not load or wait
-for recovery. Installed-provider readiness, clean-reopen queries, reset outcomes
+explicitly even with complete production wiring. Installed daemon providers
+share `queryDaemonThread` demand to load and wait cancelably for a usable view;
+the relay accepts only a usable captured result. Installed-provider readiness,
+clean-reopen queries, reset outcomes
 and requests over 36,000 entries are covered by `TestDaemonThreadQueriesReadiness`,
 `TestDaemonThreadQueriesRecovery`, `TestDaemonThreadQueriesReset` and
 `TestDaemonThreadQueriesBounded`. See the
@@ -319,17 +325,17 @@ never received the affected items. `TestDaemonThreadGapPreservesAgentIneligibleP
 checks that only the eligible consumer is retired and that the basic peer
 continues authenticated Claude publication.
 
-**`ActiveConn.View` tells the daemon which family each eligible connection
-gets (#3574).** `ActiveThreadConns` fills the additive `View` field
+**Completed and pending views both determine publication (#3563).**
+`ActiveThreadConns` fills the additive `View` field
 (`ThreadViewUnjoined`, `ThreadViewComplete`, `ThreadViewCompact`) from the
-connection's recorded join for that conversation, read under `hostedMu` the
-same way `threadQueryGate` reads it; a connection with no hosted inbox or no
-join for the conversation reports unjoined. `ActiveConns` leaves `View` at
-its zero value, since it enumerates with no conversation in view. The field
-is additive on `ActiveConn`, so existing callers holding `ActiveThreadConns`
-as a func value, such as `daemonThreadPublisher.active` in
-`cmd/pyry/daemon_thread_relay.go`, compile unchanged. One connection can
-report compact for one conversation and complete for another in the same
+connection's recorded join for that conversation. `threadViews` captures it
+atomically with `PendingView`, the admitted items query's projection, under
+`hostedMu`; an expansion read leaves the pending view unjoined.
+`ActiveThreadConns` also records the negotiated `ThreadCompact` flag so an
+unjoined complete-only peer incurs no compact encoding/read work. A connection
+with no hosted inbox or no join reports an unjoined completed view.
+`ActiveConns` leaves these fields at zero because it has no conversation scope.
+One connection can report compact for one conversation and complete for another in the same
 snapshot. `TestThreadCompactLiveRouting` pins that per-connection,
 per-conversation split; `TestThreadCompactLiveScope` pins it against a
 reconnect (a reused connection ID starts unjoined again) and an epoch reset
@@ -337,3 +343,13 @@ reconnect (a reused connection ID starts unjoined again) and an epoch reset
 completion stays independent of this view: a tool-body or children read
 neither writes nor reads it, and changes no join either way.
 
+Using only the completed join loses updates during complete↔compact switches:
+the old family's update cannot cancel a stale query of the new projection,
+yet the publisher cursor advances. Publication therefore includes completed
+and pending families. Unjoined compact-capable peers also participate in both
+families for cancellation; compact frames remain withheld without a compact
+join. Admission after the snapshot crosses the daemon publication gate before
+Store capture, so it cannot miss that pass. Late relay checks authorize content,
+not the snapshot. `TestDaemonThreadCompactSwitch` covers both directions and
+both capture/admission orderings through the installed authenticated daemon;
+see [daemon evidence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).

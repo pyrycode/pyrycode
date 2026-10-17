@@ -201,10 +201,10 @@ Optional facts distinguish unknown (`nil`) from known empty/zero/false:
 Known count and freshness values are nonnegative and below 2^53; values outside
 that domain stay unknown. `DetailOmitted` is always true and no `Content`, body
 or descendant identities are returned. These are package-owned Store facts
-matching the [declared header semantics](../../protocol-mobile.md#thread-query-messages).
-Forwarding the new facts through `runThreadChildren` remains with
-[#3562](https://github.com/pyrycode/pyrycode/issues/3562), and production compact
-delivery with [#3563](https://github.com/pyrycode/pyrycode/issues/3563).
+matching the [header semantics](../../protocol-mobile.md#thread-query-messages).
+`runThreadChildren` forwards these facts in bounded expansion replies, and
+production compact delivery uses them through the real Store installation.
+See [daemon compact wiring and evidence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
 Initial `Store.publish` initializes every public row's freshness from consumed
 publication progress. Checkpoint restoration seeds public prefix rows without
@@ -489,12 +489,14 @@ checks same-epoch reload; `TestCompactChangesWait` checks a blocked reader
 released by publication, cancellation, unload and concurrent captures,
 alongside unaffected concurrent complete `CatchUp`/`Changes` reads.
 
-Relay/daemon delivery of these reads is pending
-[#3562](https://github.com/pyrycode/pyrycode/issues/3562); bounded-time
-flush scheduling for a waiting `CompactChanges` reader is pending
-[#3563](https://github.com/pyrycode/pyrycode/issues/3563). The Store
-supplies interval facts and evidence only — neither implies a full inventory
-baseline, expansion completion or authenticated delivery.
+Relay/daemon delivery is installed: `daemonThreadPublisher.publish` reads
+`CompactChanges` only after observed version advancement, under its cancellable
+operation context, on the existing 50 ms publication schedule. Calling it at
+the current version would wait instead of flushing. See
+[daemon coalescing and recovery](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+The Store supplies interval facts and evidence only; the installed relay owns
+authenticated delivery. Neither establishes a full inventory baseline or
+expansion completion.
 
 ### Revision-scoped tool bodies
 
