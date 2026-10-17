@@ -26,6 +26,7 @@ type healthReply struct {
 	Body             string
 	Status           int
 	Delay, BodyDelay time.Duration
+	StartDelay       time.Duration
 	Redirect         string
 }
 
@@ -79,6 +80,7 @@ func TestHealthHelperProcess(t *testing.T) {
 	}
 	var config healthReply
 	json.Unmarshal(initial, &config)
+	time.Sleep(config.StartDelay)
 	if config.Descendant {
 		exe, _ := os.Executable()
 		cmd := exec.Command(exe, "-test.run", "^TestOwnerHelperProcess$", "--", "descendant", "forced")

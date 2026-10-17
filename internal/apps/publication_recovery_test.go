@@ -13,8 +13,10 @@ import (
 
 func TestPublishMigrationRetirementUncertain(t *testing.T) {
 	r, o, tools, c, _ := publishFixture(t, healthReply{Body: healthyBody()}, "fork")
+	denied := 0
 	o.kill = func(pid int, sig syscall.Signal) error {
 		if pid < 0 && sig != 0 {
+			denied++
 			return syscall.EPERM
 		}
 		return syscall.Kill(pid, sig)
@@ -30,11 +32,15 @@ func TestPublishMigrationRetirementUncertain(t *testing.T) {
 			}
 		}
 	}()
-	result, err := o.Publish(context.Background(), testHost, testApp, tools)
+	result, err := o.Publish(testCandidateDiagnostics(t), testHost, testApp, tools)
 	var failure *PublishFailure
 	if !errors.As(err, &failure) || failure.Phase != "migration" || !result.RecoveryPending || result.ActivationCommitted || result.Healthy {
 		t.Fatalf("retirement uncertainty lost: %+v, %v", result, err)
 	}
+	if denied == 0 {
+		t.Fatal("migration retirement injection did not execute")
+	}
+	t.Logf("migration retirement denied signals=%d", denied)
 	if strings.Contains(err.Error(), r.root) || strings.Contains(err.Error(), "permission") {
 		t.Fatal("unsafe feedback", err)
 	}
