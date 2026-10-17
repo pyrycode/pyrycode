@@ -24,12 +24,45 @@ lists — `mappedMethods`, `ignoredMethods`, `unrecognizedMethods` (and the item
 twins `mappedItemTypes`/`ignoredItemTypes`/`unrecognizedItemTypes`) — never on
 none or on two. `TestMethodListsPartitionServerNotifications` and
 `TestItemTypesClassified` fail otherwise, so a schema bump that adds a method
-or item type forces a decision instead of dropping it silently. An unmapped
-method becomes `turnevent.Unrecognized{Site: UnrecognizedCodexMethod}`; an
-unmapped item type becomes `Unrecognized{Site: UnrecognizedCodexItem}`, once
+or item type forces a decision instead of dropping it silently. A method
+neither mapped nor ignored becomes
+`turnevent.Unrecognized{Site: UnrecognizedCodexMethod}`; an item type neither
+mapped nor ignored becomes `Unrecognized{Site: UnrecognizedCodexItem}`, once
 per item on `item/started` only (its `item/completed` stays silent — one row
 per item, not two). `model/rerouted` and `model/verification` are on this
 partition too, deliberately, so a model reroute is never silent: see below.
+
+`ignoredMethods` includes four groups of notifications that emit no transcript
+events (#3593):
+
+- Completed-item duplicates: `turn/diff/updated`, `item/fileChange/patchUpdated`
+  and `item/commandExecution/terminalInteraction`. Completed items already
+  carry the diffs and command results.
+- Thread bookkeeping for operations pyry does not request: thread archival,
+  deletion, unarchival, closure and reversion; attachment, goal and queue
+  updates; project changes; and environment connection changes.
+- Output of requests pyry does not make: `command/exec/outputDelta`,
+  `process/outputDelta` and `process/exited`.
+- Features outside text chat: the pinned realtime notifications, `fs/changed`,
+  fuzzy-file-search session updates/completion, MCP OAuth completion and event
+  stream notifications, external-agent-config import progress/completion,
+  Windows world-writable warnings and sandbox setup completion, account login
+  completion, and auto-approval-review start/completion/strict-review notices.
+
+Realtime suppression enumerates exactly the 11 Codex 0.156.1 schema methods:
+`thread/realtime/started`, `thread/realtime/itemAdded`,
+`thread/realtime/item/started`, `thread/realtime/item/transcript/delta`,
+`thread/realtime/item/completed`, `thread/realtime/transcript/delta`,
+`thread/realtime/transcript/done`, `thread/realtime/outputAudio/delta`,
+`thread/realtime/sdp`, `thread/realtime/error` and `thread/realtime/closed`.
+`Translate` checks exact membership in `ignoredSet`; suppressing the whole
+`thread/realtime/` prefix would silently hide future methods that need a
+classification decision. Unknown methods, including `thread/realtime/future`,
+still emit `UnrecognizedCodexMethod`. `TestTranslateIgnoredNotificationGroups`
+independently pins all 43 methods to the ignored lane and checks no-event
+behavior, with populated params from each group;
+`TestTranslateUnknownNotificationStaysVisible` pins ordinary and realtime
+unknown-method visibility.
 
 `turn/moderationMetadata` occupies only `mappedMethods` (#3582).
 `moderationMetadata` validates the full params object before suppressing a
