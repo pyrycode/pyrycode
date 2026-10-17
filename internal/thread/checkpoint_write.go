@@ -19,12 +19,14 @@ import (
 // Store.mu. Inputs are detached exports; changed includes private/recipe changes
 // since the last acknowledgement. Disk state, never ack, governs reconciliation.
 type checkpointWriter struct {
-	s      *Store
-	id     conversations.ConversationID
-	source HistorySource
-	ack    checkpointFileState
-	step   func(string, func() error) error
-	write  func(*os.File, []byte) (int, error)
+	s          *Store
+	id         conversations.ConversationID
+	source     HistorySource
+	ack        checkpointFileState
+	step       func(string, func() error) error
+	write      func(*os.File, []byte) (int, error)
+	fullRefold bool
+	generation string
 }
 
 func (w *checkpointWriter) run(stage string, action func() error) error {
@@ -109,7 +111,7 @@ func (w *checkpointWriter) commit(d CheckpointState, all, changed []CheckpointIt
 	}); err != nil {
 		return err
 	}
-	fresh := prior == nil
+	fresh := prior == nil || w.fullRefold && saved.Generation != w.generation
 	rows := changed
 	if fresh {
 		token, err := randomToken()
@@ -117,6 +119,7 @@ func (w *checkpointWriter) commit(d CheckpointState, all, changed []CheckpointIt
 			return err
 		}
 		saved = checkpointFileState{Generation: "thread-index-" + token + ".bin"}
+		w.generation = saved.Generation
 		rows = all
 	} else {
 		if saved.Fold.Version > d.Version {

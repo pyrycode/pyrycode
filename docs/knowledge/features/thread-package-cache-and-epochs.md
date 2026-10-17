@@ -19,7 +19,8 @@ without fabricating history entries.
 
 Converted Store publication slots, comparison state and query rows retain only
 metadata and immutable content recipes: no rendered `Content` or derived
-user/assistant `Summary`. Worker progress and certificates remain scalar-only.
+user/assistant `Summary`. Consumed-boundary evidence and scalar certificates
+retain no rendered content.
 Baseline reads render all public rows; bounded queries select metadata first,
 then resolve only required history references from the captured publication.
 See [snapshots and retry](thread-package-background-store-replay.md#snapshots-and-retry).
@@ -150,8 +151,44 @@ original directory before removal; after redirection it leaves the original
 temporary in place rather than removing an outside file with the same leaf.
 These checks do not provide descriptor-relative atomicity. The transaction
 neither writes `thread-certificate.json` nor compacts or removes old generations.
-Scheduling, change tracking and final Store checkpoint certification belong to
-[#3501](https://github.com/pyrycode/pyrycode/issues/3501).
+The worker coordinates that separate scalar certificate with final certification.
+
+### Worker checkpoint cadence and retained changes
+
+After complete initial replay, each worker arms a 30-second checkpoint timer.
+At each deadline it persists a consumed version different from its last
+successful checkpoint, including version-only progress and a change followed
+by silence. Unchanged versions, including initial version zero, cause no
+periodic write. Publications never reset an armed deadline. After processing
+each deadline the worker starts another interval, so failures retry at the
+next interval without immediate retries or catch-up bursts. Periodic checkpoints
+remain dirty. Each failed attempt emits one fixed `thread checkpoint failed`
+warning without raw errors, paths or content; usability and later folding and
+publication continue.
+
+`workerCheckpoint.commit` exports the complete detached state and inventory at
+a completed feed/capture boundary. It compares encoded internal records with
+the last successful export and retains pending IDs until durable success.
+This is independent of `publicationCapture.capture` clearing its affected set:
+multiple publications and failed attempts cannot lose the latest hidden,
+unresolved, suppressed or recipe-only records. Public revisions alone cannot
+detect these changes. The first checkpoint of each full-refold worker writes
+the entire inventory into a fresh generation, even if a previous worker left
+valid state. Subsequent attempts reconcile surviving named state before
+appending pending latest records; a renamed state surviving failed directory
+sync must not be rolled back to an in-memory acknowledgement.
+
+Only item-record appends are incremental. Export, comparison and validation
+may inspect every row, and `thread-index-state.json` is replaced in full,
+including its complete manifest and private maps. Successful checkpoints log
+`live_record_bytes` for the latest inventory and `committed_record_bytes` for
+the generation's committed records, both including frame headers;
+`state_rewrite_bytes` reports the complete state replacement separately.
+`TestStoreCheckpointBytes` applies the same recipe-only change to small and
+large inventories: index append bytes stay equal while state replacement
+bytes grow. `TestStoreCheckpointPending` reads persisted boundaries through
+`Store.readCheckpoint` and uses `testResumeProof` to check saved-state and
+suffix-feed equivalence across publications and failed attempts.
 
 ### Store replay and public touches
 
@@ -159,7 +196,8 @@ Scheduling, change tracking and final Store checkpoint certification belong to
 readable history with bounded `ForwardReader.Walk` chunks. Eligible metadata
 retains its epoch only if replay reaches exactly V and both the consumed entry's
 checksum and reconstructed last-shown watermark match the record. Replay continues through the surviving
-readable bound before usability; cached fields never seed the fold.
+readable bound before usability; cached fields never seed the fold. Store
+checkpoint loading and history-bound validation remain with #3337.
 **Visible items are insufficient continuation state:** `Fold.Items` omits
 unresolved children, pending reports and private joins. Full replay restores
 unfinished text, queued sends and that hidden evidence before usability. The
@@ -214,13 +252,15 @@ invalid fields, mismatches or V beyond surviving history require a new epoch.
 Other conversations' recovery and retirement cannot authorize or invalidate it.
 Folding semantics changes must increment `foldingRules`.
 
-Before replay, every successful load/retry replaces the certificate with
-`Clean: false`, using the candidate epoch/progress or a fresh epoch at zero.
-The temporary file's sync/close, atomic replacement and containing-directory
-sync must all succeed before usability. Otherwise a machine crash could restore
-an older clean claim over lost published history. Replay can still reject the
-candidate and rotate its epoch in memory; the disk record remains dirty until
-retirement. Dirty-write failure withholds usability.
+Before replay, every successful load/retry replaces the scalar certificate with
+`Clean: false`, using the candidate epoch/progress or a fresh epoch at zero,
+then durably marks any existing readable checkpoint state dirty without changing
+its saved fold boundary. Temporary-file sync/close, atomic replacement and
+containing-directory sync must succeed on both surfaces before usability.
+Otherwise a machine crash could restore an older clean claim over lost
+published history. Replay can still reject the candidate and rotate its epoch
+in memory; disk evidence remains dirty until joined retirement. Failure on
+either dirty-marking surface withholds usability.
 
 **Version bounds and item equality cannot detect replaced tail entries.** A lost
 unsupported entry can be replaced at the same ID without changing folded items.
@@ -255,10 +295,12 @@ view. History/certificate I/O, containment and unsafe-leaf failures leave
 creates a new reader and fold. Lifecycle persistence failures retain
 `ErrPersistence`.
 
-Publication, active-to-idle transitions and elapsed intervals write no
-certificates. There is no checkpoint timer or shared run/coordinator/recovery
-marker state. Each new successful load/retry writes one dirty certificate; each
-successful joined retirement writes one clean certificate, even at unchanged V.
+Publication and active-to-idle transitions perform no persistence. The periodic
+timer writes dirty checkpoint state for changed versions but does not rewrite
+the scalar certificate. There is no shared run/coordinator/recovery marker
+state. Each new successful load/retry writes one dirty scalar certificate; each
+successful joined retirement writes one clean scalar certificate after its
+final checkpoint, even at unchanged V or empty version zero.
 Tail items, consumed version, `LastShownVersion` and change notifications publish
 together in memory. Publication capture shares unchanged immutable item/content
 storage and compares only final affected public rows. Retirement evidence pairs
@@ -298,8 +340,13 @@ files, and syncs the directory after cleanup. Cleanup failure withholds usabilit
 Legacy-only startup rotates once; the next clean reopen retains the new epoch.
 Rollback to pyry 0.39 finds no legacy cache, refolds history and mints a new epoch.
 
-`Unload` marks retirement, cancels/joins the worker and writes `Clean: true` at
-its last complete progress, unregistering tailing and releasing private state.
+`Unload` marks retirement and cancels/joins the worker, unregistering tailing
+and stopping its timer before final persistence. It commits the last fully
+consumed eligible fold boundary through history/index/state durability, then
+writes the scalar certificate, certifying both surfaces `Clean: true` before
+releasing private state. Final transaction or scalar-certificate failure
+invalidates both clean claims with contained best-effort removal and directory
+sync, and returns `ErrPersistence`; failed invalidation never authorizes trust.
 A successful unload stays clean even if the store later stops uncleanly with
 another conversation loaded. `Shutdown() error` closes admission and joins all
 remaining workers, certifying them independently. It preserves already-unloaded
@@ -311,7 +358,7 @@ parent-context cancellation cannot authorize clean certification, even when
 racing retirement. Repeated/concurrent lifecycle calls preserve their results.
 See [isolation and lifecycle](thread-package-background-store-lifecycle.md#isolation-and-lifecycle).
 
-[ADR 045](../decisions/045-thread-index-over-history.md) proposes resumable private
+[ADR 045](../decisions/045-thread-index-over-history.md) defines resumable private
 fold checkpoints and a persistent index. Reference folds now provide the in-memory
 `Fold.ExportCheckpoint` API: detached, separately JSON-encodable `CheckpointState`
 and creation-ordered `[]CheckpointItem` metadata/recipes, including hidden,
@@ -321,12 +368,12 @@ See the [export contract](thread-package-main-thread-folding-validation-checkpoi
 for schema/rules versions, completeness and shared identities, and the
 [encoded-size measurements](thread-package-main-thread-folding-validation-retention.md#continuation-retention-and-accounting). `ImportCheckpoint`
 restores in-memory reference folds; synthetic and committed-recording proofs
-cover resume equivalence. The package reader and durable transaction add persisted round-trip and
-interruption/retry proofs. Scheduling/final Store certification (#3501) and Store
-checkpoint loading/history-bound validation (#3337) remain follow-ups under #3336. Store loading still replays from entry 1; the
-existing scalar certificates neither resume folding nor implement the proposed
-checkpoint schedule. Callers still finish
-producer draining and tail catch-up before `Store.Shutdown`.
+cover resume equivalence. The package reader, durable transaction and worker
+cadence add persisted round-trip, interruption/retry and final-certification
+proofs. Store checkpoint loading/history-bound validation remains a follow-up
+in #3337 under #3336. Store loading still replays from entry 1; scalar
+certificates do not resume folding. Callers still finish producer draining and
+tail catch-up before `Store.Shutdown`.
 
 ### Catch-up continuity
 
