@@ -6,6 +6,11 @@ import "time"
 // live state (ADR 042). It is vocabulary only, not yet advertised or negotiated.
 const CapabilityThread = "thread"
 
+// CapabilityThreadExpansion is declared ahead of handlers and is not advertised.
+// Negotiation requires both reads wired to the real Store with normal thread and
+// interactive authorization. Vocabulary alone never enables expansion support.
+const CapabilityThreadExpansion = "thread_expansion"
+
 // CapabilityInteractive is the wire vocabulary string a phone advertises in
 // its hello.payload.capabilities to opt into the v2 interactive event
 // stream, and that the daemon echoes in hello_ack.payload.capabilities when
