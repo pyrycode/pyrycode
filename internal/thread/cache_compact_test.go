@@ -114,6 +114,7 @@ func TestStoreCacheLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	fields, _, path := testCacheJSON(t, s)
+	testScalarMigration(t, s)
 	fields["Schema"] = json.RawMessage(`0`)
 	fields["Items"], _ = json.Marshal(first.Items)
 	delete(fields, "Checksum")
@@ -213,6 +214,7 @@ func TestStoreCacheCompactRejection(t *testing.T) {
 				t.Fatal(err)
 			}
 			fields, _, path := testCacheJSON(t, s)
+			testScalarMigration(t, s)
 			change(fields)
 			raw, err := json.Marshal(fields)
 			if err != nil {
@@ -242,6 +244,7 @@ func TestStoreCacheMissingEmptyEvidence(t *testing.T) {
 					t.Fatal(err)
 				}
 				fields, _, path := testCacheJSON(t, s)
+				testScalarMigration(t, s)
 				if null {
 					fields[key] = json.RawMessage(`null`)
 				} else {
@@ -367,6 +370,7 @@ func TestStoreCacheFinalEvidence(t *testing.T) {
 			}
 			fields, _, path := testCacheJSON(t, s)
 			fields[field] = json.RawMessage(`0`)
+			testScalarMigration(t, s)
 			if field == "Checksum" {
 				fields[field] = json.RawMessage(`"` + strings.Repeat("00", 32) + `"`)
 			}
@@ -386,5 +390,13 @@ func TestStoreCacheFinalEvidence(t *testing.T) {
 				t.Fatal("modified evidence retained epoch")
 			}
 		})
+	}
+}
+
+// Scalar-only evidence requires migration even when its scalar values are valid.
+func testScalarMigration(t *testing.T, s *Store) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(mustCheckpointDir(t, s), checkpointStateName)); err != nil {
+		t.Fatal(err)
 	}
 }

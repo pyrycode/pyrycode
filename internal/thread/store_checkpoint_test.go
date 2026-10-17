@@ -218,8 +218,20 @@ func TestStoreCheckpointDirty(t *testing.T) {
 				}
 				once.Do(func() { close(release) })
 				testStoreWait(t, next, testStoreA, StateUnavailable, 0)
-				if err := next.Unload(testStoreA); err != ErrPersistence {
-					t.Fatal("dirty failure lost", err)
+				next.mu.Lock()
+				done := next.workers[testStoreA].done
+				next.mu.Unlock()
+				<-done
+				if next.workers[testStoreA].err != ErrPersistence {
+					t.Fatal("dirty failure lost")
+				}
+				next.replace, next.syncDir = os.Rename, syncCacheDir
+				if err := next.Retry(context.Background(), testStoreA); err != nil {
+					t.Fatal(err)
+				}
+				testStoreWait(t, next, testStoreA, StateUsable, 0)
+				if err := next.Unload(testStoreA); err != nil {
+					t.Fatal("repaired retry", err)
 				}
 			})
 		}
@@ -426,8 +438,8 @@ func TestStoreCheckpointFinal(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, saved, err = s.readCheckpoint(testStoreA, source)
-			if err != nil || !saved.Certificate.Clean || saved.Generation == generation {
-				t.Fatal("full-refold worker reused old generation", err)
+			if err != nil || !saved.Certificate.Clean || saved.Generation != generation {
+				t.Fatal("resumed worker changed generation", err)
 			}
 		})
 	}

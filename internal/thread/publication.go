@@ -17,6 +17,26 @@ type publicationCapture struct {
 	copied   func(int)
 }
 
+// restore seeds the initial immutable publication from validated metadata.
+// Only subsequent suffix changes need rendering for change classification.
+func (c *publicationCapture) restore(f *Fold) {
+	c.slots, c.version = make([]*Item, len(f.items)), f.version
+	c.recipes, c.active = make(map[uint64]contentRecipe), make(map[int]bool)
+	for i, item := range f.items {
+		if item.Active {
+			c.active[i] = true
+		}
+		if !f.publicVisible[item.ID] {
+			continue
+		}
+		if text := f.texts[i]; text != nil {
+			text.base.shared, text.derived.shared = true, true
+		}
+		c.slots[i] = &item
+		c.recipes[item.ID] = f.recipes[item.ID]
+	}
+}
+
 func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 	indexes := f.captureAffected
 	c.affected = append(c.affected[:0], indexes...)

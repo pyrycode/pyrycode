@@ -119,8 +119,8 @@ func (s *Store) Load(ctx context.Context, id conversations.ConversationID) error
 	return s.start(ctx, id, false)
 }
 
-// Retry replaces an unavailable view with fresh replay, discarding all private
-// reader/fold progress. It never replaces a rebuilding or usable worker.
+// Retry replaces an unavailable view using validated disk state, discarding
+// private reader/fold progress. It never replaces a rebuilding or usable worker.
 func (s *Store) Retry(ctx context.Context, id conversations.ConversationID) error {
 	return s.start(ctx, id, true)
 }
@@ -227,12 +227,13 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		result = ErrPersistence
 		return
 	}
-	candidate, err := s.recoveryCandidate(id, bound)
+	source := newRecentSource(func(ids []uint64) ([]history.Entry, error) { return s.lookup(ctx, id, ids) })
+	checkpoint, dirty, err := s.resumeCheckpoint(ctx, id, bound, source)
 	if err != nil {
 		result = err
 		return
 	}
-	dirty := candidate
+	checkpoint.parent = w.parent
 	if dirty.Epoch == "" {
 		dirty.Epoch, err = randomToken()
 		if err != nil {
@@ -249,6 +250,12 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		result = err
 		return
 	}
+	if !checkpoint.writer.fullRefold {
+		if err := checkpoint.writer.reconcileResume(); err != nil {
+			result = err
+			return
+		}
+	}
 	if err := s.removeLegacy(id); err != nil {
 		result = err
 		return
@@ -257,11 +264,28 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	if err != nil {
 		return
 	}
-	source := newRecentSource(func(ids []uint64) ([]history.Entry, error) { return s.lookup(ctx, id, ids) })
-	fold := newReferenceFold(string(id), source)
-	checkpoint = &workerCheckpoint{writer: checkpointWriter{s: s, id: id, source: source, fullRefold: true, step: s.checkpointStep}, parent: w.parent, fold: fold, pending: make(map[uint64]bool)}
+	fold := checkpoint.fold
+	if _, production := reader.(*history.ForwardReader); production {
+		reader, err = s.history.Forward(id, fold.Version())
+		if err != nil {
+			return
+		}
+	}
 	fold.captureSet = make(map[int]struct{})
+	if !checkpoint.writer.fullRefold {
+		capture.restore(fold)
+	}
+	checksum = dirty.Checksum
+	resumeVersion := fold.Version()
 	feed := func(entries []history.Entry) error {
+		// Wrapped fixture readers retain the original hook signature. Concrete
+		// production readers are positioned before reading any suffix segments.
+		for len(entries) > 0 && entries[0].ID <= resumeVersion {
+			entries = entries[1:]
+		}
+		if len(entries) == 0 {
+			return nil
+		}
 		if s.beforeFold != nil {
 			if err := s.beforeFold(ctx, id); err != nil {
 				return err
@@ -280,25 +304,8 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		return nil
 	}
 	epoch := dirty.Epoch
-	if candidate.Epoch != "" {
-		if err := reader.Walk(ctx, candidate.Version, feed); err != nil {
-			return
-		}
-		if fold.Version() == candidate.Version && checksum == candidate.Checksum && fold.lastShown == candidate.LastShownVersion {
-			epoch = candidate.Epoch
-		} else {
-			epoch = ""
-		}
-	}
 	if err := reader.Walk(ctx, bound, feed); err != nil || fold.Version() != bound || ctx.Err() != nil {
 		return
-	}
-	if epoch == "" {
-		epoch, err = randomToken()
-		if err != nil {
-			result = err
-			return
-		}
 	}
 	publish := func() error {
 		if err := ctx.Err(); err != nil {

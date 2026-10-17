@@ -95,3 +95,15 @@ Pending documentation stage:
 - Threat model: history remains authoritative; no cache-only availability or protocol changes.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-17
+
+## Revisions
+- 2026-10-17: Read-accounting proof uses an external history test and a test-only
+  counter adapter to exercise the real Store without exporting instrumentation
+  in production. It separates Forward discovery/suffix, Page, checksum lookup,
+  load and requested rendering. Existing scalar rejection tests explicitly remove
+  checkpoint state to retain their scalar-only migration premise. Fixture-reader
+  filtering uses the immutable saved boundary, so later duplicates still fail.
+- 2026-10-17: Seed restored publication slots, recipes and activity directly from
+  validated metadata rather than rendering every restored row just to classify
+  unused initial changes. Only suffix candidates require change classification.
+  Load timing ends at first usable Status; requested rendering is measured separately.
