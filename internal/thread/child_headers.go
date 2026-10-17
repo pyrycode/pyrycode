@@ -58,8 +58,12 @@ func childHeaderText(s string) string {
 	return string(runes)
 }
 
+// refreshHeader removes the stored row, whose header keys rootTouches, because
+// callers may pass the row with a replacement header already applied.
 func (q *queryIndex) refreshHeader(row queryRow, version uint64) {
-	q.membership(row, true)
+	if stored, ok := q.lookup(row.item.ID, true); ok {
+		q.membership(stored, true)
+	}
 	count := uint64(q.childRankWork(row.item.ID, ^uint64(0), ^uint64(0), true, true) - q.childRankWork(row.item.ID, 0, 0, false, true))
 	row.header.childCount, row.header.countKnown = count, count < 1<<53
 	row.header.subtreeVersion, row.header.freshKnown = version, version < 1<<53

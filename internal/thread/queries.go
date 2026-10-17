@@ -39,6 +39,7 @@ type queryIndex struct {
 	children                 *queryTree
 	roots, activeRoots       *queryTree
 	activeBranches           *queryTree
+	rootTouches              *queryTree // roots keyed by header subtreeVersion: last compact change
 	work                     func(bool)
 	copied                   func(int) // copied pointers/index positions, separate from semantic visits
 	invalidTouches           int
@@ -46,6 +47,9 @@ type queryIndex struct {
 	unprovenThrough          uint64
 	suppressed               uint64
 	complete                 bool
+	// Compact evidence: root touches are exact after compactFrom, and no row
+	// left the root set after compactLost. Complete evidence never substitutes.
+	compactFrom, compactLost uint64
 }
 
 func newQueryIndex(items []Item, work func(bool)) *queryIndex {

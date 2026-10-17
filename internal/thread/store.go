@@ -361,6 +361,7 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 			}
 			index.refreshHeader(row, fold.version)
 		}
+		index.compactFrom = fold.version
 	} else {
 		index = index.advance(items, capture.affected, fold, s.queryWork, s.queryCopies, capture.headers)
 	}

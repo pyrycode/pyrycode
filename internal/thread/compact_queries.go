@@ -19,8 +19,12 @@ type CompactQueryResult struct {
 	Headers                              []ChildSummary
 	LowerOrder, UpperOrder, Continuation uint64
 	OlderExists                          bool
+	FromVersion                          uint64 // exclusive interval bound for nonzero catch-up and live progress
+	ResetRequired                        bool   // no rows or bounds; reinitialize with a version-zero window
 	Err                                  error
 }
+
+const compactProjection = "compact-v1"
 
 // CompactNewestWindow reads ordered public roots and all roots with public
 // subtree activity. Callers authorize id; this method never loads or waits.
@@ -55,7 +59,7 @@ func (s *Store) compactQuery(ctx context.Context, id conversations.ConversationI
 	if newest {
 		upper = snap.Version + 1
 	}
-	p := CompactQueryResult{State: StateUsable, ConversationID: id, Projection: "compact-v1", Epoch: snap.Epoch, Version: snap.Version, UpperOrder: upper}
+	p := CompactQueryResult{State: StateUsable, ConversationID: id, Projection: compactProjection, Epoch: snap.Epoch, Version: snap.Version, UpperOrder: upper}
 	end := q.rank(q.roots, upper)
 	start := max(0, end-min(limit, MaxQueryItems))
 	if start < end {
@@ -63,8 +67,23 @@ func (s *Store) compactQuery(ctx context.Context, id conversations.ConversationI
 		start = q.rank(q.roots, p.LowerOrder)
 		p.Continuation, p.OlderExists = p.LowerOrder, start > 0
 	}
+	add := compactCollector(&p)
+	if err := q.visit(ctx, q.roots, start, end, add); err != nil {
+		return CompactQueryResult{}, err
+	}
+	if newest {
+		if err := q.visit(ctx, q.activeRoots, 0, treeSize(q.activeRoots), add); err != nil {
+			return CompactQueryResult{}, err
+		}
+	}
+	return s.compactRender(ctx, id, q, p)
+}
+
+// compactCollector adds each root once: tool/agent rows as prepared headers,
+// other rows as messages for compactRender. No body or descendant is read.
+func compactCollector(p *CompactQueryResult) func(queryRow) {
 	seen := make(map[uint64]bool)
-	add := func(row queryRow) {
+	return func(row queryRow) {
 		i := row.item
 		if seen[i.ID] {
 			return
@@ -78,14 +97,10 @@ func (s *Store) compactQuery(ctx context.Context, id conversations.ConversationI
 			p.Items = append(p.Items, *i)
 		}
 	}
-	if err := q.visit(ctx, q.roots, start, end, add); err != nil {
-		return CompactQueryResult{}, err
-	}
-	if newest {
-		if err := q.visit(ctx, q.activeRoots, 0, treeSize(q.activeRoots), add); err != nil {
-			return CompactQueryResult{}, err
-		}
-	}
+}
+
+// compactRender hydrates selected messages; failure discards prepared headers.
+func (s *Store) compactRender(ctx context.Context, id conversations.ConversationID, q *queryIndex, p CompactQueryResult) (CompactQueryResult, error) {
 	var err error
 	p.Items, err = s.renderItems(ctx, id, q, p.Items)
 	if ctx.Err() != nil {
@@ -101,6 +116,9 @@ func (q *queryIndex) compactMembership(row, value queryRow) {
 	i := row.item
 	if i.Parent == 0 && i.Order != 0 {
 		q.roots = q.treePut(q.roots, i.Order, i.ID, value)
+	}
+	if i.Parent == 0 {
+		q.rootTouches = q.treePut(q.rootTouches, row.header.subtreeVersion, i.ID, value)
 	}
 	if row.activeBranch {
 		q.activeBranches = q.treePutGroup(q.activeBranches, i.Parent, i.Order, i.ID, value)
