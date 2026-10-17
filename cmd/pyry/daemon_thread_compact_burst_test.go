@@ -74,7 +74,11 @@ func testCompactBurstWire(t *testing.T, s *threadShadow) (*switchWire, *relay.V2
 			if time.Since(started) > 3*time.Second {
 				t.Fatalf("live channels stalled behind closed parents: %v", seen)
 			}
-			for _, f := range testCompactRead(t, w, mgr, "phone", "legacy") {
+			frames := testCompactRead(t, w, mgr, "phone", "legacy")
+			if time.Since(started) > 3*time.Second {
+				t.Fatalf("live channels stalled behind closed parents: %v", seen)
+			}
+			for _, f := range frames {
 				if f.peer != "phone" || f.env.SessionStateCleared {
 					continue
 				}

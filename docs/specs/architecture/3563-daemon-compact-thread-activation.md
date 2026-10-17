@@ -128,3 +128,7 @@ Pending for the documentation stage:
 **Open questions resolved.** All formerly pending AC3/AC4 evidence is implemented in this stage. Only the documentation handoff and dispatcher-owned complete gates remain later-stage work.
 
 **Sizing.** Rework: approximately 700 written lines including replaced lines, no new exported type/interface, one snapshot consumer update, four findings and no new reject branch. No overlapping feature branch touches the edited existing production/test files.
+
+### 2026-10-17: verifier findings on `accd4cb1` — lint and latency proof
+
+Discard the unused fixture item snapshot in `TestDaemonThreadCompactWire` and declare `items` only at the later Store snapshot, removing SA4006. In `testCompactBurstWire`, check the three-second elapsed-time bound immediately after each wire read as well as before it, so a late batch containing every required event cannot pass. Production design and security boundaries are unchanged. Validate with staticcheck on `cmd/pyry` and focused race-enabled `TestDaemonThreadCompactWire` / `TestDaemonThreadCompactLiveChannels` on Linux; complete gates remain dispatcher-owned.

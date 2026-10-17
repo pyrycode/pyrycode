@@ -212,11 +212,11 @@ func TestDaemonThreadCompactWire(t *testing.T) {
 		burst                      int
 	}{{"small", 5, 3, 64, 3}, {"large", 8333, 40, 4096, 25}} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, store, items := testDaemonExpansionFixture(t, tc.children, tc.descendants, tc.big)
+			s, store, _ := testDaemonExpansionFixture(t, tc.children, tc.descendants, tc.big)
 			testDaemonThreadAppend(t, s.history, "tool_result", fmt.Sprintf(`{"turn_id":"t","tool_use_id":"d0","output":%q,"is_error":true}`, strings.Repeat("unopened-error", tc.big/14+1)[:tc.big]))
 			v := testDaemonThreadAppend(t, s.history, "message", `{"role":"user","text":"public-top-level"}`)
 			testShadowWait(t, func() bool { return store.Status(testConvID).Version == v })
-			items = store.Snapshot(testConvID).Items
+			items := store.Snapshot(testConvID).Items
 			w, mgr, notify := testCompactBurstWire(t, s)
 			w.open("phone", false, protocol.CapabilityThread, protocol.CapabilityThreadExpansion, protocol.CapabilityThreadCompact)
 			w.open("legacy", false, protocol.CapabilityThread)
