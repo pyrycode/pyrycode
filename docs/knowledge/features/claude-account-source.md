@@ -60,6 +60,7 @@ Hermetic fakes verify argv, bounded reads and disclosure behavior; they do not e
 ## Related
 
 - [protocol-package-types-claude-account-payloads.md](protocol-package-types-claude-account-payloads.md) — the `request_claude_account` / `claude_account` wire pair (#2838), answered by `handlers.RequestClaudeAccount` (#2839); its internal-vocabulary-vs-wire-vocabulary split names this file's `not-configured`/empty-`Kind` strings explicitly.
+- [claude-usage-reading.md](claude-usage-reading.md) — the nearest sibling (#3575): a different account-wide, per-daemon-instance reading, answered by the same authenticated paired-client map dispatch with no conversation lookup and no `interactive` gate, stored in a mutex-guarded daemon-singleton rather than resolved from a file/1Password/keychain source.
 - [streamsup-package.md § Per-instance Claude account token](streamsup-package.md#per-instance-claude-account-token-2823-2824) — `Config.AccountTokenProvider`, the per-attempt read contract #2823 shipped (ten-second deadline, LF/CRLF trim, env replacement) that this ticket is the first production wirer of.
 - [streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md) — the factory closure this field is installed in.
 - [control-plane.md](control-plane.md) — `sessions.new`/`channel.new`, the two control verbs the distinction above turns on.

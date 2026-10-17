@@ -161,6 +161,34 @@ drain divergence) could not assert at a phone-side frame before #1133 landed; `r
 
 `Config.AccountTokenProvider`, when set, is re-read for every launch attempt — first spawns, crash-loop retries and restarts alike — and its token replaces every inherited `CLAUDE_CODE_OAUTH_TOKEN` entry in that attempt's child environment; a rejected read refuses the launch rather than falling back to an earlier token. `cmd/pyry` is the only caller that sets it, and only on the Claude runner factory (`newStreamRunnerFactory`'s `scfg.AccountTokenProvider = approval.account`, above) — Codex children and the daemon's own environment never see it. See [Claude account source](claude-account-source.md) for per-instance source selection, the file reader and the accessor `cmd/pyry` builds around this field.
 
+## Usage allowance windows (#3575)
+
+`SetUsageWindowsHandler` installs a handler called once per
+`rate_limit_event` line that carries at least one of claude's
+`unifiedWindows.five_hour`/`.seven_day` windows, benign or not, with a `nil`
+argument for whichever window that line omitted. `emitRateLimit` calls the
+decode behind it, `readUsageWindows`, first and unconditionally, then
+continues exactly as before — the two decodes are intentionally
+independent (`readUsageWindows` has its own target, `usageWindowsLine`), so
+a malformed `unifiedWindows` object cannot suppress a `rate_limited` that
+the existing whole-line decode would otherwise emit. `cmd/pyry` is the only
+caller, on the Claude runner factory alone (`newStreamRunnerFactory`'s
+`parser.SetUsageWindowsHandler(approval.usage.record)`) — Codex children
+never see it. See [Claude usage allowance
+reading](claude-usage-reading.md) for the daemon-wide store this feeds and
+why the decode has to stay separate from `rateLimitEventLine`.
+
+**Naming trap: a `_windows.go`/`_linux.go`/`_darwin.go`/`_amd64.go` (etc.)
+file suffix is a GOOS/GOARCH build constraint, not just a name.** The file
+behind this feature was planned as `parser_usage_windows.go`; Go's build
+system reads the `_windows` suffix as "compile on Windows only," which would
+have silently excluded the file from every build on this project's two
+supported platforms, Linux and macOS. It shipped as
+`parser_usage_reading.go` instead. Nothing short of noticing the file never
+builds flags this ahead of time — check a new filename's last
+underscore-separated token against `go help buildconstraint`'s recognized
+GOOS/GOARCH values before naming a non-platform-specific file.
+
 ## Test fake for this wire — fakeclaude stream-json mode (#1140)
 
 `internal/e2e/internal/fakeclaude`'s `PYRY_FAKE_CLAUDE_STREAM_JSON` mode
