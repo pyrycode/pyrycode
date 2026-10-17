@@ -313,6 +313,95 @@ See the
 [Store verification guidance](thread-package-background-store-verification.md#store-verification)
 for independent membership oracles and capture barriers.
 
+### Compact root windows and pages
+
+`Store.CompactNewestWindow(ctx, conversationID, limit) (CompactQueryResult, error)`
+and `Store.CompactHistoryPage(ctx, conversationID, upperOrder, limit)
+(CompactQueryResult, error)` read public roots (`Parent == 0`) only, mirroring
+`NewestWindow`/`HistoryPage`'s range and tie rules but never selecting or
+rendering descendants or tool/agent bodies. Callers must already be authorized;
+these reads add no loading or recovery wait, validate canonical IDs
+(`history.ErrInvalidID`) and positive limits (`ErrInvalidLimit`), and clamp to
+`MaxQueryItems`. `CompactQueryResult` carries `State`, `ConversationID`,
+`Projection` (always `"compact-v1"`), `Epoch`, consumed `Version`, `Items`,
+`Headers`, `LowerOrder`/`UpperOrder`/`Continuation`, `OlderExists` and `Err`;
+only `StateUsable` carries identity, rows and bounds.
+
+Membership matches the other bounded queries' `Fold.Items` rule: hidden
+(`Shown == false`) and dropped roots remain public; unresolved private
+children and claimed standalone delivery rows are absent. A root whose own
+`Kind` is `tool_call` or `agent` never returns its `Item`; it returns a
+detached `ChildSummary` instead, built the same way as `ChildPage`'s headers
+(bounded `Headline`/known-empty `ErrorSummary`, `DetailOmitted: true`, no
+`Content`, body or descendant identities). Every other root returns its full,
+unchanged `Item`. Ordered selection, bounds and ties use the same algorithm as
+`NewestWindow`/`HistoryPage`, but count only roots with nonzero `Order`:
+`CompactNewestWindow`'s exclusive upper bound is the captured `Version + 1`;
+`CompactHistoryPage` uses the supplied exclusive upper order. Every ordered
+root in `[LowerOrder, UpperOrder)` is returned, including all lower-bound
+ties; `Continuation == LowerOrder`, and `OlderExists` is true exactly when an
+ordered root exists strictly below it. An empty ordered range still carries
+the requested `UpperOrder` with zero `LowerOrder`/`Continuation` and false
+`OlderExists`.
+
+Only `CompactNewestWindow` adds extras, and only root extras: every public
+root that is itself active or has an active public descendant at any depth,
+including order-zero roots excluded from the ordered range above. A root's
+own `Active` value is returned unchanged regardless of why it qualified.
+`CompactHistoryPage` never adds extras. Extras are deduplicated against the
+ordered selection by ID and never change the limit, bounds or continuation.
+An ordered range that selects nothing can still return extras, so a newest
+window is never empty solely because no root has a nonzero order.
+
+Root activity is indexed, not walked per request. `queryIndex` keeps `roots`
+(ordered, nonzero-order public roots), `activeRoots` (public roots whose
+subtree has activity) and `activeBranches` (a parent-grouped tree used to rank
+a subtree's active-member count without enumerating it). `compactMembership`
+maintains these alongside the existing `ordered`/`active`/`children` trees.
+`refreshRootActivity` runs after each publish: it visits only rows named in
+the affected set, walks each one's ancestor chain once, and recomputes
+`activeBranch` bottom-up from `groupRank` differences over `activeBranches` —
+a parent is revisited only after all of its pending affected children have
+been resolved, so no unaffected branch and no affected branch's unaffected
+descendants are rescanned. `TestCompactPreparationWork` checks this stays
+roughly proportional to the affected set, not total inventory: incremental
+semantic visits grew less than 3x for a 64x larger, equally-affected store.
+`TestCompactIncremental` covers activation, deactivation, reparenting (both
+directions) and suppression/un-suppression each refreshing exactly the
+affected root's freshness while an unrelated root's stays unchanged, against
+an independent `Fold`-rebuilt oracle.
+
+Request-time work does not grow with hidden inventory either: selecting a
+root extra reads indexed membership, not its descendants, so a root with
+thousands of inactive/hidden descendants costs the same as one with none.
+`TestCompactBoundedWork` holds request visits near-constant (six, in one
+run) from 124 to 8,188 active hidden descendants and asserts exactly one
+history lookup — for the one non-`tool_call`/`agent` root actually selected.
+A root's own large body is never a reason to hydrate it: an `agent` root with
+a multi-kilobyte secret-bearing body is returned only as a header in the same
+run, so growing or sensitive tool/agent content never reaches `renderItems`.
+
+Lifecycle, capture and cancellation behavior are identical to the other
+bounded queries: an already-cancelled context returns its error before ID or
+limit validation; nonusable captures return their lifecycle state with no
+rows or bounds; a required rendering failure collapses to generic
+`StateUnavailable`/`ErrUnavailable` with no partial headers or items;
+cancellation during selection or rendering discards the whole result without
+retiring a healthy worker. `TestCompactCapture` confirms an in-flight compact
+read keeps its captured publication's exact result across a newer publish,
+an unload/reload replacement and a concurrent unrelated-conversation read,
+and that an old failed reader cannot retire the replacement worker. Returned
+`Items`/`Headers` are freshly built per call: mutating a caller's copy (as
+`TestCompactSelection` and `TestCompactCapture` both do) cannot reach the
+capture or another caller's result.
+
+Catch-up/live progress over this projection is [#3569](https://github.com/pyrycode/pyrycode/issues/3569);
+production relay/daemon installation is [#3562](https://github.com/pyrycode/pyrycode/issues/3562)
+and [#3563](https://github.com/pyrycode/pyrycode/issues/3563). A compact
+window or page certifies only its own root range for one publication — never
+complete-thread coverage, and never that a tool/agent root's descendants or
+body were considered, let alone covered.
+
 ### Revision-scoped tool bodies
 
 `Store.ToolBody(ctx, conversationID, expectedEpoch, itemID, expectedRev)
