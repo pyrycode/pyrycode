@@ -353,6 +353,7 @@ func TestCapability_Constants_MatchSpec(t *testing.T) {
 		"CapabilityModelList":          CapabilityModelList,
 		"CapabilityContextUsage":       CapabilityContextUsage,
 		"CapabilityStopBackgroundTask": CapabilityStopBackgroundTask,
+		"CapabilityClaudeUsage":        CapabilityClaudeUsage,
 	}
 	want := map[string]string{
 		"CapabilityHostedAppsV1":       "hosted_apps_v1",
@@ -362,6 +363,7 @@ func TestCapability_Constants_MatchSpec(t *testing.T) {
 		"CapabilityModelList":          "model_list",
 		"CapabilityContextUsage":       "context_usage",
 		"CapabilityStopBackgroundTask": "stop_background_task",
+		"CapabilityClaudeUsage":        "claude_usage",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("capability constant count: got %d, want %d", len(got), len(want))

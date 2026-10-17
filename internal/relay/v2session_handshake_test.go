@@ -658,6 +658,10 @@ func TestNegotiateCapabilities(t *testing.T) {
 		{"all five granted, advertised in reverse", []string{protocol.CapabilityMultiAgent, protocol.CapabilityContextUsage, protocol.CapabilityModelList, protocol.CapabilityQuestion, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent}},
 		{"stop background task granted", []string{"stop_background_task"}, []string{"stop_background_task"}},
 		{"all six reversed with duplicate and unknown", []string{"stop_background_task", protocol.CapabilityMultiAgent, protocol.CapabilityContextUsage, protocol.CapabilityModelList, protocol.CapabilityQuestion, protocol.CapabilityInteractive, "stop_background_task", "snapshot-unknown"}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent, "stop_background_task"}},
+		// Detection-only, appended last. Advertised as a literal so a renamed
+		// constant cannot keep this row green.
+		{"claude usage granted", []string{"claude_usage"}, []string{"claude_usage"}},
+		{"claude usage after every other member", []string{"claude_usage", "stop_background_task", protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive, "stop_background_task", "claude_usage"}},
 	}
 
 	for _, tc := range tests {

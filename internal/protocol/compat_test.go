@@ -20,7 +20,7 @@ func TestIsKnownAppType(t *testing.T) {
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
 		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
-		TypeRequestClaudeAccount,
+		TypeRequestClaudeAccount, TypeRequestClaudeUsage,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRegisterPushToken,
@@ -43,6 +43,7 @@ func TestIsKnownAppType(t *testing.T) {
 		{"empty-type-rejected", "", false, ErrUnknownType},
 		{"host_system_prompt-rejected", TypeHostSystemPrompt, false, ErrUnknownType},
 		{"claude_account-rejected", TypeClaudeAccount, false, ErrUnknownType},
+		{"claude_usage-rejected", TypeClaudeUsage, false, ErrUnknownType},
 		{"unknown-type-rejected", "frobnicate", false, ErrUnknownType},
 		{"typo-near-known-rejected", "helo", false, ErrUnknownType},
 		{"encrypted-with-known-type", TypeHello, true, ErrUnsupported},
@@ -263,13 +264,13 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
 		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
-		TypeRequestClaudeAccount,
+		TypeRequestClaudeAccount, TypeRequestClaudeUsage,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRenameWorkspace, TypeWorkspaceUpdated,
 		TypeRegisterPushToken,
 	}
-	if got, want := len(all), 32; got != want {
+	if got, want := len(all), 33; got != want {
 		t.Fatalf("type-list length: got %d, want %d", got, want)
 	}
 	if got, want := len(inboundAppTypeSet), len(all); got != want {
@@ -430,6 +431,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeHostSystemPrompt: true,
 	// Claude account source reply is outbound; its request verb is map-dispatched.
 	TypeClaudeAccount: true,
+	// Claude usage reading reply is outbound; its request verb is map-dispatched.
+	TypeClaudeUsage: true,
 	// v2 pairing-mint pair: the request verb (inbound control) and the minted
 	// pairing it is answered with (outbound reply). The lane matters more here
 	// than on any neighbour above — the reply is a bearer credential, so
@@ -475,7 +478,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
 		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
-		TypeRequestClaudeAccount,
+		TypeRequestClaudeAccount, TypeRequestClaudeUsage,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRenameWorkspace, TypeWorkspaceUpdated,
@@ -570,7 +573,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		// v2 conversation system-prompt read pair.
 		TypeRequestSystemPrompt, TypeSystemPrompt,
 		TypeHostSystemPrompt,
-		TypeClaudeAccount,
+		TypeClaudeAccount, TypeClaudeUsage,
 		// v2 pairing-mint pair.
 		TypeMintPairing, TypePairingMinted,
 		// v2 compaction boundary (outbound status, #2237).

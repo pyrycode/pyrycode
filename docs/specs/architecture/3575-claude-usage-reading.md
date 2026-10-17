@@ -92,3 +92,8 @@ Pending for the documentation stage:
 
 - `docs/protocol-mobile.md`: new section next to § Claude account source documenting `request_claude_usage` / `claude_usage`: every field (`state`, `observed_at`, `five_hour`, `seven_day`, each window's `utilization`, `resets_at`); the reading covers the whole account and is held per daemon instance; `observed_at` is when the daemon read claude's line and the reading is never refreshed without a model call; no reading (`state: "none"`) until the first model call after daemon start; the same unvalidated-number and absent-versus-zero warnings as § `rate_limited`, including that `utilization` has been observed as a 0-to-1 fraction.
 - `docs/protocol-mobile.md` § Capability negotiation (v2): add `claude_usage` as detection-only.
+
+## Revisions
+
+- 2026-10-17, build: the streamsup file is `internal/streamsup/parser_usage_reading.go`, not `parser_usage_windows.go`. Go reads a `_windows.go` suffix as a GOOS build constraint, so the planned name compiled out on Linux and macOS. No contract changed.
+- 2026-10-17, build: `CapabilityClaudeUsage` is declared in `internal/protocol/claude_usage.go` beside the frames it detects, as `CapabilityThreadCompact` sits in `thread_compact.go`, rather than in `handshake.go`. Same string and contract.

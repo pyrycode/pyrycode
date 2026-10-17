@@ -136,6 +136,7 @@ var inboundTypes = map[string]string{
 	"TypeRequestHostSystemPrompt": "map-dispatched",
 	"TypeSetHostSystemPrompt":     "map-dispatched",
 	"TypeRequestClaudeAccount":    "map-dispatched",
+	"TypeRequestClaudeUsage":      "map-dispatched",
 	"TypeCreateWorkspaceFolder":   "map-dispatched",
 	"TypeRecentWorkspaces":        "map-dispatched",
 	"TypeRenameWorkspace":         "map-dispatched",
@@ -414,6 +415,9 @@ var excludedTypes = map[string]string{
 
 	// Claude account source status reply (#2838); its request is map-dispatched.
 	"TypeClaudeAccount": "reply",
+
+	// Claude usage reading reply; its request is map-dispatched.
+	"TypeClaudeUsage": "reply",
 
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",

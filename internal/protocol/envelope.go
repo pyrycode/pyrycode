@@ -179,4 +179,7 @@ var inboundAppTypeSet = map[string]bool{
 
 	// Claude account source read verb; the handler is pending #2839.
 	TypeRequestClaudeAccount: true,
+
+	// Claude usage allowance read verb.
+	TypeRequestClaudeUsage: true,
 }

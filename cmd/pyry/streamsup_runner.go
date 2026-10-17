@@ -626,6 +626,8 @@ type streamApprovalConfig struct {
 	// settings composes every Claude launch's --settings value with the
 	// instance's daemon-wide settings file; nil when none is configured.
 	settings streamsup.SettingsComposer
+	// usage receives every Claude session's allowance readings; nil discards them.
+	usage *claudeUsageStore
 }
 
 // approvalSurfaceReport bridges the composition-order gap between runner creation
@@ -830,6 +832,9 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		parser.SetCanUseToolHandler(func(req streamsup.CanUseToolRequest) {
 			handler.handle(req, r.Stdin())
 		})
+		if approval.usage != nil {
+			parser.SetUsageWindowsHandler(approval.usage.record)
+		}
 		scfg.OnChildExit = func() {
 			handler.childExited()
 			onChildExit()
