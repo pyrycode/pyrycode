@@ -416,8 +416,10 @@ var excludedTypes = map[string]string{
 	// Claude account source status reply (#2838); its request is map-dispatched.
 	"TypeClaudeAccount": "reply",
 
-	// Claude usage reading reply; its request is map-dispatched.
-	"TypeClaudeUsage": "reply",
+	// Claude usage reading: the correlated reply to request_claude_usage, and the
+	// same frame pushed uncorrelated to every open conn on each new reading by
+	// claudeUsageEmitterV2. Both, as TypeConversationUpdated records.
+	"TypeClaudeUsage": "reply+push",
 
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",
@@ -854,7 +856,8 @@ const (
 // TestClaudeUsageWiredToTheCompositionRoot pins the links of the usage reading
 // that no behaviour test reaches: runSupervisor mints exactly one claudeUsageStore
 // and hands that same value to the Claude runner config, which feeds it, and to the
-// relay wiring, whose field startRelayV2's request_claude_usage handler reads.
+// relay wiring, whose fields startRelayV2's request_claude_usage handler reads and
+// its push stream subscribes to.
 // TestStreamRunnerFactory_RecordsClaudeUsage proves the factory half. Deleting any
 // link here ships a daemon that answers every request_claude_usage with state none.
 //
@@ -877,9 +880,12 @@ func TestClaudeUsageWiredToTheCompositionRoot(t *testing.T) {
 			"claudeUsage := &claudeUsageStore{}",
 			" usage: claudeUsage",
 			" claudeUsage: claudeUsage",
+			" claudeUsageFeed: claudeUsage",
 		},
 		collapse(formattedGoFunc(t, relayPath, "startRelayV2")): {
 			"protocol.TypeRequestClaudeUsage: handlers.RequestClaudeUsage(w.claudeUsage, logger)",
+			"streamClaudeUsageCleanup := startClaudeUsageStreamV2(ctx, w.claudeUsageFeed, mgr, logger)",
+			"streamClaudeUsageCleanup()",
 		},
 	}
 	for source, fragments := range wants {

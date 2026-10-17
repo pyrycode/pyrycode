@@ -1087,7 +1087,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `request_claude_account` | client → daemon | no | **New in v2** (#2838, handled #2839). Reads the connected daemon's Claude account source through the same authenticated paired-client map dispatch as `request_host_system_prompt`, without a conversation/session or `interactive` gate. Empty payload. See [Claude account source](#claude-account-source). |
 | `claude_account` | daemon → client | no | **New in v2** (#2838, handled #2839), outbound only — `IsKnownAppType` rejects it inbound. Exactly one requester-only reply to `request_claude_account`, correlated by `in_reply_to`, never broadcast; always carries `kind`, `label`, `state` and `reason`, the last two as `""` when absent. See [Claude account source](#claude-account-source). |
 | `request_claude_usage` | client → daemon | no | **New in v2** (#3575). Reads the daemon's latest Claude usage allowance reading through the same authenticated paired-client map dispatch as `request_host_system_prompt` / `request_claude_account`, without a conversation/session or `interactive` gate. Empty payload. See [Claude usage allowance reading](#claude-usage-allowance-reading). |
-| `claude_usage` | daemon → client | no | **New in v2** (#3575), outbound only — `IsKnownAppType` rejects it inbound. Exactly one requester-only reply to `request_claude_usage`, correlated by `in_reply_to`, never broadcast; always carries `state`, and `observed_at` plus whichever of `five_hour` / `seven_day` the stored reading has when `state` is `observed`. See [Claude usage allowance reading](#claude-usage-allowance-reading). |
+| `claude_usage` | daemon → client | no | **New in v2** (#3575), outbound only — `IsKnownAppType` rejects it inbound. Has **two kinds of producer**, like [`conversation_updated`](#conversation_updated). As a **reply** it answers `request_claude_usage`, correlated by `in_reply_to`; always carries `state`, and `observed_at` plus whichever of `five_hour` / `seven_day` the stored reading has when `state` is `observed`. As an **unsolicited push** (#3576) it carries **no `in_reply_to` and no `event_id`**, is sent to every open connection — interactive or not — each time the daemon stores a new reading, and carries the same payload the reply would at that moment. The push is live-only: it joins no replay ring and names no conversation, so a reconnecting client is never replayed one and should send `request_claude_usage` once after connecting to learn the current reading. See [Claude usage allowance reading](#claude-usage-allowance-reading). |
 | `create_workspace_folder` | phone → binary | no | Creates a new folder on the daemon host under a client-supplied parent path (confined to `$HOME`); touches no conversation registry. Replies with `workspace_folder_created`. |
 | `workspace_folder_created` | binary → phone | no | Reply to `create_workspace_folder`, correlated by `in_reply_to`; carries the created folder's canonical (symlink-resolved) absolute path. |
 | `recent_workspaces` | phone → binary | no | Read verb (like `list_conversations`); requests the distinct set of recently-used workspace folders. Empty request payload. Replies with `recent_workspaces_list`. |
@@ -2918,7 +2918,16 @@ Direction **client → daemon**. The payload is an empty object.
 #### `claude_usage`
 
 Direction **daemon → client**. Answers `request_claude_usage` with exactly
-one unicast reply, correlated by envelope `in_reply_to`; never broadcast.
+one unicast reply, correlated by envelope `in_reply_to`.
+
+**Since #3576, the daemon also pushes this frame, uncorrelated, to every
+open connection — interactive or not — each time it stores a new reading**,
+carrying the same payload a `request_claude_usage` reply would at that
+moment. The push carries no `in_reply_to` and no `event_id`: it is not
+recorded in any conversation's history, event ring or thread, and a
+reconnecting client is not replayed pushes it missed. A client should send
+`request_claude_usage` once after connecting to learn the current reading,
+then rely on the push to keep it current.
 
 | Field | Type | Meaning |
 |---|---|---|
