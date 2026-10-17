@@ -107,3 +107,13 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+### 2026-10-17: complete live rows during a compact load (verifier review of `d4be6fd6`)
+
+- **What changed.** `threadQueryGate` now withholds a complete live item update whose conversation has a compact query in flight, instead of only after that query's final records a compact join. A complete in-flight query is still cancelled, as before. `cancelThreadQuery` is unchanged: it cancels only complete queries.
+- **What drove it.** Review finding 2 (SHOULD FIX): with the original design, complete live rows were sealed and delivered between the frames of a compact catch-up on a conversation with no join, or with a complete join being re-initialized to compact. That mixes views before the final, which the threat model claims is closed. Finding 1 (MUST FIX): the no-cancel rule for compact queries had no test.
+- **New contract.** From admission of a compact query on a conversation until its terminal frame, and afterwards while its join is compact, complete live item updates for that conversation return `ErrThreadWithheld` before sealing and never cancel the compact query. If the compact query fails, the withheld rows are recovered by the client's next catch-up, as any withheld or missed range is. A complete version-zero re-initialization on a compact-joined conversation is still cancelled by a complete live update, whose row stays withheld because the join is still compact.
+- **Tests.** New `TestThreadCompactLiveInFlight`, under `-race`, over both the `DeliverThread` lane and the legacy `Push` path: compact load with no join, compact re-initialization over a complete join, and complete re-initialization over a compact join. It asserts the compact final and its `{epoch, version, compact-v1}` join, the cancelled complete query with its join unchanged then a successful retry, and that no live row reaches the client. Removing either projection condition fails it. `TestThreadCompactJoins` now returns a higher version on the repeated compact catch-up, so the row "repeated compact queries update the join version" moves the join (it is covered there, not in `TestThreadCompactReplies`). `TestThreadCompactNegotiation` also covers a nil `ThreadCompactReady`.
+- **Naming.** The plan's `TestThreadCompactHandshake` and `threadSummaryFromChild` were built as `TestThreadCompactNegotiation` and `threadSummaryFrom`.

@@ -269,9 +269,17 @@ func (m *V2SessionManager) runCompactThreadQuery(s *V2Session, q *threadQuery, f
 		p.OlderExists = &result.OlderExists
 	}
 	for _, i := range result.Items {
+		if q.ctx.Err() != nil {
+			fail()
+			return
+		}
 		p.Items = append(p.Items, threadItemFrom(i))
 	}
 	for _, h := range result.Headers {
+		if q.ctx.Err() != nil {
+			fail()
+			return
+		}
 		p.Headers = append(p.Headers, threadSummaryFrom(h))
 	}
 	m.sendThreadReply(s, q, env, p, fail)
@@ -303,7 +311,8 @@ func (m *V2SessionManager) sendThreadReply(s *V2Session, q *threadQuery, env pro
 }
 
 // cancelThreadQuery fences live admission against final selection without holding
-// pushMu. The original bounded push queue still owns all live buffering.
+// pushMu. The original bounded push queue still owns all live buffering. A compact
+// query is never cancelled here; threadQueryGate withholds the update instead.
 func (m *V2SessionManager) cancelThreadQuery(connID string, env protocol.Envelope) {
 	if !threadItemUpdate(env.Type) || env.InReplyTo != nil {
 		return
@@ -336,8 +345,13 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 		if json.Unmarshal(env.Payload, &p) != nil {
 			return ErrThreadWithheld
 		}
-		if in.query != nil && in.query.conversation == p.Conversation && in.query.projection == "" {
-			in.query.cancel()
+		if q := in.query; q != nil && q.conversation == p.Conversation {
+			// A compact load owns its conversation's view from admission, so complete
+			// rows are withheld rather than mixed in; they never cancel it.
+			if q.projection != "" {
+				return ErrThreadWithheld
+			}
+			q.cancel()
 		}
 		if j, ok := in.threadJoins[p.Conversation]; ok && (j.projection != "" || j.epoch == p.Epoch && p.Version <= j.version) {
 			return ErrThreadWithheld

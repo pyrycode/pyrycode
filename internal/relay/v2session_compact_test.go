@@ -158,7 +158,7 @@ func TestThreadCompactNegotiation(t *testing.T) {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	for mask := 0; mask < 16; mask++ {
+	for mask := 0; mask < 32; mask++ {
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			var calls testCompactCalls
 			caps := compactCaps
@@ -175,6 +175,9 @@ func TestThreadCompactNegotiation(t *testing.T) {
 				}
 				if mask&4 != 0 {
 					c.ThreadCompactReady = func() bool { return false }
+				}
+				if mask&16 != 0 {
+					c.ThreadCompactReady = nil
 				}
 			})
 			granted := slices.Contains(p.ack.Capabilities, protocol.CapabilityThreadCompact)
@@ -349,11 +352,15 @@ func TestThreadCompactReplies(t *testing.T) {
 	}
 }
 
+func testCompactItemChanged(conv string, version uint64) protocol.Envelope {
+	return protocol.Envelope{Type: protocol.TypeThreadItemChanged, Payload: json.RawMessage(fmt.Sprintf(`{"conversation_id":%q,"epoch":"epoch","version":%d,"item":{"id":1,"kind":"user","rev":2,"status":"done","active":false,"shown":true,"summary":"","content":{}}}`, conv, version))}
+}
+
 func testCompactLive(t *testing.T, p *testHostedPeer, conv string, version uint64) error {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() {
-		done <- p.mgr.DeliverThread(t.Context(), p.conn, protocol.Envelope{Type: protocol.TypeThreadItemChanged, Payload: json.RawMessage(fmt.Sprintf(`{"conversation_id":%q,"epoch":"epoch","version":%d,"item":{"id":1,"kind":"user","rev":2,"status":"done","active":false,"shown":true,"summary":"","content":{}}}`, conv, version))})
+		done <- p.mgr.DeliverThread(t.Context(), p.conn, testCompactItemChanged(conv, version))
 	}()
 	select {
 	case err := <-done:
@@ -364,9 +371,113 @@ func testCompactLive(t *testing.T, p *testHostedPeer, conv string, version uint6
 	}
 }
 
+// TestThreadCompactLiveInFlight pins how a complete live item update meets an
+// in-flight catch-up of its conversation, through both the ordered DeliverThread
+// lane and the legacy Push path (which cancels before queueing). A compact load is
+// neither cancelled nor interleaved with complete rows; a complete re-initialization
+// over a compact join is still cancelled, and its live row stays withheld.
+func TestThreadCompactLiveInFlight(t *testing.T) {
+	compactJoin := map[string]threadJoin{catchUpConversation: {"epoch", 20, protocol.ThreadProjectionCompact}}
+	for _, push := range []bool{false, true} {
+		for _, tc := range []struct {
+			name    string
+			compact bool
+			joins   map[string]threadJoin
+		}{
+			{"compact load", true, nil},
+			{"compact over complete join", true, map[string]threadJoin{catchUpConversation: {"epoch", 20, ""}}},
+			{"complete over compact join", false, compactJoin},
+		} {
+			t.Run(fmt.Sprintf("%s push=%v", tc.name, push), func(t *testing.T) {
+				entered, release := make(chan struct{}), make(chan struct{})
+				var calls testCompactCalls
+				var n atomic.Int32
+				// Only the first provider call blocks, until released or cancelled.
+				wait := func(ctx context.Context) error {
+					if n.Add(1) != 1 {
+						return nil
+					}
+					close(entered)
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+					return ctx.Err()
+				}
+				p := testHostedStartCaps(t, &testAppDiscovery{}, compactCaps, func(c *V2SessionConfig) {
+					testCompactConfig(&calls, nil, nil)(c)
+					c.ThreadCompactCatchUp = func(ctx context.Context, r protocol.ThreadCatchUpPayload) (thread.CompactQueryResult, error) {
+						if err := wait(ctx); err != nil {
+							return thread.CompactQueryResult{}, err
+						}
+						return testCompactResult(r.ConversationID, r.Version), nil
+					}
+					c.ThreadCatchUp = func(ctx context.Context, _ protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
+						if err := wait(ctx); err != nil {
+							return thread.QueryResult{}, err
+						}
+						return thread.QueryResult{State: thread.StateUsable, Epoch: "epoch", Version: 90, LowerOrder: 1, UpperOrder: 91, Continuation: 1}, nil
+					}
+				})
+				testCompactSeed(p, tc.joins)
+				projection := ""
+				if tc.compact {
+					projection = protocol.ThreadProjectionCompact
+				}
+				testCompactCatchUp(p, 40, catchUpConversation, 0, projection)
+				testHostedAwait(t, entered)
+				if push {
+					if err := p.mgr.Push(t.Context(), p.conn, testCompactItemChanged(catchUpConversation, 91)); err != nil {
+						t.Fatal(err)
+					}
+					if err := p.mgr.FlushPushes(t.Context()); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := testCompactLive(t, p, catchUpConversation, 91); err != ErrThreadWithheld {
+					t.Fatalf("complete live during query: %v", err)
+				}
+				close(release)
+				if tc.compact {
+					// An interleaved live row fails here as an uncorrelated frame.
+					if typ, final, _, _ := testCompactReply(t, p, 40, projection); typ != protocol.TypeThreadItems || final.Version != 90 {
+						t.Fatalf("compact load did not complete: %s", typ)
+					}
+					if got := testCompactJoins(p); !maps.Equal(got, map[string]threadJoin{catchUpConversation: {"epoch", 90, protocol.ThreadProjectionCompact}}) {
+						t.Fatalf("compact join: %v", got)
+					}
+				} else {
+					testCatchUpError(t, p, 40)
+					if got := testCompactJoins(p); !maps.Equal(got, compactJoin) {
+						t.Fatalf("cancelled re-initialization changed joins: %v", got)
+					}
+					testCompactCatchUp(p, 41, catchUpConversation, 0, "")
+					if typ, _, _, _ := testCompactReply(t, p, 41, ""); typ != protocol.TypeThreadItems {
+						t.Fatalf("retry: %s", typ)
+					}
+					if got := testCompactJoins(p); !maps.Equal(got, map[string]threadJoin{catchUpConversation: {"epoch", 90, ""}}) {
+						t.Fatalf("re-initialized join: %v", got)
+					}
+				}
+				// Any reply correlated to this sentinel proves no live row was queued before it.
+				p.request(50, protocol.TypeAppCancel, `{"request_id":999}`)
+				if e, _ := p.next(); e.InReplyTo == nil || *e.InReplyTo != 50 {
+					t.Fatalf("complete live row reached the client: %+v", e)
+				}
+			})
+		}
+	}
+}
+
 func TestThreadCompactJoins(t *testing.T) {
 	var calls testCompactCalls
-	p := testCompactPeer(t, &calls, compactCaps, nil, nil)
+	// A nonzero catch-up advances the version, so the repeated query below moves the join.
+	p := testCompactPeer(t, &calls, compactCaps, func(r protocol.ThreadCatchUpPayload) thread.CompactQueryResult {
+		out := testCompactResult(r.ConversationID, r.Version)
+		if r.Version > 0 {
+			out.Version = r.Version + 5
+		}
+		return out
+	}, nil)
 	testCompactCatchUp(p, 40, catchUpConversation, 0, protocol.ThreadProjectionCompact)
 	testCompactReply(t, p, 40, protocol.ThreadProjectionCompact)
 	testCompactCatchUp(p, 41, compactOther, 0, "")
@@ -400,8 +511,12 @@ func TestThreadCompactJoins(t *testing.T) {
 	}
 
 	testCompactCatchUp(p, 44, catchUpConversation, 90, protocol.ThreadProjectionCompact)
-	if _, final, _, _ := testCompactReply(t, p, 44, protocol.ThreadProjectionCompact); final.FromVersion == nil || *final.FromVersion != 90 || calls.compact.Load() != 2 {
+	if _, final, _, _ := testCompactReply(t, p, 44, protocol.ThreadProjectionCompact); final.FromVersion == nil || *final.FromVersion != 90 || final.Version != 95 || calls.compact.Load() != 2 {
 		t.Fatal("matching compact catch-up")
+	}
+	want[catchUpConversation] = threadJoin{"epoch", 95, protocol.ThreadProjectionCompact}
+	if got := testCompactJoins(p); !maps.Equal(got, want) {
+		t.Fatalf("repeated compact join: %v", got)
 	}
 	testCompactCatchUp(p, 45, catchUpConversation, 0, "")
 	testCompactReply(t, p, 45, "")
