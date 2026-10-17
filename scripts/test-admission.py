@@ -4,6 +4,7 @@ import fcntl
 import os
 from pathlib import Path
 import signal
+import runpy
 import subprocess
 import sys
 import time
@@ -50,6 +51,9 @@ def main():
         args = args[1:]
     if not args:
         raise SystemExit("usage: test-admission.py -- command [arguments...]")
+    if Path(args[0]).name == 'go':
+        root = Path(__file__).resolve().parents[1]
+        runpy.run_path(str(root / 'scripts/test-scope.py'))['check_selection'](root, 'go', args[1:])
     path = Path(os.environ.get("PYRY_TEST_ADMISSION_LOCK", str(Path.home() / ".local/share/pyry-fleet/test-admission.lock")))
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = None
