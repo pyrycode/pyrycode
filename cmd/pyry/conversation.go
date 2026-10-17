@@ -84,7 +84,7 @@ func conversationCreator(reg *conversations.Registry, minter handlers.SessionCre
 				announce(protocol.ConversationUpdatedPayload{
 					ID: string(got.ID), Name: got.Name, Cwd: got.Cwd, WorkspaceLabel: workspaceLabel,
 					IsPromoted: got.IsPromoted, IsArchived: got.IsArchived, IsMuted: got.IsMuted,
-					ReadUpTo: got.ReadUpTo, LastUsedAt: got.LastUsedAt,
+					PinnedAt: got.PinnedAt, ReadUpTo: got.ReadUpTo, LastUsedAt: got.LastUsedAt,
 				})
 			} else {
 				log.Warn("control: conversation.new vanished before announcement", "event", "conversation_new.announce_row_vanished", "conversation_id", string(id))

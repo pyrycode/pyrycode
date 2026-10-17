@@ -108,3 +108,16 @@ channel-only pin/any-row unpin and older-host compatibility behavior.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: The installed authenticated regression exposed shared-relay bug
+  #3545: `Conn.Reply` enqueues on the per-frame outbound buffer, while the
+  announcer uses the manager push path; the push can reach the wire first.
+  Repair requires production changes outside this ticket's wiring scope.
+  Retain the strict ordering regression as `TestRelayV2_ChannelPinsReplyOrdering`,
+  skipped with the bug reference per the out-of-scope bug policy. The active
+  `TestRelayV2_ChannelPins` buffers early pushes and still requires the correlated
+  reply, identical uncorrelated pushes to both clients, idempotence, reload and
+  restart persistence, and re-pin timestamps. Wire ordering remains unproved
+  pending #3545; no shared dispatch/relay production code changes here.
