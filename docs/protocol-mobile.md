@@ -1167,6 +1167,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`thread_item_added`** | binary → phone | no | **Production emitted (#3164).** Full daemon-built item with `conversation_id`, `epoch`, `version`; oversized updates use bounded assembly parts (#3073). Delivered only to eligible authenticated interactive connections that negotiated `thread`. See [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 | **`thread_item_changed`** | binary → phone | no | **Production emitted (#3164).** In-place field replacements with `item_id`, `base_rev`, `rev`, `changes` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_item_changed`](#thread_item_changed). |
 | **`thread_text_append`** | binary → phone | no | **Production emitted (#3164).** Message text suffix with `item_id`, `base_rev`, `rev`, `text` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_text_append`](#thread_text_append). |
+| **`thread_compact_update`** | binary → phone | no | **Declared only (#3559); no production publication or negotiation.** Scoped compact root replacement or hidden-only consumed progress; oversized rows use bounded assembly. See [Compact projection](#compact-projection-declared). |
 | **`thread_catch_up`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3253).** Request current full items after an unsigned history `version`, or a newest window at zero; carries `conversation_id`, `epoch` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
 | **`thread_page`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3235).** Request an older ordered window below exclusive unsigned `before_order`, including zero; carries explicit `conversation_id` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation and shares catch-up's unfinished-query slot and completion fence. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
 | **`thread_items`** | binary → phone | no | **Production emitted (#3236).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
@@ -1577,8 +1578,9 @@ both providers plus existing thread readiness and client capabilities; missing
 an expansion provider still permits complete-thread negotiation. These reads
 return only the requested body or direct-child summaries, with expansion-only
 completion; see [Bounded expansion reads](#bounded-expansion-reads). Complete
-history/live delivery remains in use. Compact publication (#3517) and
-Desktop/Mobile adoption are later work.
+history/live delivery remains the default. The [compact contract](#compact-projection-declared)
+is declared only (#3559); Store projection (#3560/#3561), authenticated selection
+(#3562), daemon activation (#3563) and client adoption follow separately.
 
 Initial publisher acquisition and continuity repair acquire a usable live
 boundary without broadcasting historical inventories, even to clients already
@@ -1594,7 +1596,111 @@ The contract follows
 [ADR 042](knowledge/decisions/042-daemon-built-thread.md#update-messages) and the
 [backend bounded-query semantics](knowledge/features/thread-package-background-store-queries.md#bounded-queries).
 
+#### Compact projection (declared)
+
+**Declared wire contract and encoding fixtures only (#3559), pending production
+installation.** `thread_compact` is a distinct capability from the installed
+`thread_expansion`. Its declaration enables neither negotiation, authenticated
+handlers nor publication. Existing complete query/live delivery stays the default.
+The complete schemas below apply unless the explicitly selected projection says
+otherwise; compact selection uses these additive fields:
+
+| Request | Compact selection |
+|---|---|
+| `thread_catch_up` | Optional string `projection: "compact-v1"`, with existing conversation/epoch/version. Zero version initializes the newest root window; nonzero requests catch-up. |
+| `thread_page` | Optional string `projection: "compact-v1"` and required nonempty string `epoch`, with existing conversation and exclusive `before_order`. |
+
+Selection belongs to **one connection and conversation**, including subsequent
+live delivery for that conversation. Omitted `projection` selects complete;
+unknown projections require refusal, never silent complete fallback. First compact
+selection or a view change without compatible coverage MUST initialize with a
+version-zero newest window. Reconnect may resume only a successfully completed
+checkpoint matching **conversation, projection and epoch**. Complete-view coverage,
+other conversations and old epochs cannot establish compact coverage.
+
+These declared request excerpts show initialization, older paging and a later
+matching reconnect checkpoint (connection stamps omitted):
+
+```json
+{"id":71,"type":"thread_catch_up","payload":{"conversation_id":"conv","epoch":"","version":0,"projection":"compact-v1","limit":50}}
+{"id":72,"type":"thread_page","payload":{"conversation_id":"conv","epoch":"e","before_order":17,"projection":"compact-v1"}}
+{"id":73,"type":"thread_catch_up","payload":{"conversation_id":"conv","epoch":"e","version":41,"projection":"compact-v1"}}
+```
+
+Compact queries return **public top-level rows only**. `items` retains full,
+unchanged non-tool/agent rows and their content; optional `headers` contains
+metadata-only `ThreadSummary` tool/agent roots. Merge placement by `(order, id)`,
+not by concatenating the two arrays. Headers preserve source identity, parent,
+order, attribution, lifecycle and `rev` accepted by expansion reads, but contain
+no input/output, content or descendant inventory. Headline and optional error
+summary are inert single-line text, each at most **200 Unicode code points**
+including any ellipsis. Blank headlines fall back to `Tool call`, `Agent` or
+`Thread item`. The [summary field rules](#bounded-expansion-reads) also apply to
+explicitly requested child summaries: optional facts stay absent when unknown;
+known zero/false/empty remains explicit. Public child counts exclude private
+children, and `no_child` remains attribution rather than an inventory fact.
+
+Every compact data batch, assembly part, success marker, live replacement,
+progress frame and reset MUST repeat `projection: "compact-v1"`,
+`conversation_id` and nonempty `epoch`. Query envelopes retain `in_reply_to`.
+Complete replies omit `projection` and `headers`. For example, a mixed compact
+batch and its separate successful newest-window marker are:
+
+```json
+{"type":"thread_items","in_reply_to":71,"payload":{"projection":"compact-v1","conversation_id":"conv","epoch":"e","version":41,"items":[{"id":10,"kind":"assistant_message","order":10,"rev":11,"status":"done","active":false,"shown":true,"summary":"Ready","content":{"text":"Ready"}}],"headers":[{"id":17,"kind":"tool_call","order":17,"rev":23,"parent":0,"status":"done","active":false,"shown":true,"headline":"Read file","detail_omitted":true,"public_child_count":0,"has_public_children":false,"subtree_version":41,"error_summary":""}],"final":false}}
+{"type":"thread_items","in_reply_to":71,"payload":{"projection":"compact-v1","conversation_id":"conv","epoch":"e","version":41,"items":[],"final":true,"lower_order":10,"upper_order":42,"continuation":10,"older_exists":true}}
+```
+
+Only the separate successful marker certifies the **compact root window**
+`[lower_order, upper_order)` or catch-up **source interval** `(from_version, version]`.
+It never certifies complete inventory or downloaded subtree detail. Empty results
+still require this marker, with `items: []` and omitted `headers`. An oversized
+top-level message uses [whole-payload assembly](#bounded-thread-encoding-and-assembly)
+under `thread_items`; every part includes projection scope before escaped-envelope
+sizing with maximum stamps. `continuation.final` completes only assembly, never
+query coverage. Fully stamped envelopes retain the `MaxThreadEnvelopeBytes` cap;
+encoding failure returns no usable prefix, even after an earlier batch could fit.
+
+Declared `thread_compact_update` carries required projection/conversation/epoch,
+unsigned `from_version` and `version` with `from_version < version`, and explicit
+boolean `progress`. Exactly one of full `item`, tool/agent `header` or
+`progress: true` is supplied. Row replacements have `progress: false`; hidden-only
+consumed progress has neither row. These are source intervals, not event IDs:
+
+```json
+{"type":"thread_compact_update","payload":{"projection":"compact-v1","conversation_id":"conv","epoch":"e","from_version":41,"version":43,"header":{"id":17,"kind":"tool_call","order":17,"rev":23,"parent":0,"status":"done","active":false,"shown":true,"headline":"Read file","detail_omitted":true,"subtree_version":43},"progress":false}}
+{"type":"thread_compact_update","payload":{"projection":"compact-v1","conversation_id":"conv","epoch":"e","from_version":43,"version":44,"progress":true}}
+```
+
+Apply replacements by source identity only after initialization in matching scope.
+Intervals can overlap when one consumed entry changes several roots; do not drop
+different identities at equal versions. Hidden-only progress explicitly accounts
+for consumed entries without a root change. A real gap requires catch-up; only a
+successful query marker establishes a completed recovery checkpoint.
+
+`subtree_version` is epoch-scoped freshness independent of ancestor source `rev`.
+A nested public change can advance it while `rev` stays unchanged, as above.
+Changed ancestor freshness invalidates cached subtree knowledge **even while
+open**: explicitly refresh demanded bodies/pages through bounded expansion.
+Conservative invalidation is allowed; missing freshness proves nothing. Cached
+body facts are keyed by conversation, epoch, item ID and source revision.
+Expansion neither subscribes descendants to full live delivery nor changes view;
+its consumed-version-bound child cursors still refuse stale continuation even
+when the parent revision is unchanged.
+
+Expansion completion proves only its requested body/page; compact query completion
+proves only projection coverage; fragment final proves only assembly. Errors,
+disconnects and partial replies prove none and advance no completed checkpoint.
+A scoped reset requires a fresh version-zero newest window, for example:
+
+```json
+{"type":"thread_reset","in_reply_to":73,"payload":{"projection":"compact-v1","conversation_id":"conv","epoch":"replacement","version":97}}
+```
+
 #### Requests
+
+These are the installed complete-view request shapes; compact additions are
+[declared above](#compact-projection-declared).
 
 | Type | Payload fields | Meaning |
 |---|---|---|
@@ -1679,7 +1785,7 @@ For example, these payloads are separate successful terminal markers:
 
 #### Terminal reset and failure
 
-A correlated `thread_reset` has exactly the required string `conversation_id`,
+A correlated complete-view `thread_reset` has the required string `conversation_id`,
 string `epoch` and unsigned 64-bit `version`, naming current state. It carries
 no `items`, `final` or coverage fields and is terminal; acquire a fresh newest
 window. The existing correlated `error` is terminal failure: required `code`,
@@ -1856,8 +1962,10 @@ wiring on the same Store; it does not promise every history is already usable.
 Missing either expansion provider or any required capability withholds expansion;
 existing `thread` negotiation remains independent. Installed authenticated
 synthetic-history tests exercise these reads and partial-provider negotiation.
-Complete history/live delivery remains in use; compact publication (#3517) and
-Desktop/Mobile adoption are later work.
+Complete history/live delivery remains the default. The separate
+[compact projection](#compact-projection-declared) is declared only (#3559),
+with production installation and client adoption pending. Expansion support
+does not negotiate compact delivery or select a view.
 
 Both reads share complete queries' temporary daemon demand: cold or idle
 registered conversations load and wait cancelably for usable history, retaining
@@ -1955,12 +2063,22 @@ the [full item's](#full-thread-item) metadata with these presence rules:
 | `no_child` | Boolean attribution fact, omitted when false; true means positively no producing child. |
 | `headline` | Required plain single-line text, not interpreted markup. |
 | `detail_omitted` | Required boolean, always true. |
+| `error_summary` | Optional plain single-line string, at most 200 Unicode code points including ellipsis; absent means unknown, explicit `""` means known no error. |
+| `public_child_count` | Optional nonnegative integer below 2^53; public direct children only. Known count requires `has_public_children == (count > 0)`. |
+| `has_public_children` | Optional boolean; may be known without a count. Absent is unknown; false is known no public direct children. |
+| `subtree_version` | Optional nonnegative integer below 2^53, including known zero; epoch-scoped nested-public-change freshness independent of source `rev`. |
 
 `NewThreadSummary` derives `headline` from the item summary, collapsing runs of
 Unicode whitespace/control characters to one space and trimming leading/trailing
 runs. It caps the result at **200 Unicode code points**, using the first 199 plus
-`…` when truncated; the ellipsis counts toward the bound. Child encoding applies
-the same normalization and explicit omission even to supplied summaries.
+`…` when truncated; the ellipsis counts toward the bound. A blank normalized
+headline uses the kind-based fallback described in the [compact contract](#compact-projection-declared).
+`ThreadSummary.MarshalJSON` applies the same text bounds to supplied headlines
+and error summaries without inspecting content. Summary IDs, orders and revisions
+also remain integers below 2^53. Producers own numeric and count/existence
+validation. The optional facts are declared DTO fields; installed Store derivation
+of compact freshness/count/error facts follows separately. Missing facts never
+prove no children, no error or fresh cached detail.
 
 Child `limit` defaults to **50** when omitted/zero, clamps positive values to
 **256**, and rejects negative, null, fractional, wrong-type or out-of-uint64-range
@@ -2047,7 +2165,12 @@ request completion. Neither expansion `version` nor its success marker grants
 full-thread coverage, advances a full-thread recovery checkpoint or changes a
 live join watermark. Successful expansion releases only its relay query slot;
 it never writes `threadJoins`, including when a complete-thread join already
-exists. Existing complete-query and live-update contracts remain unchanged.
+exists. A body cache is scoped by conversation/epoch/item/source `rev`;
+changed ancestor subtree freshness invalidates cached subtree knowledge even
+while open and requires bounded refresh of demanded content. Expansion reads
+neither select a conversation view nor subscribe descendants to full live updates;
+their completion grants no [compact coverage](#compact-projection-declared).
+Existing complete-query and live-update contracts remain unchanged.
 
 ### `conversations`
 
@@ -2914,6 +3037,8 @@ Defined capability strings:
 | `context_usage` | The daemon can answer a fresh `detail:"full"` context-window reading on demand — the [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) verb (#2431). **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `context_usage` by itself negotiates as non-interactive, and a client advertising `interactive` without it can still use the verb. |
 | `multi_agent` | The client understands conversations run by more than one agent (#2643). **Not detection-only — this string changes what the daemon sends.** It grants no *interactive* access (every `interactive`-gated surface is unaffected, and a client can negotiate `multi_agent` alone without becoming interactive), but it gates two things on the `conversations` reply: every row carries `agent` (`"claude"` or `"codex"`, the bound session's agent), and a row whose agent is `"codex"` is included at all. A client that does not negotiate it gets today's list, byte-identical, with Codex-run conversations left out. See the `conversations` row below. As of #2644, it also gates every frame the daemon *pushes* about a Codex conversation: live turn events, conversation broadcasts (`conversation_updated`), the connect-time reconciles (model list, slash commands, background-task roster, questions, modals), reconnect replay and the `resync` marker. A client that does not negotiate `multi_agent` receives none of them; frames about a Claude conversation, frames naming no conversation, and ordinary replies to the client's own requests are delivered exactly as before. Thread item updates and continuations remain subject to the independent item authorization gate even when correlated. `modal_dismissed` and `question_dismissed` name no conversation, so such a client can still receive one for a modal or question batch it never saw (the `*_shown` frame that introduced that batch id was itself withheld) — it names nothing the client can act on and should be ignored. As of #2651 it also changes the **content** of every `model_list` frame the daemon answers with — the connect-time reconcile and the `request_model_list` reply alike — whichever agent the named conversation itself runs: a capable client's `models` merges Claude's held entries with Codex's, each tagged `agent` and `family` (see [`model_list`](#model_list) below). A client that does not negotiate `multi_agent` still gets today's Claude-only list, byte-identical, with no `agent`/`family` keys on the wire. |
 | `stop_background_task` | The daemon supports stopping one named background task through the [`stop_background_task`](#stop-background-task-v2) verb (#2797). **Detection only: this string grants no access.** Clients advertise it and draw a per-task stop button only when `hello_ack.payload.capabilities` echoes it. Advertising it alone leaves the connection non-interactive; the verb requires `interactive` alone, and an interactive client can use it without advertising this detection string. |
+| `thread_expansion` | **Production-installed (#3523/#3550).** Bounded body and direct-child reads; negotiated only with both providers, thread readiness and client `thread_expansion`, `thread` and `interactive`. See [Bounded expansion reads](#bounded-expansion-reads). |
+| `thread_compact` | **Declared only (#3559), not negotiated or emitted in production.** Separate compact root projection and freshness contract; installed expansion support does not imply compact support. See [Compact projection](#compact-projection-declared). |
 | `thread` | Per-connection daemon-built thread delivery (#3081), echoed only when advertised and supplied complete readiness is true. It grants neither `interactive` nor `multi_agent` access. **Production live publication and bounded catch-up/pages are installed (#3164/#3236)**; see [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 
 `thread` requires daemon-supplied readiness confirming installation of both
