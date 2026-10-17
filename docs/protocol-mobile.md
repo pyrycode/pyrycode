@@ -1171,8 +1171,8 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`thread_page`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3235).** Request an older ordered window below exclusive unsigned `before_order`, including zero; carries explicit `conversation_id` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation and shares catch-up's unfinished-query slot and completion fence. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
 | **`thread_items`** | binary → phone | no | **Production emitted (#3236).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
 | **`thread_reset`** | binary → phone | no | **Production emitted (#3236).** Correlated terminal catch-up reset carrying current `conversation_id`, `epoch`, `version`, with no items or coverage; it never advances a completed checkpoint. See [Thread query messages](#thread-query-messages). |
-| **`thread_read_tool_body`** | phone → binary | no | **Declared ahead of handlers (#3519); inactive.** Request one public tool/agent-launch body at an expected epoch/revision. See [Bounded expansion reads](#bounded-expansion-reads). |
-| **`thread_tool_body`** | binary → phone | no | **Declared ahead of handlers (#3519); inactive.** Correlated rendered body, optionally assembled from parts, followed by a separate success marker. See [Bounded expansion reads](#bounded-expansion-reads). |
+| **`thread_read_tool_body`** | phone → binary | no | **Authenticated handler implemented (#3549); production inactive.** Request one public tool/agent-launch body at an expected epoch/revision. Child handling/negotiation awaits #3550; production installation awaits #3523. See [Bounded expansion reads](#bounded-expansion-reads). |
+| **`thread_tool_body`** | binary → phone | no | **Authenticated handler implemented (#3549); production inactive.** Correlated rendered body, optionally assembled from parts, followed by a separate success marker. Expansion advertisement remains withheld. See [Bounded expansion reads](#bounded-expansion-reads). |
 | **`thread_read_children`** | phone → binary | no | **Declared ahead of handlers (#3519); inactive.** Request a bounded page of direct public child summaries at an expected parent epoch/revision. See [Bounded expansion reads](#bounded-expansion-reads). |
 | **`thread_children`** | binary → phone | no | **Declared ahead of handlers (#3519); inactive.** Correlated summary page and separate success marker with authoritative `more` and optional cursor. See [Bounded expansion reads](#bounded-expansion-reads). |
 
@@ -1688,18 +1688,19 @@ Neither outcome certifies partial items or advances a completed checkpoint.
 
 #### Query/live ordering
 
-Before capturing a query, the daemon establishes a missing publisher boundary
-under the same cancelable per-conversation gate used by live publication. A
-completed query cannot then be followed by initial acquisition silently skipping
+Before capturing a complete query, the daemon establishes a missing publisher
+boundary under the same cancelable per-conversation gate used by live publication.
+A completed query cannot then be followed by initial acquisition silently skipping
 intervening commits. An existing publisher cursor remains owned by following;
 query preparation does not force changed publication. The publisher boundary
 alone never certifies a client's recovery checkpoint.
 
-Catch-up and pages share one unfinished-query slot per connection: a competing
-request fails with `thread.query_failed` before provider access. Provider,
-full-item mapping and codec work run off the manager's `Run` loop. Every batch and assembly
-part must receive successful ordered transport acceptance before the handler
-sends the separate success marker. Withheld, failed or cancelled required
+Catch-up, complete-thread pages and tool-body reads share one unfinished-query
+slot per connection: a competing request fails with `thread.query_failed` before
+provider access. Provider, full-item mapping and codec work run off the manager's
+`Run` loop. Every batch and assembly part must receive successful ordered
+transport acceptance before the handler sends the separate success marker.
+Withheld, failed or cancelled required
 output stops the sequence and attempts a terminal correlated error; retirement
 or disconnect can leave the request incomplete with no terminal frame. Transport
 recovery or connection-ID reuse cannot complete an old query.
@@ -1709,13 +1710,24 @@ waits; a held provider does not block other connections or manager control work.
 A live item update for the queried conversation admitted during capture or
 reply delivery cancels the query. Already queued live updates also cancel it
 when selected for sealing. This policy fails a racing query rather than buffering
-extra live updates; retry from the last completed checkpoint. At the success
-marker's sealing boundary, cancellation is checked atomically with recording
+extra live updates; retry complete queries from the last completed checkpoint,
+or retry a body read with current item scope. When sealing a complete query's
+success marker, cancellation is checked atomically with recording
 the captured epoch/version. Later live updates in that epoch at or below the
 capture are withheld, including fragments, preventing stale patches from
 overwriting full items. Updates above the captured version retain source order,
 including multiple patches sharing a later version. Supplied transient live-state
 reconciliation remains independent of this item join.
+
+Tool-body delivery uses the same serial ordered lane and late recipient checks,
+including every assembly frame and the separate completion marker. It is pinned
+to the original authenticated connection generation, including late refusals.
+Expansion completion releases only its own query token: it never installs or
+changes a full-thread join, advances recovery coverage or suppresses unrelated
+live rows. Existing full-thread joins remain intact. Body reads do not consume
+the 256-conversation join capacity. Refusal/cancellation releases that read's
+slot, or retirement discards the generation; neither grants successful completion,
+even if the terminal error itself cannot be delivered.
 
 When retained live continuity cannot be proved, including same-epoch reload
 with lost ranges or epoch replacement, the daemon retires affected consumers
@@ -1789,15 +1801,17 @@ Classify sentinel errors with `errors.Is`; a delivery failure may wrap its cause
 The caller MUST deliver a codec sequence serially and stop on any non-success
 before its separate success marker. Enqueue, `forwardToRun` handoff, source-queue
 flush and `continuation.final: true` assembly completion alone cannot certify
-a query. Both production-installed catch-up and page handlers enforce this
-stopping rule.
+a query. Production-installed catch-up/page handlers and the staged tool-body
+handler enforce this stopping rule.
 
 Immediately before sealing queued thread content, Run rechecks open/authenticated
 state, current paired authorization, negotiated `thread`, interactive access,
 current conversation membership and the existing Codex/`multi_agent` gate.
 This covers live additions/changes/text appends and their continuations, as well
 as correlated `thread_items` batches, every assembly part including completion,
-the separate `final: true` marker and `thread_reset`. Missing payload conversation
+the separate `final: true` marker and `thread_reset`. Tool-body data, assembly
+and finals receive these same checks and additionally require recipient
+`thread_expansion`. Missing payload conversation
 identity fails closed; request correlation grants no access. Removal or
 eligibility loss while content waits unsealed withholds it without spending a
 sender ID or Noise nonce, releases its slot and lets permitted output proceed.
@@ -1812,28 +1826,47 @@ Existing legacy caller/provider signatures and reply behavior are preserved.
 
 #### Bounded expansion reads
 
-**Declared ahead of handlers (#3519).** `thread_read_tool_body` /
-`thread_tool_body` and `thread_read_children` / `thread_children` are additive
-v2 vocabulary, outside `inboundAppTypeSet`, with no admitted handlers or
-production emitters. Capability `thread_expansion` is declared but MUST NOT be
-advertised or negotiated until **both reads are wired to the real Store** and
-enforce normal authenticated, paired, conversation-scoped `thread` and
+**Body handler implemented; production expansion remains inactive.**
+`thread_read_tool_body` / `thread_tool_body` has an authenticated,
+switch-intercepted v2 handler (#3549), outside `inboundAppTypeSet`.
+`thread_read_children` / `thread_children` remains declared vocabulary with
+child handling and both-read readiness negotiation pending #3550. Production
+provider installation/activation remains #3523; `ThreadToolBody` is uninstalled
+in production. Capability `thread_expansion` MUST NOT be advertised or negotiated
+until **both reads are wired to the real Store** and enforce normal
+authenticated, paired, conversation-scoped `thread` and
 `interactive` authorization, including applicable agent restrictions.
-Declaration alone does not enable support. Store selection, authenticated
-handlers and production activation belong to #3521/#3522/#3523. Required-field,
-public ownership and freshness checks are consumer obligations; passive DTO
-decoding does not establish them.
+Installing a body provider alone does not enable negotiation or change existing
+`thread` negotiation. Authenticated synthetic tests enable the recipient's
+expansion flag on `Run` to exercise the staged handler.
 
 Both requests use `ThreadExpansionRequest`: required string `conversation_id`,
 required **nonempty** string `epoch`, unsigned 64-bit `item_id` and
 `expected_rev`. For children, `item_id` identifies the parent; optional signed
-integer `limit` and object `cursor` select its page. A body request has no cursor.
-First reads MUST match the current epoch and requested item/parent revision.
+integer `limit` and object `cursor` select its page. Body `item_id` and
+`expected_rev` must be nonzero; a body request rejects any `cursor` key,
+including null. First reads MUST match the current epoch and requested
+item/parent revision.
 Replies identify the same conversation, captured `epoch`, consumed-history
 `version`, requested `item_id` and `rev`; those three numeric fields are unsigned
 64-bit integers. Every data envelope, assembly part,
 success marker and refusal preserves `in_reply_to` equal to the request `id`
 and supplied variable envelope conversation/session metadata.
+
+Before provider work, body admission requires an open authenticated Noise
+session that is still paired, with recipient `thread_expansion`, `thread` and
+`interactive` enabled. The canonical `conversation_id` must be registered and
+currently visible through the existing Codex/`multi_agent` gates. Required
+fields reject missing, null and wrong-type values, including strings used for
+numeric IDs. Malformed envelope identity follows the existing query
+connection-close policy; other refusals use correlated, content-free
+`thread.query_failed`. Missing providers, nonusable/error results and stale
+epoch/revision cannot succeed. The provider must enforce public item ownership
+in the requested conversation, without active-conversation or other-client
+fallback. Pairing, visibility and recipient capabilities are rechecked before
+sealing every data, assembly and completion frame; revocation, deletion or
+eligibility loss can stop an admitted read. See [Query/live ordering](#querylive-ordering)
+for shared admission, live cancellation and delivery outcomes.
 
 The examples are envelope excerpts with connection stamps omitted. An available
 empty body is a successful object with empty rendered input/output:
@@ -1851,9 +1884,11 @@ empty body is a successful object with empty rendered input/output:
 ```
 
 `ThreadToolBodyPayload.kind` is `tool_call` or `agent` (the agent-launch body,
-not its children). Data requires an available object `content`; preserve
-existing rendered input/output and unknown fields as inert JSON. Retain upstream
-content limits without extra body truncation or increasing those limits. The
+not its children), taken from the same capture as identity, revision, content,
+epoch and consumed version. Only the requested body is returned, without parent,
+descendant or unrelated bodies. Data requires an available object `content`;
+preserve existing rendered input/output and unknown fields as inert JSON. Retain
+upstream content limits without extra body truncation or increasing those limits. The
 separate marker keeps the capture, identity, revision and kind, sets
 `final: true` and omits `content`. That omission marks completion, not an empty body.
 A summary's `detail_omitted: true` means detail was not fetched, not that it is
