@@ -26,8 +26,9 @@ func (e *MissingEntriesError) Error() string {
 }
 
 type lookupBound struct {
-	firstID uint64
-	size    int64
+	firstID    uint64
+	size       int64
+	discovered bool // Prefix discovery certified the first-ID bound.
 }
 
 func (c *convLog) rememberLookupBound(segment uint64, size int64, first uint64) {
@@ -51,13 +52,15 @@ func (s *Store) lookupSegmentBound(c *convLog, dir string, seg segmentRef) (look
 	bound, known := c.lookupBounds[seg.num]
 	// Recovery can remember zero from an invalid first entry. Only discovery
 	// certifies that a larger-than-header zero bound really contains no entry.
-	if !known || bound.size != info.Size() || (bound.firstID == 0 && info.Size() > int64(len(segmentHeaderLine))) {
+	if !known || bound.size != info.Size() || (bound.firstID == 0 && !bound.discovered && info.Size() > int64(len(segmentHeaderLine))) {
 		first, err := s.segmentFirstID(path)
 		if err != nil {
 			return lookupBound{}, err
 		}
 		c.rememberLookupBound(seg.num, info.Size(), first)
 		bound = c.lookupBounds[seg.num]
+		bound.discovered = true
+		c.lookupBounds[seg.num] = bound
 	}
 	return bound, nil
 }

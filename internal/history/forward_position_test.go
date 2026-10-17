@@ -117,6 +117,58 @@ func TestForwardResumeSelectiveReads(t *testing.T) {
 	}
 }
 
+func TestForwardResumeTornFirstEntryReads(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"forward", "lookup"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			old := segmentHeaderLine + `{"id":0,"payload":"` + strings.Repeat("x", 4096) + `"}`
+			selected := segmentHeaderLine + testLookupLine(20) + testLookupLine(21)
+			if len(selected) > 256 {
+				t.Fatal("selected fixture must fit in discovery read-ahead")
+			}
+			testLookupWrite(t, root, convA, 1, old)
+			testLookupWrite(t, root, convA, 2, selected)
+			s := newStore(root, 8192)
+			read := func() ([]Entry, error) {
+				if mode == "lookup" {
+					return s.Lookup(convA, []uint64{21})
+				}
+				r := testForwardReader(t, s, 20)
+				var got []Entry
+				err := r.Walk(context.Background(), 21, func(es []Entry) error {
+					got = append(got, es...)
+					return nil
+				})
+				return got, err
+			}
+			for _, cold := range []bool{true, false} {
+				s.resetReadStats() // includes Forward construction on the unprimed Store
+				got, err := read()
+				if err != nil || len(got) != 1 || got[0].ID != 21 {
+					t.Fatalf("cold=%v got %v/%v, want ID 21", cold, got, err)
+				}
+				wantBytes, wantOpens := int64(len(selected)), 1
+				if cold {
+					// Discovery must reach EOF to identify the torn first entry.
+					wantBytes += int64(len(old) + len(selected))
+					wantOpens += 2
+				}
+				bytes, opens := s.readStats()
+				t.Logf("cold=%v read %d bytes/%d opens", cold, bytes, opens)
+				if bytes != wantBytes || opens != wantOpens {
+					t.Fatalf("want %d bytes/%d opens", wantBytes, wantOpens)
+				}
+			}
+			// A size change invalidates certification: the completed zero ID is corrupt.
+			testLookupWrite(t, root, convA, 1, old+"\n")
+			if _, err := read(); !errors.Is(err, ErrCorruptSegment) {
+				t.Fatalf("completed zero-ID entry: got %v, want corruption", err)
+			}
+		})
+	}
+}
+
 func TestForwardResumeRejects(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -150,6 +202,9 @@ func TestForwardResumeRejects(t *testing.T) {
 		t.Fatal(err)
 	}
 	testLookupWrite(t, s.instanceDir, convA, 2, segmentHeaderLine+testLookupLine(20))
+	if _, err := s.Lookup(convA, []uint64{20}); !errors.Is(err, ErrCorruptSegment) {
+		t.Fatalf("lookup skipped recovered zero bound: %v", err)
+	}
 	r := testForwardReader(t, s, 19)
 	if err := r.Walk(context.Background(), 20, func([]Entry) error { t.Fatal("zero bound skipped"); return nil }); !errors.Is(err, ErrCorruptSegment) {
 		t.Fatal(err)

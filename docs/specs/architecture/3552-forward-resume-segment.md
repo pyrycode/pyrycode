@@ -105,3 +105,11 @@ distinguish consumed-range validation from prefix discovery.
   entry, so size equality alone cannot certify an empty range. The shared bound
   helper rediscovers zero bounds larger than the header; `TestForwardResumeRejects`
   covers recovery followed by positioning. This preserves torn-first-entry tolerance.
+- 2026-10-17, verifier finding 1: `lookupBound` must distinguish discovery-certified
+  empty ranges from recovery-derived zero first IDs. Reuse a discovery certificate
+  while regular-file membership and size remain valid; recovery-derived zero bounds
+  still require discovery. `TestForwardResumeTornFirstEntryReads` proves cold/warm
+  byte and open counts for Forward and Lookup, plus rejection when resizing completes
+  a zero-ID entry. The certificate stays under `Store.mu`; no new goroutines or
+  retained decoded data. The security review's containment and validation contracts
+  remain unchanged.
