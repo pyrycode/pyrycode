@@ -1086,6 +1086,8 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `host_system_prompt` | daemon → client | no | Exactly one requester-only reply to a successful read or durable write, correlated by `in_reply_to`, never broadcast; always carries current and default strings. See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
 | `request_claude_account` | client → daemon | no | **New in v2** (#2838, handled #2839). Reads the connected daemon's Claude account source through the same authenticated paired-client map dispatch as `request_host_system_prompt`, without a conversation/session or `interactive` gate. Empty payload. See [Claude account source](#claude-account-source). |
 | `claude_account` | daemon → client | no | **New in v2** (#2838, handled #2839), outbound only — `IsKnownAppType` rejects it inbound. Exactly one requester-only reply to `request_claude_account`, correlated by `in_reply_to`, never broadcast; always carries `kind`, `label`, `state` and `reason`, the last two as `""` when absent. See [Claude account source](#claude-account-source). |
+| `request_claude_usage` | client → daemon | no | **New in v2** (#3575). Reads the daemon's latest Claude usage allowance reading through the same authenticated paired-client map dispatch as `request_host_system_prompt` / `request_claude_account`, without a conversation/session or `interactive` gate. Empty payload. See [Claude usage allowance reading](#claude-usage-allowance-reading). |
+| `claude_usage` | daemon → client | no | **New in v2** (#3575), outbound only — `IsKnownAppType` rejects it inbound. Exactly one requester-only reply to `request_claude_usage`, correlated by `in_reply_to`, never broadcast; always carries `state`, and `observed_at` plus whichever of `five_hour` / `seven_day` the stored reading has when `state` is `observed`. See [Claude usage allowance reading](#claude-usage-allowance-reading). |
 | `create_workspace_folder` | phone → binary | no | Creates a new folder on the daemon host under a client-supplied parent path (confined to `$HOME`); touches no conversation registry. Replies with `workspace_folder_created`. |
 | `workspace_folder_created` | binary → phone | no | Reply to `create_workspace_folder`, correlated by `in_reply_to`; carries the created folder's canonical (symlink-resolved) absolute path. |
 | `recent_workspaces` | phone → binary | no | Read verb (like `list_conversations`); requests the distinct set of recently-used workspace folders. Empty request payload. Replies with `recent_workspaces_list`. |
@@ -2838,6 +2840,114 @@ malformed `request_claude_account` payload uses the existing
 `claude_account_machine_login.json`, `claude_account_file_ready.json`, and
 `claude_account_file_failed.json`.
 
+### Claude usage allowance reading
+
+Declared and answered together (#3575), on the same authenticated paired-client
+map dispatch as [`request_claude_account`](#claude-account-source) and
+[`request_host_system_prompt`](#daemon-wide-host-system-prompt): any paired
+client may ask, there is no conversation/session lookup and no `interactive`
+capability gate. `request_claude_usage` asks how much of claude's 5-hour and
+weekly usage allowance is spent and when each resets, so a client can show
+both windows on demand rather than only when a warning fires.
+
+**The reading covers the whole Claude account and is held per daemon
+instance**, in memory only — each daemon instance runs every Claude session
+under its one configured account (#2814), so one reading per daemon is the
+right granularity. It starts empty: **no reading exists until the first
+`rate_limit_event` line any Claude session's child prints after daemon
+start**, and `claude_usage` reports `state: "none"` until then.
+
+**Asking never triggers a model call, and the reading is never refreshed on
+its own.** `observed_at` is the daemon's own clock, read at the moment the
+daemon decoded the line that produced the stored reading — not claude's
+clock, and not the time of the request. A client that wants a fresher number
+has no way to force one short of a model call happening to run.
+
+**Each new reading replaces the whole previous one, field by field, as that
+one line reported it.** A `rate_limit_event` line carries a `five_hour`
+and/or `seven_day` sub-object; whichever one the line omits is **absent**
+from the new stored reading, never carried over from an older reading that
+did have it. So a window present on request 1 can be absent on request 2 —
+that is claude declining to repeat it on the line that produced the current
+reading, not evidence the window stopped existing. A line with no windows at
+all — no `unifiedWindows` key, a `null`/empty one, or one that fails to
+decode — changes nothing: the previously stored reading, whatever it had,
+stands untouched.
+
+#### `request_claude_usage`
+
+Direction **client → daemon**. The payload is an empty object.
+
+| Field | Type | Meaning |
+|---|---|---|
+| None | — | Send `{}`. |
+
+```json
+{
+  "id": 400, "type": "request_claude_usage", "ts": "...",
+  "payload": {}
+}
+```
+
+#### `claude_usage`
+
+Direction **daemon → client**. Answers `request_claude_usage` with exactly
+one unicast reply, correlated by envelope `in_reply_to`; never broadcast.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `state` | required string | `"none"` (no reading stored since daemon start) or `"observed"` (at least one reading has been stored). A client **must accept an unknown value**. |
+| `observed_at` | string, omitted in state `none` | RFC 3339 UTC timestamp — the daemon's own clock when it read the line that produced this reading. Never claude's clock, and never the request time. |
+| `five_hour` | object, omitted in state `none` or when the stored reading has no five-hour window | `{ "utilization": number, "resets_at": integer }`, either key independently omittable (see below). |
+| `seven_day` | object, omitted in state `none` or when the stored reading has no seven-day window | Same shape as `five_hour`, for the weekly window. |
+
+Each window object's two keys:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `utilization` | number, omitted when claude's line did not report it | How much of the window claude says is spent — claude's own number, verbatim and unvalidated, **not a bounded fraction**. **Every capture on file is a 0-to-1 fraction, not a percentage**, but nothing clamps, rounds or range-checks it: a value above 1 passes through unchanged. **Absence and `0` are different facts**: an omitted key means claude's line did not carry this number, and `0` means claude reported an untouched window. A client that reads a missing key as `0` renders "nothing reported" as "fully fresh" — the same trap [`rate_limited`](#rate_limited)'s own `utilization` field warns about, and for the same reason: a client must degrade rather than guess. |
+| `resets_at` | integer, omitted when claude's line did not report it | When claude says the window lifts, as unix seconds — claude's own number, unvalidated in both directions, the same posture [`rate_limited`](#rate_limited)'s `resets_at` has. A value in the past is representable and passes through unchanged; a client must not assume it lies in the future or in any sane range. |
+
+No reading yet:
+
+```json
+{
+  "id": 401, "type": "claude_usage", "ts": "...", "in_reply_to": 400,
+  "payload": { "state": "none" }
+}
+```
+
+Both windows observed:
+
+```json
+{
+  "id": 403, "type": "claude_usage", "ts": "...", "in_reply_to": 402,
+  "payload": {
+    "state": "observed", "observed_at": "2026-10-17T12:00:00Z",
+    "five_hour": { "utilization": 0.44, "resets_at": 1790367600 },
+    "seven_day": { "utilization": 0.64, "resets_at": 1790575200 }
+  }
+}
+```
+
+Only one window in the stored reading — the latest line did not carry the
+other, so it is absent rather than stale:
+
+```json
+{
+  "id": 405, "type": "claude_usage", "ts": "...", "in_reply_to": 404,
+  "payload": {
+    "state": "observed", "observed_at": "2026-10-17T12:01:00Z",
+    "seven_day": { "utilization": 0, "resets_at": 1000 }
+  }
+}
+```
+
+No error code is declared for this family: the reading is a daemon-local
+in-memory value with nothing that can fail to persist or fetch, so a
+malformed `request_claude_usage` payload uses the existing
+`protocol.malformed` and nothing else about this pair can reject.
+
 ### Renaming a workspace
 
 `rename_workspace` sets or clears a workspace's display name — the operator-chosen label a client shows instead of, or beside, the folder's own path, so a workspace whose folder is called something unhelpful reads the way the operator thinks of it. **The name travels with the workspace, not with the client**: it is stored on the daemon, so every client sees the same label.
@@ -3072,6 +3182,7 @@ Defined capability strings:
 | `context_usage` | The daemon can answer a fresh `detail:"full"` context-window reading on demand — the [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) verb (#2431). **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `context_usage` by itself negotiates as non-interactive, and a client advertising `interactive` without it can still use the verb. |
 | `multi_agent` | The client understands conversations run by more than one agent (#2643). **Not detection-only — this string changes what the daemon sends.** It grants no *interactive* access (every `interactive`-gated surface is unaffected, and a client can negotiate `multi_agent` alone without becoming interactive), but it gates two things on the `conversations` reply: every row carries `agent` (`"claude"` or `"codex"`, the bound session's agent), and a row whose agent is `"codex"` is included at all. A client that does not negotiate it gets today's list, byte-identical, with Codex-run conversations left out. See the `conversations` row below. As of #2644, it also gates every frame the daemon *pushes* about a Codex conversation: live turn events, conversation broadcasts (`conversation_updated`), the connect-time reconciles (model list, slash commands, background-task roster, questions, modals), reconnect replay and the `resync` marker. A client that does not negotiate `multi_agent` receives none of them; frames about a Claude conversation, frames naming no conversation, and ordinary replies to the client's own requests are delivered exactly as before. Thread item updates and continuations remain subject to the independent item authorization gate even when correlated. `modal_dismissed` and `question_dismissed` name no conversation, so such a client can still receive one for a modal or question batch it never saw (the `*_shown` frame that introduced that batch id was itself withheld) — it names nothing the client can act on and should be ignored. As of #2651 it also changes the **content** of every `model_list` frame the daemon answers with — the connect-time reconcile and the `request_model_list` reply alike — whichever agent the named conversation itself runs: a capable client's `models` merges Claude's held entries with Codex's, each tagged `agent` and `family` (see [`model_list`](#model_list) below). A client that does not negotiate `multi_agent` still gets today's Claude-only list, byte-identical, with no `agent`/`family` keys on the wire. |
 | `stop_background_task` | The daemon supports stopping one named background task through the [`stop_background_task`](#stop-background-task-v2) verb (#2797). **Detection only: this string grants no access.** Clients advertise it and draw a per-task stop button only when `hello_ack.payload.capabilities` echoes it. Advertising it alone leaves the connection non-interactive; the verb requires `interactive` alone, and an interactive client can use it without advertising this detection string. |
+| `claude_usage` | The daemon answers [`request_claude_usage`](#claude-usage-allowance-reading) with its latest Claude usage allowance reading (#3575). **Detection only: this string grants no access and gates nothing** — `request_claude_usage` is answered through authenticated paired-client map dispatch whether or not a client advertised it, the same posture `request_claude_account` already has. A client advertises it only to know the daemon understands the verb before it asks. |
 | `thread_expansion` | **Production-installed (#3523/#3550).** Bounded body and direct-child reads; negotiated only with both providers, thread readiness and client `thread_expansion`, `thread` and `interactive`. See [Bounded expansion reads](#bounded-expansion-reads). |
 | `thread_compact` | **Relay-side negotiation implemented (#3573); not granted in production.** Separate compact root projection and freshness contract; installed expansion support does not imply compact support. Granted only when the client advertises it, `thread`, `interactive` and `thread_expansion` are all granted in the same negotiation, and the daemon has installed both compact query providers plus a true compact-readiness attestation. Missing any one of those withholds only `thread_compact`; every other grant in the same `hello_ack` is unaffected. Production does not yet install the compact providers (#3563), so no real connection negotiates it today. See [Compact projection](#compact-projection-declared). |
 | `thread` | Per-connection daemon-built thread delivery (#3081), echoed only when advertised and supplied complete readiness is true. It grants neither `interactive` nor `multi_agent` access. **Production live publication and bounded catch-up/pages are installed (#3164/#3236)**; see [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |

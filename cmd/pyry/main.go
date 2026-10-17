@@ -407,6 +407,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	approvalWindow := approvalTimeout()
 	approvalSurfaces := &approvalSurfaceReport{}
 	codex := codexHarness{bin: *codexBin, home: codexHomePath(resolveInstanceDirPath(*name))}
+	// One usage reading per daemon: every Claude session's parser writes it and
+	// the relay answers request_claude_usage from it.
+	claudeUsage := &claudeUsageStore{}
 	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger, mcpServersPath, modelVocabulary, streamApprovalConfig{
 		stdio:    cfg.StdioPermissionPrompt,
 		registry: approvals,
@@ -414,6 +417,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		surface:  approvalSurfaces,
 		account:  account.provider(),
 		settings: claudeSettingsFile.composer(),
+		usage:    claudeUsage,
 	}, codex)
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)
@@ -786,6 +790,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		convReg:          convReg,
 		hostSystemPrompt: pool,
 		claudeAccount:    account,
+		claudeUsage:      claudeUsage,
 		workspaceBase:    workspaceBase,
 		readFolders:      readFolders,
 		creator:          sessionMinter{pool, modelVocabulary},

@@ -191,8 +191,8 @@ const (
 
 // Envelope types: wire values for Envelope.Type (docs/protocol-mobile.md
 // § Application message types). Every type in this block is in
-// inboundAppTypeSet (envelope.go) except TypeHostSystemPrompt and
-// TypeClaudeAccount, which are outbound only; its phone → binary verbs are
+// inboundAppTypeSet (envelope.go) except TypeHostSystemPrompt,
+// TypeClaudeAccount and TypeClaudeUsage, which are outbound only; its phone → binary verbs are
 // dispatched through dispatch.Route's Handlers map. The v2-only types follow in
 // their own blocks.
 //
@@ -285,6 +285,12 @@ const (
 	// claude_account.go.
 	TypeRequestClaudeAccount = "request_claude_account"
 	TypeClaudeAccount        = "claude_account"
+
+	// Claude usage allowance reading pair. The client → daemon read verb is
+	// map-dispatched; the daemon → client reply is outbound only. See the
+	// consumer contract in claude_usage.go.
+	TypeRequestClaudeUsage = "request_claude_usage"
+	TypeClaudeUsage        = "claude_usage"
 
 	// Workspace.
 	// TypeCreateWorkspaceFolder is a phone → binary write verb that creates a
