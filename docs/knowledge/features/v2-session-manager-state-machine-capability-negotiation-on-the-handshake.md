@@ -15,8 +15,8 @@ var supportedV2Capabilities = []string{
 }
 
 // Intersect advertisements with the supported set in its order, then grant
-// thread and hosted apps only with supplied readiness. Dedup and drop unknown
-// strings; nil means no capabilities were negotiated.
+// thread, hosted apps and expansion only with supplied readiness. Dedup and
+// drop unknown strings; nil means no capabilities were negotiated.
 func negotiateCapabilities(advertised []string, readiness ...bool) []string {
     var out []string
     for _, name := range supportedV2Capabilities { // `name`, not `cap` (builtin)
@@ -28,13 +28,16 @@ func negotiateCapabilities(advertised []string, readiness ...bool) []string {
     if len(readiness) > 1 && readiness[1] && slices.Contains(advertised, protocol.CapabilityHostedAppsV1) {
         out = append(out, protocol.CapabilityHostedAppsV1)
     }
+    if len(readiness) > 2 && readiness[0] && readiness[2] && slices.Contains(advertised, protocol.CapabilityThreadExpansion) && slices.Contains(advertised, protocol.CapabilityThread) && slices.Contains(advertised, protocol.CapabilityInteractive) {
+        out = append(out, protocol.CapabilityThreadExpansion)
+    }
     return out
 }
 ```
 
 **Iterating the supported set (not the advertised set) is the security primitive** — "a spoofed capability can never be granted" is a structural property of the loop shape, deterministic, not a runtime guard a later refactor could bypass (Threat 1 / AC#3). A pure receiver-less function, directly table-testable for the whole negotiation matrix.
 
-**Echo + record, single source of truth.** `handleNoiseInit` computes `negotiated` with `negotiateCapabilities` and the supplied thread/hosted readiness decisions **before** the `hello_ack` literal, and adds `Capabilities: negotiated` to `HelloAckPayload`. Token validation precedes ack construction so host-only metadata can be withheld. The ack is sealed via `WriteResp` before enforcing the token verdict, so it is built for accepted and token-refused handshakes — `omitempty` keeps the key absent for a no-capability phone (v1 byte-stability, AC#5). The per-conn `interactive bool` (a new `V2Session` field beside `device`/`peerStatic`, same set-once / single-owner-goroutine discipline) is set in the token-OK tail, **between `s.device = &device` and `s.state = V2StateOpen`**, via `s.interactive = slices.Contains(negotiated, protocol.CapabilityInteractive)` — derived from the *same* `negotiated` slice the ack echoed, so the echoed capability and the recorded flag can never disagree.
+**Echo + record, single source of truth.** `handleNoiseInit` computes `negotiated` with `negotiateCapabilities` and the supplied thread/hosted/expansion readiness decisions **before** the `hello_ack` literal, and adds `Capabilities: negotiated` to `HelloAckPayload`. Token validation precedes ack construction so host-only metadata can be withheld. The ack is sealed via `WriteResp` before enforcing the token verdict, so it is built for accepted and token-refused handshakes — `omitempty` keeps the key absent for a no-capability phone (v1 byte-stability, AC#5). The per-conn `interactive bool` (a new `V2Session` field beside `device`/`peerStatic`, same set-once / single-owner-goroutine discipline) is set in the token-OK tail, **between `s.device = &device` and `s.state = V2StateOpen`**, via `s.interactive = slices.Contains(negotiated, protocol.CapabilityInteractive)` — derived from the *same* `negotiated` slice the ack echoed, so the echoed capability and the recorded flag can never disagree.
 
 **Fail-closed, two independent gates.** The flag is written **only** on the token-OK branch (after `Devices.Validate`, before `V2StateOpen`); every other path leaves it at its `false` zero value (advertise-nothing / `null` / `[]` / only-unsupported → `negotiated == nil` → `false`). And `handleActiveConns` filters on `V2StateOpen` — so even if the flag were mis-set, a non-open (un-authenticated) session is never enumerated, and the negotiated flag of an un-authenticated peer is never observable. Belt-and-suspenders of different fabric — two deterministic code-level gates, the same shape #588/#589 established. Re-key (`handleRekeyInit`) preserves `s.interactive` by never touching it, like `device`/`peerStatic`.
 
@@ -119,18 +122,25 @@ thread-only replay/resync bypass are installed. Readiness attests complete
 wiring, not that every conversation has completed replay. See
 [daemon publication and lifecycle](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
-`ThreadToolBody` supplies bodies to the authenticated handler, but neither
-that callback nor `ThreadReady` grants `thread_expansion`. `s.threadExpansion`
-defaults false and handshake negotiation withholds it until both expansion reads
-are ready (#3550); production providers/activation remain uninstalled pending
-\#3523. Authenticated synthetic tests enable the recipient flag on `Run` without
-advertising it. Existing `thread` negotiation remains independent.
+With both expansion handlers and encoders compiled, `handleNoiseInit` supplies
+expansion readiness from the presence of **both** `ThreadToolBody` and
+`ThreadChildren`. `negotiateCapabilities` grants `thread_expansion` only when
+existing `ThreadReady` is also true and the client advertises all three of
+`thread_expansion`, `thread` and `interactive`. The authenticated tail derives
+`s.threadExpansion` from the same negotiated slice echoed in `hello_ack`;
+rekey preserves it. Either provider alone withholds expansion while preserving
+existing `thread` negotiation. `TestThreadExpansionHandshake` covers the
+provider/readiness/client-capability matrix through real authenticated
+handshakes, including successful child dispatch. Production installs neither
+expansion callback, so advertisement remains withheld pending real Store
+installation/activation in #3523. Compact projection remains #3517.
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
 replies, but `threadWithheld` independently gates live additions/changes/text
 appends and their continuations, plus correlated `thread_items` batches, assembly
-parts/completion, `thread_tool_body` data/assembly/finals and `thread_reset`. Body
-frames additionally require the recipient's expansion flag. Upstream checks
+parts/completion, `thread_tool_body` data/assembly/finals, `thread_children`
+data/finals and `thread_reset`. Every expansion frame additionally requires the
+recipient's expansion flag. Upstream checks
 at `forwardEnvelope` and `forwardAppReply` cannot authorize a later queued send:
 `hostedDeliver` rechecks the selected unsealed thread-content head immediately
 before Noise sealing. The connection must still be open/authenticated, currently
@@ -194,21 +204,49 @@ and requests over 36,000 entries are covered by `TestDaemonThreadQueriesReadines
 `TestDaemonThreadQueriesBounded`. See the
 [wire query contract](../../protocol-mobile.md#thread-query-messages).
 
-Body admission also requires `thread_expansion`, a nonempty string epoch and
-nonzero unsigned 64-bit item ID/expected revision; any cursor key is refused,
-including null. `ThreadToolBody` must enforce public ownership in the named
-conversation and honor cancellation. `runThreadToolBody` rejects nonusable/error
+Both expansion reads also require `thread_expansion`, a nonempty string epoch
+and nonzero unsigned 64-bit item ID/expected revision. Body admission refuses
+any cursor key, including null. `ThreadToolBody` must enforce public ownership in
+the named conversation and honor cancellation. `runThreadToolBody` rejects nonusable/error
 results and passes the captured identity, kind and content to
 `EncodeThreadToolBody`, which refuses stale/mismatched identity or wrong kind.
 There is no active-conversation or other-client fallback. Empty rendered
 input/output is available content; missing/private/unavailable bodies are errors.
 See [bounded expansion reads](../../protocol-mobile.md#bounded-expansion-reads).
 
+Child admission accepts an omitted cursor or a nonnull object with every
+`ThreadExpansionCursor` field correctly typed. `parseThreadChildCursor` requires
+matching conversation/epoch/parent/revision and a nonzero last ID, while explicit
+zero version/order remain valid. Child limits accept unsigned 64-bit integers:
+omitted/zero defaults to 50 and positive values clamp to 256 before conversion
+to `int`; null, negative, fractional or out-of-range values refuse. Existing
+complete-query and body limits retain their signed-int ceiling.
+`ThreadChildren` owns current epoch/revision/version and public parent/cursor
+membership in the named conversation; globally reused IDs cannot establish that
+scope. Changed-version continuations refuse even with unchanged parent revision,
+requiring a fresh first page. `TestThreadChildrenAdmission` and
+`TestThreadChildrenProviderScope` distinguish wire rejection from provider checks.
+
+`runThreadChildren` rejects nonusable/error results, mismatched result
+conversation and contradictory `More`/`Complete` evidence. It adapts detached
+direct summaries to `EncodeThreadChildren` without rendering complete items.
+Preserve capture epoch/version, parent revision and recorded child session
+attribution independently of transport generation. The encoder's ascending
+`(order, id)` prefix includes ties/order-zero rows, caps headlines at 200 code
+points, and omits bodies, parent extras and descendants. Its whole escaped,
+stamped page including the separate marker fits `MaxThreadEnvelopeBytes`;
+byte shortening derives the cursor from the last delivered row, rather than
+`ChildPageResult.CursorAfter`, so selected but undelivered rows remain reachable.
+No-row-fits refuses; a usable empty page succeeds. `TestThreadChildrenPages`
+checks repeated/nested paging, byte shortening and unchanged joins/live delivery;
+`TestThreadChildrenRefusals` separates empty, unavailable, stale and invalid results.
+
 **Validate the final raw field, not a retained scalar value.** JSON null decoded
-into a scalar DTO can leave an earlier duplicate-key value intact. Body admission
-reads the final raw epoch/item/revision fields into pointers, rejecting a trailing
-null instead of accepting earlier valid scope. `TestThreadToolBodyAdmission`
-exercises these duplicate keys through authenticated dispatch before provider work.
+into a scalar DTO can leave an earlier duplicate-key value intact. Expansion
+admission reads final raw epoch/item/revision and supplied cursor fields into
+pointers, rejecting a trailing null instead of accepting earlier valid scope.
+`TestThreadToolBodyAdmission` exercises duplicate keys through authenticated
+dispatch before provider work; child cursor validation applies the same rule.
 
 `ThreadPage` receives required unsigned `before_order`, including zero, and the
 normalized limit. `runThreadQuery` forwards every supplied full item and all four
@@ -238,10 +276,11 @@ for the contention evidence and bounded missing-reply/final-marker checks.
 **Dispatch probing must reach the owning validator.** Decoding a full `Envelope`
 just to identify a query type rejects wrong-type IDs before `admitThreadQuery`
 can apply its connection-close policy. `dispatchAppFrame` probes the type
-independently for catch-up, page and tool-body requests; other malformed types
-keep their existing fallback. `TestThreadPageAdmission` and
-`TestThreadToolBodyAdmission` send malformed IDs through the authenticated wire,
-because direct admission tests would miss this bypass.
+independently for catch-up, page, tool-body and child requests; other malformed
+types keep their existing fallback. `TestThreadPageAdmission`,
+`TestThreadToolBodyAdmission` and `TestThreadChildrenAdmission` send malformed
+IDs through the authenticated wire, because direct admission tests would miss
+this bypass.
 
 **A refusal must preserve the legacy delivery path.** An Outbound-only peer has
 no cancellable ordered sender. Initializing a lane merely to deny an unnegotiated
@@ -253,7 +292,7 @@ the cancellable ordered sender. `TestThreadCatchUpLegacyRefusal` and
 retains its cursor, disk reads and delivery behavior.
 
 **Completion must fence live admission.** One generation-specific query token
-owns each connection's unfinished catch-up, page or tool-body read; all share
+owns each connection's unfinished catch-up, page, tool-body or child read; all share
 the slot.
 `cancelThreadQuery` cancels it when a live item update for that conversation is
 admitted; `threadQueryGate` catches already queued updates immediately before sealing. No extra live buffer is
@@ -273,10 +312,10 @@ carry a join into a reused connection ID. The catch-up and page variants of
 pins cross-query slot contention and the join cap. Both requested-scope tests
 pair gap-producing thread and legacy handshakes with named requests.
 
-Body finals take a separate `threadQueryGate` branch: cancellation checking and
-release of that query share `hostedMu`, without writing `threadJoins`. Thus body
+Expansion finals take a separate `threadQueryGate` branch: cancellation checking
+and release of that query share `hostedMu`, without writing `threadJoins`. Expansion
 completion cannot advance full-thread coverage, replace an existing join or
-suppress unrelated live rows; body admission also bypasses the join-count cap.
+suppress unrelated live rows; expansion admission also bypasses the join-count cap.
 `deliverThread` binds even late refusals to the captured inbox generation, so a
 reused connection ID cannot receive old work. Cleanup compares the query token
 before releasing the slot, including when a refusal is withheld; it cannot clear
@@ -284,6 +323,9 @@ a later read. `TestThreadToolBodyResults`, `TestThreadToolBodySharedSlot`,
 `TestThreadToolBodyFullQuerySlot` and `TestThreadToolBodyGenerationFence` pin those
 boundaries. Failed/withheld data or final delivery cannot grant success; held
 providers and cancellation remain independent across connections.
+`TestThreadChildrenSharedSlot`, `TestThreadChildrenProviderShutdown` and
+`TestThreadChildrenInterrupted` extend these boundaries to child/body/complete
+contention, held providers, connection reuse and failed/withheld final delivery.
 
 A racing complete query may fail explicitly; retry from the last completed checkpoint.
 Only fully assembled batches followed by the separate successful marker advance
