@@ -124,6 +124,7 @@ func ArchiveConversation(reg ConversationArchiver, registryPath string, logger *
 			IsPromoted:     cv.IsPromoted,
 			IsArchived:     cv.IsArchived,
 			IsMuted:        cv.IsMuted,
+			PinnedAt:       cv.PinnedAt,
 			ReadUpTo:       cv.ReadUpTo,
 			Name:           cv.Name,
 			Cwd:            cv.Cwd,
