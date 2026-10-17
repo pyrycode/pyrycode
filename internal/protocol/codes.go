@@ -12,7 +12,8 @@ const (
 	TypeThreadReset       = "thread_reset"
 )
 
-// TypeThreadCompactUpdate is declared outbound only; production installation is pending.
+// TypeThreadCompactUpdate is outbound only: the daemon's coalesced live update
+// for a connection joined with the compact projection.
 const TypeThreadCompactUpdate = "thread_compact_update"
 
 // Expansion vocabulary is declared ahead of handlers and capability activation.
