@@ -41,7 +41,7 @@ Run owns session state, recipient gates and Noise sealing. Existing per-connecti
 Use correlated content-free `thread.query_failed` for all refusals except malformed envelope identity. No-row-fits is a refusal; usable empty is success. Serial delivery stops on any failure before success; cleanup releases only its query, while sealed failed sends retire the connection.
 
 ## Testing strategy
-Write tests first and observe failure. Use authenticated synthetic providers for strict admission, bounded selection, escaped stamped bytes, continuation and lifecycle checks; retain body/full/legacy tests. Run race tests for touched relay package, focused command guard, `go vet ./...` and `go build ./cmd/pyry` on macOS. Verifier owns `make check` and the full-module gate; record executed/passed/failed/skipped counts.
+Write tests first and observe failure. Use authenticated synthetic providers for strict admission, bounded selection, escaped stamped bytes, continuation and lifecycle checks; retain body/full/legacy tests. Reuse `TestChildPageBoundedWork` for omitted body/descendant growth and `TestThreadExpansionBudgets` for stamped byte bounds. Run race tests for touched relay package, focused command guard, `go vet ./...` and `go build ./cmd/pyry` on macOS. Verifier owns `make check` and the full-module gate; record executed/passed/failed/skipped counts.
 
 ## Open questions
 None.
@@ -62,3 +62,6 @@ Pending documentation stage:
 - Concurrency: identity-checked cleanup and final release share existing mutex; connection/manager cancellation ends provider and delivery work.
 - Threat model: hostile relay sees ciphertext only; summaries remain inert untrusted display text. Public membership cannot derive from globally reused IDs. OUT OF SCOPE: provider production installation #3523, client rendering sanitization unchanged.
 **Reviewer:** builder self-review. **Date:** 2026-10-17.
+
+## Revisions
+- 2026-10-17: Parse unsigned wire limits before clamping for children, retaining the signed-int ceiling for existing queries. `TestThreadChildrenProviderScope` explicitly checks provider-owned stale capture/public membership and zero-valued cursor version/order. Late thread/interactive withdrawal tests reopen the connection before retry because those gates also withhold terminal errors.

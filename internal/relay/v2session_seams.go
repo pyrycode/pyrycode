@@ -66,8 +66,13 @@ type V2SessionConfig struct {
 	ThreadPage func(context.Context, protocol.ThreadPagePayload) (thread.QueryResult, error)
 	// ThreadToolBody returns one detached captured public tool/agent body in the
 	// requested conversation. It must honor cancellation and enforce public
-	// ownership. Nil refuses reads; supplying it does not enable negotiation.
+	// ownership and current epoch/revision. Nil refuses reads.
 	ThreadToolBody func(context.Context, protocol.ThreadExpansionRequest) (thread.ToolBodyResult, error)
+	// ThreadChildren returns detached direct summaries off Run. It must honor
+	// cancellation and enforce current epoch/revision/version and public parent
+	// and cursor membership in the requested conversation. Both expansion
+	// providers are required for negotiation; neither may fall back to another scope.
+	ThreadChildren func(context.Context, protocol.ThreadExpansionRequest) (thread.ChildPageResult, error)
 
 	// ThreadLiveState returns a detached current-state cursor, including inactive
 	// retry/compaction and only outstanding prompts/questions with answer IDs.

@@ -1014,12 +1014,12 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 	}
 	// Query admission owns invalid envelope identity, including IDs that cannot
 	// decode into Envelope. Preserve other malformed requests' dispatch fallback.
-	if err := json.Unmarshal(plaintext, &probeType); err == nil && (json.Unmarshal(plaintext, &probeEnv) == nil || probeType.Type == protocol.TypeThreadCatchUp || probeType.Type == protocol.TypeThreadPage || probeType.Type == protocol.TypeThreadReadToolBody) {
+	if err := json.Unmarshal(plaintext, &probeType); err == nil && (json.Unmarshal(plaintext, &probeEnv) == nil || probeType.Type == protocol.TypeThreadCatchUp || probeType.Type == protocol.TypeThreadPage || probeType.Type == protocol.TypeThreadReadToolBody || probeType.Type == protocol.TypeThreadReadChildren) {
 		switch probeType.Type {
 		case protocol.TypeListApps, protocol.TypeAppCancel:
 			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
 			return
-		case protocol.TypeThreadCatchUp, protocol.TypeThreadPage, protocol.TypeThreadReadToolBody:
+		case protocol.TypeThreadCatchUp, protocol.TypeThreadPage, protocol.TypeThreadReadToolBody, protocol.TypeThreadReadChildren:
 			m.admitThreadQuery(ctx, s, plaintext)
 			return
 		case protocol.TypeRekeyRequest:
