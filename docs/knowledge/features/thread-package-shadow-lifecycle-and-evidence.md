@@ -25,15 +25,26 @@ gates. Held peer delivery cannot block history commits.
 
 `startRelayV2` installs `installDaemonThreadRelay` after the retained live-state
 providers and starts `startDaemonThreadPublisher` before connection admission.
-`installDaemonThreadRelay` binds `ThreadCatchUp` and `ThreadPage` directly to
-`Store.CatchUp` and `Store.HistoryPage` on the publisher's real store, preserving
-the request context, named conversation and complete captured `QueryResult`.
-`ThreadReady` requires both queries, the authoritative watermark lookup,
+`installDaemonThreadRelay` binds `ThreadCatchUp`/`ThreadPage` to
+`Store.CatchUp`/`Store.HistoryPage` and `ThreadToolBody`/`ThreadChildren` to
+`Store.ToolBody`/`Store.ChildPage` on the publisher's actual `thread.Store`.
+Adapters preserve the request context, named conversation and each captured
+result, including body kind, epoch/version and revision. Child requests pass
+the normalized limit and every cursor field; no adapter selects twice or reads a
+full `Snapshot`/`Observe` baseline. Installation clears all four query callbacks
+before checking the Store, preventing stale providers after clearing.
+`ThreadReady` requires both complete queries, the authoritative watermark lookup,
 `ThreadLiveState`/`LiveStateCurrent` delivery and a running publisher on that
-same store. Missing providers withhold negotiation; readiness does not promise
-that every conversation has completed replay. Authenticated queries load cold or
-idle registered conversations and wait cancelably for readiness; unavailable
-views fail with `thread.query_failed` without certifying partial items.
+same Store. Expansion additionally requires both expansion providers and client
+`thread_expansion`/`thread`/`interactive` capabilities; missing either provider
+withholds expansion while complete-thread negotiation still works. Readiness
+does not promise that every conversation has completed replay. Complete
+history/live delivery remains in use; compact publication (#3517) and client
+adoption are later work. See the
+[expansion wire contract](../../protocol-mobile.md#bounded-expansion-reads).
+Authenticated queries load cold or idle registered conversations and wait
+cancelably for readiness; unavailable views fail with `thread.query_failed`
+without certifying partial items.
 `ThreadLastShownVersion` checks
 registry membership before any certificate access. Loaded usable conversations
 read `Store.Status` without certificate I/O or copying a baseline; rebuilding
@@ -118,11 +129,16 @@ unload. Reading a newer boundary after held delivery can mark an unpublished
 commit consumed and prevent its reload. `TestDaemonThreadIdleCommit` exercises
 this race; reload must still prove the publication range or retire consumers.
 
-Authenticated thread queries own temporary daemon demand: they load cold or
-idle registered conversations, wait cancelably for a usable view, and keep it
-loaded through bounded selection and rendering. Concurrent queries share the
-worker; cancellation releases only the caller's demand. Removal and shutdown
-cancel and join all demand. Unknown and unavailable conversations fail closed.
+All four authenticated thread reads share `queryDaemonThread`'s temporary
+daemon demand; `threadShadow.queryThread` remains the complete-query wrapper.
+They load cold or idle registered conversations, wait cancelably for a usable
+view, and keep it loaded through bounded selection and rendering. Concurrent
+queries share the worker with independent demand counts; cancellation releases
+only the caller's demand without canceling another reader's worker. Removal and
+shutdown cancel and join affected demand. Each admitted read also joins the
+current publisher's wait group and follows its cancellation context through
+capture/rendering. Canceling without joining would let publisher stop return
+before demand release. Unknown and unavailable conversations fail closed.
 Queries enroll the same coordinator even for an already-loaded conversation.
 Before query capture, `threadShadow.publishThread` acquires a missing publisher
 boundary through a cancelable per-conversation gate shared with following.
@@ -180,6 +196,47 @@ nonusable failure, reset evidence and the 1024/1025 gap boundary.
 committed entries after recovery, measuring preparation separately from adapter
 allocations. `TestDaemonThreadQueriesJoin` reconstructs full current states
 through race refusal, successful retry and subsequent real publisher updates.
+
+`TestDaemonThreadExpansionWire` uses installed providers and authenticated
+synthetic history for exact ordinary tool and agent-launch bodies, captured kind,
+escaping-heavy assembly, immediate-child pages and separately opened nested
+parents. It checks omitted detail/descendants, direct-parent ownership, a separate
+complete-view client, subsequent live traffic and a second client/conversation.
+`TestDaemonThreadExpansionRefusals` covers stale cursors after history advances,
+actual epoch replacement, and missing/private or unknown-conversation refusal.
+`TestDaemonThreadExpansionPartialInstallation` preserves complete queries when
+either expansion provider is missing. `TestDaemonThreadExpansionDemand`,
+`TestDaemonThreadExpansionIdleAndUnavailable` and
+`TestDaemonThreadExpansionTeardown` cover shared-reader cancellation, idle reload,
+unavailable history and joined removal/shutdown/publisher retirement.
+
+`TestDaemonThreadExpansionBounded` separates preparation from installed requests.
+Growing unopened descendants from 8 to 512 and their bodies from 64 to 4096 bytes
+keeps the same fixed-limit page measurements: 40–53 delivered rows, two envelopes
+and at most 65,022 fully stamped aggregate bytes, below the 65,519-byte cap.
+Byte-shortened continuation enumerates all 301 direct children without skipping
+selected but undelivered rows. Existing
+[Store work-counter proofs](thread-package-background-store-queries.md#bounded-queries)
+bound selected body references and direct-child index visits with zero
+child-page body lookups; the installed adapter source guard rules out full
+baselines or a second selection. The macOS race run executed and passed all 15 installed
+expansion tests/subtests, with zero failures or skips. Live Claude and Linux were
+outside this ticket's verification scope.
+
+Expansion completion releases only its relay query slot; it neither writes
+`threadJoins` nor advances a complete-thread checkpoint. Relay tests
+`TestThreadToolBodyResults`, `TestThreadToolBodyFullQuerySlot` and
+`TestThreadChildrenPages` check unchanged/absent joins separately. The installed
+wire fixture uses a different client for complete catch-up, so its green alone
+cannot prove same-client checkpoint invariance around expansion with an existing
+join. Similarly, separate question/approval tests prove established channel
+behavior but do not prove coexistence with installed expansion in that fixture.
+
+Epoch replacement can legitimately retire the previous peer. Authenticated wire
+helpers must consume that peer's close frame before decoding a replacement
+peer's response, or valid retirement appears as malformed JSON. A publisher
+fixture with an unstarted relay manager must supply an explicit empty active-peer
+provider: otherwise shutdown can wait for a peer query no manager will service.
 
 `TestDaemonThreadBoundedRecovery` compares 128 and 8333 settled rows: initial and
 replacement acquisitions emit zero historical item frames/bytes, while a new
