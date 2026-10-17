@@ -129,6 +129,7 @@ var inboundTypes = map[string]string{
 	"TypeArchiveConversation":     "map-dispatched",
 	"TypeUnarchiveConversation":   "map-dispatched",
 	"TypeSetConversationMuted":    "map-dispatched",
+	"TypeSetConversationPinned":   "map-dispatched",
 	"TypeMarkConversationRead":    "map-dispatched",
 	"TypeChangeWorkspace":         "map-dispatched",
 	"TypeSetSystemPrompt":         "map-dispatched",
@@ -269,8 +270,6 @@ var inboundTypes = map[string]string{
 var excludedTypes = map[string]string{
 	"TypeThreadToolBody": "reply (thread tool body)",
 	"TypeThreadChildren": "reply (thread children)",
-
-	"TypeSetConversationPinned": "request (declared; handler pending #3538)",
 
 	"TypeAppAssetRequest":   "request (declared; handler pending #3247)",
 	"TypeAppAPIRequest":     "request (declared; handler pending #3247)",

@@ -84,8 +84,11 @@ const (
   `TestConversationPinnedAt` marshals decoded DTOs directly and inspects literal
   `pinned_at` output for timestamp, null and absent inputs on both types.
   Pins are host-local and clients merge hosts by pin time, without a new
-  capability. This declaration does not project stored pins: production handling
-  and projection remain pending #3537/#3538. See the
+  capability. `ListConversationsWithAgents` and every update producer copy the
+  stored pin, including command-package announcements (#3537/#3538). Checking
+  null serialization alone would miss a producer that forgot that assignment;
+  [projection regressions](relay-package-handlers.md#pin-preserving-projections-and-regression-tests)
+  seed non-null timestamps too. See the
   [request contract](../../protocol-mobile.md#set_conversation_pinned).
 - **`ArchivedAt` (#2698) is the archive-time stamp, projected verbatim from `Conversation.ArchivedAt` by `ListConversationsWithAgents`.** Pointer without `omitempty`, the same discipline as `WorkspaceLabel`: the key is always serialized, and `nil` is genuinely ambiguous on the wire between "active" and "archived before this field existed" — a client resolves that ambiguity by falling back to `LastUsedAt` for ordering, not by asking the daemon to disambiguate. Re-archiving a row never invents a stamp for it (see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `SetArchived`): stamping a legacy archived row on re-archive would reorder it to the top of every client's Archive screen, which is exactly the bug the registry-level test `TestRegistry_SetArchived_LegacyArchivedStaysUnstamped` exists to catch before it reaches this payload.
 - **`LastShownVersion` is an authoritative optional thread watermark.**

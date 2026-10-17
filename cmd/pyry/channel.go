@@ -244,6 +244,7 @@ func channelCreator(
 					IsPromoted:     got.IsPromoted,
 					IsArchived:     got.IsArchived,
 					IsMuted:        got.IsMuted,
+					PinnedAt:       got.PinnedAt,
 					ReadUpTo:       got.ReadUpTo,
 					Name:           got.Name,
 					Cwd:            got.Cwd,

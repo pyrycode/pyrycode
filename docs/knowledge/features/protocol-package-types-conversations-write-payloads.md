@@ -67,8 +67,7 @@ type SetConversationMutedPayload struct {
 }
 
 // Both keys are required by the consumer contract. Pinned keeps false distinct
-// from missing/null; semantic validation belongs to the future handler.
-// Production pin handling/projection is pending #3537/#3538.
+// from missing/null; SetConversationPinned validates before mutation.
 type SetConversationPinnedPayload struct {
     ConversationID string `json:"conversation_id"`
     Pinned         *bool  `json:"pinned"`
@@ -89,7 +88,7 @@ type ConversationUpdatedPayload struct {
     IsPromoted     bool      `json:"is_promoted"`
     IsArchived     bool      `json:"is_archived"` // #881 — always serialized, no omitempty (see below)
     IsMuted        bool      `json:"is_muted"`    // #2571 — always serialized, no omitempty (see below)
-    PinnedAt       *time.Time `json:"pinned_at"` // no omitempty: timestamp or explicit null; projection pending #3537/#3538.
+    PinnedAt       *time.Time `json:"pinned_at"` // no omitempty: stored timestamp or explicit null, including command announcements.
     ReadUpTo       uint64    `json:"read_up_to"`  // #2779 — always serialized, no omitempty (see below)
     Name           *string   `json:"name"`
     Cwd            string    `json:"cwd"`
@@ -144,15 +143,18 @@ type MarkConversationReadPayload struct {
 - **`SetConversationMutedPayload` (#2572) is one required id plus one required pointer-bool — the group's first payload where the *pointer* is the required-field marker, not the id.** `ConversationID` follows the family's usual value-typed convention (unresolvable is a dispatch-layer `conversation.not_found`, not a decode-layer concern). `Muted *bool` is required precisely because a plain `bool` cannot express "the key was missing" — decoding treats an absent or `null` key as the zero value `false`, which this verb's own semantics read as "unmute," so a plain `bool` would silently unmute on a malformed request instead of rejecting it. `SetSystemPromptPayload.SystemPrompt` uses the same pointer for the opposite reason (to preserve a genuine three-state clear/set/unset); here it exists purely to keep "absent" distinguishable from "false" so the handler can reject the former. Deliberately not a reuse of `ArchiveConversationPayload` despite sharing `ConversationID` (semantic coupling / false dependency, this file's standing rule).
 - **`SetConversationPinnedPayload.Pinned` follows the required pointer-bool pattern.**
   A plain bool would turn missing/null into an unintended unpin. A nil pointer
-  preserves that malformed state for the future handler; `encoding/json` rejects
+  preserves that malformed state for the handler to reject; `encoding/json` rejects
   non-booleans. Both `conversation_id` and `pinned` are required.
   `TestSetConversationPinnedPayload` pins literal keys and the wire discriminator
   independently of DTO tags, and checks true/false versus missing/null.
-  Recognition in `inboundAppTypeSet` does not install a handler: `excludedTypes`
-  classifies the request as pending #3538, with handling/projection in #3537/#3538.
+  Recognition in `inboundAppTypeSet` alone does not install a handler:
+  `startRelayV2` registers `SetConversationPinned`, and the dispatch guard's
+  `inboundTypes` classifies it as map-dispatched (#3538).
   Pinning an unpromoted conversation is the non-retryable
-  `conversation.not_promoted` contract; unpinning remains allowed. Future success
-  reuses `conversation_updated` without a new capability or server-sent type.
+  `conversation.not_promoted` contract; unpinning remains allowed on any existing
+  row. Success, including a no-op, reuses `conversation_updated` without a new
+  capability or server-sent type: the correlated reply precedes the matching
+  requester push, and all interactive clients receive the same stored record.
 - **`ConversationUpdatedPayload.PinnedAt` must clear as well as set a cached pin.**
   Like the [list DTO](protocol-package-types-conversations-read-payloads.md), it
   uses `*time.Time` without `omitempty`: RFC3339 when set, explicit null when
