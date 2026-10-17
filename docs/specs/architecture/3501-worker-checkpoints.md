@@ -61,3 +61,6 @@ Pending for the documentation stage: update `docs/knowledge/features/thread-pack
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+- 2026-10-17: `TestStoreCheckpointFinalCancellation` exposed cancellation during final state replacement after initial eligibility checks. Recheck the original parent context around scalar certification and invalidate both surfaces on cancellation; interrupted retirement cannot retain clean evidence. Additional file read: `internal/thread/queries_test.go` → `TestStoreQueriesRetirementIsolation`; its replacement barrier must gate once across both state and certificate replacements.

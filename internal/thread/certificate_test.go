@@ -122,6 +122,9 @@ func TestStoreCertificateWrites(t *testing.T) {
 		if err := os.Rename(from, to); err != nil {
 			return err
 		}
+		if filepath.Base(to) != cacheName {
+			return nil
+		}
 		raw, err := os.ReadFile(to)
 		if err != nil {
 			return err
