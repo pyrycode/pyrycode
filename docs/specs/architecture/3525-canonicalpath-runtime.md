@@ -73,3 +73,7 @@ Pending documentation stage: update `docs/knowledge/features/canonicalpath-packa
 **Date:** 2026-10-17
 
 Sizing: one deliverable; forecast <=650 written lines, 0 exported types, 0 consumer updates, 5 acceptance criteria, fewer than 10 native reject branches.
+
+## Revisions
+
+2026-10-17: The first native race run demonstrated that O_EVTONLY alone still waits when opening a FIFO without a peer. Add O_NONBLOCK to the metadata open; preserve the subprocess-bound special-leaf regression. The descriptor inventory also exposed Darwin ReadDir's fstatat failure for `/dev/fd`; enumerate descriptor names without stat instead. Both failures are retained as failed attempts, not attributed to the old resolver. [Apple's open contract](https://github.com/apple/darwin-xnu/blob/main/bsd/man/man2/open.2) specifies O_NONBLOCK for nonwaiting opens.
