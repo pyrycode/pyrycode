@@ -349,8 +349,11 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 		switch v := ev.(type) {
 		case turnevent.ThoughtChunk:
 		case turnevent.TextChunk:
-			for _, text := range splitDeltaText(v.Text, maxDeltaTextBytes) {
+			parts := splitDeltaText(v.Text, maxDeltaTextBytes)
+			complete := v.TextComplete
+			for i, text := range parts {
 				v.Text = text
+				v.TextComplete = complete && i == len(parts)-1
 				e.emitMappedAt(ctx, convID, v, e.runtimeClosedTurnID, e.runtimeClosedSeq)
 				e.runtimeClosedSeq++
 			}

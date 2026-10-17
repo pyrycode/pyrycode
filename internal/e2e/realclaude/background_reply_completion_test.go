@@ -4,8 +4,8 @@ package realclaude
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -15,10 +15,11 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/streamsup"
-	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 const backgroundReplyFixture = "testdata/background_reply_completion.json"
+
+const backgroundReplyWait = "while [ ! -f release ]; do sleep 0.1; done; cat release"
 
 // This scenario always runs under the live gate. Raw stdout stays in the private
 // artifact directory; the published replay contains only rig-authored values.
@@ -57,26 +58,27 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	if stdin == nil {
 		t.Fatal("runner did not start")
 	}
-	prompt := "Use Agent exactly once with run_in_background=true. Tell the Agent: use Bash to run `while [ ! -f release ]; do sleep 0.1; done; printf pyry-3589-released`, then reply with exactly pyry-3589-finished. Do not use other tools in the parent, do not wait for the Agent, and immediately reply pyry-3589-launched."
+	token := rand.Text()
+	prompt := "Use Agent exactly once with run_in_background=true. Tell the Agent: use Bash to run exactly `" + backgroundReplyWait + "`, then reply with exactly pyry-3589-finished. Do not use other tools in the parent, do not wait for the Agent, and immediately reply pyry-3589-launched."
 	if err := streamsup.WriteTurn(ctx, stdin, []byte(prompt)); err != nil {
 		t.Fatal("write rig prompt")
 	}
 	deadline := time.Now().Add(180 * time.Second)
-	released := false
+	releaseIndex := -1
 	var lines []dropcapCaptured
 	var caps dropcapCaps
-	var launch, mainEnd, final, childStart int
+	var launch, mainEnd, final, childStart, childResult int
 	var parent string
 	for time.Now().Before(deadline) {
 		lines, caps = recorder.snapshot()
-		launch, mainEnd, final, childStart, parent = backgroundReplyBoundary(lines)
-		if mainEnd >= 0 && !released {
-			if err := os.WriteFile(filepath.Join(work, "release"), []byte("release\n"), 0o600); err != nil {
+		launch, mainEnd, final, childStart, childResult, parent = backgroundReplyBoundary(lines, token)
+		if mainEnd >= 0 && releaseIndex < 0 {
+			releaseIndex, err = backgroundReplyRelease(recorder, filepath.Join(work, "release"), token)
+			if err != nil {
 				t.Fatal("release rig child")
 			}
-			released = true
 		}
-		if released && final > mainEnd && childStart >= 0 && caps.UnterminatedPartial == 0 {
+		if backgroundReplyReleased(mainEnd, releaseIndex, childResult, final) && childStart >= 0 && caps.UnterminatedPartial == 0 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -90,51 +92,37 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "stdout-private.jsonl"), []byte(raw.String()), 0o600); err != nil {
 		t.Fatal("retain private stdout")
 	}
-	t.Logf("background completion: captured=%d launch=%d main_end=%d child_start=%d final=%d lost_lines=%d lost_bytes=%d partials=%d", len(lines), launch, mainEnd, childStart, final, caps.LinesOverCap, caps.BytesOverCap, caps.PartialsDropped)
-	if launch < 0 || mainEnd <= launch || childStart <= launch || childStart >= final || final <= mainEnd || parent == "" || caps.LinesOverCap != 0 || caps.BytesOverCap != 0 || caps.PartialsDropped != 0 || caps.UnterminatedPartial != 0 {
+	t.Logf("background completion: captured=%d launch=%d main_end=%d release_index=%d child_start=%d child_result=%d final=%d lost_lines=%d lost_bytes=%d partials=%d", len(lines), launch, mainEnd, releaseIndex, childStart, childResult, final, caps.LinesOverCap, caps.BytesOverCap, caps.PartialsDropped)
+	if launch < 0 || mainEnd <= launch || childStart <= launch || childStart >= childResult || !backgroundReplyReleased(mainEnd, releaseIndex, childResult, final) || parent == "" || caps.LinesOverCap != 0 || caps.BytesOverCap != 0 || caps.PartialsDropped != 0 || caps.UnterminatedPartial != 0 {
 		t.Fatal("genuine loss-free background completion boundary was not observed")
 	}
-	// Replay the observed final envelope through the production parser. It must
-	// carry its own completion, independent of a task status or parent result.
-	var complete bool
-	p := streamsup.NewParser(func(ev turnevent.Event) {
-		if text, ok := ev.(turnevent.TextChunk); ok {
-			b, _ := json.Marshal(text)
-			var fields map[string]any
-			_ = json.Unmarshal(b, &fields)
-			complete = text.ParentToolCallID == parent && fields["TextComplete"] == true
-		}
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if _, err := p.Write(append(append([]byte(nil), lines[final].Raw...), '\n')); err != nil {
-		t.Fatal("parse captured final")
-	}
-	if !complete {
-		t.Fatal("observed final envelope did not carry intrinsic completion")
-	}
-	// Retain exact discriminators, source indices and event ordering, replacing
-	// all model-authored content/identifiers with fixed replay values.
-	replay := []string{
-		`{"type":"assistant","message":{"id":"launch","role":"assistant","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"run_in_background":true}}]}}`,
-		`{"type":"result","subtype":"success"}`,
-		`{"type":"assistant","parent_tool_use_id":"agent","message":{"id":"final","role":"assistant","content":[{"type":"text","text":"final reply"}]}}`,
+	replay, indices, alias, err := backgroundReplyReplay(t, lines, parent, token, final)
+	if err != nil {
+		t.Fatal(err)
 	}
 	revision, err := exec.Command("git", "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatal("read candidate revision")
 	}
 	record := struct {
-		ClaudeVersion     string      `json:"claude_version"`
-		Revision          string      `json:"revision"`
-		CapturedAt        string      `json:"captured_at"`
-		SourceIndices     []int       `json:"source_indices"`
-		CapturedLines     int         `json:"captured_lines"`
-		OmittedLines      int         `json:"omitted_lines"`
-		Loss              dropcapCaps `json:"loss"`
-		Replay            []string    `json:"replay"`
-		Provenance        string      `json:"provenance"`
-		ChildStart        int         `json:"child_start"`
-		ReleasedAfterMain bool        `json:"released_after_main"`
-	}{probeClaudeVersion(bin), strings.TrimSpace(string(revision)), time.Now().UTC().Format(time.RFC3339), []int{launch, mainEnd, final}, len(lines), len(lines) - 3, caps, replay, "rig-authored allowlist replay of observed assistant/tool_use, result/success, attributed assistant/text; private original retained separately; IDs and prose replaced; unrelated frames omitted", childStart, released}
+		ClaudeVersion    string      `json:"claude_version"`
+		Revision         string      `json:"revision"`
+		CapturedAt       string      `json:"captured_at"`
+		SourceIndices    []int       `json:"source_indices"`
+		CapturedLines    int         `json:"captured_lines"`
+		OmittedLines     int         `json:"omitted_lines"`
+		Loss             dropcapCaps `json:"loss"`
+		Replay           []string    `json:"replay"`
+		Provenance       string      `json:"provenance"`
+		ChildStart       int         `json:"child_start"`
+		ReleaseIndex     int         `json:"release_index"`
+		ChildResult      int         `json:"child_result"`
+		Launch           int         `json:"launch"`
+		MainEnd          int         `json:"main_end"`
+		Final            int         `json:"final"`
+		Parent           string      `json:"parent"`
+		ProducingSession string      `json:"producing_session"`
+	}{probeClaudeVersion(bin), strings.TrimSpace(string(revision)), time.Now().UTC().Format(time.RFC3339), indices, len(lines), len(lines) - len(replay), caps, replay, "rig-authored allowlisted sequence; stable aliased IDs; prose replaced; omitted lines verified against persistent production parser at every source index", childStart, releaseIndex, childResult, launch, mainEnd, final, alias(parent), alias("35890000-0000-4000-8000-000000000001")}
 	blob, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		t.Fatal("encode replay")
@@ -151,8 +139,9 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	t.Logf("safe replay artifact: %s", filepath.Join(dir, "background_reply_completion.json"))
 }
 
-func backgroundReplyBoundary(lines []dropcapCaptured) (launch, mainEnd, final, childStart int, parent string) {
-	launch, mainEnd, final, childStart = -1, -1, -1, -1
+func backgroundReplyBoundary(lines []dropcapCaptured, token string) (launch, mainEnd, final, childStart, childResult int, parent string) {
+	launch, mainEnd, final, childStart, childResult = -1, -1, -1, -1, -1
+	var childTool string
 	for i, line := range lines {
 		var v struct {
 			Type    string `json:"type"`
@@ -162,11 +151,14 @@ func backgroundReplyBoundary(lines []dropcapCaptured) (launch, mainEnd, final, c
 				ID      string `json:"id"`
 				Role    string `json:"role"`
 				Content []struct {
-					Type  string `json:"type"`
-					ID    string `json:"id"`
-					Name  string `json:"name"`
-					Text  string `json:"text"`
-					Input struct {
+					Type      string          `json:"type"`
+					ID        string          `json:"id"`
+					Name      string          `json:"name"`
+					Text      string          `json:"text"`
+					ToolUseID string          `json:"tool_use_id"`
+					Content   json.RawMessage `json:"content"`
+					IsError   bool            `json:"is_error"`
+					Input     struct {
 						Background bool   `json:"run_in_background"`
 						Command    string `json:"command"`
 					} `json:"input"`
@@ -176,8 +168,16 @@ func backgroundReplyBoundary(lines []dropcapCaptured) (launch, mainEnd, final, c
 		if json.Unmarshal(line.Raw, &v) != nil {
 			continue
 		}
-		if v.Type == "result" && v.Subtype == "success" && mainEnd < 0 {
+		if v.Type == "result" && v.Subtype == "success" && v.Parent == "" && mainEnd < 0 {
 			mainEnd = i
+		}
+		if v.Type == "user" && v.Parent == parent && childTool != "" {
+			for _, b := range v.Message.Content {
+				var output string
+				if b.Type == "tool_result" && b.ToolUseID == childTool && !b.IsError && json.Unmarshal(b.Content, &output) == nil && strings.TrimSpace(output) == token {
+					childResult = i
+				}
+			}
 		}
 		if v.Type != "assistant" || v.Message.ID == "" || v.Message.Role != "assistant" {
 			continue
@@ -187,14 +187,30 @@ func backgroundReplyBoundary(lines []dropcapCaptured) (launch, mainEnd, final, c
 				launch, parent = i, b.ID
 			}
 			if parent != "" && v.Parent == parent {
-				if b.Type == "tool_use" && b.Name == "Bash" && strings.Contains(b.Input.Command, "release") {
-					childStart = i
+				if b.Type == "tool_use" && b.Name == "Bash" && b.Input.Command == backgroundReplyWait && childStart < 0 {
+					childStart, childTool = i, b.ID
 				}
-				if b.Type == "text" && strings.TrimSpace(b.Text) == "pyry-3589-finished" {
+				if b.Type == "text" && strings.TrimSpace(b.Text) == "pyry-3589-finished" && final < 0 {
 					final = i
 				}
 			}
 		}
 	}
 	return
+}
+
+// The recorder lock places release between complete source lines. A line already
+// partially recorded is excluded from the post-release side of the boundary.
+func backgroundReplyRelease(r *dropcapRecorder, path, token string) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	index := r.seen
+	if len(r.partial) != 0 {
+		index++
+	}
+	return index, os.WriteFile(path, []byte(token+"\n"), 0o600)
+}
+
+func backgroundReplyReleased(mainEnd, releaseIndex, childResult, final int) bool {
+	return mainEnd >= 0 && releaseIndex > mainEnd && childResult >= releaseIndex && final > childResult
 }
