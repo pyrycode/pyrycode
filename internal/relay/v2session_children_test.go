@@ -127,9 +127,9 @@ func TestThreadChildrenPages(t *testing.T) {
 			}, nil)
 			p.mgr.hostedMu.Lock()
 			in := p.mgr.hostedInboxes[p.conn]
-			in.threadJoins = map[string]threadJoin{catchUpConversation: {"epoch", 20}}
+			in.threadJoins = map[string]threadJoin{catchUpConversation: {"epoch", 20, ""}}
 			for i := 1; i < maxThreadJoins; i++ {
-				in.threadJoins[fmt.Sprint(i)] = threadJoin{"epoch", 20}
+				in.threadJoins[fmt.Sprint(i)] = threadJoin{"epoch", 20, ""}
 			}
 			p.mgr.hostedMu.Unlock()
 			r := protocol.ThreadExpansionRequest{ConversationID: catchUpConversation, Epoch: "epoch", ItemID: 1, ExpectedRev: 2, Limit: 2}

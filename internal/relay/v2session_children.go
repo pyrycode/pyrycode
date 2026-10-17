@@ -53,7 +53,7 @@ func (m *V2SessionManager) runThreadChildren(ctx context.Context, s *V2Session, 
 	}
 	p := protocol.ThreadChildrenPayload{ConversationID: string(r.ConversationID), Epoch: r.Epoch, Version: r.Version, ItemID: r.Parent, Rev: r.ParentRev, Children: []protocol.ThreadSummary{}}
 	for _, row := range r.Items {
-		p.Children = append(p.Children, protocol.ThreadSummary{ID: row.ID, Kind: row.Kind, Order: row.Order, Rev: row.Rev, EndedOrder: row.EndedOrder, Session: row.Session, Agent: row.Agent, NoChild: row.NoChild, Turn: row.Turn, Parent: row.Parent, Status: row.Status, Active: row.Active, Shown: row.Shown, Headline: row.Headline, Subtype: row.Subtype, DetailOmitted: true})
+		p.Children = append(p.Children, threadSummaryFrom(row))
 	}
 	frames, err := protocol.EncodeThreadChildren(protocol.Envelope{TS: time.Now().UTC(), InReplyTo: &q.id}, *q.body, p, r.More)
 	if err != nil || q.ctx.Err() != nil {
