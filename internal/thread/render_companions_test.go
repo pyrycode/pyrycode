@@ -81,7 +81,7 @@ func TestReferenceEqualCompanion(t *testing.T) {
 							if err != nil || !reflect.DeepEqual(changes.Changes, want.Changes) {
 								t.Fatalf("entry %d changed publication: %v", e.ID, err)
 							}
-							query = query.advance(published, capture.affected, f, nil, nil)
+							query = query.advance(published, capture.affected, f, nil, nil, capture.headers)
 							items, err := renderShared(detachPublication(published), capture.recipes, source, f.items)
 							if err != nil || !reflect.DeepEqual(items, legacy.Items()) {
 								t.Fatalf("entry %d changed published items: %v", e.ID, err)

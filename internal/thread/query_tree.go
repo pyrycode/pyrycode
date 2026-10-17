@@ -10,6 +10,7 @@ type queryRow struct {
 	item   *Item
 	touch  uint64
 	recipe contentRecipe
+	header childHeader
 }
 
 // queryTree is a persistent AVL tree ordered by (group, key, item ID). Subtree sizes
@@ -41,7 +42,7 @@ func (n *queryTree) fix() {
 func (q *queryIndex) rotate(n *queryTree, left bool) *queryTree {
 	q.count(true)
 	if q.copied != nil {
-		q.copied(3)
+		q.copied(5)
 	}
 	var root queryTree
 	if !left {
@@ -81,7 +82,7 @@ func (q *queryIndex) treePutGroup(n *queryTree, group, key, id uint64, row query
 	}
 	c := *n
 	if q.copied != nil {
-		q.copied(3)
+		q.copied(5)
 	}
 	comparison := compareQueryKey(group, key, id, n)
 	if comparison < 0 {
@@ -110,7 +111,7 @@ func (q *queryIndex) treePutGroup(n *queryTree, group, key, id uint64, row query
 		if treeHeight(c.left.right) > treeHeight(c.left.left) {
 			child := *c.left
 			if q.copied != nil {
-				q.copied(3)
+				q.copied(5)
 			}
 			c.left = q.rotate(&child, true)
 		}
@@ -120,7 +121,7 @@ func (q *queryIndex) treePutGroup(n *queryTree, group, key, id uint64, row query
 		if treeHeight(c.right.left) > treeHeight(c.right.right) {
 			child := *c.right
 			if q.copied != nil {
-				q.copied(3)
+				q.copied(5)
 			}
 			c.right = q.rotate(&child, false)
 		}
@@ -214,31 +215,65 @@ func (q *queryIndex) membership(row queryRow, remove bool) {
 	}
 }
 
-func (q *queryIndex) advance(items []*Item, affected []int, f *Fold, work func(bool), copied func(int)) *queryIndex {
+func (q *queryIndex) advance(items []*Item, affected []int, f *Fold, work func(bool), copied func(int), headers map[uint64]childHeader) *queryIndex {
 	next := *q
 	next.work = work
 	next.copied = copied
 	// Copy only affected hash buckets. Clone copies index storage without
 	// comparing unrelated items; parent lookup remains constant-time.
 	var cloned [256]bool
+	cloneBucket := func(id uint64) {
+		bucket := id % uint64(len(next.byID))
+		if !cloned[bucket] {
+			if copied != nil {
+				copied(5 * len(next.byID[bucket]))
+			}
+			next.byID[bucket] = maps.Clone(next.byID[bucket])
+			cloned[bucket] = true
+		}
+	}
+	dirty := make(map[uint64]bool)
+	ancestors := func(index *queryIndex, id uint64) {
+		for id != 0 && !dirty[id] {
+			next.count(true)
+			row, ok := index.byID[id%uint64(len(index.byID))][id]
+			if !ok {
+				break
+			}
+			dirty[id] = true
+			id = row.item.Parent
+		}
+	}
+	for _, i := range affected {
+		ancestors(q, f.items[i].ID)
+	}
 	if copied != nil {
 		copied(len(next.byID))
 	}
 	for _, i := range affected {
 		next.count(true)
-		bucket := f.items[i].ID % uint64(len(next.byID))
-		if !cloned[bucket] {
-			if copied != nil {
-				copied(3 * len(next.byID[bucket]))
-			}
-			next.byID[bucket] = maps.Clone(next.byID[bucket])
-			cloned[bucket] = true
-		}
+		cloneBucket(f.items[i].ID)
 		if old, ok := next.lookup(f.items[i].ID, true); ok {
 			next.membership(old, true)
 		}
 		if items[i] != nil {
-			next.membership(queryRow{item: items[i], touch: f.touches[items[i].ID], recipe: f.recipes[items[i].ID]}, false)
+			next.membership(queryRow{item: items[i], touch: f.touches[items[i].ID], recipe: f.recipes[items[i].ID], header: headers[items[i].ID]}, false)
+		}
+	}
+	// Walk the new chains independently: a reparented row may already be dirty
+	// from its old chain, while its new ancestors still need invalidation.
+	oldDirty := dirty
+	dirty = make(map[uint64]bool)
+	for _, i := range affected {
+		ancestors(&next, f.items[i].ID)
+	}
+	for id := range oldDirty {
+		dirty[id] = true
+	}
+	for id := range dirty {
+		if row, ok := next.lookup(id, true); ok {
+			cloneBucket(id)
+			next.refreshHeader(row, f.version)
 		}
 	}
 	next.evidence(f)

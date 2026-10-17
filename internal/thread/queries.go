@@ -58,7 +58,13 @@ func newPublicationIndex(items []*Item, work func(bool)) *queryIndex {
 	q := &queryIndex{work: work}
 	for _, item := range items {
 		if item != nil {
-			q.membership(queryRow{item: item}, false)
+			q.membership(queryRow{item: item, header: prepareChildHeader(*item)}, false)
+		}
+	}
+	for _, item := range items {
+		if item != nil {
+			row, _ := q.lookup(item.ID, true)
+			q.refreshHeader(row, item.Rev)
 		}
 	}
 	return q
