@@ -182,12 +182,19 @@ func TestCompactIncremental(t *testing.T) {
 	snap, q := s.captureQuery(testStoreA)
 	old := NewStore(nil)
 	old.workers[testStoreA] = &conversationWorker{snapshot: snap, query: q}
-	want, _ := old.CompactNewestWindow(context.Background(), testStoreA, 1)
+	want, _ := old.CompactNewestWindow(context.Background(), testStoreA, MaxQueryItems)
+	assertFresh := func(first, second uint64) {
+		p, err := s.CompactHistoryPage(context.Background(), testStoreA, f.version+1, MaxQueryItems)
+		if err != nil || len(p.Headers) != 2 || *p.Headers[0].SubtreeVersion != first || *p.Headers[1].SubtreeVersion != second {
+			t.Fatal("root freshness", p, first, second, err)
+		}
+	}
+	assertFresh(17, 17)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for range 30 {
-			got, e := old.CompactNewestWindow(context.Background(), testStoreA, 1)
+			got, e := old.CompactNewestWindow(context.Background(), testStoreA, MaxQueryItems)
 			if e != nil || !reflect.DeepEqual(got, want) {
 				t.Error("capture changed", e)
 			}
@@ -198,17 +205,22 @@ func TestCompactIncremental(t *testing.T) {
 	for _, active := range []bool{true, false, true} {
 		f.items[3].Active = active
 		publish(3)
+		assertFresh(f.version, 17)
 	}
 	f.items[2].Parent = 2
 	publish(2)
+	assertFresh(21, 21)
 	f.publicVisible[4] = false
 	f.messages[4] = -1
 	publish(3)
+	assertFresh(21, 22)
 	f.publicVisible[4] = true
 	delete(f.messages, 4)
 	publish(3)
+	assertFresh(21, 23)
 	f.items[2].Parent = 0
 	publish(2)
+	assertFresh(21, 24)
 	if f.items[0].Rev != 1 || f.items[1].Rev != 2 {
 		t.Fatal("source revision changed")
 	}
