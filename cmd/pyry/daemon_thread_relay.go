@@ -19,6 +19,7 @@ import (
 type daemonThreadStore interface {
 	Status(conversations.ConversationID) thread.Snapshot
 	Changes(context.Context, conversations.ConversationID, string, uint64) (thread.Observation, error)
+	CompactChanges(context.Context, conversations.ConversationID, string, uint64) (thread.CompactQueryResult, error)
 }
 
 // Publication is serialized by the conversation coordinator, never a writer.
@@ -42,6 +43,9 @@ func installDaemonThreadRelay(cfg *relay.V2SessionConfig, s *threadShadow) {
 	cfg.ThreadPage = nil
 	cfg.ThreadToolBody = nil
 	cfg.ThreadChildren = nil
+	cfg.ThreadCompactCatchUp = nil
+	cfg.ThreadCompactPage = nil
+	cfg.ThreadCompactReady = nil
 	if s == nil || s.registry == nil {
 		return
 	}
@@ -93,6 +97,21 @@ func installDaemonThreadRelay(cfg *relay.V2SessionConfig, s *threadShadow) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return !p.stopped && p.ctx.Err() == nil
+	}
+	cfg.ThreadCompactCatchUp = func(ctx context.Context, r protocol.ThreadCatchUpPayload) (thread.CompactQueryResult, error) {
+		return queryDaemonThread(ctx, s, conversations.ConversationID(r.ConversationID), store, func(ctx context.Context) (thread.CompactQueryResult, error) {
+			return store.CompactCatchUp(ctx, conversations.ConversationID(r.ConversationID), r.Epoch, r.Version, r.Limit)
+		})
+	}
+	cfg.ThreadCompactPage = func(ctx context.Context, r protocol.ThreadPagePayload) (thread.CompactQueryResult, error) {
+		return queryDaemonThread(ctx, s, conversations.ConversationID(r.ConversationID), store, func(ctx context.Context) (thread.CompactQueryResult, error) {
+			return store.CompactHistoryPage(ctx, conversations.ConversationID(r.ConversationID), r.BeforeOrder, r.Limit)
+		})
+	}
+	// Compact needs the live publisher and both expansion reads: a header is only
+	// useful when the client can open it.
+	cfg.ThreadCompactReady = func() bool {
+		return cfg.ThreadReady != nil && cfg.ThreadToolBody != nil && cfg.ThreadChildren != nil && cfg.ThreadCompactCatchUp != nil && cfg.ThreadCompactPage != nil && cfg.ThreadReady()
 	}
 }
 
@@ -230,47 +249,53 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 	}
 	// Recipient selection follows observation capture. Reconnect history belongs
 	// to catch-up; this publisher does not initialize peers admitted later.
-	peers := p.active(ctx, string(id))
-	previousPeers := w.threadPeers
-	w.threadPeers = make(map[string]bool)
-	for _, peer := range peers {
-		if previousPeers[peer.ConnID] {
-			w.threadPeers[peer.ConnID] = true
+	// Unjoined peers get both families, so a frame of its own projection cancels
+	// whichever load is in flight; the relay withholds the other family.
+	var completePeers, compactPeers []string
+	for _, peer := range p.active(ctx, string(id)) {
+		if !peer.Interactive || !peer.Thread {
+			continue
+		}
+		if peer.View != relay.ThreadViewCompact {
+			completePeers = append(completePeers, peer.ConnID)
+		}
+		if peer.View != relay.ThreadViewComplete {
+			compactPeers = append(compactPeers, peer.ConnID)
 		}
 	}
-	var changes []thread.Change
-	if w.threadEpoch != "" {
-		changes = o.Changes
+	previousPeers := w.threadPeers
+	w.threadPeers = make(map[string]bool)
+	for _, peer := range append(completePeers, compactPeers...) {
+		if previousPeers[peer] {
+			w.threadPeers[peer] = true
+		}
 	}
-	for _, change := range changes {
-		for _, update := range daemonThreadUpdates(string(id), o.Epoch, change) {
-			frames, err := protocol.EncodeThreadUpdate(protocol.Envelope{TS: time.Now().UTC()}, update)
-			if err != nil {
-				p.log.Warn("relay: thread encoding failed", "event", "daemon.thread.encode_err")
+	var updates []any
+	if w.threadEpoch != "" {
+		if len(completePeers) > 0 {
+			for _, change := range o.Changes {
+				updates = append(updates, daemonThreadUpdates(string(id), o.Epoch, change)...)
+			}
+		}
+		if !p.deliver(ctx, id, w, updates, completePeers) {
+			return
+		}
+		updates = nil
+		if len(compactPeers) > 0 && o.Epoch == w.threadEpoch && o.Version > w.threadVersion {
+			// The Store coalesces every hidden event since the cursor into one
+			// final row per affected root, so this pass is bounded by visible roots.
+			r, err := p.store.CompactChanges(ctx, id, w.threadEpoch, w.threadVersion)
+			if err != nil || ctx.Err() != nil {
+				return
+			}
+			if r.State != thread.StateUsable || r.ResetRequired {
 				p.gap(ctx, id, w)
 				return
 			}
-			for _, raw := range frames {
-				var e protocol.Envelope
-				if err := json.Unmarshal(raw, &e); err != nil {
-					p.gap(ctx, id, w)
-					return
-				}
-				e.ID = p.nextID.Add(1)
-				for _, peer := range peers {
-					if ctx.Err() != nil {
-						return
-					}
-					if !peer.Interactive || !peer.Thread {
-						continue
-					}
-					if err := p.push(ctx, peer.ConnID, e); err == nil {
-						w.threadPeers[peer.ConnID] = true
-					} else if ctx.Err() == nil {
-						p.log.Debug("relay: thread push failed", "event", "daemon.thread.push_err")
-					}
-				}
-			}
+			updates = daemonThreadCompactUpdates(string(id), w.threadVersion, r)
+		}
+		if !p.deliver(ctx, id, w, updates, compactPeers) {
+			return
 		}
 	}
 	if ctx.Err() == nil {
@@ -279,8 +304,71 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 	}
 }
 
+// deliver encodes each update once and pushes it to every selected peer. A
+// failed push skips only that peer; false means the pass must stop.
+func (p *daemonThreadPublisher) deliver(ctx context.Context, id conversations.ConversationID, w *shadowConversation, updates []any, peers []string) bool {
+	for _, update := range updates {
+		frames, err := protocol.EncodeThreadUpdate(protocol.Envelope{TS: time.Now().UTC()}, update)
+		if err != nil {
+			p.log.Warn("relay: thread encoding failed", "event", "daemon.thread.encode_err")
+			p.gap(ctx, id, w)
+			return false
+		}
+		for _, raw := range frames {
+			var e protocol.Envelope
+			if err := json.Unmarshal(raw, &e); err != nil {
+				p.gap(ctx, id, w)
+				return false
+			}
+			e.ID = p.nextID.Add(1)
+			for _, peer := range peers {
+				if ctx.Err() != nil {
+					return false
+				}
+				if err := p.push(ctx, peer, e); err == nil {
+					w.threadPeers[peer] = true
+				} else if ctx.Err() == nil {
+					p.log.Debug("relay: thread push failed", "event", "daemon.thread.push_err")
+				}
+			}
+		}
+	}
+	return ctx.Err() == nil
+}
+
+// daemonThreadCompactUpdates turns one coalesced interval into one frame per
+// affected root, or one progress frame when no root changed.
+func daemonThreadCompactUpdates(conv string, from uint64, r thread.CompactQueryResult) []any {
+	if from >= r.Version {
+		return nil
+	}
+	scope := protocol.ThreadCompactUpdatePayload{Projection: protocol.ThreadProjectionCompact, ConversationID: conv, Epoch: r.Epoch, FromVersion: from, Version: r.Version}
+	var updates []any
+	for _, i := range r.Items {
+		u, item := scope, daemonThreadItem(i)
+		u.Item = &item
+		updates = append(updates, u)
+	}
+	for _, h := range r.Headers {
+		u, header := scope, daemonThreadSummary(h)
+		u.Header = &header
+		updates = append(updates, u)
+	}
+	if len(updates) == 0 {
+		scope.Progress = true
+		updates = append(updates, scope)
+	}
+	return updates
+}
+
 func daemonThreadItem(i thread.Item) protocol.ThreadItem {
 	return protocol.ThreadItem{ID: i.ID, Kind: i.Kind, Order: i.Order, Rev: i.Rev, EndedOrder: i.EndedOrder, Session: i.Session, Agent: i.Agent, NoChild: i.NoChild, Turn: i.Turn, Parent: i.Parent, Status: i.Status, Active: i.Active, Shown: i.Shown, Summary: i.Summary, Subtype: i.Subtype, Content: i.Content}
+}
+
+// daemonThreadSummary copies every header fact, including unknown (nil) ones.
+func daemonThreadSummary(h thread.ChildSummary) protocol.ThreadSummary {
+	return protocol.ThreadSummary{ID: h.ID, Kind: h.Kind, Order: h.Order, Rev: h.Rev, EndedOrder: h.EndedOrder, Session: h.Session, Agent: h.Agent, NoChild: h.NoChild, Turn: h.Turn, Parent: h.Parent, Status: h.Status, Active: h.Active, Shown: h.Shown, Headline: h.Headline, Subtype: h.Subtype, DetailOmitted: true,
+		ErrorSummary: h.ErrorSummary, PublicChildCount: h.PublicChildCount, HasPublicChildren: h.HasPublicChildren, SubtreeVersion: h.SubtreeVersion}
 }
 
 func daemonThreadUpdates(conv, epoch string, c thread.Change) []any {
