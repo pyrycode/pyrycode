@@ -27,11 +27,24 @@ func TestTranslateWarnings(t *testing.T) {
 		{"config empty details", "configWarning", `{"summary":"notice","details":""}`, "notice"},
 		{"config empty summary", "configWarning", `{"summary":"","details":"guidance"}`, "\nguidance"},
 		{"config empty", "configWarning", `{"summary":""}`, ""},
+		{"guardian targeted", "guardianWarning", `{"message":"notice\n界\u001b[31m","threadId":"other-thread"}`, "notice\n界\x1b[31m"},
+		{"guardian empty", "guardianWarning", `{"message":"","threadId":"other-thread"}`, ""},
+		{"deprecation absent", "deprecationNotice", `{"summary":"notice"}`, "notice"},
+		{"deprecation null", "deprecationNotice", `{"summary":"notice","details":null}`, "notice"},
+		{"deprecation details", "deprecationNotice", `{"summary":"notice","details":"guidance\n界"}`, "notice\nguidance\n界"},
+		{"deprecation empty details", "deprecationNotice", `{"summary":"notice","details":""}`, "notice"},
+		{"deprecation empty summary", "deprecationNotice", `{"summary":"","details":"guidance"}`, "\nguidance"},
+		{"deprecation empty", "deprecationNotice", `{"summary":""}`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ref := "#/definitions/v2/WarningNotification"
-			if tc.method == "configWarning" {
+			switch tc.method {
+			case "configWarning":
 				ref = "#/definitions/v2/ConfigWarningNotification"
+			case "guardianWarning":
+				ref = "#/definitions/v2/GuardianWarningNotification"
+			case "deprecationNotice":
+				ref = "#/definitions/v2/DeprecationNoticeNotification"
 			}
 			sch, err := s.resolve(ref)
 			if err != nil {
@@ -56,10 +69,15 @@ func TestTranslateWarnings(t *testing.T) {
 func TestTranslateWarningBounds(t *testing.T) {
 	t.Parallel()
 	atLimit := strings.Repeat("x", maxBannerText)
-	for _, method := range []string{"warning", "configWarning"} {
+	for _, method := range []string{"warning", "configWarning", "guardianWarning", "deprecationNotice"} {
 		key, schemaName := "message", "WarningNotification"
-		if method == "configWarning" {
+		switch method {
+		case "configWarning":
 			key, schemaName = "summary", "ConfigWarningNotification"
+		case "guardianWarning":
+			schemaName = "GuardianWarningNotification"
+		case "deprecationNotice":
+			key, schemaName = "summary", "DeprecationNoticeNotification"
 		}
 		s := loadSchema(t)
 		sch, err := s.resolve("#/definitions/v2/" + schemaName)
@@ -77,11 +95,14 @@ func TestTranslateWarningBounds(t *testing.T) {
 			{"combined at limit", "notice", strings.Repeat("x", maxBannerText-7), "notice\n" + strings.Repeat("x", maxBannerText-7), false},
 			{"combined multibyte cut", "notice", strings.Repeat("x", maxBannerText-8) + "界", "notice\n" + strings.Repeat("x", maxBannerText-8), true},
 		} {
-			if method == "warning" && tc.details != "" {
+			if key == "message" && tc.details != "" {
 				continue
 			}
 			t.Run(method+"/"+tc.name, func(t *testing.T) {
 				params := map[string]string{key: tc.prose}
+				if method == "guardianWarning" {
+					params["threadId"] = "other-thread"
+				}
 				if tc.details != "" {
 					params["details"] = tc.details
 				}
@@ -104,15 +125,15 @@ func TestTranslateWarningBounds(t *testing.T) {
 
 func TestTranslateMalformedWarnings(t *testing.T) {
 	t.Parallel()
-	for _, method := range []string{"warning", "configWarning"} {
+	for _, method := range []string{"warning", "configWarning", "guardianWarning", "deprecationNotice"} {
 		key := "message"
-		if method == "configWarning" {
+		if method == "configWarning" || method == "deprecationNotice" {
 			key = "summary"
 		}
 		cases := []string{"", "{", "null", "[]", `["notice"]`, `"notice"`, "0", "true", "{}"}
 		for _, value := range []string{"null", "42", "true", "[]", "{}"} {
 			cases = append(cases, `{"`+key+`":`+value+`}`)
-			if method == "configWarning" && value != "null" {
+			if key == "summary" && value != "null" {
 				cases = append(cases, `{"summary":"notice","details":`+value+`}`)
 			}
 		}
@@ -147,8 +168,10 @@ func TestTranslateWarningsPreserveTurn(t *testing.T) {
 	}
 	for range 2 {
 		for method, params := range map[string]string{
-			"warning":       `{"message":"notice","threadId":"other-thread"}`,
-			"configWarning": `{"summary":"notice","path":"/untrusted/config","range":null}`,
+			"warning":           `{"message":"notice","threadId":"other-thread"}`,
+			"configWarning":     `{"summary":"notice","path":"/untrusted/config","range":null}`,
+			"guardianWarning":   `{"message":"notice","threadId":"other-thread","turnId":"t","stopsTurn":true}`,
+			"deprecationNotice": `{"summary":"notice","threadId":"other-thread","turnId":"t","path":"/untrusted/config","stopsTurn":true}`,
 		} {
 			got := tr.Translate(method, json.RawMessage(params))
 			if !reflect.DeepEqual(got, []turnevent.Event{turnevent.Banner{Level: "warning", Text: "notice"}}) {
@@ -167,12 +190,12 @@ func TestTranslateWarningsPreserveTurn(t *testing.T) {
 
 func TestWarningMethodLanes(t *testing.T) {
 	t.Parallel()
-	for _, method := range []string{"warning", "configWarning"} {
+	for _, method := range []string{"warning", "configWarning", "guardianWarning", "deprecationNotice"} {
 		if !slices.Contains(mappedMethods, method) || slices.Contains(ignoredMethods, method) || slices.Contains(unrecognizedMethods, method) {
 			t.Errorf("%s must occupy only mappedMethods", method)
 		}
 	}
-	for _, method := range []string{"futureWarning", "guardianWarning"} {
+	for _, method := range []string{"futureWarning"} {
 		params := json.RawMessage(`{"message":"notice"}`)
 		got := NewTranslator("m").Translate(method, params)
 		want := []turnevent.Event{turnevent.Unrecognized{Site: turnevent.UnrecognizedCodexMethod, Kind: method, Raw: string(params)}}
