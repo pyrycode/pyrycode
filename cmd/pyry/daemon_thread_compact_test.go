@@ -341,3 +341,143 @@ func TestDaemonThreadCompactBoundary(t *testing.T) {
 		}
 	}
 }
+
+// testCompactReply returns the type and payload correlated with id.
+func testCompactReply(t *testing.T, w *switchWire, mgr *relay.V2SessionManager, peer string, id uint64) (string, json.RawMessage) {
+	t.Helper()
+	for {
+		for _, f := range testCompactRead(t, w, mgr, peer) {
+			if f.env.InReplyTo != nil && *f.env.InReplyTo == id {
+				return f.env.Type, f.env.Payload
+			}
+		}
+	}
+}
+
+func testCompactHeaders(t *testing.T, got []protocol.ThreadSummary, want []thread.ChildSummary) {
+	t.Helper()
+	byID := map[uint64]protocol.ThreadSummary{}
+	for _, h := range got {
+		byID[h.ID] = h
+	}
+	if len(byID) != len(got) || len(got) != len(want) {
+		t.Fatalf("headers %d, Store %d", len(got), len(want))
+	}
+	for _, h := range want {
+		if a, b := mustQueryJSON(t, byID[h.ID]), mustQueryJSON(t, daemonThreadSummary(h)); !bytes.Equal(a, b) {
+			t.Fatalf("header differs from Store: %s %s", a, b)
+		}
+	}
+}
+
+// A compact client recovers only through compact catch-up: a reconnect from its
+// retained checkpoint and an epoch reset both converge on the Store's root
+// headers, and a child page read before a nested change is detectably stale.
+func TestDaemonThreadCompactRecovery(t *testing.T) {
+	s, store, items := testDaemonExpansionFixture(t, 3, 1, 64)
+	w, mgr := testDaemonThreadQueryWire(t, s, nil)
+	caps := []string{protocol.CapabilityThread, protocol.CapabilityThreadExpansion, protocol.CapabilityThreadCompact}
+	w.open("phone", false, caps...)
+	w.open("legacy", false, protocol.CapabilityThread)
+	// Only a negotiated thread_compact makes an unjoined peer a compact recipient.
+	conns := mgr.ActiveThreadConns(t.Context(), testConvID)
+	if len(conns) != 2 {
+		t.Fatalf("thread conns: %d", len(conns))
+	}
+	for _, c := range conns {
+		if c.View != relay.ThreadViewUnjoined || c.ThreadCompact != (c.ConnID == "phone") {
+			t.Fatalf("unjoined compact routing facts: %+v", c)
+		}
+	}
+	window := protocol.ThreadCatchUpPayload{ConversationID: testConvID, Epoch: "e", Limit: 256, Projection: protocol.ThreadProjectionCompact}
+	base, _, _ := testCompactQuery(t, w, mgr, "phone", 20, protocol.TypeThreadCatchUp, window)
+	complete, _, _ := testCompactQuery(t, w, mgr, "legacy", 21, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 256})
+	scope := testDaemonExpansionScope(t, store, items, "root")
+	testDaemonThreadRequest(t, w, "phone", 22, protocol.TypeThreadReadChildren, scope)
+	e, _, _ := testDaemonExpansionReply(t, w, "phone", 22, protocol.TypeThreadChildren)
+	var fetched protocol.ThreadChildrenPayload
+	if err := json.Unmarshal(e.Payload, &fetched); err != nil || fetched.Version != base.Version {
+		t.Fatalf("child page capture: %s %v", e.Payload, err)
+	}
+
+	testDaemonThreadAppend(t, s.history, "tool_use", `{"turn_id":"t","parent_tool_use_id":"root","tool_use_id":"late","name":"Read","input":{"secret":"unopened-late"}}`)
+	latest, _ := s.history.LatestEntryID(testConvID)
+	testShadowWait(t, func() bool { return store.Status(testConvID).Version >= latest })
+	cw := s.workers[testConvID]
+	testShadowWait(t, func() bool {
+		if !cw.lockPublication(t.Context()) {
+			return false
+		}
+		defer cw.unlockPublication()
+		return cw.threadVersion >= latest
+	})
+	// Isolation: each projection keeps its own checkpoint on one conversation.
+	var compactTo, completeTo uint64
+	for _, f := range testCompactRead(t, w, mgr, "phone", "legacy") {
+		switch {
+		case f.peer == "phone" && f.env.Type == protocol.TypeThreadCompactUpdate:
+			var u protocol.ThreadCompactUpdatePayload
+			if json.Unmarshal(f.env.Payload, &u) != nil || u.FromVersion != base.Version || bytes.Contains(f.env.Payload, []byte("unopened-")) {
+				t.Fatalf("compact live frame: %s", f.env.Payload)
+			}
+			compactTo = u.Version
+		case f.peer == "legacy" && f.env.Type == protocol.TypeThreadItemAdded:
+			var u protocol.ThreadItemAddedPayload
+			if json.Unmarshal(f.env.Payload, &u) != nil || u.Version <= complete.Version {
+				t.Fatal("complete live frame lost its checkpoint")
+			}
+			completeTo = u.Version
+		case f.peer == "legacy" && f.env.Type == protocol.TypeThreadCompactUpdate, f.peer == "phone" && f.env.Type == protocol.TypeThreadItemAdded:
+			t.Fatalf("%s got %s", f.peer, f.env.Type)
+		}
+	}
+	if compactTo != latest || completeTo != latest {
+		t.Fatalf("checkpoints: compact %d complete %d, Store %d", compactTo, completeTo, latest)
+	}
+
+	// Reconnect: a new connection resumes from the retained compact checkpoint.
+	w.open("again", false, caps...)
+	resumed := window
+	resumed.Epoch, resumed.Version = base.Epoch, base.Version
+	got, _, _ := testCompactQuery(t, w, mgr, "again", 23, protocol.TypeThreadCatchUp, resumed)
+	want, err := store.CompactCatchUp(t.Context(), testConvID, base.Epoch, base.Version, 256)
+	if err != nil || got.FromVersion == nil || *got.FromVersion != base.Version || got.Version != latest {
+		t.Fatalf("compact catch-up from checkpoint: %+v %v", got, err)
+	}
+	testCompactHeaders(t, got.Headers, want.Headers)
+	stale := false
+	for _, h := range got.Headers {
+		if h.ID == scope.ItemID {
+			stale = h.SubtreeVersion != nil && *h.SubtreeVersion > fetched.Version
+		}
+	}
+	if !stale {
+		t.Fatal("child page read before the nested change is not detectably stale")
+	}
+	scope.Epoch = got.Epoch
+	testDaemonThreadRequest(t, w, "again", 24, protocol.TypeThreadReadChildren, scope)
+	e, _, _ = testDaemonExpansionReply(t, w, "again", 24, protocol.TypeThreadChildren)
+	var fresh protocol.ThreadChildrenPayload
+	if err := json.Unmarshal(e.Payload, &fresh); err != nil || fresh.Version != latest {
+		t.Fatalf("fresh child page: %s %v", e.Payload, err)
+	}
+
+	// Epoch reset: the reply is a compact-scoped reset, never a baseline, and a
+	// newest window then converges on the Store.
+	resumed.Epoch = "different"
+	testDaemonThreadRequest(t, w, "again", 25, protocol.TypeThreadCatchUp, resumed)
+	typ, raw := testCompactReply(t, w, mgr, "again", 25)
+	if typ != protocol.TypeThreadReset {
+		t.Fatalf("stale epoch reached %s", typ)
+	}
+	var reset protocol.ThreadResetPayload
+	if err := json.Unmarshal(raw, &reset); err != nil || reset.Projection != protocol.ThreadProjectionCompact || reset.Epoch != base.Epoch {
+		t.Fatalf("reset scope: %s %v", raw, err)
+	}
+	got, _, _ = testCompactQuery(t, w, mgr, "again", 26, protocol.TypeThreadCatchUp, window)
+	newest, err := store.CompactNewestWindow(t.Context(), testConvID, 256)
+	if err != nil || got.Version != newest.Version {
+		t.Fatalf("newest window after reset: %d/%d %v", got.Version, newest.Version, err)
+	}
+	testCompactHeaders(t, got.Headers, newest.Headers)
+}
