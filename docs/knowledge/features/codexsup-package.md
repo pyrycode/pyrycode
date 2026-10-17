@@ -31,6 +31,32 @@ per item on `item/started` only (its `item/completed` stays silent — one row
 per item, not two). `model/rerouted` and `model/verification` are on this
 partition too, deliberately, so a model reroute is never silent: see below.
 
+`turn/moderationMetadata` occupies only `mappedMethods` (#3582).
+`moderationMetadata` validates the full params object before suppressing a
+notification: absent or null `metadata`, or an empty object or array (including
+JSON whitespace), emits no events. Every other metadata value, including `""`,
+`false`, `0`, `[null]` and `{"value":null}`, emits exactly one
+`Unrecognized{Site: UnrecognizedCodexMethod, Kind: "turn/moderationMetadata"}`.
+Malformed JSON, absent params and non-object params (including top-level null)
+instead emit one `Unrecognized{Site: UnrecognizedUndecodable}`. Both fallbacks
+retain the original params as `Raw`, capped at `maxUnrecognizedRaw` (16 KiB)
+with UTF-8-safe truncation and `Truncated` set when the cap is exceeded.
+Unknown methods still surface through `UnrecognizedCodexMethod`, even with
+empty metadata; this suppression belongs only to the known method.
+
+The pinned schema makes metadata opaque JSON. Keep it as `json.RawMessage`:
+decoding into `any` would reject valid numbers such as `1e1000` through its
+default `float64` conversion, and rebuilding JSON would alter the original
+fallback text. Tolerating absent metadata inside an object is compatibility
+behavior; the schema requires the field, so that case belongs in direct
+translator tests rather than schema-valid fixtures.
+`TestTranslateModerationMetadata` pins empty and nonempty values;
+`TestTranslateModerationMetadataUndecodable` and
+`TestTranslateModerationMetadataBounds` pin invalid params and both fallback
+bounds. `TestModerationMetadataMethodLanes` checks classification, unknown-method
+visibility and replay of the nonempty hand-built fixture, which
+`TestHandBuiltFramesMatchSchema` validates against the schema.
+
 Text and reasoning deltas (`item/agentMessage/delta`,
 `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`) become
 `TextChunk`/`ThoughtChunk` keyed by the Codex item id. A `contextCompaction`
