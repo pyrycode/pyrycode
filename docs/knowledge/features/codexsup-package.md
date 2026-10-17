@@ -100,11 +100,12 @@ warning `Banner` and keys that turn's `ModelWindows` by the model it moved
 to — a silent downgrade would otherwise pass for the requested model.
 
 `warning` and `configWarning` occupy only `mappedMethods` (#3354).
-`warningBanner` emits exactly one `turnevent.Banner{Level: "warning"}` with
-`StopsTurn: false`: `warning.message` supplies its text; `configWarning.summary`
-supplies its text with a newline and `details` appended only when details
-is a nonempty string. Absent, null or empty details add nothing. The combined
-text is capped at `maxBannerText` (4096 bytes) by `truncate`, which removes
+`Translator.warningBanner` normally emits one `turnevent.Banner{Level: "warning"}`
+with `StopsTurn: false`: `warning.params.message` supplies its text;
+`configWarning.params.summary` supplies its text with a newline and `details`
+appended only when details is a nonempty string. Absent, null or empty details
+add nothing. The combined text is capped at `maxBannerText` (4096 bytes) by
+`truncate`, which removes
 any partial multibyte character at the cut so the result remains valid UTF-8.
 `Truncated` is true when the text exceeded the cap, false at or below it.
 
@@ -116,8 +117,54 @@ invalid JSON and non-object params instead use `undecodable`'s existing bounded,
 UTF-8-safe `UnrecognizedUndecodable` fallback. `threadId`, `path` and `range`
 are omitted from decoding and banner output. Warning prose stays untrusted
 [display text](../../protocol-mobile.md#security-model); the helper performs
-no routing, filesystem action or payload logging. It holds no state and leaves
-pending usage, reroute targets, the selected model and turn lifecycle unchanged.
+no routing, filesystem action or payload logging. Validation runs before matching
+or changing the warning identity: malformed target-shaped notices always emit
+the bounded fallback, before or after a valid notice, and cannot set or replace
+that identity. Pending usage, reroute targets, the selected model and turn
+lifecycle remain unchanged.
+
+Only `configWarning` deduplicates the deliberate untrusted-project warning (#3599).
+After validation, `Translator.warningBanner` searches the assembled prose
+(`params.summary` plus newline/nonempty `params.details`) for the exact,
+case-sensitive fragment `is marked as untrusted in the effective configuration`.
+The first match emits the normal banner and remembers one SHA-256 digest of
+the complete, untruncated prose. Identical repeats emit no events. Different
+prose remains visible on every occurrence and never replaces the first identity,
+even when it contains the fragment or differs only beyond the 4096-byte banner
+cap. Both matching and hashing happen before truncation: comparing displayed
+text would incorrectly hide distinct notices with the same capped prefix.
+Identity depends on the assembled prose, so changing metadata or dividing the
+same text differently between summary and details does not make a new notice.
+Only the digest is retained; there is no growing cache or retained warning text.
+
+The identity lasts for the `Translator` lifetime, across completed turns and
+model changes. `codexRunner.runOnce` creates a new translator for each app-server
+spawn, including respawn, so that boundary permits the warning again.
+The workspace deliberately remains untrusted to isolate Codex from project-local
+config, hooks and exec policies; deduplication changes no trust or configuration.
+Unrelated warnings still banner on every occurrence. Case/fragment nonmatches,
+matching text on `warning` or other methods, and the method partition retain
+their handling; genuinely unknown methods still emit `UnrecognizedCodexMethod`.
+
+The redacted [PR #3600 startup excerpts](https://github.com/pyrycode/pyrycode/pull/3600)
+were observed live with Codex 0.159.2 in an isolated untrusted home/project:
+the trust fragment arrived in `configWarning.params.summary`, with null `details`.
+The unstable-feature warning arrived in `warning.params.message`, with
+`agent_message_board=true` and suppression unset; it is unaffected by this
+matcher. No personal authentication was read or copied and deployed config was
+unchanged. The unauthenticated turn attempt failed on transport access. The
+[subsequent dispatcher gate](https://github.com/pyrycode/pyrycode/issues/3599#issuecomment-6242825748)
+skipped `TestCodexConversationLive` and `TestCodexQuestionLive` because capture
+settings were absent. Thus both carrying methods/texts are observed startup
+evidence, while authenticated conversation and actual-payload matcher acceptance
+remain unproven by the recorded runs.
+
+`TestTranslateUntrustedWarningLifetime`, `TestTranslateUntrustedWarningIdentity`,
+`TestTranslateUntrustedWarningNonmatches` and
+`TestTranslateUntrustedWarningMalformed` pin lifetime/reset, full-prose identity,
+unchanged nonmatch handling and validation before state changes. These and the
+existing warning checks passed under race detection on Linux; macOS is outside
+this ticket's verification scope.
 
 Completed replies alone do not prove notification coverage: [Mobile
 \#2052](https://github.com/pyrycode/pyrycode-mobile/issues/2052) finalized its
