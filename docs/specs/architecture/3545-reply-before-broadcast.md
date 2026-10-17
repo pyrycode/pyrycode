@@ -108,3 +108,32 @@ protocol wording remain in #3538.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: Update the `V2SessionConfig.Handlers` contract comment as a fourth
+  production file so it no longer promises a per-frame drain that has been
+  removed. Move the historical burst-size constant to tests. Add
+  `TestV2Session_ReplyReceipt` for processing acknowledgement and both escape
+  paths. The controlled wire proof observes a blocked Send stack or completed
+  announcement rather than releasing on a timer. Initial legacy and ordered
+  diagnostic cases both failed with a broadcast preceding the reply on macOS;
+  this is causal diagnostic evidence, not Linux acceptance.
+- 2026-10-17: The ordered wire scenario also holds transport delivery until the
+  handler finishes its announcement. This distinguishes plaintext admission
+  completion from transport receipt while still requiring reply-first wire
+  order after release. The full touched-package diagnostic race run passed
+  2,049/2,049 tests and subtests on macOS before this test-only strengthening.
+- Final diagnostic evidence (macOS): admitted `go test -timeout=30m -race -json
+  ./internal/dispatch/... ./internal/relay/...` passed 714/714 top-level tests,
+  2,049/2,049 including subtests, with no skips. The final focused selection of
+  `TestConnSenderReply`, `TestV2Session_ReplyBeforeAnnouncement`,
+  `TestV2Session_HeldReplyRetirement` and `TestV2Session_ReplyReceipt` passed
+  4/4 top-level tests and 11/11 including subtests. Restoring buffered
+  `routeAppFrame` through a scratch Go overlay made both final wire scenarios
+  fail with `broadcast preceded correlated reply` (1 parent and 2 subtests
+  executed, all failed as expected). `go vet ./...` and
+  `go build -o /tmp/builder-3545/pyry ./cmd/pyry` passed.
+  Required Linux builder validation remains unexecuted: the current host is
+  macOS and the fixed native recipes have no relay-package candidate check.
+  Full-module verification and the documentation handoff remain later stages.
