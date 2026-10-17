@@ -94,15 +94,16 @@ failure returns only unavailable State/Err and withdraws the captured current
 worker as described under [snapshots and retry](thread-package-background-store-replay.md#snapshots-and-retry).
 
 Initial usable replay, including recovery/retry, builds permanent-ID/parent
-lookup and ordered/active membership with `newPublicationIndex`, then adds
-latest-public-touch and coverage/suppression evidence with `prepareCatchUp`.
+lookup and ordered/active/direct-parent membership with `newPublicationIndex`,
+then adds latest-public-touch and coverage/suppression evidence with `prepareCatchUp`.
 `newQueryIndex` adapts value slices for test callers and fresh-build oracles.
 After that, `queryIndex.advance` consumes the affected stable slots preserved by
 `publicationCapture.capture`; ordinary tail publication neither rebuilds these
 indexes, scans unrelated rows to discover changes nor sorts the whole index.
 Permanent-ID lookup uses 256 hash-map buckets, cloning each affected bucket
-once. Ordered, active and latest-public-touch membership use immutable AVL
-trees with copied update/rotation paths and subtree sizes for bounded selection.
+once. Ordered, active, latest-public-touch and direct-parent membership use
+immutable AVL trees with copied update/rotation paths and subtree sizes for
+bounded selection.
 Hash lookup avoids a tree seek for each ancestor in parent closure.
 
 Each affected row loses its old memberships before its current public state is
@@ -127,7 +128,7 @@ epoch/version and rendering use one publication through later feed, replacement
 or retirement. Failure, unload and shutdown release worker references without
 invalidating readers. Reset and nonusable results resolve no references.
 
-Page/window/catch-up metadata selection is
+`HistoryPage`/`NewestWindow`/`CatchUp` metadata selection is
 `O(log N + selected range + active rows + unique parents)`;
 rendering adds selected-reference lookup/decoding and returned content work.
 Catch-up selects touched rows by version; active extras apply to catch-up and
@@ -159,6 +160,110 @@ and `TestStoreSelectedLookup` constrain selected references and metadata visits.
 Allocation ceilings cannot isolate selection from selected-segment decoding;
 assert exact allowed reference IDs, including accepted-send terminal outcomes.
 These bounds exclude background recovery and publisher baseline preparation.
+
+### Revision-scoped direct-child summaries
+
+`Store.ChildPage(ctx, conversationID, epoch, parent, revision, limit, continuation)
+(ChildPageResult, error)` reads only public rows whose `Parent` equals the
+requested parent. Pass nil continuation for the first page. Callers must already
+be authorized for the canonical conversation ID; the Store adds no loading,
+recovery wait or relay/daemon expansion wiring. The expected epoch must be
+nonempty and the parent ID and expected parent revision nonzero. Any matching
+public parent is eligible, regardless of kind.
+
+Membership matches `Fold.Items`: hidden (`Shown == false`) and dropped rows
+remain public; unresolved private children and claimed standalone delivery rows
+are absent. Rows arrive ascending by `(Order, ID)`, including order-zero rows.
+Positive limits clamp to `MaxQueryItems = 256` and impose a hard row ceiling,
+even across equal orders. There is no parent closure, active extra, deeper
+descendant or descendant inventory in the result.
+
+Each detached `ChildSummary` preserves `ID`, `Order`, `Rev`, `EndedOrder`,
+`Kind`, `Subtype`, `Session`, `Agent`, `NoChild`, `Turn`, `Parent`, `Status`,
+`Active` and `Shown`. `Headline` is plain valid UTF-8, at most 256 output bytes.
+`childHeadline` normalizes only the first 256 input bytes of captured
+`Item.Summary`: whitespace collapses, controls disappear and invalid UTF-8 is
+repaired before truncation at a rune boundary. If that bounded prefix normalizes
+to empty, it uses a similarly bounded kind label with underscores replaced by
+spaces, then `item` if necessary. It never searches the suffix for text.
+Reference-backed items can lack a captured summary even when complete rendering
+would produce one; use the fallback rather than hydrate their body.
+`DetailOmitted` is always true and no `Content` is returned, distinguishing
+omitted detail from an available empty body. Selection and headline generation
+perform zero history-reference lookups.
+
+`ChildPageResult` carries `State`, `ConversationID`, `Epoch`, consumed `Version`,
+`Parent`, `ParentRev`, `Items`, `More`, `Complete` and `Err`. A successful usable
+page identifies one captured publication and matching parent revision.
+`More` authoritatively reports whether further direct children follow the last
+selected tuple; `Complete` is its inverse for that capture. A matching public
+parent with no children succeeds with no rows, `More: false` and
+`Complete: true`. Neither an empty result nor nil separate error alone establishes
+completion: require `StateUsable` and `Complete`.
+
+`page.CursorAfter(n)` constructs a `ChildCursor` after any returned nonempty
+prefix (`1 <= n <= len(page.Items)`); other lengths or nonusable results return
+`ErrInvalidChildCursor`. The cursor binds `ConversationID`, `Epoch`, `Version`,
+`Parent`, `ParentRev` and the last delivered `Order`/`ID`. Pass its address to
+resume strictly after that tuple. A later byte packer must use the number of
+actually delivered rows, so selected but undelivered rows remain eligible.
+Page completion describes the whole selected page; it does not certify delivery
+of rows omitted by packing.
+
+Every request captures the then-current publication and validates scope anew.
+A continuation must match the conversation, epoch and parent/revision arguments,
+and its nonzero ID must name a captured public direct child with the exact order.
+Its version must equal the current captured consumed version. Even an advance
+unrelated to this parent invalidates continuation; a fresh request without a
+cursor needs only the matching epoch and parent revision. Cursors establish
+consistency, not authorization or a wire encoding. These pages certify direct
+children within one capture; they supply neither the complete queries' parent
+closure nor `CatchUp`'s consumed-version change-range coverage.
+
+An already cancelled context returns its context error first. Otherwise
+canonical-ID, positive-limit and scope validation precede capture. Nonusable
+captures return their lifecycle state before epoch/parent/cursor checks; usable
+captures check epoch, public parent and revision before validating continuation.
+Refusals return a zero `ChildPageResult` and a separate Go error:
+
+| Condition | Separate error |
+| --- | --- |
+| Noncanonical conversation ID | `history.ErrInvalidID` |
+| Zero or negative limit | `ErrInvalidLimit` |
+| Empty expected epoch, zero parent ID or zero expected revision | `ErrInvalidChildScope` |
+| Missing or private parent in that conversation | `ErrChildParentNotFound` |
+| Stale expected epoch/parent revision or continuation version | `ErrStaleChildPage` |
+| Mismatched cursor scope, zero cursor ID or invalid child/order position | `ErrInvalidChildCursor` |
+
+Rebuilding returns `StateRebuilding`; unloaded, retiring or closed stores return
+`StateNotLoaded`. Unavailable captures or a usable capture missing its query
+index return `StateUnavailable` with `ErrUnavailable` in the result's `Err`.
+These lifecycle results have a nil separate error and carry no rows, capture
+identity, `More` or `Complete`. Cancellation during selection discards partial
+rows and completion, returning a zero result and context error without retiring
+a healthy worker or cancelling another reader.
+
+`captureQuery` captures snapshot scalars and immutable roots together under
+`Store.mu`; parent lookup and selection then run outside the mutex against that
+capture, never the mutable worker Fold. `queryIndex.children` orders membership
+by `(Parent, Order, ID)`. `childRank` and subtree sizes bound the parent range
+and prove completion without enumerating descendants. `queryIndex.membership`
+removes/reinserts affected public rows through late resolution, withdrawal,
+order changes and reparenting; `queryIndex.advance` needs no publication-wide
+membership rediscovery. Old roots survive feed, newer publication, unload and
+replacement, allowing an in-flight read to finish against its capture.
+
+After initial `O(N log N)` index preparation, each request uses
+`O(log N + limit)` metadata visits and bounded prefix work per returned headline,
+independent of unrelated rows, unopened descendants and body/summary sizes.
+Complete queries additionally select ties/extras/closure and render selected
+references/content as described above; their work and coverage bounds differ.
+Recovery and total publication allocations remain outside the child-read bound.
+`TestChildPageBoundedWork` counts metadata visits and zero history lookups as
+unrelated rows, descendants and payloads grow; `TestChildPagePreparationWork`
+separately checks affected-row index maintenance. See the
+[Store verification guidance](thread-package-background-store-verification.md#store-verification)
+for independent membership oracles and capture barriers.
 
 ### Revision-scoped tool bodies
 
