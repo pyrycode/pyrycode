@@ -107,3 +107,6 @@ Pending documentation stage:
   validated metadata rather than rendering every restored row just to classify
   unused initial changes. Only suffix candidates require change classification.
   Load timing ends at first usable Status; requested rendering is measured separately.
+- 2026-10-17: Fixture certificates checksum the actual stored entry returned by
+  Lookup: history JSON escaping can change raw payload bytes without changing
+  rendered content, which would otherwise make the supposed resume test refold.

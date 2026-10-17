@@ -23,7 +23,11 @@ func testStoreResumeSeed(t *testing.T, entries []history.Entry, cut int, clean b
 	testFeed(t, f, entries[:cut]...)
 	checksum := ""
 	if cut > 0 {
-		checksum = entryChecksum(entries[cut-1])
+		stored, err := w.s.history.Lookup(testStoreA, []uint64{entries[cut-1].ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		checksum = entryChecksum(stored[0])
 	}
 	c := workerCheckpoint{writer: *w, fold: f, pending: make(map[uint64]bool)}
 	if err := c.commit(Snapshot{Version: f.Version(), LastShownVersion: f.lastShown, Epoch: strings.Repeat("c", 32)}, checksum, clean); err != nil {
@@ -55,6 +59,9 @@ func TestStoreResumeCuts(t *testing.T) {
 	for family, fixture := range [][]history.Entry{fixture, testReferenceSendEntries(), testFoldCorpus(151)} {
 		for _, clean := range []bool{false, true} {
 			for _, cut := range []int{0, 1, 2, 3, 4, len(fixture)} {
+				if cut > len(fixture) {
+					continue
+				}
 				t.Run(fmt.Sprintf("%d/%t/%d", family, clean, cut), func(t *testing.T) {
 					s, baseline, entries, saved := testStoreResumeSeed(t, fixture, cut, clean)
 					var feeds atomic.Int32
