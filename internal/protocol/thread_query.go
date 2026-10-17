@@ -22,6 +22,8 @@ type ThreadCatchUpPayload struct {
 	Epoch          string `json:"epoch"`
 	Version        uint64 `json:"version"`
 	Limit          int    `json:"limit,omitempty"`
+	// Projection also selects this conversation's live view; omission is complete.
+	Projection string `json:"projection,omitempty"`
 }
 
 // ThreadPagePayload requests the ordered window below exclusive BeforeOrder.
@@ -30,6 +32,8 @@ type ThreadPagePayload struct {
 	ConversationID string `json:"conversation_id"`
 	BeforeOrder    uint64 `json:"before_order"`
 	Limit          int    `json:"limit,omitempty"`
+	Projection     string `json:"projection,omitempty"`
+	Epoch          string `json:"epoch,omitempty"` // Required for compact pages.
 }
 
 // NormalizeThreadQueryLimit defaults omitted/zero limits and clamps positives.
@@ -44,7 +48,7 @@ func NormalizeThreadQueryLimit(limit int) (int, error) {
 	return min(limit, MaxThreadQueryLimit), nil
 }
 
-// ThreadItemsPayload is a full-item batch or a separate empty success marker.
+// ThreadItemsPayload is a row batch or a separate empty success marker.
 // Only Final certifies coverage. Nonzero catch-up markers carry FromVersion for
 // (FromVersion, Version]; window/page markers carry all four page fields, even
 // zero/false. The range is [LowerOrder, UpperOrder), Continuation equals LowerOrder,
@@ -52,6 +56,11 @@ func NormalizeThreadQueryLimit(limit int) (int, error) {
 // Ordinary batches omit all coverage fields and explicitly emit Final false.
 // An object continuation selects ThreadUpdatePart assembly instead of this DTO;
 // its final flag completes assembly only, never request coverage.
+// Compact projection puts full public non-tool/agent roots in Items and public
+// tool/agent roots in Headers. Order/ID determine placement across both arrays.
+// Compact coverage certifies only that projection's root window/source interval,
+// never complete inventory or detail. All data, parts and markers repeat scope.
+// Errors, disconnects and partial replies advance no completed checkpoint.
 type ThreadItemsPayload struct {
 	ConversationID string       `json:"conversation_id"`
 	Epoch          string       `json:"epoch"`
@@ -63,6 +72,9 @@ type ThreadItemsPayload struct {
 	UpperOrder     *uint64      `json:"upper_order,omitempty"`
 	Continuation   *uint64      `json:"continuation,omitempty"`
 	OlderExists    *bool        `json:"older_exists,omitempty"`
+
+	Projection string          `json:"projection,omitempty"`
+	Headers    []ThreadSummary `json:"headers,omitempty"`
 }
 
 func (p ThreadItemsPayload) MarshalJSON() ([]byte, error) {
@@ -79,4 +91,5 @@ type ThreadResetPayload struct {
 	ConversationID string `json:"conversation_id"`
 	Epoch          string `json:"epoch"`
 	Version        uint64 `json:"version"`
+	Projection     string `json:"projection,omitempty"`
 }

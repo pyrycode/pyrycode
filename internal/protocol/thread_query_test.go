@@ -22,10 +22,10 @@ func TestThreadQueryVocabulary(t *testing.T) {
 		kind  string
 		value any
 	}{
-		{TypeThreadCatchUp, ThreadCatchUpPayload{"c", "e", 71, -3}},
-		{TypeThreadPage, ThreadPagePayload{"c", 59, 257}},
+		{TypeThreadCatchUp, ThreadCatchUpPayload{ConversationID: "c", Epoch: "e", Version: 71, Limit: -3}},
+		{TypeThreadPage, ThreadPagePayload{ConversationID: "c", BeforeOrder: 59, Limit: 257}},
 		{TypeThreadItems, testQueryWindow([]ThreadItem{})},
-		{TypeThreadReset, ThreadResetPayload{"c", "e", 83}},
+		{TypeThreadReset, ThreadResetPayload{ConversationID: "c", Epoch: "e", Version: 83}},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			raw, _ := json.Marshal(tc.value)
@@ -212,6 +212,7 @@ type testQueryReceiver struct {
 	data                string
 	next                uint64
 	items               []ThreadItem
+	headers             []ThreadSummary
 	identity            *ThreadItemsPayload
 	broken, terminal    bool
 }
@@ -285,11 +286,11 @@ func (r *testQueryReceiver) accept(b []byte) bool {
 		r.identity = &copy
 		r.items = []ThreadItem{}
 	}
-	if p.ConversationID != r.identity.ConversationID || p.Epoch != r.identity.Epoch || p.Version != r.identity.Version {
+	if p.ConversationID != r.identity.ConversationID || p.Epoch != r.identity.Epoch || p.Version != r.identity.Version || p.Projection != r.identity.Projection {
 		return fail()
 	}
 	if p.Final {
-		if r.first != nil || len(p.Items) != 0 {
+		if r.first != nil || len(p.Items) != 0 || len(p.Headers) != 0 {
 			return fail()
 		}
 		r.checkpoint = p.Version
@@ -297,11 +298,19 @@ func (r *testQueryReceiver) accept(b []byte) bool {
 		return true
 	}
 	if r.first != nil {
-		if len(p.Items) != 1 || p.ConversationID != r.first.ConversationID || p.Epoch != r.first.Epoch || p.Version != r.first.Version || p.Items[0].ID != r.first.ItemID || p.Items[0].Rev != r.first.Rev {
+		var id, rev uint64
+		if len(p.Items) == 1 {
+			id, rev = p.Items[0].ID, p.Items[0].Rev
+		}
+		if len(p.Headers) == 1 {
+			id, rev = p.Headers[0].ID, p.Headers[0].Rev
+		}
+		if len(p.Items)+len(p.Headers) != 1 || p.ConversationID != r.first.ConversationID || p.Epoch != r.first.Epoch || p.Version != r.first.Version || p.Projection != r.first.Projection || id != r.first.ItemID || rev != r.first.Rev {
 			return fail()
 		}
 	}
 	r.items = append(r.items, p.Items...)
+	r.headers = append(r.headers, p.Headers...)
 	r.first = nil
 	r.data = ""
 	r.next = 0
@@ -327,7 +336,7 @@ func TestThreadQueryAssemblyRejects(t *testing.T) {
 			case "interrupted":
 				parts = [][]byte{parts[0], parts[len(parts)-1]}
 			case "reset", "error":
-				var payload any = ThreadResetPayload{"conversation", "epoch", 89}
+				var payload any = ThreadResetPayload{ConversationID: "conversation", Epoch: "epoch", Version: 89}
 				if scenario == "error" {
 					payload = ErrorPayload{Code: CodeProtocolMalformed, Message: "failed"}
 				}
@@ -379,7 +388,7 @@ func TestThreadQueryAssemblyRejects(t *testing.T) {
 func TestThreadQueryTerminalFailure(t *testing.T) {
 	t.Parallel()
 	request := uint64(43)
-	for _, input := range []any{ThreadResetPayload{"conversation", "epoch", 89}, ErrorPayload{Code: CodeProtocolMalformed, Message: "failed", Retryable: false}} {
+	for _, input := range []any{ThreadResetPayload{ConversationID: "conversation", Epoch: "epoch", Version: 89}, ErrorPayload{Code: CodeProtocolMalformed, Message: "failed", Retryable: false}} {
 		env := testThreadMaxEnvelope()
 		env.InReplyTo = &request
 		seq, err := EncodeThreadReply(env, input)
@@ -452,7 +461,7 @@ func TestThreadQueryErrors(t *testing.T) {
 				reply = ErrorPayload{Message: string([]byte{255})}
 			}
 			if scenario == "reset metadata" {
-				reply = ThreadResetPayload{"c", "e", 1}
+				reply = ThreadResetPayload{ConversationID: "c", Epoch: "e", Version: 1}
 			}
 			if scenario == "error metadata" {
 				reply = ErrorPayload{Message: "failed"}

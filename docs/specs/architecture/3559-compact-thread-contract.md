@@ -81,3 +81,10 @@ None. Header facts are optional and producer-owned; no Store derivation or cache
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: Wire review showed unscoped headers could otherwise be serialized as complete replies. Query/reset encoding now rejects unknown compact projections or missing compact scope, and complete replies reject headers. Extended the existing fixture receiver to check projection identity alongside conversation/epoch; no production admission or view state is installed.
+- 2026-10-17: Clarified equal-version live replacements for multiple roots: source intervals may overlap, identity determines replacement, and only a successful query marker establishes a completed recovery checkpoint. Native checks run on Linux amd64; other operating systems are outside this ticket's verification scope.
+- 2026-10-17: Kept the freshness fixture at the declared wire boundary: it proves independent ancestor/source versions and cursor refusal, without introducing a client cache implementation. Invalidation while open remains an explicit DTO contract for future consumers.
+- Final sizing: under 700 added/changed lines including plan, fixtures and helpers; one new exported type; six existing test-literal migrations and no production consumer migrations; four acceptance criteria; four added rejection sites. All limits remain satisfied.

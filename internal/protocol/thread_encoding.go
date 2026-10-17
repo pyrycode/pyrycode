@@ -43,6 +43,7 @@ type ThreadContinuation struct {
 // are preserved inside the assembled payload. Query fragments serialize the whole
 // single-item batch. BaseRev is present only for changes and appends.
 type ThreadUpdatePart struct {
+	Projection     string              `json:"projection,omitempty"`
 	ConversationID string              `json:"conversation_id"`
 	Epoch          string              `json:"epoch"`
 	Version        uint64              `json:"version"`
@@ -77,6 +78,28 @@ func EncodeThreadUpdate(env Envelope, update any) ([][]byte, error) {
 	case ThreadTextAppendPayload:
 		env.Type = TypeThreadTextAppend
 		part = ThreadUpdatePart{ConversationID: u.ConversationID, Epoch: u.Epoch, Version: u.Version, ItemID: u.ItemID, BaseRev: &u.BaseRev, Rev: u.Rev}
+	case ThreadCompactUpdatePayload:
+		rows := 0
+		if u.Item != nil {
+			rows++
+		}
+		if u.Header != nil {
+			rows++
+		}
+		if u.Progress {
+			rows++
+		}
+		if u.Projection != ThreadProjectionCompact || u.ConversationID == "" || u.Epoch == "" || u.FromVersion >= u.Version || rows != 1 {
+			return nil, ErrInvalidThreadUpdate
+		}
+		env.Type = TypeThreadCompactUpdate
+		part = ThreadUpdatePart{Projection: u.Projection, ConversationID: u.ConversationID, Epoch: u.Epoch, Version: u.Version}
+		if u.Item != nil {
+			part.ItemID, part.Rev = u.Item.ID, u.Item.Rev
+		}
+		if u.Header != nil {
+			part.ItemID, part.Rev = u.Header.ID, u.Header.Rev
+		}
 	default:
 		return nil, ErrInvalidThreadUpdate
 	}
