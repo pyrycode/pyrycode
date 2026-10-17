@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+
+	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // maxRetainedClientNameBytes, maxRetainedClientVersionBytes and
@@ -57,6 +59,10 @@ func retainedClientField(v string, maxBytes int) string {
 // (s.device), which is what "this conn belongs to that device" must be decided on
 // — never DeviceName, which any phone may set to another device's name (#2564). It
 // is daemon-authored but credential-derived, so it too MUST NOT be logged.
+//
+// View is set only by ActiveThreadConns: the projection this conn's last
+// successful items query selected for that conversation. It is the routing hint
+// for which live update family to deliver; delivery rechecks it before sealing.
 type ActiveConn struct {
 	ConnID          string
 	Interactive     bool
@@ -65,7 +71,21 @@ type ActiveConn struct {
 	ClientVersion   string
 	ClientFeatures  string
 	DeviceTokenHash string
+	View            ThreadView
 }
+
+// ThreadView is one conn's recorded projection for one conversation.
+type ThreadView uint8
+
+const (
+	// ThreadViewUnjoined means no items query has completed for the conversation
+	// on this conn. Compact updates are withheld from it.
+	ThreadViewUnjoined ThreadView = iota
+	// ThreadViewComplete selects complete thread item updates.
+	ThreadViewComplete
+	// ThreadViewCompact selects thread_compact_update.
+	ThreadViewCompact
+)
 
 // ActiveConns returns a snapshot of every session currently in V2StateOpen —
 // the authenticated, token-validated sessions to which Push may deliver — each
@@ -127,10 +147,29 @@ func (m *V2SessionManager) handleConnSnapshot(req snapshotReq) []ActiveConn {
 	for _, conn := range conns {
 		s := m.sessions[conn.ConnID]
 		if s.thread && !m.liveWithheld(s, *req.threadConversation) && !m.pushRetired(conn.ConnID) {
+			conn.View = m.threadView(s, *req.threadConversation)
 			eligible = append(eligible, conn)
 		}
 	}
 	return eligible
+}
+
+// threadView reads the recorded join under hostedMu, never nested with pushMu.
+func (m *V2SessionManager) threadView(s *V2Session, conversation string) ThreadView {
+	if s.hosted == nil || s.hosted.inbox == nil {
+		return ThreadViewUnjoined
+	}
+	m.hostedMu.Lock()
+	defer m.hostedMu.Unlock()
+	j, ok := s.hosted.inbox.threadJoins[conversation]
+	switch {
+	case !ok:
+		return ThreadViewUnjoined
+	case j.projection == protocol.ThreadProjectionCompact:
+		return ThreadViewCompact
+	default:
+		return ThreadViewComplete
+	}
 }
 
 // handleActiveConns runs on Run's dispatch goroutine — the only site that

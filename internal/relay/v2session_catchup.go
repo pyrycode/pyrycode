@@ -311,16 +311,22 @@ func (m *V2SessionManager) sendThreadReply(s *V2Session, q *threadQuery, env pro
 }
 
 // cancelThreadQuery fences live admission against final selection without holding
-// pushMu. The original bounded push queue still owns all live buffering. A compact
-// query is never cancelled here; threadQueryGate withholds the update instead.
+// pushMu. The original bounded push queue still owns all live buffering. A live
+// update cancels only a query of its own projection; threadQueryGate withholds it
+// from a load of the other projection instead.
 func (m *V2SessionManager) cancelThreadQuery(connID string, env protocol.Envelope) {
-	if !threadItemUpdate(env.Type) || env.InReplyTo != nil {
+	compact := env.Type == protocol.TypeThreadCompactUpdate
+	if !compact && (!threadItemUpdate(env.Type) || env.InReplyTo != nil) {
 		return
 	}
 	conversation := pushedConversationID(env)
 	m.hostedMu.Lock()
 	defer m.hostedMu.Unlock()
-	if in := m.hostedInboxes[connID]; in != nil && in.query != nil && in.query.conversation == conversation && in.query.projection == "" {
+	in := m.hostedInboxes[connID]
+	if in == nil || in.query == nil || in.query.conversation != conversation {
+		return
+	}
+	if compact && in.query.projection == protocol.ThreadProjectionCompact || !compact && in.query.projection == "" {
 		in.query.cancel()
 	}
 }
@@ -336,6 +342,9 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 	m.hostedMu.Lock()
 	defer m.hostedMu.Unlock()
 	in := s.hosted.inbox
+	if env.Type == protocol.TypeThreadCompactUpdate {
+		return in.compactLiveGate(env)
+	}
 	if threadItemUpdate(env.Type) && env.InReplyTo == nil {
 		var p struct {
 			Conversation string `json:"conversation_id"`
@@ -386,6 +395,35 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 		}
 		in.threadJoins[o.query.conversation] = threadJoin{p.Epoch, p.Version, p.Projection}
 		in.query = nil
+	}
+	return nil
+}
+
+// compactLiveGate admits one compact live frame, or continuation part, under
+// hostedMu. It is checked whatever its InReplyTo, since compact updates are never
+// replies. A complete load in flight owns its conversation's view, so the frame is
+// withheld without cancelling it; a compact load is cancelled as complete live
+// cancels a complete one. The frame then needs a compact join of its epoch below
+// its version. It never writes a join: only a successful query final does, so
+// updates for different roots at one version are not fenced against each other.
+func (in *hostedInbox) compactLiveGate(env protocol.Envelope) error {
+	var p struct {
+		Projection   string `json:"projection"`
+		Conversation string `json:"conversation_id"`
+		Epoch        string `json:"epoch"`
+		Version      uint64 `json:"version"`
+	}
+	if json.Unmarshal(env.Payload, &p) != nil || p.Projection != protocol.ThreadProjectionCompact {
+		return ErrThreadWithheld
+	}
+	if q := in.query; q != nil && q.conversation == p.Conversation && q.body == nil && !q.children {
+		if q.projection != protocol.ThreadProjectionCompact {
+			return ErrThreadWithheld
+		}
+		q.cancel()
+	}
+	if j, ok := in.threadJoins[p.Conversation]; !ok || j.projection != protocol.ThreadProjectionCompact || j.epoch != p.Epoch || p.Version <= j.version {
+		return ErrThreadWithheld
 	}
 	return nil
 }

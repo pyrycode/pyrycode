@@ -21,7 +21,10 @@ func threadItemUpdate(typ string) bool {
 func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) bool {
 	if threadContent(env.Type) {
 		id := pushedConversationID(env)
-		return !s.thread || m.liveWithheld(s, id) || (env.Type == protocol.TypeThreadToolBody || env.Type == protocol.TypeThreadChildren) && (!s.threadExpansion || !s.interactive)
+		// A compact update needs a hosted inbox: only there is a join recorded and
+		// checked by threadQueryGate, so the direct-seal Push path never carries one.
+		return !s.thread || m.liveWithheld(s, id) || (env.Type == protocol.TypeThreadToolBody || env.Type == protocol.TypeThreadChildren) && (!s.threadExpansion || !s.interactive) ||
+			env.Type == protocol.TypeThreadCompactUpdate && (!s.threadCompact || s.hosted == nil)
 	}
 	if !s.thread {
 		return env.SessionStateCleared
