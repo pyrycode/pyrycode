@@ -289,9 +289,11 @@ type V2Session struct {
 	// *dispatch.Conn by routeAppFrame, so a handler reads it as c.MultiAgent().
 	multiAgent bool
 	// thread is the authenticated admission decision, retained through rekey.
-	thread     bool
-	hostedApps bool
-	hosted     *hostedState
+	thread bool
+	// threadExpansion remains false until both expansion reads are ready.
+	threadExpansion bool
+	hostedApps      bool
+	hosted          *hostedState
 	// Supplied live-state progress is Run-owned and ends with this connection.
 	liveSnapshot   func() (LiveState, bool)
 	livePending    *LiveState
@@ -1012,12 +1014,12 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 	}
 	// Query admission owns invalid envelope identity, including IDs that cannot
 	// decode into Envelope. Preserve other malformed requests' dispatch fallback.
-	if err := json.Unmarshal(plaintext, &probeType); err == nil && (json.Unmarshal(plaintext, &probeEnv) == nil || probeType.Type == protocol.TypeThreadCatchUp || probeType.Type == protocol.TypeThreadPage) {
+	if err := json.Unmarshal(plaintext, &probeType); err == nil && (json.Unmarshal(plaintext, &probeEnv) == nil || probeType.Type == protocol.TypeThreadCatchUp || probeType.Type == protocol.TypeThreadPage || probeType.Type == protocol.TypeThreadReadToolBody) {
 		switch probeType.Type {
 		case protocol.TypeListApps, protocol.TypeAppCancel:
 			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
 			return
-		case protocol.TypeThreadCatchUp, protocol.TypeThreadPage:
+		case protocol.TypeThreadCatchUp, protocol.TypeThreadPage, protocol.TypeThreadReadToolBody:
 			m.admitThreadQuery(ctx, s, plaintext)
 			return
 		case protocol.TypeRekeyRequest:

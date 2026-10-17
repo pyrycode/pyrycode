@@ -89,9 +89,10 @@ supplied before encoding and preserved, as must request correlation. Errors
 return nil output, including failure after an earlier batch could fit.
 
 The [bounded expansion reads](../../protocol-mobile.md#bounded-expansion-reads)
-declare `thread_read_tool_body` / `thread_tool_body` and
-`thread_read_children` / `thread_children` ahead of handlers. Capability
-`thread_expansion` stays inactive until both real Store reads and normal
+include an authenticated switch-intercepted `thread_read_tool_body` handler and
+`thread_tool_body` replies. Child handling and both-read readiness negotiation
+remain pending #3550; production provider installation remains #3523. Capability
+`thread_expansion` stays withheld until both real Store reads and normal
 thread/interactive authorization are installed. `ThreadSummary` explicitly
 omits detail; its bounded headline and metadata cannot stand in for a full item.
 An available empty body is distinct from omitted detail or a refused read.

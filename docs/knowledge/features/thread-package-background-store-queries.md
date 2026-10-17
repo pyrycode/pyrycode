@@ -276,7 +276,7 @@ Public rows of other kinds still fail the body-kind check. Callers must already
 be authorized; this API adds no peer authorization, conversation loading or
 recovery wait. Relay/daemon expansion wiring is separate from this Store API.
 
-`ToolBodyResult` carries `State`, `ID`, `Rev`, `Content`, `Epoch`, consumed
+`ToolBodyResult` carries `State`, `ID`, `Rev`, `Kind`, `Content`, `Epoch`, consumed
 `Version` and `Err`. Only `StateUsable` carries identity and content. Its detached
 `Content` is identical to the existing complete renderer's content for that row,
 including input, output and unknown fields. Available empty input/output is
@@ -304,19 +304,26 @@ Rebuilding returns `StateRebuilding`; unloaded, retiring or closed stores return
 `StateNotLoaded`. Unavailable captures or missing, unreadable or malformed
 required content return `StateUnavailable` with only `ErrUnavailable` in the
 result's `Err` and a nil separate error. Nonusable results carry no body,
-ID/revision, epoch or version, and expose no underlying source error. Cancellation
-during rendering returns a zero result and the context error, discarding partial
-work without retiring a healthy worker or cancelling independent readers.
+ID/revision, kind, epoch or version, and expose no underlying source error.
+Cancellation during rendering returns a zero result and the context error,
+discarding partial work without retiring a healthy worker or cancelling
+independent readers.
 
 `captureQuery` captures the snapshot scalars and immutable index together under
 `Store.mu`. `queryIndex.lookup` selects only the requested public ID;
 `renderItems` and `renderSharedLookup` use recipes from that captured root, never
 the mutating worker Fold. History lookup/rendering runs outside the mutex.
 Feed, newer publications, unload or replacement cannot mix identities or recipes
-into that read. An already captured read can finish after unload/replacement if
-its references remain available. A render failure uses `Store.withdraw`'s worker
-identity and cancellation guards: an old failed reader cannot retire a
-replacement worker.
+into that read. `Kind` is the selected rendered row's `tool_call` or `agent` kind
+from this same capture, alongside ID/revision/content/epoch/version. Inferring it
+from content or rereading a newer publication could mislabel a valid captured
+body; `TestStoreToolBodyParity` and `TestStoreToolBodyCapture` assert the kind
+with the other capture fields. The relay's
+[body handler](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection)
+passes it directly to the encoder. An already captured read can finish after
+unload/replacement if its references remain available. A render failure uses
+`Store.withdraw`'s worker identity and cancellation guards: an old failed reader
+cannot retire a replacement worker.
 
 Only the selected body's creating/enrichment references and inherited recipe
 dependencies are resolved. A required ancestor can be resolved and rendered
