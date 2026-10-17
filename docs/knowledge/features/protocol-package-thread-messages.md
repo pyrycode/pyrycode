@@ -88,6 +88,32 @@ complete the query. Variable envelope conversation/session metadata must be
 supplied before encoding and preserved, as must request correlation. Errors
 return nil output, including failure after an earlier batch could fit.
 
+The [bounded expansion reads](../../protocol-mobile.md#bounded-expansion-reads)
+declare `thread_read_tool_body` / `thread_tool_body` and
+`thread_read_children` / `thread_children` ahead of handlers. Capability
+`thread_expansion` stays inactive until both real Store reads and normal
+thread/interactive authorization are installed. `ThreadSummary` explicitly
+omits detail; its bounded headline and metadata cannot stand in for a full item.
+An available empty body is distinct from omitted detail or a refused read.
+
+Expansion completion certifies only the requested body or child page at its
+captured epoch/version and item/parent revision. A fragment final completes
+assembly only; require all data and the separate success marker. Only an
+authoritative child marker with `more: false` finishes that parent's enumeration.
+No expansion result advances full-thread recovery checkpoints or live join
+watermarks. Capture-bound child cursors resume exclusively after `(order, id)`,
+including zero orders and ties; scope/revision/epoch/consumed-version mismatch
+requires a fresh first page, not a retained snapshot.
+
+`EncodeThreadChildren` budgets the **whole page**, not just the summary batch:
+the separate marker repeats variable routing metadata and needs its own maximum
+stamp reservation. A batch can fit while its page exceeds 65519 bytes.
+`TestThreadExpansionBudgets` measures both envelopes at the exact aggregate
+ceiling and proves that a byte-excluded suffix still sets `more`. If children
+remain but no row fits, refuse instead of certifying empty success.
+`EncodeThreadToolBody` instead uses the per-envelope cap and existing whole-payload
+assembly, preserving unknown fields and upstream content limits.
+
 ## Testing
 
 To prove encoding failure exposes no usable prefix, force an earlier batch to
