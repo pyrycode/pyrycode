@@ -180,17 +180,45 @@ descendant or descendant inventory in the result.
 
 Each detached `ChildSummary` preserves `ID`, `Order`, `Rev`, `EndedOrder`,
 `Kind`, `Subtype`, `Session`, `Agent`, `NoChild`, `Turn`, `Parent`, `Status`,
-`Active` and `Shown`. `Headline` is plain valid UTF-8, at most 256 output bytes.
-`childHeadline` normalizes only the first 256 input bytes of captured
-`Item.Summary`: whitespace collapses, controls disappear and invalid UTF-8 is
-repaired before truncation at a rune boundary. If that bounded prefix normalizes
-to empty, it uses a similarly bounded kind label with underscores replaced by
-spaces, then `item` if necessary. It never searches the suffix for text.
-Reference-backed items can lack a captured summary even when complete rendering
-would produce one; use the fallback rather than hydrate their body.
-`DetailOmitted` is always true and no `Content` is returned, distinguishing
-omitted detail from an available empty body. Selection and headline generation
-perform zero history-reference lookups.
+`Active` and `Shown`. `Rev` remains the source item revision accepted by
+`ToolBody` and by `ChildPage` when that row becomes the requested parent.
+`Headline` and known `ErrorSummary` are plain valid UTF-8, bounded to 200 Unicode
+code points including a truncation ellipsis. `childHeaderText` treats whitespace
+and controls as separators, collapses them to single interior spaces, trims
+boundaries and repairs invalid UTF-8. Truncation keeps 199 code points plus `…`;
+normalization can inspect beyond the former 256-byte input prefix, including
+leading separators. Blank headlines use `Tool call` for `tool_call`, `Agent` for
+`agent`, and `Thread item` otherwise.
+
+Optional facts distinguish unknown (`nil`) from known empty/zero/false:
+
+| Fact | Captured meaning |
+| --- | --- |
+| `ErrorSummary` | Own `failed`/`denied` status supplies a nonempty diagnostic, currently the status itself. Inactive `done`/`completed`/`finished` supplies known empty text. Other outcomes, including an active row with a success status, remain unknown. Descendant failures do not become ancestor errors. |
+| `PublicChildCount`, `HasPublicChildren` | Public direct-child count and existence; known existence is exactly count > 0. A usable public child index establishes known zero/false for a leaf. Hidden and dropped rows count; unresolved private children and claimed standalone delivery rows do not. `NoChild` describes producing-child attribution, independently of inventory. |
+| `SubtreeVersion` | Epoch-scoped freshness of the row and its public subtree, independently of source `Rev`. |
+
+Known count and freshness values are nonnegative and below 2^53; values outside
+that domain stay unknown. `DetailOmitted` is always true and no `Content`, body
+or descendant identities are returned. These are package-owned Store facts
+matching the [declared header semantics](../../protocol-mobile.md#thread-query-messages).
+Forwarding the new facts through `runThreadChildren` remains with
+[#3562](https://github.com/pyrycode/pyrycode/issues/3562), and production compact
+delivery with [#3563](https://github.com/pyrycode/pyrycode/issues/3563).
+
+Initial `Store.publish` initializes every public row's freshness from consumed
+publication progress. Checkpoint restoration seeds public prefix rows without
+marking them affected: initializing only affected headers, or retaining their
+source revisions as freshness, misses newer progress with no item changes.
+`TestChildHeaderInitialProgress` covers both complete-checkpoint and suffix
+resumes. Incremental public additions, content/lifecycle/`Shown` changes,
+completion, late public appearance, reparenting and withdrawal refresh surviving
+affected rows and every affected public ancestor to the new consumed version.
+Both old and new ancestor chains are collected independently, so an already
+visited reparented row cannot hide its new ancestors. Unrelated branches and
+no-item progress retain their freshness. An ancestor's `Rev` can remain unchanged
+while `SubtreeVersion` advances; freshness does not alter authoritative items,
+storage or complete-query coverage/certification.
 
 `ChildPageResult` carries `State`, `ConversationID`, `Epoch`, consumed `Version`,
 `Parent`, `ParentRev`, `Items`, `More`, `Complete` and `Err`. A successful usable
@@ -251,17 +279,37 @@ and prove completion without enumerating descendants. `queryIndex.membership`
 removes/reinserts affected public rows through late resolution, withdrawal,
 order changes and reparenting; `queryIndex.advance` needs no publication-wide
 membership rediscovery. Old roots survive feed, newer publication, unload and
-replacement, allowing an in-flight read to finish against its capture.
+replacement, allowing an in-flight read to finish against its capture. Header
+refreshes copy ancestor lookup buckets as well as directly affected buckets;
+optional result values are freshly allocated, so caller mutation cannot alter
+the capture or another result. `TestChildHeaderFreshness` checks multi-level
+changes, unchanged sibling branches and retained captures, alongside the
+independent public membership/count oracle.
 
-After initial `O(N log N)` index preparation, each request uses
-`O(log N + limit)` metadata visits and bounded prefix work per returned headline,
-independent of unrelated rows, unopened descendants and body/summary sizes.
+`publicationCapture.capture` prepares headline/outcome evidence from the already
+rendered affected public rows, including reference-backed outcomes. Initial
+`O(N log N)` index preparation establishes counts using child-tree ranks.
+Incremental header maintenance follows affected rows and old/new ancestor paths,
+refreshing counts by rank without rediscovering all public rows or enumerating
+descendants. Text normalization and source rendering belong to preparation and
+can inspect source text/content; they are outside the request bound. Existing
+stable-slot pointer copying and affected lookup-bucket copying are accounted for
+separately from semantic metadata visits and can still grow with history.
+
+Each request uses `O(log N + limit)` metadata visits and copies only prepared
+bounded headers, with zero body rendering or history-content lookups and no
+descendant enumeration. Its work is independent of unrelated rows, growing
+unopened/hidden descendants and body/summary sizes.
 Complete queries additionally select ties/extras/closure and render selected
 references/content as described above; their work and coverage bounds differ.
 Recovery and total publication allocations remain outside the child-read bound.
 `TestChildPageBoundedWork` counts metadata visits and zero history lookups as
 unrelated rows, descendants and payloads grow; `TestChildPagePreparationWork`
-separately checks affected-row index maintenance. See the
+separately checks affected-row/ancestor index maintenance.
+`TestChildHeaderFacts` checks normalization, optional facts and detached values;
+`TestChildHeaderReferenceOutcomes` proves reference-backed errors without read-time
+hydration, and `TestChildHeaderUnknownFreshness` checks the numeric boundary.
+See the
 [Store verification guidance](thread-package-background-store-verification.md#store-verification)
 for independent membership oracles and capture barriers.
 
