@@ -1,12 +1,11 @@
-# Claude usage allowance reading — latest 5-hour/weekly windows, answered on request (#3575)
+# Claude usage allowance reading — latest 5-hour/weekly windows, answered on request and pushed on each new one (#3575, #3576)
 
 The daemon keeps the latest 5-hour and weekly Claude usage allowance reading
-it has seen on any Claude session and answers it on request, so a client can
-show both windows at any time instead of only when a warning fires. Wire
-contract: [`docs/protocol-mobile.md` § Claude usage allowance
-reading](../../protocol-mobile.md#claude-usage-allowance-reading). Sibling
-\#3576 (pushing each new reading to open clients) is blocked on this ticket
-and not yet built.
+it has seen on any Claude session, answers it on request, and pushes it,
+uncorrelated, to every open connection each time a new one is stored — so a
+client can show both windows at any time and stays current without having to
+poll. Wire contract: [`docs/protocol-mobile.md` § Claude usage allowance
+reading](../../protocol-mobile.md#claude-usage-allowance-reading).
 
 ## Shape
 
@@ -53,6 +52,62 @@ and not yet built.
 - Wire types live in `internal/protocol/claude_usage.go`: see [Claude usage
   payloads](protocol-package-types-claude-usage-payloads.md) for the field
   shapes, `omitempty` behaviour and the capability string.
+- `claudeUsageStore.onRecord` (#3576) is a `func(protocol.ClaudeUsagePayload)`
+  hook, guarded by the same mutex. `setOnRecord` installs or (`nil`) removes
+  it; `record` calls it under the lock, after storing, with the payload
+  `payloadLocked` would build for a request answered right then — one
+  unexported builder backs both the reply and the push, so they can never
+  carry different bytes for the same reading. `ClaudeUsage` and `record`
+  share it too.
+
+## Pushing each new reading (#3576)
+
+- `cmd/pyry/claude_usage_push_v2.go`'s `claudeUsageEmitterV2` is the fan-out:
+  a buffered channel (`claudeUsageQueueSize`, 16) decouples `onRecord`, which
+  runs on a Claude session's stdout forwarder and must not block, from
+  `Run`, a goroutine that takes an `ActiveConns` snapshot and pushes to each
+  one with no `in_reply_to` and no `event_id`. `notify` is a non-blocking
+  send; a full buffer drops the reading with a content-free Debug line — only
+  reachable if `Run` is wedged, since a dropped reading is superseded by the
+  next model call's.
+- `startClaudeUsageStreamV2` wires it: nil `feed` starts nothing; otherwise
+  it starts `Run` and installs the hook. Its cleanup removes the hook first,
+  then waits for `Run` to exit — a send racing teardown lands in the open
+  buffer or drops, and `in` is never closed, so a late send cannot panic.
+  `relayWiring.claudeUsageFeed` (`cmd/pyry/relay.go`) carries the same store
+  pointer as `claudeUsage` (the request-side source) to `startRelayV2`,
+  which starts the stream beside `startSessionErrorStreamV2` and tears it
+  down in the same drain.
+- There is no `interactive` gate on the push, matching the request: every
+  authenticated connection may read the account-wide reading. A client that
+  does not know `claude_usage` drops it, per [Versioning](../../protocol-mobile.md#versioning).
+  `TypeClaudeUsage` is classified `"reply+push"` in
+  `cmd/pyry/relay_guard_test.go`'s `excludedTypes`, like
+  `TypeConversationUpdated`.
+- The push is live-only: it is never recorded in any conversation's history,
+  event ring or thread, and joins no replay ring, so a reconnecting client is
+  not replayed pushes it missed — it learns the current reading only by
+  sending `request_claude_usage` again.
+
+**`ActiveConns` and `Push` must run only on `Run`, never on the forwarder
+that calls `record`.** `onRecord` fires under `claudeUsageStore.mu` on every
+Claude session's stdout forwarder; if that hook called `ActiveConns`
+directly, a forwarder could block on the v2 manager's own goroutine while
+that goroutine was waiting on the same Claude session's stdin, stalling
+claude's output for every session at once. The hand-off channel is what
+keeps the forwarder's only obligation a non-blocking send;
+`TestClaudeUsageEmitter_NotifyNeverBlocks` pins the non-blocking send with
+the buffer full. This is the same shape `queueStateEmitterV2` and
+`sessionErrorNotify` already use for the reason their own comments give, and
+the pattern to copy for any future push driven by the same forwarder path.
+
+**"Every connection open at that moment" is every connection open when
+`Run` takes its `ActiveConns` snapshot, not when `record` stored the
+reading** — the hand-off is asynchronous, so there is a brief window between
+the two. A test that opens a connection immediately after calling `record`
+races that snapshot; `TestClaudeUsagePush_NoConnOpen` waits for the first
+snapshot before opening its late connection rather than asserting on timing
+it does not control.
 
 ## Why the parser needs a second, independent decode
 
@@ -127,8 +182,10 @@ built by `newStreamRunnerFactory(..., streamApprovalConfig{usage: store})`
 against a fake child that prints the committed `allowed` line and asserts
 the store observes it; `TestClaudeUsageWiredToTheCompositionRoot`
 (`relay_guard_test.go`) pins `runSupervisor`'s single store mint together
-with its `usage:` and `claudeUsage:` assignments and `startRelayV2`'s
-handler reading `w.claudeUsage`. See [Development verification § test
+with its `usage:`, `claudeUsage:` and (since #3576) `claudeUsageFeed:`
+assignments and `startRelayV2`'s handler reading `w.claudeUsage` and its
+`startClaudeUsageStreamV2(ctx, w.claudeUsageFeed, mgr, logger)` call. See
+[Development verification § test
 execution](development-verification-test-execution-and-artifact-survival.md)
 for why a unit test of an injected dependency is not evidence the daemon's
 own composition root actually injects it.
