@@ -137,3 +137,17 @@ protocol wording remain in #3538.
   Required Linux builder validation remains unexecuted: the current host is
   macOS and the fixed native recipes have no relay-package candidate check.
   Full-module verification and the documentation handoff remain later stages.
+- 2026-10-17 (recovery): The current testing OS policy supersedes the Linux-only
+  requirement in Testing strategy, Open questions and Final diagnostic evidence
+  above. This builder runs on macOS, so the macOS checks satisfy builder
+  verification; Linux is outside this ticket's verification scope. No native
+  task or second-OS capture is required, and no builder question remains open.
+  After main was merged at `948acd65`, the admitted touched-package race check
+  again passed 714/714 top-level tests, 2,049/2,049 including subtests, with no
+  skips. An uncached final focused run executed and passed 4/4 top-level tests,
+  11/11 including subtests. `go vet ./...` and the binary build passed. The
+  retained buffered-dispatch mutation evidence still rejects both authenticated
+  ordering scenarios. New
+  overlap with #3549 adds thread-query admission and a separate seam, so it adds
+  no dependency or design change. The documentation handoff and full-module
+  verifier gate remain pending with their assigned stages.
