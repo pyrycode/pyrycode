@@ -20,6 +20,11 @@ type claudeUsageStore struct {
 	sevenDay   *streamsup.UsageWindow
 	observedAt time.Time // zero means no reading
 	now        func() time.Time
+	// onRecord receives each new reading's payload, called by record under mu so
+	// readings leave in the order they were stored. It must not block: it runs on
+	// a Claude session's stdout forwarder with every other session's record
+	// waiting on mu. nil discards readings.
+	onRecord func(protocol.ClaudeUsagePayload)
 }
 
 // record replaces the reading with one rate_limit_event's windows, stamped with
@@ -35,6 +40,17 @@ func (s *claudeUsageStore) record(fiveHour, sevenDay *streamsup.UsageWindow) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fiveHour, s.sevenDay, s.observedAt = fiveHour, sevenDay, at
+	if s.onRecord != nil {
+		s.onRecord(s.payloadLocked())
+	}
+}
+
+// setOnRecord installs the destination for each new reading, or removes it with
+// nil. The hook must not block; see onRecord.
+func (s *claudeUsageStore) setOnRecord(f func(protocol.ClaudeUsagePayload)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onRecord = f
 }
 
 // ClaudeUsage reports the reading as wire data: state none before the first
@@ -42,6 +58,11 @@ func (s *claudeUsageStore) record(fiveHour, sevenDay *streamsup.UsageWindow) {
 func (s *claudeUsageStore) ClaudeUsage() protocol.ClaudeUsagePayload {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.payloadLocked()
+}
+
+// payloadLocked builds the wire form of the stored reading. The caller holds mu.
+func (s *claudeUsageStore) payloadLocked() protocol.ClaudeUsagePayload {
 	if s.observedAt.IsZero() {
 		return protocol.ClaudeUsagePayload{State: protocol.ClaudeUsageStateNone}
 	}

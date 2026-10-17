@@ -791,6 +791,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		hostSystemPrompt: pool,
 		claudeAccount:    account,
 		claudeUsage:      claudeUsage,
+		claudeUsageFeed:  claudeUsage,
 		workspaceBase:    workspaceBase,
 		readFolders:      readFolders,
 		creator:          sessionMinter{pool, modelVocabulary},
