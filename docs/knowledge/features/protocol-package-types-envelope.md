@@ -122,7 +122,7 @@ omits top-level conversation routing metadata for non-thread recipients.
 Relay-owned supplied-state delivery and reconciliation (#3082/#3195), daemon
 provenance/retention and provider installation (#3163) are implemented.
 Production thread negotiation remains #3164. See
-[relay delivery](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection),
+[relay delivery](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection),
 [the wire contract](../../protocol-mobile.md#message-envelope) and
 [ADR 042](../decisions/042-daemon-built-thread.md#decision).
 

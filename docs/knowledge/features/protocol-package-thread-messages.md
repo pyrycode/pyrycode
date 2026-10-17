@@ -67,7 +67,7 @@ switch arm must move its type from `excludedTypes` to `inboundTypes` as
 either query type excluded makes the command package's independent AST guard
 fail while relay-only tests pass. `TestEveryInboundV2TypeHasHandler` checks
 coverage, reverse registration and disjoint classification. See
-[relay admission and delivery gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+[relay admission and delivery gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection).
 
 Only the separate successful `thread_items` marker with `items: []` and
 `final: true` certifies query coverage. Every item batch has `final: false`, the

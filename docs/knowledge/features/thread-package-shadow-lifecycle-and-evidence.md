@@ -99,7 +99,7 @@ Wire metadata, changes and cursor advancement must all come from the same
 captured `Changes` result. Recheck captured usability and retire
 consumers before replacement even if withdrawal/reload races the status read.
 See [observation readiness](thread-package-background-store-replay.md#loading-and-replay-readiness)
-and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection).
 
 `daemonThreadUpdates` maps exported fold field names through `ThreadItem`'s JSON
 tags. Copying `EndedOrder` or `NoChild` directly would produce unusable wire

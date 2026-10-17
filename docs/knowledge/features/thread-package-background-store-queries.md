@@ -550,7 +550,7 @@ from this same capture, alongside ID/revision/content/epoch/version. Inferring i
 from content or rereading a newer publication could mislabel a valid captured
 body; `TestStoreToolBodyParity` and `TestStoreToolBodyCapture` assert the kind
 with the other capture fields. The relay's
-[body handler](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection)
+[body handler](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection)
 passes it directly to the encoder. An already captured read can finish after
 unload/replacement if its references remain available. A render failure uses
 `Store.withdraw`'s worker identity and cancellation guards: an old failed reader
