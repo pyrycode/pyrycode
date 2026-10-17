@@ -139,8 +139,12 @@ func (q *queryIndex) childRank(parent, order, id uint64, inclusive bool) int {
 }
 
 func (q *queryIndex) childRankWork(parent, order, id uint64, inclusive, preparing bool) int {
+	return q.groupRank(q.children, parent, order, id, inclusive, preparing)
+}
+
+func (q *queryIndex) groupRank(tree *queryTree, parent, order, id uint64, inclusive, preparing bool) int {
 	rank := 0
-	for n := q.children; n != nil; {
+	for n := tree; n != nil; {
 		q.count(preparing)
 		c := compareQueryKey(parent, order, id, n)
 		if c < 0 || c == 0 && !inclusive {

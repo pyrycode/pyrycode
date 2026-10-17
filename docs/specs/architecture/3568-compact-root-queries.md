@@ -70,3 +70,8 @@ Pending documentation stage: in `docs/knowledge/features/thread-package-backgrou
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-17
+
+## Revisions
+
+- 2026-10-17: `TestCompactCapture` additionally covers rendering cancellation and current-worker read failure, alongside replacement/unrelated-reader isolation. `TestCompactPublicMembership` exercises actual delivery suppression and late resolution; `TestCompactPreparationWork` separates semantic maintenance from copied storage. No API or selection contract changed.
+- Final sizing remains below 720 written lines, with one new exported type, zero consumer migrations, four acceptance criteria and six validation/lifecycle/render failure cases. Native verification scope is Linux.

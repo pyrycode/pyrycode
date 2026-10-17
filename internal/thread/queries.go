@@ -37,6 +37,8 @@ type queryIndex struct {
 	byID                     [256]map[uint64]queryRow
 	ordered, active, touched *queryTree
 	children                 *queryTree
+	roots, activeRoots       *queryTree
+	activeBranches           *queryTree
 	work                     func(bool)
 	copied                   func(int) // copied pointers/index positions, separate from semantic visits
 	invalidTouches           int
@@ -56,6 +58,7 @@ func newQueryIndex(items []Item, work func(bool)) *queryIndex {
 
 func newPublicationIndex(items []*Item, work func(bool)) *queryIndex {
 	q := &queryIndex{work: work}
+	dirty := make(map[uint64]bool)
 	for _, item := range items {
 		if item != nil {
 			q.membership(queryRow{item: item, header: prepareChildHeader(*item)}, false)
@@ -65,8 +68,10 @@ func newPublicationIndex(items []*Item, work func(bool)) *queryIndex {
 		if item != nil {
 			row, _ := q.lookup(item.ID, true)
 			q.refreshHeader(row, item.Rev)
+			dirty[item.ID] = true
 		}
 	}
+	q.refreshRootActivity(dirty)
 	return q
 }
 
