@@ -47,7 +47,21 @@ Write tests first. Reuse `testResumeProof` through representative saved cuts and
 None.
 
 ## Documentation handoff
-Pending documentation stage: update `docs/knowledge/features/thread-package.md`, “Cache and epochs”, and `docs/knowledge/features/thread-package-main-thread-folding-validation.md`, “Validation and testing”: describe history/index/state durability order, complete state rewrites versus changed-record appends, interruption/retry behavior and transaction round-trip proof. State scalar certificates remain separate, Store loading still replays history, and #3501 delivers scheduling/final Store certification.
+
+Satisfied in the documentation stage:
+
+- [Cache and epochs](../../knowledge/features/thread-package.md#cache-and-epochs)
+  now maps to the [owning section](../../knowledge/features/thread-package-cache-and-epochs.md#durable-transaction-and-retry-authority):
+  history/index/state durability order, complete state rewrites versus selected
+  record appends, interruption/reconciliation/retry authority, separate scalar
+  certificates, continued Store replay and #3501 scheduling/final certification.
+- [Validation and testing](../../knowledge/features/thread-package-main-thread-folding-validation.md#validation-and-testing)
+  now maps to the [transaction proof](../../knowledge/features/thread-package-main-thread-folding-validation-checkpoints.md#durable-transaction-round-trip-and-fault-proof):
+  saved-boundary/every-suffix round trips, recipe-only changes, exact append bytes,
+  interruption/fault/retry coverage and contained temporary cleanup.
+- Split both near-cap overviews into linked children, retained their original
+  paths/anchors as maps, retargeted inbound section links and catalogued every
+  new document. The startup topic map is unchanged.
 
 ## Security review
 **Verdict:** PASS
