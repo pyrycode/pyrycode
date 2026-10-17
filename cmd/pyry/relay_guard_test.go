@@ -185,9 +185,10 @@ var inboundTypes = map[string]string{
 	// appFrameWorker, where the segment reads and the page marshal run off Run,
 	// and the guard reads case SELECTORS rather than case bodies. Its reply half,
 	// TypeHistoryPage, is outbound-only and stays excluded.
-	"TypeRequestHistory": "switch-intercepted",
-	"TypeThreadCatchUp":  "switch-intercepted",
-	"TypeThreadPage":     "switch-intercepted",
+	"TypeRequestHistory":     "switch-intercepted",
+	"TypeThreadCatchUp":      "switch-intercepted",
+	"TypeThreadPage":         "switch-intercepted",
+	"TypeThreadReadToolBody": "switch-intercepted",
 	// The pairing-mint request verb (#2127), moved up from excludedTypes' "pending
 	// handler (#2127)" when dispatchAppFrame gained its case — the move that entry
 	// named in advance, and mandatory rather than tidy-up: Assertion #2 fails a
@@ -266,9 +267,8 @@ var inboundTypes = map[string]string{
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
 // a request verb mis-filed as reply/push/etc. is visually obvious in review.
 var excludedTypes = map[string]string{
-	"TypeThreadReadToolBody": "pending handler (#3522)",
 	"TypeThreadReadChildren": "pending handler (#3522)",
-	"TypeThreadToolBody":     "reply (declared ahead of handlers)",
+	"TypeThreadToolBody":     "reply (thread tool body)",
 	"TypeThreadChildren":     "reply (declared ahead of handlers)",
 
 	"TypeAppAssetRequest":   "request (declared; handler pending #3247)",

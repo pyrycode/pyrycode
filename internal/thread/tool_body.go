@@ -17,11 +17,12 @@ var (
 )
 
 // ToolBodyResult carries one detached complete body from one publication.
-// Only StateUsable carries ID, Rev, Content, Epoch and consumed Version.
+// Only StateUsable carries ID, Rev, Kind, Content, Epoch and consumed Version.
 // Refusals and cancellation return a zero result and a separate error.
 type ToolBodyResult struct {
 	State   SnapshotState
 	ID, Rev uint64
+	Kind    string
 	Content json.RawMessage
 	Epoch   string
 	Version uint64
@@ -68,5 +69,5 @@ func (s *Store) ToolBody(ctx context.Context, id conversations.ConversationID, e
 		return ToolBodyResult{State: result.State, Err: result.Err}, nil
 	}
 	item := result.Items[0]
-	return ToolBodyResult{State: StateUsable, ID: item.ID, Rev: item.Rev, Content: item.Content, Epoch: result.Epoch, Version: result.Version}, nil
+	return ToolBodyResult{State: StateUsable, ID: item.ID, Rev: item.Rev, Kind: item.Kind, Content: item.Content, Epoch: result.Epoch, Version: result.Version}, nil
 }

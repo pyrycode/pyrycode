@@ -64,6 +64,10 @@ type V2SessionConfig struct {
 	// ThreadPage returns one detached authoritative older page off Run and must
 	// honor cancellation. Nil explicitly fails pages; it never loads history.
 	ThreadPage func(context.Context, protocol.ThreadPagePayload) (thread.QueryResult, error)
+	// ThreadToolBody returns one detached captured public tool/agent body in the
+	// requested conversation. It must honor cancellation and enforce public
+	// ownership. Nil refuses reads; supplying it does not enable negotiation.
+	ThreadToolBody func(context.Context, protocol.ThreadExpansionRequest) (thread.ToolBodyResult, error)
 
 	// ThreadLiveState returns a detached current-state cursor, including inactive
 	// retry/compaction and only outstanding prompts/questions with answer IDs.
