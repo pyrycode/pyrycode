@@ -114,7 +114,14 @@ func testChildCompletionPipeline(t *testing.T, recorded []string) {
 			continue
 		}
 		replies++
-		if item.ID != prose || item.Order != prose || item.Rev != prose || item.Parent != parent || item.Turn != childTurn || item.Session != source.SessionID || item.Agent != "claude" || item.Status != "done" || item.Active || !strings.Contains(string(item.Content), "final reply") || !strings.Contains(string(item.Content), `"completion"`) {
+		var content struct {
+			Text       string                         `json:"text"`
+			Completion protocol.AssistantDeltaPayload `json:"completion"`
+		}
+		if json.Unmarshal(item.Content, &content) != nil || content.Text != "final reply" || content.Completion.Text != content.Text || !content.Completion.TextComplete || content.Completion.TurnID != childTurn || content.Completion.ParentToolUseID != "agent" {
+			t.Fatal("reply text or completing entry changed")
+		}
+		if item.ID != prose || item.Order != prose || item.Rev != prose || item.Parent != parent || item.Turn != childTurn || item.Session != source.SessionID || item.Agent != "claude" || item.Status != "done" || item.Active {
 			t.Fatalf("wrong completed reply: %+v", item)
 		}
 	}
