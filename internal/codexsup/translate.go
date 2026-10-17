@@ -34,6 +34,7 @@ var (
 		"item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
 		"thread/tokenUsage/updated", "turn/completed", "item/started", "item/completed",
 		"model/rerouted", "warning", "configWarning",
+		"guardianWarning", "deprecationNotice",
 		"turn/moderationMetadata",
 	}
 	// ignoredMethods carry no turn meaning, following streamsup's
@@ -84,7 +85,6 @@ var (
 		"model/verification",
 		"modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted",
 		"model/safetyBuffering/updated",
-		"guardianWarning", "deprecationNotice",
 	}
 )
 
@@ -201,7 +201,7 @@ func (t *Translator) Translate(method string, params json.RawMessage) []turneven
 		return t.item(method, params)
 	case "model/rerouted":
 		return t.reroute(params)
-	case "warning", "configWarning":
+	case "warning", "configWarning", "guardianWarning", "deprecationNotice":
 		return t.warningBanner(method, params)
 	case "turn/moderationMetadata":
 		return moderationMetadata(params)
@@ -235,7 +235,7 @@ func moderationMetadata(params json.RawMessage) []turnevent.Event {
 // valid; missing or null required strings are not.
 func (t *Translator) warningBanner(method string, params json.RawMessage) []turnevent.Event {
 	var text string
-	if method == "warning" {
+	if method == "warning" || method == "guardianWarning" {
 		var p struct {
 			Message *string `json:"message"`
 		}

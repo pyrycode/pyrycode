@@ -99,23 +99,29 @@ emits `RateLimited{Status: "rejected"}` first. `model/rerouted` becomes a
 warning `Banner` and keys that turn's `ModelWindows` by the model it moved
 to — a silent downgrade would otherwise pass for the requested model.
 
-`warning` and `configWarning` occupy only `mappedMethods` (#3354).
+`warning`, `configWarning`, `guardianWarning` and `deprecationNotice` occupy only
+`mappedMethods` (#3354, #3594), never `ignoredMethods` or `unrecognizedMethods`.
 `Translator.warningBanner` normally emits one `turnevent.Banner{Level: "warning"}`
-with `StopsTurn: false`: `warning.params.message` supplies its text;
-`configWarning.params.summary` supplies its text with a newline and `details`
-appended only when details is a nonempty string. Absent, null or empty details
-add nothing. The combined text is capped at `maxBannerText` (4096 bytes) by
-`truncate`, which removes
-any partial multibyte character at the cut so the result remains valid UTF-8.
+with `StopsTurn: false`: `warning` and `guardianWarning` supply `params.message`
+verbatim; `configWarning` and `deprecationNotice` supply `params.summary` with
+a newline and `params.details` appended only when details is a nonempty string.
+Absent, null or empty details add nothing; an empty summary with nonempty details
+therefore produces a leading newline. The combined text is capped at
+`maxBannerText` (4096 bytes) by `truncate`, which removes any partial multibyte
+character at the cut so the result remains valid UTF-8.
 `Truncated` is true when the text exceeded the cap, false at or below it.
 
 Required prose is decoded into `*string`: plain Go strings would turn both
 missing and null fields into the same value as a schema-valid empty string,
 silently accepting malformed warnings. Empty `message` or `summary` is valid;
-missing, null or wrong-type required prose, wrong-type `configWarning.details`,
-invalid JSON and non-object params instead use `undecodable`'s existing bounded,
-UTF-8-safe `UnrecognizedUndecodable` fallback. `threadId`, `path` and `range`
-are omitted from decoding and banner output. Warning prose stays untrusted
+missing, null or wrong-type required prose, wrong-type `details` on either
+summary-based method, invalid JSON and non-object params (including null)
+instead emit one `Unrecognized{Site: UnrecognizedUndecodable}` through
+`undecodable`. Its `Raw` retains the original params, capped at
+`maxUnrecognizedRaw` (16 KiB), with UTF-8-safe truncation and `Truncated` set
+when the cap is exceeded. Target and location fields such as `threadId`,
+`turnId`, `path`, `range` and `stopsTurn` are omitted from decoding and banner
+output. Warning prose stays untrusted
 [display text](../../protocol-mobile.md#security-model); the helper performs
 no routing, filesystem action or payload logging. Validation runs before matching
 or changing the warning identity: malformed target-shaped notices always emit
@@ -185,6 +191,15 @@ parser-gap guard; genuinely unknown methods still emit
 `UnrecognizedCodexMethod`. `TestWarningMethodLanes` pins that distinction,
 and `TestTranslateWarningsPreserveTurn` compares repeated warnings against a
 control translator's state and completed-turn output.
+
+`TestTranslateWarnings` and `TestTranslateWarningBounds` validate successful
+examples against the pinned schema, including the required `threadId` in
+`GuardianWarningNotification`. That fixture requirement does not make target
+metadata a translator validation or routing requirement. Use multiline Unicode
+prose to check verbatim warning text: a terminal-escape fixture can pass the
+translator tests while failing `substrate-guard` (#3594).
+`TestTranslateMalformedWarnings` checks prose validation and bounded raw fallback
+for all four methods.
 
 `commandExecution` and `fileChange` items (#2609) become tool events instead
 of `Unrecognized`, so a Codex tool row renders like a Claude one with no
