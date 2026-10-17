@@ -129,6 +129,7 @@ var inboundTypes = map[string]string{
 	"TypeArchiveConversation":     "map-dispatched",
 	"TypeUnarchiveConversation":   "map-dispatched",
 	"TypeSetConversationMuted":    "map-dispatched",
+	"TypeSetConversationPinned":   "map-dispatched",
 	"TypeMarkConversationRead":    "map-dispatched",
 	"TypeChangeWorkspace":         "map-dispatched",
 	"TypeSetSystemPrompt":         "map-dispatched",
@@ -270,8 +271,6 @@ var excludedTypes = map[string]string{
 	"TypeThreadToolBody": "reply (thread tool body)",
 	"TypeThreadChildren": "reply (thread children)",
 
-	"TypeSetConversationPinned": "request (declared; handler pending #3538)",
-
 	"TypeAppAssetRequest":   "request (declared; handler pending #3247)",
 	"TypeAppAPIRequest":     "request (declared; handler pending #3247)",
 	"TypeAppResponseCredit": "request (declared; handler pending #3247)",
@@ -288,6 +287,8 @@ var excludedTypes = map[string]string{
 	"TypeThreadTextAppend":  "push (declared, not yet emitted)",
 	"TypeThreadItems":       "reply (declared; query wiring pending #3236)",
 	"TypeThreadReset":       "reply (declared; query wiring pending #3236)",
+
+	"TypeThreadCompactUpdate": "push (declared; compact installation pending #3563)",
 	// handshake — consumed on the Noise_IK v2 handshake path
 	// (v2session_handshake.go), never reaches dispatchAppFrame. Borderline
 	// (hello is phone→binary), called out explicitly per AC #4: classifying it

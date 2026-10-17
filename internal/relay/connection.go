@@ -386,7 +386,27 @@ func (c *Connection) run(ctx context.Context) {
 
 	transportErrCh := make(chan error, 1)
 	go func() { transportErrCh <- c.client.Connect(ctx) }()
-	defer c.client.Close()
+	forwardCtx, cancelForward := context.WithCancel(ctx)
+	forwardReady := make(chan struct{}, 1)
+	forwardDone := make(chan struct{})
+	go func() {
+		defer close(forwardDone)
+		for {
+			select {
+			case <-forwardCtx.Done():
+				return
+			case <-c.closed:
+				return
+			case <-forwardReady:
+				c.forwardFrames(forwardCtx)
+			}
+		}
+	}()
+	defer func() {
+		cancelForward()
+		_ = c.client.Close()
+		<-forwardDone
+	}()
 
 	for {
 		select {
@@ -407,16 +427,19 @@ func (c *Connection) run(ctx context.Context) {
 			// forwarding, no handshake.
 			c.cfg.Logger.Info("relay: conn established",
 				"server_id", string(c.cfg.ServerID))
-			// Re-broadcast the fresh-conn edge to the v2 push drain so a
-			// #874-held control envelope flushes the instant the leg recovers,
-			// without waiting for the next Push (#875). Non-blocking cap-1 send —
-			// a dropped duplicate is harmless (one surviving signal drains the
-			// whole held FIFO). Runs before forwardFrames blocks.
+			// Notify the push drain independently of forwarding: a receive can
+			// cross onto a replacement socket without observing its predecessor's
+			// disconnect. Application backpressure must not hide reconnects either.
 			select {
 			case c.reconnected <- struct{}{}:
 			default:
 			}
-			c.forwardFrames(ctx)
+			// Keep one wake queued while forwarding is active, so a disconnect
+			// cannot strand the receiver when its replacement is already live.
+			select {
+			case forwardReady <- struct{}{}:
+			default:
+			}
 		}
 	}
 }

@@ -12,6 +12,9 @@ const (
 	TypeThreadReset       = "thread_reset"
 )
 
+// TypeThreadCompactUpdate is declared outbound only; production installation is pending.
+const TypeThreadCompactUpdate = "thread_compact_update"
+
 // Expansion vocabulary is declared ahead of handlers and capability activation.
 const (
 	TypeThreadReadToolBody = "thread_read_tool_body"

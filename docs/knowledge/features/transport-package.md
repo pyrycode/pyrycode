@@ -102,6 +102,25 @@ Attempt counter increments per failed dial; resets to 1 after a serve loop that 
 
 Per Client lifetime: one caller-owned goroutine running `Connect`. Per live conn: three pump goroutines (`recvPump`, `sendPump`, `pingLoop`) under a child ctx. All three drain before `serve` returns to the outer dial loop — no goroutine outlives its `serve` call.
 
+Consumers must observe connection events independently of blocking frame work.
+`ReceiveGeneration` snapshots the current `connDone` on each call. A receive
+already waiting on an old lifetime can return `ErrDisconnected`, but a caller
+resuming after replacement can snapshot the new lifetime and wait for new data
+without observing the previous disconnect. Returning from a forwarding loop is
+therefore no prerequisite for consuming `Connected`. Its signal remains
+single-observer, cap-one and drop-on-full; it is no source of frame ownership.
+The receive pump's `Generation` stamp retains that authority.
+
+[`relay.Connection.run`](relay-package.md#reconnect-state-accessors-for-the-v2-push-drain-874-connected-875-reconnected)
+is the sole transport-event observer and separately wakes one serial forwarding
+worker through a cap-one signal. The worker owns the shared receive stream and
+feedback consumption; queued wakes cover replacement while it is active. Relay
+lifecycle exit cancels its forwarding context, closes this client and joins that
+worker before closing `Frames()` and publishing completion through `done`.
+`TestReconnectWhileForwardingPaused` holds forwarding across replacement and
+requires notification before new traffic; `TestReconnectForwardingShutdown`
+checks Close and cancellation with unread application frames.
+
 `Connect` owns the retry-policy state. With `Config.TerminalUpgradeStatuses`
 unset, HTTP upgrade failures retry through cancellable backoff. A selected
 non-101 rejection (for example, 401) ends the loop on its first occurrence,
@@ -268,7 +287,7 @@ The deferred-decision note in #247's spec assigned four additions to #248 (the r
 
 - **`Connected() <-chan struct{}`** — buffer-1 with drop-on-full emit. Fires AFTER `setConn` in `serve` so consumers waking on `Connected` find `Send`/`Receive` already wired against the live conn (same precedent as `docs/lessons.md:290`). Single-observer — multiple observers can miss events by design.
 - **`Config.FatalCloseCodes` + `ErrFatalClose`** — close codes in this list halt `Connect`'s reconnect loop when `Config.FatalCloseThreshold` consecutive observations are reached. The check fires on BOTH the post-`serve` path AND the post-`dialFn` path (when `coder/websocket` surfaces a close error directly from `Dial` rather than from a subsequent `Read` — happens when the peer closes during/immediately after the WS upgrade). The post-`serve` path also walks the three pump-return errors and PREFERS one with a recognizable `websocket.CloseStatus` (recvPump observes the `CloseError` but sendPump/pingLoop can return generic `use of closed network connection`; without preferring the close-status error, fatal-close classification flakes under `-race`). To keep the `CloseError` actually present in `errs[]` for the preference loop to pick, `serve` grants a bounded `closeFrameGrace = 50ms` wait when the first pump return has no close status before calling `cancel()` (#290) — without the grace, `coder/websocket`'s `prepareRead.done()` deferred override replaces `recvPump`'s pending `CloseError` with `ctx.Err()` when ctx fires mid-Read, and no slot of `errs[]` carries the status. Grace is wire-internal (no `Config` knob; tests substitute via `testOpts.closeFrameGrace`).
-- **`ErrDisconnected` + per-conn `connDone`** — `connDone` is per-conn, pre-closed at construction (`Receive`/`Send` before `Connect` return `ErrDisconnected` immediately rather than blocking forever), replaced with a fresh open channel inside `serve` before pumps install, closed in `serve`'s deferred teardown. `Receive` and `Send` capture `connDone` once under `connDoneMu` then select — a serve iteration that replaces `c.connDone` between the capture and the select cannot accidentally wake the caller on the new channel. Without this, a `Receive` blocked when the conn drops would stay blocked until the next conn delivers a frame, wedging the relay's `forwardFrames` receive loop above this layer permanently.
+- **`ErrDisconnected` + per-conn `connDone`** — the channel starts closed, is replaced before `serve` installs pumps and closes in teardown. Each receive snapshots it under `connDoneMu`, so later replacement cannot change the lifetime that call waits on. A subsequent receive may snapshot the replacement instead and miss the old disconnect entirely; see [Lifecycle and goroutines](#lifecycle-and-goroutines). An error boundary is not a reliable reconnect-event boundary.
 - **`DropConn()`** — force-closes the live conn (if any) via `conn.CloseNow()` (abrupt 1006-equivalent, no close-frame round-trip). The serve loop sees the closed conn, returns to the dial loop, reconnects via backoff. Does NOT halt the dial loop. Idempotent (no-op when no conn is live). `CloseNow` over `Close(status, reason)` so the caller is not blocked for up to 10s on a close handshake when the only purpose is to recycle the conn. It exists for a consumer wanting to recycle a transport-healthy-but-application-stuck conn; the relay package was its original caller (the binary↔relay handshake-failure path), which #582 retired — `DropConn` now has no caller in `internal/relay` but remains for future consumers.
 
 ### #874 addition — `IsConnected() bool`, a synchronous level poll

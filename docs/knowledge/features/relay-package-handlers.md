@@ -23,9 +23,10 @@ Ordering is reply, then push, then return the reply's error: the push must still
 
 ## Conversation pins (#3537)
 
-`SetConversationPinned` implements the package handler for
+`SetConversationPinned` handles the authenticated daemon request
 [`set_conversation_pinned`](../../protocol-mobile.md#set_conversation_pinned).
-Daemon registration and command-package projections remain pending #3538.
+`startRelayV2` registers it beside mute (#3538) with the same registry, resolved
+registry path and `announceConversationHook`; no new capability is needed.
 `ConversationPinner` exposes registry metadata and persistence only; pinning
 performs no session operation.
 
@@ -54,6 +55,17 @@ reply is attempted before `ConversationAnnouncer` receives the same record;
 the announcement still runs if the reply fails. `pinned_at` is the stored
 timestamp or explicit JSON null; other projected fields come from that snapshot.
 
+**Calling Reply before announcing is insufficient to prove wire order.** Buffered
+replies and manager pushes previously took independent paths, allowing a push to
+overtake its reply. The shared [Run-processing fence](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md)
+now preserves that order for the connected requester. The announcer sends an
+uncorrelated push to every interactive client, including the requester.
+`TestRelayV2_ChannelPinsReplyOrdering` checks authenticated receive order and
+rejects an early matching push. Its functional sibling `TestRelayV2_ChannelPins`
+buffers early pushes, so it proves receipt, timestamp/null, idempotence, reload,
+restart and re-pin behavior but cannot independently prove ordering. Both tests
+must execute without skips to establish the full contract.
+
 ### Pin-preserving projections and regression tests
 
 `ListConversationsWithAgents`, `RenameConversation`, `autoNameConversation`,
@@ -61,6 +73,8 @@ timestamp or explicit JSON null; other projected fields come from that snapshot.
 `ChangeWorkspace`, `SetSystemPrompt`, `SetConversationMuted` and
 `MarkConversationRead` all copy stored `PinnedAt`. List visibility, capability
 filtering and ordering keep their existing semantics.
+`channelCreator`, `conversationCreator` and `announceSwitchedConversation`
+likewise project the stored snapshot, including on unrelated metadata changes.
 
 **Valid serialization alone cannot prove pin preservation.** Omitting the
 stored value from a payload builder still emits valid `"pinned_at":null`, which
@@ -69,6 +83,10 @@ silently clears the client's pin during an unrelated edit.
 archive/unarchive separately), checks its exact timestamp, and separately
 requires an explicit null on unpinned records. See the
 [protocol boundary testing guidance](development-verification-protocol-boundaries.md).
+`TestCommandConversationPins` applies the same timestamp/null checks to all three
+command producers. Creation normally starts unpinned, so its fixtures pin the
+stored row at the creation-success logging boundary before announcement; testing
+only the default state would leave a missing stored-value assignment undetected.
 
 ## Daemon-wide instructions and durable acknowledgement
 

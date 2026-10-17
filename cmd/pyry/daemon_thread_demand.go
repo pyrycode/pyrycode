@@ -22,10 +22,38 @@ type threadQueryDemand struct {
 // owns loading, readiness and retirement; the bounded store APIs remain read-only.
 func (s *threadShadow) queryThread(ctx context.Context, id conversations.ConversationID, store *thread.Store,
 	query func(context.Context) (thread.QueryResult, error)) (thread.QueryResult, error) {
+	return queryDaemonThread(ctx, s, id, store, query)
+}
+
+// All bounded reads retain the same demand through capture and rendering.
+func queryDaemonThread[T any](ctx context.Context, s *threadShadow, id conversations.ConversationID, store *thread.Store,
+	query func(context.Context) (T, error)) (T, error) {
+	var zero T
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	s.mu.Lock()
+	p := s.publisher
+	if p != nil {
+		p.mu.Lock()
+		if p.stopped || p.ctx.Err() != nil {
+			p.mu.Unlock()
+			s.mu.Unlock()
+			return zero, context.Canceled
+		}
+		p.wg.Add(1)
+		p.mu.Unlock()
+		defer p.wg.Done()
+	}
+	s.mu.Unlock()
+	if p != nil {
+		stop := context.AfterFunc(p.ctx, cancel)
+		defer stop()
+		if p.ctx.Err() != nil {
+			return zero, context.Canceled
+		}
+	}
 	if err := ctx.Err(); err != nil {
-		return thread.QueryResult{}, err
+		return zero, err
 	}
 	for {
 		s.quietMu.Lock()
@@ -36,7 +64,7 @@ func (s *threadShadow) queryThread(ctx context.Context, id conversations.Convers
 		s.quietMu.Unlock()
 		select {
 		case <-ctx.Done():
-			return thread.QueryResult{}, ctx.Err()
+			return zero, ctx.Err()
 		case <-retired:
 		}
 	}
@@ -46,9 +74,9 @@ func (s *threadShadow) queryThread(ctx context.Context, id conversations.Convers
 		s.mu.Unlock()
 		s.quietMu.Unlock()
 		if err := ctx.Err(); err != nil {
-			return thread.QueryResult{}, err
+			return zero, err
 		}
-		return thread.QueryResult{}, thread.ErrUnavailable
+		return zero, thread.ErrUnavailable
 	}
 	d := s.queryDemands[id]
 	if d == nil {
@@ -87,13 +115,13 @@ func (s *threadShadow) queryThread(ctx context.Context, id conversations.Convers
 		s.queryDone.Done()
 	}()
 	if err != nil {
-		return thread.QueryResult{}, err
+		return zero, err
 	}
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
-			return thread.QueryResult{}, err
+			return zero, err
 		}
 		switch store.Status(id).State {
 		case thread.StateUsable:
@@ -101,23 +129,23 @@ func (s *threadShadow) queryThread(ctx context.Context, id conversations.Convers
 			// Later commits must be delivered from it or force reconciliation.
 			if !s.publishThread(ctx, id, w, true) {
 				if err := ctx.Err(); err != nil {
-					return thread.QueryResult{}, err
+					return zero, err
 				}
-				return thread.QueryResult{}, thread.ErrUnavailable
+				return zero, thread.ErrUnavailable
 			}
 			result, err := query(ctx)
 			if ctx.Err() != nil {
-				return thread.QueryResult{}, ctx.Err()
+				return zero, ctx.Err()
 			}
 			return result, err
 		case thread.StateRebuilding:
 			select {
 			case <-ctx.Done():
-				return thread.QueryResult{}, ctx.Err()
+				return zero, ctx.Err()
 			case <-tick.C:
 			}
 		default:
-			return thread.QueryResult{}, thread.ErrUnavailable
+			return zero, thread.ErrUnavailable
 		}
 	}
 }

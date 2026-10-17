@@ -67,5 +67,5 @@ func announceSwitchedConversation(reg *conversations.Registry, id string, announ
 	if stored, ok := reg.WorkspaceLabel(row.Cwd); ok {
 		label = &stored
 	}
-	announce(protocol.ConversationUpdatedPayload{WorkspaceLabel: label, ID: string(row.ID), IsPromoted: row.IsPromoted, IsArchived: row.IsArchived, IsMuted: row.IsMuted, ReadUpTo: row.ReadUpTo, Name: row.Name, Cwd: row.Cwd, LastUsedAt: row.LastUsedAt})
+	announce(protocol.ConversationUpdatedPayload{WorkspaceLabel: label, ID: string(row.ID), IsPromoted: row.IsPromoted, IsArchived: row.IsArchived, IsMuted: row.IsMuted, PinnedAt: row.PinnedAt, ReadUpTo: row.ReadUpTo, Name: row.Name, Cwd: row.Cwd, LastUsedAt: row.LastUsedAt})
 }
