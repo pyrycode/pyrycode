@@ -269,6 +269,15 @@ Forbidden everywhere: `token`, `payload`, raw `frame` bytes, full `Headers` map 
 
 ## Test surface
 
+Admission tests must count provider calls as well as checking the correlated
+refusal. `thread.query_failed` can also result from a later provider or encoder
+failure, hiding invalid input that reached provider work.
+`TestThreadCatchUpAdmission` and `TestThreadChildrenAdmission` assert zero
+provider calls for invalid requests. Enforce the legacy signed-int ceiling
+before clamping; otherwise an overflowing legacy limit becomes an accepted
+request. Test the child uint64 allowance separately; see
+[expansion admission](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
+
 A held transport fixture must record its accepted prefix before signaling the
 cancellation gate, and signal callback exit on every return (for example with a
 `defer`). Otherwise cancellation can beat the recording callback and strand the

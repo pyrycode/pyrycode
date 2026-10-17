@@ -18,6 +18,7 @@ type threadQuery struct {
 	request      protocol.ThreadCatchUpPayload
 	page         *protocol.ThreadPagePayload
 	body         *protocol.ThreadExpansionRequest
+	children     bool
 	inbox        *hostedInbox
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -53,11 +54,13 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 	}
 	var p struct {
 		Conversation *string `json:"conversation_id"`
-		Limit        *int    `json:"limit"`
+		Limit        *uint64 `json:"limit"`
 	}
 	var payload map[string]json.RawMessage
 	page := env.Type == protocol.TypeThreadPage
 	body := env.Type == protocol.TypeThreadReadToolBody
+	children := env.Type == protocol.TypeThreadReadChildren
+	expanding := body || children
 	if json.Unmarshal(env.Payload, &p) != nil || json.Unmarshal(env.Payload, &payload) != nil || p.Conversation == nil {
 		fail()
 		return
@@ -65,16 +68,24 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 	var beforeOrder, version *uint64
 	var epoch *string
 	var expansion *protocol.ThreadExpansionRequest
-	if body {
+	if expanding {
 		var itemID, rev *uint64
 		_, cursor := payload["cursor"]
-		if cursor || json.Unmarshal(payload["epoch"], &epoch) != nil || epoch == nil || *epoch == "" ||
+		if body && cursor || json.Unmarshal(payload["epoch"], &epoch) != nil || epoch == nil || *epoch == "" ||
 			json.Unmarshal(payload["item_id"], &itemID) != nil || itemID == nil || *itemID == 0 ||
 			json.Unmarshal(payload["expected_rev"], &rev) != nil || rev == nil || *rev == 0 {
 			fail()
 			return
 		}
 		expansion = &protocol.ThreadExpansionRequest{ConversationID: *p.Conversation, Epoch: *epoch, ItemID: *itemID, ExpectedRev: *rev}
+		if children && cursor {
+			c, ok := parseThreadChildCursor(payload["cursor"], *expansion)
+			if !ok {
+				fail()
+				return
+			}
+			expansion.Cursor = c
+		}
 	} else if page {
 		if json.Unmarshal(payload["before_order"], &beforeOrder) != nil || beforeOrder == nil {
 			fail()
@@ -86,14 +97,18 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 	}
 	limit := 0
 	if p.Limit != nil {
-		limit = *p.Limit
+		if !children && *p.Limit > uint64(^uint(0)>>1) {
+			fail()
+			return
+		}
+		limit = int(min(*p.Limit, uint64(protocol.MaxThreadQueryLimit)))
 	} else if _, present := payload["limit"]; present {
 		fail()
 		return
 	}
 	limit, err := protocol.NormalizeThreadQueryLimit(limit)
-	providerMissing := body && m.cfg.ThreadToolBody == nil || !body && (page && m.cfg.ThreadPage == nil || !page && m.cfg.ThreadCatchUp == nil)
-	if err != nil || !conversations.ValidID(*p.Conversation) || s.state != V2StateOpen || m.liveWithheld(s, *p.Conversation) || !s.thread || !s.interactive || body && !s.threadExpansion || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
+	providerMissing := body && m.cfg.ThreadToolBody == nil || children && m.cfg.ThreadChildren == nil || !expanding && (page && m.cfg.ThreadPage == nil || !page && m.cfg.ThreadCatchUp == nil)
+	if err != nil || !conversations.ValidID(*p.Conversation) || s.state != V2StateOpen || m.liveWithheld(s, *p.Conversation) || !s.thread || !s.interactive || expanding && !s.threadExpansion || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
 		fail()
 		return
 	}
@@ -103,16 +118,19 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 	in := s.hosted.inbox
 	m.hostedMu.Lock()
 	_, joined := in.threadJoins[*p.Conversation]
-	if in.query != nil || !body && !joined && len(in.threadJoins) >= maxThreadJoins {
+	if in.query != nil || !expanding && !joined && len(in.threadJoins) >= maxThreadJoins {
 		m.hostedMu.Unlock()
 		fail()
 		return
 	}
 	queryCtx, cancel := context.WithCancel(in.ctx)
-	q := &threadQuery{id: *id, conversation: *p.Conversation, ctx: queryCtx, cancel: cancel, inbox: in, body: expansion}
+	q := &threadQuery{id: *id, conversation: *p.Conversation, ctx: queryCtx, cancel: cancel, inbox: in, body: expansion, children: children}
+	if expansion != nil {
+		expansion.Limit = limit
+	}
 	if page {
 		q.page = &protocol.ThreadPagePayload{ConversationID: *p.Conversation, BeforeOrder: *beforeOrder, Limit: limit}
-	} else if !body {
+	} else if !expanding {
 		q.request = protocol.ThreadCatchUpPayload{ConversationID: *p.Conversation, Epoch: *epoch, Version: *version, Limit: limit}
 	}
 	in.query = q
@@ -121,6 +139,10 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 }
 
 func (m *V2SessionManager) runThreadQuery(ctx context.Context, s *V2Session, q *threadQuery) {
+	if q.children {
+		m.runThreadChildren(ctx, s, q)
+		return
+	}
 	if q.body != nil {
 		m.runThreadToolBody(ctx, s, q)
 		return
@@ -235,8 +257,10 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 		in.query = nil
 		return nil
 	}
-	if q := o.query; q.body != nil && env.Type == protocol.TypeThreadToolBody {
-		var body protocol.ThreadToolBodyPayload
+	if q := o.query; q.body != nil && (env.Type == protocol.TypeThreadToolBody || env.Type == protocol.TypeThreadChildren) {
+		var body struct {
+			Final bool `json:"final"`
+		}
 		if json.Unmarshal(env.Payload, &body) == nil && body.Final {
 			if err := q.ctx.Err(); err != nil {
 				return err

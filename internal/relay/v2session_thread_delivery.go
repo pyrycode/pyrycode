@@ -105,7 +105,7 @@ func (o *hostedOutput) finish(err error) {
 }
 
 func threadContent(typ string) bool {
-	return threadItemUpdate(typ) || typ == protocol.TypeThreadItems || typ == protocol.TypeThreadReset || typ == protocol.TypeThreadToolBody
+	return threadItemUpdate(typ) || typ == protocol.TypeThreadItems || typ == protocol.TypeThreadReset || typ == protocol.TypeThreadToolBody || typ == protocol.TypeThreadChildren
 }
 
 func threadDeliveryError(err error) error {

@@ -21,7 +21,7 @@ func threadItemUpdate(typ string) bool {
 func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) bool {
 	if threadContent(env.Type) {
 		id := pushedConversationID(env)
-		return !s.thread || m.liveWithheld(s, id) || env.Type == protocol.TypeThreadToolBody && !s.threadExpansion
+		return !s.thread || m.liveWithheld(s, id) || (env.Type == protocol.TypeThreadToolBody || env.Type == protocol.TypeThreadChildren) && (!s.threadExpansion || !s.interactive)
 	}
 	if !s.thread {
 		return env.SessionStateCleared
