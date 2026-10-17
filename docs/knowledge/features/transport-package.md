@@ -155,7 +155,7 @@ A separate direct socket writer can overtake a frame already accepted by
 that can deliver nonce 1 before nonce 0, or application output before the initial
 `noise_resp`. Socket completion and writer serialization cannot replace shared
 admission ordering. `Connection.SendContext` adapts this contract; the relay
-still owns sender IDs and [sealing order](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
+still owns sender IDs and [sealing order](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).
 
 ### Socket generation ownership
 

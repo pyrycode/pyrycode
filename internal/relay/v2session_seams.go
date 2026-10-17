@@ -190,8 +190,9 @@ type V2SessionConfig struct {
 	// ctx timeout) or it stalls that conn's later frames. A handler MUST NOT touch
 	// Noise or session state; every reply is sealed on Run (forwardAppReply),
 	// keeping the send CipherState single-owner. A handler MUST NOT keep the
-	// *dispatch.Conn in a goroutine that outlives it: the conn's outbound channel
-	// is drained only while routeAppFrame runs, so later sends are silently lost.
+	// *dispatch.Conn in a goroutine that outlives it. Send waits for Run to process
+	// the reply, including ordered plaintext admission, before it returns; it does
+	// not wait for peer receipt. Session teardown or cancellation ends the wait.
 	Handlers map[string]dispatch.Handler
 
 	// KnownConversation reports whether conversationID names a conversation this

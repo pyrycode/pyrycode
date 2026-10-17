@@ -115,7 +115,7 @@ Leaving it nil preserves existing preparation and cleanup behavior.
 Reservations cannot substitute for this callback: a known-size body is reserved
 before reading, so preparation may continue making progress for more than five
 seconds without another reservation. The relay uses positive reads to enforce
-[read inactivity independently of its fixed deadline](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
+[read inactivity independently of its fixed deadline](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).
 `TestResponseProgress` checks known/unknown sizes, zero-byte reads and multiple
 source reads per staging chunk; `TestAssetProgress` checks asset forwarding and
 the empty 404 path. `TestAPIProgress` checks API forwarding for ordinary and HTTP

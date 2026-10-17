@@ -211,8 +211,10 @@ type snapshotReq struct {
 // CipherState seals the reply; reply is the marshalled inner frame the
 // handler emitted via c.Send.
 type appReplyMsg struct {
-	s     *V2Session
-	reply protocol.RoutingEnvelope
+	s         *V2Session
+	reply     protocol.RoutingEnvelope
+	ctx       context.Context
+	processed chan struct{}
 }
 
 // wakeBufferSize sizes the manager's wake channel. The 1-hour rekey
@@ -222,14 +224,6 @@ type appReplyMsg struct {
 // handler invocation) without forcing the timer-callback goroutine to
 // block. cap=1 would also be correct.
 const wakeBufferSize = 16
-
-// handlerOutboundBuf is the buffer size for the per-frame dispatch.Conn
-// outbound channel allocated by routeAppFrame. The three production
-// handlers (send_message, list_conversations, register_push_token) emit
-// exactly one reply per invocation; Route emits at most one error reply.
-// 8 is a generous safety margin and is documented as the
-// synchronous-handler assumption in V2SessionConfig.Handlers.
-const handlerOutboundBuf = 8
 
 // appFrameQueueDepth bounds the per-conn V2Session.appFrames queue — the
 // number of decrypted application-frame plaintexts that may sit awaiting
@@ -818,7 +812,11 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			// off-Run; seal it here so every s.send.Encrypt stays on the
 			// single-owner Run goroutine (#965). The worker never touches
 			// s.send — it only marshalled + pushed the reply through c.Send.
-			m.forwardAppReply(rep.s, rep.reply)
+			if rep.ctx.Err() == nil && m.sessions[rep.s.connID] == rep.s {
+				m.forwardAppReply(rep.s, rep.reply)
+			}
+			// Processing includes ordered plaintext admission, not transport receipt.
+			close(rep.processed)
 		}
 	}
 }

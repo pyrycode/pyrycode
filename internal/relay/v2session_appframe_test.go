@@ -13,6 +13,10 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
+// handlerOutboundBuf retains the burst boundary exercised by the dispatch
+// regressions; the production sender applies backpressure without this buffer.
+const handlerOutboundBuf = 8
+
 // prolificHandler returns a dispatch.Handler that emits req.Count reply
 // envelopes (TypeConversations) in one invocation, each carrying a
 // monotonically increasing {"index":i} payload so a test can assert
