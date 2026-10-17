@@ -23,32 +23,52 @@ reads retain exact directory containment and leaf checks.
 The worker captures the surviving readable boundary H with
 `history.Store.Page(conversationID, "", 1)`, using the newest entry's ID or zero
 for no entries. **A warm append cursor is not a recovery boundary:**
-`LatestEntryID` can remain ahead after history truncation. Recovery rejects
-certificates ahead of H and rotates their epoch even on unload/reload in one
-lifetime. Before replay, it durably writes `thread-certificate.json` with
-`Clean: false`, marks any existing readable checkpoint state dirty while
-preserving its saved boundary, and removes only allow-listed regular legacy
-metadata leaves. Failed dirty marking on either surface, including replacement
-or directory-sync failure, or failed cleanup withholds usability. The worker
-then creates `history.Store.Forward(conversationID, 0)` and feeds raw entries through H into a
-private `Fold` using `ForwardReader.Walk`. Each chunk contains at most
-`history.MaxPageEntries`, including hidden facts and continuation evidence.
-For eligible compact recovery metadata at V, replay must first reach exactly V
-with the recorded stored-entry checksum and history-reconstructed last-shown
-watermark before reusing the epoch. Invalid or mismatched evidence rotates the
-epoch; replay continues through H either way. Eligibility requires a compatible
-clean per-conversation certificate with valid fields and V within readable H;
-legacy-only startup rotates once. Cached fields never seed the fold. Full replay
-remains required: [ADR 045's checkpoints and persistent index](../decisions/045-thread-index-over-history.md)
-are now persisted, but Store restoration from them remains #3337. There is no
-shared-run eligibility or coordinator certificate.
-Readiness requires durable dirty marking (including directory sync), successful
-replay and `Fold.Version() == H`; partial replay publishes no usable view.
-Recovery stays `StateRebuilding` until these conditions hold. A missing or empty
-log becomes usable with no items and both `Version` and `LastShownVersion` zero.
-The initial page read is required even at H zero: `ForwardReader.Walk(0)` performs
-no storage read and cannot establish that empty history is readable. Items,
-revisions and version match fresh full replay through the published version.
+`LatestEntryID` can remain ahead after history truncation. `Store.resumeCheckpoint`
+imports the complete saved graph without history I/O, then checks V <= H and,
+for nonzero V, the stored-entry checksum at exactly V. Missing/changed V rejects
+the checkpoint even if rendered items remain unchanged.
+
+Valid clean checkpoint state retains its epoch; valid dirty state restores its
+fold with a new epoch. Missing/corrupt/inconsistent state, wrong owner, changed
+rules, incompatible file/fold schemas (including newer ones), V beyond H or
+missing/changed V causes full refold with a new epoch. Scalar-only installations
+migrate by refolding once; a scalar certificate cannot authorize restoration or
+override dirty/rejected state. Actual history/I/O/containment failures withhold
+usability rather than permitting fallback.
+
+Before first publication, the worker durably writes `thread-certificate.json`
+with `Clean: false` and dirties any existing readable checkpoint state without
+advancing its saved fold boundary. Epoch selection uses the original clean flag.
+Absent state needs no eager checkpoint. Replacement or directory-sync failure
+on either surface prevents usability. After validation and dirty marking,
+`reconcileResume` truncates only through a contained, no-follow/nonblocking
+regular-file descriptor to the selected generation's committed length, checking
+Truncate, Sync and Close. Complete/torn uncommitted tails are ignored then removed.
+Cleanup rechecks the surviving state's named generation and removes only other
+exact package generation leaves admitted as contained regular files, syncing
+the directory after removals. Unsafe leaves/directories fail closed; history,
+unrelated files, named generation and redirected targets survive. Full-refold
+fallback preserves the old named generation until fresh replacement state commits.
+Legacy cleanup remains separately allow-listed.
+
+The worker seeds publication slots, recipes, private/public activity and complete
+row-byte/writer acknowledgements from the restored inventory, including hidden
+or recipe-only rows. This initializes query metadata even with no suffix and
+avoids rendering every restored row just to classify initial changes. Production
+`history.Store.Forward(conversationID, V)` positions after the saved boundary;
+only `(V, H]` enters `Fold.Feed` through bounded `ForwardReader.Walk` chunks of
+at most `history.MaxPageEntries`. Full-refold fallback starts at zero. Wrapped
+fixture readers retain `Store.forward`'s signature and filter only entries at
+or below the immutable saved boundary; later duplicate IDs still fail.
+
+Readiness requires durable dirty marking, safe reconciliation/cleanup, successful
+suffix/full replay and `Fold.Version() == H`; partial recovery publishes no
+usable view. Recovery stays `StateRebuilding` until these conditions hold.
+A missing or empty log becomes usable with no items and both `Version` and
+`LastShownVersion` zero. The initial page read remains required at H zero:
+`ForwardReader.Walk(0)` performs no storage read and cannot prove readability.
+Initial results, private continuation and later tail/retirement match fresh full
+replay. See the [validated load order and read accounting](thread-package-cache-and-epochs.md#store-replay-and-public-touches).
 
 The same reader then runs `ForwardReader.Tail`. Registration precedes catch-up,
 so entries committed during replay or the handoff are consumed exactly once in
@@ -66,8 +86,8 @@ include the complete manifest/private maps. Active-to-idle transitions do not
 flush. Checksum and watermark evidence advance in memory only with successfully
 folded and captured progress; a partially failed or interrupted feed cannot
 advance retirement evidence. Dirty-write failure leaves
-`StateUnavailable` with generic `ErrUnavailable`; `Retry` reconstructs from
-history and writes dirty again. Successful joined retirement commits the final
+`StateUnavailable` with generic `ErrUnavailable`; after repair, `Retry`
+revalidates checkpoint/history and writes dirty again. Successful joined retirement commits the final
 eligible boundary and certifies both checkpoint state and scalar certificate
 clean, including unchanged and empty version-zero progress. See
 [cache and epochs](thread-package-cache-and-epochs.md#cache-and-epochs)
@@ -136,8 +156,8 @@ combined replacements/text become consecutive changed/append messages with the
 same final revision. See [daemon publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
 **A fresh baseline cannot repair an existing consumer silently.** Unload/reload
-and retry release retained live batches even if cache validation preserves the
-epoch. Nonusable state, epoch mismatch, evicted ranges or linked-delivery
+and retry release retained live batches even when clean checkpoint validation
+preserves the epoch. Nonusable state, epoch mismatch, evicted ranges or linked-delivery
 suppression require `RetireLiveState` for affected thread consumers before the
 publisher forgets its cursor and obtains a fresh usable `Observe`. Pending
 dependent deltas are quarantined immediately, rather than drained while gap
@@ -149,8 +169,9 @@ explicit requests for each open conversation.
 
 ## Snapshots and retry
 
-Production recovery validates the stored-entry checksum and reconstructed
-last-shown watermark at the saved version instead of comparing rendered items.
+Production recovery validates the complete saved graph, certificate/fold
+watermark agreement and stored-entry checksum at V instead of comparing rendered
+items or refolding the prefix to reconstruct its watermark.
 Publication capture uses `renderShared` on affected public rows to resolve the
 [standalone](thread-package-main-thread-folding-sources.md#standalone-source-entries),
 [assistant/ordinary-tool](thread-package-main-thread-folding-lifecycle.md#main-work-source-entries),
@@ -213,7 +234,7 @@ by `Snapshot`:
 | State | Meaning |
 | --- | --- |
 | `StateNotLoaded` | No loaded view, including while retiring or after shutdown. |
-| `StateRebuilding` | Durable dirty marking, legacy cleanup or full replay is still pending; no usable publication exists. |
+| `StateRebuilding` | Validation, durable dirty marking, safe cleanup or suffix/full replay is pending; no usable publication exists. |
 | `StateUsable` | Detached items/content, consumed version, last-shown watermark and conversation epoch from one consistent publication; newer appends may still be pending. |
 | `StateUnavailable` | The view is withdrawn; its producer may still be exiting. `Err` is the fixed `ErrUnavailable` sentinel; explicit retry can recover. |
 
@@ -221,7 +242,7 @@ Only `StateUsable` carries versions/epoch, including an empty usable conversatio
 only `StateUnavailable` carries `ErrUnavailable`, and every other state has nil `Err`.
 `Status.Active` preserves private activity even with no public items, so nil
 `Items` cannot establish inactivity or readiness. The last-shown watermark follows
-the [history-reconstructed rule](thread-package-cache-and-epochs.md#cache-and-epochs), and unread
+the [restored or history-reconstructed rule](thread-package-cache-and-epochs.md#cache-and-epochs), and unread
 is `LastShownVersion > ReadUpTo`. The random epoch is independent of
 deterministic item equality and follows the [recovery compatibility rules](thread-package-cache-and-epochs.md#cache-and-epochs).
 An active-index set tracks affected private/public rows without a whole-fold
@@ -248,11 +269,12 @@ checkpoint failures preserve usability and retry on the next interval. Raw error
 are neither exposed, retained nor logged:
 diagnostics contain no conversation content, raw payloads or host paths.
 
-`Retry(ctx, conversationID) error` replaces only an unavailable worker with fresh
-replay under the new context after the source is repaired. It creates a new
-reader, reference fold and recent source rather than reusing partial progress.
-It invalidates any previous clean claim with another durable dirty write before
-usability; cached progress never seeds the fold. An absent conversation returns
+`Retry(ctx, conversationID) error` replaces only an unavailable worker under the
+new context after repair. It creates a new reader/recent source and revalidates
+persisted checkpoint/history through the same Load path, importing a fresh fold
+or refolding rather than reusing partial in-memory progress. It durably dirties
+both evidence surfaces again before usability; only validated checkpoint state
+can seed continuation. An absent conversation returns
 `ErrNotLoaded`; rebuilding or usable workers return `ErrNotUnavailable`.
 **Recreate both reader and fold after failure:** a failed `Fold.Feed` can consume
 entries without advancing the reader; redelivery would repeat IDs. Completion

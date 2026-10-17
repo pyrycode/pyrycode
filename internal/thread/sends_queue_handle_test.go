@@ -174,6 +174,7 @@ func TestStoreQueueHandleCacheRules(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.Rules = tc.rules
+			testScalarMigration(t, s)
 			raw, err = json.Marshal(c)
 			if err != nil {
 				t.Fatal(err)

@@ -215,6 +215,9 @@ func (w *checkpointWriter) commit(d CheckpointState, all, changed []CheckpointIt
 	if err := w.replaceState(dir, saved); err != nil {
 		return err
 	}
+	if err := w.cleanGenerations(dir, saved.Generation); err != nil {
+		return err
+	}
 	w.ack = saved
 	return nil
 }

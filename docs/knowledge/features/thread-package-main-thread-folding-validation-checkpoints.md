@@ -17,8 +17,12 @@ the conversation owner and consumed version. Legacy inline `New` folds reject
 export and retain their existing behavior. In-memory restoration and synthetic
 and committed-recording resume-equivalence proofs are available, along with the
 persisted package reader, durable transaction and worker checkpoint cadence.
-Store restoration/history-bound validation remains #3337; Store loading still
-replays history. See
+Load/Retry now imports the complete graph, validates saved V against the
+readable history bound and stored-entry checksum, durably dirties both evidence
+surfaces and reconciles the selected generation before feeding only the suffix.
+Clean state retains its epoch; dirty state resumes with a new epoch.
+Absent/rejected or scalar-only state requires full refold with a new epoch;
+actual history, persistence or containment failures withhold usability. See
 [Cache and epochs](thread-package-cache-and-epochs.md#cache-and-epochs).
 
 `HistorySource.Lookup([]uint64) ([]history.Entry, error)` supplies immutable
@@ -180,8 +184,11 @@ bounds remain covered by the separate reader/Store tests above.
 
 Worker scheduling and final Store certification have separate
 [cadence and lifecycle proofs](thread-package-cache-and-epochs.md#worker-checkpoint-cadence-and-retained-changes).
-Store checkpoint loading/history-bound validation remains #3337; Store loading
-still replays history and scalar certificates remain separate. Native transaction
+`TestStoreResumeCuts`, `TestStoreResumeReject` and `TestStoreResumeReconcile`
+exercise Store restoration, fallback and descriptor reconciliation/cleanup.
+The Store acknowledges the complete restored inventory and continues its named
+generation, including hidden/recipe-only rows and no-suffix retirement. Scalar
+certificates remain separate from checkpoint authority. Native transaction
 acceptance evidence is recorded in
 the [transaction plan](../../specs/architecture/3504-durable-checkpoints.md#rework-validation).
 
