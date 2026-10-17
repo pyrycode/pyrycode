@@ -18,11 +18,10 @@ import (
 
 type daemonThreadStore interface {
 	Status(conversations.ConversationID) thread.Snapshot
-	Observe(conversations.ConversationID) thread.Observation
 	Changes(context.Context, conversations.ConversationID, string, uint64) (thread.Observation, error)
 }
 
-// Publication is owned by the existing conversation coordinator, never a writer.
+// Publication is serialized by the conversation coordinator, never a writer.
 type daemonThreadPublisher struct {
 	store   daemonThreadStore
 	active  func(context.Context, string) []relay.ActiveConn
@@ -116,7 +115,15 @@ func startDaemonThreadPublisher(base context.Context, s *threadShadow, m *relay.
 	}
 }
 
-func (s *threadShadow) publish(ctx context.Context, id conversations.ConversationID, w *shadowConversation) {
+func (s *threadShadow) publish(ctx context.Context, id conversations.ConversationID, w *shadowConversation) bool {
+	return s.publishThread(ctx, id, w, false)
+}
+
+func (s *threadShadow) publishThread(ctx context.Context, id conversations.ConversationID, w *shadowConversation, initialOnly bool) bool {
+	if !w.lockPublication(ctx) {
+		return false
+	}
+	defer w.unlockPublication()
 	s.mu.Lock()
 	p := s.publisher
 	if p != nil {
@@ -130,7 +137,7 @@ func (s *threadShadow) publish(ctx context.Context, id conversations.Conversatio
 	}
 	s.mu.Unlock()
 	if p == nil {
-		return
+		return true
 	}
 	defer p.wg.Done()
 	operation, cancel := context.WithCancel(ctx)
@@ -142,12 +149,26 @@ func (s *threadShadow) publish(ctx context.Context, id conversations.Conversatio
 		w.threadEpoch = ""
 		w.threadPeers = nil
 	}
+	if initialOnly && w.threadEpoch != "" {
+		return true
+	}
 	p.publish(operation, id, w)
+	return w.threadEpoch != ""
 }
 
-func (p *daemonThreadPublisher) gap(ctx context.Context, w *shadowConversation) {
-	for id := range w.threadPeers {
-		if err := p.retire(ctx, id); err != nil && ctx.Err() == nil {
+func (p *daemonThreadPublisher) gap(ctx context.Context, id conversations.ConversationID, w *shadowConversation) {
+	// Queries can initialize a consumer without any successful live push.
+	peers := w.threadPeers
+	if peers == nil {
+		peers = make(map[string]bool)
+	}
+	for _, peer := range p.active(ctx, string(id)) {
+		if peer.Interactive && peer.Thread {
+			peers[peer.ConnID] = true
+		}
+	}
+	for peer := range peers {
+		if err := p.retire(ctx, peer); err != nil && ctx.Err() == nil {
 			p.log.Debug("relay: thread retirement failed", "event", "daemon.thread.retire_err")
 		}
 	}
@@ -160,7 +181,7 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 	status := p.store.Status(id)
 	if status.State != thread.StateUsable {
 		if w.threadEpoch != "" {
-			p.gap(ctx, w)
+			p.gap(ctx, id, w)
 		}
 		return
 	}
@@ -175,15 +196,16 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 			return
 		}
 		if o.State != thread.StateUsable || o.BaselineRequired {
-			p.gap(ctx, w)
-			o = p.store.Observe(id)
-			if o.State != thread.StateUsable {
+			p.gap(ctx, id, w)
+			o, err = p.store.Changes(ctx, id, "", 0)
+			if err != nil || o.State != thread.StateUsable {
 				return
 			}
 		}
 	} else {
-		o = p.store.Observe(id)
-		if o.State != thread.StateUsable {
+		var err error
+		o, err = p.store.Changes(ctx, id, "", 0)
+		if err != nil || o.State != thread.StateUsable {
 			return
 		}
 	}
@@ -201,12 +223,7 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 		}
 	}
 	var changes []thread.Change
-	if w.threadEpoch == "" {
-		for i := range o.Items {
-			item := o.Items[i]
-			changes = append(changes, thread.Change{Addition: &item, Version: o.Version})
-		}
-	} else {
+	if w.threadEpoch != "" {
 		changes = o.Changes
 	}
 	for _, change := range changes {
@@ -214,13 +231,13 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 			frames, err := protocol.EncodeThreadUpdate(protocol.Envelope{TS: time.Now().UTC()}, update)
 			if err != nil {
 				p.log.Warn("relay: thread encoding failed", "event", "daemon.thread.encode_err")
-				p.gap(ctx, w)
+				p.gap(ctx, id, w)
 				return
 			}
 			for _, raw := range frames {
 				var e protocol.Envelope
 				if err := json.Unmarshal(raw, &e); err != nil {
-					p.gap(ctx, w)
+					p.gap(ctx, id, w)
 					return
 				}
 				e.ID = p.nextID.Add(1)

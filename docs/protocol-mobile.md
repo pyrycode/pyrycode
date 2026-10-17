@@ -1566,6 +1566,14 @@ and bounded requests over 36,000 committed entries after recovery becomes usable
 Request cost includes selected/touched rows, active/parent extras and content
 bytes; recovery and publication preparation are measured separately.
 
+Initial publisher acquisition and continuity repair acquire a usable live
+boundary without broadcasting historical inventories, even to clients already
+connected. Historical items arrive through explicit per-conversation catch-up
+and page replies. A zero-version catch-up selects the bounded newest window
+with required active items/parents and authoritative page metadata; older items
+remain reachable through `thread_page`. Required extras can exceed the ordered
+window limit. Subsequent proven changes continue through live updates.
+
 These v2 types stay outside `inboundAppTypeSet`; `thread_catch_up` and
 `thread_page` are intercepted by the authenticated relay dispatch switch.
 The contract follows
@@ -1598,8 +1606,10 @@ Neither handshake nor conversation listing queries items, and the active
 conversation cursor never substitutes for the requested ID. Apps MUST request
 catch-up explicitly for each conversation they open, including after reconnect;
 use the saved epoch/version or a zero-version newest window, then request older
-pages as needed. Queries do not load conversations, read raw history or clone a
-full projection.
+pages as needed. The daemon owns temporary demand that loads cold or idle
+registered conversations and waits cancelably for readiness through selection
+and rendering. The bounded store query APIs remain read-only and do not clone a
+full projection; unavailable views fail explicitly.
 
 #### Reply batches and successful completion
 
@@ -1674,6 +1684,13 @@ Neither outcome certifies partial items or advances a completed checkpoint.
 
 #### Query/live ordering
 
+Before capturing a query, the daemon establishes a missing publisher boundary
+under the same cancelable per-conversation gate used by live publication. A
+completed query cannot then be followed by initial acquisition silently skipping
+intervening commits. An existing publisher cursor remains owned by following;
+query preparation does not force changed publication. The publisher boundary
+alone never certifies a client's recovery checkpoint.
+
 Catch-up and pages share one unfinished-query slot per connection: a competing
 request fails with `thread.query_failed` before provider access. Provider,
 full-item mapping and codec work run off the manager's `Run` loop. Every batch and assembly
@@ -1695,6 +1712,17 @@ capture are withheld, including fragments, preventing stale patches from
 overwriting full items. Updates above the captured version retain source order,
 including multiple patches sharing a later version. Supplied transient live-state
 reconciliation remains independent of this item join.
+
+When retained live continuity cannot be proved, including same-epoch reload
+with lost ranges or epoch replacement, the daemon retires affected consumers
+before dependent output can escape. This includes currently eligible clients
+initialized only by queries, as well as recorded live recipients. Existing
+retirement closes the connection; reconnect and explicitly catch up from the
+last completed checkpoint. A terminal `thread_reset` requires a fresh
+zero-version newest window. Replacement acquisition sends no historical live
+inventory. Conversation/recipient authorization and interactive/multi-agent
+eligibility continue to apply; another eligible connection's current updates
+for an unaffected conversation continue independently.
 
 Join state is bounded to 256 conversations per connection; a new join beyond
 that cap fails explicitly. Existing queue count/byte bounds remain in force.
@@ -7903,16 +7931,23 @@ item publication and bounded query providers are installed (#3163/#3164/#3236).
 Item backfill requires an explicit [`thread_catch_up`](#thread-query-messages)
 for each conversation the app opens;
 neither handshake nor listing queries items, and an active cursor cannot change
-the named scope. Advance the checkpoint only once every batch assembles and the
-separate successful marker arrives; terminal error/reset, disconnect or
-incomplete fragments leave partial results uncertified.
+the named scope. Use the last completed epoch/version, or version zero for a
+bounded newest window including required active items and parents. Advance the
+checkpoint only once every batch assembles and the separate successful marker
+arrives; terminal error/reset, cancellation, disconnect or incomplete fragments
+leave partial results uncertified. A reset requires a fresh zero-version window.
 The [query/live ordering](#querylive-ordering) contract either joins the capture
 before later updates or fails a racing query explicitly; retry from the last
 completed checkpoint. Production catch-up/pages and thread-only replay
 replacement are installed (#3236/#3253/#3235). Request older pages explicitly
 using the successful marker's numeric continuation when `older_exists` is true.
-Live publication alone does not backfill items for connections admitted after
-the publisher's baseline. This per-connection replacement preserves simultaneous
+Initial live-boundary acquisition and continuity repair broadcast no historical
+inventory to any client. A lost retained range, even under the same epoch, or
+epoch replacement retires affected consumers, including clients initialized
+solely through queries, before replacement output. Reconnect and recover each
+open conversation explicitly; the publisher's boundary is separate from a
+client's certified checkpoint. Subsequent proven changes continue live.
+This per-connection replacement preserves simultaneous
 legacy peers; daemon-wide removal of replaced events, the replay buffer, resync
 and raw history pages belongs to
 [ADR 042 migration step 6](knowledge/decisions/042-daemon-built-thread.md#migration-order),

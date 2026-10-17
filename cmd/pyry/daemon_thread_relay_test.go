@@ -80,7 +80,7 @@ func TestDaemonThreadContinuity(t *testing.T) {
 	}, push: func(_ context.Context, _ string, e protocol.Envelope) error { frames = append(frames, e); return nil }, retire: func(_ context.Context, id string) error { retired = append(retired, id); return nil }, log: discardLogger()}
 	w := &shadowConversation{}
 	p.publish(t.Context(), id, w)
-	if len(frames) != 1 {
+	if len(frames) != 0 {
 		t.Fatalf("baseline count %d", len(frames))
 	}
 	before := store.Snapshot(id)
@@ -99,8 +99,8 @@ func TestDaemonThreadContinuity(t *testing.T) {
 	if !reflect.DeepEqual(retired, []string{"phone"}) {
 		t.Fatalf("gap did not retire: %v", retired)
 	}
-	if len(frames) != 3 {
-		t.Fatalf("fresh complete baseline count %d", len(frames))
+	if len(frames) != 0 {
+		t.Fatalf("unsolicited historical baseline count %d", len(frames))
 	}
 	for _, e := range frames {
 		if e.Type != protocol.TypeThreadItemAdded {
@@ -119,6 +119,13 @@ func TestDaemonThreadPublication(t *testing.T) {
 	t.Cleanup(func() { s.shutdown() })
 	w, mgr := testDaemonRelayWire(t, b, relayWiring{}, nil, func(cfg *relay.V2SessionConfig) {
 		installDaemonThreadRelay(cfg, s)
+		send := cfg.Outbound
+		cfg.OutboundContext = func(ctx context.Context, e protocol.RoutingEnvelope) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return send(e)
+		}
 		cfg.CodexConversation = func(id string) bool { return id == testConvIDB }
 	}, func(ctx context.Context, m *relay.V2SessionManager) func() {
 		stop := startDaemonThreadPublisher(ctx, s, m)
@@ -257,15 +264,27 @@ func TestDaemonThreadPublication(t *testing.T) {
 		}
 	}
 
-	// Linked delivery is present in the complete baseline; split public delivery
-	// publications are continuity loss and are covered by the gap test.
+	// Linked delivery is recovered through the explicit initial query.
 	initialSends := testSendHistory(h)
 	initialMessage := msgqueue.QueuedMessage{ID: 2, MessageID: "delivered", Text: "delivered", TS: time.Now().UTC()}
 	initialSends.accepted(testConvID, initialMessage)
 	operatorMessageHistory(h, func(operatorMessage) {}, nil, discardLogger(), initialSends)(testConvID, initialMessage)
 	v := appendFact(testConvID, protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: testConvID, TurnID: "turn", Text: "first"})
+	if _, err := cfg.ThreadCatchUp(t.Context(), protocol.ThreadCatchUpPayload{ConversationID: testConvIDB, Limit: 1}); err != nil {
+		t.Fatal(err)
+	}
 	s.start()
-	await(testConvID, v, "phone", "again")
+	for i, peer := range []string{"phone", "again"} {
+		testDaemonThreadRequest(t, w, peer, uint64(200+i), protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 256})
+		initial, typ := testDaemonThreadReply(t, w, uint64(200+i), peer)
+		if typ != protocol.TypeThreadItems || initial.Version != v {
+			t.Fatal("initial recovery failed")
+		}
+		rows[peer] = map[string]map[uint64]protocol.ThreadItem{testConvID: {}}
+		for _, item := range initial.Items {
+			rows[peer][testConvID][item.ID] = item
+		}
+	}
 	started := time.Now()
 	previousRev := v
 	updates = map[string][]protocol.Envelope{}
@@ -404,11 +423,15 @@ func TestDaemonThreadRetirement(t *testing.T) {
 				t.Fatal("duplicate publisher replaced live owner")
 			}
 			entered := make(chan struct{})
+			otherPublished := make(chan struct{}, 1)
 			var once sync.Once
-			p.active = func(context.Context, string) []relay.ActiveConn {
+			p.active = func(_ context.Context, id string) []relay.ActiveConn {
+				if id == testConvIDB {
+					return []relay.ActiveConn{{ConnID: "again", Interactive: true, Thread: true}}
+				}
 				return []relay.ActiveConn{{ConnID: "phone", Interactive: true, Thread: true}}
 			}
-			p.push = func(ctx context.Context, _ string, e protocol.Envelope) error {
+			p.push = func(ctx context.Context, peer string, e protocol.Envelope) error {
 				var payload struct {
 					ConversationID string `json:"conversation_id"`
 				}
@@ -418,16 +441,28 @@ func TestDaemonThreadRetirement(t *testing.T) {
 					<-ctx.Done()
 					return ctx.Err()
 				}
+				if peer != "again" {
+					t.Error("other conversation reached held recipient")
+				}
+				select {
+				case otherPublished <- struct{}{}:
+				default:
+				}
 				return nil
 			}
 			p.retire = func(context.Context, string) error { return nil }
 			testShadowAppend(t, h, id)
+			testShadowAppend(t, h, testConvIDB)
 			s.start()
+			testDaemonThreadWaitBoundary(t, s, id)
+			testDaemonThreadWaitBoundary(t, s, testConvIDB)
+			testShadowAppend(t, h, id)
 			awaitSwitchPublication(t, entered)
 			// Both this writer and another fold make progress while delivery is held.
 			testShadowAppend(t, h, id)
 			testShadowAppend(t, h, testConvIDB)
-			testShadowWait(t, func() bool { return store.Observe(id).Version == 2 && store.Observe(testConvIDB).Version == 1 })
+			awaitSwitchPublication(t, otherPublished)
+			testShadowWait(t, func() bool { return store.Observe(id).Version == 3 && store.Observe(testConvIDB).Version == 2 })
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
@@ -495,17 +530,20 @@ func TestDaemonThreadUnusable(t *testing.T) {
 
 func TestDaemonThreadIdleCommit(t *testing.T) {
 	s, h, reg, store := testShadow(t)
+	var allowIdle atomic.Bool
+	s.quiet = func(conversations.ConversationID) bool { return allowIdle.Load() }
 	reg.Create(conversations.Conversation{ID: testConvID})
 	stop := startDaemonThreadPublisher(t.Context(), s, &relay.V2SessionManager{})
 	t.Cleanup(stop)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var first sync.Once
 	var published atomic.Uint64
+	var retired atomic.Uint64
 	p := s.publisher
 	p.active = func(context.Context, string) []relay.ActiveConn {
 		return []relay.ActiveConn{{ConnID: "phone", Interactive: true, Thread: true}}
 	}
-	p.retire = func(context.Context, string) error { return nil }
+	p.retire = func(context.Context, string) error { retired.Add(1); return nil }
 	p.push = func(ctx context.Context, _ string, e protocol.Envelope) error {
 		first.Do(func() {
 			close(entered)
@@ -528,9 +566,21 @@ func TestDaemonThreadIdleCommit(t *testing.T) {
 	})
 	testShadowAppend(t, h, testConvID)
 	s.start()
-	awaitSwitchPublication(t, entered)
+	testDaemonThreadWaitBoundary(t, s, testConvID)
 	testShadowAppend(t, h, testConvID)
-	testShadowWait(t, func() bool { return store.Observe(testConvID).Version == 2 })
+	awaitSwitchPublication(t, entered)
+	allowIdle.Store(true)
+	testShadowAppend(t, h, testConvID)
+	testShadowWait(t, func() bool { return store.Observe(testConvID).Version == 3 })
 	close(release)
-	testShadowWait(t, func() bool { return published.Load() == 2 })
+	testShadowWait(t, func() bool { return retired.Load() > 0 && s.consumed(testConvID) == 3 })
+	if published.Load() != 2 {
+		t.Fatal("reload broadcast an unproven addition")
+	}
+	var cfg relay.V2SessionConfig
+	installDaemonThreadRelay(&cfg, s)
+	q, err := cfg.ThreadCatchUp(t.Context(), protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 8})
+	if err != nil || q.Version != 3 || len(q.Items) != 3 {
+		t.Fatal("held-delivery commit was not recoverable")
+	}
 }

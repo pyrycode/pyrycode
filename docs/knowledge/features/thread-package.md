@@ -45,9 +45,10 @@ the request context, named conversation and complete captured `QueryResult`.
 `ThreadReady` requires both queries, the authoritative watermark lookup,
 `ThreadLiveState`/`LiveStateCurrent` delivery and a running publisher on that
 same store. Missing providers withhold negotiation; readiness does not promise
-that every conversation has completed replay. Queries on not-loaded, rebuilding
-or unavailable views fail explicitly with `thread.query_failed`, without loading
-the conversation or supplying partial items. `ThreadLastShownVersion` checks
+that every conversation has completed replay. Authenticated queries load cold or
+idle registered conversations and wait cancelably for readiness; unavailable
+views fail with `thread.query_failed` without certifying partial items.
+`ThreadLastShownVersion` checks
 registry membership before any certificate access. Loaded usable conversations
 read `Store.Status` without certificate I/O or copying a baseline; rebuilding
 and unavailable views supply no watermark. Unloaded registered conversations
@@ -68,25 +69,33 @@ Reconnect skips event-ring replay/resync only for negotiated thread peers.
 Each open conversation requires explicit catch-up from its last completed
 epoch/version, or a zero-version newest window, with explicit older pages as needed.
 Only all assembled batches followed by the separate successful `final: true`
-marker certify completion; reset, error, disconnect and incomplete fragments
-leave the checkpoint unchanged. Live publication racing an unfinished query
+marker certify completion; reset, error, cancellation, disconnect and incomplete
+fragments leave the checkpoint unchanged. Live publication racing an unfinished query
 can cancel it; retry from the last completed checkpoint to converge. See
 [query/live ordering](../../protocol-mobile.md#querylive-ordering).
 
-Each existing conversation coordinator owns one publication cursor.
+Each conversation coordinator owns one publication cursor, distinct from a
+client's certified recovery checkpoint.
 `daemonThreadPublisher.publish` checks `Store.Status` first; an unchanged usable
 epoch/version returns without reading or traversing items/content. Changed
-publication follows proven `Store.Changes` ranges. Full `Store.Observe` baseline
-reads occur only for initial publication or a required replacement, sending
-every item as a full addition to eligible peers present at publication. It does
-not initialize connections admitted after that baseline.
+publication follows proven `Store.Changes` ranges. Initial and replacement
+acquisition use `Store.Changes` with an empty epoch to capture usable metadata
+without copying or broadcasting historical items. Subsequent proven changes
+continue live; each client initializes through explicit bounded catch-up and
+older paging, including clients already connected at acquisition.
 `BaselineRequired`, epoch change, a withdrawn usable view or encoding failure
-retires prior consumers through `RetireLiveState`, forgets the cursor and
-reacquires a usable baseline. Same-epoch reload cannot establish retained-range
-continuity; full additions over stale peer state cannot repair a suppressed row.
+retires recorded recipients and currently eligible consumers of the affected
+conversation through `RetireLiveState`, then forgets and reacquires the boundary.
+Tracking only successful live pushes misses clients initialized solely by queries.
+Retirement closes the connection before dependent output can escape; existing
+interactive/thread and agent eligibility gates still apply. Same-epoch reload
+cannot establish retained-range continuity; clients reconnect and explicitly
+catch up, or acquire a newest window after reset, rather than receive a full
+live inventory. An unchanged coordinator-owned idle checkpoint can survive
+unload as described below.
 Status is only a hint, not continuity evidence or a transaction across reads.
-Wire metadata, items/changes and cursor advancement must all come from the same
-captured `Changes` or `Observe` result. Recheck baseline usability and retire
+Wire metadata, changes and cursor advancement must all come from the same
+captured `Changes` result. Recheck captured usability and retire
 consumers before replacement even if withdrawal/reload races the status read.
 See [observation readiness](thread-package-background-store-replay.md#loading-and-replay-readiness)
 and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#thread-delivery-and-summary-projection).
@@ -124,6 +133,14 @@ idle registered conversations, wait cancelably for a usable view, and keep it
 loaded through bounded selection and rendering. Concurrent queries share the
 worker; cancellation releases only the caller's demand. Removal and shutdown
 cancel and join all demand. Unknown and unavailable conversations fail closed.
+Queries enroll the same coordinator even for an already-loaded conversation.
+Before query capture, `threadShadow.publishThread` acquires a missing publisher
+boundary through a cancelable per-conversation gate shared with following.
+Otherwise a query could complete before first publication silently skips an
+intervening commit. Preparation leaves an existing cursor to following: forcing
+changed publication here could make a query trigger its own live-race refusal.
+Never wait for this gate while holding shadow or quiescence mutexes; cancellation
+must release a query waiting behind held fanout without waiting for that fanout.
 A successful coordinator-owned idle unload retains the publication cursor while
 the cache is absent or rebuilding, so reading an unchanged checkpoint does not
 disconnect the peer. Changed publications must still prove continuity through
@@ -173,6 +190,17 @@ nonusable failure, reset evidence and the 1024/1025 gap boundary.
 committed entries after recovery, measuring preparation separately from adapter
 allocations. `TestDaemonThreadQueriesJoin` reconstructs full current states
 through race refusal, successful retry and subsequent real publisher updates.
+
+`TestDaemonThreadBoundedRecovery` compares 128 and 8333 settled rows: initial and
+replacement acquisitions emit zero historical item frames/bytes, while a new
+append emits one live item frame. It recovers idle reload, retained-range loss
+and epoch replacement through authenticated queries and reconstructs the full
+inventory through older pages. Silence alone cannot prove bounded output: wait
+for the successful query marker and completed publisher fanout, then drain the
+delivery lane with an observable FIFO barrier. `TestDaemonThreadRecoveryCommit`
+and `TestDaemonThreadQueryBoundary` hold replay/query capture around commits to
+prove recovery-to-live coverage. `TestDaemonThreadPublicationCancellation`
+checks cancellation while the publication gate is held.
 
 `TestDaemonThreadMetadataAllocations` checks unchanged publication and the
 installed list lookup on a loaded long thread. Pair allocation checks with
@@ -639,7 +667,10 @@ changes. Retained text suffixes have detached storage so they cannot pin an
 accumulated message beyond that accounting. Unload/reload,
 retry and a new store lifetime retain no old batches, even when recovery
 preserves the epoch. Missing live ranges or a different epoch explicitly return
-`BaselineRequired`; live consumers acquire a fresh complete baseline.
+`BaselineRequired`; the daemon retires affected consumers and acquires a new
+publisher boundary without broadcasting historical items. Clients recover
+explicitly through bounded catch-up or a newest window after reset, with older
+pages as needed; `Store.Observe` remains a complete-baseline API for other callers.
 
 `Store.CatchUp` proves reconnect continuity separately from committed history
 and the current fold. Clean epoch reuse supports persisted nonzero versions
