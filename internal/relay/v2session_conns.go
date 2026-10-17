@@ -63,6 +63,8 @@ func retainedClientField(v string, maxBytes int) string {
 // View is set only by ActiveThreadConns: the projection this conn's last
 // successful items query selected for that conversation. It is the routing hint
 // for which live update family to deliver; delivery rechecks it before sealing.
+// ThreadCompact, also set only by ActiveThreadConns, reports a negotiated
+// thread_compact, so an unjoined conn may be loading either projection.
 type ActiveConn struct {
 	ConnID          string
 	Interactive     bool
@@ -72,6 +74,7 @@ type ActiveConn struct {
 	ClientFeatures  string
 	DeviceTokenHash string
 	View            ThreadView
+	ThreadCompact   bool
 }
 
 // ThreadView is one conn's recorded projection for one conversation.
@@ -148,6 +151,7 @@ func (m *V2SessionManager) handleConnSnapshot(req snapshotReq) []ActiveConn {
 		s := m.sessions[conn.ConnID]
 		if s.thread && !m.liveWithheld(s, *req.threadConversation) && !m.pushRetired(conn.ConnID) {
 			conn.View = m.threadView(s, *req.threadConversation)
+			conn.ThreadCompact = s.threadCompact
 			eligible = append(eligible, conn)
 		}
 	}

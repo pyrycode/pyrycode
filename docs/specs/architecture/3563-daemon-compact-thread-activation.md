@@ -87,3 +87,17 @@ Pending for the documentation stage:
 - [Threat model] View mixing is closed by relay joins. OUT OF SCOPE: compact query starvation on a busy conversation (shared with complete queries); view change from compact to complete mid-connection relies on the client's gap rule (owner: client adoption #2080/#2200).
 
 **Reviewer:** builder (self-review) **Date:** 2026-10-17
+
+## Revisions
+
+### 2026-10-17: unjoined peers get compact frames only when they negotiated `thread_compact`
+
+**What changed.** The Design's per-recipient selection sent compact frames to every `Unjoined` peer. It now sends them only to `Compact` peers and to `Unjoined` peers that negotiated `thread_compact`. Every other unjoined peer gets complete frames only, as before this ticket. `relay.ActiveConn` gains `ThreadCompact`, which `ActiveThreadConns` sets from the session's negotiated capability next to `View`.
+
+**What drove it.** The affected-test run on the salvaged tree failed `TestDaemonThreadStatusInterleaving` and `TestDaemonThreadIdleCommit`. Their complete-only peers are unjoined, so they received a compact frame for every pass. That frame never reaches such a peer, because the relay withholds it. But the daemon still spent `CompactChanges` on every pass of a complete-only deployment, against the security review's SHOULD FIX, and it burned a daemon envelope ID per withheld frame.
+
+**New contract.** A peer that can only load complete views sees exactly today's frames. A compact-capable unjoined peer still gets both families, so `TestDaemonThreadCompactBoundary`'s cancellation of an in-flight compact load still holds. `CompactChanges` runs only when some recipient is compact-capable.
+
+### 2026-10-17: installed recovery and stale-detail evidence
+
+`TestDaemonThreadCompactRecovery` covers the AC3 cases this tree proves. A new connection resumes from a retained compact checkpoint, and its headers equal `Store.CompactCatchUp`. A stale epoch gets a compact-scoped `thread_reset`, never a baseline, and a newest window then converges on the Store. A child page read before a nested change is stale by the root header's `subtree_version`, and a fresh read returns the Store's version. A complete peer and a compact peer on one conversation each get only their own family, with independent checkpoints. Second-conversation isolation and the retirement-driven gap under a compact join are not separately exercised here; the PR lists them as pending.
