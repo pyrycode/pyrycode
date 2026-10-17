@@ -19,13 +19,18 @@ type threadQuery struct {
 	page         *protocol.ThreadPagePayload
 	body         *protocol.ThreadExpansionRequest
 	children     bool
+	projection   string // empty is complete; otherwise protocol.ThreadProjectionCompact
 	inbox        *hostedInbox
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
+
+// threadJoin is one conversation's completed checkpoint on one connection.
+// Projection owns that conversation's view: non-initializing requests must match it.
 type threadJoin struct {
-	epoch   string
-	version uint64
+	epoch      string
+	version    uint64
+	projection string
 }
 
 func threadQueryError(id uint64) protocol.Envelope {
@@ -112,30 +117,60 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 		fail()
 		return
 	}
+	projection, ok := m.threadProjection(s, payload, page, &epoch)
+	if !expanding && !ok {
+		fail()
+		return
+	}
 	if s.hosted == nil {
 		m.initHosted(ctx, s)
 	}
 	in := s.hosted.inbox
 	m.hostedMu.Lock()
-	_, joined := in.threadJoins[*p.Conversation]
-	if in.query != nil || !expanding && !joined && len(in.threadJoins) >= maxThreadJoins {
+	j, joined := in.threadJoins[*p.Conversation]
+	initializing := !page && !expanding && *version == 0
+	if in.query != nil || !expanding && !joined && len(in.threadJoins) >= maxThreadJoins || !expanding && joined && !initializing && j.projection != projection {
 		m.hostedMu.Unlock()
 		fail()
 		return
 	}
 	queryCtx, cancel := context.WithCancel(in.ctx)
 	q := &threadQuery{id: *id, conversation: *p.Conversation, ctx: queryCtx, cancel: cancel, inbox: in, body: expansion, children: children}
+	if !expanding {
+		q.projection = projection
+	}
 	if expansion != nil {
 		expansion.Limit = limit
 	}
 	if page {
-		q.page = &protocol.ThreadPagePayload{ConversationID: *p.Conversation, BeforeOrder: *beforeOrder, Limit: limit}
+		q.page = &protocol.ThreadPagePayload{ConversationID: *p.Conversation, BeforeOrder: *beforeOrder, Limit: limit, Projection: projection}
+		if projection != "" {
+			q.page.Epoch = *epoch
+		}
 	} else if !expanding {
-		q.request = protocol.ThreadCatchUpPayload{ConversationID: *p.Conversation, Epoch: *epoch, Version: *version, Limit: limit}
+		q.request = protocol.ThreadCatchUpPayload{ConversationID: *p.Conversation, Epoch: *epoch, Version: *version, Limit: limit, Projection: projection}
 	}
 	in.query = q
 	m.hostedMu.Unlock()
 	m.enqueueAppFrame(ctx, s, appFrameJob{kind: appFrameThreadQuery, query: q})
+}
+
+// threadProjection validates an optional catch-up/page projection after the
+// normal gates. Only the compact literal is known; it needs the negotiated
+// capability, both compact providers and, for pages, a nonempty epoch.
+func (m *V2SessionManager) threadProjection(s *V2Session, payload map[string]json.RawMessage, page bool, epoch **string) (string, bool) {
+	raw, present := payload["projection"]
+	if !present {
+		return "", true
+	}
+	var projection *string
+	if json.Unmarshal(raw, &projection) != nil || projection == nil || *projection != protocol.ThreadProjectionCompact || !s.threadCompact || m.cfg.ThreadCompactCatchUp == nil || m.cfg.ThreadCompactPage == nil {
+		return "", false
+	}
+	if page && (json.Unmarshal(payload["epoch"], epoch) != nil || *epoch == nil || **epoch == "") {
+		return "", false
+	}
+	return *projection, true
 }
 
 func (m *V2SessionManager) runThreadQuery(ctx context.Context, s *V2Session, q *threadQuery) {
@@ -151,6 +186,10 @@ func (m *V2SessionManager) runThreadQuery(ctx context.Context, s *V2Session, q *
 	fail := func() { _ = m.deliverThread(ctx, s.connID, threadQueryError(q.id), q) } // best effort terminal refusal; retirement cannot receive it.
 	if q.ctx.Err() != nil {
 		fail()
+		return
+	}
+	if q.projection != "" {
+		m.runCompactThreadQuery(s, q, fail)
 		return
 	}
 	var result thread.QueryResult
@@ -183,10 +222,64 @@ func (m *V2SessionManager) runThreadQuery(ctx context.Context, s *V2Session, q *
 				fail()
 				return
 			}
-			p.Items = append(p.Items, protocol.ThreadItem{ID: i.ID, Kind: i.Kind, Order: i.Order, Rev: i.Rev, EndedOrder: i.EndedOrder, Session: i.Session, Agent: i.Agent, NoChild: i.NoChild, Turn: i.Turn, Parent: i.Parent, Status: i.Status, Active: i.Active, Shown: i.Shown, Summary: i.Summary, Subtype: i.Subtype, Content: i.Content})
+			p.Items = append(p.Items, threadItemFrom(i))
 		}
 		reply = p
 	}
+	m.sendThreadReply(s, q, env, reply, fail)
+}
+
+func threadItemFrom(i thread.Item) protocol.ThreadItem {
+	return protocol.ThreadItem{ID: i.ID, Kind: i.Kind, Order: i.Order, Rev: i.Rev, EndedOrder: i.EndedOrder, Session: i.Session, Agent: i.Agent, NoChild: i.NoChild, Turn: i.Turn, Parent: i.Parent, Status: i.Status, Active: i.Active, Shown: i.Shown, Summary: i.Summary, Subtype: i.Subtype, Content: i.Content}
+}
+
+// threadSummaryFrom copies every header fact, including unknown (nil) ones.
+func threadSummaryFrom(row thread.ChildSummary) protocol.ThreadSummary {
+	return protocol.ThreadSummary{ID: row.ID, Kind: row.Kind, Order: row.Order, Rev: row.Rev, EndedOrder: row.EndedOrder, Session: row.Session, Agent: row.Agent, NoChild: row.NoChild, Turn: row.Turn, Parent: row.Parent, Status: row.Status, Active: row.Active, Shown: row.Shown, Headline: row.Headline, Subtype: row.Subtype, DetailOmitted: true,
+		ErrorSummary: row.ErrorSummary, PublicChildCount: row.PublicChildCount, HasPublicChildren: row.HasPublicChildren, SubtreeVersion: row.SubtreeVersion}
+}
+
+// runCompactThreadQuery answers a compact query with the complete reply's bounds
+// and final semantics. A Store reset, or a page captured in another epoch than
+// requested, becomes a compact-scoped reset; a mislabelled result refuses.
+func (m *V2SessionManager) runCompactThreadQuery(s *V2Session, q *threadQuery, fail func()) {
+	var result thread.CompactQueryResult
+	var err error
+	if q.page != nil {
+		result, err = m.cfg.ThreadCompactPage(q.ctx, *q.page)
+	} else {
+		result, err = m.cfg.ThreadCompactCatchUp(q.ctx, q.request)
+	}
+	if err != nil || result.Err != nil || result.State != thread.StateUsable || q.ctx.Err() != nil || result.Projection != q.projection || string(result.ConversationID) != q.conversation {
+		fail()
+		return
+	}
+	env := protocol.Envelope{TS: time.Now().UTC(), InReplyTo: &q.id}
+	if result.ResetRequired || q.page != nil && result.Epoch != q.page.Epoch {
+		m.sendThreadReply(s, q, env, protocol.ThreadResetPayload{ConversationID: q.conversation, Epoch: result.Epoch, Version: result.Version, Projection: q.projection}, fail)
+		return
+	}
+	p := protocol.ThreadItemsPayload{ConversationID: q.conversation, Epoch: result.Epoch, Version: result.Version, Final: true, Projection: q.projection}
+	if q.page == nil && q.request.Version > 0 {
+		p.FromVersion = &result.FromVersion
+	} else {
+		p.LowerOrder = &result.LowerOrder
+		p.UpperOrder = &result.UpperOrder
+		p.Continuation = &result.Continuation
+		p.OlderExists = &result.OlderExists
+	}
+	for _, i := range result.Items {
+		p.Items = append(p.Items, threadItemFrom(i))
+	}
+	for _, h := range result.Headers {
+		p.Headers = append(p.Headers, threadSummaryFrom(h))
+	}
+	m.sendThreadReply(s, q, env, p, fail)
+}
+
+// sendThreadReply encodes and delivers one correlated reply in order; any
+// failure or cancellation ends with the content-free refusal.
+func (m *V2SessionManager) sendThreadReply(s *V2Session, q *threadQuery, env protocol.Envelope, reply any, fail func()) {
 	if q.ctx.Err() != nil {
 		fail()
 		return
@@ -218,7 +311,7 @@ func (m *V2SessionManager) cancelThreadQuery(connID string, env protocol.Envelop
 	conversation := pushedConversationID(env)
 	m.hostedMu.Lock()
 	defer m.hostedMu.Unlock()
-	if in := m.hostedInboxes[connID]; in != nil && in.query != nil && in.query.conversation == conversation {
+	if in := m.hostedInboxes[connID]; in != nil && in.query != nil && in.query.conversation == conversation && in.query.projection == "" {
 		in.query.cancel()
 	}
 }
@@ -243,10 +336,10 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 		if json.Unmarshal(env.Payload, &p) != nil {
 			return ErrThreadWithheld
 		}
-		if in.query != nil && in.query.conversation == p.Conversation {
+		if in.query != nil && in.query.conversation == p.Conversation && in.query.projection == "" {
 			in.query.cancel()
 		}
-		if j, ok := in.threadJoins[p.Conversation]; ok && j.epoch == p.Epoch && p.Version <= j.version {
+		if j, ok := in.threadJoins[p.Conversation]; ok && (j.projection != "" || j.epoch == p.Epoch && p.Version <= j.version) {
 			return ErrThreadWithheld
 		}
 	}
@@ -277,7 +370,7 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 		if in.threadJoins == nil {
 			in.threadJoins = make(map[string]threadJoin)
 		}
-		in.threadJoins[o.query.conversation] = threadJoin{p.Epoch, p.Version}
+		in.threadJoins[o.query.conversation] = threadJoin{p.Epoch, p.Version, p.Projection}
 		in.query = nil
 	}
 	return nil

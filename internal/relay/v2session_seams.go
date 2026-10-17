@@ -73,6 +73,16 @@ type V2SessionConfig struct {
 	// and cursor membership in the requested conversation. Both expansion
 	// providers are required for negotiation; neither may fall back to another scope.
 	ThreadChildren func(context.Context, protocol.ThreadExpansionRequest) (thread.ChildPageResult, error)
+	// ThreadCompactCatchUp returns a detached compact newest window (version zero)
+	// or catch-up interval off Run and must honor cancellation. ThreadCompactPage
+	// returns one detached compact older page. Neither may fall back to complete
+	// rows. Both, plus a true ThreadCompactReady, are required to grant
+	// thread_compact; nil withholds it and refuses compact requests.
+	ThreadCompactCatchUp func(context.Context, protocol.ThreadCatchUpPayload) (thread.CompactQueryResult, error)
+	ThreadCompactPage    func(context.Context, protocol.ThreadPagePayload) (thread.CompactQueryResult, error)
+	// ThreadCompactReady must be nonblocking and attest installed compact query
+	// and live publication. Nil/false keeps compact withheld.
+	ThreadCompactReady func() bool
 
 	// ThreadLiveState returns a detached current-state cursor, including inactive
 	// retry/compaction and only outstanding prompts/questions with answer IDs.

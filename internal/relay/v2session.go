@@ -292,8 +292,10 @@ type V2Session struct {
 	thread bool
 	// threadExpansion remains false until both expansion reads are ready.
 	threadExpansion bool
-	hostedApps      bool
-	hosted          *hostedState
+	// threadCompact additionally requires expansion and installed compact reads.
+	threadCompact bool
+	hostedApps    bool
+	hosted        *hostedState
 	// Supplied live-state progress is Run-owned and ends with this connection.
 	liveSnapshot   func() (LiveState, bool)
 	livePending    *LiveState

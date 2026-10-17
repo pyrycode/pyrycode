@@ -103,7 +103,8 @@ type InnerFrameV2Decoded struct {
 var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent, protocol.CapabilityStopBackgroundTask}
 
 // negotiateCapabilities intersects advertisements with supported capabilities,
-// in supported-set order, then grants thread, hosted apps and expansion with readiness.
+// in supported-set order, then grants thread, hosted apps, expansion and compact
+// (which also requires expansion) with readiness.
 // Duplicates collapse and unsupported names grant nothing. A nil result omits
 // the ack field and preserves the fail-closed capability flags.
 func negotiateCapabilities(advertised []string, readiness ...bool) []string {
@@ -121,6 +122,9 @@ func negotiateCapabilities(advertised []string, readiness ...bool) []string {
 	}
 	if len(readiness) > 2 && readiness[0] && readiness[2] && slices.Contains(advertised, protocol.CapabilityThreadExpansion) && slices.Contains(advertised, protocol.CapabilityThread) && slices.Contains(advertised, protocol.CapabilityInteractive) {
 		out = append(out, protocol.CapabilityThreadExpansion)
+		if len(readiness) > 3 && readiness[3] && slices.Contains(advertised, protocol.CapabilityThreadCompact) {
+			out = append(out, protocol.CapabilityThreadCompact)
+		}
 	}
 	return out
 }
@@ -236,7 +240,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// as s.interactive below. Computed before the ack literal so the same
 	// negotiated slice is the single source of truth for both the echo and the
 	// flag — ack and flag can never disagree.
-	negotiated := negotiateCapabilities(helloPayload.Capabilities, m.cfg.ThreadReady != nil && m.cfg.ThreadReady(), m.cfg.HostedAppsDiscovery != nil && m.cfg.HostedAppsSend != nil && m.cfg.HostedAppsReady != nil && m.cfg.HostedAppsReady(), m.cfg.ThreadToolBody != nil && m.cfg.ThreadChildren != nil)
+	negotiated := negotiateCapabilities(helloPayload.Capabilities, m.cfg.ThreadReady != nil && m.cfg.ThreadReady(), m.cfg.HostedAppsDiscovery != nil && m.cfg.HostedAppsSend != nil && m.cfg.HostedAppsReady != nil && m.cfg.HostedAppsReady(), m.cfg.ThreadToolBody != nil && m.cfg.ThreadChildren != nil, m.cfg.ThreadCompactCatchUp != nil && m.cfg.ThreadCompactPage != nil && m.cfg.ThreadCompactReady != nil && m.cfg.ThreadCompactReady())
 
 	// Reload the on-disk registry so a device paired after daemon startup
 	// authenticates without a restart (#782). Fail closed on a read error:
@@ -497,6 +501,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	s.multiAgent = slices.Contains(negotiated, protocol.CapabilityMultiAgent)
 	s.thread = slices.Contains(negotiated, protocol.CapabilityThread)
 	s.threadExpansion = slices.Contains(negotiated, protocol.CapabilityThreadExpansion)
+	s.threadCompact = slices.Contains(negotiated, protocol.CapabilityThreadCompact)
 	s.hostedApps = slices.Contains(negotiated, protocol.CapabilityHostedAppsV1)
 	s.nextID = 2
 	if (s.thread && m.cfg.OutboundContext != nil) || m.cfg.HostedAppsSend != nil || m.cfg.HostedAppsDiscovery != nil || slices.Contains(helloPayload.Capabilities, protocol.CapabilityHostedAppsV1) {

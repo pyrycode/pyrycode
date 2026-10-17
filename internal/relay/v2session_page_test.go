@@ -345,7 +345,7 @@ func TestThreadPageSharedAdmission(t *testing.T) {
 		in := p.mgr.hostedInboxes[p.conn]
 		in.threadJoins = make(map[string]threadJoin)
 		for i := range maxThreadJoins {
-			in.threadJoins[fmt.Sprint(i)] = threadJoin{"epoch", 1}
+			in.threadJoins[fmt.Sprint(i)] = threadJoin{"epoch", 1, ""}
 		}
 		p.mgr.hostedMu.Unlock()
 		testPageRequest(p, 40, 20)
@@ -355,7 +355,7 @@ func TestThreadPageSharedAdmission(t *testing.T) {
 		}
 		p.mgr.hostedMu.Lock()
 		delete(in.threadJoins, "0")
-		in.threadJoins[catchUpConversation] = threadJoin{"epoch", 1}
+		in.threadJoins[catchUpConversation] = threadJoin{"epoch", 1, ""}
 		p.mgr.hostedMu.Unlock()
 		testPageRequest(p, 41, 20)
 		testReadPage(t, p, 41)
