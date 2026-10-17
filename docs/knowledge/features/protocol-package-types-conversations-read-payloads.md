@@ -66,7 +66,7 @@ const (
   and restart/sleep dividers do not raise it; valid receipts provide accounting
   without establishing content visibility. Missing/empty or hidden-only logs
   yield `0`; see [visible-content clamping](../../protocol-mobile.md#marking-a-conversation-read).
-  [`MarkConversationRead`](relay-package-handlers.md#markconversationread-cannot-copy-setconversationmuteds-best-effort-save-2780)
+  [`MarkConversationRead`](relay-package-handlers-mark-conversation-read.md#markconversationread-cannot-copy-setconversationmuteds-best-effort-save-2780)
   uses the same target for `max(held, min(up_to, latest))`. Reading the newest
   visible entry clears unread despite hidden tails; reading an older entry leaves
   newer content unread. Higher held marks never decrease, even at latest zero.
@@ -77,7 +77,7 @@ const (
   Both fields are `uint64` without `omitempty`: clients read explicit zero,
   rather than interpreting a missing key as unknown. A lookup failure on any
   surviving row fails the whole correlated reply with retryable
-  `history.unavailable`; see [the list handler](relay-package-handlers.md#listconversations-gains-a-third-required-parameter-the-history-dependency-is-not-optional-2779).
+  `history.unavailable`; see [the list handler](relay-package-handlers-list-conversations.md#listconversations-gains-a-third-required-parameter-the-history-dependency-is-not-optional-2779).
 - **`PinnedAt` uses `*time.Time` without `omitempty` on both list and update DTOs.**
   Nil must serialize as explicit `null` so an unpin can clear a client's cached
   stamp; decoding an absent key from an older host also means unpinned.

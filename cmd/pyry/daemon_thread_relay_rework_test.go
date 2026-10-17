@@ -39,14 +39,10 @@ func TestDaemonThreadGapPreservesAgentIneligiblePeer(t *testing.T) {
 	if err := mgr.FlushPushes(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	peer, e := wire.read()
-	if peer != "again" || e.Type != protocol.TypeThreadItemAdded {
-		t.Fatalf("Codex baseline recipient: %s / %s", peer, e.Type)
+	if len(codex.threadPeers) != 0 {
+		t.Error("boundary acquisition recorded a live push")
 	}
-	if codex.threadPeers["phone"] || !codex.threadPeers["again"] {
-		t.Error("publication recorded an agent-ineligible consumer")
-	}
-	s.publisher.gap(t.Context(), codex)
+	s.publisher.gap(t.Context(), testConvIDB, codex)
 	closed := wire.await()
 	if closed.ConnID != "again" || closed.CloseCode != uint16(relay.StatusQueueOverflow) {
 		t.Fatalf("gap retired an unaffected peer: %#v", closed)
@@ -56,14 +52,18 @@ func TestDaemonThreadGapPreservesAgentIneligiblePeer(t *testing.T) {
 	if len(peers) != 1 || peers[0].ConnID != "phone" {
 		t.Fatalf("unaffected basic connection disappeared: %#v", peers)
 	}
-	s.publisher.publish(t.Context(), testConvID, &shadowConversation{})
-	peer, e = wire.read()
+	cursor := &shadowConversation{}
+	s.publisher.publish(t.Context(), testConvID, cursor)
+	v := testShadowAppend(t, h, testConvID)
+	testShadowWait(t, func() bool { return store.Status(testConvID).Version == v })
+	s.publisher.publish(t.Context(), testConvID, cursor)
+	peer, e := wire.read()
 	var added protocol.ThreadItemAddedPayload
 	if err := json.Unmarshal(e.Payload, &added); err != nil {
 		t.Fatal(err)
 	}
 	items := store.Observe(testConvID).Items
-	if peer != "phone" || e.Type != protocol.TypeThreadItemAdded || added.ConversationID != testConvID || added.Item.ID != items[0].ID {
+	if peer != "phone" || e.Type != protocol.TypeThreadItemAdded || added.ConversationID != testConvID || added.Item.ID != items[1].ID {
 		t.Fatalf("unaffected conversation stopped publishing: %s / %#v", peer, e)
 	}
 }

@@ -122,17 +122,8 @@ func TestQueuedSendHandleActions(t *testing.T) {
 			testDaemonThreadLoad(t, store, 100)
 			w, mgr := testDaemonThreadQueryWire(t, s, func(c *relay.V2SessionConfig) { c.QueueRemover = q; c.QueueSender = q })
 			w.open("phone", false, protocol.CapabilityThread)
-			cursor := &shadowConversation{}
+			cursor := testDaemonThreadCursor(s)
 			s.publisher.publish(t.Context(), testConvID, cursor)
-			if err := mgr.FlushPushes(t.Context()); err != nil {
-				t.Fatal(err)
-			}
-			_, env := w.read()
-			var added protocol.ThreadItemAddedPayload
-			if env.Type != protocol.TypeThreadItemAdded || json.Unmarshal(env.Payload, &added) != nil {
-				t.Fatal("live acceptance", env)
-			}
-			testQueuedHandle(t, added.Item, 100, "queued")
 			// No send acknowledgement is delivered; explicit catch-up recovers acceptance.
 			testDaemonThreadRequest(t, w, "phone", 40, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 10})
 			got, typ := testDaemonThreadReply(t, w, 40)
@@ -140,6 +131,7 @@ func TestQueuedSendHandleActions(t *testing.T) {
 				t.Fatal("catch-up", typ, got)
 			}
 			handle := testQueuedHandle(t, got.Items[0], 100, "queued")
+			added := protocol.ThreadItemAddedPayload{Item: got.Items[0]}
 			if action == "drop" {
 				testDaemonThreadRequest(t, w, "phone", 41, protocol.TypeDequeueMessage, protocol.DequeueMessagePayload{ConversationID: testConvID, QueuedMsgID: handle})
 			} else {
@@ -183,7 +175,7 @@ func TestQueuedSendHandleActions(t *testing.T) {
 				}
 				testQueuedHandle(t, recovered.Items[0], 100, status)
 			} else {
-				_, env = w.read()
+				_, env := w.read()
 				var changed protocol.ThreadItemChangedPayload
 				if env.Type != protocol.TypeThreadItemChanged || json.Unmarshal(env.Payload, &changed) != nil || changed.ItemID != 100 {
 					t.Fatal("live terminal revision", env)

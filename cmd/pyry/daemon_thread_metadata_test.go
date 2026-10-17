@@ -197,7 +197,7 @@ func TestDaemonThreadStatusInterleaving(t *testing.T) {
 			}
 			wantFrames := 1
 			if tc.initial || tc.action == "reload" {
-				wantFrames = len(current.Items)
+				wantFrames = 0
 			} else if !tc.unchanged {
 				wantFrames = 2
 			}

@@ -104,6 +104,7 @@ func RenameConversation(reg ConversationRenamer, registryPath string, logger *sl
 				IsPromoted: cv.IsPromoted,
 				IsArchived: cv.IsArchived, // preserve archived state on the shared reply payload
 				IsMuted:    cv.IsMuted,
+				PinnedAt:   cv.PinnedAt,
 				ReadUpTo:   cv.ReadUpTo,
 				Name:       &title,
 				Cwd:        cv.Cwd,

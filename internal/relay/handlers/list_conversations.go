@@ -153,6 +153,7 @@ func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarne
 				IsPromoted:       conv.IsPromoted,
 				IsArchived:       conv.IsArchived,
 				IsMuted:          conv.IsMuted,
+				PinnedAt:         conv.PinnedAt,
 				ReadUpTo:         conv.ReadUpTo,
 				LatestEntryID:    latestID,
 				ArchivedAt:       conv.ArchivedAt,
