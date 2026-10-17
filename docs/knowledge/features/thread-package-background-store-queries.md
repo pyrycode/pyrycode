@@ -395,12 +395,106 @@ and that an old failed reader cannot retire the replacement worker. Returned
 `TestCompactSelection` and `TestCompactCapture` both do) cannot reach the
 capture or another caller's result.
 
-Catch-up/live progress over this projection is [#3569](https://github.com/pyrycode/pyrycode/issues/3569);
-production relay/daemon installation is [#3562](https://github.com/pyrycode/pyrycode/issues/3562)
-and [#3563](https://github.com/pyrycode/pyrycode/issues/3563). A compact
-window or page certifies only its own root range for one publication — never
-complete-thread coverage, and never that a tool/agent root's descendants or
-body were considered, let alone covered.
+A compact window or page certifies only its own root range for one
+publication — never complete-thread coverage, and never that a tool/agent
+root's descendants or body were considered, let alone covered.
+
+### Compact catch-up and live progress
+
+`Store.CompactCatchUp(ctx, conversationID, epoch, afterVersion, limit)
+(CompactQueryResult, error)` and `Store.CompactChanges(ctx, conversationID,
+epoch, after) (CompactQueryResult, error)` extend compact-v1 with reconnect
+catch-up and waiting live progress, implementing the
+[compact-v1 interval contract](../../specs/architecture/3559-compact-thread-contract.md#design).
+Both identify one immutable publication by `ConversationID`, `Projection`
+(`"compact-v1"`), `Epoch` and consumed `Version`, and report the source
+interval as exclusive `FromVersion` through inclusive `Version` on
+`CompactQueryResult`. Neither selects or renders descendants, tool/agent
+bodies or per-hidden-child updates. Neither widens `CatchUp`/`Changes`, the
+complete-view reads, which are unchanged; complete evidence is never
+consulted by these reads, and compact evidence is never consulted by the
+complete-view reads.
+
+`CompactCatchUp` at `afterVersion == 0` delegates to `CompactNewestWindow`
+for any epoch, including a mismatched one, so version-zero recovery always
+succeeds with the same validation and `MaxQueryItems` clamp; `FromVersion`
+and `ResetRequired` stay zero/false, as they do for `CompactHistoryPage`. A
+matching nonzero call ignores `limit` (even nonpositive), is bounded by the
+same inclusive `MaxCatchUpGap = 1024` history-ID distance as `CatchUp`, and
+returns every root whose compact state changed in `(afterVersion, Version]`
+plus the indexed `activeRoots` extras, deduplicated. `CompactChanges` waits
+while the captured snapshot is usable, the epoch matches and `after` equals
+the current `Version` — the same locking and wake-up pattern as `Changes`,
+capturing `changed` under `Store.mu` alongside the version check — then
+returns the same interval without activity extras. A lifecycle change while
+waiting returns that nonusable `{State, Err}`; retirement returns the zero
+result; cancellation returns the zero result and the context error without
+retiring a healthy worker.
+
+Roots are selected from `queryIndex.rootTouches`, a persistent tree keying
+every public root (`Parent == 0`) by `(header.subtreeVersion, ID)`.
+`queryIndex.advance` already marks every affected row and its old and new
+ancestor chains dirty and refreshes each one's `subtreeVersion` to the
+publication's version (see
+[revision-scoped direct-child summaries](#revision-scoped-direct-child-summaries)),
+so a root's key is exactly the version its compact state — its own fields or
+any descendant's header count, activity or freshness — last changed. A
+nested burst under a stable root `Rev` moves the root's key without changing
+`Rev`. Each root occupies one key, so a range read over `rootTouches` yields
+each affected root exactly once with its final state, coalescing any number
+of intervening updates. A source advance that touches no root, such as
+hidden-only or otherwise nonvisual activity, still returns `StateUsable` with
+the new `FromVersion`/`Version` and no items or headers: explicit consumed
+progress, not an empty or failed read.
+
+Compact evidence is projection-scoped, kept on `queryIndex` as two scalars
+copied by value through `advance`. `compactFrom` is the version at which
+this index was constructed — the first publication of a worker run, or the
+version a same-epoch reload/rebuild resumed at; touches before it are
+unknown, so an interval starting earlier resets. `compactLost` is the latest
+version at which a row left the root set — withdrawn, suppressed, or
+reparented under another row; `membership` sets it whenever a row that was a
+root stops being one. Clients have no root-removal operation, so an interval
+spanning `compactLost` resets; nested suppression or reparenting below a
+root is instead repaired by that root's own dirty-ancestor header refresh.
+Shared `compactInterval` produces either the interval or a scoped reset —
+`State`, `ConversationID`, `Projection`, `Epoch`, `Version` and
+`ResetRequired: true`, with no rows, `FromVersion` or order bounds — when:
+the epoch does not match; `after > Version`; `Version - after >
+MaxCatchUpGap`; the query index is nil; `q.coveredThrough != Version`;
+`after < q.compactFrom`; or `q.compactLost > after`. Recovery is always a
+version-zero compact window. Complete-thread recovery (`CatchUp`/`Changes`)
+is independent: it can stay usable while a compact reader resets, and the
+reverse. A same-epoch reload or rebuild moves `compactFrom` forward even
+though the epoch is unchanged, so a client sitting at the reused epoch's old
+version still resets — epoch equality alone never substitutes for compact
+evidence, matching [catch-up continuity](thread-package-cache-and-epochs.md#catch-up-continuity).
+
+Request work does not grow with hidden inventory: selection and rendering
+are bounded by affected roots and indexed extras only, with zero tool-body
+lookups and no descendant enumeration. `TestCompactIntervalWork` holds
+request visits near-constant (11, in one run) from 125 to 8,189 hidden
+descendants. That bound depends on `refreshHeader` removing the *stored* row
+rather than the row it was passed: `publish`'s first-index path applies a
+row's replacement header before calling `refreshHeader`, so removal keyed by
+the new header's `subtreeVersion` previously missed the `rootTouches` entry
+for the old header and left one stale, unselected entry per row. The stale
+keys sat at or below `compactFrom` and were never selected by any read, so
+every correctness check passed regardless; only the work counter caught it,
+growing from 35 to 59 visits across the same descendant range before the
+fix. `TestCompactInterval` checks nested bursts, repeated activation, and
+reparenting/suppression in both directions against an independently tracked
+oracle of each root's last-changed version; `TestCompactCatchUpReload`
+checks same-epoch reload; `TestCompactChangesWait` checks a blocked reader
+released by publication, cancellation, unload and concurrent captures,
+alongside unaffected concurrent complete `CatchUp`/`Changes` reads.
+
+Relay/daemon delivery of these reads is pending
+[#3562](https://github.com/pyrycode/pyrycode/issues/3562); bounded-time
+flush scheduling for a waiting `CompactChanges` reader is pending
+[#3563](https://github.com/pyrycode/pyrycode/issues/3563). The Store
+supplies interval facts and evidence only — neither implies a full inventory
+baseline, expansion completion or authenticated delivery.
 
 ### Revision-scoped tool bodies
 

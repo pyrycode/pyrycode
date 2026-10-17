@@ -530,6 +530,27 @@ and the
 [observation contract](thread-package-background-store-replay.md#loading-and-replay-readiness)
 for bounded retention and linked delivery suppression.
 
+The compact-v1 projection's catch-up and live progress
+(`Store.CompactCatchUp`/`Store.CompactChanges`, see
+[compact catch-up and live progress](thread-package-background-store-queries.md#compact-catch-up-and-live-progress))
+keep their own evidence rather than borrowing this complete-view proof.
+`queryIndex.compactFrom` and `compactLost` are scoped to roots alone, distinct
+from this section's `unprovenThrough`/`suppressed` watermarks, though both
+pairs share the same `coveredThrough` index-current-with-snapshot check.
+A same-epoch reload or rebuild advances `compactFrom` to its resume version
+even though the epoch, and this section's complete-view continuity, are
+unaffected: a compact reader sitting at an older version resets while a
+complete reader at the same version and epoch can stay usable. Epoch reuse
+establishes compatible item identity, but recovering either projection's
+continuity needs its own separate proof — compact evidence is never replaced
+by equal-epoch recovery, complete-thread certification, retained complete
+changes, or a successful `ChildPage` expansion, including a clean reload
+whose epoch is unchanged but whose compact evidence is absent. Compact
+bounds and evidence certify compact root coverage only; they never
+substitute for complete-thread certification above or for a child page's own
+completion (`Store.ChildPage`, under
+[revision-scoped direct-child summaries](thread-package-background-store-queries.md#revision-scoped-direct-child-summaries)).
+
 ### Send now before consumption (#3508)
 
 A `send_written` fact advances a queued accepted user item to `written` after
