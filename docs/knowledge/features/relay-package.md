@@ -164,15 +164,13 @@ operator rollout checklist live in the reference above.
 The binary↔relay leg is **content-blind** — there is no application-layer `hello`/`hello_ack` ceremony on it (retired #582). The relay registers the binary's server-id from the `x-pyrycode-server` request header and claims the slot on WS upgrade; under v2 a `hello_ack` would be AEAD-sealed application data the relay holds no key for. So the conn is established the moment the upgrade fires, and `run()` goes straight to forwarding.
 
 ```
-Connect()              → goroutine spawns
-   │
-   └── on every fresh transport conn (signalled by transport.Client.Connected()):
-         │
-         ├── log Info "relay: conn established" (server_id)
-         │
-         └── forwardFrames(): Receive → unmarshal RoutingEnvelope → c.frames
-                                │
-                                └── any err → return; outer select catches next Connected → re-enter forwardFrames
+Connect() → run(ctx)
+   ├── transport worker: client.Connect(ctx)
+   ├── event loop: sole observer of client.Connected()
+   │     └── log establishment; nonblocking Reconnected + forwarding wake
+   └── one forwarding worker: wait for wake → forwardFrames(forwardCtx)
+         └── ReceiveGeneration → validate/decode → feedback or c.frames
+               └── receive error → return to waiting for wake
 ```
 
 WS close-code `4409` (server-id conflict) is counted independently of any frame exchange. `Connect` sets transport's `FatalCloseCodes: [4409]` and production `FatalCloseThreshold: 8`; only a persistent conflict surfaces as `ErrServerIDConflict` from `Wait()` (see Reconnect semantics).
@@ -183,7 +181,7 @@ WS close-code `4409` (server-id conflict) is counted independently of any frame 
 
 | Cause | Behaviour |
 |---|---|
-| Transport drop (`1011`, `1006`, network error) | Inherits `internal/transport`'s backoff (1s/2s/4s/8s/16s/30s cap ±20% jitter, reset after ≥60s uptime). On each fresh conn, re-enters forwarding directly (no handshake). Frames flow on the SAME `Frames()` channel before and after reconnect — consumers see a contiguous in-order stream. |
+| Transport drop (`1011`, `1006`, network error) | Inherits `internal/transport`'s recovery policy. Each fresh-conn event independently notifies `Reconnected()` and wakes the serial forwarding worker (no handshake). Forwarding may continue across replacement; frames use the SAME `Frames()` channel before and after reconnect. See [transport cadence](transport-package.md#cadence-locked-at-wire-spec-level) for retry timing. |
 | WS close `4409` (server-id conflict) | Retry on the normal backoff ladder; after eight consecutive closes, `Wait()` returns `ErrServerIDConflict`. This lets transient self-conflicts clear while Relay reaps the old connection and applies its grace reclaim. Persistent conflicts need operator intervention. |
 | HTTP 401 on upgrade | First rejection ends all automatic attempts, initially or after an established connection, with or without a credential. `Frames()` closes and `Wait()` returns `ErrAdmissionFailed`; no further dial or 4409 conflict-budget consumption. |
 | HTTP 5xx on upgrade | Retry through transport's normal recovery policy with the same selected credential. |
@@ -219,10 +217,25 @@ proofs retain frame hygiene, network/5xx recovery and the 4409 threshold.
 
 ### Reconnect-state accessors for the v2 push drain (#874 `Connected`, #875 `Reconnected`)
 
-`internal/relay`'s [`V2SessionManager`](v2-session-manager.md) needs to know the binary↔relay transport's live-conn state to avoid burning a Noise send-nonce on a dead link ([`Transport-down hold on the push drain`](v2-session-manager.md#transport-down-hold-on-the-push-drain-874--connected-probe--transportdown)). It cannot observe `transport.Client.Connected() <-chan struct{}` directly — that channel is documented single-observer, and `Connection.run()` is already its sole consumer (it re-enters `forwardFrames` on each fire). So `Connection` re-exposes the transport's live-conn state one layer down, in two complementary shapes:
+`internal/relay`'s [`V2SessionManager`](v2-session-manager.md) needs to know the binary↔relay transport's live-conn state to avoid burning a Noise send-nonce on a dead link ([`Transport-down hold on the push drain`](v2-session-manager.md#transport-down-hold-on-the-push-drain-874--connected-probe--transportdown)). It cannot observe `transport.Client.Connected() <-chan struct{}` directly: `Connection.run` is its sole observer and consumes events independently of frame forwarding. `Connection` exposes two complementary shapes:
 
 - **`Connected() bool` (#874)** — a synchronous level poll, one-line passthrough to `transport.Client.IsConnected()`. Answers "is the leg up *right now*" at an arbitrary call site.
-- **`Reconnected() <-chan struct{}` (#875)** — an edge-triggered signal, cap-1 drop-on-full, re-broadcasting `client.Connected()`'s fresh-conn edge from inside the same `run()` arm that already consumes it (right after the "conn established" log, before the blocking `forwardFrames` call). Fires on the *initial* connect too, not only reconnects — harmless, since it triggers at most one empty drain pass.
+- **`Reconnected() <-chan struct{}` (#875)** — single-observer, cap-one, drop-on-full signal re-broadcasting `client.Connected()` after the establishment log. Includes initial connection; slow observers may coalesce edges. Frame backpressure does not block this send.
+
+`run` also sends a nonblocking cap-one wake to one forwarding worker. That worker
+alone calls `forwardFrames` serially, including generation-stamped push feedback
+consumption. A wake queued during forwarding lets it resume after a disconnect
+even if the replacement is already live. `Frames()` remains the same unbuffered
+channel across generations. On every lifecycle exit, `run` cancels the derived
+forwarding context, closes the transport client and joins the worker before
+closing `Frames()` and then `done`; `Wait` observes completed forwarding cleanup.
+
+A receive error cannot gate reconnect observation (#3557). Each
+`Client.ReceiveGeneration` call snapshots the current disconnect lifetime: if
+forwarding resumes after replacement, its next receive may wait on the new socket
+without ever returning `ErrDisconnected` for the old one. Inline forwarding in
+the event loop would then leave a live replacement's event unread until traffic
+or cancellation arrived. See [transport lifecycle](transport-package.md#lifecycle-and-goroutines).
 
 Both are wired in `cmd/pyry/relay.go`'s `V2SessionConfig` literal (`Connected: conn.Connected`, `Reconnect: conn.Reconnected()`) and are otherwise unconsumed inside this package — `Connection` itself never reads either. See [`codebase/874.md`](../codebase/874.md) / [`codebase/875.md`](../codebase/875.md).
 
@@ -265,7 +278,7 @@ Forbidden everywhere: `token`, `payload`, raw `frame` bytes, full `Headers` map 
 - **Reconnects are invisible to `Frames()` consumers.** The same channel persists across reconnects; frames resume on the new conn directly (no handshake).
 - **`Connect` is sync-validate, async-run.** It returns immediately after `Config` validation. The connection is NOT yet established; observe `Frames()` to consume inbound frames, or call `Wait()` to block on terminal classification.
 - **Caller is responsible for `Close()`** during shutdown to release resources; `ctx` cancellation also drains the lifecycle.
-- **Race between `Connected` signal and conn drop:** if the conn drops right after the relay observes `Connected`, `forwardFrames`'s first `Receive` returns `ErrDisconnected`, `run` loops and catches the next `Connected` or `transportErrCh`. No stuck state.
+- **Drop after a `Connected` event:** forwarding may return `ErrDisconnected` or already observe a replacement's lifetime. `run` keeps consuming events in either case, and its queued wake restarts forwarding when needed.
 
 ## Test surface
 
@@ -302,6 +315,16 @@ multiplicity across retries, unchanged frame bytes and counted terminal 401
 attempts. Diagnostic assertions traverse single- and multi-cause error chains
 and captured log attributes for reflected synthetic credentials and peer text.
 
+`TestReconnectWhileForwardingPaused` holds the static malformed-envelope log
+across socket replacement, releases forwarding, then requires the reconnect
+notification before sending new application traffic. With absent and supplied
+tokens it checks one 503, three upgrades and exact echoes over the same routing
+ID and `Frames()` channel. Repeated green runs alone would miss the ordering;
+this barrier fails the old inline event loop without relying on scheduler luck.
+`TestReconnectForwardingShutdown` leaves application frames unread and requires
+both Close and cancellation to join forwarding and close `Frames()` within the
+test bound.
+
 `internal/relay/connection_test.go` (~700 LOC, stdlib + `coder/websocket`):
 
 - `newTestRelay(t)` — `httptest.NewServer` + `websocket.Accept` upgrader for a **content-blind forwarder**: it registers each conn on upgrade (`ConnCount()` / `connectedCh` / header capture) and pumps `outboundFrames` to the binary; it never reads a hello or sends a `hello_ack`. Behaviors: `behaviorForward` (default — register + forward), `behaviorCloseImmediately4409` (close 4409 on accept), `behaviorDropOnConnect` (`CloseNow` right after upgrade → transport reconnects).
@@ -315,7 +338,7 @@ Pinned behaviour:
 - `TestHeaders_Set` — relay introspects `x-pyrycode-server`, `x-pyrycode-version`, `user-agent: pyry/<version>`.
 - `TestServerIDConflict_FatalNoReconnect` — its `newTestConnection` seam leaves transport's threshold at the single-close default: 4409 returns `ErrServerIDConflict` with one connection. It does not prove production's eight-close threshold. Transport's `TestFatalCloseThreshold_TransientConflictRecovers`, `TestFatalCloseThreshold_PersistentConflictGoesFatal` and `TestFatalCloseThreshold_CounterResetsOnHealthyConn` cover threshold and reset semantics.
 - `TestTransportDropOnConnect_Reconnects` (#582) — relay `CloseNow`s right after upgrade; transport reconnects (`ConnCount >= 2`).
-- `TestTransportDropPostConnect_Reconnects` (#582) — proves post-reconnect frames flow on the SAME `Frames()` channel (pins the `ErrDisconnected` wedge fix in the transport additions; without it, `forwardFrames` would wedge in the previous-conn `Receive` and never let `run` observe the next `Connected`).
+- `TestTransportDropPostConnect_Reconnects` (#582) — proves post-reconnect frames flow on the SAME `Frames()` channel; complements the controlled replacement barrier above.
 - `TestFrames_AfterConnect_InOrder` — three frames delivered in arrival order.
 - `TestClose_ShutsDownCleanly` — `Close()` drains `Frames()` and `Wait()` returns; goroutines exit.
 - `TestContextCancel_ShutsDownCleanly` — `cancel(ctx)` drains the lifecycle.
