@@ -1,0 +1,3 @@
+{"kind":"notification","method":"item/started","params":{"threadId":"th","turnId":"t","item":{"type":"mcpToolCall","id":"mcp-1","server":"example","tool":"lookup","arguments":{"query":"hello"},"status":"inProgress"}}}
+{"kind":"notification","method":"item/mcpToolCall/progress","params":{"threadId":"th","turnId":"t","itemId":"mcp-1","message":"working"}}
+{"kind":"notification","method":"item/completed","params":{"threadId":"th","turnId":"t","item":{"type":"mcpToolCall","id":"mcp-1","server":"example","tool":"lookup","arguments":{"query":"hello"},"status":"completed","result":{"content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}]}}}}
