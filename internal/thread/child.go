@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -156,6 +157,11 @@ func (f *Fold) childWork(e history.Entry) bool {
 	for index := before; index < len(f.items); index++ {
 		f.countPublicWork(1)
 		f.saveChild(index, group, parent)
+	}
+	if e.Type == protocol.TypeAssistantDelta && id.TextComplete && strings.TrimSpace(summary) != "" &&
+		!slices.Contains(id.Truncated, "text_complete") && !slices.Contains(id.Dropped, "text_complete") && st.text >= 0 {
+		f.setOutcome(st.text, f.outcome(e, "done", "completion"))
+		f.closeText(st, e.ID)
 	}
 	if id.ToolUseID != "" && saved.call.item >= 0 {
 		f.saveChild(saved.call.item, group, parent)

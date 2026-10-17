@@ -373,6 +373,10 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 		// Thought text is never forwarded; thinking surfaces only as a state.
 		e.transitionTo(ctx, convID, turnbridge.StateThinking)
 	case turnevent.TextChunk:
+		if v.TextComplete && v.ParentToolCallID != "" {
+			e.emitCompleteChildText(ctx, convID, v)
+			return
+		}
 		if v.ParentToolCallID == "" && !e.startTurnIfNeeded(ctx, convID) {
 			return
 		}

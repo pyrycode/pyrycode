@@ -66,3 +66,6 @@ Pending documentation stage: in `docs/protocol-mobile.md`, â€œFull thread itemâ€
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-18
+
+## Revisions
+- 2026-10-18: the source predicate is restricted to one nonblank text block with assistant role and a nonempty message ID, matching the inspected foreground shape. Suppressed partial-message companions cannot assert completion. The fold saves the completing raw entry under `completion` using its existing history-reference recipe, including when completion follows provisional ancestor interruption. Disk checkpoint reopen joins the every-cut continuation proof. The first artifact return must also remove the recorded reader's initial missing-fixture skip; the genuine live scenario always runs regardless of fixture presence.

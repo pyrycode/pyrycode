@@ -59,14 +59,15 @@ func (f *Fold) countClosureWork(n int) {
 
 // mainIdentity also validates optional identity-loss markers on recorded facts.
 type mainIdentity struct {
-	TurnID     string   `json:"turn_id"`
-	ToolUseID  string   `json:"tool_use_id"`
-	ToolCallID string   `json:"tool_call_id"`
-	Parent     string   `json:"parent_tool_use_id"`
-	ParentCall string   `json:"parent_tool_call_id"`
-	Opening    *uint64  `json:"turn_opened_entry_id"`
-	Truncated  []string `json:"truncated_fields"`
-	Dropped    []string `json:"dropped_fields"`
+	TurnID       string   `json:"turn_id"`
+	ToolUseID    string   `json:"tool_use_id"`
+	ToolCallID   string   `json:"tool_call_id"`
+	Parent       string   `json:"parent_tool_use_id"`
+	ParentCall   string   `json:"parent_tool_call_id"`
+	Opening      *uint64  `json:"turn_opened_entry_id"`
+	Truncated    []string `json:"truncated_fields"`
+	Dropped      []string `json:"dropped_fields"`
+	TextComplete bool     `json:"text_complete"`
 }
 type mainRuntime struct {
 	TurnID     string    `json:"turn_id"`

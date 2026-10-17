@@ -74,6 +74,7 @@ type AssistantDeltaPayload struct {
 	Seq             int    `json:"seq"`
 	ParentToolUseID string `json:"parent_tool_use_id"`
 	Text            string `json:"text"`
+	TextComplete    bool   `json:"text_complete,omitempty"`
 }
 
 // ToolUsePayload is the body of an Envelope whose Type == TypeToolUse

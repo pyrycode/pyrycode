@@ -2,6 +2,7 @@ package streamsup
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -237,6 +238,7 @@ func (p *Parser) emitAssistant(msg *streamMessage, line []byte) {
 				MessageID:        msg.ID,
 				ParentToolCallID: parent,
 				Text:             block.Text,
+				TextComplete:     parent != "" && msg.ID != "" && msg.Role == "assistant" && len(msg.Content) == 1 && strings.TrimSpace(block.Text) != "",
 			})
 		case "thinking":
 			p.emit(turnevent.ThoughtChunk{MessageID: msg.ID, Text: block.Thinking, ParentToolCallID: parent})
