@@ -1598,11 +1598,15 @@ The contract follows
 
 #### Compact projection (declared)
 
-**Declared wire contract and encoding fixtures only (#3559), pending production
-installation.** `thread_compact` is a distinct capability from the installed
-`thread_expansion`. Its declaration enables neither negotiation, authenticated
-handlers nor publication. Existing complete query/live delivery stays the default.
-The complete schemas below apply unless the explicitly selected projection says
+**Query admission is implemented in the relay (#3573); production activation and
+live delivery remain pending.** `thread_compact` is a distinct capability from
+`thread_expansion`. `admitThreadQuery`/`runThreadQuery` now negotiate it and
+answer `thread_catch_up`/`thread_page` with a compact projection when a session
+holds the capability; `thread_compact_update`, the live-delivery half, stays
+declared only (#3574). The daemon does not yet install compact providers or
+grant `thread_compact` in production (#3563), so every real connection still
+negotiates complete-only and gets complete delivery until that lands. The
+complete schemas below apply unless the explicitly selected projection says
 otherwise; compact selection uses these additive fields:
 
 | Request | Compact selection |
@@ -1617,6 +1621,37 @@ selection or a view change without compatible coverage MUST initialize with a
 version-zero newest window. Reconnect may resume only a successfully completed
 checkpoint matching **conversation, projection and epoch**. Complete-view coverage,
 other conversations and old epochs cannot establish compact coverage.
+
+**Admission, implemented.** A `thread_catch_up`/`thread_page` carrying
+`projection` passes the ordinary authentication, membership, agent and
+`thread`/`interactive` gates first, exactly as a projection-less request does.
+Only then is `projection` validated: it must decode to exactly `"compact-v1"`
+(null, non-string, empty or any other string refuses); the connection must
+hold `thread_compact`; and a page must carry a nonempty string `epoch`. Each
+of these, and a compact request on a connection without `thread_compact`, gets
+the existing content-free `thread.query_failed` refusal, makes zero calls into
+either compact provider, and leaves the connection's recorded joins untouched.
+A request without `projection` behaves exactly as before and still reaches the
+complete provider.
+
+A successful final records the join: conversation, projection and epoch stay
+together on that connection, keyed per conversation, so one connection can
+hold a compact join on one conversation and a complete join on another at the
+same time. A nonzero (non-initializing) request whose `projection` differs
+from the conversation's recorded join is refused before any provider call;
+version zero always re-initializes and may switch projection. With no
+recorded join — including right after reconnect — a nonzero compact request
+reaches the compact provider, which decides between catch-up and a scoped
+reset. Reading a tool/agent body or a conversation's direct children never
+creates or changes a join, compact or complete.
+
+While a conversation's recorded join is compact, an unsolicited complete live
+item update for it is withheld before sealing rather than mixed into the
+compact view; the compact query in flight is never cancelled by it. A complete
+live update still cancels an in-flight *complete* re-initialization of that
+conversation, the same as before. Compact live delivery itself —
+`thread_compact_update` — is #3574; this slice only prevents complete rows
+from leaking into a conversation that is loading or holds a compact checkpoint.
 
 These declared request excerpts show initialization, older paging and a later
 matching reconnect checkpoint (connection stamps omitted):
@@ -3038,7 +3073,7 @@ Defined capability strings:
 | `multi_agent` | The client understands conversations run by more than one agent (#2643). **Not detection-only — this string changes what the daemon sends.** It grants no *interactive* access (every `interactive`-gated surface is unaffected, and a client can negotiate `multi_agent` alone without becoming interactive), but it gates two things on the `conversations` reply: every row carries `agent` (`"claude"` or `"codex"`, the bound session's agent), and a row whose agent is `"codex"` is included at all. A client that does not negotiate it gets today's list, byte-identical, with Codex-run conversations left out. See the `conversations` row below. As of #2644, it also gates every frame the daemon *pushes* about a Codex conversation: live turn events, conversation broadcasts (`conversation_updated`), the connect-time reconciles (model list, slash commands, background-task roster, questions, modals), reconnect replay and the `resync` marker. A client that does not negotiate `multi_agent` receives none of them; frames about a Claude conversation, frames naming no conversation, and ordinary replies to the client's own requests are delivered exactly as before. Thread item updates and continuations remain subject to the independent item authorization gate even when correlated. `modal_dismissed` and `question_dismissed` name no conversation, so such a client can still receive one for a modal or question batch it never saw (the `*_shown` frame that introduced that batch id was itself withheld) — it names nothing the client can act on and should be ignored. As of #2651 it also changes the **content** of every `model_list` frame the daemon answers with — the connect-time reconcile and the `request_model_list` reply alike — whichever agent the named conversation itself runs: a capable client's `models` merges Claude's held entries with Codex's, each tagged `agent` and `family` (see [`model_list`](#model_list) below). A client that does not negotiate `multi_agent` still gets today's Claude-only list, byte-identical, with no `agent`/`family` keys on the wire. |
 | `stop_background_task` | The daemon supports stopping one named background task through the [`stop_background_task`](#stop-background-task-v2) verb (#2797). **Detection only: this string grants no access.** Clients advertise it and draw a per-task stop button only when `hello_ack.payload.capabilities` echoes it. Advertising it alone leaves the connection non-interactive; the verb requires `interactive` alone, and an interactive client can use it without advertising this detection string. |
 | `thread_expansion` | **Production-installed (#3523/#3550).** Bounded body and direct-child reads; negotiated only with both providers, thread readiness and client `thread_expansion`, `thread` and `interactive`. See [Bounded expansion reads](#bounded-expansion-reads). |
-| `thread_compact` | **Declared only (#3559), not negotiated or emitted in production.** Separate compact root projection and freshness contract; installed expansion support does not imply compact support. See [Compact projection](#compact-projection-declared). |
+| `thread_compact` | **Relay-side negotiation implemented (#3573); not granted in production.** Separate compact root projection and freshness contract; installed expansion support does not imply compact support. Granted only when the client advertises it, `thread`, `interactive` and `thread_expansion` are all granted in the same negotiation, and the daemon has installed both compact query providers plus a true compact-readiness attestation. Missing any one of those withholds only `thread_compact`; every other grant in the same `hello_ack` is unaffected. Production does not yet install the compact providers (#3563), so no real connection negotiates it today. See [Compact projection](#compact-projection-declared). |
 | `thread` | Per-connection daemon-built thread delivery (#3081), echoed only when advertised and supplied complete readiness is true. It grants neither `interactive` nor `multi_agent` access. **Production live publication and bounded catch-up/pages are installed (#3164/#3236)**; see [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 
 `thread` requires daemon-supplied readiness confirming installation of both

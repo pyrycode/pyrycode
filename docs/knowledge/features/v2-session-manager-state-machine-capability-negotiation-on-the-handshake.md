@@ -133,7 +133,26 @@ existing `thread` negotiation. `TestThreadExpansionHandshake` covers the
 provider/readiness/client-capability matrix through real authenticated
 handshakes, including successful child dispatch. Production installs neither
 expansion callback, so advertisement remains withheld pending real Store
-installation/activation in #3523. Compact projection remains #3517.
+installation/activation in #3523. `negotiateCapabilities` grants
+`CapabilityThreadCompact` (#3573) only alongside a `thread_expansion` grant in
+the same call, with `thread_compact` advertised and a fourth readiness true;
+`s.threadCompact` is set beside `s.threadExpansion` from that negotiated slice.
+Production installs none of the compact providers, so it stays withheld
+pending #3563.
+
+**A conversation's join records projection, not just epoch/version, and owns
+that conversation's view per connection.** `threadJoin{epoch, version, projection}`
+is keyed per conversation; `admitThreadQuery` refuses a non-initializing
+(nonzero catch-up, or any page) request whose `projection` differs from the
+recorded join before calling any provider, while a version-zero request
+always re-initializes, including switching projection. One connection can hold
+a compact join on one conversation and a complete join on another at the same
+time. Reading a tool/agent body or a conversation's children never creates or
+changes a join; only a catch-up/page final does. While a join is compact,
+`threadQueryGate` withholds an unsolicited complete live item update for that
+conversation before sealing instead of cancelling the in-flight compact query;
+a complete live update still cancels only an in-flight *complete*
+re-initialization. See [thread query messages](../../../protocol-mobile.md#thread-query-messages).
 
 **Correlation is not item authorization.** `withheldFromConn` exempts ordinary
 replies, but `threadWithheld` independently gates live additions/changes/text
