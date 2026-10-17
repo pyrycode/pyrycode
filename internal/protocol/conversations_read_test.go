@@ -102,17 +102,19 @@ func TestConversationsPayload_RoundTrip(t *testing.T) {
 	if !c0.IsArchived {
 		t.Errorf("row 0 IsArchived: got false, want true")
 	}
-	// The re-marshal below cannot see WorkspaceLabel at all: Envelope.Payload is
-	// a json.RawMessage, so marshalling the envelope writes the fixture's own
-	// payload bytes back and the byte comparison passes whatever the struct
-	// gained or lost. These decoded assertions are the only proof the key is
-	// carried by the type.
 	if c0.WorkspaceLabel == nil || *c0.WorkspaceLabel != "Kitchen Claw" {
 		t.Errorf("row 0 WorkspaceLabel: got %v, want pointer to %q", c0.WorkspaceLabel, "Kitchen Claw")
 	}
 	wantArchivedAt := time.Date(2026, 5, 8, 10, 32, 40, 0, time.UTC)
 	if c0.ArchivedAt == nil || !c0.ArchivedAt.Equal(wantArchivedAt) {
 		t.Errorf("row 0 ArchivedAt: got %v, want %v", c0.ArchivedAt, wantArchivedAt)
+	}
+	wantPinnedAt := time.Date(2026, 5, 8, 10, 30, 0, 0, time.UTC)
+	if c0.PinnedAt == nil || !c0.PinnedAt.Equal(wantPinnedAt) {
+		t.Errorf("row 0 PinnedAt: got %v, want %v", c0.PinnedAt, wantPinnedAt)
+	}
+	if p.Conversations[1].PinnedAt != nil || p.Conversations[2].PinnedAt != nil {
+		t.Error("unpinned fixture rows must decode to nil PinnedAt")
 	}
 
 	// Row 1: name null on wire → nil pointer; active (is_archived false).
@@ -152,6 +154,10 @@ func TestConversationsPayload_RoundTrip(t *testing.T) {
 		t.Errorf("row with nil ArchivedAt serialized without an explicit null: %s", rowJSON)
 	}
 
+	env.Payload, err = json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal decoded payload: %v", err)
+	}
 	out, err := json.Marshal(env)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

@@ -17,7 +17,7 @@ func TestConversationLastShownVersion(t *testing.T) {
 		{name: "shown watermark", field: `,"last_shown_version":53`, version: testThreadUint64(53)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := fmt.Sprintf(`{"conversations":[{"id":"conv-a","name":null,"is_promoted":false,"current_session_id":"stored-binding","is_archived":false,"is_muted":false,"read_up_to":17,"latest_entry_id":71,"archived_at":null,"cwd":"/workspace","workspace_label":null,"last_message_ts":"0001-01-01T00:00:00Z","last_used_at":"0001-01-01T00:00:00Z"%s}]}`, tc.field)
+			raw := fmt.Sprintf(`{"conversations":[{"id":"conv-a","name":null,"is_promoted":false,"current_session_id":"stored-binding","is_archived":false,"is_muted":false,"pinned_at":null,"read_up_to":17,"latest_entry_id":71,"archived_at":null,"cwd":"/workspace","workspace_label":null,"last_message_ts":"0001-01-01T00:00:00Z","last_used_at":"0001-01-01T00:00:00Z"%s}]}`, tc.field)
 			want := ConversationsPayload{Conversations: []ConversationSummary{{ID: "conv-a", CurrentSessionID: "stored-binding", ReadUpTo: 17, LatestEntryID: 71, Cwd: "/workspace", LastShownVersion: tc.version}}}
 			_, obj := testThreadPayloadRoundTrip(t, TypeConversations, raw, want)
 			row := obj["conversations"].([]any)[0].(map[string]any)
