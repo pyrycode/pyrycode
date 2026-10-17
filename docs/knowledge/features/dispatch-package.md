@@ -39,9 +39,13 @@ func (c *Conn) Send(ctx context.Context, env protocol.Envelope) error
 func (c *Conn) Reply(ctx context.Context, req protocol.Envelope,
                     respType string, payload json.RawMessage) error
 
-// Production Conn factory. The caller (the v2 session manager) owns its
-// own per-conn goroutine and supplies the auth device it already
-// resolved during the Noise handshake.
+// Synchronous sender factory used by the v2 session manager. The caller
+// owns the worker, completion boundary and cancellation-aware sender.
+func NewConnWithSender(id string,
+    sender func(context.Context, protocol.RoutingEnvelope) error,
+    auth *devices.Device) *Conn
+
+// Channel factory retained for consumers that own and drain outbound.
 func NewConn(id string, outbound chan<- protocol.RoutingEnvelope,
               auth *devices.Device) *Conn
 
@@ -52,26 +56,26 @@ func NewTestConn(id string, outbound chan<- protocol.RoutingEnvelope,
 // Route decodes frame, refuses frames whose type is not a known inbound
 // app-frame type via protocol.IsKnownAppType, and dispatches to the
 // handler registered for the envelope Type.
-// Synchronous — runs the handler on the caller's goroutine; the caller
-// drains conn's outbound channel afterwards.
+// Synchronous — runs the handler on the caller's goroutine and preserves
+// Conn.Send's completion/backpressure contract. Channel consumers must
+// drain concurrently when a handler can exceed the channel's capacity.
 func Route(ctx context.Context, logger *slog.Logger, conn *Conn,
             handlers map[string]Handler, frame json.RawMessage)
 ```
 
-`Conn.auth` is now write-once at construction (`NewConn` / `NewTestConn`)
+`Conn.auth` is write-once at construction (all three factories)
 — there is no post-construction mutator. The v2 session manager passes
-the handshake-matched `*devices.Device` directly
-(`v2session.go:1051` → `dispatch.NewConn(s.connID, outbound, s.device)`);
+the handshake-matched `*devices.Device` directly through
+`routeAppFrame` → `dispatch.NewConnWithSender`;
 the live production reader is `internal/relay/handlers/register_push_token.go`'s
 `c.Auth()` call.
 
 **`Conn.multiAgent` (#2643) is write-once too, but through a setter rather than
 a constructor argument** — `NewConn`/`NewTestConn` don't change shape because
 17 test call sites already depend on their signature. `routeAppFrame` calls
-`conn.SetMultiAgent(s.multiAgent)` right after `NewConn`, before the per-conn
-`Route` goroutine starts; the goroutine start is the happens-before edge, so
-`MultiAgent()` needs no lock even though the field isn't `const`-after-`New`
-the way `auth` is. A `Conn` built by a test and never given `SetMultiAgent`
+`conn.SetMultiAgent(s.multiAgent)` right after `NewConnWithSender`, before
+calling `Route` synchronously on the same worker, so `MultiAgent()` needs no
+lock. A `Conn` built by a test and never given `SetMultiAgent`
 reads `false`, same as an unauthenticated `Conn.Auth() == nil`. This is the
 precedent for widening `Conn` again behind a capability without touching
 either constructor: add the field, a getter, and a setter called once before
@@ -102,12 +106,34 @@ the wire (`sendError`, unexported).
 
 ## Concurrency model
 
-Goroutine-free. `Route` runs synchronously on the caller's goroutine; the
-v2 session manager owns whatever goroutine calls it (one per conn_id, per
-its own design — not this package's concern). This strictly shrank from
-the pre-#1039 shape, which ran a demux goroutine (`Run`) fanning out to
-one goroutine per `conn_id` (`routeConn` → `runConn`) with `WaitGroup` /
-`d.mu` / channel-close shutdown choreography — all deleted.
+Dispatch owns no goroutines. `Route` runs on its caller; the v2 manager calls
+it directly on `appFrameWorker`. `Send` marshals a `RoutingEnvelope` and invokes
+the `NewConnWithSender` callback synchronously, returning its error. That sender
+owns completion, bounded backpressure and cancellation. `Reply` uses the same
+boundary after allocating an ID with `NextID`, setting `InReplyTo` to the request
+ID and stamping UTC time.
+`NewConn` and `NewTestConn` retain channel-admission completion: a successful send
+there does not establish forwarding order against an independent push path.
+
+The manager's sender waits for Run to process each reply before the handler
+continues to a synchronous conversation announcement. For an open, connected
+authenticated session, the requester therefore receives the correlated reply
+before its resulting uncorrelated broadcast; eligible interactive siblings
+still receive the same broadcast. Buffered channel admission, or merely handing
+the reply to Run, would let that announcement overtake it. Completion covers
+legacy forwarding, ordered plaintext admission or bounded upstream deferral,
+and existing deliberate drops; it does not promise peer receipt. Waiting for
+hosted transport receipt would unnecessarily park the handler behind a slow
+client. See [manager concurrency](v2-session-manager-concurrency-workers.md)
+and [ordered delivery](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).
+
+The worker's connection context and both sender waits end on requester teardown
+or manager cancellation. Run checks cancellation, original session identity and
+open state before forwarding, so a replacement with the same connection ID
+cannot receive a retired reply. Transport-down drops occur before encryption.
+Only Run owns Noise operations; the dispatch sender carries plaintext.
+`TestConnSenderReply` checks callback completion/error propagation and correlation;
+the manager's authenticated ordering and lifecycle proofs cover wire behavior.
 
 ## Test surface (`internal/dispatch/dispatch_test.go`)
 

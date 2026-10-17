@@ -56,6 +56,7 @@ type Conn struct {
 	id       string
 	nextID   atomic.Uint64
 	outbound chan<- protocol.RoutingEnvelope
+	sender   func(context.Context, protocol.RoutingEnvelope) error
 
 	// auth is the authenticated device snapshot for this conn, supplied by
 	// the constructor (NewConn / NewTestConn) — the v2 session manager
@@ -112,22 +113,32 @@ func NewConn(id string, outbound chan<- protocol.RoutingEnvelope, auth *devices.
 	return &Conn{id: id, outbound: outbound, auth: auth}
 }
 
+// NewConnWithSender constructs a connection whose Send calls sender synchronously.
+// The sender owns completion and backpressure and must honor cancellation.
+// Configure it before handing the connection to Route or a handler.
+func NewConnWithSender(id string, sender func(context.Context, protocol.RoutingEnvelope) error, auth *devices.Device) *Conn {
+	return &Conn{id: id, sender: sender, auth: auth}
+}
+
 // NextID returns the next monotonic outbound envelope id for this conn.
 // Starts at 1 on the first call. Concurrent-safe even though the conn's
 // owning goroutine is the only writer today — atomic is cheap insurance
 // for future fan-out inside a handler.
 func (c *Conn) NextID() uint64 { return c.nextID.Add(1) }
 
-// Send wraps env in a RoutingEnvelope addressed to this conn and pushes
-// it onto this conn's outbound channel. Blocks on backpressure; returns
-// ctx.Err if ctx is cancelled while blocked. Caller is responsible for
-// env.ID and env.TS — use Reply for the request/response convenience path.
+// Send wraps env in a RoutingEnvelope addressed to this conn and waits for its
+// sender, or for outbound channel admission when constructed with NewConn.
+// Blocks on backpressure; cancellation is handled by the sender or channel wait.
+// Caller supplies env.ID and env.TS; Reply builds a correlated response.
 func (c *Conn) Send(ctx context.Context, env protocol.Envelope) error {
 	frame, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
 	routing := protocol.RoutingEnvelope{ConnID: c.id, Frame: frame}
+	if c.sender != nil {
+		return c.sender(ctx, routing)
+	}
 	select {
 	case c.outbound <- routing:
 		return nil
@@ -165,9 +176,8 @@ func (c *Conn) Reply(ctx context.Context, req protocol.Envelope, respType string
 // may be nil — every envelope then falls through to the "no handler
 // registered" reply path.
 //
-// Route does NOT change conn.outbound's blocking behaviour: the caller
-// is responsible for sizing the channel so handler+Route replies fit
-// without head-of-line-blocking the dispatch loop.
+// Route preserves Conn.Send's completion and backpressure contract. Channel
+// consumers must drain concurrently if a handler can exceed their capacity.
 func Route(ctx context.Context, logger *slog.Logger, conn *Conn, handlers map[string]Handler, frame json.RawMessage) {
 	var env protocol.Envelope
 	if err := json.Unmarshal(frame, &env); err != nil {
