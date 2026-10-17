@@ -59,7 +59,7 @@ at every call site since it lands in claude's argv.
   files.** `readPromptAnswerHistory` follows `history.parseSegmentName` and
   `history.listSegments`: regular files named `segment-` plus a 20-character
   uint64 decimal field plus `.jsonl`. The
-  [thread cache, recovery marker and run certificates](thread-package.md#cache-and-epochs)
+  [thread cache, recovery marker and run certificates](thread-package-cache-and-epochs.md#cache-and-epochs)
   share that directory; `thread.Store.writeCacheFile` publishes them through
   `.thread-*` temporary files that can disappear between enumeration and
   opening. Globbing every entry can therefore fail after a successful remote

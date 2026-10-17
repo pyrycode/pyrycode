@@ -117,7 +117,7 @@ func TestDaemonThreadDemandWireAfterIdle(t *testing.T) {
 	testDaemonThreadRequest(t, w, "phone", 400, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID})
 	got, typ := testDaemonThreadReply(t, w, 400)
 	if typ != protocol.TypeThreadItems || got.Version != 1 || len(got.Items) != 1 || !got.Final {
-		t.Fatal("idle baseline was not certified")
+		t.Fatalf("idle baseline was not certified: type=%s version=%d rows=%d final=%t", typ, got.Version, len(got.Items), got.Final)
 	}
 }
 

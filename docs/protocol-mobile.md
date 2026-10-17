@@ -1171,6 +1171,10 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`thread_page`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3235).** Request an older ordered window below exclusive unsigned `before_order`, including zero; carries explicit `conversation_id` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation and shares catch-up's unfinished-query slot and completion fence. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
 | **`thread_items`** | binary → phone | no | **Production emitted (#3236).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
 | **`thread_reset`** | binary → phone | no | **Production emitted (#3236).** Correlated terminal catch-up reset carrying current `conversation_id`, `epoch`, `version`, with no items or coverage; it never advances a completed checkpoint. See [Thread query messages](#thread-query-messages). |
+| **`thread_read_tool_body`** | phone → binary | no | **Declared ahead of handlers (#3519); inactive.** Request one public tool/agent-launch body at an expected epoch/revision. See [Bounded expansion reads](#bounded-expansion-reads). |
+| **`thread_tool_body`** | binary → phone | no | **Declared ahead of handlers (#3519); inactive.** Correlated rendered body, optionally assembled from parts, followed by a separate success marker. See [Bounded expansion reads](#bounded-expansion-reads). |
+| **`thread_read_children`** | phone → binary | no | **Declared ahead of handlers (#3519); inactive.** Request a bounded page of direct public child summaries at an expected parent epoch/revision. See [Bounded expansion reads](#bounded-expansion-reads). |
+| **`thread_children`** | binary → phone | no | **Declared ahead of handlers (#3519); inactive.** Correlated summary page and separate success marker with authoritative `more` and optional cursor. See [Bounded expansion reads](#bounded-expansion-reads). |
 
 Payload shapes inherited from v1 are preserved in git history (the v1 doc has them); additive fields and declared contracts are documented here. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -1805,6 +1809,159 @@ sender IDs and Noise sealing, and checks each stamped plaintext against
 recovery cannot turn failed output into success. Cancellation of an active sealed
 send retires the connection because its nonce may already have reached the peer.
 Existing legacy caller/provider signatures and reply behavior are preserved.
+
+#### Bounded expansion reads
+
+**Declared ahead of handlers (#3519).** `thread_read_tool_body` /
+`thread_tool_body` and `thread_read_children` / `thread_children` are additive
+v2 vocabulary, outside `inboundAppTypeSet`, with no admitted handlers or
+production emitters. Capability `thread_expansion` is declared but MUST NOT be
+advertised or negotiated until **both reads are wired to the real Store** and
+enforce normal authenticated, paired, conversation-scoped `thread` and
+`interactive` authorization, including applicable agent restrictions.
+Declaration alone does not enable support. Store selection, authenticated
+handlers and production activation belong to #3521/#3522/#3523. Required-field,
+public ownership and freshness checks are consumer obligations; passive DTO
+decoding does not establish them.
+
+Both requests use `ThreadExpansionRequest`: required string `conversation_id`,
+required **nonempty** string `epoch`, unsigned 64-bit `item_id` and
+`expected_rev`. For children, `item_id` identifies the parent; optional signed
+integer `limit` and object `cursor` select its page. A body request has no cursor.
+First reads MUST match the current epoch and requested item/parent revision.
+Replies identify the same conversation, captured `epoch`, consumed-history
+`version`, requested `item_id` and `rev`; those three numeric fields are unsigned
+64-bit integers. Every data envelope, assembly part,
+success marker and refusal preserves `in_reply_to` equal to the request `id`
+and supplied variable envelope conversation/session metadata.
+
+The examples are envelope excerpts with connection stamps omitted. An available
+empty body is a successful object with empty rendered input/output:
+
+```json
+{"id":37,"type":"thread_read_tool_body","payload":{"conversation_id":"conv","epoch":"epoch","item_id":17,"expected_rev":23}}
+```
+
+```json
+{"type":"thread_tool_body","in_reply_to":37,"payload":{"conversation_id":"conv","epoch":"epoch","version":41,"item_id":17,"rev":23,"kind":"tool_call","content":{"input":"","output":""},"final":false}}
+```
+
+```json
+{"type":"thread_tool_body","in_reply_to":37,"payload":{"conversation_id":"conv","epoch":"epoch","version":41,"item_id":17,"rev":23,"kind":"tool_call","final":true}}
+```
+
+`ThreadToolBodyPayload.kind` is `tool_call` or `agent` (the agent-launch body,
+not its children). Data requires an available object `content`; preserve
+existing rendered input/output and unknown fields as inert JSON. Retain upstream
+content limits without extra body truncation or increasing those limits. The
+separate marker keeps the capture, identity, revision and kind, sets
+`final: true` and omits `content`. That omission marks completion, not an empty body.
+A summary's `detail_omitted: true` means detail was not fetched, not that it is
+empty or unavailable. Missing, private, unavailable or wrong-kind bodies MUST
+NOT become successful empty objects or empty input/output.
+
+A first child page, its summary data and its separate continuation marker:
+
+```json
+{"id":38,"type":"thread_read_children","payload":{"conversation_id":"conv","epoch":"epoch","item_id":17,"expected_rev":23,"limit":1}}
+```
+
+```json
+{"type":"thread_children","in_reply_to":38,"payload":{"conversation_id":"conv","epoch":"epoch","version":41,"item_id":17,"rev":23,"children":[{"id":50,"kind":"agent","order":0,"rev":7,"ended_order":9,"session":"s","agent":"claude","no_child":true,"turn":"t","parent":17,"status":"done","active":false,"shown":true,"headline":"Inspect files","subtype":"task","detail_omitted":true}],"final":false}}
+```
+
+```json
+{"type":"thread_children","in_reply_to":38,"payload":{"conversation_id":"conv","epoch":"epoch","version":41,"item_id":17,"rev":23,"children":[],"final":true,"more":true,"cursor":{"conversation_id":"conv","epoch":"epoch","item_id":17,"rev":23,"version":41,"order":0,"id":50}}}
+```
+
+`ThreadSummary` has no `content`, child list or descendant inventory. It preserves
+the [full item's](#full-thread-item) metadata with these presence rules:
+
+| Fields | Type and presence |
+|---|---|
+| `id`, `order`, `rev`, `parent` | Required unsigned 64-bit integers; `order` and `parent` remain explicit even at zero. |
+| `kind`, `status` | Required strings retaining the open kind/status vocabulary. |
+| `active`, `shown` | Required booleans, including false. |
+| `ended_order` | Unsigned 64-bit lifecycle order; omitted at zero. |
+| `session`, `agent`, `turn`, `subtype` | Recorded attribution/subtype strings; omitted when empty. No inferred agent default. |
+| `no_child` | Boolean attribution fact, omitted when false; true means positively no producing child. |
+| `headline` | Required plain single-line text, not interpreted markup. |
+| `detail_omitted` | Required boolean, always true. |
+
+`NewThreadSummary` derives `headline` from the item summary, collapsing runs of
+Unicode whitespace/control characters to one space and trimming leading/trailing
+runs. It caps the result at **200 Unicode code points**, using the first 199 plus
+`…` when truncated; the ellipsis counts toward the bound. Child encoding applies
+the same normalization and explicit omission even to supplied summaries.
+
+Child `limit` defaults to **50** when omitted/zero, clamps positive values to
+**256**, and rejects negative values. This is a **hard row ceiling including
+ties**. Select only public direct children, ascending by **`(order, id)`**,
+including order-zero rows. Do not add parents, active extras, descendants or
+tie expansion from complete-thread queries.
+
+Resume by copying the marker's cursor into a new request:
+
+```json
+{"id":39,"type":"thread_read_children","payload":{"conversation_id":"conv","epoch":"epoch","item_id":17,"expected_rev":23,"limit":1,"cursor":{"conversation_id":"conv","epoch":"epoch","item_id":17,"rev":23,"version":41,"order":0,"id":50}}}
+```
+
+The cursor binds conversation, epoch, parent ID/revision, captured consumed
+version and last emitted `(order, id)`; resume **strictly after** that tuple,
+including within order ties. It conveys no authority. Any scope, epoch,
+parent-revision or consumed-version mismatch MUST refuse and require a fresh
+first page. Check current Store facts; retaining old snapshots between requests
+is unnecessary.
+
+`EncodeThreadChildren` packs a detached ascending candidate prefix; it performs
+no Store I/O. Its caller supplies authoritative evidence of rows beyond the
+candidates. `more` is true if that evidence says rows remain **or** any supplied
+suffix was excluded by the row or byte limit. Data has `final: false` and omits
+`more`/`cursor`; the separate marker has `children: []`, `final: true`, explicit
+`more` and a cursor naming the last emitted row only when more remain.
+Only authoritative `more: false` finishes that parent's enumeration at the
+capture; a short page does not. An actually empty result succeeds with only:
+
+```json
+{"type":"thread_children","in_reply_to":39,"payload":{"conversation_id":"conv","epoch":"epoch","version":41,"item_id":17,"rev":23,"children":[],"final":true,"more":false}}
+```
+
+All encoded envelopes of **one child page together**, including its separate
+marker and each envelope's [maximum reserved stamps](#thread-update-byte-budgets),
+MUST total at most `MaxThreadEnvelopeBytes` (**65519 bytes**). Measure escaped
+JSON, including repeated variable envelope conversation/session metadata supplied
+before encoding. Child pages use at most one data envelope plus the marker,
+without fragmentation. Stop before the first row that does not fit; never skip
+it. If rows remain but none fits, or the marker cannot fit, refuse without
+completion or cursor advancement.
+
+`EncodeThreadToolBody` applies the same **per-envelope** cap and stamp
+reservations, without an aggregate body cap. Oversized bodies reuse
+[`ThreadUpdatePart` assembly](#bounded-thread-encoding-and-assembly) under
+`thread_tool_body`: each part carries `conversation_id`, `epoch`, `version`,
+`item_id`, `rev`, object `continuation` and string `data`, without `base_rev`.
+Concatenated decoded `data` bytes equal the serialized entire body payload,
+including `kind`, unknown content and `final: false`. Validate consecutive
+indices/offsets, total length, digest, routing/session metadata, correlation
+and capture/identity/revision before accepting assembly. A separate content-free
+`final: true` body marker must still follow; terminal markers never fragment.
+
+Both encoders return **nil output on encoding failure**, even if earlier output
+could fit or an invalid later candidate lay beyond the selected prefix.
+Stale, unavailable, missing/private, wrong-kind or failed reads use the existing
+correlated, content-free refusal, with no successful empty substitute:
+
+```json
+{"type":"error","in_reply_to":37,"payload":{"code":"thread.query_failed","message":"thread query could not complete","retryable":true}}
+```
+
+Only all required data/validated assembly followed by the separate success
+marker completes the requested expansion body/page at that capture. Fragment
+`continuation.final`, partial delivery, errors and cancellation certify no
+request completion. Neither expansion `version` nor its success marker grants
+full-thread coverage, advances a full-thread recovery checkpoint or changes a
+live join watermark. Existing complete-query and live-update contracts remain
+unchanged.
 
 ### `conversations`
 

@@ -167,4 +167,4 @@ cancellable sender as readiness would advertise services that do not exist.
 Because `List` can wait on this mutex, relay cancellation retires its result
 without releasing read capacity until the
 original reader returns. Starting a replacement reader on every cancel would
-accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency.md#hosted-discovery-and-ordered-delivery).
+accumulate blocked goroutines. See [hosted discovery concurrency](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).

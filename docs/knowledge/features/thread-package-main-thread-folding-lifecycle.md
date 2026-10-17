@@ -202,7 +202,7 @@ Session reset can let Claude cancel a foreground call before daemon closure:
 an error `tool_result` then leaves the call `failed`, and the later cancelled
 `turn_end`/divider cannot replace that first terminal with `interrupted`.
 Assert settlement against raw terminal facts rather than a checkpoint's name;
-the [retained shadow capture](thread-package.md#shadow-lifecycle-and-evidence)
+the [retained shadow capture](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
 requires this non-success closure before its divider.
 
 `main_turn_opened` records an explicit opening without a row. In legacy logs,

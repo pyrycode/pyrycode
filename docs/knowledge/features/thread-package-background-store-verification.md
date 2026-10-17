@@ -106,7 +106,7 @@ it checks pointer reuse, borrowed content and mutation of detached results.
 Retain internal pointers after text-buffer initialization to prove borrowed
 Content ownership; detached `Fold.Items` snapshots can stay correct while
 reusable buffers corrupt old publications. See the
-[text-buffer ownership checks](thread-package-main-thread-folding-validation.md#validation-and-testing).
+[text-buffer ownership checks](thread-package-main-thread-folding-validation-replay.md#replay-rendering-and-ingestion-validation).
 `BenchmarkPublicationPhases` isolates capture/comparison from replay, checkpoint
 I/O, query preparation and output encoding; see the
 [bounded comparison evidence](../../specs/architecture/3388-immutable-publication.md#performance-evidence).

@@ -4,13 +4,18 @@ Part of the [background store](thread-package-background-store.md) overview.
 
 ## Isolation and lifecycle
 
-One worker owns each conversation's fold, completed progress and certificate
-writes. It runs replay and the same reader's `Tail` synchronously, serializing
-feed callbacks, capture and publication; no tail helper goroutine or checkpoint
-timer remains. Items, pending reports, unresolved parents and join state are
-private to that conversation. The store mutex protects worker identities,
-publications and scalar lifecycle records; history/certificate I/O, folding,
-snapshot copying and joining happen outside it. Paused replay therefore leaves
+One worker owns each conversation's fold, completed progress and checkpoint and
+certificate writes. Replay runs synchronously; the same reader's `Tail` then
+runs in one forwarding goroutine. It borrows at most one bounded chunk, sends
+it over an unbuffered channel and awaits the worker's acknowledgement before
+returning from the callback. Both waits honor cancellation. Only the worker
+feeds, captures, publishes and exports the fold, processing checkpoint deadlines
+between completed feed steps. Retirement cancels and joins the forwarder and
+stops the timer before final persistence and completion. Items, pending reports,
+unresolved parents and join state are private to that conversation. The store
+mutex protects worker identities, publications and scalar lifecycle records;
+history/checkpoint/certificate I/O, folding, snapshot copying and joining happen
+outside it. Paused replay therefore leaves
 appends and other conversations' processing and snapshot lookup free to progress.
 
 `threadShadow.follow` polls `Store.Status` every 50 ms for readiness, consumed
@@ -19,7 +24,16 @@ version and private activity without traversing or copying items/content.
 nil items do not establish inactivity. Load/retry and quiescent unload decisions
 use the captured status, taken before publication can wait on delivery. Retirement
 retains that consumed boundary so a later append still triggers reload. Activity
-transitions and elapsed time do not write certificates.
+transitions do not flush. After initial replay a 30-second timer persists changed
+consumed versions, including version-only progress or a change followed by
+silence. Publications cannot postpone its deadline; unchanged intervals perform
+no write. Failed attempts retain pending latest internal records independently
+of publication capture and retry after another interval without catch-up bursts.
+They emit one fixed content-free warning per attempt and leave usability and
+publication intact. Periodic checkpoint state remains dirty; scalar certificates
+are written at load and joined retirement. Only item-record appends are
+incremental; complete state-file replacements may grow with the manifest and
+private maps. See [checkpoint cadence](thread-package-cache-and-epochs.md#worker-checkpoint-cadence-and-retained-changes).
 
 `Changes` captures the immutable publication, retained ranges and notification
 channel under the same mutex used by publication. Publication closes/replaces
@@ -43,9 +57,14 @@ encoded byte accounting cannot bound a substring that pins an accumulated
 message's backing allocation.
 
 `Unload(conversationID) error` marks the worker retiring, clears its publication,
-cancels and joins it, certifying its last complete captured progress with
-`Clean: true` before removing its identity. Unchanged V still requires this
-replacement. Tail consumption unregisters on exit; items and private continuation
+cancels and joins it, persisting its last fully consumed eligible fold boundary
+before removing its identity. History, index and complete checkpoint state must
+be durable before the scalar certificate is written; successful retirement
+certifies both surfaces `Clean: true`. Unchanged V and empty version zero still
+require final persistence. A final transaction or scalar-certificate failure
+returns `ErrPersistence` and invalidates both clean claims with contained
+best-effort removal and directory sync; failed invalidation never authorizes
+trust. Tail consumption unregisters on exit; items and private continuation
 state are released while scalar lifecycle results remain. Other conversations
 continue independently. `Load`/`Retry` return `ErrUnloading` during retirement.
 After unload returns, lookup is not loaded unless explicitly reopened
@@ -69,13 +88,22 @@ mapping it to generic fold failure would prevent retirement from certifying the
 preceding complete progress. `TestStoreCheckpointCancelledFold` checks the saved
 version excludes the interrupted chunk. Certification also requires the original
 load context to remain uncancelled: parent cancellation racing unload/shutdown
-cannot authorize a clean write. Interrupted recovery and other fold failures
-remain unavailable. Lifecycle persistence failures remain `ErrPersistence`,
-including after the worker has been unloaded.
+cannot authorize a clean write. Eligibility checked before final persistence
+can become stale during I/O, so `workerCheckpoint.commit` rechecks the original
+parent around scalar certification and invalidates both surfaces if cancellation
+wins. `TestStoreCheckpointFinalCancellation` cancels during final state
+replacement to exercise that race. Replacement hooks observe both checkpoint
+state and scalar writes; a retirement test barrier must gate only once to avoid
+closing the same channel twice. Interrupted recovery, source/render failure and
+failed or partially consumed feeds never certify clean. A failed feed may have
+mutated the fold without completing its boundary; exporting it with the previous
+version would falsely certify that progress. Lifecycle persistence failures
+remain `ErrPersistence`, including after the worker has been unloaded.
 
 `Shutdown() error` closes admission, cancels and joins all workers, and clears
 loaded state after independently certifying each remaining worker's complete
-progress, including unchanged V. Already-unloaded certificates are never rewritten,
+progress and both clean surfaces, including unchanged V and empty version zero.
+Already-unloaded checkpoints and certificates are never rewritten,
 and history committed while unloaded is not folded until reopening. Shutdown
 attempts healthy workers even when another final write fails: the failed
 conversation stays uncertified while healthy ones become clean and retain their
@@ -89,7 +117,7 @@ from restoring released state. Cancelling a worker context alone leaves an
 unavailable view until retry or unload; it does not shut down other conversations.
 
 The daemon owns [startup discovery, retirement and final committed-version
-draining](thread-package.md#shadow-lifecycle-and-evidence). `Store.Shutdown`
+draining](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence). `Store.Shutdown`
 cancels workers; callers must finish producer draining and tail catch-up before
 invoking it to preserve final commits. Status-only polling preserves this order:
 after producers finish, shadow shutdown discovers final activity and joins

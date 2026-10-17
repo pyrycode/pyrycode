@@ -101,8 +101,8 @@ Claude Agent/Task calls own [agent lifecycle items](thread-package-agents-and-ba
 Parented text, ordinary tools and nested agents fold in [child lanes](thread-package-agents-and-background-work.md#parent-repair).
 Linked Claude/legacy Bash calls retain ordinary identity with
 [background shell lifecycle](thread-package-agents-and-background-work.md#background-shells).
-[Cache persistence and epochs](thread-package.md#cache-and-epochs) belong to the
-background store. [Daemon shadow wiring](thread-package.md#shadow-lifecycle-and-evidence)
+[Cache persistence and epochs](thread-package-cache-and-epochs.md#cache-and-epochs) belong to the
+background store. [Daemon shadow wiring](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
 folds history without app publication; thread protocol and read-mark migration
 remain downstream.
 

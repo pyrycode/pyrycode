@@ -266,6 +266,11 @@ var inboundTypes = map[string]string{
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
 // a request verb mis-filed as reply/push/etc. is visually obvious in review.
 var excludedTypes = map[string]string{
+	"TypeThreadReadToolBody": "pending handler (#3522)",
+	"TypeThreadReadChildren": "pending handler (#3522)",
+	"TypeThreadToolBody":     "reply (declared ahead of handlers)",
+	"TypeThreadChildren":     "reply (declared ahead of handlers)",
+
 	"TypeAppAssetRequest":   "request (declared; handler pending #3247)",
 	"TypeAppAPIRequest":     "request (declared; handler pending #3247)",
 	"TypeAppResponseCredit": "request (declared; handler pending #3247)",
