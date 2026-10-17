@@ -84,6 +84,11 @@ armed can block the observation meant to prove reader isolation.
 `TestCatchUpIsolation` and `TestStoreQueriesRetirementIsolation` use this pattern;
 `TestStoreToolBodyCapture` instead tags the held request's content lookup so other
 readers can proceed through publication, unload/replacement and cancellation.
+Do not block inside `sync.Once.Do`: its mutex also blocks later visitors while
+the callback waits. Use an atomic first-entry guard to hold only the intended
+reader. `TestChildPageCaptureLifecycle` requires a concurrent `Snapshot` of the
+same publication to finish before advancing history; advancing first can replace
+the hooked index and conceal a deadlocking barrier.
 
 `TestAffectedPublicationOracle` compares affected capture with whole-thread
 `difference` after single-entry and chunked corpus feeds, including private
@@ -115,6 +120,17 @@ result metadata, disregarding only item order (align independently generated
 Store epochs). `TestIncrementalTreeOwnership` retains lookup buckets and roots
 through concurrent reads and later membership/order updates, checking AVL
 ordering, balance and subtree sizes.
+
+Synthetic withdrawal fixtures must keep `Fold.publicVisible` consistent with
+child ownership and claimed-delivery evidence. `Fold.Render`, and therefore the
+independent `Fold.Items` oracle, derives membership from those facts rather than
+that visibility map. Changing only the map compares an impossible publication
+against a still-public row. `TestChildPageIncrementalOracle` updates both the
+map and `Fold.messages` suppression evidence, then filters/sorts `Fold.Items`
+independently for direct-parent pages; it also exercises late child resolution
+through real feed entries. See the
+[child-page contract](thread-package-background-store-queries.md#revision-scoped-direct-child-summaries)
+for strict tuple limits and publication-bound continuation.
 
 `BenchmarkStorePublication` measures state-changing additions and fixed appends
 with 50,000 prepared public items, including affected capture, Changes
