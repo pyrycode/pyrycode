@@ -121,6 +121,41 @@ reaches that field. A file change's `ToolUpdate` content is each changed
 path followed by that change's diff exactly as Codex sent it, joined by
 blank lines; nothing is read from disk to reconstruct it.
 
+`mcpToolCall` occupies only `mappedItemTypes` (#3585). `mcpToolCallItem`
+maps `item/started` to one `ToolStart` with the item id as `ToolCallID`,
+kind `other`, and a `server/tool` title capped at 256 bytes with valid UTF-8.
+`RawInput` preserves the opaque `arguments` JSON value, including objects,
+arrays, scalars and null, without wrapping or truncating it. Existing
+[turnbridge](turnbridge-package.md) input projections bound its display on
+the wire. `item/mcpToolCall/progress` occupies only `ignoredMethods` and
+emits nothing: forwarding progress as updates would create extra results
+because every `ToolUpdate` becomes a `tool_result` frame.
+
+`item/completed` emits one `ToolUpdate` for the same id. `toolStatus` maps
+`completed` to completed and `failed` or an out-of-contract status to failed.
+A non-null `error` selects `error.message`, even when that string is empty;
+otherwise, concatenate string `text` fields from `result.content` objects
+whose `type` is `"text"`, in array order with no separators. Skip all other
+elements, including non-objects and text blocks with non-string text. The
+selected error or combined result text is capped at 16 KiB by `truncate`,
+dropping any partial multibyte character at the cut. Empty selected text
+(including absent or null results) leaves `Content` nil; nonempty text becomes
+one `TextContent`. `ResultDetail` stays empty because the content is authored
+by the peer, not composed by the daemon.
+
+Keep `result.content` as `[]json.RawMessage` and decode elements independently:
+decoding the whole array into typed text blocks would reject schema-valid
+scalars or differently shaped elements and lose a valid terminal tool row.
+Malformed JSON, missing required mapping fields or wrong types use the bounded
+`UnrecognizedUndecodable` fallback; valid null arguments remain distinct from
+missing arguments. MCP payloads remain untrusted
+[display data](../../protocol-mobile.md#security-model): metadata, structured
+content and non-text blocks cause no execution, URL/resource fetch, filesystem
+access, payload logging or image/resource decoding. The completed, failed and
+empty-result fixtures in `testdata/handbuilt/mcp_*.jsonl` are schema-derived
+hand-built evidence validated by `TestHandBuiltFramesMatchSchema` and replayed
+by `TestTranslateMCPHandBuilt`; there is no real MCP capture.
+
 **Why `thread/tokenUsage/updated` is on the ignored-for-emission-but-still-read
 list.** It carries a `turnId` and is held (not emitted) until that turn's
 `turn/completed`, at which point the turn's own counts and window ride the
@@ -362,6 +397,14 @@ a shared frame-dispatch loop like this one needs a check for an existing
 fallthrough path before adding a parallel one.
 
 `client_test.go` and the offline capture tests run without a Codex account.
+Validate complete notification frames when adding hand-built fixtures: a valid
+`ThreadItem` alone is insufficient. `item/started` requires `startedAtMs` and
+`item/completed` requires `completedAtMs` in their params. The first MCP fixtures
+omitted these lifecycle timestamps; mapping tests could replay them, but
+`TestHandBuiltFramesMatchSchema` rejected the envelopes. Keep both schema
+validation and event replay so permissive translator decoding cannot hide an
+invalid fixture.
+
 `TestCaptureLive` lives in `capture_live_test.go`, behind `codex_capture`;
 recapture with `go test -tags codex_capture -run TestCaptureLive ./internal/codexsup/`.
 It still requires both `PYRY_CODEX_CAPTURE_BIN` and `PYRY_CODEX_CAPTURE_HOME`
