@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -34,9 +37,10 @@ func requestClaudeUsageWire(t *testing.T, src handlers.ClaudeUsageSource) string
 	return string(env.Payload)
 }
 
-// TestClaudeUsageStore drives claude's lines through a session parser wired to
-// the store exactly as newStreamRunnerFactory wires it, and reads the reply a
-// client would get after each one.
+// TestClaudeUsageStore drives claude's lines through a bare session parser with
+// store.record installed as its usage handler, and reads the reply a client would
+// get after each one. TestStreamRunnerFactory_RecordsClaudeUsage proves the
+// factory installs that handler.
 func TestClaudeUsageStore(t *testing.T) {
 	t.Parallel()
 	clock := time.Date(2026, 10, 17, 12, 0, 0, 0, time.FixedZone("EEST", 3*3600))
@@ -72,6 +76,69 @@ func TestClaudeUsageStore(t *testing.T) {
 	one := `{"state":"observed","observed_at":"2026-10-17T09:01:00Z","seven_day":{"utilization":0,"resets_at":1000}}`
 	if got := requestClaudeUsageWire(t, store); got != one {
 		t.Fatalf("one window: %s, want %s", got, one)
+	}
+}
+
+// TestStreamRunnerFactory_RecordsClaudeUsage runs a real runner built by
+// newStreamRunnerFactory with a store attached and proves a rate_limit_event line
+// on the child's stdout reaches the store. Every other test here installs
+// store.record itself, so it stays green with the factory's handler line deleted.
+func TestStreamRunnerFactory_RecordsClaudeUsage(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	childPath := filepath.Join(dir, "fake-claude.sh")
+	const line = `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790367600,"rateLimitType":"five_hour",` +
+		`"unifiedWindows":{"five_hour":{"utilization":0.44,"resetsAt":1790367600},"seven_day":{"utilization":0.64,"resetsAt":1790575200}}}}`
+	script := "#!/bin/sh\nIFS= read -r initialize\nprintf '%s\\n' '" + line + "'\nexec sleep 3600\n"
+	if err := os.WriteFile(childPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+
+	store := &claudeUsageStore{}
+	runner, err := newStreamRunnerFactory(newStreamTurnSink(8, discardLogger()), "", nil, streamApprovalConfig{usage: store})(sessions.RunnerConfig{
+		ClaudeBin: childPath,
+		WorkDir:   dir,
+		SessionID: "factory-session-3575",
+		Logger:    discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("newStreamRunnerFactory: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	var got protocol.ClaudeUsagePayload
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if got = store.ClaudeUsage(); got.State == protocol.ClaudeUsageStateObserved {
+			break
+		}
+	}
+	if got.State != protocol.ClaudeUsageStateObserved {
+		t.Fatal("store holds no reading after the child's rate_limit_event — the factory did not install the usage handler")
+	}
+	if got.FiveHour == nil || *got.FiveHour.Utilization != 0.44 || got.SevenDay == nil || *got.SevenDay.Utilization != 0.64 {
+		t.Errorf("reading = %+v, want five_hour 0.44 and seven_day 0.64", got)
+	}
+}
+
+// TestClaudeUsageStore_ReplySharesNothing proves a payload handed out of the lock
+// cannot reach back into the stored reading.
+func TestClaudeUsageStore_ReplySharesNothing(t *testing.T) {
+	t.Parallel()
+	store := &claudeUsageStore{}
+	u, at := 0.44, int64(1790367600)
+	store.record(&streamsup.UsageWindow{Utilization: &u, ResetsAt: &at}, nil)
+
+	first := store.ClaudeUsage()
+	*first.FiveHour.Utilization, *first.FiveHour.ResetsAt = 9, 9
+	if again := store.ClaudeUsage(); *again.FiveHour.Utilization != 0.44 || *again.FiveHour.ResetsAt != 1790367600 {
+		t.Fatalf("writing through one reply changed the stored reading to %v/%v", *again.FiveHour.Utilization, *again.FiveHour.ResetsAt)
 	}
 }
 

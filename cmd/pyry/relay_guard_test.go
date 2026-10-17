@@ -851,6 +851,46 @@ const (
 	relayWiringRecv     = "w"
 )
 
+// TestClaudeUsageWiredToTheCompositionRoot pins the links of the usage reading
+// that no behaviour test reaches: runSupervisor mints exactly one claudeUsageStore
+// and hands that same value to the Claude runner config, which feeds it, and to the
+// relay wiring, whose field startRelayV2's request_claude_usage handler reads.
+// TestStreamRunnerFactory_RecordsClaudeUsage proves the factory half. Deleting any
+// link here ships a daemon that answers every request_claude_usage with state none.
+//
+// Fragments are matched on whitespace-collapsed gofmt output, so composite-literal
+// alignment cannot hide or fake a match. They carry no trailing comma: printed
+// without positions, a literal can collapse onto one line and drop its last
+// element's comma. The parseGoFile family's mutation note
+// above applies: mutate the real file, not an overlay.
+func TestClaudeUsageWiredToTheCompositionRoot(t *testing.T) {
+	t.Parallel()
+
+	collapse := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	supervisor := collapse(formattedGoFunc(t, "main.go", "runSupervisor"))
+	if n := strings.Count(supervisor, "claudeUsageStore{"); n != 1 {
+		t.Errorf("runSupervisor mints %d claudeUsageStore values, want exactly 1 — the sessions "+
+			"would feed one store while the relay answers from another.", n)
+	}
+	wants := map[string][]string{
+		supervisor: {
+			"claudeUsage := &claudeUsageStore{}",
+			" usage: claudeUsage",
+			" claudeUsage: claudeUsage",
+		},
+		collapse(formattedGoFunc(t, relayPath, "startRelayV2")): {
+			"protocol.TypeRequestClaudeUsage: handlers.RequestClaudeUsage(w.claudeUsage, logger)",
+		},
+	}
+	for source, fragments := range wants {
+		for _, fragment := range fragments {
+			if !strings.Contains(source, fragment) {
+				t.Errorf("production wiring lacks %q", fragment)
+			}
+		}
+	}
+}
+
 // configSeamSelector returns the receiver identifier and selected name of the sole
 // composite-literal element keyed fieldName, asserting the value is a selector on a
 // plain identifier (`x.Y` — a method value or a struct field). Anything else — a

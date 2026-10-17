@@ -54,10 +54,21 @@ func (s *claudeUsageStore) ClaudeUsage() protocol.ClaudeUsagePayload {
 	}
 }
 
-// claudeUsageWindow copies one window into its wire form, absent for nil.
+// claudeUsageWindow copies one window into its wire form, absent for nil. The
+// values are copied, not the pointers, so a caller holding the payload outside the
+// lock shares nothing with the stored reading.
 func claudeUsageWindow(w *streamsup.UsageWindow) *protocol.ClaudeUsageWindow {
 	if w == nil {
 		return nil
 	}
-	return &protocol.ClaudeUsageWindow{Utilization: w.Utilization, ResetsAt: w.ResetsAt}
+	return &protocol.ClaudeUsageWindow{Utilization: copyOf(w.Utilization), ResetsAt: copyOf(w.ResetsAt)}
+}
+
+// copyOf returns a fresh pointer to *v, or nil for nil.
+func copyOf[T any](v *T) *T {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	return &c
 }
