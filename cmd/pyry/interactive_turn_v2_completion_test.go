@@ -43,9 +43,6 @@ func TestInteractiveTurnEmitterV2_ChildCompletionSequence(t *testing.T) {
 func TestRecordedBackgroundReplyCompletion(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile("../../internal/e2e/realclaude/testdata/background_reply_completion.json")
-	if os.IsNotExist(err) {
-		t.Skip("pending dispatcher live capture and needs-live-artifacts return")
-	}
 	if err != nil {
 		t.Fatal(err)
 	}

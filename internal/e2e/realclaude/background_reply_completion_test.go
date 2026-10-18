@@ -131,7 +131,16 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	if hits, _ := scanner.scan(blob); len(hits) != 0 {
 		t.Fatal("publish deny-scan rejected replay")
 	}
-	for _, path := range []string{filepath.Join(dir, "background_reply_completion.json"), backgroundReplyFixture} {
+	paths := []string{filepath.Join(dir, "background_reply_completion.json"), backgroundReplyFixture}
+	// Only the deny-scanned replay leaves the private capture directory. The
+	// gate retains this copy after its disposable candidate worktree is removed.
+	if evidenceDir := os.Getenv("PYRY_GATE_EVIDENCE_DIR"); evidenceDir != "" {
+		if err := os.MkdirAll(evidenceDir, 0o700); err != nil {
+			t.Fatal("create durable replay directory")
+		}
+		paths = append(paths, filepath.Join(evidenceDir, "background_reply_completion.json"))
+	}
+	for _, path := range paths {
 		if err := os.WriteFile(path, append(blob, '\n'), 0o600); err != nil {
 			t.Fatal("write safe replay")
 		}
