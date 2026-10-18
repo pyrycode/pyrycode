@@ -2,11 +2,10 @@
 
 ## Forward repair and evidence
 
-This plan precedes new production work on `fix/3603-confirmed-mode`, based on
-`2379fb7261d9c9f257a54252fc70237b081a3051`; it preserves the earlier retrospective
-plan. At that base, native `TestCodexConversationLive` executed one, failed one,
-skipped zero: same-session `permission_mode` remained empty. The pool deliberately
-excludes future intent; Codex lacks its optional confirmation reader.
+This plan precedes production work on `fix/3603-confirmed-mode` and preserves
+the retrospective plan. Base `2379fb7261d9c9f257a54252fc70237b081a3051` failed native
+`TestCodexConversationLive`: one executed, one failed, zero skipped; same-session
+`permission_mode` stayed empty. The pool excludes future intent; Codex lacked its reader.
 
 ## Contract and implementation
 
@@ -59,6 +58,10 @@ in the owning streams/session settings knowledge topic during documentation.
 
 Before code: add root-thread fencing, serialized starts, cancellable gate and held-RPC proof.
 After focused checks: condense repeated prose only; design and security unchanged.
+
+Before prompt repair: current `92c507` LIVE failed once (7.14s), confirmed read-only with no tool call; reason unknown.
+Scope no-tools to this turn; request real shell approval for the rig-owned touch, await and honor its decision.
+Security: keep model/effort, modal/file/remote checks, credential isolation, policy and one attempt unchanged.
 
 ## Security review
 
