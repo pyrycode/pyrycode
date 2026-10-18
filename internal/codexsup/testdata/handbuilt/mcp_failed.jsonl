@@ -1,0 +1,2 @@
+{"kind":"notification","method":"item/started","params":{"threadId":"th","turnId":"t","startedAtMs":1000,"item":{"type":"mcpToolCall","id":"mcp-2","server":"example","tool":"lookup","arguments":[1,true],"status":"inProgress"}}}
+{"kind":"notification","method":"item/completed","params":{"threadId":"th","turnId":"t","completedAtMs":2000,"item":{"type":"mcpToolCall","id":"mcp-2","server":"example","tool":"lookup","arguments":[1,true],"status":"failed","error":{"message":"permission denied"},"result":{"content":[{"type":"text","text":"hidden"}]}}}}
