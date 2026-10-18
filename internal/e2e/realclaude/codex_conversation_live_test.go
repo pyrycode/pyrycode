@@ -30,7 +30,7 @@ package realclaude
 // for TestCodexApprovalLive.
 //
 // The approval scenario explicitly selects plan/read-only and confirms the
-// stored mode before either write. An unset mode canonicalizes to default,
+// accepted current-child mode before either write. An unset mode canonicalizes to default,
 // whose workspace-write sandbox correctly permits workspace writes directly.
 
 import (
@@ -181,10 +181,15 @@ func TestCodexConversationLive(t *testing.T) {
 	})
 	drainForReply(t, h.phone, h.initRecv, protocol.TypeSessionSettingsUpdated, reqID, codexSettingsBudget)
 	reqID++
-	if got := requestSessionSettings(t, h, convID, reqID); got.SessionID != sessionID || got.PermissionMode != "plan" {
-		t.Fatalf("session_settings session=%q permission_mode=%q, want session=%q plan/read-only before approval turns", got.SessionID, got.PermissionMode, sessionID)
+	// Codex applies settings on turn/start, not on the settings acknowledgement.
+	staged := runCodexTurn(t, h, convID, reqID,
+		"Do not use tools. Reply with one short word acknowledging this read-only turn.",
+		turnevent.PermissionOptionKindRejectOnce)
+	if staged.modals != 0 {
+		t.Fatalf("read-only staging requested %d permission modals, want a tool-free turn", staged.modals)
 	}
-	reqID++
+	reqID = staged.nextReqID
+	reqID = waitCodexPlanApplied(t, h, convID, sessionID, reqID)
 	// AC 3, declined: the write asks, the answer is no, the file stays absent.
 	declined := fmt.Sprintf("declined-%d.txt", nonce)
 	decline := runCodexTurn(t, h, convID, reqID, touchPrompt(declined),
@@ -211,6 +216,35 @@ func TestCodexConversationLive(t *testing.T) {
 
 func codexQuestionPrompt(nonce int64) string {
 	return fmt.Sprintf("Before answering, use request_user_input to ask exactly one single-select question about which in-memory cache eviction policy I prefer. Offer exactly two options with descriptions and allow a free-text alternative. After I answer, reply with only the option or free-text value I selected. Do not choose for me and do not use another tool. run=%d", nonce)
+}
+
+// waitCodexPlanApplied allows the turn/start response handler to join its
+// notification even when the read loop delivered turn_end before it was scheduled.
+// This only polls wire state; it never sends another turn or relaxes plan/session.
+func waitCodexPlanApplied(t *testing.T, h *perConvHarness, convID, sessionID string, reqID uint64) uint64 {
+	t.Helper()
+	deadline := time.Now().Add(codexSettingsBudget)
+	var got protocol.SessionSettingsPayload
+	for time.Now().Before(deadline) {
+		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+			ID: reqID, Type: protocol.TypeRequestSessionSettings, TS: time.Now().UTC(),
+			Payload: mustJSON(t, protocol.RequestSessionSettingsPayload{ConversationID: convID}),
+		})
+		env := drainForReply(t, h.phone, h.initRecv, protocol.TypeSessionSettings, reqID, time.Until(deadline))
+		reqID++
+		if err := json.Unmarshal(env.Payload, &got); err != nil {
+			t.Fatalf("decode session_settings: %v", err)
+		}
+		if got.SessionID != sessionID {
+			t.Fatalf("session_settings session=%q, want exact session=%q", got.SessionID, sessionID)
+		}
+		if got.PermissionMode == "plan" {
+			return reqID
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("session_settings permission_mode=%q, want plan/read-only before approval turns within %s", got.PermissionMode, codexSettingsBudget)
+	return reqID
 }
 
 // waitCodexLiveModel lets the daemon's asynchronous model read finish before
