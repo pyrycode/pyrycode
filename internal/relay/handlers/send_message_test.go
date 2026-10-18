@@ -1869,11 +1869,9 @@ func TestSendMessage_ClearDropsAttachments(t *testing.T) {
 	}
 }
 
-// TestSendMessage_OnlyTheExactLiteralIsIntercepted covers AC-3: the match is one
-// fixed, case-sensitive, first-position token. Every other text reaches claude
-// byte-for-byte, delivery included. This table is what pins the literal against
-// drift into a prefix match, a case-insensitive compare, or a vocabulary — the
-// security constraint the protocol doc's one stated exception carries.
+// TestSendMessage_OnlyTheExactLiteralIsIntercepted pins the two fixed,
+// case-sensitive first-token exceptions. Other text is queued byte-for-byte,
+// delivery included, without prefix or case-insensitive matching.
 func TestSendMessage_OnlyTheExactLiteralIsIntercepted(t *testing.T) {
 	t.Parallel()
 
@@ -1883,6 +1881,17 @@ func TestSendMessage_OnlyTheExactLiteralIsIntercepted(t *testing.T) {
 		intercept bool
 	}{
 		{"the literal", "/clear", true},
+		{"reset literal", "/reset", true},
+		{"reset surrounding whitespace", " \t/reset\n", true},
+		{"reset with trailing text", "/reset more text", true},
+		{"reset Unicode whitespace", "\u2003/reset\u00a0more", true},
+		{"reset newline boundary", "/reset\nmore", true},
+		{"reset tab boundary", "/reset\tmore", true},
+		{"reset prefix", "/resetfoo", false},
+		{"reset uppercase", "/RESET", false},
+		{"reset mixed case", "/Reset", false},
+		{"reset later token", "please /reset", false},
+		{"reset nonspace boundary", "/reset\u200bmore", false},
 		{"surrounding whitespace is trimmed", "  /clear\n", true},
 		{"first token, with an argument after it", "/clear the decks", true},
 		{"longer command sharing the prefix", "/clearcache", false},
