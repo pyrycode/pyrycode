@@ -100,6 +100,21 @@ type SessionCapabilities struct {
   "confirmation unavailable", not necessarily "nothing resolved", and
   `yolo: false` alone is not evidence that permissions are enforced.
 
+  For Codex, `codexRunner.ConfirmedPermissionMode` (#3603) joins a successful
+  `StartTurn` reply carrying a nonempty turn ID with the matching root-thread
+  `turn/started`, in either order. It reports acceptance of that attempt's
+  exact overrides, not a sandbox echo or the desired settings. The join is
+  fenced by current child/client, generation, translator, thread and attempt
+  epoch. A settings acknowledgement alone never changes confirmed posture;
+  the last accepted mode can remain until the next turn attempt starts.
+  That attempt clears it before I/O, and failed, incomplete, unknown or
+  superseded attempts leave it unavailable. Old-child/old-attempt callbacks
+  cannot restore it; restart, rotation arming (even if aborted), teardown,
+  fresh-session changes and child exit invalidate it. A live but unconfirmed
+  session still returns its exact ID and saved model/effort with the empty
+  mode/false pair. See [Codex runner confirmation](codexsup-package-production-wiring.md#accepted-turn-permission-confirmation-3603)
+  and the [tool-free staging/readback scenario](e2e-realclaude-codex-conversation-live-test-go.md).
+
 - **Optional slice-bearing reports use pointers to keep the reply comparable.**
   The existing read tests
   compare two `SessionSettingsPayload` values with `!=`; a struct-valued field

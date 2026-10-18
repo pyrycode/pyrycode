@@ -467,6 +467,25 @@ func (s *server) turnStart(raw json.RawMessage) (any, func(), *rpcError) {
 			text.WriteString(in.Text)
 		}
 	}
+	// Narrow test-only control: hold this RPC before acknowledgement so runner
+	// tests can exercise a competing caller's cancellation without scheduling luck.
+	if gate := os.Getenv("FAKECODEX_TURN_START_GATE"); gate != "" && strings.Contains(text.String(), "[fakecodex:start-held]") {
+		if err := os.WriteFile(gate+".arrived", []byte("ready"), 0o600); err != nil {
+			return nil, nil, &rpcError{-32603, "turn start gate arrival failed"}
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(gate + ".release"); err == nil {
+				break
+			} else if !os.IsNotExist(err) {
+				return nil, nil, &rpcError{-32603, "turn start gate release failed"}
+			}
+			if time.Now().After(deadline) {
+				return nil, nil, &rpcError{-32603, "turn start gate timed out"}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	turnID := newID()
 	interrupt := make(chan struct{})
 	s.mu.Lock()
