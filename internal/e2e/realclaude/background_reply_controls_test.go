@@ -3,9 +3,11 @@
 package realclaude
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -120,4 +122,79 @@ func backgroundReplyTestLines(frames []string) []dropcapCaptured {
 		lines[i] = dropcapCaptured{Index: i, Raw: []byte(frame)}
 	}
 	return lines
+}
+
+func TestBackgroundReplyReplayTaskPatch(t *testing.T) {
+	for _, patch := range []string{
+		`{"status":"completed","end_time":1234567890123}`,
+		`{ "end_time" : 1234567890123, "status" : "completed" }`,
+	} {
+		frames := []string{
+			`{"type":"assistant","message":{"id":"launch","role":"assistant","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"run_in_background":true}}]}}`,
+			`{"type":"system","subtype":"task_started","task_id":"task","tool_use_id":"agent","task_type":"local_agent"}`,
+			`{"type":"result","subtype":"success"}`,
+			`{"type":"assistant","parent_tool_use_id":"agent","message":{"id":"final","role":"assistant","content":[{"type":"text","text":"pyry-3589-finished"}]}}`,
+			`{"type":"system","subtype":"task_updated","task_id":"task","patch":` + patch + `}`,
+		}
+		replay, indices, _, err := backgroundReplyReplay(t, backgroundReplyTestLines(frames), "agent", "token", 3)
+		if err != nil || len(replay) != len(frames) || len(indices) != len(frames) {
+			t.Fatalf("observed task patch could not retain parser trace: %v", err)
+		}
+		var safe struct {
+			Patch map[string]any `json:"patch"`
+		}
+		if json.Unmarshal([]byte(replay[4]), &safe) != nil || safe.Patch["status"] != "completed" || safe.Patch["end_time"] != float64(0) || strings.Contains(replay[4], "1234567890123") {
+			t.Fatal("task patch did not retain status with a rig-authored timestamp")
+		}
+	}
+}
+
+func TestBackgroundReplyReplayUnknownTaskPatch(t *testing.T) {
+	for _, patch := range []string{`{"unknown_key":"private-patch-sentinel"}`, `{"end_time":"private-patch-sentinel"}`} {
+		frames := []string{`{"type":"system","subtype":"task_updated","task_id":"task","patch":` + patch + `}`}
+		_, _, _, err := backgroundReplyReplay(t, backgroundReplyTestLines(frames), "agent", "token", -1)
+		if err == nil || strings.Contains(err.Error(), "private-patch-sentinel") {
+			t.Fatal("unrecognized or mistyped patch field did not fail closed privately")
+		}
+	}
+}
+
+func TestBackgroundReplyPatchTraceStructure(t *testing.T) {
+	first := `{"first_key":"x"}`
+	other := `{"other_key":"x"}`
+	if len(first) != len(other) {
+		t.Fatal("fixture no longer exercises equal serialized lengths")
+	}
+	a, err := backgroundReplyPatchTrace(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := backgroundReplyPatchTrace(other)
+	if err != nil || reflect.DeepEqual(a, b) {
+		t.Fatal("equal serialized lengths hid different patch keys")
+	}
+	a, err = backgroundReplyPatchTrace(`{"a":1,"b":true}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = backgroundReplyPatchTrace(`{ "b" : true, "a" : 1 }`)
+	if err != nil || !reflect.DeepEqual(a, b) {
+		t.Fatal("JSON key order or whitespace changed patch structure")
+	}
+	var values []map[string]any
+	for _, raw := range []string{"", `null`, `""`, `{}`, `{"a":1}`, `{"a":"1"}`} {
+		value, err := backgroundReplyPatchTrace(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, previous := range values {
+			if reflect.DeepEqual(value, previous) {
+				t.Fatal("patch absence, JSON kind or field type became indistinguishable")
+			}
+		}
+		values = append(values, value)
+	}
+	if _, err := backgroundReplyPatchTrace(`{"private-patch-sentinel":`); err == nil || strings.Contains(err.Error(), "private-patch-sentinel") {
+		t.Fatal("invalid opaque patch did not fail closed privately")
+	}
 }

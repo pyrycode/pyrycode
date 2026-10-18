@@ -46,6 +46,14 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 			slices.Sort(keys)
 			for _, k := range keys {
 				value := x[k]
+				// The observed task patch's timestamp is metadata, not child
+				// completion evidence. Keep its numeric type with a rig value.
+				if k == "end_time" {
+					if _, ok := value.(float64); ok {
+						out[k] = float64(0)
+						continue
+					}
+				}
 				if trace || strings.Contains(" type subtype message id role content parent_tool_use_id session_id event index content_block delta text thinking signature input name tool_use_id is_error run_in_background command prompt description subagent_type partial_json task_id task_type status task_status tasks summary patch is_backgrounded tool_name elapsed_time_seconds terminal_reason error isReplay timeout model ", " "+k+" ") {
 					out[k] = scrub(k, value, trace, normalized)
 				}
@@ -84,6 +92,7 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 		}
 	}
 	var original, replayed []string
+	var traceErr error
 	signature := func(ev turnevent.Event, normalized bool) string {
 		if end, ok := ev.(turnevent.TurnEnd); ok {
 			// Accounting does not participate in text completion or ownership.
@@ -104,6 +113,18 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 		var v any
 		if json.Unmarshal(raw, &v) != nil {
 			t.Fatal("decode parser trace")
+		}
+		if update, ok := ev.(turnevent.BackgroundTaskUpdated); ok {
+			// Patch is JSON carried inside a string. Compare its decoded key/type
+			// structure rather than masking serialized bytes: whitespace and key
+			// order are irrelevant, but a dropped key must remain detectable even
+			// when two serialized strings happen to have equal lengths.
+			patch, err := backgroundReplyPatchTrace(update.Patch)
+			if err != nil {
+				traceErr = err
+				return ""
+			}
+			v.(map[string]any)["Patch"] = patch
 		}
 		b, _ := json.Marshal(scrub("", v, true, normalized))
 		return fmt.Sprintf("%T:%s", ev, b)
@@ -141,6 +162,9 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 		}
 		complete = false
 		_, _ = q.Write(append(safe, '\n'))
+		if traceErr != nil {
+			return nil, nil, alias, fmt.Errorf("task patch trace at source index %d: %w", i, traceErr)
+		}
 		if !reflect.DeepEqual(original, replayed) {
 			return nil, nil, alias, fmt.Errorf("scrubbing changed relevant parser events at source index %d", i)
 		}
@@ -151,4 +175,17 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 		}
 	}
 	return replay, indices, alias, nil
+}
+
+// Preserve absence and JSON type as well as object keys. Private patch values
+// pass through the same scrubber as other trace fields and are never logged.
+func backgroundReplyPatchTrace(patch string) (map[string]any, error) {
+	if patch == "" {
+		return map[string]any{"present": false}, nil
+	}
+	var value any
+	if json.Unmarshal([]byte(patch), &value) != nil {
+		return nil, fmt.Errorf("task patch is not valid JSON")
+	}
+	return map[string]any{"present": true, "value": value}, nil
 }
