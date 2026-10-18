@@ -59,7 +59,7 @@ in the owning streams/session settings knowledge topic during documentation.
 Before code: add root-thread fencing, serialized starts, cancellable gate and held-RPC proof.
 After focused checks: condense repeated prose only; design and security unchanged.
 
-Before prompt repair: current `92c507` LIVE failed once (7.14s), confirmed read-only with no tool call; reason unknown.
+Before prompt repair: current `92c507` initial LIVE attempt failed (7.14s), confirmed read-only with no tool call; reason unknown.
 Scope no-tools to this turn; request real shell approval for the rig-owned touch, await and honor its decision.
 Security: keep model/effort, modal/file/remote checks, credential isolation, policy and one attempt unchanged.
 
