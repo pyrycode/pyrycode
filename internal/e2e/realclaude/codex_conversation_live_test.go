@@ -29,12 +29,9 @@ package realclaude
 // prepareCodexHome rewrites config.toml there on every session start, as it does
 // for TestCodexApprovalLive.
 //
-// permission_mode is deliberately left unset, per the ticket. Read the plan
-// (docs/specs/architecture/2660-codex-live-daemon-turn.md) before changing that:
-// the pool stores an unset mode as "default", which codexTurnOverrides maps to a
-// workspace-write sandbox, so the decline turn may fail with no modal. That
-// failure is the finding the ticket asks to be reported, not a flake to be
-// fixed by picking another mode here.
+// The approval scenario explicitly selects plan/read-only and confirms the
+// stored mode before either write. An unset mode canonicalizes to default,
+// whose workspace-write sandbox correctly permits workspace writes directly.
 
 import (
 	"context"
@@ -170,16 +167,31 @@ func startCodexLiveConversation(t *testing.T) (*perConvHarness, string, string, 
 }
 
 func TestCodexConversationLive(t *testing.T) {
-	h, convID, _, reqID, nonce := startCodexLiveConversation(t)
+	h, convID, sessionID, reqID, nonce := startCodexLiveConversation(t)
+	// Select the read-only posture through the client protocol, then confirm it
+	// before asking for writes that must require an approval round trip.
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeSetSessionSettings,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
+			SessionID:      sessionID,
+			PermissionMode: ptr("plan"),
+		}),
+	})
+	drainForReply(t, h.phone, h.initRecv, protocol.TypeSessionSettingsUpdated, reqID, codexSettingsBudget)
+	reqID++
+	if got := requestSessionSettings(t, h, convID, reqID); got.SessionID != sessionID || got.PermissionMode != "plan" {
+		t.Fatalf("session_settings session=%q permission_mode=%q, want session=%q plan/read-only before approval turns", got.SessionID, got.PermissionMode, sessionID)
+	}
+	reqID++
 	// AC 3, declined: the write asks, the answer is no, the file stays absent.
 	declined := fmt.Sprintf("declined-%d.txt", nonce)
 	decline := runCodexTurn(t, h, convID, reqID, touchPrompt(declined),
 		turnevent.PermissionOptionKindRejectOnce)
 	_, statErr := os.Stat(filepath.Join(h.workdir, declined))
 	if decline.modals == 0 {
-		t.Fatalf("the write turn ended with no permission modal (file present: %v). With permission_mode unset the pool stores %q, "+
-			"which codexTurnOverrides maps to a workspace-write sandbox, so Codex may write without asking; report this on #2660 rather than changing the mode here",
-			statErr == nil, "default")
+		t.Fatalf("the write turn ended with no permission modal in confirmed plan/read-only mode (file present: %v)", statErr == nil)
 	}
 	if !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("%s after a declined modal: stat err = %v, want it absent", declined, statErr)
