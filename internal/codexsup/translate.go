@@ -2,6 +2,7 @@ package codexsup
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -32,7 +33,8 @@ var (
 	mappedMethods = []string{
 		"item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
 		"thread/tokenUsage/updated", "turn/completed", "item/started", "item/completed",
-		"model/rerouted", "warning", "configWarning",
+		"model/rerouted", "warning", "configWarning", "error",
+		"guardianWarning", "deprecationNotice",
 		"turn/moderationMetadata",
 	}
 	// ignoredMethods carry no turn meaning, following streamsup's
@@ -79,11 +81,10 @@ var (
 	// but with no mapping yet. model/verification is here so it is never
 	// silent.
 	unrecognizedMethods = []string{
-		"error", "hook/started", "hook/completed", "turn/plan/updated", "item/plan/delta",
+		"hook/started", "hook/completed", "turn/plan/updated", "item/plan/delta",
 		"model/verification",
 		"modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted",
 		"model/safetyBuffering/updated",
-		"guardianWarning", "deprecationNotice",
 	}
 )
 
@@ -149,7 +150,8 @@ type turnUsage struct {
 }
 
 // Translator maps Codex server notifications onto turn events: the Codex twin
-// of streamsup's parser. It holds per-turn state (usage, reroute target) and
+// of streamsup's parser. It holds per-turn state (usage, reroute target, retry) and
+// remembers the first untrusted-project warning for its entire lifetime. It
 // is not safe for concurrent use; call it from OnNotification, which runs on
 // one goroutine.
 //
@@ -159,9 +161,11 @@ type turnUsage struct {
 // tool input and tool_result text, bounded by acp's line cap and capped by
 // turnbridge on the way to the wire.
 type Translator struct {
-	model    string
-	usage    map[string]*turnUsage
-	rerouted map[string]string
+	model            string
+	usage            map[string]*turnUsage
+	rerouted         map[string]string
+	apiRetryOpen     bool
+	untrustedWarning *[sha256.Size]byte
 }
 
 // NewTranslator returns a translator for turns running on model, the model
@@ -177,6 +181,21 @@ func (t *Translator) SetModel(model string) { t.model = model }
 // An ignored method yields none; a method or item type with no mapping yields
 // one Unrecognized.
 func (t *Translator) Translate(method string, params json.RawMessage) []turnevent.Event {
+	events := t.translate(method, params)
+	if t.apiRetryOpen {
+		for _, event := range events {
+			switch event.(type) {
+			case turnevent.TextChunk, turnevent.ThoughtChunk, turnevent.ToolStart, turnevent.ToolUpdate, turnevent.TurnEnd:
+				// Clear retry before the content or terminal events that resume the turn.
+				t.apiRetryOpen = false
+				return append([]turnevent.Event{turnevent.ApiRetry{Active: false}}, events...)
+			}
+		}
+	}
+	return events
+}
+
+func (t *Translator) translate(method string, params json.RawMessage) []turnevent.Event {
 	switch method {
 	case "item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
 		var p struct {
@@ -198,8 +217,10 @@ func (t *Translator) Translate(method string, params json.RawMessage) []turneven
 		return t.item(method, params)
 	case "model/rerouted":
 		return t.reroute(params)
-	case "warning", "configWarning":
-		return warningBanner(method, params)
+	case "warning", "configWarning", "guardianWarning", "deprecationNotice":
+		return t.warningBanner(method, params)
+	case "error":
+		return t.errorNotification(params)
 	case "turn/moderationMetadata":
 		return moderationMetadata(params)
 	}
@@ -207,6 +228,39 @@ func (t *Translator) Translate(method string, params json.RawMessage) []turneven
 		return nil
 	}
 	return []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexMethod, method, params)}
+}
+
+// errorNotification reports retries or inert provider prose. Completion owns
+// usage-limit and context-window reports, so those errors emit no banner here.
+func (t *Translator) errorNotification(params json.RawMessage) []turnevent.Event {
+	var p struct {
+		Error *struct {
+			Message           *string         `json:"message"`
+			CodexErrorInfo    json.RawMessage `json:"codexErrorInfo"`
+			AdditionalDetails *string         `json:"additionalDetails"`
+		} `json:"error"`
+		WillRetry *bool   `json:"willRetry"`
+		ThreadID  *string `json:"threadId"`
+		TurnID    *string `json:"turnId"`
+	}
+	if json.Unmarshal(params, &p) != nil || p.Error == nil || p.Error.Message == nil ||
+		p.WillRetry == nil || p.ThreadID == nil || p.TurnID == nil {
+		return undecodable(params)
+	}
+	if *p.WillRetry {
+		t.apiRetryOpen = true
+		return []turnevent.Event{turnevent.ApiRetry{Active: true}}
+	}
+	switch errorCategory(p.Error.CodexErrorInfo) {
+	case "usageLimitExceeded", "contextWindowExceeded":
+		return nil
+	}
+	text := *p.Error.Message
+	if p.Error.AdditionalDetails != nil && *p.Error.AdditionalDetails != "" {
+		text += "\n" + *p.Error.AdditionalDetails
+	}
+	text, truncated := truncate(text, maxBannerText)
+	return []turnevent.Event{turnevent.Banner{Level: "error", Text: text, Truncated: truncated}}
 }
 
 // moderationMetadata suppresses only absent, null or empty-container metadata.
@@ -230,9 +284,9 @@ func moderationMetadata(params json.RawMessage) []turnevent.Event {
 // warningBanner carries prose only: targeting and location metadata have no
 // routing, filesystem or turn-state meaning here. Empty required strings are
 // valid; missing or null required strings are not.
-func warningBanner(method string, params json.RawMessage) []turnevent.Event {
+func (t *Translator) warningBanner(method string, params json.RawMessage) []turnevent.Event {
 	var text string
-	if method == "warning" {
+	if method == "warning" || method == "guardianWarning" {
 		var p struct {
 			Message *string `json:"message"`
 		}
@@ -251,6 +305,16 @@ func warningBanner(method string, params json.RawMessage) []turnevent.Event {
 		text = *p.Summary
 		if p.Details != nil && *p.Details != "" {
 			text += "\n" + *p.Details
+		}
+	}
+	if method == "configWarning" && strings.Contains(text, "is marked as untrusted in the effective configuration") {
+		// Compare full validated prose before truncation; distinct notices stay
+		// visible and never replace the first identity. Retain no payload text.
+		identity := sha256.Sum256([]byte(text))
+		if t.untrustedWarning == nil {
+			t.untrustedWarning = &identity
+		} else if *t.untrustedWarning == identity {
+			return nil
 		}
 	}
 	text, truncated := truncate(text, maxBannerText)

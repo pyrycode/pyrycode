@@ -17,7 +17,7 @@ same #2620 runner, one `Translator` per spawn.
 ## The translator's three-list partition
 
 `Translate(method, params)` runs on the caller's goroutine (`OnNotification`),
-holds per-turn state (pending usage, reroute target), and is not safe for
+holds per-turn state (pending usage, reroute target, open retry), and is not safe for
 concurrent use. Every method in `methods.go`'s `serverNotifications`, and
 every schema `ThreadItem` type, sits on exactly one of three package-level
 lists — `mappedMethods`, `ignoredMethods`, `unrecognizedMethods` (and the item
@@ -99,25 +99,150 @@ emits `RateLimited{Status: "rejected"}` first. `model/rerouted` becomes a
 warning `Banner` and keys that turn's `ModelWindows` by the model it moved
 to — a silent downgrade would otherwise pass for the requested model.
 
-`warning` and `configWarning` occupy only `mappedMethods` (#3354).
-`warningBanner` emits exactly one `turnevent.Banner{Level: "warning"}` with
-`StopsTurn: false`: `warning.message` supplies its text; `configWarning.summary`
-supplies its text with a newline and `details` appended only when details
-is a nonempty string. Absent, null or empty details add nothing. The combined
-text is capped at `maxBannerText` (4096 bytes) by `truncate`, which removes
-any partial multibyte character at the cut so the result remains valid UTF-8.
+`error` occupies only `mappedMethods` (#3584). Every valid notification with
+`willRetry: true` emits exactly one `ApiRetry{Active: true}`, including repeated
+retry notifications. `Current` and `Total` remain zero because the pinned schema
+supplies no retry counters. One translator-local boolean tracks the open retry;
+it retains no thread or turn identifier. While open, `Translate` prepends exactly
+one `ApiRetry{Active: false}` before the next emitted `TextChunk`, `ThoughtChunk`,
+`ToolStart`, `ToolUpdate` or completed turn's events. For completion, the falling
+edge precedes the entire event batch, including `RateLimited` when present and
+`TurnEnd`, whether the turn completed, failed or was interrupted. No falling edge
+is emitted without an open retry; completion leaves none for the next turn.
+
+Clear retry status on emitted content or completion, rather than on the next
+notification: warnings, non-retrying error banners, usage updates, compaction,
+ignored notifications and undecodable input do not mean output has resumed and
+leave the retry open. This event-based boundary also covers mapped tools without
+duplicating retry handling in each tool decoder.
+
+With `willRetry: false`, `Translator.errorNotification` normally emits exactly
+one `Banner{Level: "error", StopsTurn: false}`. Text is `error.message` verbatim,
+plus a newline and `error.additionalDetails` only when details is a nonempty
+string. Absent, null or empty details add nothing; an empty message is valid,
+including the leading newline when details are present. `truncate` bounds the
+combined text at `maxBannerText` (4096 bytes), removing a partial multibyte
+character at the cut so the result stays valid UTF-8. `Truncated` is true only
+when cut, and false at or below the cap.
+
+Suppress that non-retrying banner only for `usageLimitExceeded` and
+`contextWindowExceeded`, interpreted by `errorCategory` as a string token or
+the single key of an object variant. Completion already owns those reports:
+`turnCompleted` still emits `RateLimited{Status: "rejected"}` before its single
+error `TurnEnd` for usage-limit rejection, and uses `TurnEndReasonMaxTokens` for
+context-window exhaustion. Other failures retain their existing error category.
+Neither retrying nor non-retrying `error` notifications emit `RateLimited` or
+`TurnEnd` themselves. Usage, model/reroute fields and completion ordering remain
+unchanged apart from the retry falling edge.
+
+Validate the complete notification before changing retry state. Required
+`error` (object), `error.message` (string), `willRetry` (boolean), `threadId` and
+`turnId` (strings) use pointer decoding so missing/null values stay distinct
+from valid empty strings and `false`. Invalid JSON, non-object params,
+missing/null/wrong-type required fields and wrong-type `additionalDetails`
+emit the existing `Unrecognized{Site: UnrecognizedUndecodable}` fallback without
+changing retry state. Its original `Raw` params are capped at
+`maxUnrecognizedRaw` (16 KiB), with UTF-8-safe truncation and `Truncated` when
+cut. Absent/null optional details and `codexErrorInfo` are accepted. Genuinely
+unknown methods keep `UnrecognizedCodexMethod`. Error prose remains inert
+[display text](../../protocol-mobile.md#security-model) and is never logged;
+identifiers and optional `misalignment` metadata confer no routing, filesystem,
+execution or approval action.
+
+The notification examples in `testdata/handbuilt/error_notifications.jsonl` are
+schema-derived hand-built frames, not live captures. `TestHandBuiltFramesMatchSchema`
+validates their envelopes and `TestTranslateErrorFrames` replays them.
+`TestTranslateErrorRetryLifecycle` checks repeated rising edges, single falling
+edges and later turns; `TestTranslateMalformedErrors` checks that rejected input
+preserves an open retry. `TestTranslateErrorBannerBounds` covers joined prose
+and multibyte cuts. `TestTranslateErrorsPreserveCompletion` compares against a
+control translator with pending usage and a reroute: checking only the banner
+would miss accidentally consuming completion state or duplicating terminal
+reports for the suppressed categories.
+
+`warning`, `configWarning`, `guardianWarning` and `deprecationNotice` occupy only
+`mappedMethods` (#3354, #3594), never `ignoredMethods` or `unrecognizedMethods`.
+`Translator.warningBanner` normally emits one `turnevent.Banner{Level: "warning"}`
+with `StopsTurn: false`: `warning` and `guardianWarning` supply `params.message`
+verbatim; `configWarning` and `deprecationNotice` supply `params.summary` with
+a newline and `params.details` appended only when details is a nonempty string.
+Absent, null or empty details add nothing; an empty summary with nonempty details
+therefore produces a leading newline. The combined text is capped at
+`maxBannerText` (4096 bytes) by `truncate`, which removes any partial multibyte
+character at the cut so the result remains valid UTF-8.
 `Truncated` is true when the text exceeded the cap, false at or below it.
 
 Required prose is decoded into `*string`: plain Go strings would turn both
 missing and null fields into the same value as a schema-valid empty string,
 silently accepting malformed warnings. Empty `message` or `summary` is valid;
-missing, null or wrong-type required prose, wrong-type `configWarning.details`,
-invalid JSON and non-object params instead use `undecodable`'s existing bounded,
-UTF-8-safe `UnrecognizedUndecodable` fallback. `threadId`, `path` and `range`
-are omitted from decoding and banner output. Warning prose stays untrusted
+missing, null or wrong-type required prose, wrong-type `details` on either
+summary-based method, invalid JSON and non-object params (including null)
+instead emit one `Unrecognized{Site: UnrecognizedUndecodable}` through
+`undecodable`. Its `Raw` retains the original params, capped at
+`maxUnrecognizedRaw` (16 KiB), with UTF-8-safe truncation and `Truncated` set
+when the cap is exceeded. Target and location fields such as `threadId`,
+`turnId`, `path`, `range` and `stopsTurn` are omitted from decoding and banner
+output. Warning prose stays untrusted
 [display text](../../protocol-mobile.md#security-model); the helper performs
-no routing, filesystem action or payload logging. It holds no state and leaves
-pending usage, reroute targets, the selected model and turn lifecycle unchanged.
+no routing, filesystem action or payload logging. Validation runs before matching
+or changing the warning identity: malformed target-shaped notices always emit
+the bounded fallback, before or after a valid notice, and cannot set or replace
+that identity. Pending usage, reroute targets, the selected model and turn
+lifecycle remain unchanged.
+
+Only `configWarning` deduplicates the deliberate untrusted-project warning (#3599).
+After validation, `Translator.warningBanner` searches the assembled prose
+(`params.summary` plus newline/nonempty `params.details`) for the exact,
+case-sensitive fragment `is marked as untrusted in the effective configuration`.
+The first match emits the normal banner and remembers one SHA-256 digest of
+the complete, untruncated prose. Identical repeats emit no events. Different
+prose remains visible on every occurrence and never replaces the first identity,
+even when it contains the fragment or differs only beyond the 4096-byte banner
+cap. Both matching and hashing happen before truncation: comparing displayed
+text would incorrectly hide distinct notices with the same capped prefix.
+Identity depends on the assembled prose, so changing metadata or dividing the
+same text differently between summary and details does not make a new notice.
+Only the digest is retained; there is no growing cache or retained warning text.
+
+The identity lasts for the `Translator` lifetime, across completed turns and
+model changes. `codexRunner.runOnce` creates a new translator for each app-server
+spawn, including respawn, so that boundary permits the warning again.
+
+`codexHomeConfig` in `cmd/pyry/codex_home.go` sets the top-level
+`suppress_unstable_features_warning = true` before `[features]` (#3598),
+suppressing the unstable-feature warning caused by pyry enabling
+`default_mode_request_user_input`. The feature remains enabled in the isolated,
+daemon-owned home. The workspace deliberately stays untrusted to isolate Codex
+from project-local config, hooks and exec policies, preserving
+[ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md).
+`TestPrepareCodexHome` checks that the true assignment precedes the first TOML
+table and rejects project/trust entries, alongside the existing feature,
+posture, permissions and auth-preservation checks.
+
+Trust-warning deduplication changes no trust or configuration.
+Unrelated warnings still banner on every occurrence. Case/fragment nonmatches,
+matching text on `warning` or other methods, and the method partition retain
+their handling; genuinely unknown methods still emit `UnrecognizedCodexMethod`.
+
+The redacted [PR #3600 startup excerpts](https://github.com/pyrycode/pyrycode/pull/3600)
+were observed live with Codex 0.159.2 in an isolated untrusted home/project:
+the trust fragment arrived in `configWarning.params.summary`, with null `details`.
+The unstable-feature warning arrived in `warning.params.message`, with
+`agent_message_board=true` and suppression unset; it is unaffected by this
+matcher. No personal authentication was read or copied and deployed config was
+unchanged. The unauthenticated turn attempt failed on transport access. The
+[subsequent dispatcher gate](https://github.com/pyrycode/pyrycode/issues/3599#issuecomment-6242825748)
+skipped `TestCodexConversationLive` and `TestCodexQuestionLive` because capture
+settings were absent. Thus both carrying methods/texts are observed startup
+evidence, while authenticated conversation and actual-payload matcher acceptance
+remain unproven by the recorded runs.
+
+`TestTranslateUntrustedWarningLifetime`, `TestTranslateUntrustedWarningIdentity`,
+`TestTranslateUntrustedWarningNonmatches` and
+`TestTranslateUntrustedWarningMalformed` pin lifetime/reset, full-prose identity,
+unchanged nonmatch handling and validation before state changes. These and the
+existing warning checks passed under race detection on Linux; macOS is outside
+this ticket's verification scope.
 
 Completed replies alone do not prove notification coverage: [Mobile
 \#2052](https://github.com/pyrycode/pyrycode-mobile/issues/2052) finalized its
@@ -127,6 +252,15 @@ parser-gap guard; genuinely unknown methods still emit
 `UnrecognizedCodexMethod`. `TestWarningMethodLanes` pins that distinction,
 and `TestTranslateWarningsPreserveTurn` compares repeated warnings against a
 control translator's state and completed-turn output.
+
+`TestTranslateWarnings` and `TestTranslateWarningBounds` validate successful
+examples against the pinned schema, including the required `threadId` in
+`GuardianWarningNotification`. That fixture requirement does not make target
+metadata a translator validation or routing requirement. Use multiline Unicode
+prose to check verbatim warning text: a terminal-escape fixture can pass the
+translator tests while failing `substrate-guard` (#3594).
+`TestTranslateMalformedWarnings` checks prose validation and bounded raw fallback
+for all four methods.
 
 `commandExecution` and `fileChange` items (#2609) become tool events instead
 of `Unrecognized`, so a Codex tool row renders like a Claude one with no
