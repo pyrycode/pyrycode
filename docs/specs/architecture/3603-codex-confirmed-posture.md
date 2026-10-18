@@ -28,6 +28,12 @@ notification-before-response; only the same nonempty turn ID joins the two.
 The raw notification must also name the snapshotted active root thread ID; a
 subagent or other thread in the same child cannot confirm it. The translator
 does not provide this filter, so the confirmation boundary checks it directly.
+Serialize `WriteUserTurn` snapshot through RPC completion with a separate turn
+start mutex: concurrent callers cannot send an older attempt after a newer one
+has confirmed. The reader, lifecycle barriers and notification callbacks never
+take that mutex. Verify the production sink only offers events to its drain and
+does not synchronously reenter `WriteUserTurn` from the app-server read loop;
+cover the ordering with blocked model resolution and actual posted policies.
 Do not add public events or log notification contents. Empty and unknown modes
 remain unconfirmed even though the existing encoder conservatively maps them.
 
@@ -92,7 +98,8 @@ builder change does not edit the documentation-stage knowledge files.
 - [Concurrency] The leaf mutex protects both factors, generations and epoch. It
   is never held across `StartTurn`, translator locking or other blocking calls.
   Every attempt clears authority before I/O, all lifecycle barriers invalidate,
-  and no goroutine is added. Failed/late responses cannot revive prior authority.
+  and no goroutine is added. The separate turn-start mutex orders writes only;
+  lifecycle invalidation never waits for an RPC or acquires that mutex. Failed/late responses cannot revive prior authority.
 - [Threat model] Scope is accurate permission reporting for a current local
   Codex child. Existing relay authorization and actual sandbox/approval enforcement
   remain required and unchanged; reporting never authorizes an operation.
