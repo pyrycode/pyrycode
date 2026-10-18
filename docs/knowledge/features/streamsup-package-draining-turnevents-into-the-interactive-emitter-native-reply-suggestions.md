@@ -188,6 +188,13 @@ away the very answers the prompt asks for. A rejected suggestion shows nothing.
 `TestValidReplyFallbackVoice` and `TestReplyExchangeAssistantKeepsTail` cover
 both.
 Oversized or otherwise invalid output is rejected rather than truncated.
+
+`replyFallbackRejection` exposes only fixed `stdout_text_rejection` labels:
+`bounds`, `control`, `words`, `sentences`, `assistant-voice`, or `none` for accepted
+text. Before a decoded result is available after Wait, the diagnostic is
+`unknown`. These labels explain silent rejection without logging generated text,
+changing validation or adding a second inference attempt. See the
+[live diagnostic and staging contract](e2e-realclaude-test-infrastructure.md#test-infrastructure).
 Result receipt alone is insufficient: `replyFallback.run` requires successful
 Wait receipt and an unexpired context before returning validated text. A killed
 or unsuccessfully completed process cannot publish a reply, even if its result

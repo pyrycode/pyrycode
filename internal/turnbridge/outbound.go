@@ -358,6 +358,7 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Seq:             tc.Seq,
 			ParentToolUseID: e.ParentToolCallID,
 			Text:            e.Text,
+			TextComplete:    e.TextComplete,
 		}, true
 	case turnevent.ToolStart:
 		// RawInput is read TWICE and the two readings are independent by design.

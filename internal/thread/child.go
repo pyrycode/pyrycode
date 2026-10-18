@@ -157,6 +157,11 @@ func (f *Fold) childWork(e history.Entry) bool {
 		f.countPublicWork(1)
 		f.saveChild(index, group, parent)
 	}
+	if e.Type == protocol.TypeAssistantDelta && id.TextComplete && st.textNonblank &&
+		!slices.Contains(id.Truncated, "text_complete") && !slices.Contains(id.Dropped, "text_complete") && st.text >= 0 {
+		f.setOutcome(st.text, f.outcome(e, "done", "completion"))
+		f.closeText(st, e.ID)
+	}
 	if id.ToolUseID != "" && saved.call.item >= 0 {
 		f.saveChild(saved.call.item, group, parent)
 		if saved.call.terminal != nil && saved.call.shell == nil && !saved.call.launcher {

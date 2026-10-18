@@ -5,6 +5,18 @@ Infrastructure, staging and evidence contracts for the
 
 ## Test infrastructure
 
+A background completion witness must establish release order, not merely final
+prose after the main result. `TestRealClaude_BackgroundReplyCompletion` serializes
+its release with recorder writes, saves the next source index, and requires a
+successful child tool result echoing a rig-only token before attributed final
+text. A pre-release final, wrong tool or failed result cannot prove the boundary.
+The committed scrubbed replay replaces identifiers/prose with rig-authored values
+and retains source ordering and loss counts; original stdout stays private.
+Persistent production parsers compare original and scrubbed relevant events at
+every source index. A final-frame-only check would miss preceding partial-block
+state that suppresses the settled companion. See [child completion](thread-package-agents-and-background-work.md#parent-repair)
+and [capture evidence](development-verification-captures-and-live-evidence.md).
+
 Source citation edits can break exact comparisons with historical capture prose.
 `TestDropcapFixtureIsACapture` normalizes only the two filename/position labels
 recognized by `dropcapHistoricalCitationLabels` before comparing recorded prose
@@ -227,7 +239,8 @@ that never participates in the live proof.
 refuses non-stream native-probe launches. Fallback disables native generation and
 removes `--prompt-suggestions` only on the persistent child.
 `TestInteractiveStream_FallbackReplySuggestionSetThenClear` completes one
-exchange, then waits up to 35 seconds after idle: two for native priority,
+exchange staged with a short tool-free yes/no closing question about adding a
+table-driven Go test, then waits up to 35 seconds after idle: two for native priority,
 30 for the production fallback including termination, and three for transport
 and scheduling. The native probe's window is independent. Require a UTF-8
 single-line nonempty reply for `suggestConvID`, ≤240 characters/1024 bytes,
@@ -235,6 +248,12 @@ then `suggested_reply: null` at a
 higher revision after accepted input. Authenticated absence is FAIL. Both tests
 run under `make e2e-realclaude` and
 [passed a counted gate](https://github.com/pyrycode/pyrycode/issues/2856#issuecomment-6009817217).
+
+A broad request for suggested tasks can legitimately yield text rejected by the
+unchanged word/sentence/voice checks. Stage an unambiguous short human answer;
+retain strict set/clear assertions, silent rejection and one inference attempt.
+The wrapper's bounded nonblank single-line UTF-8 check does not establish the
+full daemon validator's word, sentence and speaker eligibility.
 
 The fallback's 29.8-second internal deadline starts before credential lookup
 inside a 30-second total bound. Valid result receipt must be followed by
@@ -328,6 +347,13 @@ Zero retained bytes is valid UTF-8 with no decoded result. `stdout_json_ok`
 means a bounded decoded result, not a valid whole stream; decoded result-success
 and trimmed-text predicates stay separate from Wait success and receipt
 saturation. `decodeReplyFallback` and `validReplyFallback` match production.
+
+`stdout_text_rejection` adds content-free reasons to daemon lifecycle evidence:
+`bounds`, `control`, `words`, `sentences`, `assistant-voice`, `none`, or `unknown`.
+`suggestLifecycle` exports `none` only alongside `stdout_text_ok=true`, and a
+known rejection only alongside false. Missing, contradictory or arbitrary values
+stay `unknown`; never forward generated text as a diagnostic reason.
+`TestSuggestLifecycleRejection` pins this consistency/privacy boundary.
 
 `suggestLifecycle` uses `suggestLogScalars` to scan complete daemon records with
 quote/escape awareness before selecting the wrapper PID. Quoted attribute

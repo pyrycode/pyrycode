@@ -6,7 +6,7 @@ import (
 )
 
 // checkpointSchema must change whenever the checkpoint document format changes.
-const checkpointSchema = 1
+const checkpointSchema = 2
 
 // CheckpointState is the private continuation part of a reference fold checkpoint.
 // ItemIDs is the complete creation-ordered manifest for the separate item records.
@@ -109,12 +109,13 @@ type checkpointTurnRef struct {
 	Ref int           `json:"ref"`
 }
 type checkpointTurn struct {
-	Key      checkpointKey               `json:"key"`
-	Opening  uint64                      `json:"opening"`
-	Text     int                         `json:"text"`
-	Calls    map[string]int              `json:"calls"`
-	Finished map[string]checkpointMarker `json:"finished"`
-	End      int                         `json:"end"`
+	Key          checkpointKey               `json:"key"`
+	Opening      uint64                      `json:"opening"`
+	Text         int                         `json:"text"`
+	TextNonblank bool                        `json:"text_nonblank"`
+	Calls        map[string]int              `json:"calls"`
+	Finished     map[string]checkpointMarker `json:"finished"`
+	End          int                         `json:"end"`
 }
 type checkpointMainCall struct {
 	Shell    int           `json:"shell"`

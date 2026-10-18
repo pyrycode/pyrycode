@@ -17,13 +17,14 @@ type mainKey struct {
 	turn   string
 }
 type mainTurn struct {
-	key      mainKey
-	opening  uint64
-	text     int
-	textSlot int // one-based slot in Fold.openTexts; zero for untracked/child text
-	calls    map[string]*mainCall
-	finished map[string]*mainCallMarker
-	end      *mainOutcome
+	key          mainKey
+	opening      uint64
+	text         int
+	textNonblank bool // current paragraph contains an admitted non-whitespace fragment
+	textSlot     int  // one-based slot in Fold.openTexts; zero for untracked/child text
+	calls        map[string]*mainCall
+	finished     map[string]*mainCallMarker
+	end          *mainOutcome
 }
 type mainCall struct {
 	shell    *agentCall
@@ -59,14 +60,15 @@ func (f *Fold) countClosureWork(n int) {
 
 // mainIdentity also validates optional identity-loss markers on recorded facts.
 type mainIdentity struct {
-	TurnID     string   `json:"turn_id"`
-	ToolUseID  string   `json:"tool_use_id"`
-	ToolCallID string   `json:"tool_call_id"`
-	Parent     string   `json:"parent_tool_use_id"`
-	ParentCall string   `json:"parent_tool_call_id"`
-	Opening    *uint64  `json:"turn_opened_entry_id"`
-	Truncated  []string `json:"truncated_fields"`
-	Dropped    []string `json:"dropped_fields"`
+	TurnID       string   `json:"turn_id"`
+	ToolUseID    string   `json:"tool_use_id"`
+	ToolCallID   string   `json:"tool_call_id"`
+	Parent       string   `json:"parent_tool_use_id"`
+	ParentCall   string   `json:"parent_tool_call_id"`
+	Opening      *uint64  `json:"turn_opened_entry_id"`
+	Truncated    []string `json:"truncated_fields"`
+	Dropped      []string `json:"dropped_fields"`
+	TextComplete bool     `json:"text_complete"`
 }
 type mainRuntime struct {
 	TurnID     string    `json:"turn_id"`
@@ -225,6 +227,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		return true
 	}
 	if e.Type == protocol.TypeAssistantDelta {
+		st.textNonblank = (st.text >= 0 && st.textNonblank) || strings.TrimSpace(summary) != ""
 		if st.text >= 0 {
 			f.countPublicWork(1) // inspected append candidate, including empty deltas
 			item := &f.items[st.text]
@@ -357,6 +360,7 @@ func (f *Fold) closeText(st *mainTurn, rev uint64) {
 	}
 	f.countClosureWork(1) // release the coalescing row reference, including inactive text
 	st.text = -1
+	st.textNonblank = false
 }
 func (f *Fold) applyTerminal(call *mainCall) {
 	if call.item < 0 || call.terminal == nil || call.launcher || (call.shell != nil && call.shell.linked) {

@@ -10,6 +10,8 @@ type TextChunk struct {
 	MessageID        string
 	ParentToolCallID string
 	Text             string
+	// TextComplete records an observed complete attributed assistant text block.
+	TextComplete bool
 }
 
 // ThoughtChunk is streaming reasoning ("thinking") text, grouped by message.

@@ -153,7 +153,7 @@ type checkpointExporter struct {
 
 func (x *checkpointExporter) turn(p *mainTurn) int {
 	return x.turns.ref(p, func(p *mainTurn) checkpointTurn {
-		d := checkpointTurn{Key: checkpointMainKey(p.key), Opening: p.opening, Text: p.text, End: x.outcome(p.end)}
+		d := checkpointTurn{Key: checkpointMainKey(p.key), Opening: p.opening, Text: p.text, TextNonblank: p.textNonblank, End: x.outcome(p.end)}
 		if p.calls != nil {
 			d.Calls = make(map[string]int)
 			for _, id := range checkpointKeys(p.calls) {

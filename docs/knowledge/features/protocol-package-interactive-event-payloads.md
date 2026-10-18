@@ -22,6 +22,13 @@ claude-authored facts with no ACP mapping and no PTY lineage of their own —
 daemon-computed field at all (see below); `tool_denied` is turn-scoped like
 `tool_use`/`tool_result`, the frame it joins on `tool_use_id`.
 
+`AssistantDeltaPayload.TextComplete` preserves observed child-text completion in
+both wire events and raw history. False/absent supplies no evidence for legacy
+history. Only the last transport piece carries true; it completes the scoped
+paragraph rather than its parent Agent. The [protocol contract](../../protocol-mobile.md#assistant_delta)
+and [parent-repair rules](thread-package-agents-and-background-work.md#parent-repair)
+define source validation, rendered `completion` evidence and replay behavior.
+
 ```go
 type TurnStatePayload struct {
     ConversationID string `json:"conversation_id"`
@@ -34,6 +41,7 @@ type AssistantDeltaPayload struct {
     Seq             int    `json:"seq"`                // per-lane, non-negative; each lane starts at zero
     ParentToolUseID string `json:"parent_tool_use_id"` // Agent call's ToolUseID, "" on the main thread (#2329)
     Text            string `json:"text"`               // coalesced chunk, not per-token
+    TextComplete    bool   `json:"text_complete,omitempty"` // observed complete attributed child text
 }
 
 type ToolUsePayload struct {

@@ -283,6 +283,15 @@ create a reasoning-text lane. Repeated empty-parent deltas may repeat this opene
 downstream state transitions de-duplicate publication and the busy tracker stores
 membership rather than a count, so the parser needs no extra lifecycle latch.
 
+A complete attributed child `assistant` line can independently complete prose:
+`emitAssistant` sets `TextChunk.TextComplete` only with a valid nonempty parent,
+nonempty message ID, assistant role and one nonblank text block. A null or absent
+stop reason does not disqualify that observed complete shape. A settled companion
+suppressed after matching streamed deltas supplies no marker; neither partial
+text nor `message_stop` asserts completion. The [background replay proof](thread-package-agents-and-background-work.md#parent-repair)
+requires the full preceding stream sequence: feeding the final line alone into
+a fresh parser could conceal that suppression and falsely certify completion.
+
 The other measured lifecycle, signature, and partial tool-input events remain
 content-free and silent, and partial JSON never competes with the completed
 assistant `tool_use` block as the tool event's owner. Unknown, undecodable, or
