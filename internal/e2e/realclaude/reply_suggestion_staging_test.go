@@ -379,6 +379,30 @@ func TestSuggestCLISourceEvidence(t *testing.T) {
 	}
 }
 
+func TestSuggestLifecycleRejection(t *testing.T) {
+	const base = "msg=reply_fallback.lifecycle pid=42 attempt_ms=10 child_ms=9 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=100 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true result_bytes=100 "
+	for _, reason := range []string{"bounds", "control", "words", "sentences", "assistant-voice"} {
+		got := suggestLifecycle(base+"stdout_text_ok=false stdout_text_rejection="+reason+"\n", 42)
+		if !strings.Contains(got, "stdout_text_rejection="+reason) {
+			t.Fatalf("missing fixed reason %s", reason)
+		}
+	}
+	for _, fields := range []string{
+		"stdout_text_ok=false stdout_text_rejection=private-generated-text",
+		"stdout_text_ok=true stdout_text_rejection=words",
+		"stdout_text_ok=false stdout_text_rejection=none",
+		"stdout_text_ok=false",
+	} {
+		got := suggestLifecycle(base+fields+"\n", 42)
+		if strings.Contains(got, "private-generated-text") || !strings.Contains(got, "stdout_text_rejection=unknown") {
+			t.Fatal("unverified rejection escaped diagnostics")
+		}
+	}
+	if got := suggestLifecycle(base+"stdout_text_ok=true stdout_text_rejection=none\n", 42); !strings.Contains(got, "stdout_text_rejection=none") {
+		t.Fatal("accepted result lost")
+	}
+}
+
 func TestSuggestLifecycleOutput(t *testing.T) {
 	const base = "msg=reply_fallback.lifecycle pid=42 attempt_ms=9810 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 "
 	const output = "output_observed=true wait_ok=false wait_delay=false stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown"

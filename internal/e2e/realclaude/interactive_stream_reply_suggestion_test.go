@@ -647,6 +647,16 @@ func suggestLifecycle(stderr string, pid int) string {
 			for _, key := range []string{"output_observed", "wait_ok", "wait_delay", "stdout_bytes", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok"} {
 				safe = append(safe, key+"="+values[key])
 			}
+			rejection := "unknown"
+			if values["stdout_text_ok"] == "true" && fields["stdout_text_rejection"] == "none" {
+				rejection = "none"
+			} else if values["stdout_text_ok"] == "false" {
+				switch fields["stdout_text_rejection"] {
+				case "bounds", "control", "words", "sentences", "assistant-voice":
+					rejection = fields["stdout_text_rejection"]
+				}
+			}
+			safe = append(safe, "stdout_text_rejection="+rejection)
 			safe = append(safe, "result_bytes="+values["result_bytes"])
 			safe = append(safe, suggestProgressFields(fields)...)
 			safe = append(safe, suggestStderrFields(fields)...)

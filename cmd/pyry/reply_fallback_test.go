@@ -756,7 +756,7 @@ func TestReplyFallbackOutputUnknownWait(t *testing.T) {
 	if got["output_observed"] != false {
 		t.Fatal("invented capture")
 	}
-	for _, key := range []string{"stdout_bytes", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok", "wait_ok", "wait_delay"} {
+	for _, key := range []string{"stdout_bytes", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok", "stdout_text_rejection", "wait_ok", "wait_delay"} {
 		if got[key] != "unknown" {
 			t.Fatalf("invented %s", key)
 		}
@@ -789,6 +789,38 @@ func TestReplyFallbackOutputPredicates(t *testing.T) {
 				if got[key] != want {
 					t.Fatalf("incorrect %s predicate", key)
 				}
+			}
+		})
+	}
+}
+
+func TestReplyFallbackRejectionMetadata(t *testing.T) {
+	for _, tc := range []struct{ name, text, reason string }{
+		{"accepted", "Go ahead and merge it", "none"},
+		{"empty", "", "bounds"},
+		{"bounds", strings.Repeat("x", 241), "bounds"},
+		{"control", "Please\nmerge it", "control"},
+		{"words", "Please also update the docs and the changelog before you open the pull request", "words"},
+		{"sentences", "Merge it. Then cut a release", "sentences"},
+		{"voice", "Would you like me to merge it?", "assistant-voice"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(map[string]any{"type": "result", "result": tc.text})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stream replyFallbackStream
+			_, _ = stream.Write(data)
+			fields := replyFallbackOutput(&stream, true, nil)
+			got := make(map[string]any)
+			for i := 0; i < len(fields); i += 2 {
+				got[fields[i].(string)] = fields[i+1]
+			}
+			if got["stdout_text_rejection"] != tc.reason {
+				t.Fatalf("rejection = %v, want %s", got["stdout_text_rejection"], tc.reason)
+			}
+			if got["stdout_text_ok"] != (tc.reason == "none") {
+				t.Fatal("rejection disagrees with acceptance")
 			}
 		})
 	}

@@ -352,6 +352,7 @@ func (s *replyFallbackStream) progressFields() []any {
 // observations are synchronized independently by progressFields.
 func replyFallbackOutput(stdout *replyFallbackStream, waited bool, waitErr error) []any {
 	var count, capExceeded, utf8OK, jsonOK, resultOK, textOK, waitOK, waitDelay, resultBytes any = "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"
+	textRejection := "unknown"
 	if waited {
 		stdout.finish()
 		stdout.mu.Lock()
@@ -364,11 +365,12 @@ func replyFallbackOutput(stdout *replyFallbackStream, waited bool, waitErr error
 		if stdout.decoded {
 			resultBytes = stdout.resultBytes
 			resultOK = !stdout.result.IsError && (stdout.result.Subtype == "" || stdout.result.Subtype == "success")
-			textOK = validReplyFallback(strings.TrimSpace(stdout.result.Result))
+			textRejection = replyFallbackRejection(strings.TrimSpace(stdout.result.Result))
+			textOK = textRejection == "none"
 		}
 	}
 	return []any{"output_observed", waited, "stdout_bytes", count, "stdout_cap_exceeded", capExceeded,
-		"stdout_utf8_ok", utf8OK, "stdout_json_ok", jsonOK, "stdout_result_ok", resultOK, "stdout_text_ok", textOK,
+		"stdout_utf8_ok", utf8OK, "stdout_json_ok", jsonOK, "stdout_result_ok", resultOK, "stdout_text_ok", textOK, "stdout_text_rejection", textRejection,
 		"result_bytes", resultBytes, "wait_ok", waitOK, "wait_delay", waitDelay}
 }
 
@@ -399,27 +401,32 @@ var replyFallbackLeadIns = []string{
 // sentence, or a short lead-in such as "Thanks!" and one more sentence. A
 // rejected suggestion shows nothing, which beats a draft the user must delete.
 func validReplyFallback(text string) bool {
+	return replyFallbackRejection(text) == "none"
+}
+
+// Only fixed reason codes leave validation; generated text remains private.
+func replyFallbackRejection(text string) string {
 	if text == "" || len(text) > 1024 || !utf8.ValidString(text) || utf8.RuneCountInString(text) > 240 {
-		return false
+		return "bounds"
 	}
 	for _, r := range text {
 		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
-			return false
+			return "control"
 		}
 	}
 	if len(strings.Fields(text)) > replyFallbackMaxWords {
-		return false
+		return "words"
 	}
 	sentences := replyFallbackSentences(text)
 	if len(sentences) > 2 || len(sentences) == 2 && !slices.Contains(replyFallbackLeadIns, replyFallbackNormalize(strings.TrimRight(sentences[0], ".!? "))) {
-		return false
+		return "sentences"
 	}
 	for _, sentence := range sentences {
 		if replyFallbackAssistantVoice(sentence) {
-			return false
+			return "assistant-voice"
 		}
 	}
-	return true
+	return "none"
 }
 
 func replyFallbackNormalize(text string) string {
