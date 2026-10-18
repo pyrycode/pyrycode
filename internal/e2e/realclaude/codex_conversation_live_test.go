@@ -29,12 +29,9 @@ package realclaude
 // prepareCodexHome rewrites config.toml there on every session start, as it does
 // for TestCodexApprovalLive.
 //
-// permission_mode is deliberately left unset, per the ticket. Read the plan
-// (docs/specs/architecture/2660-codex-live-daemon-turn.md) before changing that:
-// the pool stores an unset mode as "default", which codexTurnOverrides maps to a
-// workspace-write sandbox, so the decline turn may fail with no modal. That
-// failure is the finding the ticket asks to be reported, not a flake to be
-// fixed by picking another mode here.
+// The approval scenario explicitly selects plan/read-only and confirms the
+// accepted current-child mode before either write. An unset mode canonicalizes to default,
+// whose workspace-write sandbox correctly permits workspace writes directly.
 
 import (
 	"context"
@@ -170,16 +167,36 @@ func startCodexLiveConversation(t *testing.T) (*perConvHarness, string, string, 
 }
 
 func TestCodexConversationLive(t *testing.T) {
-	h, convID, _, reqID, nonce := startCodexLiveConversation(t)
+	h, convID, sessionID, reqID, nonce := startCodexLiveConversation(t)
+	// Select the read-only posture through the client protocol, then confirm it
+	// before asking for writes that must require an approval round trip.
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeSetSessionSettings,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
+			SessionID:      sessionID,
+			PermissionMode: ptr("plan"),
+		}),
+	})
+	drainForReply(t, h.phone, h.initRecv, protocol.TypeSessionSettingsUpdated, reqID, codexSettingsBudget)
+	reqID++
+	// Codex applies settings on turn/start, not on the settings acknowledgement.
+	staged := runCodexTurn(t, h, convID, reqID,
+		"For this turn only, do not use tools. Reply with one short word acknowledging this read-only turn.",
+		turnevent.PermissionOptionKindRejectOnce)
+	if staged.modals != 0 {
+		t.Fatalf("read-only staging requested %d permission modals, want a tool-free turn", staged.modals)
+	}
+	reqID = staged.nextReqID
+	reqID = waitCodexPlanApplied(t, h, convID, sessionID, reqID)
 	// AC 3, declined: the write asks, the answer is no, the file stays absent.
 	declined := fmt.Sprintf("declined-%d.txt", nonce)
 	decline := runCodexTurn(t, h, convID, reqID, touchPrompt(declined),
 		turnevent.PermissionOptionKindRejectOnce)
 	_, statErr := os.Stat(filepath.Join(h.workdir, declined))
 	if decline.modals == 0 {
-		t.Fatalf("the write turn ended with no permission modal (file present: %v). With permission_mode unset the pool stores %q, "+
-			"which codexTurnOverrides maps to a workspace-write sandbox, so Codex may write without asking; report this on #2660 rather than changing the mode here",
-			statErr == nil, "default")
+		t.Fatalf("the write turn ended with no permission modal in confirmed plan/read-only mode (file present: %v)", statErr == nil)
 	}
 	if !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("%s after a declined modal: stat err = %v, want it absent", declined, statErr)
@@ -199,6 +216,35 @@ func TestCodexConversationLive(t *testing.T) {
 
 func codexQuestionPrompt(nonce int64) string {
 	return fmt.Sprintf("Before answering, use request_user_input to ask exactly one single-select question about which in-memory cache eviction policy I prefer. Offer exactly two options with descriptions and allow a free-text alternative. After I answer, reply with only the option or free-text value I selected. Do not choose for me and do not use another tool. run=%d", nonce)
+}
+
+// waitCodexPlanApplied allows the turn/start response handler to join its
+// notification even when the read loop delivered turn_end before it was scheduled.
+// This only polls wire state; it never sends another turn or relaxes plan/session.
+func waitCodexPlanApplied(t *testing.T, h *perConvHarness, convID, sessionID string, reqID uint64) uint64 {
+	t.Helper()
+	deadline := time.Now().Add(codexSettingsBudget)
+	var got protocol.SessionSettingsPayload
+	for time.Now().Before(deadline) {
+		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+			ID: reqID, Type: protocol.TypeRequestSessionSettings, TS: time.Now().UTC(),
+			Payload: mustJSON(t, protocol.RequestSessionSettingsPayload{ConversationID: convID}),
+		})
+		env := drainForReply(t, h.phone, h.initRecv, protocol.TypeSessionSettings, reqID, time.Until(deadline))
+		reqID++
+		if err := json.Unmarshal(env.Payload, &got); err != nil {
+			t.Fatalf("decode session_settings: %v", err)
+		}
+		if got.SessionID != sessionID {
+			t.Fatalf("session_settings session=%q, want exact session=%q", got.SessionID, sessionID)
+		}
+		if got.PermissionMode == "plan" {
+			return reqID
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("session_settings permission_mode=%q, want plan/read-only before approval turns within %s", got.PermissionMode, codexSettingsBudget)
+	return reqID
 }
 
 // waitCodexLiveModel lets the daemon's asynchronous model read finish before
@@ -268,7 +314,8 @@ func setCodexLiveModel(t *testing.T, h *perConvHarness, sessionID, convID string
 // touchPrompt asks Codex to create name in its working directory, which is the
 // conversation's workspace (the daemon workdir, since the create named no cwd).
 func touchPrompt(name string) string {
-	return "Use your shell tool to run `touch " + name + "` in the current directory, then reply done."
+	return "Use your shell tool to request user approval to run `touch " + name + "` in the current directory. " +
+		"Wait for the decision. If denied, stop without creating the file; if approved, run the command, then reply done."
 }
 
 // codexTurn is what runCodexTurn saw between its send and the turn's end.

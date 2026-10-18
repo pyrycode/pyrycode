@@ -177,8 +177,10 @@ mode explicitly set gets the `default`/`acceptEdits` row (`workspaceWrite`,
 no modal for an in-workspace write), not the read-only row this table's last
 line describes; that row only fires for a mode hand-constructed outside
 `canonicalSettings`. #2660's daemon-level live test assumed the opposite —
-that leaving a conversation's mode unset yields read-only — and found this
-by reading `canonicalPermissionMode` rather than the table alone.
+that leaving a conversation's mode unset yields read-only. The #3589 branch
+and base live failures later observed the declined file present without a
+modal. Approval tests must explicitly select and confirm `plan`; see the
+[daemon live scenario](e2e-realclaude-codex-conversation-live-test-go.md).
 
 The YOLO bit is read before the mode, mirroring `claudeSettingsArgs`. The
 posture is never empty: Codex keeps a `turn/start` override for the
@@ -210,6 +212,44 @@ came from the committed `codex_app_server_protocol.schemas.json`'s
 correction of an assumption that it held only server-request types. Check
 the committed bundle before assuming a `v2` request type is missing from
 it and needs regenerating.
+
+### Accepted-turn permission confirmation (#3603)
+
+`codexRunner.ConfirmedPermissionMode` implements the optional
+`confirmedPermissionModeReader` consumed by
+`runSettingsPool.ConfirmedPermissionModeFor`. Stored settings and a successful
+`set_session_settings` acknowledgement describe future intent only. A known
+mode requires both a successful `Client.StartTurn` reply with a nonempty turn
+ID and a matching root-thread `turn/started` notification, in either order.
+This confirms acceptance of the exact snapshotted overrides; the RPC does not
+echo the sandbox posture. Returning saved `plan` instead would falsely report
+read-only while a workspace-write turn could be starting.
+
+The join is fenced by current client, child generation, the child-specific
+translator, active root thread and monotonic turn-attempt epoch. One factor
+alone, mismatched IDs, unknown modes and failed starts provide no confirmation.
+`beginPermissionAttempt` clears previous authority before `StartTurn` I/O;
+late replies or notifications from a superseded attempt cannot restore it.
+Changing future mode alone can leave the last accepted mode visible until
+that next attempt begins; it never confirms the new choice.
+
+Bind/unbind, restart, fresh-session changes, rotation arming and teardown
+invalidate confirmation. Aborting rotation does not revive it. A closed
+`Client.Done()` makes the reading unavailable immediately, before the
+supervise loop processes exit. The [session-settings wire reply](protocol-package-types-session-settings-read-payloads.md)
+therefore reports unavailable posture for old-child or old-attempt evidence,
+never falling back to intent, another session or the bootstrap child.
+
+`WriteUserTurn` serializes settings snapshots through RPC completion with a
+context-selectable single-token gate. A cancelled waiter cannot post later;
+notification, reader and lifecycle paths never take that gate. The leaf mutex
+protecting the join is not held across RPC or translator locking.
+`TestCodexRunner_ConfirmationRequiresMatchingFactors` exercises both callback
+orders and negative windows directly; a test that only waits for turn end
+would miss a transient false confirmation. The lifecycle and bound-run-config
+regressions preserve unavailable wire state, and
+`TestCodexRunner_CancelledWaiterCannotPostAfterHeldRPC` holds the actual RPC
+response to prove cancellation both before and after gate release.
 
 ### Approvals reach the permission modal (#2587)
 

@@ -363,11 +363,14 @@ type codexRunner struct {
 	cfg       codexRunnerConfig
 	log       *slog.Logger
 	restartCh chan struct{}
+	// turnStartGate orders snapshots and RPCs; notification/lifecycle paths never wait on it.
+	turnStartGate chan struct{}
 
 	// mu is a leaf: it is never held across a Codex call or with trMu.
 	mu              sync.Mutex
 	client          *codexsup.Client // bound live client, nil when none may take a turn
 	childGeneration uint64
+	confirmation    codexPermissionConfirmation
 	threadID        string // Codex thread to resume; empty means start one
 	turnID          string // running turn, from turn/started
 	freshSeq        uint64 // bumped by RestartFresh
@@ -399,13 +402,14 @@ func newCodexRunner(cfg codexRunnerConfig) *codexRunner {
 		log = slog.Default()
 	}
 	return &codexRunner{
-		cfg:       cfg,
-		log:       log,
-		restartCh: make(chan struct{}, 1),
-		model:     cfg.Model,
-		effort:    cfg.Effort,
-		mode:      cfg.PermissionMode,
-		threadID:  cfg.ThreadID,
+		cfg:           cfg,
+		log:           log,
+		restartCh:     make(chan struct{}, 1),
+		turnStartGate: make(chan struct{}, 1),
+		model:         cfg.Model,
+		effort:        cfg.Effort,
+		mode:          cfg.PermissionMode,
+		threadID:      cfg.ThreadID,
 	}
 }
 
@@ -585,6 +589,8 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	}
 	r.client = client
 	r.childGeneration++
+	r.invalidateConfirmationLocked()
+	r.confirmation.translator = tr
 	r.tearingDown = false
 	if r.rotating && seq > r.armFreshSeq {
 		r.rotating = false
@@ -611,6 +617,8 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	r.mu.Lock()
 	r.client = nil
 	r.childGeneration++
+	r.invalidateConfirmationLocked()
+	r.confirmation.translator = nil
 	r.state.ChildPID = 0
 	r.mu.Unlock()
 	// Serialize the final stdin close with any server request still on the
@@ -709,13 +717,15 @@ func (r *codexRunner) notify(tr *codexsup.Translator, method string, params json
 	switch method {
 	case "turn/started":
 		var p struct {
-			Turn struct {
+			ThreadID string `json:"threadId"`
+			Turn     struct {
 				ID string `json:"id"`
 			} `json:"turn"`
 		}
 		if json.Unmarshal(params, &p) == nil && p.Turn.ID != "" {
 			r.mu.Lock()
 			r.turnID = p.Turn.ID
+			r.permissionTurnStartedLocked(tr, p.ThreadID, p.Turn.ID)
 			r.mu.Unlock()
 		}
 	case "turn/completed":
@@ -740,9 +750,19 @@ func (r *codexRunner) notify(tr *codexsup.Translator, method string, params json
 // armed or no client is bound, and claims the queue's commit gate before
 // sending. Neither the payload nor the conversation id is logged.
 func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byte) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case r.turnStartGate <- struct{}{}:
+	}
+	defer func() { <-r.turnStartGate }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	client, rotating, tearingDown := r.client, r.rotating, r.tearingDown
-	in := codexTurnOverrides(r.turnSettings())
+	generation, settings := r.childGeneration, r.turnSettings()
+	in := codexTurnOverrides(settings)
 	r.mu.Unlock()
 	switch {
 	case rotating:
@@ -768,9 +788,16 @@ func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byt
 		r.trMu.Unlock()
 	}
 	in.Text = string(payload)
-	if _, err := client.StartTurn(ctx, in); err != nil {
+	epoch, ok := r.beginPermissionAttempt(client, generation, settings.PermissionMode)
+	if !ok {
+		return streamsup.ErrNoLiveChild
+	}
+	turnID, err := client.StartTurn(ctx, in)
+	if err != nil {
+		r.finishPermissionAttempt(client, generation, epoch, "")
 		return fmt.Errorf("cmd/pyry: codex turn: %w", err)
 	}
+	r.finishPermissionAttempt(client, generation, epoch, turnID)
 	return nil
 }
 
@@ -827,6 +854,8 @@ func (r *codexRunner) setTurnSettings(args []string) {
 func (r *codexRunner) endIteration() {
 	r.mu.Lock()
 	cancel := r.iterCancel
+	r.invalidateConfirmationLocked()
+	r.confirmation.translator = nil
 	r.mu.Unlock()
 	select {
 	case r.restartCh <- struct{}{}:
@@ -899,6 +928,7 @@ func (r *codexRunner) SetPermissionMode(mode string) error {
 func (r *codexRunner) BeginTeardown() {
 	r.mu.Lock()
 	r.tearingDown = true
+	r.invalidateConfirmationLocked()
 	r.mu.Unlock()
 	r.cfg.Approvals.declineAll(reasonCodexTeardown)
 }
@@ -909,6 +939,7 @@ func (r *codexRunner) BeginTeardown() {
 func (r *codexRunner) BeginRotation() func() {
 	r.mu.Lock()
 	r.rotating = true
+	r.invalidateConfirmationLocked()
 	r.rotateGen++
 	r.armFreshSeq = r.freshSeq
 	gen := r.rotateGen
@@ -931,6 +962,8 @@ func (r *codexRunner) RestartFresh(newID string) {
 	}
 	r.mu.Lock()
 	r.threadID = ""
+	r.invalidateConfirmationLocked()
+	r.confirmation.translator = nil
 	r.freshSeq++
 	r.cfg.Tag.Rotate(newID)
 	r.mu.Unlock()

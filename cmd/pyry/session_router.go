@@ -479,7 +479,7 @@ func (p runSettingsPool) ConfirmedPermissionModeFor(id sessions.SessionID) (stri
 // which does collapse it, could not be reused).
 //
 // Stored posture is never copied here. A live answer asks only the exact session's
-// runner for Claude's last current-child confirmation; a dormant answer has no
+// runner for its last current-child confirmation; a dormant answer has no
 // runner to ask and therefore keeps the permission pair at its zero value.
 //
 // Pool.SettingsFor, not Lookup-then-read, for two reasons load-bearing enough to
