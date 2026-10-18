@@ -134,9 +134,13 @@ Pending for the documentation stage in `docs/knowledge/features/codexsup-package
   `f21617d94966678497163f99d1826fc07941624f346caa14331e472f9091a443`, captured
   against `ce414973b7d4c3f45666bab0a6a2b35cd5cf363a` with Codex **0.159.2**.
   `TestCaptureLiveWebSearch` executed once, passed once, and skipped zero times.
-  Preserve all 75 scrubbed frames byte-for-byte in
+  Preserve only the two unchanged web-search item frames in
   `internal/codexsup/testdata/capture/web_search.jsonl` (SHA-256
-  `9f8444591fd4d57c46034fea3a1b4612b9ef47f1a4d445c481dfc933c71dd6b0`).
+  `16a6d05118fa805f8c936b4fdc00c1e628812ad8a6526cabe22eb1e927c5b533`).
+  The complete recorded stream includes unrelated account/credit/rate-limit
+  metadata and remains private; it is not a publishable replay fixture. Codex
+  **0.159.2** is recorded in the PR provenance from the retained version output,
+  rather than requiring bootstrap or account frames in the fixture.
   The single same-id pair starts with an explicit empty query and null
   action/results. Completion has `action.type=search`, a populated singular
   `action.query` matching the top-level query, explicit null `action.queries`,
@@ -144,8 +148,8 @@ Pending for the documentation stage in `docs/knowledge/features/codexsup-package
   only; populated plural queries, openPage, findInPage and other/fallback live
   shapes remain unobserved. The schema stays pinned to 0.156.1.
   `TestTranslateCapturedWebSearch` in `translate_web_search_capture_test.go`
-  must fail for a missing fixture, assert the captured CLI version and raw
-  observed fields, validate both web-search items against the pinned schema,
+  must fail for a missing fixture or any extra bootstrap/account frames, assert
+  the raw observed fields, validate both web-search items against the pinned schema,
   and replay exactly one fetch start and one query-only completed result.
   Existing fixture scrub checks cover the new artifact; no new I/O or execution
   capability enters production. The merge resolution preserves main's MCP

@@ -8,24 +8,23 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
-// TestTranslateCapturedWebSearch pins the observed Codex version and field
-// timing as well as the tool rows; a missing capture is a failure.
+// TestTranslateCapturedWebSearch pins the observed field timing and tool rows.
+// Only the unchanged item pair is publishable; version provenance lives in the PR.
 func TestTranslateCapturedWebSearch(t *testing.T) {
 	t.Parallel()
 	const path = "testdata/capture/web_search.jsonl"
 	const id = "exec-cb2e3207-3fb8-4f3c-b836-677222dc5ed3"
 	const query = "official Go programming language release notes"
 	frames := readFrames(t, path)
+	if len(frames) != 2 {
+		t.Fatal("capture must contain only the web-search pair; bootstrap/account metadata stays private")
+	}
 	var pair []frame
-	var version string
 	for _, f := range frames {
 		if f.Kind != "notification" {
 			continue
 		}
 		var p struct {
-			Thread struct {
-				CLIVersion string `json:"cliVersion"`
-			} `json:"thread"`
 			Item struct {
 				Type string `json:"type"`
 			} `json:"item"`
@@ -33,15 +32,9 @@ func TestTranslateCapturedWebSearch(t *testing.T) {
 		if err := json.Unmarshal(f.Params, &p); err != nil {
 			t.Fatal(err)
 		}
-		if f.Method == "thread/started" {
-			version = p.Thread.CLIVersion
-		}
 		if p.Item.Type == "webSearch" {
 			pair = append(pair, f)
 		}
-	}
-	if version != "0.159.2" {
-		t.Fatalf("captured CLI version = %q, want 0.159.2", version)
 	}
 	if len(pair) != 2 || pair[0].Method != "item/started" || pair[1].Method != "item/completed" {
 		t.Fatal("capture must contain exactly one ordered webSearch started/completed pair")
