@@ -47,6 +47,18 @@ Pending documentation stage: update `docs/knowledge/features/e2e-realclaude-test
 
 Review follow-up: this missing plan was added after implementation commit `a4116ccf`; the original history is preserved. This commit records the existing reviewed design and required acceptance without claiming the plan preceded the code. No implementation or acceptance change accompanies the plan.
 
+### 2026-10-18 — prospective rebuild after verifier findings 1 and 2
+
+Finding 1 cannot be repaired retroactively. Commit `671607e0` withdraws the complete implementation from `a4116ccf`, restoring `composer_stop_test.go` byte-for-byte to its pre-implementation state. The earlier implementation and retrospective plan remain visible in history. This revision is the prospective design and security review for a replacement implementation; commit it separately before rebuilding. No prior-design claim is made for the withdrawn work.
+
+The replacement retains the Design above: exact foreground Bash input, PID arrival file, absent release file and live non-zombie shell before interrupt. Preserve every background identity, reader, cancellation and exact-task completion assertion. Reintroduce the native hold/release and premature-exit regression first, then implement their witness. A missing witness is a build failure, so also use the replacement gate's PID contract to demonstrate a failing runtime assertion before adding the witness checks.
+
+For finding 2, `composerForegroundHeld` must return a contextual error wrapping the underlying `ps` execution error with `%w`. Empty status and zombie status remain a separate fail-closed error. Add `TestComposerForegroundHeldInspectionError` with a live test-owned PID and an empty test-local PATH: `errors.Is(err, exec.ErrNotFound)` must survive the wrapper. This regression must fail with the earlier combined error branch before that branch is repaired. No new abstraction or subprocess injection is required.
+
+Sizing recheck: one observable staging repair with its regression and diagnosis; approximately 450 total written lines including the withdrawn/rebuilt work and plan, zero new exported types/interfaces, at most five local consumer sites, three acceptance criteria and fewer than ten rejection branches. No concurrent `origin/feature/<ticket>` branch touches `composer_stop_test.go`. The original #3589 branch/base `no-reader` failures and #3602's independent-cause refinement evidence were reread; historical failures remain failures.
+
+Run uncached affected offline tests on macOS with the race detector and `e2e_realclaude`, plus tagged package vet, `go vet ./...` and `go build ./cmd/pyry` to scratch output. Retain red and green logs and per-test counts in the PR. Complete verification and the named live acceptance remain dispatcher-owned; no new skip or Linux check is introduced. Documentation handoff above remains pending.
+
 ## Security review
 
 **Verdict:** PASS
@@ -65,3 +77,19 @@ Review follow-up: this missing plan was added after implementation commit `a4116
 
 **Reviewer:** repair builder (self-review per the security-review checklist)
 **Date:** 2026-10-18
+
+### Prospective rework security review — 2026-10-18
+
+**Verdict:** PASS, before replacement implementation.
+
+- [Trust boundaries] Arrival alone remains insufficient: the replacement requires the exact observed Bash input, an unreleased gate and a live non-zombie shell. Private rig state grants no product authority.
+- [Tokens] No authentication or credential changes; native regressions use no Claude login and print no environment.
+- [File operations] Rig-generated paths stay within the private workspace, shell-quoted; release writes remain mode `0600` and idempotent.
+- [Subprocesses] The rig authors the shell command; PID parsing precedes fixed `ps` argv and signal-zero inspection. Tests cancel and join their own child. The missing-`ps` regression inspects its own PID without starting another process.
+- [Cryptography] Existing Noise and key handling are unchanged.
+- [Network and I/O] Existing wire/read deadlines and bounded child cleanup remain authoritative; no endpoint or unbounded I/O is added.
+- [Errors/logs] Finding 2 is a SHOULD FIX implemented in this rebuild: wrap `ps` errors with operation context and preserve their cause. The missing-`ps` regression checks the cause without printing environment or generated conversation text.
+- [Concurrency] No production worker or lock is added. Context cancellation and joined Wait workers bound failure cleanup; test-local PATH restoration is serial.
+- [Threat model] Cancelled foreground turn, post-Stop background reader and same-task completion only after rig release remain mandatory. No assertion or skip is weakened.
+
+**Reviewer:** rework builder (self-review per the security-review checklist).
