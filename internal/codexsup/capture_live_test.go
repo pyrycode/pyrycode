@@ -43,6 +43,20 @@ type captureScenario struct {
 // PYRY_CODEX_CAPTURE_HOME (an isolated CODEX_HOME holding only a minimal
 // config and the sign-in). It spends Codex allowance.
 func TestCaptureLive(t *testing.T) {
+	captureLive(t, false)
+}
+
+// TestCaptureLiveWebSearch records only a web-search turn:
+//
+//	go test -tags codex_capture -run '^TestCaptureLiveWebSearch$' -v ./internal/codexsup/
+//
+// It uses the same isolated-home environment guards as TestCaptureLive.
+func TestCaptureLiveWebSearch(t *testing.T) {
+	captureLive(t, true)
+}
+
+func captureLive(t *testing.T, webSearchOnly bool) {
+	t.Helper()
 	bin, home := os.Getenv("PYRY_CODEX_CAPTURE_BIN"), os.Getenv("PYRY_CODEX_CAPTURE_HOME")
 	if bin == "" || home == "" {
 		t.Skip("set PYRY_CODEX_CAPTURE_BIN and PYRY_CODEX_CAPTURE_HOME to capture live Codex frames")
@@ -80,6 +94,9 @@ func TestCaptureLive(t *testing.T) {
 				return ok && allUnder(cwd, paths)
 			}},
 		{name: "interrupted", prompt: "Write the numbers from 1 to 300, one per line.", interrupt: true},
+	}
+	if webSearchOnly {
+		scenarios = []captureScenario{{name: "web_search", prompt: "Use your web search tool to search for the official Go programming language release notes. Summarize the result in one sentence. Do not use shell commands or edit files."}}
 	}
 
 	notes := make(chan captureFrame, 4096)
@@ -155,8 +172,83 @@ func TestCaptureLive(t *testing.T) {
 		mu.Lock()
 		got := frames
 		mu.Unlock()
+		if webSearchOnly {
+			writeFocusedWebSearchCapture(t, got, cwd, home)
+			continue
+		}
 		writeCapture(t, sc.name, got, cwd, home)
 	}
+}
+
+// writeFocusedWebSearchCapture keeps the complete recorded stream private and
+// publishes only the scrubbed same-id web-search pair. The broad capture suite
+// keeps its existing output behavior.
+func writeFocusedWebSearchCapture(t *testing.T, frames []captureFrame, cwd, home string) string {
+	t.Helper()
+	private, err := os.CreateTemp("", "pyry-codex-web-search-private-*.jsonl")
+	if err != nil {
+		t.Fatal("create private web-search recording")
+	}
+	enc := json.NewEncoder(private)
+	for _, frame := range frames {
+		if err := enc.Encode(frame); err != nil {
+			_ = private.Close()
+			t.Fatal("retain private web-search recording")
+		}
+	}
+	if err := private.Close(); err != nil {
+		t.Fatal("close private web-search recording")
+	}
+	t.Logf("private web-search recording: %s", private.Name())
+	pair := requireWebSearchPair(t, frames)
+	writeCapture(t, "web_search", pair, cwd, home)
+	if evidenceDir := os.Getenv("PYRY_GATE_EVIDENCE_DIR"); evidenceDir != "" {
+		if err := os.MkdirAll(evidenceDir, 0o700); err != nil {
+			t.Fatal("create durable web-search evidence directory")
+		}
+		data, err := os.ReadFile(filepath.Join(captureDir, "web_search.jsonl"))
+		if err != nil {
+			t.Fatal("read scrubbed web-search pair")
+		}
+		if err := os.WriteFile(filepath.Join(evidenceDir, "web_search.jsonl"), data, 0o600); err != nil {
+			t.Fatal("retain durable web-search pair")
+		}
+	}
+	return private.Name()
+}
+
+// requireWebSearchPair rejects a capture that proves no completed web search.
+// Its diagnostics contain counts and field presence, never peer text.
+func requireWebSearchPair(t *testing.T, frames []captureFrame) []captureFrame {
+	t.Helper()
+	started := map[string]captureFrame{}
+	for _, f := range frames {
+		if f.Kind != "notification" || f.Method != "item/started" && f.Method != "item/completed" {
+			continue
+		}
+		var p struct {
+			Item struct {
+				Type   string          `json:"type"`
+				ID     string          `json:"id"`
+				Query  string          `json:"query"`
+				Action json.RawMessage `json:"action"`
+			} `json:"item"`
+		}
+		if err := json.Unmarshal(f.Params, &p); err != nil {
+			t.Fatal("invalid item JSON in web-search capture")
+		}
+		if p.Item.Type != "webSearch" || p.Item.ID == "" {
+			continue
+		}
+		if f.Method == "item/started" {
+			started[p.Item.ID] = f
+		} else if start, ok := started[p.Item.ID]; ok {
+			t.Logf("webSearch pair observed: completion query nonempty=%v, action populated=%v", p.Item.Query != "", len(p.Item.Action) > 0 && string(p.Item.Action) != "null")
+			return []captureFrame{start, f}
+		}
+	}
+	t.Fatalf("no webSearch started/completed pair: %d frames, %d webSearch starts", len(frames), len(started))
+	return nil
 }
 
 // captureTurn starts a thread and runs one turn on it until turn/completed,
@@ -166,6 +258,9 @@ func captureTurn(ctx context.Context, t *testing.T, c *Client, cwd string, sc ca
 	threadParams := map[string]any{
 		// untrusted prompts for every command outside Codex's read-only allowlist.
 		"cwd": cwd, "sandbox": "read-only", "model": captureModel, "approvalPolicy": "untrusted",
+	}
+	if sc.name == "web_search" {
+		threadParams["config"] = map[string]string{"web_search": "live"}
 	}
 	var tr threadResult
 	if err := c.call(ctx, methodThreadStart, threadParams, &tr); err != nil {
@@ -289,4 +384,36 @@ func scrub(v any) any {
 		}
 	}
 	return v
+}
+
+// Account bootstrap metadata must never reach either publishable output.
+func TestFocusedWebSearchCaptureKeepsMetadataPrivate(t *testing.T) {
+	oldCaptureDir := captureDir
+	captureDir = t.TempDir()
+	t.Cleanup(func() { captureDir = oldCaptureDir })
+	evidenceDir := t.TempDir()
+	t.Setenv("PYRY_GATE_EVIDENCE_DIR", evidenceDir)
+	frames := []captureFrame{
+		{Kind: "notification", Method: "account/rateLimits/updated", Params: json.RawMessage(`{"private":"private-account-sentinel"}`)},
+		{Kind: "notification", Method: "item/started", Params: json.RawMessage(`{"item":{"type":"webSearch","id":"ws-1","query":"","action":null,"results":null}}`)},
+		{Kind: "notification", Method: "item/completed", Params: json.RawMessage(`{"item":{"type":"webSearch","id":"ws-1","query":"query","action":{"type":"search","query":"query"},"results":null}}`)},
+	}
+	private := writeFocusedWebSearchCapture(t, frames, "/capture/cwd", "/capture/codexhome")
+	t.Cleanup(func() { _ = os.Remove(private) })
+	info, err := os.Stat(private)
+	if err != nil || info.Mode().Perm() != 0o600 || strings.HasPrefix(private, captureDir+string(os.PathSeparator)) || strings.HasPrefix(private, evidenceDir+string(os.PathSeparator)) {
+		t.Fatal("complete recording did not remain in a private file outside published outputs")
+	}
+	raw, err := os.ReadFile(private)
+	if err != nil || !strings.Contains(string(raw), "private-account-sentinel") {
+		t.Fatal("complete private recording was not retained")
+	}
+	fixture, err := os.ReadFile(filepath.Join(captureDir, "web_search.jsonl"))
+	if err != nil || strings.Contains(string(fixture), "private-account-sentinel") || len(readFrames(t, filepath.Join(captureDir, "web_search.jsonl"))) != 2 {
+		t.Fatal("fixture must contain only the web-search pair")
+	}
+	durable, err := os.ReadFile(filepath.Join(evidenceDir, "web_search.jsonl"))
+	if err != nil || string(durable) != string(fixture) {
+		t.Fatal("durable evidence did not retain exactly the scrubbed pair")
+	}
 }
