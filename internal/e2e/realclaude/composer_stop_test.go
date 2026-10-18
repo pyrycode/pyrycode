@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -56,10 +57,9 @@ func TestRealClaudeComposerStopPreservesBackgroundTask(t *testing.T) {
 	}
 	composerRendezvous(t, arrived)
 	composerRequireReader(t, background, fifoLiveReaderPresent)
-	foreground := filepath.Join(h.workdir, "composer-foreground.fifo")
-	foregroundArrived, releaseForeground := tpcapHoldFIFO(t, foreground)
+	foregroundCommand, foregroundStarted, releaseForeground := composerForegroundGate(t, h.workdir)
 	defer releaseForeground()
-	sealSendMessage(t, h.phone, h.initSend, 27751, convID, "composer-foreground", composerForegroundPrompt(foreground))
+	sealSendMessage(t, h.phone, h.initSend, 27751, convID, "composer-foreground", composerForegroundPrompt(foregroundCommand))
 	deadline = time.Now().Add(perTurnReplyBudget)
 	for {
 		env := composerReceive(t, h, deadline)
@@ -73,12 +73,17 @@ func TestRealClaudeComposerStopPreservesBackgroundTask(t *testing.T) {
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
 			t.Fatal("decode foreground tool")
 		}
-		if p.ConversationID == convID && p.Name == "Bash" && p.Input["command"] == "cat "+foreground && p.Input["run_in_background"] != "true" {
+		if p.ConversationID == convID && p.Name == "Bash" && p.Input["command"] == foregroundCommand && p.Input["run_in_background"] != "true" {
 			break
 		}
 	}
-	composerRendezvous(t, foregroundArrived)
-	composerRequireReader(t, foreground, fifoLiveReaderPresent)
+	// The exact tool input above establishes identity, and the arrival file
+	// witnesses actual shell execution. The command can finish only when the
+	// rig creates its release file. Confirm its process is still live before Stop.
+	composerFileRendezvous(t, foregroundStarted, nil)
+	if err := composerForegroundHeld(foregroundStarted); err != nil {
+		t.Fatalf("foreground not held before Composer Stop: %v", err)
+	}
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: 27752, Type: protocol.TypeInterrupt, TS: time.Now().UTC()})
 	drainForCancelledTurnEnd(t, h.phone, h.initRecv, convID, perTurnReplyBudget, false)
 	composerRequireReader(t, background, fifoLiveReaderPresent)
@@ -228,8 +233,8 @@ func TestRealClaudeComposerStopClosedInputKillsHeldTask(t *testing.T) {
 	t.Log("closed input killed the held background task at foreground-result release")
 }
 
-func composerForegroundPrompt(fifo string) string {
-	return fmt.Sprintf("Use Bash in the foreground with timeout=120000 and run_in_background=false to run exactly: cat %s. Do not add flags, redirections or other commands. Wait for its result. run=%d", fifo, time.Now().UnixNano())
+func composerForegroundPrompt(command string) string {
+	return fmt.Sprintf("Use Bash in the foreground with timeout=120000 and run_in_background=false to run exactly: %s. Do not change the command. Wait for its result. run=%d", command, time.Now().UnixNano())
 }
 
 func composerReceive(t *testing.T, h *perConvHarness, deadline time.Time) protocol.Envelope {
@@ -299,7 +304,7 @@ func composerForegroundGate(t *testing.T, workdir string) (command, started stri
 	started = filepath.Join(workdir, "foreground-started")
 	released := filepath.Join(workdir, "foreground-released")
 	quote := func(path string) string { return "'" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'" }
-	command = fmt.Sprintf("printf ready > %s; while [ ! -f %s ]; do sleep 0.1; done", quote(started), quote(released))
+	command = fmt.Sprintf(`printf '%%s\n' "$$" > %s; while [ ! -f %s ]; do sleep 0.1; done`, quote(started), quote(released))
 	release = func() {
 		if err := os.WriteFile(released, nil, 0o600); err != nil {
 			t.Error("release foreground file gate")
@@ -307,6 +312,30 @@ func composerForegroundGate(t *testing.T, workdir string) (command, started stri
 	}
 	t.Cleanup(release)
 	return command, started, release
+}
+
+// composerForegroundHeld rejects a released gate or a shell that exited after
+// writing its arrival file. The exact command is matched on the client wire.
+func composerForegroundHeld(started string) error {
+	if _, err := os.Stat(filepath.Join(filepath.Dir(started), "foreground-released")); !os.IsNotExist(err) {
+		return fmt.Errorf("foreground release is present or unreadable: %v", err)
+	}
+	raw, err := os.ReadFile(started)
+	if err != nil {
+		return fmt.Errorf("read foreground process: %w", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		return fmt.Errorf("foreground arrival has no valid process id")
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		return fmt.Errorf("foreground shell is not live: %w", err)
+	}
+	status, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output()
+	if err != nil || strings.TrimSpace(string(status)) == "" || strings.HasPrefix(strings.TrimSpace(string(status)), "Z") {
+		return fmt.Errorf("foreground shell is exited or cannot be inspected")
+	}
+	return nil
 }
 
 func composerFileRendezvous(t *testing.T, started string, done <-chan struct{}) {
@@ -376,6 +405,9 @@ func TestComposerForegroundGate(t *testing.T) {
 		<-done
 	}()
 	composerFileRendezvous(t, started, done)
+	if err := composerForegroundHeld(started); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-done:
 		t.Fatal("foreground command exited before release")
@@ -390,5 +422,36 @@ func TestComposerForegroundGate(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("foreground command did not exit on release")
+	}
+}
+
+func TestComposerForegroundGateDetectsPrematureExit(t *testing.T) {
+	command, started, _ := composerForegroundGate(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.WaitDelay = time.Second
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait() // The shell is deliberately killed before rig release.
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	composerFileRendezvous(t, started, done)
+	if err := composerForegroundHeld(started); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if err := composerForegroundHeld(started); err == nil {
+		t.Fatal("arrival from an exited foreground shell counted as held")
 	}
 }
