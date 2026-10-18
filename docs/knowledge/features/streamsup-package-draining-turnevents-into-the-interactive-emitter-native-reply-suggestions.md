@@ -84,7 +84,7 @@ matching identity; a refused commit gate registers no identity.
 
 New turn activity and a new queued write cancel the native wait or inference,
 drop prior pending text and clear a held suggestion. Accepted queued sends,
-accepted send-now, successful `/clear`,
+accepted send-now, successful `/clear` or `/reset`,
 reset/eviction transitions and `closeForConversation` on exit or teardown also
 invalidate the producing turn. Refused sends or resets preserve state. A clear
 advances the conversation's revision only when published text was held; other
@@ -99,6 +99,16 @@ result; calling `forget` directly misses absent wiring.
 `TestReplyFallbackRegistryRemovalCancellation` exercises both phases and
 preserves another conversation's ring and suggestion. See
 [the removal observer contract](conversations-registry-crud.md#setondeletefn-funcid-conversationid-1502).
+
+**Reset interception tests (#3607).** `suggestionResetter.StartNewSession` invalidates only after the inner reset
+returns nil; refused resets preserve held state. `/clear` and `/reset` share
+this seam. Test through `handlers.SendMessage`: a success-only suggestion
+assertion can pass even when an alias is mistakenly enqueued, because
+`suggestionEnqueuer` also invalidates accepted sends. `TestReplySuggestions_ResetAliases`
+uses a rejecting queue and checks the ordinary ack, successful invalidation,
+refusal preservation and another conversation's unchanged state for both
+literals. Retain `TestReplySuggestions_ClearTriggers` for late-suggestion
+invalidation coverage. See the [fixed-token interception contract](relay-package-handlers-send-message.md#send_message-grows-an-eighth-seam-the-clear-intercept-2456).
 
 **One isolated Haiku attempt.** `replyFallback.run` uses the daemon's configured
 Claude binary and `claudeAccount.provider()` with the `haiku` alias, no
