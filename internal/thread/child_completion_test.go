@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -91,9 +92,18 @@ func TestChildTextCompletionNegative(t *testing.T) {
 
 func TestChildTextCompletionCheckpoint(t *testing.T) {
 	t.Parallel()
-	testCheckpointResume(t, childCompletionEntries(), []int{0, 1, 2, 3, 4})
-	for _, cut := range []int{2, 3, 4} {
-		w, f, entries := testCheckpointWriter(t, childCompletionEntries())
+	testChildCompletionCheckpoint(t, childCompletionEntries())
+}
+
+func testChildCompletionCheckpoint(t *testing.T, history []history.Entry) {
+	t.Helper()
+	cuts := make([]int, len(history)+1)
+	for i := range cuts {
+		cuts[i] = i
+	}
+	testCheckpointResume(t, history, cuts)
+	for _, cut := range cuts[1:] {
+		w, f, entries := testCheckpointWriter(t, history)
 		testFeed(t, f, entries[:cut]...)
 		if _, err := testCommitCheckpoint(t, w, f, nil, true); err != nil {
 			t.Fatal(err)
@@ -116,4 +126,47 @@ func TestChildTextCompletionCheckpoint(t *testing.T) {
 			t.Fatal("reopened reply lost completion")
 		}
 	}
+}
+
+func TestChildTextCompletionFragments(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, prefix, marker, status string
+	}{
+		{"newline suffix", "reply", `true`, "done"},
+		{"blank paragraph", " \t", `true`, "interrupted"},
+		{"missing completion", "reply", `false`, "interrupted"},
+		{"null completion", "reply", `null`, "interrupted"},
+		{"wrong type", "reply", `"true"`, "interrupted"},
+		{"truncated completion", "reply", `true,"truncated_fields":["text_complete"]`, "interrupted"},
+		{"dropped completion", "reply", `true,"dropped_fields":["text_complete"]`, "interrupted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := childCompletionEntries()
+			entries[2] = testChild(3, "assistant_delta", "a", fmt.Sprintf(`,"text":%q`, tc.prefix))
+			entries = append(entries, testChild(5, "assistant_delta", "a", `,"text":"\n","text_complete":`+tc.marker))
+			f := testMainReplay(t, entries)
+			item := testChildItem(t, f, 3, 1, "assistant_message", tc.status, false)
+			if tc.status == "done" {
+				testContent(t, item, "text", "reply\n")
+				testContent(t, item, "parent_ending", nil)
+				if item.Rev != 5 {
+					t.Fatal("completion did not own the terminal revision")
+				}
+				testChildCompletionCheckpoint(t, entries)
+			}
+		})
+	}
+	t.Run("new paragraph after tool", func(t *testing.T) {
+		entries := []history.Entry{
+			testMain(1, "tool_use", `,"tool_use_id":"a","name":"Agent"`),
+			testChild(2, "assistant_delta", "a", `,"text":"earlier reply"`),
+			testChild(3, "tool_use", "a", `,"tool_use_id":"read","name":"Read"`),
+			testChild(4, "assistant_delta", "a", `,"text":"\n","text_complete":true`),
+			testMain(5, "tool_result", `,"tool_use_id":"a","is_error":false`),
+		}
+		f := testMainReplay(t, entries)
+		testChildItem(t, f, 2, 1, "assistant_message", "done", false)
+		testChildItem(t, f, 4, 1, "assistant_message", "interrupted", false)
+	})
 }

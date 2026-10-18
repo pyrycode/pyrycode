@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -204,33 +205,39 @@ func testChildCompletionPipeline(t *testing.T, recorded *backgroundCompletionRec
 
 func TestInteractiveTurnEmitterV2_ChildCompletionSplit(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	_, bcast, e := newParentLaneEmitter(t, testConvID)
-	text := strings.Repeat("x", 2*maxDeltaTextBytes+1)
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "large", ParentToolCallID: "agent", Text: text, TextComplete: true})
-	deltas := assistantDeltas(t, bcast.pushes)
-	var joined strings.Builder
-	for i, delta := range deltas {
-		if delta.Seq != i || delta.TextComplete != (i == len(deltas)-1) || delta.ParentToolUseID != "agent" {
-			t.Fatal("split lost completion order")
-		}
-		joined.WriteString(delta.Text)
-	}
-	if len(deltas) != 3 || joined.String() != text || e.inTurn {
-		t.Fatal("split lost text or changed main lifecycle")
+	for _, suffix := range []string{"x", "\n"} {
+		t.Run(fmt.Sprintf("suffix-%q", suffix), func(t *testing.T) {
+			testChildCompletionSplit(t, false, strings.Repeat("x", 2*maxDeltaTextBytes)+suffix)
+		})
 	}
 }
 
 func TestInteractiveTurnEmitterV2_SealedChildCompletionSplit(t *testing.T) {
 	t.Parallel()
+	for _, suffix := range []string{"x", "\n"} {
+		t.Run(fmt.Sprintf("suffix-%q", suffix), func(t *testing.T) {
+			testChildCompletionSplit(t, true, strings.Repeat("x", 2*maxDeltaTextBytes)+suffix)
+		})
+	}
+}
+
+func testChildCompletionSplit(t *testing.T, sealed bool, text string) {
+	t.Helper()
 	ctx := context.Background()
 	_, bcast, e := newParentLaneEmitter(t, testConvID)
 	e.hist, e.runtimeFacts = history.New(t.TempDir()), true
-	source := history.SessionProvenance{Kind: "claude", SessionID: "sealed-session"}
+	source := history.SessionProvenance{Kind: "claude", SessionID: "producing-session"}
 	e.handleForSource(ctx, testConvID, turnevent.ToolStart{ToolCallID: "agent", Title: "Agent"}, source, 7)
-	e.closeRuntimeSource(ctx, testConvID, source.SessionID, "operator_reset", time.Now().UTC(), true, 0, 7)
-	text := strings.Repeat("x", 2*maxDeltaTextBytes+1)
+	e.handleForSource(ctx, testConvID, turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "agent"}, source, 7)
+	if sealed {
+		e.closeRuntimeSource(ctx, testConvID, source.SessionID, "operator_reset", time.Now().UTC(), true, 0, 7)
+	} else {
+		e.handleForSource(ctx, testConvID, turnevent.TurnEnd{Reason: "end_turn"}, source, 7)
+	}
 	e.handleForSource(ctx, testConvID, turnevent.TextChunk{MessageID: "large", ParentToolCallID: "agent", Text: text, TextComplete: true}, source, 7)
+	if !sealed {
+		e.handleForSource(ctx, testConvID, turnevent.BackgroundTaskUpdated{TaskID: "task", Status: "completed"}, source, 7)
+	}
 	deltas := assistantDeltas(t, bcast.pushes)
 	if len(deltas) != 3 {
 		t.Fatalf("deltas=%d, want 3", len(deltas))
@@ -258,20 +265,23 @@ func TestInteractiveTurnEmitterV2_SealedChildCompletionSplit(t *testing.T) {
 			continue
 		}
 		replies++
-		var content struct{ Text string }
+		var content struct {
+			Text       string
+			Completion protocol.AssistantDeltaPayload
+		}
 		if err := json.Unmarshal(item.Content, &content); err != nil {
 			t.Fatal(err)
 		}
-		if content.Text != text || item.ID != first || item.Order != first || item.Rev != last || item.Parent != parent || item.Session != source.SessionID || item.Turn != deltas[0].TurnID || item.Status != "done" || item.Active {
-			t.Fatalf("sealed reply lost text, identity or completion: id=%d rev=%d bytes=%d", item.ID, item.Rev, len(content.Text))
+		if content.Text != text || item.ID != first || item.Order != first || item.Rev != last || item.Parent != parent || item.Session != source.SessionID || item.Turn != deltas[0].TurnID || item.Status != "done" || item.Active || !content.Completion.TextComplete || content.Completion.Text != deltas[2].Text {
+			t.Fatalf("split reply lost text, identity or completion: id=%d rev=%d bytes=%d", item.ID, item.Rev, len(content.Text))
 		}
 	}
 	if replies != 1 || e.inTurn {
 		t.Fatalf("replies=%d inTurn=%t", replies, e.inTurn)
 	}
 	for i, delta := range deltas {
-		if delta.TextComplete != (i == len(deltas)-1) || delta.TurnID != deltas[0].TurnID || delta.Seq != deltas[0].Seq+i {
-			t.Fatal("sealed split lost final-piece completion or lane identity")
+		if delta.TextComplete != (i == len(deltas)-1) || delta.TurnID != deltas[0].TurnID || delta.Seq != deltas[0].Seq+i || delta.ParentToolUseID != "agent" {
+			t.Fatal("split lost final-piece completion or lane identity")
 		}
 	}
 }

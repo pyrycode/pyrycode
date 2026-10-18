@@ -126,6 +126,7 @@ func ImportCheckpoint(conversationID string, source HistorySource, d CheckpointS
 		x.historyID(t.Opening, false)
 		st := turns[i]
 		st.key, st.opening, st.text, st.end = restoreMainKey(t.Key), t.Opening, t.Text, checkpointGet(&x, outcomes, t.End)
+		st.textNonblank = t.TextNonblank
 		if t.Text >= 0 {
 			x.check(rowsKind(rows, t.Text) == "assistant_message", "turn text item")
 		}

@@ -17,13 +17,14 @@ type mainKey struct {
 	turn   string
 }
 type mainTurn struct {
-	key      mainKey
-	opening  uint64
-	text     int
-	textSlot int // one-based slot in Fold.openTexts; zero for untracked/child text
-	calls    map[string]*mainCall
-	finished map[string]*mainCallMarker
-	end      *mainOutcome
+	key          mainKey
+	opening      uint64
+	text         int
+	textNonblank bool // current paragraph contains an admitted non-whitespace fragment
+	textSlot     int  // one-based slot in Fold.openTexts; zero for untracked/child text
+	calls        map[string]*mainCall
+	finished     map[string]*mainCallMarker
+	end          *mainOutcome
 }
 type mainCall struct {
 	shell    *agentCall
@@ -226,6 +227,7 @@ func (f *Fold) foldWork(e history.Entry, id mainIdentity, summary, status string
 		return true
 	}
 	if e.Type == protocol.TypeAssistantDelta {
+		st.textNonblank = (st.text >= 0 && st.textNonblank) || strings.TrimSpace(summary) != ""
 		if st.text >= 0 {
 			f.countPublicWork(1) // inspected append candidate, including empty deltas
 			item := &f.items[st.text]
@@ -358,6 +360,7 @@ func (f *Fold) closeText(st *mainTurn, rev uint64) {
 	}
 	f.countClosureWork(1) // release the coalescing row reference, including inactive text
 	st.text = -1
+	st.textNonblank = false
 }
 func (f *Fold) applyTerminal(call *mainCall) {
 	if call.item < 0 || call.terminal == nil || call.launcher || (call.shell != nil && call.shell.linked) {

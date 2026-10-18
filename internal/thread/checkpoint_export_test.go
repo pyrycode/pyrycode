@@ -29,7 +29,7 @@ func TestCheckpointEmpty(t *testing.T) {
 	f, source := testReferenceFold(nil)
 	source.lookup = func([]uint64) ([]history.Entry, error) { t.Fatal("export read history"); return nil, nil }
 	state, records, err := f.ExportCheckpoint()
-	if err != nil || state.ConversationID != "a" || state.Version != 0 || state.Schema != 1 || state.Rules != foldingRules || len(records) != 0 || len(state.ItemIDs) != 0 {
+	if err != nil || state.ConversationID != "a" || state.Version != 0 || state.Schema != 2 || state.Rules != foldingRules || len(records) != 0 || len(state.ItemIDs) != 0 {
 		t.Fatal("empty checkpoint", state, err)
 	}
 	testCheckpointJSON(t, state)
