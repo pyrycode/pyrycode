@@ -225,6 +225,39 @@ including parent evidence saved before a mapped launch or supplied only on a
 report. Main Agent/Task launches still split main text; queued sends do not,
 and delivered user messages retain their main-text closure behavior.
 
+**Completion belongs to the paragraph, independently of its ancestor.**
+`Parser.emitAssistant` marks only a complete parent-attributed assistant envelope
+with a nonempty message ID, assistant role and exactly one nonblank text block.
+The observed background boundary does not require `stop_reason`; message-ending
+events and task success alone supply no text completion. `TextChunk.TextComplete`
+reaches raw history as [`assistant_delta.text_complete`](../../protocol-mobile.md#assistant_delta).
+`childWork` accepts the valid, untruncated and undropped marker only for a
+nonblank paragraph in that scoped child lane, records the completing entry under
+`completion`, and calls `closeText` before ancestor resolution. The rendered
+field contains the raw entry payload through the existing history recipe.
+Main-turn closure creates no synthetic child ending or main turn.
+
+**Validate the paragraph across transport fragments.** Both ordinary and sealed
+emitter paths put completion only on the last piece; that piece can be just a
+newline. Checking its text alone would reject genuine completion. `mainTurn`
+retains one nonblank bit from admitted fragments, resets it in `closeText`, and
+exports/imports it in checkpoint schema 2. This retains no prose during ingestion
+and cannot let an earlier paragraph authorize a blank successor. Blank-only,
+malformed, loss-marked, partial or other-child evidence cannot complete the
+paragraph, nor can an absent child or successful ancestor.
+
+Raw replay, live/catch-up publication and checkpoint reopen retain the creating
+ID/order, source/session, child turn, exact text, completing revision and
+`completion` content. Folding rules 6 invalidate older cached projections;
+older history without the marker retains its prior closure behavior. Completed
+children preserve intrinsic done/inactive state through late parent/link repair
+and later Agent endings. `resolveChildren` still interrupts unfinished active
+non-Agent descendants instead of inferring completion from the ancestor.
+`TestRecordedBackgroundReplyCompletion` replays the complete scrubbed sequence
+through the production parser/emitter/fold; split tests must assert terminal
+folded identity and content, since emitter-only marker assertions miss consumer
+rejection. Every-cut continuation and disk reopen cover a split paragraph.
+
 Production assistant text, child tools and nested agents use the same
 [history recipes and exact-byte renderer](thread-package-main-thread-folding-lifecycle.md#main-work-source-entries)
 as main work. Public items/recipes and any reversible intrinsic/previous copies

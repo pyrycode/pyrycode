@@ -1345,6 +1345,31 @@ from a known status list. Content can contain untrusted user or subprocess
 data: render it safely, never treat it as executable input. Protocol retains
 the JSON without interpreting kind-specific fields.
 
+A child `assistant_message` independently becomes `status: done`, `active: false`
+when its own recorded [`assistant_delta.text_complete`](#assistant_delta) closes
+its nonblank paragraph. The observed source is a complete attributed Claude
+`assistant` envelope with a nonempty `message.id`, `message.role: "assistant"`
+and exactly one nonblank `message.content` text block. A stop reason is not
+required. The daemon retains the completing raw history entry's payload under
+`content.completion` using a history-backed reference; this is inert evidence,
+not a second paragraph or a client-side completion rule.
+
+Completion preserves the paragraph's creating `id`, `order`, producing `session`,
+child `turn`, parent and exact text; the completing entry supplies its terminal
+`rev`. Live updates, catch-up, fresh raw-history replay and persisted-checkpoint
+reopen recover the same identity and completion content. Folding rules 6 reject
+older cached projections, and checkpoint schema 2 preserves paragraph
+nonblankness across transport fragments; incompatible projections rebuild from
+raw history rather than retaining cached interrupted output.
+
+An ancestor's completion cannot complete unfinished child prose. Still-active
+non-Agent descendants become inactive `interrupted` under ancestor closure,
+without an inferred successful outcome. Independently completed children keep
+their own outcome through later Agent endings and parent/link repair. Missing
+or false completion evidence in older history preserves existing closure rules;
+partial text, malformed or loss-marked evidence, another child's completion and
+parent success alone supply no intrinsic completion.
+
 Attribution preserves recorded facts. A known session with an unknown agent
 keeps `session` and omits `agent`; unknown attribution omits both and leaves
 `no_child` absent. Positively no child sends `no_child: true`. Neither unknown
@@ -3443,6 +3468,7 @@ On legacy interactive connections, this frame is also re-asserted on connect for
 | `seq` | int | Per-lane, non-negative delta-ordering counter; starts at 0 independently for every lane. |
 | `parent_tool_use_id` | string | The parent `Agent` call's `tool_use_id`. **Empty means the main thread.** |
 | `text` | string | Incremental assistant text, coalesced (not per token). |
+| `text_complete` | bool | Optional; omitted when false. `true` retains an observed complete attributed assistant text block for this child paragraph. Absence supplies no completion evidence. |
 
 `parent_tool_use_id` is an inert grouping hint for attributed subagent prose.
 Join it to the parent `Agent` frame's `tool_use_id` to render that prose under
@@ -3463,6 +3489,18 @@ arrives beside publishable child prose. This preserves [ADR 025's remote-head
 boundary](knowledge/decisions/025-mobile-remote-head-interactive-session.md): the
 phone receives typed display events, never claude's private reasoning or signature
 material.
+
+`text_complete` is retained in raw history as well as the wire payload. Only
+`Parser.emitAssistant`'s validated complete attributed text shape supplies it;
+streamed partial deltas, uncorrelated message endings, task success and main text
+supply none. A settled companion suppressed because its text was already streamed
+cannot assert completion. Complete child text flushes earlier buffered text and
+publishes immediately in source order. If transport splitting is necessary, only
+the final piece carries `text_complete: true`, including a whitespace-only final
+piece of an otherwise nonblank paragraph. The marker closes that scoped
+paragraph, not the Agent or main turn. Older histories without the field retain
+their existing behavior. See [Full thread item](#full-thread-item) for the folded
+completion evidence and replay contract.
 
 The main `turn_end` carries the main turn id and follows any pending prose.
 Background child lanes can continue afterwards with their own stable IDs and
