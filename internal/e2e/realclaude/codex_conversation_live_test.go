@@ -183,7 +183,7 @@ func TestCodexConversationLive(t *testing.T) {
 	reqID++
 	// Codex applies settings on turn/start, not on the settings acknowledgement.
 	staged := runCodexTurn(t, h, convID, reqID,
-		"Do not use tools. Reply with one short word acknowledging this read-only turn.",
+		"For this turn only, do not use tools. Reply with one short word acknowledging this read-only turn.",
 		turnevent.PermissionOptionKindRejectOnce)
 	if staged.modals != 0 {
 		t.Fatalf("read-only staging requested %d permission modals, want a tool-free turn", staged.modals)
@@ -314,7 +314,8 @@ func setCodexLiveModel(t *testing.T, h *perConvHarness, sessionID, convID string
 // touchPrompt asks Codex to create name in its working directory, which is the
 // conversation's workspace (the daemon workdir, since the create named no cwd).
 func touchPrompt(name string) string {
-	return "Use your shell tool to run `touch " + name + "` in the current directory, then reply done."
+	return "Use your shell tool to request user approval to run `touch " + name + "` in the current directory. " +
+		"Wait for the decision. If denied, stop without creating the file; if approved, run the command, then reply done."
 }
 
 // codexTurn is what runCodexTurn saw between its send and the turn's end.
