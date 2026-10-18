@@ -36,6 +36,9 @@ new goroutine. Independent source trace confirms `wrapUpCapture.Sink`,
 `sinkForProducer` and `forwardEvent` only accumulate/offer to separate drain and
 publisher workers; none synchronously reenter `WriteUserTurn` from the read loop;
 cover the ordering with blocked model resolution and actual posted policies.
+Add a narrowly marker-scoped fake app-server release-file control to hold a
+turn/start response itself, proving a deadline-bound competing writer returns
+without posting and cannot send later; controls stay under a temporary test dir.
 Do not add public events or log notification contents. Empty and unknown modes
 remain unconfirmed even though the existing encoder conservatively maps them.
 
