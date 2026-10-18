@@ -138,7 +138,8 @@ Pending for the documentation stage in `docs/knowledge/features/codexsup-package
   `internal/codexsup/testdata/capture/web_search.jsonl` (SHA-256
   `16a6d05118fa805f8c936b4fdc00c1e628812ad8a6526cabe22eb1e927c5b533`).
   The complete recorded stream includes unrelated account/credit/rate-limit
-  metadata and remains private; it is not a publishable replay fixture. Codex
+  metadata and must stay in private evidence storage; it is not a publishable
+  replay fixture. Codex
   **0.159.2** is recorded in the PR provenance from the retained version output,
   rather than requiring bootstrap or account frames in the fixture.
   The single same-id pair starts with an explicit empty query and null
@@ -159,3 +160,16 @@ Pending for the documentation stage in `docs/knowledge/features/codexsup-package
   Documentation stage: replace the unavailable-evidence account under
   **The capture's live gaps, and what they mean for a recapture** with these
   observed fields/version and the remaining unobserved variants.
+
+- 2026-10-18: The focused web-search driver retains its complete recording in a
+  mode-0600 temporary file outside the checkout, then writes only the scrubbed
+  observed same-id pair to the fixture and, when configured, to
+  `PYRY_GATE_EVIDENCE_DIR/web_search.jsonl`. Version provenance remains in the
+  test log/PR rather than in bootstrap frames. The broad capture suite keeps its
+  previous output behavior. An offline writer regression proves that account
+  metadata stays in the private recording and both public outputs contain only
+  the same pair. A future focused capture gate must select `codex_capture`, use
+  the managed dedicated sign-in with serialization, and declare its exact durable
+  output. This ticket's genuine focused operator capture, committed pair and
+  offline replay are separate evidence; its ordinary final e2e gate remains as
+  originally required and does not establish that it re-ran the capture.
