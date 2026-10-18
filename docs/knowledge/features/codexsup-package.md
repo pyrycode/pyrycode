@@ -288,6 +288,40 @@ reaches that field. A file change's `ToolUpdate` content is each changed
 path followed by that change's diff exactly as Codex sent it, joined by
 blank lines; nothing is read from disk to reconstruct it.
 
+`webSearch` occupies only `mappedItemTypes` (#3583). `webSearchItem` maps
+`item/started` to one `ToolStart` with the item id as `ToolCallID`, fixed
+title `web_search` and kind `fetch`. It supplies no query, `RawInput` or
+locations, even if the start fields are populated, and emits no
+`Unrecognized` card. `item/completed` supplies exactly one `ToolUpdate` for
+the same id with completed status; the schema has no web-search status field.
+Its `Content` is one `TextContent` joining nonempty display values with newlines:
+
+- `search`: nonempty `action.queries` entries in order; if none remain,
+  nonempty `action.query`; otherwise the top-level `query`.
+- `openPage`: `action.url` only.
+- `findInPage`: `action.url`, then `action.pattern`, each when nonempty.
+- Missing/null action or `other`: the top-level `query`.
+
+Missing/null optional fields add nothing. Open/find actions never fall back to
+the top-level query; if no display text remains, `Content` stays nil and the
+completion is status-only. `ResultDetail` stays empty because these strings
+come from the peer. Opaque `results` are neither decoded nor forwarded.
+`truncate` caps the **combined** display text at `maxWebSearchText` (16 KiB),
+dropping any partial multibyte character at the cut to preserve valid UTF-8.
+Capping each query or URL/pattern separately would still permit an oversized
+joined result. Queries, URLs and patterns remain inert
+[display text](../../protocol-mobile.md#security-model): this mapping performs
+no URL fetch, filesystem access, command execution or payload logging.
+
+`TestTranslateWebSearch` checks action variants, nullable fields and fallbacks;
+`TestTranslateWebSearchBounds` checks combined multibyte bounds, and
+`TestTranslateWebSearchIdentityReuse` checks that reusing an id retains no old
+payload. `TestHandBuiltFramesMatchSchema` validates the hand-built web-search
+envelopes. The unmapped fixture uses `imageView`, with the unknown-item assertion
+retained in `TestTranslateUnrecognizedLanes`; see the
+[live-capture limits below](#the-captures-live-gaps-and-what-they-mean-for-a-recapture)
+for which web-search fields have actually been observed.
+
 `mcpToolCall` occupies only `mappedItemTypes` (#3585). `mcpToolCallItem`
 maps `item/started` to one `ToolStart` with the item id as `ToolCallID`,
 kind `other`, and a `server/tool` title capped at 256 bytes with valid UTF-8.
@@ -368,13 +402,14 @@ threading the model through the caller.
 ## The capture's live gaps, and what they mean for a recapture
 
 `TestCaptureLive` in `capture_live_test.go` requires the `codex_capture` build
-tag. Run `go test -tags codex_capture -run TestCaptureLive ./internal/codexsup/`
-with `PYRY_CODEX_CAPTURE_BIN` pointing to a Codex 0.156.1 binary and
-`PYRY_CODEX_CAPTURE_HOME` pointing to an isolated `CODEX_HOME` holding only a
+tag. Run it through test admission with `-run '^TestCaptureLive$'` to select
+only the broad suite. Set `PYRY_CODEX_CAPTURE_BIN` to the Codex binary and
+`PYRY_CODEX_CAPTURE_HOME` to an isolated `CODEX_HOME` holding only a
 minimal config and the sign-in. It skips if either variable is empty; when
 enabled, it spends Codex allowance and rewrites `testdata/capture/` fixtures.
 Ordinary `go test ./...` and `make check` exclude the live test at compilation,
-even when both variables are inherited from the environment. The capture records
+even when both variables are inherited from the environment. The original
+Codex 0.156.1 capture records
 plain text, an accepted command, a declined command, an interrupted turn and a
 file-edit attempt against real Codex. Two frame types could not be
 produced on demand and are hand-built instead, each schema-validated by the
@@ -398,6 +433,45 @@ package's `jsonSchema.validate`:
   (`askForApproval.granular requires experimentalApi capability`); the
   capture uses `untrusted` with the `read-only` sandbox instead, which still
   yields command approval requests.
+
+**Web-search timing is observed for singular search only (#3583).** The
+committed [web-search fixture](../../../internal/codexsup/testdata/capture/web_search.jsonl)
+contains exactly one same-id started/completed pair from Codex **0.159.2** on
+Linux. The focused `TestCaptureLiveWebSearch` capture executed once, passed once
+and skipped zero times; [PR #3588](https://github.com/pyrycode/pyrycode/pull/3588)
+records version and revision provenance. Start has explicit `query: ""`,
+`action: null` and `results: null`. Completion has `action.type: "search"`, a
+populated singular `action.query` matching the top-level `query`, explicit
+`action.queries: null` and populated opaque results. This confirms that useful
+singular-search fields arrive on completion. Populated plural queries,
+`openPage`, `findInPage` and `other`/fallback live shapes remain unobserved;
+their mapping is backed by the pinned **0.156.1** schema and hand-built tests.
+`TestTranslateCapturedWebSearch` requires the fixture, rejects extra
+bootstrap/account frames, checks these raw fields and both item schemas, then
+replays one fetch start and one query-only completed result.
+
+For a focused recapture, use the managed dedicated sign-in with serialized home
+access and test admission:
+
+```sh
+python3 scripts/test-admission.py -- go test -timeout=30m -tags codex_capture -race -count=1 -json -run '^TestCaptureLiveWebSearch$' ./internal/codexsup/
+```
+
+The same binary/home guards apply. `requireWebSearchPair` rejects a capture
+without a usable same-id pair; an unset-environment skip confirms no live fields.
+`writeFocusedWebSearchCapture` retains the complete recording in a mode-0600
+temporary file outside the checkout, then publishes only the scrubbed pair to
+`testdata/capture/web_search.jsonl` and, when configured, to
+`PYRY_GATE_EVIDENCE_DIR/web_search.jsonl`. Declare that durable output for a
+focused capture gate and commit usable fixture bytes. Keep version provenance
+in the test log/PR rather than adding bootstrap/account frames to the fixture.
+Identity scrubbing alone leaves unrelated account, credit and rate-limit
+metadata: selecting the minimal pair is necessary before publishing.
+`TestFocusedWebSearchCaptureKeepsMetadataPrivate` checks private permissions
+and matching pair-only fixture/export. The retained live pair predates this
+writer change; the updated writer has offline regression proof. The ordinary
+`e2e_realclaude` gate does not select this `codex_capture` test and cannot prove
+a focused recapture ran. macOS is outside this Linux ticket's verification scope.
 
 **Fixture scrub is enforced in code, not just by a manual grep.** The first
 cut of `writeCapture` replaced `cwd` and `os.UserHomeDir()` but not the
@@ -573,7 +647,8 @@ validation and event replay so permissive translator decoding cannot hide an
 invalid fixture.
 
 `TestCaptureLive` lives in `capture_live_test.go`, behind `codex_capture`;
-recapture with `go test -tags codex_capture -run TestCaptureLive ./internal/codexsup/`.
+select it with `-run '^TestCaptureLive$'` through test admission, or use the
+[focused web-search invocation above](#the-captures-live-gaps-and-what-they-mean-for-a-recapture).
 It still requires both `PYRY_CODEX_CAPTURE_BIN` and `PYRY_CODEX_CAPTURE_HOME`
 as described above and spends Codex allowance. `cmd/pyry`'s
 [`TestCodexApprovalLive`](codexsup-package-production-wiring.md) shares the tag
