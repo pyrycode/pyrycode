@@ -24,12 +24,45 @@ lists — `mappedMethods`, `ignoredMethods`, `unrecognizedMethods` (and the item
 twins `mappedItemTypes`/`ignoredItemTypes`/`unrecognizedItemTypes`) — never on
 none or on two. `TestMethodListsPartitionServerNotifications` and
 `TestItemTypesClassified` fail otherwise, so a schema bump that adds a method
-or item type forces a decision instead of dropping it silently. An unmapped
-method becomes `turnevent.Unrecognized{Site: UnrecognizedCodexMethod}`; an
-unmapped item type becomes `Unrecognized{Site: UnrecognizedCodexItem}`, once
+or item type forces a decision instead of dropping it silently. A method
+neither mapped nor ignored becomes
+`turnevent.Unrecognized{Site: UnrecognizedCodexMethod}`; an item type neither
+mapped nor ignored becomes `Unrecognized{Site: UnrecognizedCodexItem}`, once
 per item on `item/started` only (its `item/completed` stays silent — one row
 per item, not two). `model/rerouted` and `model/verification` are on this
 partition too, deliberately, so a model reroute is never silent: see below.
+
+`ignoredMethods` includes four groups of notifications that emit no transcript
+events (#3593):
+
+- Completed-item duplicates: `turn/diff/updated`, `item/fileChange/patchUpdated`
+  and `item/commandExecution/terminalInteraction`. Completed items already
+  carry the diffs and command results.
+- Thread bookkeeping for operations pyry does not request: thread archival,
+  deletion, unarchival, closure and reversion; attachment, goal and queue
+  updates; project changes; and environment connection changes.
+- Output of requests pyry does not make: `command/exec/outputDelta`,
+  `process/outputDelta` and `process/exited`.
+- Features outside text chat: the pinned realtime notifications, `fs/changed`,
+  fuzzy-file-search session updates/completion, MCP OAuth completion and event
+  stream notifications, external-agent-config import progress/completion,
+  Windows world-writable warnings and sandbox setup completion, account login
+  completion, and auto-approval-review start/completion/strict-review notices.
+
+Realtime suppression enumerates exactly the 11 Codex 0.156.1 schema methods:
+`thread/realtime/started`, `thread/realtime/itemAdded`,
+`thread/realtime/item/started`, `thread/realtime/item/transcript/delta`,
+`thread/realtime/item/completed`, `thread/realtime/transcript/delta`,
+`thread/realtime/transcript/done`, `thread/realtime/outputAudio/delta`,
+`thread/realtime/sdp`, `thread/realtime/error` and `thread/realtime/closed`.
+`Translate` checks exact membership in `ignoredSet`; suppressing the whole
+`thread/realtime/` prefix would silently hide future methods that need a
+classification decision. Unknown methods, including `thread/realtime/future`,
+still emit `UnrecognizedCodexMethod`. `TestTranslateIgnoredNotificationGroups`
+independently pins all 43 methods to the ignored lane and checks no-event
+behavior, with populated params from each group;
+`TestTranslateUnknownNotificationStaysVisible` pins ordinary and realtime
+unknown-method visibility.
 
 `turn/moderationMetadata` occupies only `mappedMethods` (#3582).
 `moderationMetadata` validates the full params object before suppressing a
@@ -66,25 +99,89 @@ emits `RateLimited{Status: "rejected"}` first. `model/rerouted` becomes a
 warning `Banner` and keys that turn's `ModelWindows` by the model it moved
 to — a silent downgrade would otherwise pass for the requested model.
 
-`warning` and `configWarning` occupy only `mappedMethods` (#3354).
-`warningBanner` emits exactly one `turnevent.Banner{Level: "warning"}` with
-`StopsTurn: false`: `warning.message` supplies its text; `configWarning.summary`
-supplies its text with a newline and `details` appended only when details
-is a nonempty string. Absent, null or empty details add nothing. The combined
-text is capped at `maxBannerText` (4096 bytes) by `truncate`, which removes
-any partial multibyte character at the cut so the result remains valid UTF-8.
+`warning`, `configWarning`, `guardianWarning` and `deprecationNotice` occupy only
+`mappedMethods` (#3354, #3594), never `ignoredMethods` or `unrecognizedMethods`.
+`Translator.warningBanner` normally emits one `turnevent.Banner{Level: "warning"}`
+with `StopsTurn: false`: `warning` and `guardianWarning` supply `params.message`
+verbatim; `configWarning` and `deprecationNotice` supply `params.summary` with
+a newline and `params.details` appended only when details is a nonempty string.
+Absent, null or empty details add nothing; an empty summary with nonempty details
+therefore produces a leading newline. The combined text is capped at
+`maxBannerText` (4096 bytes) by `truncate`, which removes any partial multibyte
+character at the cut so the result remains valid UTF-8.
 `Truncated` is true when the text exceeded the cap, false at or below it.
 
 Required prose is decoded into `*string`: plain Go strings would turn both
 missing and null fields into the same value as a schema-valid empty string,
 silently accepting malformed warnings. Empty `message` or `summary` is valid;
-missing, null or wrong-type required prose, wrong-type `configWarning.details`,
-invalid JSON and non-object params instead use `undecodable`'s existing bounded,
-UTF-8-safe `UnrecognizedUndecodable` fallback. `threadId`, `path` and `range`
-are omitted from decoding and banner output. Warning prose stays untrusted
+missing, null or wrong-type required prose, wrong-type `details` on either
+summary-based method, invalid JSON and non-object params (including null)
+instead emit one `Unrecognized{Site: UnrecognizedUndecodable}` through
+`undecodable`. Its `Raw` retains the original params, capped at
+`maxUnrecognizedRaw` (16 KiB), with UTF-8-safe truncation and `Truncated` set
+when the cap is exceeded. Target and location fields such as `threadId`,
+`turnId`, `path`, `range` and `stopsTurn` are omitted from decoding and banner
+output. Warning prose stays untrusted
 [display text](../../protocol-mobile.md#security-model); the helper performs
-no routing, filesystem action or payload logging. It holds no state and leaves
-pending usage, reroute targets, the selected model and turn lifecycle unchanged.
+no routing, filesystem action or payload logging. Validation runs before matching
+or changing the warning identity: malformed target-shaped notices always emit
+the bounded fallback, before or after a valid notice, and cannot set or replace
+that identity. Pending usage, reroute targets, the selected model and turn
+lifecycle remain unchanged.
+
+Only `configWarning` deduplicates the deliberate untrusted-project warning (#3599).
+After validation, `Translator.warningBanner` searches the assembled prose
+(`params.summary` plus newline/nonempty `params.details`) for the exact,
+case-sensitive fragment `is marked as untrusted in the effective configuration`.
+The first match emits the normal banner and remembers one SHA-256 digest of
+the complete, untruncated prose. Identical repeats emit no events. Different
+prose remains visible on every occurrence and never replaces the first identity,
+even when it contains the fragment or differs only beyond the 4096-byte banner
+cap. Both matching and hashing happen before truncation: comparing displayed
+text would incorrectly hide distinct notices with the same capped prefix.
+Identity depends on the assembled prose, so changing metadata or dividing the
+same text differently between summary and details does not make a new notice.
+Only the digest is retained; there is no growing cache or retained warning text.
+
+The identity lasts for the `Translator` lifetime, across completed turns and
+model changes. `codexRunner.runOnce` creates a new translator for each app-server
+spawn, including respawn, so that boundary permits the warning again.
+
+`codexHomeConfig` in `cmd/pyry/codex_home.go` sets the top-level
+`suppress_unstable_features_warning = true` before `[features]` (#3598),
+suppressing the unstable-feature warning caused by pyry enabling
+`default_mode_request_user_input`. The feature remains enabled in the isolated,
+daemon-owned home. The workspace deliberately stays untrusted to isolate Codex
+from project-local config, hooks and exec policies, preserving
+[ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md).
+`TestPrepareCodexHome` checks that the true assignment precedes the first TOML
+table and rejects project/trust entries, alongside the existing feature,
+posture, permissions and auth-preservation checks.
+
+Trust-warning deduplication changes no trust or configuration.
+Unrelated warnings still banner on every occurrence. Case/fragment nonmatches,
+matching text on `warning` or other methods, and the method partition retain
+their handling; genuinely unknown methods still emit `UnrecognizedCodexMethod`.
+
+The redacted [PR #3600 startup excerpts](https://github.com/pyrycode/pyrycode/pull/3600)
+were observed live with Codex 0.159.2 in an isolated untrusted home/project:
+the trust fragment arrived in `configWarning.params.summary`, with null `details`.
+The unstable-feature warning arrived in `warning.params.message`, with
+`agent_message_board=true` and suppression unset; it is unaffected by this
+matcher. No personal authentication was read or copied and deployed config was
+unchanged. The unauthenticated turn attempt failed on transport access. The
+[subsequent dispatcher gate](https://github.com/pyrycode/pyrycode/issues/3599#issuecomment-6242825748)
+skipped `TestCodexConversationLive` and `TestCodexQuestionLive` because capture
+settings were absent. Thus both carrying methods/texts are observed startup
+evidence, while authenticated conversation and actual-payload matcher acceptance
+remain unproven by the recorded runs.
+
+`TestTranslateUntrustedWarningLifetime`, `TestTranslateUntrustedWarningIdentity`,
+`TestTranslateUntrustedWarningNonmatches` and
+`TestTranslateUntrustedWarningMalformed` pin lifetime/reset, full-prose identity,
+unchanged nonmatch handling and validation before state changes. These and the
+existing warning checks passed under race detection on Linux; macOS is outside
+this ticket's verification scope.
 
 Completed replies alone do not prove notification coverage: [Mobile
 \#2052](https://github.com/pyrycode/pyrycode-mobile/issues/2052) finalized its
@@ -94,6 +191,15 @@ parser-gap guard; genuinely unknown methods still emit
 `UnrecognizedCodexMethod`. `TestWarningMethodLanes` pins that distinction,
 and `TestTranslateWarningsPreserveTurn` compares repeated warnings against a
 control translator's state and completed-turn output.
+
+`TestTranslateWarnings` and `TestTranslateWarningBounds` validate successful
+examples against the pinned schema, including the required `threadId` in
+`GuardianWarningNotification`. That fixture requirement does not make target
+metadata a translator validation or routing requirement. Use multiline Unicode
+prose to check verbatim warning text: a terminal-escape fixture can pass the
+translator tests while failing `substrate-guard` (#3594).
+`TestTranslateMalformedWarnings` checks prose validation and bounded raw fallback
+for all four methods.
 
 `commandExecution` and `fileChange` items (#2609) become tool events instead
 of `Unrecognized`, so a Codex tool row renders like a Claude one with no
@@ -120,6 +226,41 @@ a negative code — never from the peer's status string, so no Codex byte
 reaches that field. A file change's `ToolUpdate` content is each changed
 path followed by that change's diff exactly as Codex sent it, joined by
 blank lines; nothing is read from disk to reconstruct it.
+
+`mcpToolCall` occupies only `mappedItemTypes` (#3585). `mcpToolCallItem`
+maps `item/started` to one `ToolStart` with the item id as `ToolCallID`,
+kind `other`, and a `server/tool` title capped at 256 bytes with valid UTF-8.
+`RawInput` preserves the opaque `arguments` JSON value, including objects,
+arrays, scalars and null, without wrapping or truncating it. Existing
+[turnbridge](turnbridge-package.md) input projections bound its display on
+the wire. `item/mcpToolCall/progress` occupies only `ignoredMethods` and
+emits nothing: forwarding progress as updates would create extra results
+because every `ToolUpdate` becomes a `tool_result` frame.
+
+`item/completed` emits one `ToolUpdate` for the same id. `toolStatus` maps
+`completed` to completed and `failed` or an out-of-contract status to failed.
+A non-null `error` selects `error.message`, even when that string is empty;
+otherwise, concatenate string `text` fields from `result.content` objects
+whose `type` is `"text"`, in array order with no separators. Skip all other
+elements, including non-objects and text blocks with non-string text. The
+selected error or combined result text is capped at 16 KiB by `truncate`,
+dropping any partial multibyte character at the cut. Empty selected text
+(including absent or null results) leaves `Content` nil; nonempty text becomes
+one `TextContent`. `ResultDetail` stays empty because the content is authored
+by the peer, not composed by the daemon.
+
+Keep `result.content` as `[]json.RawMessage` and decode elements independently:
+decoding the whole array into typed text blocks would reject schema-valid
+scalars or differently shaped elements and lose a valid terminal tool row.
+Malformed JSON, missing required mapping fields or wrong types use the bounded
+`UnrecognizedUndecodable` fallback; valid null arguments remain distinct from
+missing arguments. MCP payloads remain untrusted
+[display data](../../protocol-mobile.md#security-model): metadata, structured
+content and non-text blocks cause no execution, URL/resource fetch, filesystem
+access, payload logging or image/resource decoding. The completed, failed and
+empty-result fixtures in `testdata/handbuilt/mcp_*.jsonl` are schema-derived
+hand-built evidence validated by `TestHandBuiltFramesMatchSchema` and replayed
+by `TestTranslateMCPHandBuilt`; there is no real MCP capture.
 
 **Why `thread/tokenUsage/updated` is on the ignored-for-emission-but-still-read
 list.** It carries a `turnId` and is held (not emitted) until that turn's
@@ -362,6 +503,14 @@ a shared frame-dispatch loop like this one needs a check for an existing
 fallthrough path before adding a parallel one.
 
 `client_test.go` and the offline capture tests run without a Codex account.
+Validate complete notification frames when adding hand-built fixtures: a valid
+`ThreadItem` alone is insufficient. `item/started` requires `startedAtMs` and
+`item/completed` requires `completedAtMs` in their params. The first MCP fixtures
+omitted these lifecycle timestamps; mapping tests could replay them, but
+`TestHandBuiltFramesMatchSchema` rejected the envelopes. Keep both schema
+validation and event replay so permissive translator decoding cannot hide an
+invalid fixture.
+
 `TestCaptureLive` lives in `capture_live_test.go`, behind `codex_capture`;
 recapture with `go test -tags codex_capture -run TestCaptureLive ./internal/codexsup/`.
 It still requires both `PYRY_CODEX_CAPTURE_BIN` and `PYRY_CODEX_CAPTURE_HOME`

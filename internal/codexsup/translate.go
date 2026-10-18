@@ -2,6 +2,7 @@ package codexsup
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -15,6 +16,8 @@ import (
 const (
 	maxUnrecognizedRaw = 16 << 10
 	maxWebSearchText   = 16 << 10
+	maxMCPToolText     = 16 << 10
+	maxMCPToolTitle    = 256
 	maxBannerText      = 4 << 10
 	maxStopField       = 256
 	maxModelID         = 256
@@ -32,6 +35,7 @@ var (
 		"item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
 		"thread/tokenUsage/updated", "turn/completed", "item/started", "item/completed",
 		"model/rerouted", "warning", "configWarning",
+		"guardianWarning", "deprecationNotice",
 		"turn/moderationMetadata",
 	}
 	// ignoredMethods carry no turn meaning, following streamsup's
@@ -51,48 +55,51 @@ var (
 		// ToolUpdate; turnbridge makes every ToolUpdate a tool_result frame, so a
 		// delta each would give one row several results.
 		"item/commandExecution/outputDelta", "item/fileChange/outputDelta",
+		"item/mcpToolCall/progress",
+		// Completed items already carry these diffs and command results.
+		"turn/diff/updated", "item/fileChange/patchUpdated", "item/commandExecution/terminalInteraction",
+		// Thread bookkeeping for operations pyry does not request.
+		"thread/archived", "thread/deleted", "thread/unarchived", "thread/closed",
+		"thread/reverted", "thread/attachment/updated", "thread/goal/updated",
+		"thread/goal/cleared", "thread/queue/changed", "project/changed",
+		"thread/project/updated", "thread/environment/connected", "thread/environment/disconnected",
+		// Output of command/exec and process requests pyry does not make.
+		"command/exec/outputDelta", "process/outputDelta", "process/exited",
+		// Features outside text chat; realtime names enumerate the pinned schema.
+		"thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
+		"thread/realtime/item/transcript/delta", "thread/realtime/item/completed",
+		"thread/realtime/transcript/delta", "thread/realtime/transcript/done",
+		"thread/realtime/outputAudio/delta", "thread/realtime/sdp", "thread/realtime/error",
+		"thread/realtime/closed", "fs/changed",
+		"fuzzyFileSearch/sessionUpdated", "fuzzyFileSearch/sessionCompleted",
+		"mcpServer/oauthLogin/completed", "mcpServer/event/stream/notification",
+		"externalAgentConfig/import/progress", "externalAgentConfig/import/completed",
+		"windows/worldWritableWarning", "windowsSandbox/setupCompleted", "account/login/completed",
+		"item/autoApprovalReview/started", "item/autoApprovalReview/completed",
+		"autoApprovalReview/strictReviewRequired",
 	}
 	// unrecognizedMethods become Unrecognized on the codex_method lane: seen,
 	// but with no mapping yet. model/verification is here so it is never
 	// silent.
 	unrecognizedMethods = []string{
-		"error", "thread/archived", "thread/deleted", "thread/unarchived", "thread/closed",
-		"thread/reverted", "thread/attachment/updated", "thread/goal/updated",
-		"thread/goal/cleared", "thread/queue/changed", "project/changed",
-		"thread/project/updated", "thread/environment/connected",
-		"thread/environment/disconnected", "hook/started", "hook/completed",
-		"turn/diff/updated", "turn/plan/updated", "item/autoApprovalReview/started",
-		"item/autoApprovalReview/completed", "autoApprovalReview/strictReviewRequired",
-		"item/plan/delta", "command/exec/outputDelta", "process/outputDelta", "process/exited",
-		"item/commandExecution/terminalInteraction", "item/fileChange/patchUpdated",
-		"item/mcpToolCall/progress",
-		"mcpServer/oauthLogin/completed", "mcpServer/event/stream/notification",
-		"externalAgentConfig/import/progress", "externalAgentConfig/import/completed",
-		"fs/changed", "model/verification",
+		"error", "hook/started", "hook/completed", "turn/plan/updated", "item/plan/delta",
+		"model/verification",
 		"modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted",
 		"model/safetyBuffering/updated",
-		"guardianWarning", "deprecationNotice",
-		"fuzzyFileSearch/sessionUpdated", "fuzzyFileSearch/sessionCompleted",
-		"thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
-		"thread/realtime/item/transcript/delta", "thread/realtime/item/completed",
-		"thread/realtime/transcript/delta", "thread/realtime/transcript/done",
-		"thread/realtime/outputAudio/delta", "thread/realtime/sdp", "thread/realtime/error",
-		"thread/realtime/closed", "windows/worldWritableWarning",
-		"windowsSandbox/setupCompleted", "account/login/completed",
 	}
 )
 
 // Item-type lanes, the same three-way classification over ThreadItem types;
 // TestItemTypesClassified checks them against the schema.
 var (
-	mappedItemTypes = []string{"contextCompaction", "commandExecution", "fileChange", "webSearch"}
+	mappedItemTypes = []string{"contextCompaction", "commandExecution", "fileChange", "webSearch", "mcpToolCall"}
 	// ignoredItemTypes carry no new turn meaning: a user message echoes the
 	// prompt, and agentMessage and reasoning text already arrived as deltas.
 	ignoredItemTypes = []string{"userMessage", "agentMessage", "reasoning"}
 	// unrecognizedItemTypes become Unrecognized on the codex_item lane, once
 	// per item, on item/started.
 	unrecognizedItemTypes = []string{
-		"hookPrompt", "functionCallOutput", "plan", "mcpToolCall", "dynamicToolCall",
+		"hookPrompt", "functionCallOutput", "plan", "dynamicToolCall",
 		"collabAgentToolCall", "subAgentActivity", "imageView", "sleep",
 		"imageGeneration", "enteredReviewMode", "exitedReviewMode",
 	}
@@ -145,6 +152,7 @@ type turnUsage struct {
 
 // Translator maps Codex server notifications onto turn events: the Codex twin
 // of streamsup's parser. It holds per-turn state (usage, reroute target) and
+// remembers the first untrusted-project warning for its entire lifetime. It
 // is not safe for concurrent use; call it from OnNotification, which runs on
 // one goroutine.
 //
@@ -154,9 +162,10 @@ type turnUsage struct {
 // tool input and tool_result text, bounded by acp's line cap and capped by
 // turnbridge on the way to the wire.
 type Translator struct {
-	model    string
-	usage    map[string]*turnUsage
-	rerouted map[string]string
+	model            string
+	usage            map[string]*turnUsage
+	rerouted         map[string]string
+	untrustedWarning *[sha256.Size]byte
 }
 
 // NewTranslator returns a translator for turns running on model, the model
@@ -193,8 +202,8 @@ func (t *Translator) Translate(method string, params json.RawMessage) []turneven
 		return t.item(method, params)
 	case "model/rerouted":
 		return t.reroute(params)
-	case "warning", "configWarning":
-		return warningBanner(method, params)
+	case "warning", "configWarning", "guardianWarning", "deprecationNotice":
+		return t.warningBanner(method, params)
 	case "turn/moderationMetadata":
 		return moderationMetadata(params)
 	}
@@ -225,9 +234,9 @@ func moderationMetadata(params json.RawMessage) []turnevent.Event {
 // warningBanner carries prose only: targeting and location metadata have no
 // routing, filesystem or turn-state meaning here. Empty required strings are
 // valid; missing or null required strings are not.
-func warningBanner(method string, params json.RawMessage) []turnevent.Event {
+func (t *Translator) warningBanner(method string, params json.RawMessage) []turnevent.Event {
 	var text string
-	if method == "warning" {
+	if method == "warning" || method == "guardianWarning" {
 		var p struct {
 			Message *string `json:"message"`
 		}
@@ -246,6 +255,16 @@ func warningBanner(method string, params json.RawMessage) []turnevent.Event {
 		text = *p.Summary
 		if p.Details != nil && *p.Details != "" {
 			text += "\n" + *p.Details
+		}
+	}
+	if method == "configWarning" && strings.Contains(text, "is marked as untrusted in the effective configuration") {
+		// Compare full validated prose before truncation; distinct notices stay
+		// visible and never replace the first identity. Retain no payload text.
+		identity := sha256.Sum256([]byte(text))
+		if t.untrustedWarning == nil {
+			t.untrustedWarning = &identity
+		} else if *t.untrustedWarning == identity {
+			return nil
 		}
 	}
 	text, truncated := truncate(text, maxBannerText)
@@ -388,6 +407,8 @@ func (t *Translator) item(method string, params json.RawMessage) []turnevent.Eve
 		return fileChangeItem(method, params)
 	case typ == "webSearch":
 		return webSearchItem(method, params)
+	case typ == "mcpToolCall":
+		return mcpToolCallItem(method, params)
 	case ignoredItemSet[typ], mappedItemSet[typ]:
 		return nil
 	case method == "item/completed":
@@ -454,6 +475,62 @@ func webSearchItem(method string, params json.RawMessage) []turnevent.Event {
 	}
 	update := turnevent.ToolUpdate{ToolCallID: it.ID, Status: turnevent.ToolStatusCompleted}
 	if text, _ := truncate(strings.Join(parts, "\n"), maxWebSearchText); text != "" {
+		update.Content = turnevent.TextContent{Text: text}
+	}
+	return []turnevent.Event{update}
+}
+
+// mcpToolCallItem carries opaque input and text-only output as untrusted display
+// data. Progress is ignored; completion supplies the call's only result.
+func mcpToolCallItem(method string, params json.RawMessage) []turnevent.Event {
+	var p struct {
+		Item struct {
+			ID        *string         `json:"id"`
+			Server    *string         `json:"server"`
+			Tool      *string         `json:"tool"`
+			Status    *string         `json:"status"`
+			Arguments json.RawMessage `json:"arguments"`
+			Result    *struct {
+				Content []json.RawMessage `json:"content"`
+			} `json:"result"`
+			Error *struct {
+				Message *string `json:"message"`
+			} `json:"error"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return undecodable(params)
+	}
+	it := p.Item
+	if it.ID == nil || it.Server == nil || it.Tool == nil || it.Status == nil || len(it.Arguments) == 0 ||
+		(it.Result != nil && it.Result.Content == nil) || (it.Error != nil && it.Error.Message == nil) {
+		return undecodable(params)
+	}
+	if method == "item/started" {
+		return []turnevent.Event{turnevent.ToolStart{
+			ToolCallID: *it.ID, Title: cut(*it.Server+"/"+*it.Tool, maxMCPToolTitle),
+			Kind: turnevent.ToolKindOther, RawInput: it.Arguments,
+		}}
+	}
+	var text string
+	if it.Error != nil {
+		text = *it.Error.Message
+	} else if it.Result != nil {
+		var b strings.Builder
+		for _, raw := range it.Result.Content {
+			var block struct {
+				Type string  `json:"type"`
+				Text *string `json:"text"`
+			}
+			// Content elements are unrestricted JSON; only typed text is displayable.
+			if json.Unmarshal(raw, &block) == nil && block.Type == "text" && block.Text != nil {
+				b.WriteString(*block.Text)
+			}
+		}
+		text = b.String()
+	}
+	update := turnevent.ToolUpdate{ToolCallID: *it.ID, Status: toolStatus(*it.Status)}
+	if text = cut(text, maxMCPToolText); text != "" {
 		update.Content = turnevent.TextContent{Text: text}
 	}
 	return []turnevent.Event{update}

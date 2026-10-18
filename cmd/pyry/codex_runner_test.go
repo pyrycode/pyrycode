@@ -404,6 +404,13 @@ func TestPrepareCodexHome(t *testing.T) {
 			t.Errorf("config.toml lacks %s:\n%s", line, got)
 		}
 	}
+	topLevel, _, _ := strings.Cut(string(got), "\n[")
+	if !strings.Contains(topLevel, "\nsuppress_unstable_features_warning = true\n") {
+		t.Errorf("config.toml lacks top-level unstable-feature warning suppression:\n%s", got)
+	}
+	if strings.Contains(string(got), "[projects") || strings.Contains(string(got), "trust_level") {
+		t.Errorf("config.toml grants project trust:\n%s", got)
+	}
 	if strings.Contains(string(got), "danger-full-access") {
 		t.Errorf("edited config survived:\n%s", got)
 	}
