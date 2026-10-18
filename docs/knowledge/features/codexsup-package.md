@@ -17,7 +17,7 @@ same #2620 runner, one `Translator` per spawn.
 ## The translator's three-list partition
 
 `Translate(method, params)` runs on the caller's goroutine (`OnNotification`),
-holds per-turn state (pending usage, reroute target), and is not safe for
+holds per-turn state (pending usage, reroute target, open retry), and is not safe for
 concurrent use. Every method in `methods.go`'s `serverNotifications`, and
 every schema `ThreadItem` type, sits on exactly one of three package-level
 lists — `mappedMethods`, `ignoredMethods`, `unrecognizedMethods` (and the item
@@ -98,6 +98,67 @@ item's `item/started`/`item/completed` become `Compacting{Active: true/false}`.
 emits `RateLimited{Status: "rejected"}` first. `model/rerouted` becomes a
 warning `Banner` and keys that turn's `ModelWindows` by the model it moved
 to — a silent downgrade would otherwise pass for the requested model.
+
+`error` occupies only `mappedMethods` (#3584). Every valid notification with
+`willRetry: true` emits exactly one `ApiRetry{Active: true}`, including repeated
+retry notifications. `Current` and `Total` remain zero because the pinned schema
+supplies no retry counters. One translator-local boolean tracks the open retry;
+it retains no thread or turn identifier. While open, `Translate` prepends exactly
+one `ApiRetry{Active: false}` before the next emitted `TextChunk`, `ThoughtChunk`,
+`ToolStart`, `ToolUpdate` or completed turn's events. For completion, the falling
+edge precedes the entire event batch, including `RateLimited` when present and
+`TurnEnd`, whether the turn completed, failed or was interrupted. No falling edge
+is emitted without an open retry; completion leaves none for the next turn.
+
+Clear retry status on emitted content or completion, rather than on the next
+notification: warnings, non-retrying error banners, usage updates, compaction,
+ignored notifications and undecodable input do not mean output has resumed and
+leave the retry open. This event-based boundary also covers mapped tools without
+duplicating retry handling in each tool decoder.
+
+With `willRetry: false`, `Translator.errorNotification` normally emits exactly
+one `Banner{Level: "error", StopsTurn: false}`. Text is `error.message` verbatim,
+plus a newline and `error.additionalDetails` only when details is a nonempty
+string. Absent, null or empty details add nothing; an empty message is valid,
+including the leading newline when details are present. `truncate` bounds the
+combined text at `maxBannerText` (4096 bytes), removing a partial multibyte
+character at the cut so the result stays valid UTF-8. `Truncated` is true only
+when cut, and false at or below the cap.
+
+Suppress that non-retrying banner only for `usageLimitExceeded` and
+`contextWindowExceeded`, interpreted by `errorCategory` as a string token or
+the single key of an object variant. Completion already owns those reports:
+`turnCompleted` still emits `RateLimited{Status: "rejected"}` before its single
+error `TurnEnd` for usage-limit rejection, and uses `TurnEndReasonMaxTokens` for
+context-window exhaustion. Other failures retain their existing error category.
+Neither retrying nor non-retrying `error` notifications emit `RateLimited` or
+`TurnEnd` themselves. Usage, model/reroute fields and completion ordering remain
+unchanged apart from the retry falling edge.
+
+Validate the complete notification before changing retry state. Required
+`error` (object), `error.message` (string), `willRetry` (boolean), `threadId` and
+`turnId` (strings) use pointer decoding so missing/null values stay distinct
+from valid empty strings and `false`. Invalid JSON, non-object params,
+missing/null/wrong-type required fields and wrong-type `additionalDetails`
+emit the existing `Unrecognized{Site: UnrecognizedUndecodable}` fallback without
+changing retry state. Its original `Raw` params are capped at
+`maxUnrecognizedRaw` (16 KiB), with UTF-8-safe truncation and `Truncated` when
+cut. Absent/null optional details and `codexErrorInfo` are accepted. Genuinely
+unknown methods keep `UnrecognizedCodexMethod`. Error prose remains inert
+[display text](../../protocol-mobile.md#security-model) and is never logged;
+identifiers and optional `misalignment` metadata confer no routing, filesystem,
+execution or approval action.
+
+The notification examples in `testdata/handbuilt/error_notifications.jsonl` are
+schema-derived hand-built frames, not live captures. `TestHandBuiltFramesMatchSchema`
+validates their envelopes and `TestTranslateErrorFrames` replays them.
+`TestTranslateErrorRetryLifecycle` checks repeated rising edges, single falling
+edges and later turns; `TestTranslateMalformedErrors` checks that rejected input
+preserves an open retry. `TestTranslateErrorBannerBounds` covers joined prose
+and multibyte cuts. `TestTranslateErrorsPreserveCompletion` compares against a
+control translator with pending usage and a reroute: checking only the banner
+would miss accidentally consuming completion state or duplicating terminal
+reports for the suppressed categories.
 
 `warning`, `configWarning`, `guardianWarning` and `deprecationNotice` occupy only
 `mappedMethods` (#3354, #3594), never `ignoredMethods` or `unrecognizedMethods`.
