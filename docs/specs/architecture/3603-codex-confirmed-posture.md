@@ -25,6 +25,9 @@ Keep this state under the runner's leaf mutex in a small helper file. Fence it
 by current client, child generation, unique child translator and monotonically
 increasing attempt epoch. Support either response-before-notification or
 notification-before-response; only the same nonempty turn ID joins the two.
+The raw notification must also name the snapshotted active root thread ID; a
+subagent or other thread in the same child cannot confirm it. The translator
+does not provide this filter, so the confirmation boundary checks it directly.
 Do not add public events or log notification contents. Empty and unknown modes
 remain unconfirmed even though the existing encoder conservatively maps them.
 
@@ -48,7 +51,8 @@ No empty guard bypass, retry loop, skipped live scenario or relaxed validator.
 First add a real fake-app-server regression that fails because the optional
 reader is missing. Then verify stored intent versus accepted mode, both factor
 orders, failed/incomplete/mismatched attempts, superseded epochs, stale children,
-restart/rotation/teardown invalidation, exact posted policy and bound wire mode.
+restart/rotation/teardown invalidation, wrong-thread notifications from the same
+child, exact posted policy and bound wire mode.
 Run focused native race tests through shared test admission, tagged package
 compilation, independent review, then one exact pinned native live scenario via
 the dedicated managed Codex home and serialized live gate. Existing full native
