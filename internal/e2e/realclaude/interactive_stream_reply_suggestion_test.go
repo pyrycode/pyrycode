@@ -840,7 +840,10 @@ func TestInteractiveStream_FallbackReplySuggestionSetThenClear(t *testing.T) {
 		t.Log(suggestLifecycle(h.daemon.stderr.String(), source.PID))
 	}
 	defer logSource()
-	sealSendMessage(t, h.phone, h.initSend, 2, suggestConvID, "fallback-turn", "Suggest a simple Go testing task I can do next. One sentence, no tools.")
+	// Stage an unambiguous short human reply. The fallback answers a closing
+	// question in the user's voice; a broad request for tasks can legitimately
+	// produce a suggestion rejected by its unchanged word/sentence/voice rules.
+	sealSendMessage(t, h.phone, h.initSend, 2, suggestConvID, "fallback-turn", "Without tools, ask me whether I want you to add a table-driven Go test. Reply only with that short yes/no question.")
 	if !w.pumpUntil(t, frames, perTurnReplyBudget, func() bool { return w.idle }) {
 		logSource()
 		t.Fatal("exchange did not complete")
