@@ -487,12 +487,27 @@ start here, not be chased as a daemon regression.
 Composer Stop survival needs a witness tied to the actual rig task. An interrupt
 ack or retained roster can stay green after the task has died.
 `TestRealClaudeComposerStopPreservesBackgroundTask` uses `stopHeldTaskSetup` to
-join the exact background Bash call to its task id, waits for an active
-foreground call's FIFO rendezvous, then requires a cancelled turn. Only that
-same background task's completion after rig release proves survival; reader
-presence immediately after Stop is an additional liveness check. See
+join the exact background Bash call to its task id and holds its FIFO reader.
+Before interrupting, it matches the exact rig-authored foreground Bash command
+on the client wire, with `run_in_background` not true, then waits for
+`composerForegroundGate`'s PID arrival file. `composerForegroundHeld` requires
+the release file absent and that PID to identify a live non-zombie shell.
+A transient FIFO open or an arrival file left by an exited shell cannot prove
+held execution; only the rig creates the foreground release file. Stop must
+then produce a cancelled foreground turn while the background FIFO reader
+remains present. Only `completed` for the same background task id after the rig
+releases its background hold proves survival; another task's completion,
+`failed` or `stopped` cannot substitute. See
 [task identity and FIFO staging](e2e-realclaude-roster-after-finish-capture-test-go.md#stop-completion-needs-a-held-task-and-all-terminal-signals)
-and [Composer Stop](streamsup-package.md#composer-stop).
+and [Composer Stop](streamsup-package.md#composer-stop), with the foreground
+witness design in [the staging repair plan](../../specs/architecture/3604-composer-foreground-hold.md).
+
+`TestComposerForegroundGate` checks hold/release, PID identity and harmless
+repeated release; `TestComposerForegroundGateDetectsPrematureExit` rejects a
+surviving arrival file after its shell exits. Keep `ps` execution errors separate
+from empty/zombie status: combining them hid the staging failure's cause.
+`TestComposerForegroundHeldInspectionError` uses an empty test-local PATH and
+requires `errors.Is(err, exec.ErrNotFound)` through the contextual wrapper.
 
 Closed-input cleanup needs independent attribution. Parent cancellation invokes
 the descendant reaper and could make a task-death assertion pass even if Claude
