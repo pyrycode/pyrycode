@@ -27,11 +27,24 @@ func TestTranslateWarnings(t *testing.T) {
 		{"config empty details", "configWarning", `{"summary":"notice","details":""}`, "notice"},
 		{"config empty summary", "configWarning", `{"summary":"","details":"guidance"}`, "\nguidance"},
 		{"config empty", "configWarning", `{"summary":""}`, ""},
+		{"guardian targeted", "guardianWarning", `{"message":"notice\n界","threadId":"other-thread"}`, "notice\n界"},
+		{"guardian empty", "guardianWarning", `{"message":"","threadId":"other-thread"}`, ""},
+		{"deprecation absent", "deprecationNotice", `{"summary":"notice"}`, "notice"},
+		{"deprecation null", "deprecationNotice", `{"summary":"notice","details":null}`, "notice"},
+		{"deprecation details", "deprecationNotice", `{"summary":"notice","details":"guidance\n界"}`, "notice\nguidance\n界"},
+		{"deprecation empty details", "deprecationNotice", `{"summary":"notice","details":""}`, "notice"},
+		{"deprecation empty summary", "deprecationNotice", `{"summary":"","details":"guidance"}`, "\nguidance"},
+		{"deprecation empty", "deprecationNotice", `{"summary":""}`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ref := "#/definitions/v2/WarningNotification"
-			if tc.method == "configWarning" {
+			switch tc.method {
+			case "configWarning":
 				ref = "#/definitions/v2/ConfigWarningNotification"
+			case "guardianWarning":
+				ref = "#/definitions/v2/GuardianWarningNotification"
+			case "deprecationNotice":
+				ref = "#/definitions/v2/DeprecationNoticeNotification"
 			}
 			sch, err := s.resolve(ref)
 			if err != nil {
@@ -56,10 +69,15 @@ func TestTranslateWarnings(t *testing.T) {
 func TestTranslateWarningBounds(t *testing.T) {
 	t.Parallel()
 	atLimit := strings.Repeat("x", maxBannerText)
-	for _, method := range []string{"warning", "configWarning"} {
+	for _, method := range []string{"warning", "configWarning", "guardianWarning", "deprecationNotice"} {
 		key, schemaName := "message", "WarningNotification"
-		if method == "configWarning" {
+		switch method {
+		case "configWarning":
 			key, schemaName = "summary", "ConfigWarningNotification"
+		case "guardianWarning":
+			schemaName = "GuardianWarningNotification"
+		case "deprecationNotice":
+			key, schemaName = "summary", "DeprecationNoticeNotification"
 		}
 		s := loadSchema(t)
 		sch, err := s.resolve("#/definitions/v2/" + schemaName)
@@ -77,11 +95,14 @@ func TestTranslateWarningBounds(t *testing.T) {
 			{"combined at limit", "notice", strings.Repeat("x", maxBannerText-7), "notice\n" + strings.Repeat("x", maxBannerText-7), false},
 			{"combined multibyte cut", "notice", strings.Repeat("x", maxBannerText-8) + "界", "notice\n" + strings.Repeat("x", maxBannerText-8), true},
 		} {
-			if method == "warning" && tc.details != "" {
+			if key == "message" && tc.details != "" {
 				continue
 			}
 			t.Run(method+"/"+tc.name, func(t *testing.T) {
 				params := map[string]string{key: tc.prose}
+				if method == "guardianWarning" {
+					params["threadId"] = "other-thread"
+				}
 				if tc.details != "" {
 					params["details"] = tc.details
 				}
@@ -104,15 +125,15 @@ func TestTranslateWarningBounds(t *testing.T) {
 
 func TestTranslateMalformedWarnings(t *testing.T) {
 	t.Parallel()
-	for _, method := range []string{"warning", "configWarning"} {
+	for _, method := range []string{"warning", "configWarning", "guardianWarning", "deprecationNotice"} {
 		key := "message"
-		if method == "configWarning" {
+		if method == "configWarning" || method == "deprecationNotice" {
 			key = "summary"
 		}
 		cases := []string{"", "{", "null", "[]", `["notice"]`, `"notice"`, "0", "true", "{}"}
 		for _, value := range []string{"null", "42", "true", "[]", "{}"} {
 			cases = append(cases, `{"`+key+`":`+value+`}`)
-			if method == "configWarning" && value != "null" {
+			if key == "summary" && value != "null" {
 				cases = append(cases, `{"summary":"notice","details":`+value+`}`)
 			}
 		}
@@ -147,8 +168,10 @@ func TestTranslateWarningsPreserveTurn(t *testing.T) {
 	}
 	for range 2 {
 		for method, params := range map[string]string{
-			"warning":       `{"message":"notice","threadId":"other-thread"}`,
-			"configWarning": `{"summary":"notice","path":"/untrusted/config","range":null}`,
+			"warning":           `{"message":"notice","threadId":"other-thread"}`,
+			"configWarning":     `{"summary":"notice","path":"/untrusted/config","range":null}`,
+			"guardianWarning":   `{"message":"notice","threadId":"other-thread","turnId":"t","stopsTurn":true}`,
+			"deprecationNotice": `{"summary":"notice","threadId":"other-thread","turnId":"t","path":"/untrusted/config","stopsTurn":true}`,
 		} {
 			got := tr.Translate(method, json.RawMessage(params))
 			if !reflect.DeepEqual(got, []turnevent.Event{turnevent.Banner{Level: "warning", Text: "notice"}}) {
@@ -167,17 +190,153 @@ func TestTranslateWarningsPreserveTurn(t *testing.T) {
 
 func TestWarningMethodLanes(t *testing.T) {
 	t.Parallel()
-	for _, method := range []string{"warning", "configWarning"} {
+	for _, method := range []string{"warning", "configWarning", "guardianWarning", "deprecationNotice"} {
 		if !slices.Contains(mappedMethods, method) || slices.Contains(ignoredMethods, method) || slices.Contains(unrecognizedMethods, method) {
 			t.Errorf("%s must occupy only mappedMethods", method)
 		}
 	}
-	for _, method := range []string{"futureWarning", "guardianWarning"} {
+	for _, method := range []string{"futureWarning"} {
 		params := json.RawMessage(`{"message":"notice"}`)
 		got := NewTranslator("m").Translate(method, params)
 		want := []turnevent.Event{turnevent.Unrecognized{Site: turnevent.UnrecognizedCodexMethod, Kind: method, Raw: string(params)}}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: got %#v, want %#v", method, got, want)
+		}
+	}
+}
+
+const testUntrustedWarning = "project is marked as untrusted in the effective configuration"
+
+func testWarningParams(summary, details string) json.RawMessage {
+	params, _ := json.Marshal(map[string]string{"summary": summary, "details": details})
+	return params
+}
+
+func testWarningBanner(t *testing.T, tr *Translator, method string, params json.RawMessage, text string) {
+	t.Helper()
+	bounded, truncated := truncate(text, maxBannerText)
+	want := []turnevent.Event{turnevent.Banner{Level: "warning", Text: bounded, Truncated: truncated}}
+	if got := tr.Translate(method, params); !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s: want one bounded warning banner; got %#v", method, got)
+	}
+}
+
+func TestTranslateUntrustedWarningLifetime(t *testing.T) {
+	t.Parallel()
+	tr, control := NewTranslator("m"), NewTranslator("m")
+	params := testWarningParams(testUntrustedWarning, "guidance")
+	testWarningBanner(t, tr, "configWarning", params, testUntrustedWarning+"\nguidance")
+	for range 2 {
+		for _, translator := range []*Translator{tr, control} {
+			translator.SetModel("next-model")
+			translator.Translate("model/rerouted", json.RawMessage(`{"turnId":"t","toModel":"other-model"}`))
+			translator.Translate("thread/tokenUsage/updated", json.RawMessage(`{"turnId":"t","tokenUsage":{"total":{"inputTokens":10,"outputTokens":5},"last":{"inputTokens":10,"outputTokens":5},"modelContextWindow":1000}}`))
+		}
+		if got := tr.Translate("configWarning", params); len(got) != 0 {
+			t.Fatalf("repeat during turn = %#v, want no events", got)
+		}
+		completed := json.RawMessage(`{"turn":{"id":"t","status":"completed"}}`)
+		if got, want := tr.Translate("turn/completed", completed), control.Translate("turn/completed", completed); !reflect.DeepEqual(got, want) {
+			t.Fatalf("warning changed turn output: got %#v, want %#v", got, want)
+		}
+		if got := tr.Translate("configWarning", params); len(got) != 0 {
+			t.Fatalf("repeat between turns = %#v, want no events", got)
+		}
+	}
+	testWarningBanner(t, NewTranslator("m"), "configWarning", params, testUntrustedWarning+"\nguidance")
+}
+
+func TestTranslateUntrustedWarningIdentity(t *testing.T) {
+	t.Parallel()
+	for _, first := range []string{
+		testUntrustedWarning,
+		testUntrustedWarning + strings.Repeat("界", maxBannerText),
+		strings.Repeat("界", maxBannerText) + testUntrustedWarning,
+	} {
+		tr := NewTranslator("m")
+		params := testWarningParams(first, "guidance")
+		testWarningBanner(t, tr, "configWarning", params, first+"\nguidance")
+		for range 2 {
+			for _, distinct := range []string{first + " changed", first + "界"} {
+				testWarningBanner(t, tr, "configWarning", testWarningParams(distinct, "guidance"), distinct+"\nguidance")
+			}
+			testWarningBanner(t, tr, "configWarning", testWarningParams(first, "different guidance"), first+"\ndifferent guidance")
+			// The identity is assembled prose, independent of its field split or metadata.
+			repeat := testWarningParams(first+"\nguidance", "")
+			if got := tr.Translate("configWarning", repeat); len(got) != 0 {
+				t.Fatalf("distinct warning replaced the first identity: %#v", got)
+			}
+		}
+	}
+	tr := NewTranslator("m")
+	testWarningBanner(t, tr, "configWarning", testWarningParams("notice", testUntrustedWarning), "notice\n"+testUntrustedWarning)
+	if got := tr.Translate("configWarning", testWarningParams("notice", testUntrustedWarning)); len(got) != 0 {
+		t.Fatalf("matching details repeat = %#v", got)
+	}
+}
+
+func TestTranslateUntrustedWarningNonmatches(t *testing.T) {
+	t.Parallel()
+	tr := NewTranslator("m")
+	for _, matched := range []bool{false, true} {
+		if matched {
+			testWarningBanner(t, tr, "configWarning", testWarningParams(testUntrustedWarning, ""), testUntrustedWarning)
+		}
+		for range 2 {
+			for _, text := range []string{
+				"unrelated warning",
+				strings.Replace(testUntrustedWarning, "is marked", "Is marked", 1),
+				strings.Replace(testUntrustedWarning, "untrusted", "un-trusted", 1),
+				strings.TrimSuffix(testUntrustedWarning, "n"),
+			} {
+				testWarningBanner(t, tr, "configWarning", testWarningParams(text, ""), text)
+			}
+			// Matching metadata is inert and does not make unrelated prose a match.
+			metadata, _ := json.Marshal(map[string]any{"summary": "notice", "path": testUntrustedWarning, "range": false, "threadId": []int{1}})
+			testWarningBanner(t, tr, "configWarning", metadata, "notice")
+			other, _ := json.Marshal(map[string]string{"message": testUntrustedWarning})
+			testWarningBanner(t, tr, "warning", other, testUntrustedWarning)
+			want := []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexMethod, "futureWarning", other)}
+			if got := tr.Translate("futureWarning", other); !reflect.DeepEqual(got, want) {
+				t.Fatalf("unknown method handling = %#v, want %#v", got, want)
+			}
+		}
+	}
+	params := json.RawMessage(`{"summary":"` + testUntrustedWarning + `","path":"other","threadId":"other","range":42}`)
+	if got := tr.Translate("configWarning", params); len(got) != 0 {
+		t.Fatalf("nonmatch changed first identity: %#v", got)
+	}
+}
+
+func TestTranslateUntrustedWarningMalformed(t *testing.T) {
+	t.Parallel()
+	for _, params := range []string{
+		`{"summary":"` + testUntrustedWarning + `","details":42}`,
+		`{"summary":"` + testUntrustedWarning + `","details":{}}`,
+		`{"summary":"` + testUntrustedWarning + `","details":[]}`,
+		`{"summary":"` + testUntrustedWarning + `","details":true}`,
+		`{"summary":null,"details":"` + testUntrustedWarning + `"}`,
+		`{"details":"` + testUntrustedWarning + `"}`,
+		`{"summary":42,"details":"` + testUntrustedWarning + `"}`,
+		`{"summary":"` + testUntrustedWarning + `"} trailing`,
+		`{"summary":"` + testUntrustedWarning + strings.Repeat("界", maxUnrecognizedRaw) + `","details":42}`,
+	} {
+		tr := NewTranslator("m")
+		for _, afterValid := range []bool{false, true} {
+			if afterValid {
+				testWarningBanner(t, tr, "configWarning", testWarningParams(testUntrustedWarning, ""), testUntrustedWarning)
+			}
+			before := *tr
+			for range 2 {
+				got := tr.Translate("configWarning", json.RawMessage(params))
+				want := undecodable(json.RawMessage(params))
+				if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(*tr, before) {
+					t.Fatal("malformed target changed state or bounded undecodable handling")
+				}
+			}
+		}
+		if got := tr.Translate("configWarning", testWarningParams(testUntrustedWarning, "")); len(got) != 0 {
+			t.Fatalf("malformed target replaced the valid identity: %#v", got)
 		}
 	}
 }

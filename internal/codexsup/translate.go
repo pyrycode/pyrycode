@@ -2,6 +2,7 @@ package codexsup
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ var (
 		"item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
 		"thread/tokenUsage/updated", "turn/completed", "item/started", "item/completed",
 		"model/rerouted", "warning", "configWarning",
+		"guardianWarning", "deprecationNotice",
 		"turn/moderationMetadata",
 	}
 	// ignoredMethods carry no turn meaning, following streamsup's
@@ -83,7 +85,6 @@ var (
 		"model/verification",
 		"modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted",
 		"model/safetyBuffering/updated",
-		"guardianWarning", "deprecationNotice",
 	}
 )
 
@@ -150,6 +151,7 @@ type turnUsage struct {
 
 // Translator maps Codex server notifications onto turn events: the Codex twin
 // of streamsup's parser. It holds per-turn state (usage, reroute target) and
+// remembers the first untrusted-project warning for its entire lifetime. It
 // is not safe for concurrent use; call it from OnNotification, which runs on
 // one goroutine.
 //
@@ -159,9 +161,10 @@ type turnUsage struct {
 // tool input and tool_result text, bounded by acp's line cap and capped by
 // turnbridge on the way to the wire.
 type Translator struct {
-	model    string
-	usage    map[string]*turnUsage
-	rerouted map[string]string
+	model            string
+	usage            map[string]*turnUsage
+	rerouted         map[string]string
+	untrustedWarning *[sha256.Size]byte
 }
 
 // NewTranslator returns a translator for turns running on model, the model
@@ -198,8 +201,8 @@ func (t *Translator) Translate(method string, params json.RawMessage) []turneven
 		return t.item(method, params)
 	case "model/rerouted":
 		return t.reroute(params)
-	case "warning", "configWarning":
-		return warningBanner(method, params)
+	case "warning", "configWarning", "guardianWarning", "deprecationNotice":
+		return t.warningBanner(method, params)
 	case "turn/moderationMetadata":
 		return moderationMetadata(params)
 	}
@@ -230,9 +233,9 @@ func moderationMetadata(params json.RawMessage) []turnevent.Event {
 // warningBanner carries prose only: targeting and location metadata have no
 // routing, filesystem or turn-state meaning here. Empty required strings are
 // valid; missing or null required strings are not.
-func warningBanner(method string, params json.RawMessage) []turnevent.Event {
+func (t *Translator) warningBanner(method string, params json.RawMessage) []turnevent.Event {
 	var text string
-	if method == "warning" {
+	if method == "warning" || method == "guardianWarning" {
 		var p struct {
 			Message *string `json:"message"`
 		}
@@ -251,6 +254,16 @@ func warningBanner(method string, params json.RawMessage) []turnevent.Event {
 		text = *p.Summary
 		if p.Details != nil && *p.Details != "" {
 			text += "\n" + *p.Details
+		}
+	}
+	if method == "configWarning" && strings.Contains(text, "is marked as untrusted in the effective configuration") {
+		// Compare full validated prose before truncation; distinct notices stay
+		// visible and never replace the first identity. Retain no payload text.
+		identity := sha256.Sum256([]byte(text))
+		if t.untrustedWarning == nil {
+			t.untrustedWarning = &identity
+		} else if *t.untrustedWarning == identity {
+			return nil
 		}
 	}
 	text, truncated := truncate(text, maxBannerText)

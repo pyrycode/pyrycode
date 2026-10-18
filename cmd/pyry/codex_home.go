@@ -14,13 +14,13 @@ const codexHomeDirName = "codex-home"
 
 // codexHomeConfig is the config.toml the daemon writes into its Codex home:
 // threads start read-only and every approval is routed to the user, never to
-// Codex's reviewer agent. The keys and kebab-case values are v2.Config's in
-// the pinned 0.156.1 schema. Until the approvals ticket lands, codexsup's
-// default decline answers every request this posture raises.
+// Codex's reviewer agent. The workspace deliberately stays untrusted so
+// workspace-local Codex configuration is not loaded (ADR 038).
 const codexHomeConfig = `# Written by pyry on every Codex session start; edits are overwritten.
 approval_policy = "on-request"
 sandbox_mode = "read-only"
 approvals_reviewer = "user"
+suppress_unstable_features_warning = true
 
 [features]
 default_mode_request_user_input = true
