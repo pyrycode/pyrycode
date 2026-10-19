@@ -30,7 +30,7 @@ class RecordedEvidenceTest(unittest.TestCase):
             success = RUNNER.run('replay', Path('/controlled-fixtures'), None)
         return success, launch.call_args.kwargs['env']
 
-    def test_two_counted_successful_scenarios_required(self):
+    def test_all_counted_successful_scenarios_required(self):
         expected = [('TestRecordedClaude/' + name, 'pass') for name in RUNNER.SCENARIOS]
         success, _ = self.execute(expected)
         self.assertTrue(success)

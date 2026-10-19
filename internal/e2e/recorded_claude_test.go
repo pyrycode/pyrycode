@@ -21,6 +21,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	scenariohelpers "github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -28,7 +29,7 @@ const tapeSession = "ecda0000-0000-4000-8000-000000000001"
 const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
 
 func TestRecordedClaude(t *testing.T) {
-	for _, scenario := range []string{"two-turn", "permission-deny"} {
+	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer"} {
 		t.Run(scenario, func(t *testing.T) { runRecordedClaude(t, scenario) })
 	}
 }
@@ -94,7 +95,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		c.Producer = claudetape.Producer{Revision: strings.TrimSpace(string(rev)), BinarySHA256: hex.EncodeToString(sum[:]), ClaudeVersion: strings.TrimSpace(string(version)), CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	}
 	wrapper := tapeWrapper(t, c)
-	writeStreamInteractiveConfig(t, home, scenario == "permission-deny")
+	writeStreamInteractiveConfig(t, home, scenario == "permission-deny" || scenario == "question-answer")
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 	relayURL := fr.URL() + "/v2/server"
@@ -129,7 +130,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pub, pairing.Token)
 	sequence := uint64(100)
-	transmit := func(kind string, payload any) {
+	transmit := func(kind string, payload any) uint64 {
 		t.Helper()
 		sequence++
 		raw, e := json.Marshal(protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
@@ -141,6 +142,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 			t.Fatal(e)
 		}
 		sendNoiseMsg(t, phone, cipher)
+		return sequence
 	}
 	next := func(deadline time.Time) protocol.Envelope {
 		t.Helper()
@@ -245,16 +247,24 @@ func runRecordedClaude(t *testing.T, scenario string) {
 			}
 		}
 	}
-	if scenario == "two-turn" {
+	switch scenario {
+	case "reply":
+		transmit(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: "reply", Text: "Without using tools, briefly describe reliable process supervision."})
+		scenariohelpers.CompletedTurn(t, next, tapeConversation, 120*time.Second, false)
+	case "question-answer":
+		scenariohelpers.QuestionAnswer(t, scenariohelpers.Wire{Send: transmit, Next: next}, scenariohelpers.QuestionConfig{Home: home, ConversationID: tapeConversation, SessionID: tapeSession, HistorySession: tapeSession, Prompt: scenariohelpers.RecordedQuestionPrompt(), Followup: "Without using tools, reply with a short greeting after the model change.", ExpectedModel: "claude-haiku-4-5-20251001", SurfaceBudget: 180 * time.Second, UpdateBudget: 30 * time.Second, TurnBudget: 150 * time.Second})
+	case "two-turn":
 		turn("Without using tools, reply with a short greeting.", false)
 		turn("Without using tools, reply with a short farewell.", false)
-	} else {
+	case "permission-deny":
 		turn("Use the Write tool exactly once to create a file named tape-denied.txt containing hello. If denied, do not retry and do not use other tools. Reply with one short sentence after the decision.", true)
 		if mode == "capture" {
 			if _, e := os.Stat(filepath.Join(home, "tape-denied.txt")); !os.IsNotExist(e) {
 				t.Fatal("denied tool created its file")
 			}
 		}
+	default:
+		t.Fatal("unknown recorded scenario")
 	}
 	if err = os.WriteFile(c.Finish, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -287,7 +297,7 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 	if baseline == "" {
 		baseline = "testdata/claude-tapes"
 	}
-	for _, scenario := range []string{"two-turn", "permission-deny"} {
+	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer"} {
 		t.Run(scenario, func(t *testing.T) {
 			load := func(dir string) *claudetape.Tape {
 				f, err := os.Open(filepath.Join(dir, scenario+".json"))

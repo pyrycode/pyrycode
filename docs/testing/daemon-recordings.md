@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Two scenarios share exactly the same driver in live capture and offline replay:
+Four scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -14,6 +14,18 @@ Two scenarios share exactly the same driver in live capture and offline replay:
   its tool, target path and conversation are checked before explicit rejection
   dismisses that modal with remote attribution and the conversation completes.
   Live capture also checks that the denied file does not exist. Replay cannot prove that Claude obeys a denial or performs no IO.
+
+- `reply`: a cold reply passes the same completed-turn drain used by
+  `TestInteractiveStreamLiveness`: nonempty attributed text then idle, with no
+  wording or chunk-count requirement. Parser gaps and unknown rate-limit statuses
+  remain global alarms.
+- `question-answer`: a nonempty answerable batch parks while the model changes;
+  the update reply retains request/session correlation, every question gets its
+  last surfaced option, and the original batch is remotely dismissed as answered.
+  Continuation must name that chosen option first among the offered labels and
+  reach idle. Raw durable history must contain exactly one attributed, visible
+  answer fact with bounded context and the asking session. A new application turn
+  must announce the selected Haiku model and complete.
 
 `make e2e` includes these cases in the ordinary offline integration selection.
 `make e2e-recorded-claude` runs just the pilot. Missing fixtures fail; nothing
@@ -76,7 +88,7 @@ replay and strict outgoing request comparison. Comparison binds observed control
 IDs by producer direction and ordinal; it retains complete ordered requests.
 Different provider wording and accounting do not themselves fail this comparison.
 Changed user choices, commands, recovery steps and request payloads do. Every
-stage must execute both named leaves with no failures or skips. A failing stage
+stage must execute all four named leaves with no failures or skips. A failing stage
 cannot produce a successful compatibility summary, even if the others passed.
 Verification never replaces the reviewed baseline.
 
@@ -85,8 +97,25 @@ Verification never replaces the reviewed baseline.
 `inventory` lists static test declarations under `internal/e2e/realclaude`,
 separating the live-tagged files from offline evidence validation. It includes
 opt-in probes, so those declaration counts are not executed acceptance counts.
-The pilot is additive. It does not retire existing fake or live tests, change
-preship, or disable automatic dispatcher routing.
+The first migration moves reply and question protocol assertions into
+`internal/e2e/internal/scenario`. Existing live callers and recorded tests share
+those drivers, including history validation. No live test is removed or retagged,
+preship remains unchanged, and dispatcher routing is unchanged.
+
+| Existing live contract | Offline owner | Retained live proof |
+| --- | --- | --- |
+| `TestInteractiveStreamLiveness` | `reply`, same completed-turn driver | Current provider compatibility |
+| `TestInteractiveStreamQuestionAnswer` and stdio counterpart | `question-answer`, same question/model/history driver | Unpredictable question labels and current Claude interpretation |
+| Three-turn memory continuity | None in this batch | Actual Claude context retention |
+| Question refusal and permission filesystem effects | None in this batch | Actual external effects and provider refusal behavior |
+
+The recorded question trigger supplies a complete fixed AskUserQuestion input so
+fresh daemon requests remain exactly comparable, including question keys and
+option labels. The action still selects from the surfaced batch. Existing live
+question triggers name no option, preserving their stronger interpretation test.
+The compatibility comparator does not scrub provider prose or loosen request
+comparison for these cases. Dismissal and terminal idle may arrive in either order;
+both are required after the matching continuation.
 
 Next candidates are ordinary reply delivery, permission allow/deny, questions,
 queue actions, model-control messages and thread folding. Each must preserve its
