@@ -35,7 +35,7 @@ Existing daemon-owned flight goroutines remain bounded by daemon shutdown and th
 | Rotation held then entitled successor binds, no additional message | `TestContextUsageRotationDelivery` |
 | Repeated arm and ineligible intermediate binding | `TestContextUsageReadinessRotation` |
 | Generation replaced between readiness/query or delayed predecessor reply | `TestContextUsageGenerationQuery`, `TestContextUsageRotationStaleFlight` |
-| Caller cancellation with shared callers; daemon shutdown; deadline expiry | `TestContextUsageRotationCancellation`, `TestContextUsageReadinessCancellation` |
+| Caller cancellation with shared callers; daemon shutdown; deadline expiry | `TestContextUsageRotationCancellation`, `TestContextUsageReadinessCancellation`, `TestContextUsageRotationTimeout` |
 | Other conversation remains independently answerable; collapse within source | `TestContextUsageRotationDelivery`, existing resolver collapse tests |
 
 ## Error handling
@@ -73,3 +73,8 @@ Pending documentation stage: update `docs/protocol-mobile.md`, “Asking for a c
 **Date:** 2026-10-19
 
 Sizing recheck: one behavior, approximately 700 written lines including plan and tests, zero new exported types/interfaces, one production consumer, four acceptance criteria, fewer than ten new rejection branches. Within all admission ceilings.
+
+## Revisions
+
+- 2026-10-19: The held-binding shared-caller regression exposed a transition during readiness. Flights that have not started querying now join across source transitions only for the same stable runner identity, reserving successor ordering under the existing boundary. Once querying starts, source-generation separation remains mandatory. The adapter contains a function field and cannot itself be compared as an interface; identity is its underlying runner pointer.
+- 2026-10-19: The subprocess fixture uses a launcher that places Claude's fixed argument prefix after Go's `--` separator. It holds the second launch before binding after a real predecessor has run. Both delivery variants fail against the original resolver, adapter and control implementation via a Go overlay, returning predecessor memory before release; the repair preserves their pending state and successor source. Verification runs on macOS under the current single-OS policy.

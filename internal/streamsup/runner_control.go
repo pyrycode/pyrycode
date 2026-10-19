@@ -492,6 +492,16 @@ const contextUsageQueryIDPrefix = "context-usage-query-"
 // The order below is QueryMCPStatus's, for the reasons actuateMCP records: snapshot the
 // binding under the leaf mutex, register OUTSIDE it, then re-check the generation.
 func (r *Runner) QueryContextUsage(ctx context.Context, detail string) (turnevent.ContextUsage, bool) {
+	return r.queryContextUsage(ctx, detail, nil)
+}
+
+// QueryContextUsageGeneration queries only the binding admitted by readiness.
+// Replacement or rotation before registration or completion refuses the result.
+func (r *Runner) QueryContextUsageGeneration(ctx context.Context, detail string, generation uint64) (turnevent.ContextUsage, bool) {
+	return r.queryContextUsage(ctx, detail, &generation)
+}
+
+func (r *Runner) queryContextUsage(ctx context.Context, detail string, expected *uint64) (turnevent.ContextUsage, bool) {
 	// Vocabulary refusal precedes every other check, as RequestContextUsage and
 	// WriteContextUsage do it: an unsupported value is permanent regardless of child
 	// state, and refusing here is what keeps an id from being minted or a request
@@ -504,7 +514,7 @@ func (r *Runner) QueryContextUsage(ctx context.Context, detail string) (turneven
 	}
 
 	r.mu.Lock()
-	if r.stdin == nil || r.rotating {
+	if r.stdin == nil || r.rotating || (expected != nil && r.childGeneration != *expected) {
 		r.mu.Unlock()
 		return turnevent.ContextUsage{}, false
 	}
@@ -537,7 +547,10 @@ func (r *Runner) QueryContextUsage(ctx context.Context, detail string) (turneven
 
 	select {
 	case result := <-pending.result:
-		if ctx.Err() != nil {
+		r.mu.Lock()
+		current := r.stdin != nil && !r.rotating && r.childGeneration == generation
+		r.mu.Unlock()
+		if ctx.Err() != nil || !current {
 			return turnevent.ContextUsage{}, false
 		}
 		return result.usage, result.ok

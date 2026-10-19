@@ -497,6 +497,18 @@ func (a streamRunner) QueryContextUsage(ctx context.Context, detail string) (tur
 	return a.r.QueryContextUsage(ctx, detail)
 }
 
+// WaitContextUsageReady observes the runner's entitled successor binding.
+func (a streamRunner) WaitContextUsageReady(ctx context.Context) (uint64, bool) {
+	return a.r.WaitContextUsageReady(ctx)
+}
+
+func (a streamRunner) contextUsageIdentity() contextUsageQuerier { return a.r }
+
+// QueryContextUsageGeneration preserves the binding selected at readiness.
+func (a streamRunner) QueryContextUsageGeneration(ctx context.Context, detail string, generation uint64) (turnevent.ContextUsage, bool) {
+	return a.r.QueryContextUsageGeneration(ctx, detail, generation)
+}
+
 // QueryAppliedSettings asks this runner's exact live child for the bounded model
 // and nullable effort Claude applied. It stays off sessions.Runner because #2505
 // adds no general session-lifecycle consumer; the client projection belongs to
