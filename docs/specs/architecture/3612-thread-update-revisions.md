@@ -73,3 +73,8 @@ Pending for the documentation stage: update `docs/protocol-mobile.md`, “Bounde
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-19
+
+## Revisions
+
+- 2026-10-19: The focused daemon suite exposed `TestDaemonThreadQueriesJoin` in `cmd/pyry/daemon_thread_queries_test.go` still waiting for two frames per combined transition. Update its racing-query and post-retry live expectations to one atomic update, retaining recipient/correlation, catch-up checkpoint and final-row equality checks. Require strict revision advancement in both application branches. This existing lifecycle test proves query failure/retry followed by further updates under the same item identity; rerun it with race detection. Production design is unchanged.
+- 2026-10-19: The same run found companion-frame assumptions in `TestDaemonThreadQueryBoundary` (`cmd/pyry/daemon_thread_recovery_test.go`) and `TestDaemonThreadPublication` (`cmd/pyry/daemon_thread_relay_test.go`). Observe one combined changed frame, retain the query/publication barrier and check complete content at the source revision. The new streaming regression also needs a per-ID row map because turn completion adds a separate item; compare every row while checking accumulated assistant text independently. Rerun all four failed tests with race detection. These are verification updates for the same revision invariant, with total written work still below 500 lines.

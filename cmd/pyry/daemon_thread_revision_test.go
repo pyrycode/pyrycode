@@ -14,7 +14,7 @@ import (
 func TestDaemonThreadStreamingRevisions(t *testing.T) {
 	t.Parallel()
 	f := thread.New("conv")
-	var held protocol.ThreadItem
+	rows := make(map[uint64]protocol.ThreadItem)
 	var text string
 	changed, appended := 0, 0
 	deltas := []string{"hello", " 世界\n\"\\", strings.Repeat("x", 300), " tail", " again"}
@@ -34,6 +34,7 @@ func TestDaemonThreadStreamingRevisions(t *testing.T) {
 		}
 		for _, c := range o.Changes {
 			for _, update := range daemonThreadUpdates("conv", "epoch", c) {
+				held := rows[c.ID]
 				env, _ := testDaemonThreadEncodedUpdate(t, update)
 				switch env.Type {
 				case protocol.TypeThreadItemAdded:
@@ -88,6 +89,7 @@ func TestDaemonThreadStreamingRevisions(t *testing.T) {
 				default:
 					t.Fatalf("unexpected update type %s", env.Type)
 				}
+				rows[held.ID] = held
 			}
 		}
 		if entry.Type == "assistant_delta" {
@@ -97,12 +99,14 @@ func TestDaemonThreadStreamingRevisions(t *testing.T) {
 			continue
 		}
 		items := f.Items()
-		if len(items) != 1 {
-			t.Fatalf("entry %d: got %d items", entry.ID, len(items))
+		if len(items) != len(rows) {
+			t.Fatalf("entry %d: held %d items, fold has %d", entry.ID, len(rows), len(items))
 		}
-		testDaemonThreadJSONEqual(t, held, daemonThreadItem(items[0]))
+		for _, item := range items {
+			testDaemonThreadJSONEqual(t, rows[item.ID], daemonThreadItem(item))
+		}
 		var content struct{ Text string }
-		if err := json.Unmarshal(held.Content, &content); err != nil || content.Text != text {
+		if err := json.Unmarshal(rows[2].Content, &content); err != nil || content.Text != text {
 			t.Fatalf("entry %d: accumulated text %q, want %q (error %v)", entry.ID, content.Text, text, err)
 		}
 	}

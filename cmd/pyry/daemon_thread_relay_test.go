@@ -217,8 +217,8 @@ func TestDaemonThreadPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			prior := items[changed.ItemID]
-			if prior.Rev != changed.BaseRev {
-				t.Fatalf("change base %d != %d", prior.Rev, changed.BaseRev)
+			if prior.Rev != changed.BaseRev || changed.Rev <= changed.BaseRev {
+				t.Fatalf("change revision %d -> %d does not advance held %d", changed.BaseRev, changed.Rev, prior.Rev)
 			}
 			raw, _ := json.Marshal(prior)
 			var fields map[string]json.RawMessage
@@ -235,8 +235,8 @@ func TestDaemonThreadPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			prior := items[appended.ItemID]
-			if prior.Rev != appended.BaseRev {
-				t.Fatal("append base mismatch")
+			if prior.Rev != appended.BaseRev || appended.Rev <= appended.BaseRev {
+				t.Fatal("append revision mismatch")
 			}
 			var fields map[string]json.RawMessage
 			_ = json.Unmarshal(prior.Content, &fields)
@@ -316,19 +316,19 @@ func TestDaemonThreadPublication(t *testing.T) {
 	}
 	for _, peer := range []string{"phone", "again"} {
 		got := updates[peer]
-		if len(got) != 2 || got[0].Type != protocol.TypeThreadItemChanged || got[1].Type != protocol.TypeThreadTextAppend {
-			t.Fatalf("%s combined delivery did not replace before appending: %#v", peer, got)
+		if len(got) != 1 || got[0].Type != protocol.TypeThreadItemChanged {
+			t.Fatalf("%s combined delivery was not atomic: %#v", peer, got)
 		}
 		var changed protocol.ThreadItemChangedPayload
-		var appended protocol.ThreadTextAppendPayload
 		if err := json.Unmarshal(got[0].Payload, &changed); err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal(got[1].Payload, &appended); err != nil {
+		var content struct{ Text string }
+		if err := json.Unmarshal(changed.Changes["content"], &content); err != nil {
 			t.Fatal(err)
 		}
-		if changed.BaseRev != previousRev || changed.Rev != v || appended.BaseRev != v || appended.Rev != v || changed.ItemID != appended.ItemID || string(changed.Changes["summary"]) != `"first second"` || appended.Text != " second" {
-			t.Fatalf("%s combined wire revision chain: %#v / %#v", peer, changed, appended)
+		if changed.BaseRev != previousRev || changed.Rev != v || changed.Rev <= changed.BaseRev || string(changed.Changes["summary"]) != `"first second"` || content.Text != "first second" {
+			t.Fatalf("%s combined wire revision chain: %#v", peer, changed)
 		}
 	}
 	v = appendFact(testConvIDB, protocol.TypeMessage, map[string]any{"role": "user", "text": "other"})
