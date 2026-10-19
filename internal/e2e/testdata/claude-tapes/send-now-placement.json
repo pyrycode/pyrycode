@@ -1,0 +1,3331 @@
+{
+  "version": 1,
+  "scenario": "send-now-placement",
+  "producer": {
+    "revision": "191b23a3591faaf759990cd59d14ada3f6a305c8",
+    "binary_sha256": "4615571108c400e15426f398a4ebbfc02a20bd4cae78682568bb91f2576b1f28",
+    "claude_version": "2.1.280 (Claude Code)",
+    "captured_at": "2026-10-19T17:04:28.024041Z"
+  },
+  "args": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--forward-subagent-text",
+    "--replay-user-messages",
+    "--prompt-suggestions",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--settings",
+    "${PILOT_HOME}/.pyry/test/session-settings/ecda0000-0000-4000-8000-000000000001.json",
+    "--append-system-prompt-file",
+    "${PILOT_HOME}/.pyry/test/system-prompt.txt",
+    "--permission-mode",
+    "default",
+    "--permission-prompt-tool",
+    "stdio",
+    "--session-id",
+    "ecda0000-0000-4000-8000-000000000001"
+  ],
+  "frames": [
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "perTaskStopAffordance": true,
+          "subtype": "initialize"
+        },
+        "request_id": "1",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "text": "Use the Bash tool exactly once to run this command and wait for it to finish in the foreground — do NOT run it in the background: for i in $(seq 1 25); do sleep 1; done; echo slept. When it finishes, reply in one short paragraph. run=tape-send-now-placement",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "type": "user"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "pending_permission_requests": [],
+          "pending_user_dialog_requests": [],
+          "request_id": "1",
+          "response": {
+            "account": {
+              "apiProvider": "firstParty",
+              "tokenSource": "CLAUDE_CODE_OAUTH_TOKEN"
+            },
+            "agents": [
+              {
+                "description": "Catch-all for any task that doesn't fit a more specific agent. FleetView's default when no agent name is typed.",
+                "name": "claude"
+              },
+              {
+                "description": "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions.",
+                "model": "inherit",
+                "name": "Explore"
+              },
+              {
+                "description": "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
+                "name": "general-purpose"
+              },
+              {
+                "description": "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
+                "model": "inherit",
+                "name": "Plan"
+              },
+              {
+                "description": "Use this agent to configure the user's Claude Code status line setting.",
+                "model": "sonnet",
+                "name": "statusline-setup"
+              }
+            ],
+            "analytics_disabled": false,
+            "available_output_styles": [
+              "default",
+              "Proactive",
+              "Concise",
+              "Explanatory",
+              "Learning"
+            ],
+            "commands": [
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)",
+                "name": "deep-research"
+              },
+              {
+                "argumentHint": "consent | revoke",
+                "builtin": true,
+                "description": "Grant or revoke Claude agent access to your Design projects",
+                "name": "design"
+              },
+              {
+                "argumentHint": "[\u003cproject hint, e.g. \"Acme DS\"\u003e]",
+                "builtin": true,
+                "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+                "name": "design-sync"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".",
+                "name": "dataviz"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill to configure the Claude Code harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when claude stops show X\". For simple settings like theme/model, suggest the /config command.",
+                "name": "update-config"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior — drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) — there's nothing to observe.",
+                "name": "verify"
+              },
+              {
+                "argumentHint": "[issue description]",
+                "builtin": true,
+                "description": "Enable debug logging for this session and help diagnose issues",
+                "name": "debug"
+              },
+              {
+                "aliases": [
+                  "review"
+                ],
+                "argumentHint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [\u003cpr#\u003e|\u003cbranch\u003e|\u003cpath\u003e]",
+                "builtin": true,
+                "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level (low/medium: fewer, high-confidence findings; high→max: broader coverage, may include uncertain findings; ultra: deep multi-agent review in the cloud); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review. For ultra on a GitHub.com PR target, --post asks to post the finished review’s findings to the PR as a single comment from the user’s GitHub account (not a review; the launch dialog still confirms in interactive sessions, while non-interactive mode posts on the flag alone) and --no-post hides that option.",
+                "name": "code-review"
+              },
+              {
+                "argumentHint": "[\u003ctarget\u003e]",
+                "builtin": true,
+                "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that.",
+                "name": "simplify"
+              },
+              {
+                "argumentHint": "\u003cinstruction\u003e",
+                "builtin": true,
+                "description": "Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR.",
+                "name": "batch"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.",
+                "name": "fewer-permission-prompts"
+              },
+              {
+                "aliases": [
+                  "checkup"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health — what the `claude doctor` terminal diagnostics cover — from local data (duplicate or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local CLAUDE.md files against checked-in ones; trim checked-in CLAUDE.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded CLAUDE.md guidance into lazy skills and nested CLAUDE.md files; flag slow hooks and context-heavy extensions; check the installed version is current; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a doctor run, checkup, audit, tune-up, or cleanup of their Claude Code setup or configuration.",
+                "name": "doctor"
+              },
+              {
+                "aliases": [
+                  "proactive"
+                ],
+                "argumentHint": "[interval] [prompt]",
+                "builtin": true,
+                "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+                "name": "loop"
+              },
+              {
+                "aliases": [
+                  "routines"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Create, update, list, or run scheduled cloud agents (routines) that execute on a cron schedule.",
+                "name": "schedule"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER — read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) — never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named — don't Read the file).",
+                "name": "claude-api"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one.",
+                "name": "workflow-authoring"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).",
+                "name": "run"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Author or improve the run-\u003cunit\u003e skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment.",
+                "name": "run-skill-generator"
+              },
+              {
+                "argumentHint": "[fable|opus|sonnet|off]",
+                "builtin": true,
+                "description": "Let Claude consult a stronger model at key moments",
+                "name": "advisor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+                "name": "agents"
+              },
+              {
+                "argumentHint": "[--request-id \u003cuuid\u003e] (--wizard posture=… scope=… depth=… --propose | --expect-sha256 \u003c64-hex\u003e --apply-file \u003cpath\u003e)",
+                "builtin": true,
+                "description": "Teach auto mode about your environment, plus optional rule tweaks",
+                "name": "auto-mode-setup"
+              },
+              {
+                "argumentHint": "[auto|\u003ctokens\u003e]",
+                "builtin": true,
+                "description": "Configure the auto-compact window size",
+                "name": "autocompact"
+              },
+              {
+                "aliases": [
+                  "reset",
+                  "new"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+                "name": "clear"
+              },
+              {
+                "argumentHint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]",
+                "builtin": true,
+                "description": "Set the prompt bar color for this session",
+                "name": "color"
+              },
+              {
+                "argumentHint": "\u003coptional custom summarization instructions\u003e",
+                "builtin": true,
+                "description": "Free up context by summarizing the conversation so far",
+                "name": "compact"
+              },
+              {
+                "aliases": [
+                  "settings"
+                ],
+                "argumentHint": "key=value",
+                "builtin": true,
+                "description": "Set a setting by key",
+                "name": "config"
+              },
+              {
+                "argumentHint": "[style]",
+                "builtin": true,
+                "description": "List output styles or switch to one",
+                "name": "output-style"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show current context usage",
+                "name": "context"
+              },
+              {
+                "argumentHint": "\u003clow|medium|high|xhigh|max|auto\u003e",
+                "builtin": true,
+                "description": "Set effort level for model usage",
+                "name": "effort"
+              },
+              {
+                "argumentHint": "[on|off]",
+                "builtin": true,
+                "description": "Toggle fast mode (Opus 5.5)",
+                "name": "fast"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+                "name": "heapdump"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Initialize a new CLAUDE.md file with codebase documentation",
+                "name": "init"
+              },
+              {
+                "argumentHint": "[reconnect|enable|disable [\u003cserver\u003e|all]]",
+                "builtin": true,
+                "description": "Manage MCP servers",
+                "name": "mcp"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Import config from another AI coding agent",
+                "name": "import"
+              },
+              {
+                "argumentHint": "\u003cmodel\u003e",
+                "builtin": true,
+                "description": "Set the AI model for Claude Code",
+                "name": "model"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Run the workflow script delivered in this session environment (server-launched sessions only)",
+                "name": "__remote-workflow"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+                "name": "workflow-launch-exec"
+              },
+              {
+                "argumentHint": "[--force]",
+                "builtin": true,
+                "description": "Activate pending plugin changes in the current session",
+                "name": "reload-plugins"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Pick up skills added or changed on disk during this session",
+                "name": "reload-skills"
+              },
+              {
+                "aliases": [
+                  "name"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Rename the current conversation",
+                "name": "rename"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Start a cloud agent that finds and verifies bugs in your branch (~15-25 min, $5-$25 USD) · Runs in a cloud session. See https://code.claude.com/docs/en/claude-code-on-the-web",
+                "name": "ultrareview"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Complete a security review of the pending changes on the current branch",
+                "name": "security-review"
+              },
+              {
+                "aliases": [
+                  "cost",
+                  "stats"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show session cost, plan usage, and what's contributing to your limits",
+                "name": "usage"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a report analyzing your Claude Code sessions",
+                "name": "insights"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a one-line session recap now",
+                "name": "recap"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show which loaded skills are unused and costing context",
+                "name": "skill-doctor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Set a goal — keep working until the condition is met",
+                "name": "goal"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Grant Claude agent access to your Design projects",
+                "name": "design-consent"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Revoke Claude agent access to your Design projects",
+                "name": "design-revoke"
+              },
+              {
+                "aliases": [
+                  "peers"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "List subagents, teammates, and other Claude sessions you can message",
+                "name": "list-agents"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Help teammates ramp on Claude Code with a guide from your usage",
+                "name": "team-onboarding"
+              }
+            ],
+            "current_permission_mode": "bypassPermissions",
+            "fast_mode_disabled_reason": "sdk_opt_in_required",
+            "fast_mode_state": "off",
+            "ide_rc_auto_enable_gate": true,
+            "models": [
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Default (recommended)",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "default"
+              },
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Sonnet",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "sonnet"
+              },
+              {
+                "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+                "displayName": "Fable",
+                "resolvedModel": "claude-fable-5-1",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "claude-fable-5-1"
+              },
+              {
+                "description": "Opus 5.5 · Best for everyday, complex tasks",
+                "displayName": "Opus",
+                "resolvedModel": "claude-opus-5-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "supportsFastMode": true,
+                "value": "opus"
+              },
+              {
+                "description": "Haiku 4.5 · Fastest for quick answers",
+                "displayName": "Haiku",
+                "resolvedModel": "claude-haiku-4-5-20251001",
+                "value": "haiku"
+              }
+            ],
+            "output_style": "default",
+            "pid": 1315,
+            "remote_control_auto_connect_default": false,
+            "remote_control_auto_enable": false,
+            "remote_control_auto_on_by_default": false,
+            "remote_control_available": true,
+            "session_state": "idle",
+            "user_output_styles_dir": "${PILOT_HOME}/.claude/output-styles"
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "agents": [
+          "claude",
+          "Explore",
+          "general-purpose",
+          "Plan",
+          "statusline-setup"
+        ],
+        "analytics_disabled": false,
+        "apiKeySource": "none",
+        "capabilities": [
+          "interrupt_receipt_v1",
+          "interrupt_cancel_queued_v1",
+          "msg_lifecycle_v1",
+          "mcp_read_resource_v1",
+          "mcp_tool_ui_meta_v1"
+        ],
+        "claude_code_version": "2.1.280",
+        "cwd": "${PILOT_HOME}",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "mcp_servers": [],
+        "memory_paths": {
+          "auto": "${PILOT_HOME}/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-p-301-2904495791/memory/"
+        },
+        "messaging_socket_path": "/tmp/cc-socks/1315.sock",
+        "model": "claude-haiku-4-5-20251001",
+        "output_style": "default",
+        "permissionMode": "bypassPermissions",
+        "plugins": [
+          {
+            "name": "telemetry",
+            "path": "builtin",
+            "source": "telemetry@builtin"
+          }
+        ],
+        "product_feedback_disabled": false,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "skills": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator"
+        ],
+        "slash_commands": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator",
+          "advisor",
+          "agents",
+          "auto-mode-setup",
+          "autocompact",
+          "clear",
+          "color",
+          "compact",
+          "config",
+          "output-style",
+          "context",
+          "effort",
+          "fast",
+          "heapdump",
+          "init",
+          "mcp",
+          "import",
+          "model",
+          "__remote-workflow",
+          "workflow-launch-exec",
+          "reload-plugins",
+          "reload-skills",
+          "rename",
+          "ultrareview",
+          "security-review",
+          "usage",
+          "insights",
+          "recap",
+          "skill-doctor",
+          "goal",
+          "design-consent",
+          "design-revoke",
+          "list-agents",
+          "team-onboarding"
+        ],
+        "subtype": "init",
+        "terminal_slash_commands": [
+          "doctor",
+          "color",
+          "reload-plugins"
+        ],
+        "tools": [
+          "Task",
+          "AskUserQuestion",
+          "Bash",
+          "CronCreate",
+          "CronDelete",
+          "CronList",
+          "DesignSync",
+          "Edit",
+          "EnterPlanMode",
+          "EnterWorktree",
+          "ExitPlanMode",
+          "ExitWorktree",
+          "ListAgents",
+          "Monitor",
+          "NotebookEdit",
+          "PushNotification",
+          "Read",
+          "RemoteTrigger",
+          "ReportFindings",
+          "ScheduleWakeup",
+          "SendMessage",
+          "Skill",
+          "TaskCreate",
+          "TaskGet",
+          "TaskList",
+          "TaskStop",
+          "TaskUpdate",
+          "ToolSearch",
+          "WebFetch",
+          "WebSearch",
+          "Workflow",
+          "Write"
+        ],
+        "type": "system",
+        "uuid": "8c45df28-74bb-4d5a-a29a-677d7fc1e3ee"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "ec241335-0ee3-4fd2-9e91-eb2a51380371"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "isReplay": true,
+        "message": {
+          "content": [
+            {
+              "text": "Use the Bash tool exactly once to run this command and wait for it to finish in the foreground — do NOT run it in the background: for i in $(seq 1 25); do sleep 1; done; echo slept. When it finishes, reply in one short paragraph. run=tape-send-now-placement",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:04:29.422Z",
+        "type": "user",
+        "uuid": "72dd7520-da5f-4980-8771-fdb491462fe4"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBxZogZbAtXhRKNrjGGK",
+            "input_transformations": [],
+            "model": "claude-haiku-4-5-20251001",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 7181,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 7181,
+              "cache_read_input_tokens": 14716,
+              "inference_geo": "not_available",
+              "input_tokens": 10,
+              "output_tokens": 6,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 924,
+        "type": "stream_event",
+        "uuid": "f2f3229c-973a-4173-a9ea-a458b68619fc"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "signature": "",
+            "thinking": "",
+            "type": "thinking"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "dfa6ad12-fdcf-42ea-943a-bd1250081c0e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 50,
+        "estimated_tokens_delta": 50,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "a07991c1-f2d4-4ec3-affc-323cf162d024"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": 50,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1c120d34-a650-4d75-a58e-e71e99e530d6"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": null,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "f4510897-c32d-454e-97eb-280237541571"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 225,
+        "estimated_tokens_delta": 175,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "d8808267-79c5-4e9f-81f2-a6679d27f297"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "signature": "EvwGCtABCBIYAipAlxn5kyXtWugw7xaYT7AYLmvTD3F2eBzUtBHb8rd8KdNfVRDpzr15rNbTm0bdLvKfm0Tp2qd0YRjHEiu1LhaEjDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chAv/cs+CFS+I1ZOab/UC86kiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAGfm9nWBrABAhIMctpDD9D8wNZTQcElGgzcaPDuCVdifPBaIwgiMAoTWofb/syIS/T4yiza0rgp7215mu5i/bn3444yjVolnOlPBUtiSmFVWCJcYRXiUCrYBOUzh8z6dyIpIapES5k6BPi3Zk8GWXLgLArmq6nuNX3qSiTct3kdnj2JMK0WpxIM8qSxwKvei2k02nLEujmKFXY/iInZHszCnZ14OyYV+XBQoqfQhzjEQxxiW/+SIDyeYzAltWFBpCVSqMXuu5hlNZZ2MmDK06uuYLSeY+4RGdm7zCzGekLM2AMfK2n599q3qtyWLMn9bWPDDeRQo7uztx9Op6g/vRslb5gfPVoLn37V2LtMJxWtEQAj1qdir6DdOVuF2L1sH8mLT6UbzqI+2cTTLkxcF4SR5LkEP29jb4I70U6CpSkKR4yMSKYggNUgZEFO2dzbd/VfyUg1sKwoElIfYwJDAwX7YHE/jnHouxnq3508poReRV9NIJrzsJ1p2f1sSuZ/6GU1ZY01YErm08ASnZPguJMWKQNuUjlRX/bLTiqy9uTVvggMcmrt2M5L3pszs4eq5LKnFb5TRQRLVENOi+wUPrXNbpEj+0zaGoVlqq3LHqn5mnUoaEY4C3MvN2fLy5EzhT/rRJUrAb0gONFfWlUdLntF4uOt8q8dX5EHBTtzQJd4y+dzT3ZihLoZyMX74UsDY1G8GcSqtfLU5GNFoUsKWewXEmgIQT94IPccjn502qOuVdaNC05jox7BBFkjDivCDSUMtLaFB+aWcquwjyF6WG4tUvFYOj1x6bxrCtpgJXs94vYG1Kkx7mB5CGabPac0xeWVDqu4VjEN8OpKl2CrmMGWcLGCoUxNwq5pDU2cmzfIRwCkdVvaC8A2BL/kMoci9Kf4ueHqfJR5mBwGxBaU+RZtRRgB",
+            "type": "signature_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "545347c2-35e1-40ad-99cc-6f9c8babf32d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "signature": "EvwGCtABCBIYAipAlxn5kyXtWugw7xaYT7AYLmvTD3F2eBzUtBHb8rd8KdNfVRDpzr15rNbTm0bdLvKfm0Tp2qd0YRjHEiu1LhaEjDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chAv/cs+CFS+I1ZOab/UC86kiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAGfm9nWBrABAhIMctpDD9D8wNZTQcElGgzcaPDuCVdifPBaIwgiMAoTWofb/syIS/T4yiza0rgp7215mu5i/bn3444yjVolnOlPBUtiSmFVWCJcYRXiUCrYBOUzh8z6dyIpIapES5k6BPi3Zk8GWXLgLArmq6nuNX3qSiTct3kdnj2JMK0WpxIM8qSxwKvei2k02nLEujmKFXY/iInZHszCnZ14OyYV+XBQoqfQhzjEQxxiW/+SIDyeYzAltWFBpCVSqMXuu5hlNZZ2MmDK06uuYLSeY+4RGdm7zCzGekLM2AMfK2n599q3qtyWLMn9bWPDDeRQo7uztx9Op6g/vRslb5gfPVoLn37V2LtMJxWtEQAj1qdir6DdOVuF2L1sH8mLT6UbzqI+2cTTLkxcF4SR5LkEP29jb4I70U6CpSkKR4yMSKYggNUgZEFO2dzbd/VfyUg1sKwoElIfYwJDAwX7YHE/jnHouxnq3508poReRV9NIJrzsJ1p2f1sSuZ/6GU1ZY01YErm08ASnZPguJMWKQNuUjlRX/bLTiqy9uTVvggMcmrt2M5L3pszs4eq5LKnFb5TRQRLVENOi+wUPrXNbpEj+0zaGoVlqq3LHqn5mnUoaEY4C3MvN2fLy5EzhT/rRJUrAb0gONFfWlUdLntF4uOt8q8dX5EHBTtzQJd4y+dzT3ZihLoZyMX74UsDY1G8GcSqtfLU5GNFoUsKWewXEmgIQT94IPccjn502qOuVdaNC05jox7BBFkjDivCDSUMtLaFB+aWcquwjyF6WG4tUvFYOj1x6bxrCtpgJXs94vYG1Kkx7mB5CGabPac0xeWVDqu4VjEN8OpKl2CrmMGWcLGCoUxNwq5pDU2cmzfIRwCkdVvaC8A2BL/kMoci9Kf4ueHqfJR5mBwGxBaU+RZtRRgB",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBxZogZbAtXhRKNrjGGK",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 7181,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 7181,
+            "cache_read_input_tokens": 14716,
+            "inference_geo": "not_available",
+            "input_tokens": 10,
+            "output_tokens": 6,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBxZoJzJ1Sf5PA62h2oV",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:04:31.601Z",
+        "type": "assistant",
+        "uuid": "4311be51-3e26-43dd-9f55-7e4b285d6ee4"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "43888699-7cda-4c44-b557-f6a3cbc4d89d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "caller": {
+              "type": "direct"
+            },
+            "id": "toolu_014uaEVVup8pEEqXwLoBUsFu",
+            "input": {},
+            "name": "Bash",
+            "type": "tool_use"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "34c9a9b3-a44d-4818-8d7c-64fc9b62a425"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "004e9d23-32a3-4974-b5c2-4ea43bfe30d4"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "{\"command\": \"for i in $(seq ",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "92a7dbe3-5db4-43ce-9918-ee5e4394108c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "1 25); do sleep",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "62fe665b-0f58-48c8-9ba9-3856fc230942"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": " 1; done; echo",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "327917fe-925a-4001-8552-6224e5426ad6"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": " slept",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "86bd7843-da08-4270-9f56-ca09172e3dfb"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\", \"description\": \"Sleep",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e64de71f-5ddd-4b7b-a480-aef30892778a"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": " for 25",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "70060361-3f01-4be4-b3e5-47b3d6bd196d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": " seconds then",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3f890c6c-e79f-496a-85f3-b8c02d54932c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": " echo completion",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3b786831-3b23-48b8-bdaf-553a58d7bd0a"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": " message",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "be32c448-85d2-487f-a0d9-9324791f6c09"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\"}",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "37fb8020-2d3f-4a76-93ba-108290fd4b05"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "caller": {
+                "type": "direct"
+              },
+              "id": "toolu_014uaEVVup8pEEqXwLoBUsFu",
+              "input": {
+                "command": "for i in $(seq 1 25); do sleep 1; done; echo slept",
+                "description": "Sleep for 25 seconds then echo completion message"
+              },
+              "name": "Bash",
+              "type": "tool_use"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBxZogZbAtXhRKNrjGGK",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 7181,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 7181,
+            "cache_read_input_tokens": 14716,
+            "inference_geo": "not_available",
+            "input_tokens": 10,
+            "output_tokens": 6,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBxZoJzJ1Sf5PA62h2oV",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:04:32.001Z",
+        "type": "assistant",
+        "uuid": "5f9b8c6b-53f2-452f-8e07-d1c123a3d2d3",
+        "wire_tool_inputs": {
+          "toolu_014uaEVVup8pEEqXwLoBUsFu": {
+            "command": "for i in $(seq 1 25); do sleep 1; done; echo slept",
+            "description": "Sleep for 25 seconds then echo completion message"
+          }
+        }
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "081b3859-ad02-400a-ada0-df20f7441c16"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "text": "One more thing: include the exact word SENDNOW-PLACEMENT-7Q in your final reply.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "type": "user"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 7181,
+            "cache_read_input_tokens": 14716,
+            "input_tokens": 10,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 7181,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 7181,
+                "cache_read_input_tokens": 14716,
+                "input_tokens": 10,
+                "output_tokens": 270,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 270,
+            "output_tokens_details": {
+              "thinking_tokens": 170
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "f84e754c-4347-4726-9db1-7fea653a3776"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "c9d5482d-fa3f-487e-a9ba-6f09965ae03f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "rate_limit_info": {
+          "isUsingOverage": false,
+          "overageDisabledReason": "org_level_disabled",
+          "overageStatus": "rejected",
+          "rateLimitType": "five_hour",
+          "resetsAt": 1792436400,
+          "status": "allowed",
+          "unifiedWindows": {
+            "five_hour": {
+              "resetsAt": 1792436400,
+              "utilization": 0.47
+            },
+            "seven_day": {
+              "resetsAt": 1792994400,
+              "utilization": 0.14
+            }
+          }
+        },
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "rate_limit_event",
+        "uuid": "7f654031-99fe-4b8c-b69f-ae57d83eaaa9"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "description": "Sleep for 25 seconds then echo completion message",
+        "is_backgrounded": false,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "task_started",
+        "task_id": "bbz8y5guq",
+        "task_type": "local_bash",
+        "tool_use_id": "toolu_014uaEVVup8pEEqXwLoBUsFu",
+        "type": "system",
+        "uuid": "e723fb9d-7975-40ee-9e32-1f819e8eafaa"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "output_file": "",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "completed",
+        "subtype": "task_notification",
+        "summary": "Sleep for 25 seconds then echo completion message",
+        "task_id": "bbz8y5guq",
+        "tool_use_id": "toolu_014uaEVVup8pEEqXwLoBUsFu",
+        "type": "system",
+        "uuid": "3588cac4-8161-477b-87b2-2086131a6917"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "content": "slept",
+              "is_error": false,
+              "tool_use_id": "toolu_014uaEVVup8pEEqXwLoBUsFu",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:04:57.415Z",
+        "tool_use_result": {
+          "interrupted": false,
+          "isImage": false,
+          "noOutputExpected": false,
+          "stderr": "",
+          "stdout": "slept"
+        },
+        "type": "user",
+        "uuid": "2704448d-f59a-4f10-92f5-a7d5bb68cf8f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "isReplay": true,
+        "message": {
+          "content": [
+            {
+              "text": "One more thing: include the exact word SENDNOW-PLACEMENT-7Q in your final reply.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:04:32.027Z",
+        "type": "user",
+        "uuid": "55d0585b-2dfe-4d9b-927a-a974f2e38bd8"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "f8daa697-9480-4a20-9bd1-95b21cc57db4"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBxbsHB4gvXTf7gvJM33",
+            "input_transformations": [],
+            "model": "claude-haiku-4-5-20251001",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 414,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 414,
+              "cache_read_input_tokens": 21897,
+              "inference_geo": "not_available",
+              "input_tokens": 8,
+              "output_tokens": 6,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 799,
+        "type": "stream_event",
+        "uuid": "285fb291-a7f4-4b68-9d17-e8cc3dea2571"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "signature": "",
+            "thinking": "",
+            "type": "thinking"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "82096095-2715-49f2-82d9-3a2593c2b799"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 50,
+        "estimated_tokens_delta": 50,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "1db083cb-e81e-46cf-9c94-868a6d5eec23"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": 50,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "283d142c-9726-4a31-afa6-61eb0b73990e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": null,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "530d5088-a016-4e2f-93f4-f15336337797"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 147,
+        "estimated_tokens_delta": 97,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "31c550c6-0ba9-4757-9d68-fc8f8cf51e5d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "signature": "EscECtABCBIYAipASFsTkiRRgxspIdX/WNPDViLG0SvLPdMtuMgVvzSbbEB7B7SIdIVQ/qBNnj1Xc+IlNfO+0H1hBIsMGnWrDtrqczIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chAv/cs+CFS+I1ZOab/UC86kiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAG6m9nWBrABAhIMYeq+rBLwIuy9/dpiGgwC0+e29ef/+bk8a1wiMBqPfELv5MsusJbcMbdIUIUl5skquiRzc372YfSGeP5dJtLPvyd+LwFMFHaVVjwyiiqjAoj9Jy70FJrPyXS2RdJJ28OS+02vbDlyGGx45ueAQxBf6jxJU8FhaMoIueWnjnpZsslUqpuUsOl1t6zsBYBskNW8ojfDPSFr2e2os9Tg4OQbW35G9lUhUQP8qqmovWEW8c8po3pX+3oRXioloD/d7AjkR2jGs9JYLq/dV0WgPNYPye0ooUt2u0rkSAmDCVkAAL3UtermBw242U7RIbH51qBhg3XhPbYu9O2xUah+x45ICjbId/5YJQ6THTT/QxT4OTK4poC0kyw7BiVWamDSfsfK7A193TftmgRblKnduu7KKCNxWk1sAscbHQov3JbyfP5Cbw2oRPI3oQK7lYQPa92bXM5dvB/K2SupGoj5b/2FNYS5pGsG08/vBDh3bNSDGBZvrhgB",
+            "type": "signature_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "85fc3955-51cf-4c9e-bd2f-075650608164"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "signature": "EscECtABCBIYAipASFsTkiRRgxspIdX/WNPDViLG0SvLPdMtuMgVvzSbbEB7B7SIdIVQ/qBNnj1Xc+IlNfO+0H1hBIsMGnWrDtrqczIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chAv/cs+CFS+I1ZOab/UC86kiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAG6m9nWBrABAhIMYeq+rBLwIuy9/dpiGgwC0+e29ef/+bk8a1wiMBqPfELv5MsusJbcMbdIUIUl5skquiRzc372YfSGeP5dJtLPvyd+LwFMFHaVVjwyiiqjAoj9Jy70FJrPyXS2RdJJ28OS+02vbDlyGGx45ueAQxBf6jxJU8FhaMoIueWnjnpZsslUqpuUsOl1t6zsBYBskNW8ojfDPSFr2e2os9Tg4OQbW35G9lUhUQP8qqmovWEW8c8po3pX+3oRXioloD/d7AjkR2jGs9JYLq/dV0WgPNYPye0ooUt2u0rkSAmDCVkAAL3UtermBw242U7RIbH51qBhg3XhPbYu9O2xUah+x45ICjbId/5YJQ6THTT/QxT4OTK4poC0kyw7BiVWamDSfsfK7A193TftmgRblKnduu7KKCNxWk1sAscbHQov3JbyfP5Cbw2oRPI3oQK7lYQPa92bXM5dvB/K2SupGoj5b/2FNYS5pGsG08/vBDh3bNSDGBZvrhgB",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBxbsHB4gvXTf7gvJM33",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 414,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 414,
+            "cache_read_input_tokens": 21897,
+            "inference_geo": "not_available",
+            "input_tokens": 8,
+            "output_tokens": 6,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBxbs32Z5C3huynCxM1Q",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:04:58.753Z",
+        "type": "assistant",
+        "uuid": "36b05f1c-dadb-4ebf-a828-7d69fd031d53"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "43ffef8f-50e0-442b-ae4b-52896eab41a9"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "4665eddd-0836-47ff-8960-346366dd9402"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "The",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "7524f0f0-f106-4999-832e-281419d6e1fa"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " sleep",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "c73dae00-9b1c-4ee9-9643-e8c1015c5c91"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " command completed successfully after",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3837aab9-7cea-4027-8ac5-83f2582a0e33"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " 25 seconds,",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1e5ea25c-2bd8-41bf-b44f-cac96104b56b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " confir",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "12652520-f12a-4e51-b131-637f45ddbaf6"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "ming that",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "162522ec-70fe-4188-a0a7-a26cb694e121"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " the fore",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1c1b28a6-7893-4c22-b189-53b4f3ea85f4"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "ground execution",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e229f67d-64aa-4e63-9c00-be3e7a727681"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " worked",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "befd6aac-db20-4bcb-b892-13cde7d19730"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " as expected and",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e3f045e9-9908-491f-b992-069a770e7943"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " the echo statement",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "9b56839d-e6f9-4e44-a9a2-513fe9c8d9ef"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " printed",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "03ad173f-cc89-4866-8707-87e09ab291c0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " \"slept\" at",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "525bcffc-4c53-42ba-a156-2e1ec617c06f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " the end.",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1b532d10-64db-4ca8-bc80-a9e95ef5eec4"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " The task",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "db8bb9d4-b88c-46cd-8eeb-e1b8387c57fc"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " ran",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e91cfc1d-e916-45dd-958a-1e3f3b410abd"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " to",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0888f8ad-a714-474e-9d2a-2f49a15bd8f5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " completion without interru",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "b5bd1ccf-048d-4823-90cc-8e0af6f29efa"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "ption,",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0922d795-63b4-48be-b32d-3610345b1822"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " allowing",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "ff81ced6-38c7-401a-9d45-af1b83b08f82"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " the",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "82053138-da41-46cd-bb28-d326ddcc6175"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " full",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1bf51682-6407-4eec-8130-b54a23c38c87"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " duration",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "a935d101-e35c-4ecb-a45b-f8f4de384146"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " to",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0e1fa41e-daf0-4ab9-98df-035a84671deb"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " el",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1b4e7960-6149-431e-b1dd-f80b1707c551"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "apse before producing",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "5f271bbb-18ff-42c1-8838-55f36d8da020"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " output",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1aaa5c19-2b42-4482-b9a4-a6cf626c898f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " SENDNOW-PLACEMENT",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "a0d5e26f-2133-42c2-b425-5d41846f9bcb"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "-7Q.",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6a798e16-4cd5-4c90-a7f5-f7f497c39b42"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "text": "The sleep command completed successfully after 25 seconds, confirming that the foreground execution worked as expected and the echo statement printed \"slept\" at the end. The task ran to completion without interruption, allowing the full duration to elapse before producing output SENDNOW-PLACEMENT-7Q.",
+              "type": "text"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBxbsHB4gvXTf7gvJM33",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 414,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 414,
+            "cache_read_input_tokens": 21897,
+            "inference_geo": "not_available",
+            "input_tokens": 8,
+            "output_tokens": 6,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBxbs32Z5C3huynCxM1Q",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:04:59.471Z",
+        "type": "assistant",
+        "uuid": "4e4e73a0-b7a2-48d3-bd99-86b2a1c68b23"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "147247ec-954b-441c-ab48-b2190d2a4af1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 414,
+            "cache_read_input_tokens": 21897,
+            "input_tokens": 8,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 414,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 414,
+                "cache_read_input_tokens": 21897,
+                "input_tokens": 8,
+                "output_tokens": 136,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 136,
+            "output_tokens_details": {
+              "thinking_tokens": 66
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "9191ec5f-9681-42af-a519-157d2dbfbf99"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "7d970c9f-9500-47e4-ae8b-be5b6b019519"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "api_error_status": null,
+        "duration_api_ms": 4669,
+        "duration_ms": 30111,
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "first_content_frame_ms": 945,
+        "is_error": false,
+        "modelUsage": {
+          "claude-haiku-4-5-20251001": {
+            "cacheCreationInputTokens": 7595,
+            "cacheReadInputTokens": 36613,
+            "canonicalModel": "claude-haiku-4-5",
+            "contextWindow": 200000,
+            "costBasis": "list",
+            "costUSD": 0.0208993,
+            "inputTokens": 18,
+            "maxOutputTokens": 32000,
+            "outputTokens": 406,
+            "provider": "firstParty",
+            "thinkingTokens": 236,
+            "webSearchRequests": 0
+          }
+        },
+        "num_turns": 2,
+        "permission_denials": [],
+        "queued_turn_count": 0,
+        "result": "The sleep command completed successfully after 25 seconds, confirming that the foreground execution worked as expected and the echo statement printed \"slept\" at the end. The task ran to completion without interruption, allowing the full duration to elapse before producing output SENDNOW-PLACEMENT-7Q.",
+        "result_index": 0,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "stop_reason": "end_turn",
+        "subagent_stats": {
+          "by_type": {},
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "system": 0,
+            "user": 0
+          },
+          "max_depth": 0,
+          "refused": {
+            "budget": 0,
+            "concurrency_limit": 0,
+            "depth_limit": 0
+          },
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "spawned": 0,
+          "spawned_by_subagents": 0,
+          "started_in_background": 0
+        },
+        "subtype": "success",
+        "terminal_reason": "completed",
+        "time_to_request_ms": 21,
+        "total_cost_usd": 0.0208993,
+        "ttft_ms": 2187,
+        "ttft_stream_ms": 945,
+        "type": "result",
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 7595,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 7595,
+          "cache_read_input_tokens": 36613,
+          "inference_geo": "not_available",
+          "input_tokens": 18,
+          "iterations": [
+            {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 414,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 414,
+              "cache_read_input_tokens": 21897,
+              "input_tokens": 8,
+              "output_tokens": 136,
+              "type": "message"
+            }
+          ],
+          "output_tokens": 406,
+          "output_tokens_details": {
+            "thinking_tokens": 236
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "uuid": "d0ee79f5-d1c7-42a9-933d-b6e8f63af5f2"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "detail": "summary",
+          "subtype": "get_context_usage"
+        },
+        "request_id": "2",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "2",
+          "response": {
+            "agents": [],
+            "apiUsage": {
+              "cache_creation_input_tokens": 414,
+              "cache_read_input_tokens": 21897,
+              "input_tokens": 8,
+              "output_tokens": 136
+            },
+            "autoCompactThreshold": 167000,
+            "autocompactSource": "auto",
+            "categories": [
+              {
+                "color": "promptBorder",
+                "kind": "used",
+                "name": "System prompt",
+                "tokens": 7080
+              },
+              {
+                "color": "inactive",
+                "kind": "used",
+                "name": "System tools",
+                "tokens": 22240
+              },
+              {
+                "color": "inactive",
+                "isDeferred": true,
+                "kind": "deferred",
+                "name": "System tools (deferred)",
+                "tokens": 30296
+              },
+              {
+                "color": "warning",
+                "kind": "used",
+                "name": "Skills",
+                "tokens": 1556
+              },
+              {
+                "color": "purple_FOR_SUBAGENTS_ONLY",
+                "kind": "used",
+                "name": "Messages",
+                "tokens": 75
+              },
+              {
+                "color": "promptBorder",
+                "kind": "free",
+                "name": "Free space",
+                "tokens": 169049
+              }
+            ],
+            "gridRows": [
+              [
+                {
+                  "categoryName": "System prompt",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 4,
+                  "squareFullness": 1,
+                  "tokens": 7080
+                },
+                {
+                  "categoryName": "System prompt",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 4,
+                  "squareFullness": 1,
+                  "tokens": 7080
+                },
+                {
+                  "categoryName": "System prompt",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 4,
+                  "squareFullness": 1,
+                  "tokens": 7080
+                },
+                {
+                  "categoryName": "System prompt",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 4,
+                  "squareFullness": 0.54,
+                  "tokens": 7080
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                }
+              ],
+              [
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "Skills",
+                  "color": "warning",
+                  "isFilled": true,
+                  "percentage": 1,
+                  "squareFullness": 0.7779999999999999,
+                  "tokens": 1556
+                },
+                {
+                  "categoryName": "Messages",
+                  "color": "purple_FOR_SUBAGENTS_ONLY",
+                  "isFilled": true,
+                  "percentage": 0,
+                  "squareFullness": 0.0375,
+                  "tokens": 75
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169049
+                }
+              ]
+            ],
+            "isAutoCompactEnabled": true,
+            "maxTokens": 200000,
+            "mcpTools": [],
+            "memoryFiles": [],
+            "messageBreakdown": {
+              "assistantMessageTokens": 601,
+              "attachmentTokens": 36804,
+              "attachmentsByType": [
+                {
+                  "name": "prompt_snapshot",
+                  "tokens": 34181
+                },
+                {
+                  "name": "skill_listing",
+                  "tokens": 1646
+                },
+                {
+                  "name": "agent_listing_delta",
+                  "tokens": 469
+                },
+                {
+                  "name": "deferred_tools_delta",
+                  "tokens": 181
+                },
+                {
+                  "name": "model",
+                  "tokens": 70
+                },
+                {
+                  "name": "environment",
+                  "tokens": 66
+                },
+                {
+                  "name": "queued_command",
+                  "tokens": 64
+                },
+                {
+                  "name": "remote_session_change",
+                  "tokens": 62
+                },
+                {
+                  "name": "total_tokens_reminder",
+                  "tokens": 46
+                },
+                {
+                  "name": "session_context",
+                  "tokens": 10
+                },
+                {
+                  "name": "date",
+                  "tokens": 9
+                }
+              ],
+              "redirectedContextTokens": 0,
+              "toolCallTokens": 59,
+              "toolCallsByType": [
+                {
+                  "callTokens": 59,
+                  "name": "Bash",
+                  "resultTokens": 26
+                }
+              ],
+              "toolResultTokens": 26,
+              "unattributedTokens": 0,
+              "userMessageTokens": 71
+            },
+            "model": "claude-haiku-4-5-20251001",
+            "percentage": 11,
+            "rawMaxTokens": 200000,
+            "skills": {
+              "includedSkills": 13,
+              "skillFrontmatter": [
+                {
+                  "name": "dataviz",
+                  "source": "built-in",
+                  "tokens": 362
+                },
+                {
+                  "name": "update-config",
+                  "source": "built-in",
+                  "tokens": 177
+                },
+                {
+                  "name": "keybindings-help",
+                  "source": "built-in",
+                  "tokens": 62
+                },
+                {
+                  "name": "code-review",
+                  "source": "built-in",
+                  "tokens": 213
+                },
+                {
+                  "name": "simplify",
+                  "source": "built-in",
+                  "tokens": 47
+                },
+                {
+                  "name": "fewer-permission-prompts",
+                  "source": "built-in",
+                  "tokens": 48
+                },
+                {
+                  "name": "loop",
+                  "source": "built-in",
+                  "tokens": 86
+                },
+                {
+                  "name": "schedule",
+                  "source": "built-in",
+                  "tokens": 95
+                },
+                {
+                  "name": "claude-api",
+                  "source": "built-in",
+                  "tokens": 271
+                },
+                {
+                  "name": "workflow-authoring",
+                  "source": "built-in",
+                  "tokens": 63
+                },
+                {
+                  "name": "run",
+                  "source": "built-in",
+                  "tokens": 92
+                },
+                {
+                  "name": "init",
+                  "source": "built-in",
+                  "tokens": 17
+                },
+                {
+                  "name": "security-review",
+                  "source": "built-in",
+                  "tokens": 23
+                }
+              ],
+              "tokens": 1556,
+              "totalSkills": 13
+            },
+            "slashCommands": {
+              "includedCommands": 13,
+              "tokens": 1417,
+              "totalCommands": 13
+            },
+            "totalTokens": 22319
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    }
+  ],
+  "files": {
+    "--append-system-prompt-file": "You are running as a supervised child of the pyry daemon. Your replies are not displayed in a terminal: they leave this process as a structured stream and are rendered for the operator by a separate client application, which may be running on a different machine than the one your tools execute on. More than one client can be attached to a session, and which one is attached can change while the session runs.\n",
+    "--settings": {
+      "enableAllProjectMcpServers": true,
+      "skipDangerousModePermissionPrompt": true
+    }
+  }
+}
