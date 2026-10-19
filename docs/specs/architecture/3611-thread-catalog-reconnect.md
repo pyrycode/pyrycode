@@ -31,6 +31,7 @@ No new goroutine. Relay Run owns each finite cursor and per-recipient delivery. 
 | Held catalog overtaken by a newer catalog, a reused-session transition, or removal/recreation | `TestDaemonLiveRelayCatalogSnapshotOvertaken` |
 | Re-resolution after a target clear versus delivery of captured old evidence | `TestDaemonLiveRelayCatalogSnapshotOvertaken` |
 | Colliding target/session identities and borrowed inventory isolation | `TestDaemonLiveRelayCatalogReconnect`, existing `TestDaemonLiveRelayRequestedCatalog` |
+| A refused reservation supplies no accepted replacement | `TestDaemonLiveRelayCatalogReservedSnapshot` |
 
 ## Error handling
 Provider refusal skips that target and completes the finite handshake snapshot. Existing validation rejects malformed or oversized supplied envelopes. Stale snapshots are silently withheld under the existing late delivery check; no fallback bypasses supplied-state gates.
@@ -60,3 +61,7 @@ Pending documentation stage: update `docs/protocol-mobile.md`, “Session-scoped
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-19
+
+## Revisions
+- 2026-10-19: Preserve the existing wire harness's `open` behavior while extracting `openCapabilities` for the non-interactive gate assertion. Add explicit null-producer and failed-reservation coverage. The revision-only borrowed bookkeeping needs local edits in three production files (`daemon_live_relay.go`, `daemon_live_state.go`, `daemon_control_live.go`); the forecast remains under 650 written lines with no new exported types or interfaces.
+- 2026-10-19: Reconnect fixtures must retain the phone's static key across handshakes: pairing correctly rejects a replacement key under the same token. Store test-only keys in `switchWire` so reconnect exercises the authenticated snapshot path, with fresh connection ciphers and the original paired identity.
