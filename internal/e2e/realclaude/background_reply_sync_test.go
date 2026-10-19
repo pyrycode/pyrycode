@@ -100,7 +100,7 @@ func TestBackgroundReplySyncHook(t *testing.T) {
 	}
 	for _, mode := range []string{`true`, `false`, ``} {
 		t.Run("background="+mode, func(t *testing.T) {
-			input := map[string]any{"command": backgroundReplyWait, "description": "rig-description"}
+			input := map[string]any{"command": "rig-hold", "description": "rig-description"}
 			if mode == "false" {
 				input["timeout"] = 1
 			}
@@ -131,7 +131,7 @@ func TestBackgroundReplySyncHook(t *testing.T) {
 			if result.Hook.Input["timeout"] != float64(240000) {
 				t.Fatal("Bash timeout can expire before the capture window")
 			}
-			if result.Hook.Input["command"] != backgroundReplyWait || result.Hook.Input["description"] != "rig-description" || len(result.Hook.Input) != 4 {
+			if result.Hook.Input["command"] != "rig-hold" || result.Hook.Input["description"] != "rig-description" || len(result.Hook.Input) != 4 {
 				t.Fatal("hook changed command or unrelated input")
 			}
 		})

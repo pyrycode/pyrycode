@@ -19,7 +19,7 @@ import (
 // Every parser input is retained in order. Only known structural keys and a
 // fixed vocabulary survive; all remaining strings are rig-authored substitutes.
 // Persistent parser traces must agree at each source index before publication.
-func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token string, final int) ([]string, []int, func(string) string, error) {
+func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token string, final int, execution ...*backgroundReplyExecution) ([]string, []int, func(string) string, error) {
 	t.Helper()
 	aliases := map[string]string{}
 	alias := func(s string) string {
@@ -34,6 +34,10 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 	// Assign aliases deterministically, independent of JSON map iteration order.
 	alias(parent)
 	alias("35890000-0000-4000-8000-000000000001")
+	var witness *backgroundReplyExecution
+	if len(execution) == 1 {
+		witness = execution[0]
+	}
 	var scrub func(string, any, bool, bool) any
 	scrub = func(key string, v any, trace, normalized bool) any {
 		switch x := v.(type) {
@@ -58,6 +62,26 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 					out[k] = scrub(k, value, trace, normalized)
 				}
 			}
+			// This synthetic command records the physical witness join, never the
+			// observed shell spelling. Normalize ToolStart traces by the same ID.
+			if witness != nil {
+				tool := witness.Tool
+				if normalized {
+					tool = alias(tool)
+				}
+				inputKey := ""
+				if x["id"] == tool && x["name"] == "Bash" {
+					inputKey = "input"
+				}
+				if x["ToolCallID"] == tool {
+					inputKey = "RawInput"
+				}
+				if input, ok := out[inputKey].(map[string]any); ok {
+					if _, present := input["command"]; present {
+						input["command"] = "rig-synthetic-operation:" + alias(witness.Operation)
+					}
+				}
+			}
 			return out
 		case []any:
 			out := make([]any, len(x))
@@ -66,19 +90,19 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 			}
 			return out
 		case string:
+			if key == "command" {
+				return "rig-synthetic-command"
+			}
 			if strings.HasSuffix(key, "ID") || strings.HasSuffix(key, "_id") || key == "id" {
 				if normalized {
 					return x
 				}
 				return alias(x)
 			}
-			if x == backgroundReplyWait || strings.TrimSpace(x) == token {
-				if x == backgroundReplyWait {
-					return x
-				}
+			if strings.TrimSpace(x) == token {
 				return "rig-release-observed"
 			}
-			if strings.Contains(" assistant user result success stream_event message_start content_block_start content_block_delta content_block_stop message_delta message_stop text text_delta thinking thinking_delta signature_delta input_json_delta tool_use tool_result Agent Bash Task system task_started task_updated task_notification background_tasks_changed local_agent local_bash completed running failed stopped cancelled end_turn tool execute done pyry-3589-finished pyry-3589-launched rig-release-observed ", " "+x+" ") && x != "" {
+			if strings.Contains(" assistant user result success stream_event message_start content_block_start content_block_delta content_block_stop message_delta message_stop text text_delta thinking thinking_delta signature_delta input_json_delta tool_use tool_result Agent Bash Task system task_started task_updated task_notification background_tasks_changed local_agent local_bash completed running failed stopped cancelled end_turn tool execute done pyry-3589-finished pyry-3589-launched rig-release-observed rig-synthetic-command ", " "+x+" ") && x != "" {
 				return x
 			}
 			return strings.Map(func(r rune) rune {

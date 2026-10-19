@@ -8,6 +8,10 @@ Infrastructure, staging and evidence contracts for the
 The background-reply rig keeps the Agent backgrounded while a Bash-only
 pre-tool hook forces its held Bash operation to run synchronously. An async
 launch notice cannot prove successful release-token output from that operation.
+The same hook binds the held invocation to its Bash tool ID. Setup joins that
+identity with a witness written by the physical hold process, independently of
+generated shell quoting. Release waits for both that hold and successful
+completion of the launching main turn.
 
 A background completion witness must establish release order, not merely final
 prose after the main result. `TestRealClaude_BackgroundReplyCompletion` serializes
