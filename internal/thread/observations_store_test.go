@@ -129,8 +129,8 @@ func TestStoreObservationRecovery(t *testing.T) {
 		t.Fatal(reload)
 	}
 	o, err := s.Changes(context.Background(), testStoreA, first.Epoch, 2)
-	if err != nil || !o.BaselineRequired {
-		t.Fatal("reload claimed continuity", o, err)
+	if err != nil || o.BaselineRequired || o.FromVersion != 2 || o.Version != 3 || len(o.Changes) != 0 {
+		t.Fatal("clean reload lost version-only continuity", o, err)
 	}
 	if err := s.Shutdown(); err != nil {
 		t.Fatal(err)

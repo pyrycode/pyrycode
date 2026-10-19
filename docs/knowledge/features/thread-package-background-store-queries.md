@@ -411,9 +411,9 @@ Both identify one immutable publication by `ConversationID`, `Projection`
 interval as exclusive `FromVersion` through inclusive `Version` on
 `CompactQueryResult`. Neither selects or renders descendants, tool/agent
 bodies or per-hidden-child updates. Neither widens `CatchUp`/`Changes`, the
-complete-view reads, which are unchanged; complete evidence is never
-consulted by these reads, and compact evidence is never consulted by the
-complete-view reads.
+complete-view reads. Each projection checks its own membership/removal evidence;
+both reject missing-history coverage through `unprovenThrough`. Complete-view
+continuity alone cannot authorize a compact interval.
 
 `CompactCatchUp` at `afterVersion == 0` delegates to `CompactNewestWindow`
 for any epoch, including a mismatched one, so version-zero recovery always
@@ -447,11 +447,13 @@ hidden-only or otherwise nonvisual activity, still returns `StateUsable` with
 the new `FromVersion`/`Version` and no items or headers: explicit consumed
 progress, not an empty or failed read.
 
-Compact evidence is projection-scoped, kept on `queryIndex` as two scalars
+Compact root evidence is projection-scoped, kept on `queryIndex` as two scalars
 copied by value through `advance`. `compactFrom` is the version at which
-this index was constructed — the first publication of a worker run, or the
-version a same-epoch reload/rebuild resumed at; touches before it are
-unknown, so an interval starting earlier resets. `compactLost` is the latest
+this index was constructed. Ordinary initialization uses the first publication's
+version; a clean idle reload with validated matching retirement evidence
+reconstructs the index at the saved boundary before advancing the suffix.
+Touches before that boundary remain unknown, so an interval starting earlier
+resets even when the epoch matches. `compactLost` is the latest
 version at which a row left the root set — withdrawn, suppressed, or
 reparented under another row; `membership` sets it whenever a row that was a
 root stops being one. Clients have no root-removal operation, so an interval
@@ -462,13 +464,14 @@ Shared `compactInterval` produces either the interval or a scoped reset —
 `ResetRequired: true`, with no rows, `FromVersion` or order bounds — when:
 the epoch does not match; `after > Version`; `Version - after >
 MaxCatchUpGap`; the query index is nil; `q.coveredThrough != Version`;
-`after < q.compactFrom`; or `q.compactLost > after`. Recovery is always a
+`after < q.compactFrom`; `q.compactLost > after`; or
+`q.unprovenThrough > after` (missing history IDs). Recovery is always a
 version-zero compact window. Complete-thread recovery (`CatchUp`/`Changes`)
 is independent: it can stay usable while a compact reader resets, and the
-reverse. A same-epoch reload or rebuild moves `compactFrom` forward even
-though the epoch is unchanged, so a client sitting at the reused epoch's old
-version still resets — epoch equality alone never substitutes for compact
-evidence, matching [catch-up continuity](thread-package-cache-and-epochs.md#catch-up-continuity).
+reverse. A validated idle reload can cover its saved boundary and contiguous,
+representable suffix without resetting or sending a full inventory. It restores
+no older compact interval: epoch equality alone never substitutes for coverage,
+matching [catch-up continuity](thread-package-cache-and-epochs.md#catch-up-continuity).
 
 Request work does not grow with hidden inventory: selection and rendering
 are bounded by affected roots and indexed extras only, with zero tool-body
@@ -485,8 +488,10 @@ growing from 35 to 59 visits across the same descendant range before the
 fix. `TestCompactInterval` checks nested bursts, repeated activation, and
 reparenting/suppression in both directions against an independently tracked
 oracle of each root's last-changed version; `TestCompactCatchUpReload`
-checks same-epoch reload; `TestCompactChangesWait` checks a blocked reader
-released by publication, cancellation, unload and concurrent captures,
+keeps the reset for an older interval lost at same-epoch reload, while
+`TestStoreIdleReloadContinuity` and `TestStoreIdleReloadNestedCompact` check
+saved-boundary suffix coverage and ancestor refresh. `TestCompactChangesWait`
+checks a blocked reader released by publication, cancellation, unload and concurrent captures,
 alongside unaffected concurrent complete `CatchUp`/`Changes` reads.
 
 Relay/daemon delivery is installed: `daemonThreadPublisher.publish` reads

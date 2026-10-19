@@ -65,8 +65,15 @@ func TestDaemonThreadPublicationCancellation(t *testing.T) {
 }
 
 func TestDaemonThreadBoundedRecovery(t *testing.T) {
-	for _, count := range []int{128, 8333} {
-		t.Run(fmt.Sprint(count), func(t *testing.T) {
+	for _, tc := range []struct {
+		count int
+		event string
+	}{
+		{128, "idle"}, {128, "range"}, {128, "epoch"},
+		{8333, "idle"}, {8333, "range"}, {8333, "epoch"},
+	} {
+		t.Run(fmt.Sprintf("%d/%s", tc.count, tc.event), func(t *testing.T) {
+			count, event := tc.count, tc.event
 			s, h, reg, store := testShadow(t)
 			reg.Create(conversations.Conversation{ID: testConvID})
 			for range count {
@@ -121,95 +128,104 @@ func TestDaemonThreadBoundedRecovery(t *testing.T) {
 				t.Fatalf("paged %d rows, want %d", len(all), count)
 			}
 			testDaemonThreadRows(t, all, store.Snapshot(testConvID).Items)
-			for index, event := range []string{"idle", "range", "epoch"} {
-				t.Run(event, func(t *testing.T) {
-					before := store.Status(testConvID)
-					var v uint64
-					if event == "range" {
-						for range 65 {
-							v = testShadowAppend(t, h, testConvID)
-							testShadowWait(t, func() bool { return store.Status(testConvID).Version == v })
-						}
-					} else {
-						if err := store.Unload(testConvID); err != nil {
+			before := store.Status(testConvID)
+			var v uint64
+			if event == "range" {
+				for range 65 {
+					v = testShadowAppend(t, h, testConvID)
+					testShadowWait(t, func() bool { return store.Status(testConvID).Version == v })
+				}
+			} else {
+				if err := store.Unload(testConvID); err != nil {
+					t.Fatal(err)
+				}
+				if event == "epoch" {
+					dir, err := h.EnsureLogDir(testConvID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, name := range []string{"thread-certificate.json", "thread-index-state.json"} {
+						if err := os.Remove(filepath.Join(dir, name)); err != nil {
 							t.Fatal(err)
 						}
-						if event == "epoch" {
-							dir, err := h.EnsureLogDir(testConvID)
-							if err != nil {
-								t.Fatal(err)
-							}
-							for _, name := range []string{"thread-certificate.json", "thread-index-state.json"} {
-								if err := os.Remove(filepath.Join(dir, name)); err != nil {
-									t.Fatal(err)
-								}
-							}
-						}
-						v = testShadowAppend(t, h, testConvID)
-						testDaemonThreadLoad(t, store, v)
-						if event == "epoch" && store.Status(testConvID).Epoch == before.Epoch {
-							t.Fatal("fixture did not replace epoch")
-						}
 					}
-					p.publish(t.Context(), testConvID, cursor)
-					closed := wire.await()
-					if closed.ConnID != recipient || closed.CloseCode != uint16(relay.StatusProducerGap) {
-						t.Fatalf("missing reconciliation: %#v", closed)
-					}
-					if frames != 0 || bytes != 0 {
-						t.Fatalf("replacement historical output: %d frames / %d bytes", frames, bytes)
-					}
-					recipient = []string{"again", "legacy", "recovered"}[index]
-					wire.open(recipient, false, protocol.CapabilityThread)
-					testDaemonThreadRequest(t, wire, recipient, 401, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Epoch: before.Epoch, Version: before.Version, Limit: 8})
-					recovered, kind := testDaemonThreadReply(t, wire, 401, recipient)
-					if kind == protocol.TypeThreadReset {
-						testDaemonThreadRequest(t, wire, recipient, 402, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 8})
-						recovered, kind = testDaemonThreadReply(t, wire, 402, recipient)
-						if event != "epoch" {
-							t.Fatal("unexpected reset")
-						}
-					}
-					if kind != protocol.TypeThreadItems || !recovered.Final || recovered.Version != v {
-						t.Fatal("recovery not completed")
-					}
-					want, err := store.CatchUp(t.Context(), testConvID, before.Epoch, before.Version, 8)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if want.ResetRequired {
-						want, err = store.CatchUp(t.Context(), testConvID, "", 0, 8)
-					}
-					if err != nil {
-						t.Fatal(err)
-					}
-					testDaemonThreadRows(t, recovered.Items, want.Items)
-					testDaemonThreadRequest(t, wire, recipient, 403, protocol.TypeThreadPage, protocol.ThreadPagePayload{ConversationID: testConvID, BeforeOrder: uint64(count), Limit: 8})
-					older, kind := testDaemonThreadReply(t, wire, 403, recipient)
-					page, err := store.HistoryPage(t.Context(), testConvID, uint64(count), 8)
-					if err != nil || kind != protocol.TypeThreadItems || !older.Final || older.Continuation == nil || *older.Continuation != page.Continuation {
-						t.Fatal("older page unavailable")
-					}
-					testDaemonThreadRows(t, older.Items, page.Items)
-					// Synchronous publish completion precedes the FIFO drain barrier.
-					p.publish(t.Context(), testConvID, cursor)
-					if err := mgr.FlushPushes(t.Context()); err != nil {
-						t.Fatal(err)
-					}
-					barrier := protocol.Envelope{Type: protocol.TypeError, Payload: json.RawMessage(`{}`)}
-					if err := mgr.Push(t.Context(), recipient, barrier); err != nil {
-						t.Fatal(err)
-					}
-					peer, e := wire.read()
-					if peer != recipient || e.Type != protocol.TypeError {
-						t.Fatal("historical inventory escaped after completion")
-					}
-				})
+				}
+				v = testShadowAppend(t, h, testConvID)
+				testDaemonThreadLoad(t, store, v)
+				if event == "epoch" && store.Status(testConvID).Epoch == before.Epoch {
+					t.Fatal("fixture did not replace epoch")
+				}
 			}
-			v := testShadowAppend(t, h, testConvID)
+			p.publish(t.Context(), testConvID, cursor)
+			if event == "idle" {
+				peer, e := wire.read()
+				var added protocol.ThreadItemAddedPayload
+				if err := json.Unmarshal(e.Payload, &added); err != nil {
+					t.Fatal(err)
+				}
+				if peer != recipient || e.Type != protocol.TypeThreadItemAdded || e.InReplyTo != nil || added.ConversationID != testConvID || added.Epoch != before.Epoch || added.Version != v || added.Item.ID != v || frames != 1 || bytes > 1024 {
+					t.Fatalf("idle live update: peer=%s type=%s payload=%#v frames=%d bytes=%d", peer, e.Type, added, frames, bytes)
+				}
+				testDaemonThreadRows(t, append(all, added.Item), store.Snapshot(testConvID).Items)
+				frames, bytes = 0, 0
+			} else {
+				closed := wire.await()
+				if closed.ConnID != recipient || closed.CloseCode != uint16(relay.StatusProducerGap) {
+					t.Fatalf("missing reconciliation: %#v", closed)
+				}
+				if frames != 0 || bytes != 0 {
+					t.Fatalf("replacement historical output: %d frames / %d bytes", frames, bytes)
+				}
+				recipient = "again"
+				wire.open(recipient, false, protocol.CapabilityThread)
+			}
+			testDaemonThreadRequest(t, wire, recipient, 401, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Epoch: before.Epoch, Version: before.Version, Limit: 8})
+			recovered, kind := testDaemonThreadReply(t, wire, 401, recipient)
+			if kind == protocol.TypeThreadReset {
+				testDaemonThreadRequest(t, wire, recipient, 402, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 8})
+				recovered, kind = testDaemonThreadReply(t, wire, 402, recipient)
+				if event != "epoch" {
+					t.Fatal("unexpected reset")
+				}
+			}
+			if kind != protocol.TypeThreadItems || !recovered.Final || recovered.Version != v {
+				t.Fatal("recovery not completed")
+			}
+			want, err := store.CatchUp(t.Context(), testConvID, before.Epoch, before.Version, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want.ResetRequired {
+				want, err = store.CatchUp(t.Context(), testConvID, "", 0, 8)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			testDaemonThreadRows(t, recovered.Items, want.Items)
+			testDaemonThreadRequest(t, wire, recipient, 403, protocol.TypeThreadPage, protocol.ThreadPagePayload{ConversationID: testConvID, BeforeOrder: uint64(count), Limit: 8})
+			older, kind := testDaemonThreadReply(t, wire, 403, recipient)
+			expectedPage, err := store.HistoryPage(t.Context(), testConvID, uint64(count), 8)
+			if err != nil || kind != protocol.TypeThreadItems || !older.Final || older.Continuation == nil || *older.Continuation != expectedPage.Continuation {
+				t.Fatal("older page unavailable")
+			}
+			testDaemonThreadRows(t, older.Items, expectedPage.Items)
+			// Synchronous publish completion precedes the FIFO drain barrier.
+			p.publish(t.Context(), testConvID, cursor)
+			if err := mgr.FlushPushes(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			barrier := protocol.Envelope{Type: protocol.TypeError, Payload: json.RawMessage(`{}`)}
+			if err := mgr.Push(t.Context(), recipient, barrier); err != nil {
+				t.Fatal(err)
+			}
+			peer, e := wire.read()
+			if peer != recipient || e.Type != protocol.TypeError {
+				t.Fatal("historical inventory escaped after completion")
+			}
+			v = testShadowAppend(t, h, testConvID)
 			testDaemonThreadLoad(t, store, v)
 			p.publish(t.Context(), testConvID, cursor)
-			peer, e := wire.read()
+			peer, e = wire.read()
 			var added protocol.ThreadItemAddedPayload
 			if err := json.Unmarshal(e.Payload, &added); err != nil {
 				t.Fatal(err)
@@ -217,7 +233,7 @@ func TestDaemonThreadBoundedRecovery(t *testing.T) {
 			if peer != recipient || e.Type != protocol.TypeThreadItemAdded || added.Version != v || frames != 1 || bytes > 1024 {
 				t.Fatalf("new output: peer=%s type=%s version=%d frames=%d bytes=%d", peer, e.Type, added.Version, frames, bytes)
 			}
-			t.Logf("old_rows=%d initial/replacement_item_frames=0 new_item_frames=%d new_bytes=%d", count, frames, bytes)
+			t.Logf("old_rows=%d event=%s initial/replacement_item_frames=0 subsequent_item_frames=%d subsequent_bytes=%d", count, event, frames, bytes)
 		})
 	}
 }
