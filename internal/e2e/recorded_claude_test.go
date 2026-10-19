@@ -94,6 +94,12 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		}
 		c.Producer = claudetape.Producer{Revision: strings.TrimSpace(string(rev)), BinarySHA256: hex.EncodeToString(sum[:]), ClaudeVersion: strings.TrimSpace(string(version)), CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	}
+	if claudetape.RequiresClientCheckpoint(scenario) {
+		c.CheckpointDir = filepath.Join(home, "client-checkpoints")
+		if err := claudetape.NewCheckpointDirectory(c.CheckpointDir); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var observer *recordedSourceObserver
 	switch scenario {
 	case "permission-context-absent", "permission-context-outside", "native-suggestions":
@@ -156,7 +162,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 	transmit := func(kind string, payload any) uint64 {
 		t.Helper()
 		sequence++
-		raw, e := json.Marshal(protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+		raw, e := json.Marshal(protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: recordedOptionalPayload(t, payload)})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -256,7 +262,16 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		}
 		return observer.snapshot(t)
 	}
-	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Source: source, Reconnect: reconnect, Home: home, Workdir: workdir, Socket: c.Socket, Mode: mode, Wire: scenariohelpers.Wire{Send: transmit, Next: next}, Sequence: &sequence, DaemonLog: stderr.String})
+	checkpoint := func(action claudetape.ClientCheckpoint) {
+		t.Helper()
+		if !claudetape.RequiresClientCheckpoint(scenario) || c.CheckpointDir == "" {
+			t.Fatal("scenario has no client checkpoint profile")
+		}
+		if err := claudetape.PublishCheckpoint(c.CheckpointDir, action, 10*time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Checkpoint: checkpoint, Source: source, Reconnect: reconnect, Home: home, Workdir: workdir, Socket: c.Socket, Mode: mode, Wire: scenariohelpers.Wire{Send: transmit, Next: next}, Sequence: &sequence, DaemonLog: stderr.String})
 
 	if err = os.WriteFile(c.Finish, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -331,4 +346,12 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 			t.Logf("CLAUDE_COMPARISON %s", raw)
 		})
 	}
+}
+
+func recordedOptionalPayload(t *testing.T, payload any) json.RawMessage {
+	t.Helper()
+	if payload == nil {
+		return nil
+	}
+	return mustJSON(t, payload)
 }

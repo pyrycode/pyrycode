@@ -94,6 +94,9 @@ func (t *Tape) Validate() error {
 			if t.Scenario == "interrupt-running" && (action.Action != "interrupt_phase" || action.Phase != "responding") {
 				return errors.New("wrong running interrupt checkpoint")
 			}
+			if t.Scenario == "subagent-text" && action.Action != "main_stream_observed" {
+				return errors.New("subagent checkpoint action changed")
+			}
 			if t.Scenario == "interrupt-thinking" && (action.Action != "interrupt_phase" || action.Phase != "thinking") {
 				return errors.New("wrong thinking interrupt checkpoint")
 			}

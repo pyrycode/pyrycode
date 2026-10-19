@@ -17,7 +17,7 @@ func TestWorkspaceProtocolControls(t *testing.T) {
 	for _, name := range []string{
 		"workspace-valid", "workspace-conversation", "workspace-correlation", "workspace-raw-path", "workspace-persistence", "workspace-foreign-reply",
 		"skill-valid", "skill-no-token", "skill-no-drop", "skill-leaked-body", "skill-prompt-leak", "skill-parser-gap",
-		"subagent-valid", "subagent-no-agent", "subagent-empty-agent", "subagent-parented-agent", "subagent-duplicate-agent", "subagent-foreign-parent", "subagent-main-sequence", "subagent-child-sequence", "subagent-changing-turn", "subagent-same-turn", "subagent-short-main", "subagent-no-child",
+		"subagent-valid", "subagent-checkpoint-valid", "subagent-checkpoint-empty-turn", "subagent-no-agent", "subagent-empty-agent", "subagent-parented-agent", "subagent-duplicate-agent", "subagent-foreign-parent", "subagent-main-sequence", "subagent-child-sequence", "subagent-changing-turn", "subagent-same-turn", "subagent-short-main", "subagent-no-child",
 		"mcp-valid", "mcp-missing-target", "mcp-empty-error", "mcp-not-failed", "mcp-still-failed", "mcp-after-incomplete", "mcp-refused", "mcp-uncorrelated",
 		"settings-valid", "settings-initial-mode", "settings-initial-model", "settings-initial-session", "settings-update-session", "settings-confirmed-model", "settings-confirmed-effort", "settings-respawn-update", "settings-respawn-read", "settings-no-modal", "settings-wrong-tool", "settings-no-token", "settings-prompt-leak",
 	} {
@@ -114,7 +114,11 @@ func TestWorkspaceProtocolHelperProcess(t *testing.T) {
 				if name == "subagent-main-sequence" {
 					first = 1
 				}
-				rows = append(rows, delta("main", "", "main-turn", first))
+				turn := "main-turn"
+				if name == "subagent-checkpoint-empty-turn" {
+					turn = ""
+				}
+				rows = append(rows, delta("main", "", turn, first))
 				if name != "subagent-short-main" {
 					turn := "main-turn"
 					if name == "subagent-changing-turn" {
@@ -284,7 +288,20 @@ func TestWorkspaceProtocolHelperProcess(t *testing.T) {
 		}
 		SkillSilence(t, w, conv, prompt, budget, func() string { return log })
 	case strings.HasPrefix(name, "subagent-"):
-		SubagentText(t, w, conv, "Use one foreground agent", budget)
+		if strings.HasPrefix(name, "subagent-checkpoint-") {
+			count := 0
+			SubagentText(t, w, conv, "Use one foreground agent", budget, func() {
+				count++
+				if count != 1 || len(rows) != 3 {
+					t.Fatal("checkpoint was not exactly after first owned main delta")
+				}
+			})
+			if count != 1 {
+				t.Fatal("missing first main observation")
+			}
+		} else {
+			SubagentText(t, w, conv, "Use one foreground agent", budget)
+		}
 	case strings.HasPrefix(name, "mcp-"):
 		repairs := 0
 		MCPReconnect(t, w, MCPReconnectConfig{ConversationID: conv, TurnBudget: budget, SettleBudget: budget, StatusBudget: budget, ReconnectBudget: budget, Poll: time.Millisecond, Repair: func() { repairs++ }})

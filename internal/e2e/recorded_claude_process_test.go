@@ -23,6 +23,7 @@ import (
 )
 
 type tapeProcessConfig struct {
+	CheckpointDir   string
 	ObserverAddress string
 	Mode            string
 	Path            string
@@ -304,7 +305,7 @@ func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage,
 		return nil, errors.New("incomplete pilot Claude input files")
 	}
 	switch c.Scenario {
-	case "hook-banner", "workspace-change", "skill-silence", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
+	case "ordinary-queue-placement", "interrupt-running", "interrupt-thinking", "subagent-text", "hook-banner", "workspace-change", "skill-silence", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
 		cwd, err := os.Getwd()
 		if err != nil {
 			return nil, errors.New("scenario cwd unavailable")
@@ -394,12 +395,15 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		return 0, errTapeDuplicate
 	}
 	_ = claim.Close()
+	if (c.CheckpointDir != "") != claudetape.RequiresClientCheckpoint(c.Scenario) {
+		return 0, errors.New("client checkpoint configuration changed")
+	}
 	files, err := tapeFiles(args, &c)
 	if err != nil {
 		return 0, err
 	}
 	budget := 4 * time.Minute
-	if c.Scenario == "mcp-reconnect" || c.Scenario == "hook-banner" {
+	if c.Scenario == "mcp-reconnect" || c.Scenario == "hook-banner" || claudetape.RequiresClientCheckpoint(c.Scenario) {
 		budget = 10 * time.Minute
 	}
 	if c.Scenario == "native-suggestions" {
@@ -468,6 +472,10 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 	} else {
 		return 0, errors.New("unknown Claude tape mode")
 	}
+	if claudetape.RequiresClientCheckpoint(c.Scenario) && c.Mode == "capture" {
+		tape.Version = 2
+	}
+	checkpoint := recordedCheckpointState{dir: c.CheckpointDir}
 	frames := 0
 	bytes := 0
 	finalInputSeen := c.Scenario != "native-suggestions"
@@ -529,7 +537,13 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 
 		return nil
 	}
+	pollCheckpoint := func() error {
+		return checkpoint.poll(tape, player, func(raw []byte) ([]byte, error) { return tapeNormalize(raw, c, false) }, emit, &bytes, &frames)
+	}
 	for {
+		if err := pollCheckpoint(); err != nil {
+			return frames, err
+		}
 		if err := inputs.drain(handleInput); err != nil {
 			return frames, err
 		}
@@ -547,10 +561,19 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 				if !finalInputSeen {
 					continue
 				}
+				if err := pollCheckpoint(); err != nil {
+					return frames, err
+				}
 				if player != nil {
-					return frames, player.Complete()
+					if err := player.Complete(); err != nil {
+						return frames, err
+					}
+					return frames, checkpoint.seal()
 				}
 				if err := checkTapeCheckpoint(tape); err != nil {
+					return frames, err
+				}
+				if err := checkpoint.seal(); err != nil {
 					return frames, err
 				}
 				if err := tape.Save(c.Path); err != nil {
@@ -614,6 +637,17 @@ func tapeWrapper(t *testing.T, c tapeProcessConfig) string {
 // The busy-turn scenario must not be promoted unless a real daemon stdin write
 // gates the recorded tool result. Apply the same audit on every replay.
 func checkTapeCheckpoint(tape *claudetape.Tape) error {
+	switch tape.Scenario {
+	case "ordinary-queue-placement":
+		return tape.RequireQueueAdmission(tapeConversation, recordedOrdinaryQueuePrompt, scenariohelpers.OrdinaryQueuedText)
+	case "interrupt-running":
+		return tape.RequireInterruptBoundary(tapeConversation, recordedRunningInterruptPrompt, recordedInterruptHealthPrompt, false)
+	case "interrupt-thinking":
+		return tape.RequireInterruptBoundary(tapeConversation, scenariohelpers.InitialThinkingPrompt("tape-interrupt-thinking"), "", true)
+	case "subagent-text":
+		return tape.RequireSubagentMainObservation(tapeConversation, recordedSubagentPrompt)
+	}
+
 	if tape.Scenario == "hook-banner" {
 		return tape.RequireHookOrder(scenariohelpers.HookBlockPrompt, scenariohelpers.HookLivePrompt)
 	}

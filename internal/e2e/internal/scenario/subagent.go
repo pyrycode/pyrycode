@@ -9,11 +9,12 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-func SubagentText(t *testing.T, w Wire, convID, prompt string, budget time.Duration) {
+func SubagentText(t *testing.T, w Wire, convID, prompt string, budget time.Duration, observed ...func()) {
 	t.Helper()
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: convID, MessageID: "subagent-text", Text: prompt})
 
 	deadline := time.Now().Add(budget)
+	var mainObserved bool
 	var agentID string
 	lanes := map[string]*subagentTextLane{
 		"": {},
@@ -73,6 +74,15 @@ func SubagentText(t *testing.T, w Wire, convID, prompt string, budget time.Durat
 				t.Fatalf("assistant_delta reached unregistered parent lane %q", p.ParentToolUseID)
 			}
 			lane.observe(t, p)
+			if !mainObserved && p.ParentToolUseID == "" {
+				mainObserved = true
+				if len(observed) != 0 && observed[0] != nil {
+					if p.TurnID == "" {
+						t.Fatal("first main observation lacks a turn identity")
+					}
+					observed[0]()
+				}
+			}
 
 		case protocol.TypeTurnState:
 			var p protocol.TurnStatePayload

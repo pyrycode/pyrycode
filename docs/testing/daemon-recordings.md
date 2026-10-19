@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Twenty-six scenarios run the same assertions in live capture and offline replay:
+Thirty scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -128,8 +128,8 @@ The `workspace-protocol` batch adds nine cases:
   hook execution and original conversation creation remain live proof.
 
 Subagent text retains its live main/child identity and sequence assertions. Its
-recording awaits a first-client-delta checkpoint: burst playback otherwise lets
-the production text coalescer combine all main text into a single delta.
+first-client-delta checkpoint lets the production coalescer flush a main delta
+before receiving the remaining text during replay.
 
 These profiles retain the working directory as an exact input. The skill's full
 `SKILL.md` and native non-stream rejection policy and enable setting are captured
@@ -378,8 +378,8 @@ The live send-now test still supplies a fresh run nonce. Recorded requests use a
 fixed run suffix so their complete stdin contracts remain comparable; the shell
 command, marker and all queue/order assertions are unchanged. The ordinary-queue
 live test uses the extracted classifier with its original assertions intact.
-Ordinary queue admission does not itself write Claude stdin, so its separate
-client-action checkpoint requirement remains unresolved and it is not migrated.
+Ordinary queue admission does not itself write Claude stdin. Its separate
+client-action checkpoint profile below records the actual client observation.
 
 ### Three-scenario protocol batch
 
@@ -441,3 +441,40 @@ A fixed replay token establishes deterministic protocol/data assertions only;
 it does not replace the original live random-token non-guessability claim.
 No dynamic session-ID rebinding, multi-process playback, queue checkpoint support,
 production changes or live-test retirement are introduced by this batch.
+
+
+### Client observation checkpoint batch
+
+`--batch client-checkpoints` groups ordinary queue placement, running and initial
+thinking interrupts, and subagent text. These four profiles alone use version 2
+tapes, with exactly one typed `client_checkpoint` in addition to native stdin and
+stdout. Legacy profiles remain version 1. No checkpoint is written to Claude
+stdin or allowed to rebind native identifiers. The strict comparison includes
+the complete action object in its ordered request sequence.
+
+The driver publishes only after checking the owned queue admission, requested
+interrupt phase, or first owned nonempty main text delta with a valid initial
+sequence/turn identity. Replay holds its output tail at that action until the
+same real daemon/client observation occurs. Capture polls actions without
+waiting or suppressing native stdout. Native source audits require queue
+admission between Bash use and matching result, interrupt input between phase
+observation and the cancelled result, or nonempty native main text on both
+sides of the client main-delta observation. Early/late checkpoints fail capture;
+a timestamp, sleep, retrospective marker or provider stdout alone cannot replace
+the client observation.
+
+Each run uses a new private action directory. Closed canonical files are
+published exclusively and acknowledged only after capture append or successful
+replay matching and output delivery. Before save or successful receipt, the
+helper requires complete input consumption and exactly one accepted action,
+atomically revokes the publisher's directory pathname and audits the frozen
+exact ready/ack inventory. Missing, extra, partial or changed action evidence
+fails. The helper allows ten minutes for checkpoint profiles, preserving all
+original cumulative phase budgets; a selected checkpoint recording run permits
+thirty minutes for the serial suite.
+
+Physical Bash execution, measured queue duration, actual provider interruption
+and latency remain live obligations. Every original live root stays enabled
+with its original trigger, budget and assertions; live callbacks are omitted.
+Subagent replay preserves the requirement for at least two main lane deltas,
+nonempty child text and distinct stable main/child turn identities.
