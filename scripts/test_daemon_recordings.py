@@ -37,11 +37,19 @@ class RecordedEvidenceTest(unittest.TestCase):
         for outcomes, code in [([], 0), ([('TestRecordedClaude', 'pass')], 0),
                                (expected[:1], 0), (expected, 1),
                                (expected + [('TestRecordedClaude/unexpected', 'pass')], 0),
+                               (expected + [expected[0]], 0),
+                               (expected + [('TestRecordedClaude', 'fail')], 0),
                                ([(expected[0][0], 'skip'), expected[1]], 0),
                                ([(expected[0][0], 'fail'), expected[1]], 0)]:
             with self.subTest(outcomes=outcomes, code=code):
                 success, _ = self.execute(outcomes, code)
                 self.assertFalse(success)
+
+    def test_subset_requires_all_selected_and_no_other_leaves(self):
+        with patch.object(RUNNER.subprocess, 'Popen', return_value=FakeRun([('TestRecordedClaude/reply', 'pass')])), contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(RUNNER.run('replay', Path('/fixtures'), None, scenarios=['reply']))
+        with patch.object(RUNNER.subprocess, 'Popen', return_value=FakeRun([('TestRecordedClaude/reply', 'pass'), ('TestRecordedClaude/two-turn', 'pass')])), contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(RUNNER.run('replay', Path('/fixtures'), None, scenarios=['reply']))
 
     def test_verify_uses_distinct_reports_for_baseline_named_fresh(self):
         def launch(command, **kwargs):
@@ -51,23 +59,51 @@ class RecordedEvidenceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / 'baseline/fresh'
             output = Path(temporary) / 'verify'
-            with patch.object(RUNNER.sys, 'argv', ['daemon-recordings.py', 'verify', '--directory', str(directory), '--output', str(output)]), patch.object(RUNNER.subprocess, 'Popen', side_effect=launch), contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(RUNNER.sys, 'argv', ['daemon-recordings.py', 'verify', '--directory', str(directory), '--output', str(output)]), patch.object(RUNNER.subprocess, 'Popen', side_effect=launch), patch.object(RUNNER.subprocess, 'check_output', return_value='test-revision\n'), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(0, RUNNER.main())
             self.assertEqual({'capture.json', 'saved-replay.json', 'fresh-replay.json', 'request-contract.json'},
                              {path.name for path in (output / 'reports').glob('*.json')})
             self.assertTrue(json.loads((output / 'summary.json').read_text())['success'])
 
+    def test_batch_cli_runs_four_comparisons_and_one_gate_group(self):
+        calls = []
+        def run(mode, directory, report_dir, **kwargs):
+            calls.append((mode, kwargs.get('label'), kwargs.get('scenarios')))
+            if mode == 'capture':
+                for name in kwargs['scenarios']:
+                    (directory / (name + '.json')).write_text(json.dumps({'producer': {'revision': 'revision'}}))
+            return True
+        def git(command, **kwargs):
+            return '' if 'status' in command else 'revision\n'
+        for changed in (False, True):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / 'batch'
+                def current(command, **kwargs):
+                    if changed and 'rev-parse' in command and len(calls) >= 4:
+                        return 'changed\n'
+                    return git(command, **kwargs)
+                calls.clear()
+                with patch.object(RUNNER.sys, 'argv', ['daemon-recordings.py', 'batch', '--batch', 'permissions', '--output', str(output)]), patch.object(RUNNER, 'inventory', return_value={'issues': [], 'summary': {}}), patch.object(RUNNER, 'run', side_effect=run), patch.object(RUNNER.subprocess, 'check_output', side_effect=current), patch.object(RUNNER.daemon_batch, 'gates', return_value={'success': True, 'source_revision': 'revision'}) as gates, contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(1 if changed else 0, RUNNER.main())
+                self.assertEqual(4, len(calls))
+                self.assertEqual(['capture', 'saved-replay', 'fresh-replay', 'request-contract'], [row[1] for row in calls])
+                self.assertTrue(all(row[2] == ['permission-deny', 'permission-allow', 'permission-cancel'] for row in calls))
+                self.assertEqual(0 if changed else 1, gates.call_count)
+                self.assertEqual(not changed, json.loads((output / 'summary.json').read_text())['success'])
+
     def test_replay_drops_both_provider_credentials(self):
         with patch.dict(os.environ, {'CLAUDE_CODE_OAUTH_TOKEN': 'unit-oauth-sentinel',
-                                    'ANTHROPIC_API_KEY': 'unit-api-sentinel'}):
+                                    'ANTHROPIC_API_KEY': 'unit-api-sentinel', 'CLAUDE_CONFIG_DIR': '/private/credential-config'}, clear=True):
             _, env = self.execute([])
-        self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', env)
-        self.assertNotIn('ANTHROPIC_API_KEY', env)
+        self.assertFalse('CLAUDE_CODE_OAUTH_TOKEN' in env, 'Provider configuration leaked into replay environment')
+        self.assertFalse('ANTHROPIC_API_KEY' in env, 'Provider configuration leaked into replay environment')
+        self.assertFalse('CLAUDE_CONFIG_DIR' in env, 'Provider configuration leaked into replay environment')
         self.assertEqual('replay', env['PYRY_CLAUDE_TAPE_MODE'])
+        self.assertEqual(list(RUNNER.SCENARIOS), json.loads(env['PYRY_CLAUDE_TAPE_SCENARIOS']))
 
     def test_inventory_accounts_for_pilot_and_original_suite(self):
         inventory = RUNNER.inventory()
-        self.assertEqual(list(RUNNER.SCENARIOS), inventory['pilot_scenarios'])
+        self.assertEqual(list(RUNNER.SCENARIOS), inventory['recorded_scenarios'])
         self.assertTrue(inventory['existing_tests'])
         self.assertIn('not executed acceptance', inventory['inventory_kind'])
         self.assertTrue(any(row['name'] == 'TestInteractiveStreamMultiTurnContinuity'
