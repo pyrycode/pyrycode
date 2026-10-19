@@ -315,11 +315,12 @@ func TestDaemonLiveRelayReplies(t *testing.T) {
 				t.Fatal("request duplicated MCP query")
 			}
 			if name == "model" {
-				// The actual cached provider returns predecessor evidence after same-ID transition.
+				// A new request keeps target ordering and the cached predecessor's provenance.
 				b.sink.live.transition(sessions.SessionTransition{ConversationID: "conv", PreviousID: sessions.SessionID(sid), NewID: sessions.SessionID(sid), NextAgent: "claude"})
 				r, ok := wiring.modelListReading("conv", false)
-				if !ok || r.SessionGeneration != src.SessionGeneration {
-					t.Fatal("valid stale provider result became unavailable or successor")
+				target := b.capture("conv", sid, false)
+				if !ok || r.SessionGeneration != target.SessionGeneration || r.SessionGeneration == src.SessionGeneration || string(r.Envelope.SessionID) != `"`+sid+`"` {
+					t.Fatal("new catalog request lost target ordering or predecessor provenance")
 				}
 				retained := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeModelList, ""}]
 				if !retained.Envelope.SessionStateCleared {

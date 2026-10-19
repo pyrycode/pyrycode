@@ -4,7 +4,13 @@ The v2 wire shape for claude's **model inventory** — the `models` array a `con
 
 **One filler, two production paths — don't call it "two constructors."** `cmd/pyry`'s `resolveBoundModelList` (#1857) is a second route that yields this type: it resolves a conversation's bound session and reads its retained `turnevent.ModelList`, but it routes that list back through `turnbridge.MapEvent` rather than filling `ModelListPayload`'s fields itself. Six of its seven returns are the zero-value refusal `protocol.ModelListPayload{}`; only the one that reaches `MapEvent` is non-zero. #1848's arm remains the only site that actually fills the fields.
 
-Delivery is the live interactive turn lane, best-effort by construction: the frame is classed droppable at the turn-busy fan-in (`turnMarkFor` answers `turnMarkNone`), so a busy session can refuse it under load, and it is dropped outright before a conversation has been routed. `V2SessionConfig.RetainedModelLists` (#1863, see [`v2-session-manager.md`](v2-session-manager.md)) is the connect-time reconcile seam for that gap; #1867 wired the daemon-side producer (`cmd/pyry`'s `retainedModelLists`, enumerating `resolveBoundModelList` over the conversations registry), so a client that missed the live frame — dropped, or connected after the exchange — now receives the current menu on connect instead. `docs/protocol-mobile.md` § `model_list` still states the earlier, live-lane-only contract as of this ticket; correcting it is a sibling slice blocked on #1867 (out of scope here, per the #1867 spec).
+Legacy live delivery is best-effort: the frame is droppable at the turn-busy
+fan-in (`turnMarkFor` answers `turnMarkNone`). `V2SessionConfig.RetainedModelLists`
+and `cmd/pyry`'s `retainedModelLists` provide legacy connect-time reconciliation;
+on-demand requests use the same inventory precedence. Supplied thread delivery
+uses retained current readings and source-bearing request results instead. Its
+request-driven catalog admission is described below; reconnect fallback
+resolution remains [#3611](https://github.com/pyrycode/pyrycode/issues/3611).
 
 ```go
 type ModelListPayload struct {
@@ -33,7 +39,16 @@ type ModelOption struct {
 - **`DroppedModels` was declared with nothing counting it, and the doc said so plainly rather than implying a producer existed — since #1812, that is no longer true.** `internal/streamsup/parser.go`'s `maxModelListEntries = 10` bounds the entry count, truncating from the tail, and the decode records the cut as `DroppedModels`. `internal/turnbridge`'s `MapEvent` carries the count verbatim (#1848, never recomputed from `len(models)`) and `cmd/pyry` emits it (#1849), so `len(Models) + DroppedModels` **is** the menu's true size all the way to the wire — `ModelListPayload`'s Go doc comment was right about this the whole time; `docs/protocol-mobile.md` § `model_list` was the side that had it backwards, and #1860 corrected it there.
 - **The wire-name naming pin has the same trap the sibling `model_announced` block documents for itself.** `TestModelListType_IsNotClaudesVocabulary` checks `TypeModelList` against claude's own words on this path (`initialize`, `models`) with negative `strings.Contains` checks, plus a positive exact-equality pin — the pin is required because a `strings.Contains(…, "model")` check would be **red against the correct name** (`model` is this frame's own subject noun), so the negative checks alone would leave every wrong name green.
 - **Fixed by #1848, the same class already on record for `BackgroundTask` (#1393):** `ModelOption.TruncatedFields`'s doc comment enumerated the cut-field vocabulary as `("value", "display_name")` — 2-of-4 against the four names the producer (`streamsup`'s `emitModelList`) actually records. Every other `TruncatedFields` doc in this file enumerates exhaustively; this one didn't. Nothing broke at runtime — the field is a free-form `[]string` — but it was the line a reader would pick names from, and #1848 is what read it to build the `turnbridge` mapping, catching the gap in the same ticket that would otherwise have under-covered `ResolvedModel` and `EffortLevels`. Now enumerates all four in producer order (`resolved_model`, `value`, `display_name`, `effort_levels`), with `effort_levels` called out as the one reporting on a list rather than a scalar.
-- **No longer a pure unconstructed DTO, and no longer merely reachable.** `internal/turnbridge`'s `MapEvent` has a `turnevent.ModelList` arm (#1848) that constructs this payload 1:1, verbatim, carrying `DroppedModels` from the decode, and `interactiveTurnEmitterV2.Handle` has carried the case that calls it since #1849 — a decoded list now reaches every interactive conn as a `model_list` envelope, on the same no-lifecycle-mutation shape as `ModelAnnounced`. Two gaps remain, both by design rather than oversight: the frame is droppable at the turn-busy fan-in under load (`turnMarkFor` answers `turnMarkNone` for this variant), and it is dropped outright before a conversation has been routed (the bootstrap child at daemon start always hits the no-cursor guard). `sessionModelHold` (#1840, see [`streamsup-package.md`](streamsup-package.md)) retains the list precisely so a client can recover from either loss; reading that retention back for a client that connects or reconnects after the fact was re-cut twice (#1846 → #1857/#1858, #1858 → #1863/#1864 → #1867/#1868). #1863 shipped the relay-side seam (`V2SessionConfig.RetainedModelLists`); #1867 wired a real producer into it (`cmd/pyry`'s `retainedModelLists`, enumerating `resolveBoundModelList` over the conversations registry), so a client that missed the frame now receives the current menu on connect. #1868 is the cross-process e2e proof. #1705 closed the encoding and documentation gap (fixtures, round-trip tests, `docs/protocol-mobile.md` § `model_list`).
+- **Live emission and recovery have different guarantees.** `turnbridge.MapEvent`
+  maps an admitted `turnevent.ModelList` verbatim, and
+  `interactiveTurnEmitterV2.Handle` publishes it without opening or closing a
+  turn. The legacy fan-in can drop the frame, so clients must also support
+  reconciliation or on-demand resolution. Bootstrap and rotated-child events
+  route to their own bound conversation; the bootstrap menu no longer depends
+  on a foreground cursor (#2739). A supplied thread catalog reply carries no
+  ring/history identity and does not establish current-session ownership. See
+  [the delivery contract](../../protocol-mobile.md#model_list).
+
 
 Six tests in `interactive_test.go` total. The #1704 trio — `TestModelListPayload_NilModelsNormalises` and `TestModelOption_NilSliceEncodings` — follow `TestBackgroundTaskRosterPayload_NilTasksNormalises`'s value/pointer-subtest shape, the only way to reach the nil branch on `Models`/`EffortLevels` since decoding `[]` always yields a non-nil slice; `TestModelListType_IsNotClaudesVocabulary` follows `TestModelAnnouncedType_IsNotClaudesSubtype`'s shape. #1705 added three committed fixtures under `testdata/` (`model_list.json` populated, `model_list_empty.json`, `model_list_zero.json` — a zero-value payload whose single all-zero entry is the only route to five of the nine wire keys) with round-trip tests, closing the six scalar wire keys the #1704 pair doesn't reach. All nine `,omitempty` mutants (one per wire key on `ModelListPayload`/`ModelOption`) were run through `go test -overlay=` against a scratch copy and each reddened at least one test — re-run and confirmed independently in code review.
 
@@ -41,4 +56,37 @@ Six tests in `interactive_test.go` total. The #1704 trio — `TestModelListPaylo
 
 **`RequestModelListPayload` (#2125)** is the one-field inbound request this reply now answers on demand, in addition to the live turn lane and the connect-time reconcile: `ConversationID string \`json:"conversation_id"\`` in `interactive.go`, no `omitempty` (absent and empty are the same case, and keeping the key on the wire lets a fixture pin the full shape), no `MarshalJSON`. Correlation rides `Envelope.InReplyTo`, so there is no request-id key — `TypeAttachmentStored`'s decision, transferred. It is declared after `ModelOption.MarshalJSON` rather than immediately beside `ModelListPayload`, keeping the *reply* family (`ModelListPayload` + `ModelOption` + both `MarshalJSON`s) contiguous and the new *request* type adjacent to what it asks for. `ModelListPayload` and `ModelOption` are otherwise **unchanged** by this ticket: no second outbound shape is minted and `turnbridge.MapEvent`'s mapping is not forked, so "the same payload the reconcile would send" means the same *source*, not fields copied. See [Inbound `request_model_list`](v2-session-manager-state-machine-inbound-request-model-list-modellistfor-seam.md) for the handler and the two coded rejects (`conversation.not_found`, `model_list.unavailable`) it answers with instead of a degraded, partially-empty `model_list`.
 
-See `docs/protocol-mobile.md` § `model_list` for the client-facing contract: the four properties a decoder gets wrong by default (`value` is not a dated identifier, a lookup miss is ordinary, a published value is still re-validated by `validModel` rather than trusted — `effort_levels` is the field that still gets refused since #1838, not `value` — and the strings are claude-authored and unsanitized), and the mutual cross-reference with § `model_announced`.
+## Catalog admission and source evidence
+
+`type: "model_list"` identifies catalog inventory, including its `{}` clear form.
+The [supplied delivery contract](../../protocol-mobile.md#session-scoped-live-state-v2-supplied-delivery-contract)
+routes by authoritative top-level `conversation_id`, matching any payload
+identity. Clients may admit that catalog on the active authenticated connection
+before a first turn even when `session_id` differs from the current session or is
+unresolved. Omitted means unresolved evidence, `null` positively means no producing
+session, and a string names the actual captured producer, possibly bootstrap or
+predecessor. Stamping the target session onto borrowed bytes would invent
+ownership. The tag does not identify the source of every capability-merged row.
+Connection/incarnation and ordering checks remain required.
+
+Current-session admission is still required for other live reading families,
+including slash-command inventory. A catalog neither admits a session nor
+authorizes settings or prompts. Full same-generation source replacement changes
+only the catalog, with no additional clear or current model/effort changes.
+Uncorrelated target-only clears invalidate the catalog once per target generation
+before fresh inventory; later resolution can repopulate it. Equal-revision
+correlated answers remain usable, while older revisions and overtaken generations
+are suppressed. These counters are internal ordering inputs, not wire fields.
+
+A new resolution of retained predecessor vocabulary owns the request's target
+ordering; an old captured reply keeps its earlier ordering. Checking only the
+producer conversation would miss a predecessor in the same conversation, and
+matching session strings cannot distinguish a reused-ID transition. Borrowed
+inventory remains reply-only and cannot change target retention or cache evidence.
+See [daemon retention and regression proofs](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#control-and-on-demand-readings)
+and [emitted wire examples](../../protocol-mobile.md#asking-for-a-model-list-on-demand).
+
+See [`model_list`](../../protocol-mobile.md#model_list) for selection validation:
+`value` is the offered choice, a lookup against an announcement can miss, and
+published values and effort levels still require independent validation against
+the target session's agent. Inventory strings remain untrusted rendering data.
