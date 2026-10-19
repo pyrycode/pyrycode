@@ -117,10 +117,25 @@ func TestDaemonThreadContinuity(t *testing.T) {
 		t.Fatal("fixture did not reuse epoch")
 	}
 	p.publish(t.Context(), id, w)
+	if len(retired) != 0 || len(frames) != 1 || frames[0].Type != protocol.TypeThreadItemAdded {
+		t.Fatalf("validated suffix lost continuity: retired=%v frames=%v", retired, frames)
+	}
+	// A publication before the saved reload boundary is still lost.
+	testShadowAppend(t, h, id)
+	testShadowWait(t, func() bool { return store.Snapshot(id).Version == 3 })
+	if err := store.Unload(id); err != nil {
+		t.Fatal(err)
+	}
+	testShadowAppend(t, h, id)
+	if err := store.Load(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	testShadowWait(t, func() bool { return store.Snapshot(id).Version == 4 })
+	p.publish(t.Context(), id, w)
 	if !reflect.DeepEqual(retired, []string{"phone"}) {
 		t.Fatalf("gap did not retire: %v", retired)
 	}
-	if len(frames) != 0 {
+	if len(frames) != 1 {
 		t.Fatalf("unsolicited historical baseline count %d", len(frames))
 	}
 	for _, e := range frames {
