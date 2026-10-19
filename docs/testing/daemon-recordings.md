@@ -113,7 +113,8 @@ replay and strict outgoing request comparison. Comparison binds observed control
 IDs by producer direction and ordinal; it retains complete ordered requests.
 Different provider wording and accounting do not themselves fail this comparison.
 Changed user choices, commands, recovery steps and request payloads do. Every
-stage must execute all seven named leaves with no failures or skips. A failing stage
+stage must execute every selected named leaf with no failures or skips; default
+selection includes the full manifest. A failing stage
 cannot produce a successful compatibility summary, even if the others passed.
 Verification never replaces the reviewed baseline.
 
@@ -162,3 +163,89 @@ and idle in either order, but cannot pass with an unresolved sent decision. Allo
 still needs text before idle; deny and refusal retain their original ability to
 finish silently. Retry caps remain four permission retries, two re-asked questions
 and four post-refusal permission allows.
+
+## Batch migration tooling
+
+`internal/e2e/testdata/claude-scenarios.json` is the shared source of scenario
+names, stdio configuration, original live owners, retained live obligations and
+named batches. Both the Go tests and Python runner read it. A driver without a
+manifest entry, an entry without an implemented driver, an empty/unknown/duplicate
+selection, or missing/extra/duplicate/skipped execution evidence fails. Default
+selection remains every scenario; normal `make e2e` and `make check` retain all
+recorded coverage. A selected batch never narrows the full regression gate.
+
+```sh
+python3 scripts/daemon-recordings.py inventory
+python3 scripts/daemon-recordings.py plan --batch permissions
+python3 scripts/daemon-recordings.py replay --batch permissions --output /outside/new/replay-reports
+python3 scripts/daemon-recordings.py capture --scenario permission-cancel --output /outside/new/capture
+python3 scripts/daemon-recordings.py batch --batch all --agents-repo /path/to/pyrycode-agents --output /outside/new/batch
+```
+
+`batch` audits the manifest, performs fresh capture, committed replay, fresh
+replay and strict request comparison, then runs `make check-common` **once for
+the entire selected group**, its mapped live test roots once, the complete
+201-cut restoration proof once, and citation/documentation guards once. Live
+roots and restoration cuts are counted from Go JSON events: exit zero, skipped
+cases or an empty run cannot substitute for evidence. Failed stages stop later
+gates and retain their reports and private logs. The summary records source
+revision, manifest identity, individual stages, selected cases and retained live
+obligations. Every fresh producer must match the pinned clean source revision;
+changing HEAD or leaving source changes during gates fails completion. The
+existing shared host admission launcher serializes expensive stages and its
+inherited descriptor is preserved. Set `AGENTS_REPO_PATH` or use `--agents-repo`
+for a checkout where the sibling agents repository is elsewhere. Provider
+credentials and `CLAUDE_CONFIG_DIR` are removed for replay/offline gates.
+
+### Inventory counts and review boundaries
+
+The standard-library Go AST reader enumerates declarations and package-function
+references, including callbacks passed as function values; Go build expressions
+are evaluated rather than inferred from filenames or a line-prefix regex. The
+Python analysis reports possible paths to configured provider prerequisites or
+literal Claude executable calls, process-helper entries, and entries with no
+known provider path. **No known path is not an offline-safety proof.** Methods,
+dynamic dispatch and external packages are not type-resolved; findings are
+conservative source evidence, not executed acceptance or automatic eligibility.
+Diagnostic probe environment gates are names only, never values.
+
+Reviewed manifest dispositions distinguish shared replay assertions, candidates,
+checkpoint work and live-only proof. Everything else remains explicitly
+unreviewed. Counts of recorded scenarios, shared live entrypoints, static test
+declarations and remaining eligibility reviews are separate; the total eligible
+migration count stays unknown until reviewed. No live requirement is retired.
+
+Review fingerprints include reachable package function bodies plus conservative
+package declaration/method context and the imported shared assertion source.
+Changing a timeout constant, model table, harness global or shared assertion
+invalidates the review as well as changing a function. Inventory reports stale
+reviews, and plan/scaffold/batch refuse to proceed. A maintainer reviews the new
+boundary and records the new digest from inventory; the tooling never silently
+refreshes its own approval metadata. Context is deliberately conservative and
+can require re-review after an unrelated declaration change.
+
+### Generate a reviewable proposal
+
+```sh
+python3 scripts/daemon-recordings.py scaffold \
+  --name send-now-placement \
+  --live-test TestRealClaude_SendQueuedNowPlacement \
+  --retained-live 'Actual Bash execution and elapsed/settle time remain live' \
+  --output /outside/new/proposal
+```
+
+This creates a Go registry adapter, manifest fragment with current source
+fingerprints, and a review checklist in a new directory outside the checkout.
+The adapter calls `t.Fatal` until the shared driver is implemented. It is a
+proposal, never counted as a migrated scenario. It refuses unsafe names, missing
+live owners/obligations, already-owned or live-only entries, and existing output
+directories. Use `--stdio-permission` when the reviewed scenario requires that
+configuration. Review the actual spawn/bypass settings and all external-input
+checkpoints rather than inferring them from the generated stub.
+
+After implementing the shared driver and merging its manifest entry, commit clean
+source, capture the named candidates into a new directory, inspect their privacy,
+provenance and complete inputs, then commit the inspected fixtures and run the
+batch workflow. Capture never overwrites a baseline and neither scaffolding nor
+batching removes or retags a live test. Semantic assertion mapping, physical/time
+witnesses and candidate promotion remain explicit code-review work.
