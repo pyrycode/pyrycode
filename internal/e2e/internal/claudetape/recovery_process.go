@@ -21,7 +21,7 @@ func RunRecoveryProcess(c RecoveryProcessConfig, args []string, input *os.File, 
 	if err != nil || cwd != c.WorkDir || os.Getenv("HOME") != c.Home {
 		return 0, errors.New("recovery child environment changed")
 	}
-	b, err := NewDaemonBinding(args, c.Home, c.WorkDir, c.Daemon, c.Socket)
+	b, err := newRecoveryBinding(args, c.Home, c.WorkDir, c.Daemon, c.Socket)
 	if err != nil {
 		return 0, err
 	}
@@ -30,4 +30,17 @@ func RunRecoveryProcess(c RecoveryProcessConfig, args []string, input *os.File, 
 		return 0, err
 	}
 	return runBoundProcess(c.PoolProcessConfig, args, b, files, input, output, diagnostic)
+}
+
+// The original recovery root owns this fixed session. Unlike dynamically
+// created conversation IDs, it must be checked before typed normalization.
+func newRecoveryBinding(args []string, home, workdir, daemon, socket string) (*DaemonBinding, error) {
+	b, err := NewDaemonBinding(args, home, workdir, daemon, socket)
+	if err != nil {
+		return nil, err
+	}
+	if b.session != RecoverySessionID {
+		return nil, errors.New("recovery native session changed")
+	}
+	return b, nil
 }

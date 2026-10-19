@@ -160,3 +160,27 @@ func TestRecoveryArtifactsRejectLateChanges(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoveryBindingPinsOriginalNativeSession(t *testing.T) {
+	home := t.TempDir()
+	args := []string{"--session-id", RecoverySessionID, "--settings", filepath.Join(home, "settings.json"), "--append-system-prompt-file", filepath.Join(home, "prompt.txt")}
+	bind := func(argv []string) error {
+		_, err := newRecoveryBinding(argv, home, filepath.Join(home, "work"), filepath.Join(home, "pyry"), filepath.Join(home, "socket"))
+		return err
+	}
+	if err := bind(args); err != nil {
+		t.Fatal(err)
+	}
+	changed := append([]string(nil), args...)
+	changed[1] = "11111111-1111-4111-8111-111111111111"
+	if bind(changed) == nil {
+		t.Fatal("foreign valid native session normalized away")
+	}
+	suite := recoveryControl(t)
+	role := suite.Roles["retained"]
+	role.Transcript.SessionID = changed[1]
+	role.Transcript.Snapshot.Data = strings.ReplaceAll(role.Transcript.Snapshot.Data, RecoverySessionID, changed[1])
+	if role.Transcript.Validate() == nil {
+		t.Fatal("foreign consistent transcript accepted")
+	}
+}

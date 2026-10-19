@@ -11,6 +11,7 @@ import (
 )
 
 const RecoveryScenario = "daemon-session-recovery"
+const RecoverySessionID = "77777777-7777-4777-8777-777777777777"
 const RecoveryRoot = "TestInteractiveSessionErrorRecovery"
 const RecoveryMetadataDirectory = ".pyry-recovery-recording"
 
@@ -34,7 +35,7 @@ type RecoverySuite struct {
 
 func (t RecoveryTranscript) Validate() error {
 	fail := errors.New("invalid recovered session transcript")
-	if !poolUUID.MatchString(t.SessionID) || !t.Snapshot.Exists || t.Snapshot.Mode == 0 || t.Snapshot.Mode > 0777 || len(t.Snapshot.Data) == 0 || len(t.Snapshot.Data) > MaxBytes || !utf8.ValidString(t.Snapshot.Data) {
+	if t.SessionID != RecoverySessionID || !t.Snapshot.Exists || t.Snapshot.Mode == 0 || t.Snapshot.Mode > 0777 || len(t.Snapshot.Data) == 0 || len(t.Snapshot.Data) > MaxBytes || !utf8.ValidString(t.Snapshot.Data) {
 		return fail
 	}
 	raw, err := json.Marshal(t)
