@@ -5,9 +5,9 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Forty-four scenarios run the same assertions in live capture and offline replay:
+Fifty-nine scenarios run the same assertions in live capture and offline replay:
 
-The manifest associates 37 original live roots with these recordings.
+The manifest associates 52 original live roots with these recordings.
 The legacy `question-answer` and four bypass-question recordings retain their
 original assertions and fixtures without owning current live roots. Five new
 witness profiles share the stronger proof introduced by PR #3622: a fresh
