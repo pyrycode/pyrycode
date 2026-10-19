@@ -75,17 +75,22 @@ func scan(dir string) ([]function, error) {
 	// Assertion helpers are imported by live roots; their bodies are part of
 	// the reviewed boundary even though this syntactic graph does not type-resolve
 	// calls into another package.
-	shared, _ := filepath.Glob(filepath.Join(dir, "..", "internal", "scenario", "*.go"))
-	for _, path := range shared {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		raw, err := os.ReadFile(path)
+	for _, pkg := range []string{"scenario", "claudetape"} {
+		shared, err := filepath.Glob(filepath.Join(dir, "..", "internal", pkg, "*.go"))
 		if err != nil {
 			return nil, err
 		}
-		context.WriteString(filepath.Base(path))
-		context.Write(raw)
+		for _, path := range shared {
+			if strings.HasSuffix(path, "_test.go") {
+				continue
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			context.WriteString(filepath.Join(pkg, filepath.Base(path)))
+			context.Write(raw)
+		}
 	}
 	contextSum := sha256.Sum256([]byte(context.String()))
 	contextDigest := hex.EncodeToString(contextSum[:])

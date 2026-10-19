@@ -25,11 +25,11 @@ def load(path=PATH):
     names(value['provider_roots'], r'[A-Za-z_][A-Za-z0-9_]*', True)
     seen = set()
     for row in value['scenarios']:
-        keys(row, 'name stdio_permission claude_args live_tests retained_live live_contracts')
+        keys(row, 'name stdio_permission initial_yolo claude_args live_tests retained_live live_contracts')
         if not isinstance(row['name'], str) or not re.fullmatch(r'[a-z][a-z0-9-]*', row['name']) or row['name'] in seen:
             raise ValueError('Invalid or duplicate scenario')
         seen.add(row['name'])
-        if type(row['stdio_permission']) is not bool:
+        if type(row['stdio_permission']) is not bool or type(row['initial_yolo']) is not bool:
             raise ValueError('Permission configuration must be explicit')
         if not isinstance(row['claude_args'], list) or any(not isinstance(arg, str) or not arg.strip() for arg in row['claude_args']):
             raise ValueError('Claude arguments must be explicit nonempty strings')
