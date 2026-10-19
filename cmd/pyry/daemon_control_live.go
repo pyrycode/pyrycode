@@ -250,7 +250,12 @@ func liveInventoryResult[T any](b *daemonLiveBindings, conv, typ string, e proto
 	if !ok {
 		return v.payload, false, daemonLiveReading{}
 	}
-	if v.source.SessionGeneration != 0 && v.source.ConversationID != op.source.ConversationID {
+	if typ == protocol.TypeModelList {
+		// Catalog requests own target ordering independently of producer evidence.
+		// Re-resolving predecessor vocabulary does not promote its cache to live state.
+		op.replyOnly = v.source.ConversationID != op.source.ConversationID || v.source.SessionGeneration != op.source.SessionGeneration
+		op.source.provenance = v.source.provenance
+	} else if v.source.SessionGeneration != 0 && v.source.ConversationID != op.source.ConversationID {
 		// Borrowed vocabulary uses captured request ordering, preserving its producer
 		// tag without installing foreign cached evidence as target live state.
 		op.source.provenance = v.source.provenance

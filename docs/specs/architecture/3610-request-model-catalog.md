@@ -10,6 +10,7 @@
 - `internal/relay/v2session_live_replies.go` → `pushLiveReply`: correlation without recapture.
 - `cmd/pyry/daemon_inventory_ingress_test.go` → `testInventoryIngress`: real parser/hold/source harness.
 - `cmd/pyry/daemon_live_relay_rework_test.go` → `TestDaemonLiveRelayBorrowedBootstrapVocabulary`: authenticated borrowed-reply and reused-ID proof.
+- `cmd/pyry/daemon_live_relay_test.go` → `TestDaemonLiveRelayReplies`: existing model assertion must follow the new request-ordering contract; other reading families remain unchanged.
 - `docs/knowledge/features/protocol-package-model-list-payload.md`: inventory is a report; selection still requires independent settings validation.
 - `docs/knowledge/features/v2-session-manager-state-machine-inbound-request-model-list-modellistfor-seam.md`: membership must permit hosted conversations without sessions.
 - `docs/knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md`: foreign replies must not replace target retention; capability projection follows source capture.
@@ -76,3 +77,7 @@ Pending documentation stage: update `docs/protocol-mobile.md`, “Message envelo
 
 **Reviewer:** builder (self-review per checklist)
 **Date:** 2026-10-19
+
+## Revisions
+
+- 2026-10-19: Focused regression confirmed generation 1 returned after a generation 2 reused-ID clear. Update the existing `TestDaemonLiveRelayReplies` model assertion to expect newly captured target ordering while retaining predecessor provenance. Added explicit legacy wire/refusal coverage and a positive no-producing-session adapter case; no production design change.
