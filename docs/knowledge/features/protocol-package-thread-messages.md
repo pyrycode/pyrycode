@@ -30,13 +30,22 @@ Live negotiation/publication and production bounded catch-up/page providers
 are installed. Bounded live encoding is available through `EncodeThreadUpdate`.
 The DTO declarations perform no validation, fold I/O or patch application.
 
+Every logical changed/append update requires the held revision to equal
+`base_rev` and `rev > base_rev`. A fold transition combining fields and a suffix
+becomes one `ThreadItemChangedPayload` with all replacements and complete final
+content; only suffix-only transitions use `ThreadTextAppendPayload`. Splitting
+the combined transition into a patch followed by a same-revision append makes
+strict clients reject the suffix, leaving truncated text at the final revision.
+Preserve the fold's actual revisions so subsequent updates and full reads agree;
+see [daemon publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+
 Split the serialized logical update, not just kind-specific content: a large
 `summary` or other metadata can exceed the cap even when content fits. This
 also preserves unknown JSON and patch omission versus explicit clears without
 a known-kind field list. `ThreadUpdatePart` fragments require ordered, complete
 assembly before committing item fields, `rev` and `version`; changes/appends
-still require the original `base_rev`. Fragment progress never becomes history
-progress. See the
+still require the original `base_rev` and strict revision advancement after
+complete assembly. Fragment progress never becomes history progress. See the
 [assembly contract](../../protocol-mobile.md#bounded-thread-encoding-and-assembly).
 
 Measure the whole escaped envelope: fragment strings escape logical JSON again,

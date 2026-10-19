@@ -1390,6 +1390,13 @@ It performs no I/O or logging, leaves inputs unchanged and returns independently
 owned serialized envelopes. Callers MUST NOT mutate inputs concurrently.
 Encoding preserves inert JSON; consumers still own semantic validation.
 
+Every logical `thread_item_changed` or `thread_text_append` MUST require the held
+item revision to equal `base_rev` and the resulting `rev` to be strictly greater
+than `base_rev`. These are the fold's actual previous and resulting revisions.
+Combined field/text changes use one atomic changed update containing complete
+resulting content; suffix-only changes use one append update. Continuation parts
+are fragments of that one logical update, not additional revision transitions.
+
 Every complete application envelope MUST fit **65519 serialized bytes** before
 Noise encryption, including envelope fields and all JSON escaping. The external
 relay `RoutingEnvelope` is outside this cap. Checking a source event's size is
@@ -1435,16 +1442,17 @@ or versions, and enforce these completion rules:
    `item.rev` supply those checks for a full item.
 3. Validate the logical update, including stable identity/kind and message-only
    append applicability. A change or append still requires the currently
-   completed item's revision to equal its original `base_rev`. Only then apply
+   completed item's revision to equal its original `base_rev` and its target
+   `rev` to be strictly greater than `base_rev`. Only then apply
    the complete update atomically and record its original target `rev` and
    conversation `version`. Full-item additions/catch-up use the original item
    identity and revision, never fragment indices.
 
 A missing middle part followed by the final part fails the index/offset check;
 an out-of-order part, metadata/digest disagreement, corrupt payload or wrong
-`base_rev` likewise fails assembly/application. Discard incomplete assembly,
-retain completed item fields/revision/version and require catch-up before
-resuming. A fresh catch-up state discards the failed buffer. An absent final
+`base_rev` or non-advancing `rev` likewise fails assembly/application. Discard
+incomplete assembly, retain completed item fields/revision/version and require
+catch-up before resuming. A fresh catch-up state discards the failed buffer. An absent final
 part leaves the update incomplete; receiver buffering limits/timeouts belong
 to the client implementation. The publisher enqueues all parts of one logical
 update consecutively before the next update; reassembly preserves the entire
@@ -1453,9 +1461,8 @@ fits 65519 bytes after JSON escaping and relay stamps. The separate
 [query contract](#thread-query-messages) reuses this assembly representation;
 production catch-up/page providers and relay handlers are installed
 (#3236/#3253/#3235). Client assembly and recovery remain app-owned.
-Revision-advancing updates reject duplicates through their old `base_rev`, but
-the same-revision append in a combined change below needs ordered, once-only
-application too: `base_rev` equality alone cannot detect its duplicate.
+After a changed/append update applies, its old `base_rev` no longer matches the
+held revision, so a duplicate cannot apply again.
 
 #### Thread update byte budgets
 
@@ -1526,7 +1533,7 @@ adds these required fields to the common conversation/epoch/version fields:
 |---|---|---|
 | `item_id` | number | Stable ID of the existing item. |
 | `base_rev` | number | Previous revision the client must hold before applying the patch. |
-| `rev` | number | Resulting item revision. |
+| `rev` | number | Resulting item revision, strictly greater than `base_rev`. |
 | `changes` | object | Replacements keyed by `ThreadItem` JSON field name (for example `ended_order`, `no_child`), excluding immutable `id` and `kind`; never exported Go names. |
 
 An absent key in `changes` means unchanged. A supplied empty string, `false`,
@@ -1534,20 +1541,21 @@ zero, empty object or `null` is an explicit replacement/clear, retained as
 supplied. A `content` patch replaces the entire content value; it is not a
 recursive merge. Raw patch values, including unknown fields, stay inert JSON;
 consumers validate and apply them. Apply only when the held item revision
-equals `base_rev`; otherwise request catch-up rather than guessing.
+equals `base_rev` and `rev > base_rev`; otherwise request catch-up rather than
+guessing. Commit all replacements, `rev` and conversation `version` atomically.
 
-A fold change can combine replacements with a text suffix. Production sends a
-`thread_item_changed` first, from the prior revision to the fold's final `rev`,
-then a `thread_text_append` with that final revision as **both** `base_rev` and
-`rev`. Both messages carry the same conversation `version`. Apply them in order;
-do not reject the append merely because its result revision is already held,
-and do not invent an intermediate history revision. Each logical message is
-assembled completely before applying it or processing the dependent message.
+A fold change combining field replacements and a text suffix produces one
+`thread_item_changed`. Its `changes` contains all resulting replacements,
+including the complete resulting `content` with the suffix already included
+exactly once, unknown content fields and explicit clears preserved. `base_rev`
+and `rev` are the fold's actual previous and resulting revisions, matching
+full-item reads. There is no companion append or synthetic intermediate revision.
 
 Oversized changes use [assembly parts](#bounded-thread-encoding-and-assembly)
 under this same type. Assembly preserves omitted keys and all explicit clears;
 apply no partial patch. After completion, apply the original replacements and
-record `rev`/`version` atomically only if the original `base_rev` still matches.
+record `rev`/`version` atomically only if the original `base_rev` still matches
+and `rev > base_rev`.
 
 ```json
 {
@@ -1563,17 +1571,18 @@ record `rev`/`version` atomically only if the original `base_rev` still matches.
 shape, required `item_id`, `base_rev` and `rev` have the same meanings as on a
 change. Required string `text` is only the suffix added to a message item's
 text, including an explicit empty string when supplied; it is not the full
-resulting text. Apply only when the held revision equals `base_rev`, then
-record `rev` and conversation `version`; a mismatch requires catch-up.
-For a combined field/text change, the preceding replacement already established
-`rev`, so the append's `base_rev == rev` is valid and its suffix still applies
-once. Revision equality is not by itself a reason to skip this ordered append.
+resulting text. Production uses this update for suffix-only changes; combined
+field/text changes use one atomic `thread_item_changed` with complete resulting
+content instead. Apply only when the held revision equals `base_rev` and
+`rev > base_rev`, then record `rev` and conversation `version` atomically with
+the text change. A mismatch or non-advancing revision requires catch-up.
 
 An oversized suffix uses [assembly parts](#bounded-thread-encoding-and-assembly)
 under this same type. Their `data` fragments are serialized logical payload
 fragments, never text to append directly. Append the recovered `text` exactly
-once after complete assembly and the original `base_rev` check; incomplete or
-rejected assembly changes neither message text nor completed `rev`/`version`.
+once after complete assembly, the original `base_rev` check and `rev > base_rev`
+validation; incomplete or rejected assembly changes neither message text nor
+completed `rev`/`version`.
 
 ```json
 {
@@ -9042,6 +9051,8 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-10-19`: Corrected thread update revision continuity (#3612): combined field/text changes now produce one atomic [`thread_item_changed`](#thread_item_changed) containing complete resulting content; suffix-only changes retain [`thread_text_append`](#thread_text_append). Both require held revision equal to `base_rev` and `rev > base_rev`, preserving fold/full-read revisions. Bounded continuation parts advance state only after complete logical assembly.
 
 - `2026-10-17`: Activated shared channel pins for paired clients (#3538), with the shared reply-ordering fence from #3545: [`set_conversation_pinned`](#set_conversation_pinned) delivers the correlated reply before the matching requester push and broadcasts the same record to all interactive clients, including on no-ops. Repeated pinning preserves its timestamp; unpinning emits explicit null, and re-pinning creates a new time. Pinning is channel-only (including archived channels); unpinning accepts any existing row. All command announcements preserve stored pins. Older hosts may omit `pinned_at` (unpinned) or return `protocol.unknown_type` for the request; no new capability is needed.
 - `2026-10-17`: Implemented the conversation-pin package handler and handler-owned stored-pin projections (#3537): stable UTC timestamps, promoted-only pinning, unpinning any existing row, eager best-effort saves, correlated reply before announcement even on no-ops/reply failures. Corrected empty-ID refusal to `conversation.not_found`. Daemon activation and command-package producers remain pending #3538.
