@@ -326,6 +326,7 @@ func spawnBootstrapDaemonBinary(t *testing.T, bin, home, workdir, claudeBin, rel
 	t.Helper()
 	socket := shortSocketPath(t)
 	daemonRecordingRegisterSocket(t, home, bin, socket)
+	recoveryRecordingRegisterSocket(t, home, bin, socket)
 	stderr := &lockedBuffer{}
 
 	args := []string{

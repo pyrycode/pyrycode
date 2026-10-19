@@ -630,3 +630,38 @@ missing, failed, modified or late invocations. Replay has no Claude credentials
 and never launches a provider. Whole-role request comparisons preserve every
 control query and complete outgoing JSON field. Provider compaction behavior,
 settings defaults and menu accuracy remain covered by the original live roots.
+
+
+### Same-daemon error recovery
+
+`--batch session-recovery` proposes the original retained/dropped session-error
+root. Its deliberately failing executable still closes stdin, advertises
+readiness, writes its original failure marker and exits through the original
+external gate. Production retry/backoff and the dropped arm's original
+three-second give-up window remain unchanged in capture and replay. Only the
+final recovered Claude child is recorded, once per independent retained/dropped
+HOME. The original root still decrypts all queue/error frames, checks daemon and
+session identity, distinguishes held versus fresh delivery and reads its JSONL.
+
+A private parent builds the same bridge-enabled daemon tag as the original root;
+its actual source stamp/checksum and the compiled original-test binary identify
+the capture. The normal live root still builds its own bridge-enabled daemon and
+ignores the ordinary `PYRY_E2E_BIN`. Role selection uses the exact owned HOME,
+never retry count or launch order. The original failing script is not replaced
+by a tape or counted as a recorded Claude launch.
+
+After the root itself observes completion, correct delivery and an empty queue,
+a recording-only hook captures the actual native JSONL before the unchanged
+marker checks. Replay restores those exact bytes and mode at the production
+session path, preserving Unicode and escaping with only declared path bindings.
+Each JSONL object retains its actual session identity. This is a captured file
+witness; current Claude startup, interpretation and physical transcript creation
+remain obligations of the original live run. Settings, appended prompts and any
+supplied MCP file remain complete inputs to the strict native pipe recorder.
+
+Each role seals before original daemon cleanup. A final exact private inventory
+pins its endpoint, request tape, transcript, exclusive claim, receipt and seal
+across that cleanup. Candidate publication requires exactly one run/pass for the
+outer root and both subtests, no skipped/failed event, matching source checksums
+and successful post-cleanup audits. Unknown or duplicate children fail closed.
+`--batch runner-recovery` groups this root with the two direct-runner profiles.

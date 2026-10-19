@@ -1084,6 +1084,23 @@
       "retained_live": [
         "Current Claude model/effort menu, applied settings and compaction production; provider-created HOME state between settings arms; physical execution and provider timing."
       ]
+    },
+    {
+      "name": "daemon-session-recovery",
+      "boundary": "recovery_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveSessionErrorRecovery"
+      ],
+      "live_contracts": {
+        "TestInteractiveSessionErrorRecovery": "69af9c9bab228f30bf37b60b42f45fb9be91a0e5cad591060e4935741b7fee16"
+      },
+      "retained_live": [
+        "Current real Claude startup, response and physical JSONL creation; the original test-owned failing executable, closed stdin, retry/backoff, retained/drop queue and original transcript marker assertions continue running."
+      ]
     }
   ],
   "batches": {
@@ -1213,6 +1230,14 @@
     "direct-runner": [
       "runner-applied-settings",
       "runner-compaction"
+    ],
+    "session-recovery": [
+      "daemon-session-recovery"
+    ],
+    "runner-recovery": [
+      "runner-applied-settings",
+      "runner-compaction",
+      "daemon-session-recovery"
     ]
   },
   "reviews": {
@@ -1255,11 +1280,6 @@
       "disposition": "needs_harness",
       "reason": "Two conversations require separate appended system-prompt files and marker isolation. Add session/process-role identity support and complete per-child prompt-file comparison; semantic instruction following stays live.",
       "contract_sha256": "083f6642672714d617110e6113ead1943090de87e0f4e60f1dedee71fd3ead9e"
-    },
-    "TestInteractiveSessionErrorRecovery": {
-      "disposition": "needs_harness",
-      "reason": "The helper deliberately starts a failing closed-stdin executable, changes executable selection, observes retained versus dropped queue behavior and recovers a successor. Add explicit child exit/EOF/stderr and multiple-launch lifecycle support.",
-      "contract_sha256": "69af9c9bab228f30bf37b60b42f45fb9be91a0e5cad591060e4935741b7fee16"
     },
     "TestInteractiveStreamBackgroundIdleProbe": {
       "disposition": "live_only",

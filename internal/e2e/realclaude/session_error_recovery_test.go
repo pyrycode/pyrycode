@@ -32,13 +32,16 @@ func TestInteractiveSessionErrorRecovery(t *testing.T) {
 		t.Skipf("claude not available: %v", err)
 	}
 	WithWorktreeAuthenticated(t) // dispatcher supplies authentication; never fetch it here
-	bin := filepath.Join(t.TempDir(), "pyry")
-	buildCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	build := exec.CommandContext(buildCtx, "go", "build", "-tags", "e2e_realclaude", "-o", bin, "github.com/pyrycode/pyrycode/cmd/pyry")
-	build.Env = buildEnvWithRealHome()
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build control-enabled daemon: %v\n%s", err, out)
+	bin, recorded := recoveryRecordingDaemon(t)
+	if !recorded {
+		bin = filepath.Join(t.TempDir(), "pyry")
+		buildCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		build := exec.CommandContext(buildCtx, "go", "build", "-tags", "e2e_realclaude", "-o", bin, "github.com/pyrycode/pyrycode/cmd/pyry")
+		build.Env = buildEnvWithRealHome()
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build control-enabled daemon: %v\n%s", err, out)
+		}
 	}
 	for _, drop := range []bool{false, true} {
 		name := "retained"
@@ -170,6 +173,8 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 		}
 	}
 	assertSessionErrorIdentity(t, d, home)
+	t.Cleanup(func() { finishRecoveryRecording(t) })
+	recoveryRecordingTranscript(t, workdir, liveBootstrapUUID)
 	// A completed real-Claude transcript is an independent witness of the exact
 	// prompt received. Do not depend on the model's choice of reply wording.
 	f, path, err := resolveAndOpenJSONL(workdir, liveBootstrapUUID)

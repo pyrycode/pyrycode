@@ -65,7 +65,7 @@ func cliRecordingHome(t *testing.T) string {
 	t.Helper()
 	c, ok := cliRecordingCurrent(t)
 	if !ok {
-		return authenticatedHome(t)
+		return recoveryRecordingHome(t)
 	}
 	info, err := os.Lstat(c.Process.Home)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {

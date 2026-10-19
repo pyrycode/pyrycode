@@ -31,7 +31,7 @@ const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
 func TestRecordedClaude(t *testing.T) {
 	selected := selectedRecordedScenarios(t)
 	for _, name := range selected {
-		if _, ok := recordedPoolProfiles[name]; ok || claudetape.DaemonSuiteProfiles()[name].Root != "" || claudetape.CLIProfiles()[name] != "" || claudetape.RunnerProfiles()[name].Root != "" {
+		if _, ok := recordedPoolProfiles[name]; ok || claudetape.DaemonSuiteProfiles()[name].Root != "" || claudetape.CLIProfiles()[name] != "" || claudetape.RunnerProfiles()[name].Root != "" || name == claudetape.RecoveryScenario {
 			buildRecordedPoolBinary(t)
 			break
 		}
@@ -42,6 +42,8 @@ func TestRecordedClaude(t *testing.T) {
 				runRecordedPool(t, scenario)
 			} else if claudetape.DaemonSuiteProfiles()[scenario].Root != "" {
 				runRecordedDaemonSuite(t, scenario)
+			} else if scenario == claudetape.RecoveryScenario {
+				runRecordedRecoverySuite(t, scenario)
 			} else if claudetape.RunnerProfiles()[scenario].Root != "" {
 				runRecordedRunnerSuite(t, scenario)
 			} else if claudetape.CLIProfiles()[scenario] != "" {
@@ -403,6 +405,26 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 	for _, scenario := range selectedRecordedScenarios(t) {
 		t.Run(scenario, func(t *testing.T) {
 
+			if scenario == claudetape.RecoveryScenario {
+				load := func(dir string) *claudetape.RecoverySuite {
+					f, err := os.Open(filepath.Join(dir, scenario+".json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer f.Close()
+					suite, err := claudetape.DecodeRecoverySuite(f)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return suite
+				}
+				if claudetape.SameRecoveryContract(load(baseline), load(fresh)) != nil {
+					t.Fatal("recovery outgoing contract changed")
+				}
+				raw, _ := json.Marshal(map[string]string{"scenario": scenario, "policy": "strict_ordered"})
+				t.Logf("CLAUDE_COMPARISON %s", raw)
+				return
+			}
 			if claudetape.RunnerProfiles()[scenario].Root != "" {
 				load := func(dir string) *claudetape.RunnerSuite {
 					f, err := os.Open(filepath.Join(dir, scenario+".json"))
