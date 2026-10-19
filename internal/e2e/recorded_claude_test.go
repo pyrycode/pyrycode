@@ -43,6 +43,37 @@ func TestRecordedClaude(t *testing.T) {
 func TestRecordedClaudeFirstTurnWaitsForStartup(t *testing.T) {
 	t.Setenv("PYRY_CLAUDE_TAPE_MODE", "replay")
 	t.Setenv("PYRY_CLAUDE_TAPE_DIR", "")
+	// The proof needs a tape whose posture write and MCP status ask both come
+	// before the first turn. A recapture with another order must fail here
+	// rather than let this test pass without exercising the window.
+	f, err := os.Open(filepath.Join("testdata", "claude-tapes", "reply.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tape, err := claudetape.Decode(f)
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup := map[string]bool{}
+	for _, frame := range tape.Frames {
+		var v struct {
+			Type    string `json:"type"`
+			Request struct {
+				Subtype string `json:"subtype"`
+			} `json:"request"`
+		}
+		if frame.Direction != "stdin" || json.Unmarshal(frame.Data, &v) != nil {
+			continue
+		}
+		if v.Type == "user" {
+			break
+		}
+		startup[v.Request.Subtype] = true
+	}
+	if !startup["set_permission_mode"] || !startup["initialize"] || !startup["mcp_status"] {
+		t.Fatal("reply tape no longer records posture, initialize and MCP status before its first turn")
+	}
 	runRecordedClaude(t, "reply", 2*time.Second)
 }
 
@@ -227,12 +258,17 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 			}
 			if raw, e := os.ReadFile(c.Receipt); e == nil {
 				var receipt tapeReceipt
-				if json.Unmarshal(raw, &receipt) != nil || !receipt.Success {
+				if json.Unmarshal(raw, &receipt) != nil {
+					t.Fatal("invalid Claude tape receipt")
+				}
+				if !receipt.Success {
 					t.Fatalf("Claude tape failed before the first turn: %s", receipt.Error)
 				}
 			}
 			if time.Now().After(deadline) {
-				t.Fatal("Claude tape did not reach the recorded first turn")
+				// AwaitsTurn needs the next recorded daemon input to be a user turn.
+				// A driver that writes something else first needs its own rule.
+				t.Fatal("Claude tape did not reach its recorded first user turn")
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
