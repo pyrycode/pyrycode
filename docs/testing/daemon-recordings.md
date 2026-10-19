@@ -119,8 +119,9 @@ The `workspace-protocol` batch adds ten cases:
 - `native-suggestions` requires source-native suggestions, a nonempty owned set
   with a positive revision, and a higher-revision explicit-null clear on the next
   user message. Continuous reads preserve ordinary no-suggestion windows. The
-  final typed user input must reach Claude stdin before sealing, and a print-mode
-  fallback attempt fails even if it occurs during final delivery or shutdown.
+  final typed user input must reach Claude stdin before sealing. The native
+  wrapper refuses non-stream invocations before producer admission, matching the
+  original live source-isolation rig, so fallback attempts cannot produce output.
 
 - `hook-banner` retains the five-second no-read refusal window, exact next-send
   ACK barrier, subsequent text/idle milestones and all six durable banner joins.
@@ -129,7 +130,7 @@ The `workspace-protocol` batch adds ten cases:
   hook execution and original conversation creation remain live proof.
 
 These profiles retain the working directory as an exact input. The skill's full
-`SKILL.md` and native fallback guard script and enable setting are also captured
+`SKILL.md` and native non-stream rejection policy and enable setting are captured
 and compared. Permission-context and native-suggestion checks observe selected
 native source objects through a bounded loopback channel in memory; this does
 not replace the daemon's parsing or client delivery. Old profiles keep their

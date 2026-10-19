@@ -42,8 +42,19 @@ func SubagentText(t *testing.T, w Wire, convID, prompt string, budget time.Durat
 			if agentID != "" {
 				t.Fatalf("observed multiple foreground Agent/Task calls: %q and %q", agentID, p.ToolUseID)
 			}
+			t.Logf("foreground agent requested background=%t", p.Input["run_in_background"] == "true")
 			agentID = p.ToolUseID
 			lanes[agentID] = &subagentTextLane{}
+
+		case protocol.TypeToolResult:
+			var p protocol.ToolResultPayload
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid subagent tool result")
+			}
+			if p.ConversationID == convID && p.ToolUseID == agentID {
+				lower := strings.ToLower(p.ResultSummary)
+				t.Logf("foreground agent result: error=%t summary_bytes=%d not_found=%t model=%t permission=%t agent_type=%t usage=%t", p.IsError, len(p.ResultSummary), strings.Contains(lower, "not found"), strings.Contains(lower, "model"), strings.Contains(lower, "permission"), strings.Contains(lower, "agent type"), strings.Contains(lower, "usage"))
+			}
 
 		case protocol.TypeAssistantDelta:
 			var p protocol.AssistantDeltaPayload

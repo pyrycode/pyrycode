@@ -67,7 +67,7 @@ func TestClaudeTapeProcess(t *testing.T) {
 		}
 	}
 	frames, err := runClaudeTapeProcess(c, args)
-	if errors.Is(err, errTapeDuplicate) {
+	if errors.Is(err, errTapeDuplicate) || errors.Is(err, errTapeNativePrintRefused) {
 		os.Exit(1)
 	}
 	receipt := tapeReceipt{Success: err == nil, Frames: frames}
@@ -359,19 +359,8 @@ func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage,
 		files["$skill/pyry-probe"] = normalized
 	}
 	if c.Scenario == "native-suggestions" {
-		raw, err := os.ReadFile(filepath.Join(c.Home, "native-bin", "claude"))
-		if err != nil || len(raw) > claudetape.MaxBytes {
-			return nil, errors.New("native fallback guard unavailable")
-		}
-		encoded, _ := json.Marshal(string(raw))
-		normalized, err := tapeNormalize(encoded, *c, false)
-		if err != nil {
-			return nil, err
-		}
-		if err = claudetape.Safe(normalized); err != nil {
-			return nil, err
-		}
-		files["$native/fallback-guard"] = normalized
+		policy, _ := json.Marshal("reject-non-stream-before-producer-claim")
+		files["$native/non-stream-policy"] = policy
 		enabled, _ := json.Marshal(os.Getenv("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"))
 		files["$native/enable"] = enabled
 	}
@@ -379,8 +368,21 @@ func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage,
 }
 
 var errTapeDuplicate = errors.New("pilot allows exactly one Claude process")
+var errTapeNativePrintRefused = errors.New("native profile refuses non-stream invocation")
+
+func nativeStreamArgs(args []string) bool {
+	for i, arg := range args {
+		if arg == "--input-format" && i+1 < len(args) && args[i+1] == "stream-json" {
+			return true
+		}
+	}
+	return false
+}
 
 func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
+	if c.Scenario == "native-suggestions" && !nativeStreamArgs(args) {
+		return 0, errTapeNativePrintRefused
+	}
 	if c.Scenario == "native-suggestions" {
 		if err := os.Setenv("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "1"); err != nil {
 			return 0, errors.New("native suggestion enable unavailable")

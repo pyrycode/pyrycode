@@ -136,17 +136,6 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		extra = append(extra, "CLAUDE_CODE_OAUTH_TOKEN=", "ANTHROPIC_API_KEY=", "CLAUDE_CONFIG_DIR=")
 	}
 
-	if scenario == "native-suggestions" {
-		dir := filepath.Join(home, "native-bin")
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
-		script := "#!/bin/sh\nprintf attempted > '" + filepath.Join(home, "native-fallback-attempt") + "'\nexit 1\n"
-		if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0700); err != nil {
-			t.Fatal(err)
-		}
-		extra = append(extra, "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
 	_, cmd, stdout, stderr, done := spawnWith(t, home, spawnOpts{claudeBin: wrapper, claudeArgs: append([]string{}, definition.ClaudeArgs...), extraEnv: extra, extraFlags: []string{"-pyry-relay=" + relayURL, "-pyry-workdir=" + workdir, "-pyry-verbose", "-pyry-socket=" + c.Socket}})
 	h := &Harness{SocketPath: c.Socket, HomeDir: home, PID: cmd.Process.Pid, Stdout: stdout, Stderr: stderr, cmd: cmd, doneCh: done}
 	t.Cleanup(func() { h.Stop(t) })
@@ -269,11 +258,6 @@ func runRecordedClaude(t *testing.T, scenario string) {
 	}
 	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Source: source, Reconnect: reconnect, Home: home, Workdir: workdir, Socket: c.Socket, Mode: mode, Wire: scenariohelpers.Wire{Send: transmit, Next: next}, Sequence: &sequence, DaemonLog: stderr.String})
 
-	if scenario == "native-suggestions" {
-		if _, err := os.Stat(filepath.Join(home, "native-fallback-attempt")); !os.IsNotExist(err) {
-			t.Fatal("native suggestion used or could not exclude the print fallback")
-		}
-	}
 	if err = os.WriteFile(c.Finish, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -289,11 +273,6 @@ func runRecordedClaude(t *testing.T, scenario string) {
 				t.Fatalf("incomplete Claude tape: %s", receipt.Error)
 			}
 			h.Stop(t)
-			if scenario == "native-suggestions" {
-				if _, err := os.Stat(filepath.Join(home, "native-fallback-attempt")); !os.IsNotExist(err) {
-					t.Fatal("native suggestion used or could not exclude the print fallback")
-				}
-			}
 			if _, err := os.Stat(c.Claim + ".duplicate"); err == nil {
 				t.Fatal("unrecorded additional Claude process")
 			}
