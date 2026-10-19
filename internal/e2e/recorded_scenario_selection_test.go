@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
 	"os"
 	"os/exec"
 	"strings"
@@ -50,7 +51,7 @@ func TestRecordedSelectionHelperProcess(t *testing.T) {
 		delete(recordedScenarioDrivers, "reply")
 	}
 	selected := selectedRecordedScenarios(t)
-	if name == "all" && len(selected) != len(recordedScenarioDrivers)+len(recordedPoolProfiles) {
+	if name == "all" && len(selected) != len(recordedScenarioDrivers)+len(recordedPoolProfiles)+len(claudetape.DaemonSuiteProfiles()) {
 		t.Fatal("default selection omitted a registered case")
 	}
 	if name == "subset" && strings.Join(selected, ",") != "reply,permission-deny" {

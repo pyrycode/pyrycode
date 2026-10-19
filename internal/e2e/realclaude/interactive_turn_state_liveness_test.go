@@ -52,7 +52,7 @@ import (
 func TestInteractivePerConversationTurnStateLiveness(t *testing.T) {
 	runParallel(t)
 	h := startPerConversationHarness(t)
-	nonce := time.Now().UnixNano()
+	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 
 	convID := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 2, nil)
 	sealSendMessage(t, h.phone, h.initSend, 3, convID, "m-1",
