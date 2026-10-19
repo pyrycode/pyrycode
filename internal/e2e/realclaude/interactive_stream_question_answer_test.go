@@ -2,15 +2,23 @@
 
 package realclaude
 
-// The live question gate shares its protocol driver and durable-history checks
-// with captured replay. Live runs additionally establish current Claude semantics.
+// The live question gate shares encrypted wire adapters and durable-history
+// readers with captured replay, and additionally checks current Claude semantics.
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
+	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -28,39 +36,20 @@ const questionModelUpdateBudget = 30 * time.Second
 // modal gates do.
 const questionSurfaceBudget = 180 * time.Second
 
-// questionAnswerTrigger drives claude to ask. It is askQuestionCapturePrompt's shape
-// with #1938's three constraints carried and one addition, and every one of them is
-// load-bearing rather than stylistic:
-//
-//   - IT NAMES THE TOOL, legitimate for #1938's reason: this slice measures the
-//     round trip, not claude's spontaneous propensity to reach for the tool.
-//   - IT ASKS FOR SINGLE SELECTION, which is what makes claude emit the multiSelect
-//     key at all. questionbridge.Parse REJECTS a question whose key is absent, and a
-//     rejected batch falls through to a permission modal this test never answers, so
-//     the turn would park until the approval window elapsed. Four options rather
-//     than the capture's two widen the space a continuation would have to guess
-//     from; both counts sit inside Parse's 2-4 bound.
-//   - IT CARRIES NO PATH, NO FILENAME AND NO "in this repo". #1938 needed that for
-//     its deny-scan; here it keeps a claude-authored question from quoting the
-//     worktree path — under /var/folders/ on macOS — into a salvaged run log.
-//   - IT NAMES NO OPTION AND NO PREFERENCE. That is AC 4: the choice must be
-//     unpredictable from the prompt. What it does add is the continuation
-//     instruction, which cannot leak the choice because the labels do not exist
-//     until claude writes them.
-//
-// The nonce keeps the trigger distinct per run (defeats accidental caching) and is
-// never asserted on.
+// The trigger contains no preference or answer witness.
 func questionAnswerTrigger(nonce int64) string {
 	return fmt.Sprintf("Before writing anything, use the AskUserQuestion tool to ask me one "+
 		"clarifying question: for an in-memory key-value cache, which eviction policy should it use? "+
 		"Give the question a short header, offer four policies as options with a one-line description "+
-		"each, and allow only a single choice. After I answer, reply with only the exact label of the "+
-		"option I chose and nothing else — do not write code and do not use any other tool. run=%d", nonce)
+		"each, and explicitly allow only a single choice (multiSelect false). My answer will also name "+
+		"the cache. After I answer, confirm the selected policy and repeat that supplied cache name "+
+		"verbatim as the answer witness. Your entire task is this question and confirmation; "+
+		"do not offer implementation, write code or use any other tool. run=%d", nonce)
 }
 
 func TestInteractiveStreamQuestionAnswer(t *testing.T) {
 	runParallel(t)
-	h, convID := startStreamModalResolutionHarness(t, askQuestionCaptureModel)
+	h, convID := startStdioModalResolutionHarness(t, askQuestionCaptureModel)
 	driveSharedQuestionAnswer(t, h, convID)
 }
 
@@ -72,40 +61,350 @@ func TestInteractiveStreamStdioQuestionAnswer(t *testing.T) {
 
 func driveSharedQuestionAnswer(t *testing.T, h *perConvHarness, convID string) {
 	t.Helper()
-	wire := modalScenarioWire(t, h, 2)
 	nonce := time.Now().UnixNano()
-	scenario.QuestionAnswer(t, wire, scenario.QuestionConfig{Home: h.home, ConversationID: convID, SessionID: streamModalBootstrapUUID, Prompt: questionAnswerTrigger(nonce), Followup: fmt.Sprintf("Reply with one short word. run=%d after-model-change", nonce), ExpectedModel: announcedTargetFor(t, "haiku"), SurfaceBudget: questionSurfaceBudget, UpdateBudget: questionModelUpdateBudget, TurnBudget: perTurnReplyBudget})
+
+	// AC 1: a real batch surfaced, and non-vacuous BEFORE anything is answered.
+	trigger := questionAnswerTrigger(nonce)
+	var prior strings.Builder
+	batch := raiseRealQuestionBatch(t, h, 2, convID, trigger, &prior)
+
+	// Change the live child's model while AskUserQuestion is parked. The reply
+	// proves the daemon accepted the update; the original batch id remains the
+	// subject of the answer and dismissal below, which proves it was not replaced.
+	targetModel := "haiku"
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:   3,
+		Type: protocol.TypeSetSessionSettings,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
+			SessionID: streamModalBootstrapUUID,
+			Model:     &targetModel,
+		}),
+	})
+	updated := awaitQuestionControl(t, h, protocol.TypeSessionSettingsUpdated, questionModelUpdateBudget, &prior, &batch)
+	if updated.InReplyTo == nil || *updated.InReplyTo != 3 {
+		t.Fatalf("session_settings_updated in_reply_to = %v, want 3", updated.InReplyTo)
+	}
+	var updatedPayload protocol.SessionSettingsUpdatedPayload
+	if err := json.Unmarshal(updated.Payload, &updatedPayload); err != nil {
+		t.Fatalf("decode session_settings_updated: %v", err)
+	}
+	if updatedPayload.SessionID != streamModalBootstrapUUID {
+		t.Fatalf("session_settings_updated session_id = %q, want %q", updatedPayload.SessionID, streamModalBootstrapUUID)
+	}
+
+	// AC 4's first half: the choice is made from the surfaced batch.
+	entries, choice := chooseQuestionAnswers(t, batch, false)
+	if err := checkQuestionWitness(choice.witness, batch, trigger, prior.String()); err != nil {
+		t.Fatal(err)
+	}
+
+	// AC 2: answer through the daemon's own inbound path. handleQuestionAnswer
+	// emits no reply and no broadcast of its own, so there is nothing to correlate
+	// on — the dismissal below is what reports the outcome.
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:   4,
+		Type: protocol.TypeQuestionAnswer,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.QuestionAnswerPayload{
+			QuestionBatchID: batch.QuestionBatchID,
+			AnswerToken:     "e2e-1987-answer-token",
+			Answers:         entries,
+		}),
+	})
+
+	requirePromptAnswerHistory(t, h, convID, batch.QuestionBatchID, "answer", true, func(e history.Entry) error {
+		return checkQuestionAnswerHistory(e, batch, entries)
+	})
+	drainAnsweredQuestionTurn(t, h, convID, batch.QuestionBatchID, choice.witness, perTurnReplyBudget)
+
+	// A fresh application turn proves the parked-question update changed the
+	// child's model rather than merely persisting it and reporting success.
+	sealSendMessage(t, h.phone, h.initSend, 5, convID, "m-after-model-change",
+		fmt.Sprintf("Reply with one short word. run=%d after-model-change", nonce))
+	drainQuestionModelTurn(t, h.phone, h.initRecv, convID, announcedTargetFor(t, targetModel), perTurnReplyBudget)
 }
 
-// Compatibility helpers retain the existing live callers on the shared checks.
-func raiseRealQuestionBatch(t *testing.T, h *perConvHarness, reqID uint64, convID, triggerPrompt string) protocol.QuestionShownPayload {
+func drainQuestionModelTurn(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, convID, expected string, timeout time.Duration) {
+	t.Helper()
+	var announced protocol.ModelAnnouncedPayload
+	seen := false
+	next := func(deadline time.Time) protocol.Envelope {
+		env, _ := receiveQuestionEnvelope(t, phone, cs, deadline)
+		switch env.Type {
+		case protocol.TypeModalShown:
+			t.Fatalf("unexpected modal_shown during post-question turn: %q", truncateString(string(env.Payload), questionTextLogCap))
+		case protocol.TypeRateLimited:
+			// The receiver has validated this warning; do not log provider fields.
+			return protocol.Envelope{}
+		case protocol.TypeModelAnnounced:
+			if !seen {
+				var p protocol.ModelAnnouncedPayload
+				if json.Unmarshal(env.Payload, &p) != nil {
+					t.Fatalf("invalid model announcement: %q", truncateString(string(env.Payload), questionTextLogCap))
+				}
+				if p.ConversationID == convID {
+					announced, seen = p, true
+				}
+			}
+		}
+		return env
+	}
+	scenario.CompletedTurn(t, next, convID, timeout, true)
+	if !seen {
+		t.Fatalf("the post-question turn emitted no model_announced frame")
+	}
+	if announced.Model != expected {
+		t.Errorf("post-question model = %q, want %q", truncateString(announced.Model, questionTextLogCap), expected)
+	}
+}
+
+// raiseRealQuestionBatch asserts a nonempty batch before any answer is sent.
+func raiseRealQuestionBatch(t *testing.T, h *perConvHarness, reqID uint64, convID, triggerPrompt string, prior ...*strings.Builder) protocol.QuestionShownPayload {
 	t.Helper()
 	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID), triggerPrompt)
-	return scenario.WaitQuestion(t, scenario.Receive(t, h.phone, h.initRecv), convID, questionSurfaceBudget)
+	var collected *strings.Builder
+	if len(prior) > 0 {
+		collected = prior[0]
+	}
+	env := awaitQuestionControl(t, h, protocol.TypeQuestionShown, questionSurfaceBudget, collected, nil)
+
+	var batch protocol.QuestionShownPayload
+	if err := json.Unmarshal(env.Payload, &batch); err != nil {
+		t.Fatalf("decode question_shown payload: %v", err)
+	}
+	if batch.ConversationID != convID {
+		t.Fatal("question surfaced for another conversation")
+	}
+	if batch.QuestionBatchID == "" {
+		t.Fatal("question_shown carried an empty question_batch_id — no dismissal could ever correlate to it")
+	}
+	if len(batch.Questions) == 0 {
+		t.Fatal("question_shown carried no questions — an unanswerable batch, and a vacuous green if tolerated")
+	}
+	if got := len(batch.Questions[0].Options); got < 2 {
+		t.Fatalf("question_shown's first question offers %d option(s), want at least 2 — a batch with one "+
+			"option cannot show that a CHOICE reached claude", got)
+	}
+	for i, q := range batch.Questions {
+		t.Logf("question_shown %s: question %d has %d options, multi_select=%v",
+			batch.QuestionBatchID, i, len(q.Options), q.MultiSelect)
+	}
+	return batch
 }
 
-type questionChoice struct {
-	chosen   string
-	unchosen []string
-}
+// Single-select carries the offered label and witness in one legal free-text
+// value. Multi-select retains two offered labels and adds a tied free-text value.
+type questionChoice struct{ witness string }
 
-func chooseQuestionAnswers(t *testing.T, batch protocol.QuestionShownPayload) ([]protocol.QuestionAnswerEntry, questionChoice) {
+func chooseQuestionAnswers(t *testing.T, batch protocol.QuestionShownPayload, multiple bool) ([]protocol.QuestionAnswerEntry, questionChoice) {
 	t.Helper()
-	entries, choice := scenario.ChooseAnswers(t, batch)
-	return entries, questionChoice{chosen: choice.Chosen, unchosen: choice.Unchosen}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		t.Fatal(err)
+	}
+	choice := questionChoice{witness: fmt.Sprintf("answer-witness-%x", random)}
+	var entries []protocol.QuestionAnswerEntry
+	for i, q := range batch.Questions {
+		if len(q.Options) == 0 {
+			t.Fatal("question offers no options")
+		}
+		selected := q.Options[len(q.Options)-1].Label
+		values := []string{selected}
+		if multiple {
+			if !q.MultiSelect || len(q.Options) < 2 || selected == q.Options[len(q.Options)-2].Label {
+				t.Fatal("question cannot prove multiple selections")
+			}
+			values = append(values, q.Options[len(q.Options)-2].Label)
+			selected = strings.Join(values, ", ")
+		}
+		if i == 0 {
+			answer := fmt.Sprintf("%s for the cache named %s. In your reply, confirm this selection and include the answer witness verbatim: %s", selected, choice.witness, choice.witness)
+			if multiple {
+				values = append(values, answer)
+			} else {
+				values[0] = answer
+			}
+		}
+		entries = append(entries, protocol.QuestionAnswerEntry{QuestionIndex: i, Values: values})
+	}
+	t.Logf("generated answer values: %q", truncateString(string(mustJSON(t, entries)), questionTextLogCap))
+	return entries, choice
+}
+
+func checkQuestionWitness(witness string, batch protocol.QuestionShownPayload, trigger, prior string) error {
+	raw, err := json.Marshal(batch)
+	if err != nil {
+		return err
+	}
+	if witness == "" || strings.Contains(trigger, witness) || strings.Contains(prior, witness) || strings.Contains(string(raw), witness) {
+		return errors.New("answer witness is empty or already present before answering")
+	}
+	return nil
 }
 
 const questionLabelLogCap = 256
 const questionTextLogCap = 2048
 
-func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID string, timeout time.Duration) string {
-	t.Helper()
-	return scenario.AnsweredTurn(t, scenario.Receive(t, h.phone, h.initRecv), convID, batchID, timeout)
+// One owner consumes independently delivered dismissal, continuation and idle.
+// No pre-answer text is seeded into this accumulator.
+type questionAnswerTurn struct {
+	convID, batchID, witness string
+	text                     strings.Builder
+	dismissed, idle          bool
 }
 
-func requireContinuationNamesChoice(t *testing.T, text string, choice questionChoice) {
+func (p *questionAnswerTurn) observe(env protocol.Envelope) error {
+	switch env.Type {
+	case protocol.TypeQuestionDismissed:
+		var d protocol.QuestionDismissedPayload
+		if err := json.Unmarshal(env.Payload, &d); err != nil {
+			return err
+		}
+		if d.QuestionBatchID != p.batchID || d.Source != wantQuestionSource || d.Outcome != wantQuestionOutcome {
+			return errors.New("question dismissal does not match original remote answer")
+		}
+		p.dismissed = true
+	case protocol.TypeAssistantDelta:
+		var d protocol.AssistantDeltaPayload
+		if err := json.Unmarshal(env.Payload, &d); err != nil {
+			return err
+		}
+		if d.ConversationID == p.convID {
+			p.text.WriteString(d.Text)
+			if d.Text != "" {
+				p.idle = false
+			}
+		}
+	case protocol.TypeTurnState:
+		var st protocol.TurnStatePayload
+		if err := json.Unmarshal(env.Payload, &st); err != nil {
+			return err
+		}
+		if st.ConversationID == p.convID {
+			p.idle = st.State == "idle"
+		}
+	}
+	return nil
+}
+
+func (p *questionAnswerTurn) complete() bool {
+	return p.dismissed && p.idle && p.witness != "" && strings.Contains(p.text.String(), p.witness)
+}
+
+func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID, witness string, timeout time.Duration) string {
 	t.Helper()
-	scenario.RequireChoice(t, text, scenario.Choice{Chosen: choice.chosen, Unchosen: choice.unchosen})
+	proof := questionAnswerTurn{convID: convID, batchID: batchID, witness: witness}
+	deadline := time.Now().Add(timeout)
+	for {
+		env, ok := receiveQuestionEnvelope(t, h.phone, h.initRecv, deadline)
+		if !ok {
+			t.Fatalf("answer proof incomplete: dismissal=%v idle=%v; continuation=%q", proof.dismissed, proof.idle, truncateString(proof.text.String(), questionTextLogCap))
+		}
+		if env.Type == protocol.TypeToolResult {
+			t.Logf("question tool result: %q", truncateString(string(env.Payload), questionTextLogCap))
+		}
+		if err := proof.observe(env); err != nil {
+			t.Fatal(err)
+		}
+		if proof.complete() {
+			t.Logf("answered continuation: %q", truncateString(proof.text.String(), questionTextLogCap))
+			return proof.text.String()
+		}
+	}
+}
+
+// receiveQuestionEnvelope decrypts every Noise frame in order. Transport controls
+// do not advance the receive nonce and are skipped without decryption.
+func receiveQuestionEnvelope(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, deadline time.Time) (protocol.Envelope, bool) {
+	t.Helper()
+	for time.Until(deadline) > 0 {
+		raw, err := phone.ReceiveBytes(time.Until(deadline))
+		if errors.Is(err, fakephone.ErrReceiveTimeout) {
+			return protocol.Envelope{}, false
+		}
+		if err != nil {
+			t.Fatalf("question receive: %v", err)
+		}
+		var inner protocol.InnerFrameV2
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			t.Fatal(err)
+		}
+		if inner.Type != protocol.TypeNoiseMsg {
+			continue
+		}
+		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain, err := cs.Decrypt(cipher)
+		if err != nil {
+			t.Fatalf("question decrypt: %v", err)
+		}
+		var env protocol.Envelope
+		if err := json.Unmarshal(plain, &env); err != nil {
+			t.Fatal(err)
+		}
+		if err := checkQuestionEnvelopeAlarm(env); err != nil {
+			t.Fatal(err)
+		}
+		return env, true
+	}
+	return protocol.Envelope{}, false
+}
+
+func checkQuestionEnvelopeAlarm(env protocol.Envelope) error {
+	switch env.Type {
+	case protocol.TypeError:
+		return fmt.Errorf("question error envelope: %q", truncateString(string(env.Payload), questionTextLogCap))
+	case protocol.TypeUnrecognizedMessage:
+		return fmt.Errorf("question exposed an unrecognized provider message: %q", truncateString(string(env.Payload), questionTextLogCap))
+	case protocol.TypeRateLimited:
+		var p protocol.RateLimitedPayload
+		if json.Unmarshal(env.Payload, &p) != nil || p.Status != scenario.WarnRateLimitStatus {
+			return fmt.Errorf("question rate-limit status is malformed or unknown: %q", truncateString(string(env.Payload), questionTextLogCap))
+		}
+	}
+	return nil
+}
+
+func checkQuestionControl(env protocol.Envelope, parked *protocol.QuestionShownPayload) error {
+	if env.Type == protocol.TypeQuestionDismissed {
+		return errors.New("question resolved before the answer was sent")
+	}
+	if parked != nil && env.Type == protocol.TypeQuestionShown {
+		var repeated protocol.QuestionShownPayload
+		if json.Unmarshal(env.Payload, &repeated) != nil || repeated.QuestionBatchID != parked.QuestionBatchID || repeated.ConversationID != parked.ConversationID {
+			return errors.New("parked question was replaced or malformed during model update")
+		}
+	}
+	return nil
+}
+
+// Retain pre-answer prose and reject resolution while the question must remain
+// outstanding, including during an in-band model update.
+func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout time.Duration, prior *strings.Builder, parked *protocol.QuestionShownPayload) protocol.Envelope {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		env, ok := receiveQuestionEnvelope(t, h.phone, h.initRecv, deadline)
+		if !ok {
+			t.Fatalf("no %s within %s", want, timeout)
+		}
+		if err := checkQuestionControl(env, parked); err != nil {
+			t.Fatal(err)
+		}
+		if env.Type == protocol.TypeAssistantDelta && prior != nil {
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			prior.WriteString(p.Text)
+		}
+		if env.Type == want {
+			return env
+		}
+	}
 }
 
 // modalScenarioWire leaves encryption and sequence ownership in the live harness.

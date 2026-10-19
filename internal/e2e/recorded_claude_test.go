@@ -30,11 +30,54 @@ const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
 
 func TestRecordedClaude(t *testing.T) {
 	for _, scenario := range selectedRecordedScenarios(t) {
-		t.Run(scenario, func(t *testing.T) { runRecordedClaude(t, scenario) })
+		t.Run(scenario, func(t *testing.T) { runRecordedClaude(t, scenario, 0) })
 	}
 }
 
-func runRecordedClaude(t *testing.T, scenario string) {
+// The daemon may write a turn once claude confirms the permission posture, which
+// can precede the initialize reply that triggers its MCP status ask. A message
+// that reaches the daemon inside that window therefore reorders its stdin
+// against the tape, which happened in HP release checks on 2026-10-19. Holding
+// the initialize reply widens the window to two seconds, so a driver that does
+// not wait for the replayed startup fails here on every run.
+func TestRecordedClaudeFirstTurnWaitsForStartup(t *testing.T) {
+	t.Setenv("PYRY_CLAUDE_TAPE_MODE", "replay")
+	t.Setenv("PYRY_CLAUDE_TAPE_DIR", "")
+	// The proof needs a tape whose posture write and MCP status ask both come
+	// before the first turn. A recapture with another order must fail here
+	// rather than let this test pass without exercising the window.
+	f, err := os.Open(filepath.Join("testdata", "claude-tapes", "reply.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tape, err := claudetape.Decode(f)
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup := map[string]bool{}
+	for _, frame := range tape.Frames {
+		var v struct {
+			Type    string `json:"type"`
+			Request struct {
+				Subtype string `json:"subtype"`
+			} `json:"request"`
+		}
+		if frame.Direction != "stdin" || json.Unmarshal(frame.Data, &v) != nil {
+			continue
+		}
+		if v.Type == "user" {
+			break
+		}
+		startup[v.Request.Subtype] = true
+	}
+	if !startup["set_permission_mode"] || !startup["initialize"] || !startup["mcp_status"] {
+		t.Fatal("reply tape no longer records posture, initialize and MCP status before its first turn")
+	}
+	runRecordedClaude(t, "reply", 2*time.Second)
+}
+
+func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Duration) {
 	t.Helper()
 	home := shortHome(t)
 	mode := os.Getenv("PYRY_CLAUDE_TAPE_MODE")
@@ -49,7 +92,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := tapeProcessConfig{Daemon: ensurePyryBuilt(t), Socket: shortSocketPath(t), Mode: mode, Path: filepath.Join(dir, scenario+".json"), Home: home, Scenario: scenario, Finish: filepath.Join(home, "finish"), Receipt: filepath.Join(home, "receipt"), Claim: filepath.Join(home, "claimed")}
+	c := tapeProcessConfig{Daemon: ensurePyryBuilt(t), Socket: shortSocketPath(t), Mode: mode, Path: filepath.Join(dir, scenario+".json"), Home: home, Scenario: scenario, Finish: filepath.Join(home, "finish"), Receipt: filepath.Join(home, "receipt"), Claim: filepath.Join(home, "claimed"), Ready: filepath.Join(home, "turn-ready"), HoldInitialize: holdInitialize}
 	if mode == "capture" {
 		if os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") == "" && os.Getenv("ANTHROPIC_API_KEY") == "" {
 			t.Fatal("capture requires explicit Claude test credentials; no tests skipped")
@@ -239,6 +282,31 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		return protocol.Envelope{}
 	}
 
+	if mode == "replay" {
+		// Send the first message only after the tape has replayed everything the
+		// daemon recorded before its first turn. See the startup-order test above.
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			if _, e := os.Stat(c.Ready); e == nil {
+				break
+			}
+			if raw, e := os.ReadFile(c.Receipt); e == nil {
+				var receipt tapeReceipt
+				if json.Unmarshal(raw, &receipt) != nil {
+					t.Fatal("invalid Claude tape receipt")
+				}
+				if !receipt.Success {
+					t.Fatalf("Claude tape failed before the first turn: %s", receipt.Error)
+				}
+			}
+			if time.Now().After(deadline) {
+				// AwaitsTurn needs the next recorded daemon input to be a user turn.
+				// A driver that writes something else first needs its own rule.
+				t.Fatal("Claude tape did not reach its recorded first user turn")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	reconnect := func() {
 		_ = phone.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

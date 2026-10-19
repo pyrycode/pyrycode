@@ -7,6 +7,15 @@ The test-only wrapper and recorder are not imported by the shipped daemon.
 
 Twenty-six scenarios run the same assertions in live capture and offline replay:
 
+The manifest currently associates 21 original live roots with these recordings.
+The legacy `question-answer` and four bypass-question recordings still run their
+original capture/replay assertions, but no longer own current live roots:
+PR #3622 introduced stronger answer-only named-cache witnesses, exact answer
+history and turn ownership checks. Fingerprint drift exposed that change during
+integration. The three affected live roots remain enabled and are explicit
+`candidate` backlog until a new shared witness driver and reviewed fresh
+captures establish equivalence. Existing fixtures are not silently refreshed.
+
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
   This checks sequential delivery, not semantic recall or response chunk counts.

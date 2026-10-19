@@ -36,6 +36,13 @@ type tapeProcessConfig struct {
 	Socket          string
 	MCPConfig       string
 	Producer        claudetape.Producer
+	// Ready is created once a replay has delivered every frame before the
+	// daemon's first user turn. The scenario driver waits for it in replay.
+	Ready string
+	// HoldInitialize delays the replayed reply to the initialize request,
+	// modelling a Claude that answers its posture before its initialize. It
+	// exists for the startup-order regression test only.
+	HoldInitialize time.Duration
 }
 
 type tapeReceipt struct {
@@ -471,10 +478,28 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 	frames := 0
 	bytes := 0
 	finalInputSeen := c.Scenario != "native-suggestions"
+	initializeID := ""
+	holdPending := c.HoldInitialize > 0
+	ready := false
+	signalReady := func() error {
+		if ready || player == nil || c.Ready == "" || !player.AwaitsTurn() {
+			return nil
+		}
+		ready = true
+		if os.WriteFile(c.Ready, nil, 0o600) != nil {
+			return errors.New("claude replay readiness signal failed")
+		}
+		return nil
+	}
+
 	emit := func(lines []json.RawMessage) error {
 		for _, line := range lines {
 			if err := checkTapePermission(line, c); err != nil {
 				return err
+			}
+			if holdPending && initializeID != "" && answersRequest(line, initializeID) {
+				holdPending = false
+				time.Sleep(c.HoldInitialize)
 			}
 			data, e := tapeNormalize(line, c, true)
 			if e != nil {
@@ -494,6 +519,9 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		if err := emit(player.Prefix()); err != nil {
 			return frames, err
 		}
+		if err := signalReady(); err != nil {
+			return frames, err
+		}
 	}
 	handleInput := func(raw []byte) error {
 		if c.Scenario == "native-suggestions" && claudetape.IsUserText(raw, scenariohelpers.NativeSuggestionClearPrompt) {
@@ -504,12 +532,18 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 			return e
 		}
 		if player != nil {
+			if holdPending && initializeID == "" {
+				initializeID = initializeRequestID(raw)
+			}
 			out, e := player.Input(normalized)
 			if e != nil {
 				return e
 			}
 			frames++
 			if e = emit(out); e != nil {
+				return e
+			}
+			if e = signalReady(); e != nil {
 				return e
 			}
 		} else {
@@ -586,6 +620,32 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 			}
 		}
 	}
+}
+
+// initializeRequestID returns the request id of an initialize control request.
+func initializeRequestID(raw []byte) string {
+	var frame struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+		Request   struct {
+			Subtype string `json:"subtype"`
+		} `json:"request"`
+	}
+	if json.Unmarshal(raw, &frame) != nil || frame.Type != "control_request" || frame.Request.Subtype != "initialize" {
+		return ""
+	}
+	return frame.RequestID
+}
+
+// answersRequest reports whether raw is the control response to requestID.
+func answersRequest(raw []byte, requestID string) bool {
+	var frame struct {
+		Type     string `json:"type"`
+		Response struct {
+			RequestID string `json:"request_id"`
+		} `json:"response"`
+	}
+	return json.Unmarshal(raw, &frame) == nil && frame.Type == "control_response" && frame.Response.RequestID == requestID
 }
 
 func tapeWrapper(t *testing.T, c tapeProcessConfig) string {
