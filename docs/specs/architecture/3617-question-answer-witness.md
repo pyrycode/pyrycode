@@ -170,3 +170,34 @@ are allowed and dismissal and continuation may arrive in either order.
   unchanged. Run focused tagged race controls, tagged compilation/vet, full vet
   and the daemon build on macOS. Counted live acceptance and complete suites stay
   dispatcher-owned as the ticket requires; documentation handoff is unchanged.
+- 2026-10-19: prospective repair of findings 1–3 at `080870cf`. The fresh
+  model-confirmation turn must preserve the same conversation ownership and
+  provider alarms as `scenario.QuestionAnswer`/`CompletedTurn`. Extract its
+  drain into `drainQuestionModelTurn`, using `receiveQuestionEnvelope` and the
+  existing `scenario.CompletedTurn` contract. Capture only the first announcement
+  for the driving conversation; require its expected model after nonempty reply
+  and terminal idle. Reject unexpected modals before the shared drain can print
+  their untrusted payloads; all error/provider/modal diagnostics stay capped and
+  quoted. Generalize the existing receiver's arguments to phone/cipher state so
+  encrypted credential-free controls exercise the actual drain. Restore the
+  bypass settings assertion's bootstrap-session equality alongside mode and YOLO.
+  `TestQuestionAnswerModelTurnControls` covers foreign/missing/wrong announcements,
+  foreign-before-valid announcements, invalid provider frames (including foreign
+  conversations), recognized warnings, unexpected modals, and reply/idle ordering.
+  Use the existing helper-process/cipher fixtures to observe fatal rejections;
+  retain a source-wiring assertion and verify bounded quoted diagnostics.
+  No new goroutines or lifecycle owners; the existing receive loop has one
+  deadline and the helper process has context cancellation. No overlapping remote
+  feature branches touch the repair files. This restores the same delivery-proof
+  invariant, with about 220 written repair lines including controls/plan; the
+  existing branch already exceeds 800 lines and the handback floor preserves this
+  inseparable repair with its tests. Zero new exported types, three receiver
+  call-site updates, four acceptance criteria and no new independent behaviour.
+  Security re-review: PASS. SHOULD FIX: fail closed on foreign announcement
+  ownership and provider/modal alarms before accepting normal response/idle;
+  never print raw provider/modal payloads. No new credentials, file paths,
+  subprocess command construction, transport bounds, network listeners or crypto;
+  the existing synthetic test-binary helper owns cancellation. Run focused tagged
+  race controls, tagged vet/compilation, full vet and daemon build on macOS.
+  Current-head counted live acceptance for both question entry points and all
+  bypass variants, full suites and documentation remain dispatcher-owned.
