@@ -5,9 +5,9 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Forty-four scenarios run the same assertions in live capture and offline replay:
-
-The manifest associates 37 original live roots with these recordings.
+Each manifest scenario runs the same assertions in live capture and offline replay.
+Use `python3 scripts/daemon-recordings.py inventory` for current scenario counts and
+original live-root associations.
 The legacy `question-answer` and four bypass-question recordings retain their
 original assertions and fixtures without owning current live roots. Five new
 witness profiles share the stronger proof introduced by PR #3622: a fresh
@@ -665,3 +665,43 @@ across that cleanup. Candidate publication requires exactly one run/pass for the
 outer root and both subtests, no skipped/failed event, matching source checksums
 and successful post-cleanup audits. Unknown or duplicate children fail closed.
 `--batch runner-recovery` groups this root with the two direct-runner profiles.
+
+
+## Conversation deletion and owned process lifetime
+
+`conversation-lifecycle` runs the original create, rename, archive, unarchive,
+liveness, delete reply and on-disk removal assertions. The bootstrap and actually
+created conversation keep independent roles. Session IDs bind to the persisted
+conversation before launch; the original bootstrap UUID is checked before typed
+normalization. The complete supplied files, modes, argv and strict stdin remain
+part of the outgoing contract.
+
+Capture execs the real Claude executable at the daemon-owned PID. A separate
+broker owns the recording pipes in a separate process group, so termination of
+that provider leaves its evidence available. Replay runs an owned stand-in and
+never executes a provider. Before the unchanged original delete envelope, the
+client hook asks the broker to acknowledge a typed `lifecycle_delete` checkpoint.
+The saved created-child protocol prefix ends at that checkpoint. Replay cannot
+release later frames before the original client reaches deletion; the original
+metadata and routing assertions remain in charge of the result.
+
+The broker continues forwarding the actual native tail after the checkpoint
+without treating it as replay evidence. Both actual stdout/stderr EOF and the
+matching owned action are required for its terminal receipt. The original test
+then requires that exact current owned PID to disappear before sealing the root.
+No particular exit code or signal is inferred for deletion. Actual Claude
+termination behavior remains a live obligation; replay exercises production
+termination of its real stand-in process and the original wire/disk assertions.
+Captured host PIDs are kept only in private launch/action audit files and never
+restored from a fixture.
+
+The idle bootstrap prefix seals without closing its pipes. The broker holds that
+lifetime through the original cleanup, bounded by a 30-second absolute deadline.
+Each pipe write has both a ten-second bound and the remaining absolute lifecycle
+or seal deadline. Original stdin EOF is forwarded, and failure cleanup addresses
+only the private jobs belonging to this test. Changed tapes, roles, launch
+arguments, owned action/acknowledgment, stop observations, failed terminal receipts,
+public controls, duplicate launches and extra artifacts fail the final audit.
+The complete original root and cleanup must pass before an external candidate is
+published. Stderr bytes belong to the saved prefix; their separate diagnostic
+stream order is not an asserted deletion property.

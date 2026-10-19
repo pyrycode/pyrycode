@@ -65,6 +65,9 @@ func daemonRecordingCurrent(t *testing.T) (daemonRecordingConfig, bool) {
 }
 func daemonProviderEnvironment(t *testing.T) (string, string) {
 	t.Helper()
+	if bin, home, ok := lifecycleProviderEnvironment(t); ok {
+		return bin, home
+	}
 	c, recording := daemonRecordingCurrent(t)
 	if !recording {
 		bin, err := exec.LookPath("claude")
@@ -91,6 +94,9 @@ func daemonProviderEnvironment(t *testing.T) (string, string) {
 	return c.Wrapper, c.Process.Home
 }
 func daemonRecordingNonce(t *testing.T, live int64) int64 {
+	if _, ok := lifecycleRecordingCurrent(t); ok {
+		return 2718281828
+	}
 	if _, ok := daemonRecordingCurrent(t); ok {
 		return 2718281828
 	}
@@ -130,6 +136,7 @@ func daemonRecordingRead(path string, value any) error {
 }
 func daemonRecordingRegisterSocket(t *testing.T, home, daemon, socket string) {
 	t.Helper()
+	lifecycleRecordingRegisterSocket(t, home, daemon, socket)
 	c, ok := daemonRecordingCurrent(t)
 	if !ok {
 		return
@@ -145,6 +152,7 @@ func daemonRecordingRegisterSocket(t *testing.T, home, daemon, socket string) {
 }
 func daemonRecordingRegisterConversation(t *testing.T, conv string) {
 	t.Helper()
+	lifecycleRecordingRegisterConversation(t, conv)
 	c, ok := daemonRecordingCurrent(t)
 	if !ok {
 		return
@@ -195,6 +203,7 @@ func daemonRecordingRegisterConversation(t *testing.T, conv string) {
 }
 func finishDaemonRecording(t *testing.T) {
 	t.Helper()
+	finishLifecycleRecording(t)
 	c, ok := daemonRecordingCurrent(t)
 	if !ok || t.Failed() {
 		return

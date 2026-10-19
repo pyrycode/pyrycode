@@ -22,7 +22,7 @@ type LifecycleTape struct {
 }
 
 func (t *LifecycleTape) Validate() error {
-	if t == nil || t.Version != 1 || t.Tape == nil || (t.End != "kill" && t.End != "seal" && t.End != "eof") || len(t.Stderr) > MaxBytes || Safe([]byte(t.Stderr)) != nil {
+	if t == nil || t.Version != 1 || t.Tape == nil || (t.End != "kill" && t.End != "seal" && t.End != "eof" && t.End != "delete-conversation") || len(t.Stderr) > MaxBytes || Safe([]byte(t.Stderr)) != nil {
 		return errors.New("invalid lifecycle tape")
 	}
 	raw, err := json.Marshal(t.Tape)
@@ -86,10 +86,10 @@ func (t *LifecycleTape) Save(path string) error {
 
 type LifecycleBrokerConfig struct {
 	PoolProcessConfig
-	OwnerPID  int
-	Deadline  time.Time
-	End, Kill string
-	OnSeal    func(int) error `json:"-"`
+	OwnerPID         int
+	Deadline         time.Time
+	End, Kill, Abort string
+	OnSeal           func(int) error `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -102,7 +102,7 @@ type LifecycleKill struct {
 // SIGKILL authorization. A seal-ended role must still be alive at its seal.
 func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count int, resultErr error) {
 	fail := errors.New("lifecycle broker failed")
-	if c.OwnerPID <= 1 || os.Getppid() != c.OwnerPID || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof") {
+	if c.OwnerPID <= 1 || os.Getppid() != c.OwnerPID || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation") {
 		return 0, fail
 	}
 	defer func() {
@@ -136,7 +136,11 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	var tape *LifecycleTape
 	var player *Player
 	if c.Mode == "capture" {
-		tape = &LifecycleTape{Version: 1, Tape: &Tape{Version: 1, Scenario: c.Scenario, Producer: c.Producer, Args: binding.Args(), Files: files}, End: c.End}
+		version := 1
+		if c.End == "delete-conversation" {
+			version = 2
+		}
+		tape = &LifecycleTape{Version: 1, Tape: &Tape{Version: version, Scenario: c.Scenario, Producer: c.Producer, Args: binding.Args(), Files: files}, End: c.End}
 	} else {
 		f, e := os.Open(c.Path)
 		if e != nil {
@@ -168,6 +172,8 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	_ = originals[6].Close()
 	frames, total := 0, 0
 	sealed := false
+	actionAccepted := false
+	var observeAction func() error
 	sealDeadline := time.Time{}
 	deadline := time.Now().Add(20 * time.Minute)
 	if !c.Deadline.IsZero() && c.Deadline.Before(deadline) {
@@ -215,6 +221,21 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	var pendingInput, pendingOutput []byte
 	inputEOF, outputEOF, stderrEOF := false, false, false
 	accept := func(direction string, raw []byte) error {
+		if direction == "stdout" && observeAction != nil {
+			if err := observeAction(); err != nil {
+				return err
+			}
+		}
+		if actionAccepted {
+			target := originals[1]
+			if direction == "stdin" {
+				target = originals[3]
+			}
+			// This native tail follows the acknowledged original client action and is
+			// outside the saved prefix. A deleted daemon consumer may close its pipe.
+			_ = write(target, append(raw, '\n'))
+			return nil
+		}
 		if sealed {
 			target := originals[1]
 			if direction == "stdin" {
@@ -278,13 +299,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					if player != nil {
 						return fail
 					}
-					if !sealed {
+					if !sealed && !actionAccepted {
 						tape.Stderr += string(buf[:n])
 					}
 					if len(tape.Stderr) > MaxBytes {
 						return fail
 					}
-					if e := write(originals[2], buf[:n]); e != nil {
+					if e := write(originals[2], buf[:n]); e != nil && !actionAccepted {
 						return fail
 					}
 				} else {
@@ -336,10 +357,65 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		var k LifecycleKill
 		d := json.NewDecoder(bytes.NewReader(raw))
 		d.DisallowUnknownFields()
-		return uniqueSuiteKeys(raw) && d.Decode(&k) == nil && d.Decode(new(any)) == io.EOF && k.PID == c.OwnerPID && k.Signal == "SIGKILL"
+		return uniqueSuiteKeys(raw) && d.Decode(&k) == nil && d.Decode(new(any)) == io.EOF && k.PID == c.OwnerPID && k.Signal == func() string {
+			if c.End == "delete-conversation" {
+				return "delete-conversation"
+			}
+			return "SIGKILL"
+		}()
+	}
+
+	observeAction = func() error {
+		if c.End != "delete-conversation" || actionAccepted {
+			return nil
+		}
+		if _, err := os.Lstat(c.Kill); os.IsNotExist(err) {
+			return nil
+		}
+		if !authorizedKill() {
+			return errors.New("lifecycle action has foreign owner")
+		}
+		if len(pendingInput) != 0 {
+			return nil
+		}
+		if player != nil && (player.next >= len(player.tape.Frames) || player.tape.Frames[player.next].Direction != ClientCheckpointDirection) {
+			return nil
+		}
+		checkpoint, _ := json.Marshal(ClientCheckpoint{Type: ClientCheckpointDirection, Sequence: 1, Action: "lifecycle_delete", ConversationID: "${LIFECYCLE_CONVERSATION}"})
+		if player != nil {
+			released, err := player.Action(checkpoint)
+			if err != nil {
+				return err
+			}
+			if len(released) != 0 {
+				return errors.New("lifecycle tape extends beyond original delete checkpoint")
+			}
+		} else {
+			total += len(checkpoint)
+			if total > MaxBytes || len(tape.Tape.Frames) >= MaxFrames {
+				return fail
+			}
+			tape.Tape.Frames = append(tape.Tape.Frames, Frame{Direction: ClientCheckpointDirection, Data: checkpoint})
+		}
+		frames++
+		actionAccepted = true
+		ack, _ := json.Marshal(LifecycleKill{PID: c.OwnerPID, Signal: "delete-conversation"})
+		f, err := os.OpenFile(c.Kill+".ready", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return fail
+		}
+		_, err = f.Write(ack)
+		closeErr := f.Close()
+		if err != nil || closeErr != nil {
+			return fail
+		}
+		return nil
 	}
 	finish := func() (int, error) {
-		if len(pendingInput) != 0 || len(pendingOutput) != 0 {
+		if c.End == "delete-conversation" && !actionAccepted {
+			return frames, errors.New("missing original delete checkpoint")
+		}
+		if !actionAccepted && (len(pendingInput) != 0 || len(pendingOutput) != 0) {
 			return frames, fail
 		}
 		if player != nil {
@@ -354,7 +430,15 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		return frames, tape.Save(c.Path)
 	}
 	for time.Now().Before(deadline) {
+		if c.Abort != "" {
+			if _, err := os.Lstat(c.Abort); err == nil {
+				return frames, errors.New("lifecycle owner aborted recording")
+			}
+		}
 		if err := read(inputFD, &pendingInput, &inputEOF, "stdin"); err != nil {
+			return frames, err
+		}
+		if err := observeAction(); err != nil {
 			return frames, err
 		}
 		if player != nil {
@@ -382,7 +466,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if c.End == "eof" && inputEOF && outputEOF && stderrEOF {
 			return finish()
 		}
-		if c.End == "kill" && outputEOF && stderrEOF {
+		if (c.End == "kill" || c.End == "delete-conversation") && outputEOF && stderrEOF {
 			if !authorizedKill() {
 				return frames, errors.New("provider ended without original owned kill")
 			}

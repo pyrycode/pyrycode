@@ -23,7 +23,7 @@ type ClientCheckpoint struct {
 }
 
 func RequiresClientCheckpoint(name string) bool {
-	return name == "ordinary-queue-placement" || name == "interrupt-running" || name == "interrupt-thinking" || name == "subagent-text"
+	return name == "conversation-lifecycle-created-1" || name == "ordinary-queue-placement" || name == "interrupt-running" || name == "interrupt-thinking" || name == "subagent-text"
 }
 
 // DecodeClientCheckpoint accepts a closed, duplicate-free action object. These
@@ -75,7 +75,7 @@ func DecodeClientCheckpoint(raw []byte) (ClientCheckpoint, error) {
 		if c.MessageID == "" || c.QueuedMsgID == 0 || c.Text == "" {
 			return fail()
 		}
-	case "main_stream_observed":
+	case "main_stream_observed", "lifecycle_delete":
 	case "interrupt_phase":
 		required = append(required, "phase")
 		if c.Phase != "thinking" && c.Phase != "responding" {

@@ -130,7 +130,7 @@ func waitLifecycleProbe(t *testing.T, path string, target any) {
 func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 	producer := Producer{Revision: strings.Repeat("a", 40), BinarySHA256: strings.Repeat("b", 64), ClaudeVersion: "test-owned", CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	saved := map[string]*LifecycleTape{}
-	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input"} {
+	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-delete", "replay-delete", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
 		t.Run(variant, func(t *testing.T) {
 			root := t.TempDir()
 			mode := "capture"
@@ -138,6 +138,13 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 				mode = "replay"
 			}
 			c := LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: mode, Scenario: "lifecycle-probe", Path: filepath.Join(root, "tape.json"), Claim: filepath.Join(root, "claim"), Finish: filepath.Join(root, "finish"), Producer: producer}, End: "kill", Kill: filepath.Join(root, "kill.json")}
+			if strings.HasSuffix(variant, "-delete") || variant == "delete-without-checkpoint" {
+				c.End = "delete-conversation"
+				c.Scenario = "conversation-lifecycle-created-1"
+			}
+			if variant == "abort" {
+				c.Abort = filepath.Join(root, "abort")
+			}
 			if strings.HasSuffix(variant, "-eof") {
 				c.End = "eof"
 			}
@@ -202,12 +209,17 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal("provider was not exec at daemon-owned PID")
 				}
 			}
-			if c.End == "kill" && variant != "unauthorized-kill" {
+			if (c.End == "kill" || c.End == "delete-conversation") && variant != "unauthorized-kill" && variant != "abort" && variant != "delete-without-checkpoint" {
 				pid := cmd.Process.Pid
 				if variant == "foreign-pid" {
 					pid++
 				}
-				if e := probeWrite(c.Kill, LifecycleKill{PID: pid, Signal: "SIGKILL"}); e != nil {
+				if e := probeWrite(c.Kill, LifecycleKill{PID: pid, Signal: func() string {
+					if c.End == "delete-conversation" {
+						return "delete-conversation"
+					}
+					return "SIGKILL"
+				}()}); e != nil {
 					t.Fatal(e)
 				}
 			}
@@ -231,22 +243,43 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal("broker ended before original cleanup")
 				}
 			}
-			if c.End != "kill" {
+			if c.End == "seal" || c.End == "eof" {
 				_ = in.Close()
 			}
-			if c.End == "kill" && variant != "changed-input" {
-				if e := cmd.Process.Signal(syscall.SIGKILL); e != nil {
+			if variant == "abort" {
+				if e := os.WriteFile(c.Abort, nil, 0600); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if c.End == "delete-conversation" && variant != "delete-without-checkpoint" {
+				var ack LifecycleKill
+				waitLifecycleProbe(t, c.Kill+".ready", &ack)
+				if ack.PID != cmd.Process.Pid || ack.Signal != "delete-conversation" {
+					t.Fatal("foreign original action ack")
+				}
+			}
+			if (c.End == "kill" || c.End == "delete-conversation") && variant != "changed-input" && variant != "abort" {
+				signal := syscall.SIGKILL
+				if c.End == "delete-conversation" {
+					signal = syscall.SIGTERM
+				}
+				if e := cmd.Process.Signal(signal); e != nil {
 					t.Fatal(e)
 				}
 			}
 			e = cmd.Wait()
 			_ = in.Close()
-			if c.End != "kill" && e != nil {
+			if (c.End == "seal" || c.End == "eof") && e != nil {
 				t.Fatal("original stdin EOF did not shut down owned process", e)
 			}
-			if c.End == "kill" && variant != "changed-input" {
+			if (c.End == "kill" || c.End == "delete-conversation") && variant != "changed-input" {
 				status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
-				if e == nil || !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				if e == nil || !ok || !status.Signaled() || status.Signal() != func() syscall.Signal {
+					if c.End == "delete-conversation" {
+						return syscall.SIGTERM
+					}
+					return syscall.SIGKILL
+				}() {
 					t.Fatal("original kill did not terminate its owned PID")
 				}
 			}
@@ -257,7 +290,11 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 				t.Fatalf("broker receipt success=%v frames=%d owner-match=%v error=%s", r.Success, r.Frames, r.OwnerPID == cmd.Process.Pid, r.Error)
 			}
 			if want {
-				if r.Frames != 2 {
+				wantFrames := 2
+				if c.End == "delete-conversation" {
+					wantFrames = 3
+				}
+				if r.Frames != wantFrames {
 					t.Fatal("incomplete pipe journal")
 				}
 				f, e := os.Open(c.Path)

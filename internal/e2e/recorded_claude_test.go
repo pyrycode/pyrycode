@@ -31,7 +31,7 @@ const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
 func TestRecordedClaude(t *testing.T) {
 	selected := selectedRecordedScenarios(t)
 	for _, name := range selected {
-		if _, ok := recordedPoolProfiles[name]; ok || claudetape.DaemonSuiteProfiles()[name].Root != "" || claudetape.CLIProfiles()[name] != "" || claudetape.RunnerProfiles()[name].Root != "" || name == claudetape.RecoveryScenario {
+		if _, ok := recordedPoolProfiles[name]; ok || claudetape.DaemonSuiteProfiles()[name].Root != "" || claudetape.CLIProfiles()[name] != "" || claudetape.RunnerProfiles()[name].Root != "" || name == claudetape.RecoveryScenario || claudetape.LifecycleProfiles()[name].Root != "" {
 			buildRecordedPoolBinary(t)
 			break
 		}
@@ -42,6 +42,8 @@ func TestRecordedClaude(t *testing.T) {
 				runRecordedPool(t, scenario)
 			} else if claudetape.DaemonSuiteProfiles()[scenario].Root != "" {
 				runRecordedDaemonSuite(t, scenario)
+			} else if claudetape.LifecycleProfiles()[scenario].Root != "" {
+				runRecordedLifecycleSuite(t, scenario)
 			} else if scenario == claudetape.RecoveryScenario {
 				runRecordedRecoverySuite(t, scenario)
 			} else if claudetape.RunnerProfiles()[scenario].Root != "" {
@@ -404,6 +406,27 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 	}
 	for _, scenario := range selectedRecordedScenarios(t) {
 		t.Run(scenario, func(t *testing.T) {
+
+			if profile, ok := claudetape.LifecycleProfiles()[scenario]; ok {
+				load := func(dir string) *claudetape.LifecycleSuite {
+					f, e := os.Open(filepath.Join(dir, scenario+".json"))
+					if e != nil {
+						t.Fatal(e)
+					}
+					defer f.Close()
+					suite, e := claudetape.DecodeLifecycleSuite(f, profile.Roles)
+					if e != nil {
+						t.Fatal(e)
+					}
+					return suite
+				}
+				if claudetape.SameLifecycleSuiteContract(load(baseline), load(fresh), profile.Roles) != nil {
+					t.Fatal("lifecycle outgoing contract changed")
+				}
+				raw, _ := json.Marshal(map[string]string{"scenario": scenario, "policy": "strict_ordered"})
+				t.Logf("CLAUDE_COMPARISON %s", raw)
+				return
+			}
 
 			if scenario == claudetape.RecoveryScenario {
 				load := func(dir string) *claudetape.RecoverySuite {

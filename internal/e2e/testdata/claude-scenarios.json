@@ -1101,6 +1101,23 @@
       "retained_live": [
         "Current real Claude startup, response and physical JSONL creation; the original test-owned failing executable, closed stdin, retry/backoff, retained/drop queue and original transcript marker assertions continue running."
       ]
+    },
+    {
+      "name": "conversation-lifecycle",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveConversationLifecycle"
+      ],
+      "retained_live": [
+        "Real Claude startup, native process termination and current-provider interpretation remain live. Replay preserves original create/rename/archive/unarchive/routing/delete assertions and observes its owned stand-in EOF after the unchanged delete action."
+      ],
+      "live_contracts": {
+        "TestInteractiveConversationLifecycle": "f3d5c30e7ebac9cff845043ada13bbe5d6010087639c1f192a1ca13412d3f6d1"
+      },
+      "comparison_policy": "strict_ordered",
+      "boundary": "lifecycle_suite"
     }
   ],
   "batches": {
@@ -1238,6 +1255,9 @@
       "runner-applied-settings",
       "runner-compaction",
       "daemon-session-recovery"
+    ],
+    "conversation-lifecycle": [
+      "conversation-lifecycle"
     ]
   },
   "reviews": {
@@ -1270,11 +1290,6 @@
       "disposition": "needs_harness",
       "reason": "Codex request_user_input and adaptive model fallback need a separate Codex protocol recorder. Preserve surfaced question/answer assertions and current-provider fallback behavior.",
       "contract_sha256": "c9372ce1a6e26a345fc5f424341340e04ab2e9f74f6611059654be6322150e32"
-    },
-    "TestInteractiveConversationLifecycle": {
-      "disposition": "needs_harness",
-      "reason": "Create/rename/archive/unarchive/delete and disk removal are replayable daemon assertions, but actual conversation creation mints session/conversation identities and may add a child. Add typed identity/process-role support; do not replace create with a preseed and claim creation coverage.",
-      "contract_sha256": "f3d5c30e7ebac9cff845043ada13bbe5d6010087639c1f192a1ca13412d3f6d1"
     },
     "TestInteractiveConversationSystemPrompt_ReachesTheReply": {
       "disposition": "needs_harness",
