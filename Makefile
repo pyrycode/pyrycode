@@ -88,6 +88,11 @@ test-slow:
 e2e:
 	$(TEST_ADMISSION) $(GO) test -timeout=$(TEST_TIMEOUT) -tags e2e -race -count=1 ./internal/e2e/...
 
+# Captured Claude stdio; starts real isolated daemons without a provider login.
+.PHONY: e2e-recorded-claude
+e2e-recorded-claude:
+	python3 scripts/daemon-recordings.py replay
+
 # e2e-realclaude, e2e-liverelay, e2e-install and e2e-update each pass -count=1,
 # and it is load-bearing. Every one of them builds its binary under test with a
 # subprocess `go build` (ensurePyryBuilt in internal/e2e, internal/e2e/realclaude
