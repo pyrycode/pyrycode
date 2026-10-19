@@ -139,3 +139,11 @@ func TestClaudeTapeProcessContract(t *testing.T) {
 		})
 	}
 }
+
+func TestTapeNormalizeRejectsTrailingJSON(t *testing.T) {
+	for _, raw := range []string{`{"type":"user"} {}`, `{"type":"user"} trailing`} {
+		if _, err := tapeNormalize([]byte(raw), tapeProcessConfig{}, false); err == nil {
+			t.Fatal("normalizer discarded trailing JSONL bytes")
+		}
+	}
+}

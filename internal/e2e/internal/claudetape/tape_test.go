@@ -188,3 +188,25 @@ func TestInputFileRoundTrip(t *testing.T) {
 		t.Fatal("changed prompt passed")
 	}
 }
+
+func TestControlBindingPreservesPayloadIDs(t *testing.T) {
+	tape := rigTape()
+	tape.Frames[0].Data = json.RawMessage(`{"type":"control_request","request_id":"old","request":{"subtype":"initialize","data":{"request_id":"old"}}}`)
+	tape.Frames[1].Data = json.RawMessage(`{"type":"control_response","response":{"request_id":"old","subtype":"success","response":{"request_id":"old"}}}`)
+	p, err := New(tape, tape.Args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := p.Input([]byte(`{"type":"control_request","request_id":"fresh","request":{"subtype":"initialize","data":{"request_id":"old"}}}`))
+	if err != nil {
+		t.Fatal("control binding changed application payload:", err)
+	}
+	if len(out) != 1 || !bytes.Contains(out[0], []byte(`"response":{"request_id":"old"}`)) {
+		t.Fatal("control binding changed output payload")
+	}
+	fresh := rigTape()
+	fresh.Frames[0].Data = json.RawMessage(`{"type":"control_request","request_id":"new","request":{"subtype":"initialize","data":{"request_id":"new"}}}`)
+	if SameContract(tape, fresh) == nil {
+		t.Fatal("compatibility ignored changed payload request_id")
+	}
+}

@@ -118,7 +118,7 @@ func tapeNormalize(raw []byte, c tapeProcessConfig, restore bool) ([]byte, error
 	var value any
 	d := json.NewDecoder(strings.NewReader(string(raw)))
 	d.UseNumber()
-	if d.Decode(&value) != nil {
+	if d.Decode(&value) != nil || d.Decode(new(any)) != io.EOF {
 		return nil, errors.New("invalid Claude JSONL")
 	}
 	var walk func(any) any

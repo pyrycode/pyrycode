@@ -266,23 +266,27 @@ func object(raw []byte) (map[string]any, error) {
 	return v, nil
 }
 
+// rewrite changes only protocol correlation fields. Tool data and other payloads
+// can contain request_id keys whose values must remain part of the exact contract.
 func rewrite(v any, bindings map[string]string) any {
-	switch x := v.(type) {
-	case map[string]any:
-		for k, value := range x {
-			if k == "request_id" {
-				if id, ok := value.(string); ok {
-					if bound, exists := bindings[id]; exists {
-						x[k] = bound
-						continue
-					}
-				}
-			}
-			x[k] = rewrite(value, bindings)
+	envelope, ok := v.(map[string]any)
+	if !ok {
+		return v
+	}
+	identity := envelope
+	switch envelope["type"] {
+	case "control_request":
+	case "control_response":
+		identity, ok = envelope["response"].(map[string]any)
+		if !ok {
+			return v
 		}
-	case []any:
-		for i, value := range x {
-			x[i] = rewrite(value, bindings)
+	default:
+		return v
+	}
+	if id, ok := identity["request_id"].(string); ok {
+		if bound, exists := bindings[id]; exists {
+			identity["request_id"] = bound
 		}
 	}
 	return v
