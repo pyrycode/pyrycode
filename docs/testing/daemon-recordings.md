@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Thirty scenarios run the same assertions in live capture and offline replay:
+Thirty-four scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -478,3 +478,45 @@ and latency remain live obligations. Every original live root stays enabled
 with its original trigger, budget and assertions; live callbacks are omitted.
 Subagent replay preserves the requirement for at least two main lane deltas,
 nonempty child text and distinct stable main/child turn identities.
+
+
+### Direct pool control batch
+
+`--batch pool-controls` covers model changes, stored bypass revocation,
+re-escalation and the spawn posture gate. These profiles declare `pool_stdio`
+and run the complete original live test bodies in a separately compiled test
+binary. Their pool, concrete runner, raw native control/init taps, response
+counts, operator provenance, model/menu resolution, unchanged supervised PID and
+spawn-count assertions all remain in place. Only the executable/isolated HOME
+setup acquires an optional recording adapter. Normal live runs use the original
+credential setup. No test is removed or retagged.
+
+The single fresh provider child is captured behind the original runner's pipes.
+Capture refuses an external `CLAUDE_CONFIG_DIR` and the closed argv profile
+rejects new or unknown flags until their input contracts are reviewed.
+Replay uses no provider credentials/configuration and never starts Claude.
+The profile refuses resume, continuation or a second child. Every supplied
+settings, system-prompt or MCP file is included with its complete content and
+mode; settings are mandatory. Complete argv and cwd remain compared. The
+manifest's daemon seed/extra-argument fields stay unused and false/empty for
+pool profiles: their original test bodies compose the actual spawn configuration,
+which is recorded and checked at the lower pipe boundary.
+
+A typed identity binding permits only the exact `--session-id` argument and
+matching top-level native `session_id` to use the fresh pool session identity.
+System-init cwd metadata binds only to the declared, checked actual working
+directory. Nested identities, user/tool text and all other fields stay literal.
+File argument paths are explicit file handles with independently compared
+contents/modes, never recursive path scrubbing. Unexpected private paths fail
+capture. The helper checks the original runner's actual cwd and HOME and inherits
+them when starting native Claude; it cannot repair an incorrect environment.
+
+The original root must run exactly once and pass, with no skipped/failing event.
+Before runner cleanup, its recording must seal with complete input consumption;
+source failures cannot publish successful candidates. Capture provenance names
+the compiled original-test binary's checksum and pinned clean source revision.
+Error-only version diagnostics use the same capture's provider version. Private
+original-root JSON events are retained alongside each stage's reports. The four
+serial pool roots receive adequate whole-run limits; bounded native pipe helpers
+allow twenty minutes per root. Real provider application of the controls remains
+an explicit live obligation.

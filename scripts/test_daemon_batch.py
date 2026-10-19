@@ -38,7 +38,9 @@ class ManifestTest(unittest.TestCase):
                 manifest.select(value, group, names)
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'manifest.json'
-            for mutate in (lambda m: m['scenarios'][0].update(comparison_policy='unknown'),
+            for mutate in (lambda m: m['scenarios'][0].update(boundary='unknown'),
+                           lambda m: m['scenarios'][0].update(boundary='pool_stdio'),
+                           lambda m: m['scenarios'][0].update(comparison_policy='unknown'),
                            lambda m: m['scenarios'][0].update(comparison_policy='native_coding_prefix'),
                            lambda m: m['scenarios'].append(m['scenarios'][0]),
                            lambda m: m['batches'].update(broken=['missing']),

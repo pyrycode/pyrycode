@@ -25,7 +25,7 @@ def load(path=PATH):
     names(value['provider_roots'], r'[A-Za-z_][A-Za-z0-9_]*', True)
     seen = set()
     for row in value['scenarios']:
-        keys(row, 'name stdio_permission initial_yolo claude_args live_tests retained_live live_contracts comparison_policy')
+        keys(row, 'name stdio_permission initial_yolo claude_args live_tests retained_live live_contracts comparison_policy boundary')
         if not isinstance(row['name'], str) or not re.fullmatch(r'[a-z][a-z0-9-]*', row['name']) or row['name'] in seen:
             raise ValueError('Invalid or duplicate scenario')
         seen.add(row['name'])
@@ -33,6 +33,16 @@ def load(path=PATH):
             raise ValueError('Permission configuration must be explicit')
         if not isinstance(row['claude_args'], list) or any(not isinstance(arg, str) or not arg.strip() for arg in row['claude_args']):
             raise ValueError('Claude arguments must be explicit nonempty strings')
+        pool_roots = {
+            'pool-model-change': 'TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel',
+            'pool-bypass-revoke': 'TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode',
+            'pool-bypass-escalate': 'TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode',
+            'pool-posture-gate': 'TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows',
+        }
+        if row['boundary'] not in ('daemon_stdio', 'pool_stdio') or (row['boundary'] == 'pool_stdio') != (row['name'] in pool_roots):
+            raise ValueError('Unsupported recording boundary')
+        if row['boundary'] == 'pool_stdio' and (row['live_tests'] != [pool_roots[row['name']]] or row['stdio_permission'] or row['initial_yolo'] or row['claude_args']):
+            raise ValueError('Pool recording must own the exact original configuration/root')
         policy = row['comparison_policy']
         if policy not in ('strict_ordered', 'native_coding_prefix') or (policy == 'native_coding_prefix') != (row['name'] == 'native-suggestions'):
             raise ValueError('Unsupported scenario comparison policy')

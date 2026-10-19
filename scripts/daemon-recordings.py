@@ -35,11 +35,17 @@ def run(mode, directory, report_dir, compare=None, label=None, scenarios=None):
         name = 'TestClaudeTapeCompatibility'
     else:
         env.pop('PYRY_CLAUDE_TAPE_FRESH', None)
+    if report_dir:
+        evidence = report_dir / ((label or mode) + '-native-events')
+        evidence.mkdir(parents=True, exist_ok=False)
+        env['PYRY_CLAUDE_TAPE_EVIDENCE'] = str(evidence.resolve())
+    else:
+        env.pop('PYRY_CLAUDE_TAPE_EVIDENCE', None)
     if mode == 'replay':
         for key in ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR'):
             env.pop(key, None)
     cmd = [sys.executable, str(ROOT / 'scripts/test-admission.py'), '--', 'go', 'test',
-           '-tags=e2e', '-count=1', '-timeout=' + ('30m' if set(scenarios) & {'native-suggestions', 'ordinary-queue-placement', 'interrupt-running', 'interrupt-thinking', 'subagent-text'} else '10m'), '-json', '-run', '^' + name + '$', './internal/e2e']
+           '-tags=e2e', '-count=1', '-timeout=' + ('60m' if any(s.startswith('pool-') for s in scenarios) else '30m' if set(scenarios) & {'native-suggestions', 'ordinary-queue-placement', 'interrupt-running', 'interrupt-thinking', 'subagent-text'} else '10m'), '-json', '-run', '^' + name + '$', './internal/e2e']
     started = time.monotonic()
     # Preserve the admission descriptor when an operator reserves one slot for
     # the whole compatibility command. The nested launcher validates its inode.
