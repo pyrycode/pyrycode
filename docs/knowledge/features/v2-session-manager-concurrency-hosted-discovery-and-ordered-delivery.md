@@ -153,6 +153,15 @@ under `pushMu`, or `RetireLiveState` or byte-ceiling retirement could leave a
 quarantined head eligible for delivery. `TestHostedPushAdmissionRetirement`
 forces both races and checks that declined output returns its reservation.
 
+The same boundary applies to `drainLiveOnce`: after `reserveHostedPush`, recheck
+`pushRetired` before consuming `livePending` or invoking `liveSnapshot`, and
+release the unused reservation on retirement. An entry-only check can pass
+before admission blocks on `hostedMu`, then consume a quarantined reading after
+the producer retires. `TestHostedLiveAdmissionRetirement` holds that lock across
+retirement for both sources and checks unchanged pending state, zero snapshot
+reads, no retained output and no retained capacity. A test that retires before
+entering the drain cannot expose this race.
+
 `releaseHosted` signals the drain when capacity returns, including delivery
 completion through `handleHostedDone` and cancelled queued pages. Capacity-held
 connections do not re-signal themselves; another connection and manager control
