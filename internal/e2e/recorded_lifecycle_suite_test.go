@@ -295,6 +295,22 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	if e != nil || afterSum != daemonSum {
 		t.Fatal("lifecycle daemon image changed")
 	}
+	// Detached brokers close after provider EOF, independently of the original
+	// root's test2json exit. Join their bounded terminal publication before the
+	// immutable final audit; process exit alone is not a receipt barrier.
+	deadline := time.Now().Add(15 * time.Second)
+	for _, role := range profile.Roles {
+		for {
+			var terminal claudetape.LifecycleReceipt
+			if claudetape.ReadLifecycleControl(filepath.Join(children, role+".receipt"), 16384, &terminal) == nil {
+				break
+			}
+			if !time.Now().Before(deadline) {
+				t.Fatal("lifecycle terminal publication timed out after original cleanup")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	digest, tapes, err := claudetape.AuditLifecycleArtifacts(home, name, revision, sourceSHA, config.DaemonSHA256, true)
 	if err != nil || digest != receipt.ArtifactSHA256 {
 		for _, role := range profile.Roles {
