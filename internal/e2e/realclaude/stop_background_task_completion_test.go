@@ -23,12 +23,13 @@ func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
 	arrived, release := tpcapHoldFIFO(t, fifo)
 	defer release()
 	hold := newStopHoldOperation(t, h.workdir, fifo)
+	reader := newStopTaskReader(t, h)
 	sealSendMessage(t, h.phone, h.initSend, 27960, convID, "stop-held-task", hold.prompt())
 	setup := stopHeldTaskSetup{hold: hold}
 	var taskID string
 	deadline := time.Now().Add(perTurnReplyBudget)
 	for taskID == "" {
-		env, ok := receiveEnvelope(t, h, min(100*time.Millisecond, time.Until(deadline)))
+		env, ok := reader.receive(t, min(100*time.Millisecond, time.Until(deadline)))
 		if !ok {
 			if time.Now().After(deadline) {
 				t.Fatalf("held task setup timed out: %s fifo_arrived=%t", setup.diagnostic(), stopTaskFIFOArrived(arrived))
@@ -52,7 +53,7 @@ func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: 27961, Type: protocol.TypeStopBackgroundTask, TS: time.Now().UTC(), Payload: payload})
 	deadline = time.Now().Add(45 * time.Second)
 	for {
-		env, ok := receiveEnvelope(t, h, time.Until(deadline))
+		env, ok := reader.receive(t, time.Until(deadline))
 		if !ok {
 			t.Fatal("stop acceptance did not produce task completion while FIFO held")
 		}
