@@ -69,6 +69,14 @@ func TestClaudeTapeProcessContract(t *testing.T) {
 			if err = cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
+			waited := false
+			defer func() {
+				if !waited {
+					cancel()
+					_ = stdin.Close()
+					_ = cmd.Wait()
+				}
+			}()
 			reader := bufio.NewReader(stdout)
 			if variant != "changed-settings" {
 				first := `{"type":"user","message":{"content":"hello"}}`
@@ -105,6 +113,7 @@ func TestClaudeTapeProcessContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitErr := cmd.Wait()
+			waited = true
 			_ = stdin.Close()
 			if ctx.Err() != nil {
 				t.Fatal("tape helper did not finish")

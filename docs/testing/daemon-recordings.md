@@ -38,12 +38,17 @@ a fixture and replay never creates one. Inspect successful candidates before
 copying them into `internal/e2e/testdata/claude-tapes/` and committing them.
 
 The wrapper records complete JSONL objects on both pipes before forwarding them.
-It preserves every observed frame and its direction in order, with an 8 MiB /
-10000-frame bound. Paths inside the disposable HOME are replaced with the single
-`${PILOT_HOME}` binding, including embedded prompt/argument paths. There is no
-arbitrary prose scrubber or field allowlist. Known secret patterns, configured
-credentials and unnormalized operator home paths are rejected without echoing
-the payload. Raw transcripts are never written. Candidate files are private.
+Every forwarded frame is recorded first, in order, with an 8 MiB / 10000-frame
+bound. The successful driver seals the captured prefix before teardown; later
+process activity is outside this pilot. Paths inside the disposable HOME bind
+to `${PILOT_HOME}`. The test daemon executable, its control socket and generated
+MCP configuration filename have their own explicit path bindings. Complete
+settings, appended system prompt and MCP configuration file contents are also
+retained and compared. There is no arbitrary prose scrubber or field allowlist.
+Known secret patterns, configured credentials and unnormalized operator home
+paths are rejected without echoing the payload. Exact credential-source labels
+in `tokenSource` and `apiKeySource` metadata are safe names; the scanner accepts
+those two known labels without altering captured bytes or permitting values. Raw transcripts are never written. Candidate files are private.
 A successful scenario explicitly seals its stream before teardown; incomplete
 or failed scenarios cannot publish a candidate. The pilot allows one Claude
 process per scenario and does not model respawns or resume files.
