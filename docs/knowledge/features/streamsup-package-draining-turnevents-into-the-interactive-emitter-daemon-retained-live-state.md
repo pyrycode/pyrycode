@@ -117,8 +117,9 @@ fields and the same omitted/null/nonempty-string provenance distinction as strea
 | Requested/stream `context_usage`, `mcp_status`, `slash_command_list`, `model_list` | One shared singleton per family and conversation. |
 | `session_settings`, `session_settings_updated` | One settings singleton; update retention follows successful writes only. |
 
-Requested model catalogs may answer from foreign/predecessor vocabulary without
-installing that inventory in the target's retained singleton, as described below.
+Requested and reconnect model catalogs may answer from foreign/predecessor
+vocabulary without installing it in the target's retained singleton, as described
+below.
 
 Relay prompt snapshots hold only outstanding eligible prompts with their
 existing answer IDs; missing or false captured eligibility withholds shows.
@@ -255,10 +256,17 @@ MCP's enabled `TestDaemonLiveMappedInventoryBounds` assertion is separate eviden
 
 ## Relay delivery
 
-`startRelayV2` installs `ThreadLiveState` through `daemonRelaySnapshot`, a finite
-cursor across owner conversations returning one detached eligible reading per
-call. `daemonRelayReading` preserves conversation, positive generation/revision,
-reading identity, captured eligibility, payload session fields and the original
+`installDaemonLiveRelay` composes `ThreadLiveState` through
+`daemonRelayCatalogSnapshot` when registry and catalog resolution are available.
+It uses `daemonRelaySnapshot` for other retained families, skips its model-catalog
+records and lazily resolves a finite captured registry target set through
+`daemonModelListReadingFor`. A retained-only cursor misses registered targets
+with no own inventory because borrowed vocabulary deliberately is not retained.
+Resolution uses bound/bootstrap/saved precedence and canonical inventory for
+recipient projection, without a request or turn. No usable vocabulary skips the
+target and permits snapshot completion. `daemonRelayReading` preserves
+conversation, positive generation/revision, reading identity, captured eligibility,
+payload session fields and the original
 omitted/null/string envelope session tag. Snapshot and push delivery include
 explicit inactive retry/compaction values; slash-command inventories use the same
 retained snapshot/publication path. Correlated replies use the five installed
@@ -297,8 +305,31 @@ allow duplicate publishers. `TestDaemonLivePublicationRetirement` and
 and queued pushes again on relay Run. Removal/recreation or an overtaking update
 can invalidate a detached cursor after capture. Ordinary readings compare the
 retained revision, not an unfinished query reservation: a failed/refused query
-must leave prior accepted state available. Dismissals compare terminal ordering;
-clears compare current generation. Correlated replies keep captured source and
+must leave prior accepted state available. Catalogs compare the greater of the
+retained revision and `catalogReplyRevision`, the latest successfully completed
+reply-only resolution. `daemonLiveOperation.complete` records that revision only
+after generation and reservation validation, without retaining or publishing
+borrowed bytes. Generation changes reset it and removal discards it. Comparing
+only retention rejects valid borrowed snapshots; comparing reservations blanks
+available inventory after a refused resolution.
+
+Accepted borrowed ordering is target-wide: another peer's request can invalidate
+a reconnect catalog parked behind its clear without publishing a replacement.
+`refreshLiveCatalog` resolves that overtaken unsolicited catalog once for the
+same target and captured generation, then ordinary relay delivery checks apply.
+The stale capture remains invalid. No refresh can carry it across a transition
+or removal/recreation, including reused session IDs; separate fresh resolution
+after a clear captures current target ordering. Borrowing changes neither target
+retention nor the producing conversation's state.
+`TestDaemonLiveRelayCatalogConcurrentRequest` holds delivery after the target
+clear and processes the other peer's request first, covering unchanged/replaced
+bootstrap vocabulary and both projections. A one-peer reconnect test cannot
+expose that lost-replacement interleaving.
+`TestDaemonLiveRelayCatalogReservedSnapshot` separately proves unfinished
+reservations leave accepted inventory usable.
+
+Dismissals compare terminal ordering; clears compare current generation.
+Correlated replies keep captured source and
 use relay watermarks rather than this retention check. See
 [relay ordering and access gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#supplied-live-state-ordering).
 
