@@ -4,6 +4,25 @@ Part of the [background store](thread-package-background-store.md) overview.
 
 ## Store verification
 
+Idle-reload proof must apply suffix changes to the existing baseline and compare
+every resulting row with full replay. `TestStoreIdleReloadContinuity` repeats
+clean unload/append/reload and checks that an existing row is changed with its
+held `PreviousRev`, never accepted as a new addition. Accepting additions for
+existing IDs can hide a broken revision chain. Its compact check applies only
+affected roots to the prior inventory and rejects unrelated rows.
+`TestStoreIdleReloadNestedCompact` checks nested completion advancing the root
+header. Fixture semantics matter: a user message closes the assistant text run,
+so use queued acceptance between suffixes to test repeated revisions of the
+same row; a tool result without `is_error` is neutral, so give an explicit
+successful result to exercise ancestor advancement.
+`TestStoreIdleReloadRejectsContinuity` checks absent/mismatched retirement
+evidence, failed retirement, dirty/invalid checkpoints, history gaps, public-row
+suppression and unavailable recovery at the reload boundary. Keep
+`TestCompactCatchUpReload`'s older lost-interval reset alongside the new
+saved-boundary continuity proof. See the
+[reload contract](thread-package-background-store-replay.md#loading-and-replay-readiness)
+and [authenticated idle/recovery checks](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+
 `TestReferenceSourceOrder` checks feed/recent/Lookup precedence, deduplicated
 miss-only requests and the all-hit no-I/O path. `TestReferenceSourceBatch` uses
 36,000 all-hit IDs with duplicate/unordered requests and stale recent data to
