@@ -16,13 +16,42 @@ completion of the launching main turn.
 A background completion witness must establish release order, not merely final
 prose after the main result. `TestRealClaude_BackgroundReplyCompletion` serializes
 its release with recorder writes, saves the next source index, and requires a
-successful child tool result echoing a rig-only token before attributed final
-text. A pre-release final, wrong tool or failed result cannot prove the boundary.
-The committed scrubbed replay replaces identifiers/prose with rig-authored values
-and retains source ordering and loss counts; original stdout stays private.
-Persistent production parsers compare original and scrubbed relevant events at
-every source index. A final-frame-only check would miss preceding partial-block
-state that suppresses the settled companion. See [child completion](thread-package-agents-and-background-work.md#parent-repair)
+successful child Bash result echoing the private release token before the
+attributed response. `backgroundReplyBoundary` feeds the full sequence through
+one persistent production parser and requires a nonblank `TextChunk` with
+intrinsic completion, matching the response's message ID and spawning Agent.
+Completion depends on that attribution and the ordered successful main turn,
+release, correlated tool result and response rather than exact model wording;
+punctuation and narration are valid. The live prompt requires no exact
+completion phrase.
+Blank, missing, malformed or parser-incomplete text, wrong-child/tool evidence,
+failed main/tool results and pre-release responses cannot establish completion.
+
+Early progress narration must neither become completion nor hide a later genuine
+response. The first observation owns each response message identity, including
+an incomplete shape: replaying it after release cannot move its source position.
+A fresh response identity after the correlated result remains eligible.
+
+`backgroundReplyReplay` replaces identifiers/prose with rig-authored values and
+retains source ordering and loss counts; original stdout and arbitrary observed
+prose stay private. At the selected source index, both persistent original and
+scrubbed production parsers must emit the corresponding completed child
+`TextChunk`. Only that selected completion's text is canonicalized to
+`pyry-3589-finished`; this published text is explicitly synthetic, never verbatim
+observed prose. Relevant events must agree under explicit privacy normalization
+at every source index, preserving ownership, message identity, completion,
+multiplicity and order. A final-frame-only check would miss preceding
+partial-block state that suppresses the settled companion. Release-token
+validation, physical-witness correlation, loss rejection and the publication deny
+scan remain required.
+
+Rejection controls need otherwise acceptable evidence. `TestBackgroundReplyWording`
+keeps canonical wording in negative cases so the old exact-phrase check cannot
+mask broken rejection gates by rejecting varied prose first. Likewise,
+`TestBackgroundReplyReplayUnknownTaskPatch` includes a valid selected completion;
+otherwise missing-selection rejection could hide a dropped or mistyped patch
+field. See [the recognition design](../../specs/architecture/3620-background-reply-wording.md),
+[child completion](thread-package-agents-and-background-work.md#parent-repair)
 and [capture evidence](development-verification-captures-and-live-evidence.md).
 
 Source citation edits can break exact comparisons with historical capture prose.
