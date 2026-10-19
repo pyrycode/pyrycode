@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Eleven scenarios run the same assertions in live capture and offline replay:
+Seventeen scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -73,6 +73,27 @@ Eleven scenarios run the same assertions in live capture and offline replay:
   parser-gap and unknown-rate-status alarms. Owned matching Write and Read
   use/result pairs make the sample non-vacuous in live capture and replay.
   Real filesystem effects and newly introduced provider shapes remain live.
+
+- `family-alias`: the complete menu has one row per family; two completed turns
+  must announce a nonempty baseline and then the selected family's exact model
+  after a model-only pinned-ID request. The family rule is checked independently
+  of production rewriting. Current provider menu/resolution stays live.
+- `attachment-read`: upload one declared, hashed chunk before routing any turn,
+  require its correlated stored receipt and the actual on-host directory/file,
+  then send the attachment ID with a prompt that withholds its contents. Owned
+  accumulated text must contain the file-only token before terminal idle; errors
+  and modals fail. The live caller mints a 96-bit random token and the recorded
+  caller uses a fixed fixture token. Unpredictable real file-opening proof stays
+  live; the daemon upload and storage checks also run during replay.
+- Four `bypass-questions-*` cases cross stored/operator bypass with the existing
+  stdio-permission configuration off/on. Every case answers one single-select
+  and one multi-select batch, including custom free text, checks continuation
+  choice ordering and exact answer history, runs the ordinary Bash witness turn,
+  and confirms the child still reports bypass. Both original live observation
+  and capture/replay independently require init to offer AskUserQuestion in
+  bypass, exactly two uniquely identified asks, at least three completed results
+  and no host approval for ordinary tools. Physical Bash effects and unpredictable
+  labels/free text remain live proof.
 
 `make e2e` includes these cases in the ordinary offline integration selection.
 `make e2e-recorded-claude` runs just the recorded suite. Missing fixtures fail; nothing
@@ -243,7 +264,8 @@ declarations and remaining eligibility reviews are separate; the total eligible
 migration count stays unknown until reviewed. No live requirement is retired.
 
 Review fingerprints include reachable package function bodies plus conservative
-package declaration/method context and the imported shared assertion source.
+package declaration/method context and the imported `scenario` and `claudetape`
+non-test source, including native bypass source audits.
 Changing a timeout constant, model table, harness global or shared assertion
 invalidates the review as well as changing a function. Inventory reports stale
 reviews, and plan/scaffold/batch refuse to proceed. A maintainer reviews the new
@@ -330,3 +352,37 @@ itself to belong to the driving conversation. Controls reject missing or wrong
 models, alias echoes, foreign attribution, log leaks, incomplete menus, wrong
 request correlation, retryable/wrong rejection codes, changed post-rejection
 models, missing/foreign tool results and parser/rate-limit alarms.
+
+### Six-scenario extended batch
+
+`--batch extended-protocol` selects family selection, attachment reading and all
+four bypass-question configurations. These are **six scenarios covering three
+original live test roots**; the bypass root itself has four configuration subtests
+and two question turns plus an ordinary-tool turn per configuration. Scenario,
+root and executed-subtest counts are kept separate. The group shares one complete
+regression and one 201-cut restoration, and its live selection executes all three
+original roots. Default offline selection includes all seventeen scenarios.
+
+The manifest's explicit `initial_yolo` flag seeds only the disposable test
+bootstrap registry, using the original live stored-bypass setup. Operator-bypass
+variants instead retain the explicit CLI flag. All eleven prior entries stay
+false and preserve their arguments/fixtures. The scaffold defaults the new field
+to false; malformed or implicit configuration is rejected by the Python audit.
+The stdio configuration labels describe the selected harness configuration;
+bypass runtime routing still follows production's stdio ownership rule.
+
+The bypass source audit runs against the original live observer's selected source
+frames and the complete recorded stdout. Capture must pass it before publication,
+and every replay rechecks it before releasing frames. The ordinary file witness
+is always checked in the original live test and fresh capture; replay cannot
+claim real Claude Bash execution. Question histories and session settings are
+read from the real isolated daemon in every mode. Fixed recorded question inputs,
+free text and witness bytes preserve complete ordered request comparison.
+
+The attachment source file lives in a sibling test directory, outside the daemon
+HOME/workdir. Its read-back bytes determine the chunk size and SHA, and the shared
+driver checks the actual stored directory before sending its first routed turn.
+A fixed replay token establishes deterministic protocol/data assertions only;
+it does not replace the original live random-token non-guessability claim.
+No dynamic session-ID rebinding, multi-process playback, queue checkpoint support,
+production changes or live-test retirement are introduced by this batch.

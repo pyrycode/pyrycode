@@ -100,7 +100,6 @@ package realclaude
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -109,13 +108,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	scenariohelpers "github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -163,65 +162,13 @@ const attachReadToolLogCap = 8
 func TestInteractiveStreamAttachmentRead(t *testing.T) {
 	runParallel(t)
 	h := startAttachmentReadHarness(t)
-	nonce := time.Now().UnixNano()
-
-	token := mintAttachmentToken(t)
-	file, digest := writeTokenFile(t, token)
-
-	// ── The upload: one chunk, then the reply that says the bytes are on the host ──
-	//
-	// NO TURN IS ROUTED FIRST since #2143. This run used to drive a whole stamp turn
-	// against a real claude — a live prompt and its full drain — for no reason but to
-	// stamp the follow-active cursor attachments.Intake read the destination from;
-	// before any route that cursor is empty, the completing chunk answered
-	// ErrNoConversation, and the dispatch arm mapped it to attachment.storage_failed:
-	// a success-shaped stream that stored nothing. The chunk names its conversation
-	// now, so the upload stands alone and the live budget goes to the turn under test.
-	//
-	// THE TWO STANDING ALARMS WENT WITH IT, and that is deliberate rather than an
-	// oversight. drainForCompletedTurn owns the package's unrecognized_message and
-	// rate_limited arms, and the stamp turn inherited them for free — but it was the
-	// STAMP turn they watched. The turn this file actually asserts on drains through
-	// drainTurnText below, which never carried either arm and still does not. So what
-	// went away is a sentinel over a throwaway prompt, not coverage of anything under
-	// test. Re-arming drainTurnText would be NEW coverage dressed as a restoration,
-	// and no run has yet shown it is wanted; interactive_stream_liveness_test.go
-	// stays the package's owner of both alarms.
-	uploadSingleChunk(t, h, attachReadChunkEnvID, file, digest)
-	awaitAttachmentStored(t, h, attachReadChunkEnvID, 30*time.Second)
-	requireStoredAttachment(t, h.home)
-
-	// ── The message naming it, and the assertion the whole file exists for ──
-	//
-	// The text has to ask for the CONTENTS: the daemon's block tells claude to read
-	// the files, it does not tell claude to say what it found. Without that, a claude
-	// that opened the file correctly could still reply "I've read it" and red this.
-	text := fmt.Sprintf("Read the attached file and reply with its exact contents and "+
-		"nothing else. run=%d", nonce)
-	if strings.Contains(text, token) {
-		t.Fatal("the message text carries the token, so a reply echoing it would prove nothing " +
-			"about whether the file was opened; the token must exist only inside the attachment")
-	}
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   attachReadSendEnvID,
-		Type: protocol.TypeSendMessage,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.SendMessagePayload{
-			ConversationID: attachReadConvID,
-			MessageID:      "m-attach",
-			Text:           text,
-			AttachmentIDs:  []string{attachReadAttachmentID},
-		}),
-	})
-
-	reply, tools := drainTurnText(t, h, attachReadConvID, perTurnReplyBudget)
-	if !strings.Contains(reply, token) {
-		t.Fatalf("the reply does not carry the token that existed only inside the attached file, so "+
-			"nothing here shows claude opened it. Reply (%d bytes): %q. Tools called: %v",
-			len(reply), truncateString(reply, questionTextLogCap), tools)
-	}
-	t.Logf("measured: claude returned the attachment's token in a %d-byte reply, calling %v — the "+
-		"composed path was opened, not guessed", len(reply), tools)
+	sequence := uint64(2)
+	wire := scenariohelpers.Wire{Send: func(kind string, payload any) uint64 {
+		sequence++
+		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+		return sequence
+	}, Next: scenariohelpers.Receive(t, h.phone, h.initRecv)}
+	scenariohelpers.AttachmentRead(t, wire, scenariohelpers.AttachmentReadConfig{Home: h.home, ConversationID: attachReadConvID, AttachmentID: attachReadAttachmentID, Filename: attachReadFilename, Token: mintAttachmentToken(t), Prompt: fmt.Sprintf("Read the attached file and reply with its exact contents and nothing else. run=%d", time.Now().UnixNano()), Budget: perTurnReplyBudget})
 }
 
 // --- fixture ----------------------------------------------------------------
@@ -243,276 +190,6 @@ func mintAttachmentToken(t *testing.T) string {
 			"the token was unguessable, which is the whole basis of its assertion", err)
 	}
 	return hex.EncodeToString(buf)
-}
-
-// writeTokenFile writes the token to a file UNDER t.TempDir() and returns the bytes
-// read back plus their lowercase-hex sha256.
-//
-// THE DIRECTORY IS THE POINT. t.TempDir() is a sibling of the isolated HOME, so the
-// file sits outside both the daemon's tree and claude's cwd. Written under the
-// workdir instead, an ordinary directory listing would find it and this test would
-// green with the attachment path playing no part — the one vacuity that would not
-// announce itself. 0600 matches what attachments.Store writes the daemon-side copy
-// at: these are the user's own private file bytes on both ends.
-//
-// The digest is taken over the bytes READ BACK, which are the same bytes the chunk
-// carries, so the declaration and the payload share provenance and a fixture bug
-// cannot make a self-consistent green. hex.EncodeToString is already lowercase, the
-// canonical form docs/protocol-mobile.md § Attachments compares for exact equality.
-func writeTokenFile(t *testing.T, token string) (file []byte, digest string) {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), attachReadFilename)
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
-		t.Fatalf("write token file: %v", err)
-	}
-	file, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read back token file: %v", err)
-	}
-	sum := sha256.Sum256(file)
-	return file, hex.EncodeToString(sum[:])
-}
-
-// --- upload -----------------------------------------------------------------
-
-// uploadSingleChunk seals the whole file as ONE attachment_chunk at index 0.
-//
-// THE CHUNK COUNT IS DERIVED FROM protocol.MaxAttachmentChunkBytes, never hardcoded
-// to 1, and guarded. attachments.CheckDeclaration compares total_chunks to
-// max(1, ceil(size / bound)) as an EQUALITY, so a fixture that stopped being
-// single-chunk would be refused invalid_chunk for a reason no failure message here
-// would name. The package overview records the same trap from the other side —
-// #1898's multi-chunk fixture derives its count so a future move of the constant
-// reddens loudly instead of silently degrading to one chunk. The ceiling is the
-// receiver's own division-then-remainder form, never (size + bound - 1) / bound,
-// which wraps.
-//
-// attachment_chunk NAMES its conversation (#2142), and since #2143 the daemon files
-// the bytes under exactly that one — validated against its own registry before the
-// id becomes a path component, never trusted as sent. That is why this caller no
-// longer routes a turn first: the destination is on the frame rather than in a
-// cursor only a successful send_message stamps. Naming a conversation is not
-// authorization; confinement is the registry check plus attachments.EnsureDir
-// refusing an escaping directory, and it did not move.
-func uploadSingleChunk(t *testing.T, h *perConvHarness, envID uint64, file []byte, digest string) {
-	t.Helper()
-	totalChunks := len(file) / protocol.MaxAttachmentChunkBytes
-	if len(file)%protocol.MaxAttachmentChunkBytes != 0 {
-		totalChunks++
-	}
-	totalChunks = max(totalChunks, 1)
-	if totalChunks != 1 {
-		t.Fatalf("fixture of %d bytes cuts into %d chunks at a bound of %d; this run drives a "+
-			"SINGLE-chunk transfer and its declaration would be refused invalid_chunk",
-			len(file), totalChunks, protocol.MaxAttachmentChunkBytes)
-	}
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   envID,
-		Type: protocol.TypeAttachmentChunk,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.AttachmentChunkPayload{
-			ConversationID: attachReadConvID,
-			AttachmentID:   attachReadAttachmentID,
-			Index:          0,
-			TotalChunks:    totalChunks,
-			Filename:       attachReadFilename,
-			MimeType:       "text/plain",
-			Size:           int64(len(file)),
-			SHA256:         digest,
-			Data:           file,
-		}),
-	})
-}
-
-// awaitAttachmentStored drains to the attachment_stored correlated to the chunk that
-// completed the transfer, and fails naming the code on any error frame.
-//
-// It is a local drain rather than drainForReply because drainForReply skips a
-// TypeError silently and would report a bare timeout on the most diagnostic frame in
-// the run. Here the refusal CODE is the whole diagnostic, and since #2143 it reads:
-// invalid_chunk is EITHER the declaration arithmetic OR handleAttachmentChunk's
-// destination gate — the conversation named on the chunk is empty, unknown, or not
-// one this daemon hosts — and that second cause is the one this ticket newly makes
-// reachable, so check it first; storage_failed is the host write itself (EnsureDir or
-// Store) and no longer says anything about the follow-active cursor, which this path
-// stopped reading; integrity_failed is the digest or the assembled length.
-func awaitAttachmentStored(t *testing.T, h *perConvHarness, envID uint64, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		env, ok := nextAttachReadEnvelope(t, h, deadline)
-		if !ok {
-			t.Fatalf("no attachment_stored for chunk envelope %d within %s — the single chunk either "+
-				"never reached the intake or did not complete the transfer", envID, timeout)
-		}
-		switch env.Type {
-		case protocol.TypeAttachmentStored:
-			if env.InReplyTo == nil || *env.InReplyTo != envID {
-				continue // an earlier transfer's reply cannot exist here, but correlate anyway
-			}
-			var p protocol.AttachmentStoredPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode attachment_stored payload: %v", err)
-			}
-			if p.AttachmentID != attachReadAttachmentID {
-				t.Fatalf("attachment_stored attachment_id = %q, want %q (the id this run chose)",
-					p.AttachmentID, attachReadAttachmentID)
-			}
-			return
-		case protocol.TypeError:
-			var ep protocol.ErrorPayload
-			if err := json.Unmarshal(env.Payload, &ep); err != nil {
-				t.Fatalf("the upload was refused and its error payload did not decode: %v", err)
-			}
-			t.Fatalf("the upload was refused with code %q (retryable=%v); invalid_chunk is either the "+
-				"declaration arithmetic or the destination gate — the conversation this chunk named "+
-				"is empty, unknown, or not one the daemon hosts, so check seedBoundConversation — "+
-				"storage_failed is the host write (EnsureDir or Store), integrity_failed the digest",
-				ep.Code, ep.Retryable)
-		}
-		// Nothing else should be on the wire: no turn is routed before this upload, so
-		// the routed turn's tail that used to arrive here has no producer. Classify
-		// after decrypt anyway, which keeps the receive nonce in lockstep, and read on.
-	}
-}
-
-// requireStoredAttachment is the deterministic precondition under the stochastic
-// assertion: the bytes are actually on the host before claude is asked to read them.
-//
-// DIFFERENT FABRIC, and it separates two reds that are otherwise identical. Without
-// it, a stored file that never landed and a claude that never opened one both
-// surface as "the reply does not carry the token", and only the second is the
-// finding this run exists to make. #1898 owns the bytes-on-host claim in full; this
-// is one directory read, not a second copy of that proof.
-//
-// It names the DIRECTORY and never the leaf. The leaf is attachments.SanitizeFilename's
-// rendering of a client filename, which § Attachments bans logging for a privacy
-// reason sanitising does not lift — the same obligation attachments.ResolvePath puts
-// on its own callers. The directory is built from two canonical-shape-checked ids
-// and carries no client text.
-func requireStoredAttachment(t *testing.T, home string) {
-	t.Helper()
-	dir := filepath.Join(home, ".pyry", "test", "conversations", attachReadConvID,
-		"attachments", attachReadAttachmentID)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("attachment directory: %v — the daemon replied attachment_stored and the host has "+
-			"no such directory, so the composed prompt would name a path that opens nothing", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("attachment directory holds %d entries, want exactly 1 — a second entry is a leaked "+
-			"temporary file from attachments.Store's rename", len(entries))
-	}
-	if got := entries[0].Name(); got != attachReadFilename {
-		t.Fatalf("stored file name = %q, want %q — a plain-ASCII name is inside SanitizeFilename's "+
-			"allowlist and passes through unchanged", got, attachReadFilename)
-	}
-}
-
-// --- the turn under test ----------------------------------------------------
-
-// drainTurnText accumulates the turn's assistant text for convID and returns it with
-// the distinct tool names claude called along the way, at the terminal
-// turn_state{idle}.
-//
-// IT ACCUMULATES RATHER THAN SIGNALS, which is the whole reason it is not
-// drainForAssistantReply: that one returns on the FIRST non-empty delta and discards
-// the text, so it proves liveness and could never see a token that arrives in the
-// third delta. Widening it would change what fourteen callers assert.
-//
-// IDLE IS ONLY TERMINAL ONCE A DELTA HAS BEEN SEEN. Since #2143 no turn runs ahead
-// of this one at all, so no earlier idle should be on the wire — but accepting one
-// unconditionally would turn any stray frame into an empty accumulation and a token
-// failure that blamed claude for a wire bug. Gating on
-// sawDelta makes the deadline message name which milestone was missed instead, the
-// same split drainForCompletedTurn makes.
-//
-// A MODAL IS A HARD FAIL, not something to answer. spawnBootstrapDaemon passes
-// --dangerously-skip-permissions, so a file read raises no permission modal; one
-// arriving means that premise broke, and without an answer the turn parks until the
-// daemon's approval window elapses and the diagnostic becomes a bare wall clock.
-//
-// The frame loop is the package's standing one: read binary→phone frames in receive
-// order, decrypt EVERY noise_msg to keep the sequential receive nonce in sync, and
-// skip a non-noise_msg control frame WITHOUT decrypting. A TypeError is a hard fail
-// naming its code — attachment.not_found here means the resolver, the conversation
-// binding or a non-canonical id, and never claude.
-func drainTurnText(t *testing.T, h *perConvHarness, convID string, timeout time.Duration) (string, []string) {
-	t.Helper()
-	var (
-		text     strings.Builder
-		tools    []string
-		seenTool = map[string]struct{}{}
-		sawDelta bool
-	)
-	deadline := time.Now().Add(timeout)
-	for {
-		env, ok := nextAttachReadEnvelope(t, h, deadline)
-		if !ok {
-			if !sawDelta {
-				t.Fatalf("no non-empty assistant_delta for %q within %s — the message naming the "+
-					"attachment never produced a turn (it was refused before enqueue, or the drain "+
-					"never delivered it)", convID, timeout)
-			}
-			t.Fatalf("claude replied for %q but the turn never reached terminal turn_state{idle} "+
-				"within %s; %d byte(s) so far, tools %v", convID, timeout, text.Len(), tools)
-		}
-		switch env.Type {
-		case protocol.TypeError:
-			var ep protocol.ErrorPayload
-			if err := json.Unmarshal(env.Payload, &ep); err != nil {
-				t.Fatalf("the message was refused and its error payload did not decode: %v", err)
-			}
-			t.Fatalf("the message naming the attachment was refused with code %q (retryable=%v); "+
-				"attachment.not_found means the id did not resolve under this conversation — the "+
-				"resolver, the binding, or a non-canonical id, never claude", ep.Code, ep.Retryable)
-
-		case protocol.TypeModalShown:
-			var shown protocol.ModalShownPayload
-			if err := json.Unmarshal(env.Payload, &shown); err != nil {
-				t.Fatalf("decode modal_shown payload: %v", err)
-			}
-			t.Fatalf("a modal was raised (class %q, id %q, title %q) — this harness spawns claude "+
-				"with --dangerously-skip-permissions precisely so reading the attachment raises "+
-				"none, and nothing here answers one, so the turn would park until the daemon's "+
-				"approval window elapsed", shown.Class, shown.ModalID,
-				truncateString(shown.Title, questionLabelLogCap))
-
-		case protocol.TypeToolUse:
-			var p protocol.ToolUsePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode tool_use payload: %v", err)
-			}
-			if p.ConversationID != convID || p.Name == "" {
-				continue
-			}
-			if _, dup := seenTool[p.Name]; dup || len(tools) >= attachReadToolLogCap {
-				continue
-			}
-			seenTool[p.Name] = struct{}{}
-			tools = append(tools, truncateString(p.Name, questionLabelLogCap))
-
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				sawDelta = true
-				text.WriteString(p.Text)
-			}
-
-		case protocol.TypeTurnState:
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			if st.State != "idle" || st.ConversationID != convID || !sawDelta {
-				continue
-			}
-			return text.String(), tools
-		}
-	}
 }
 
 // nextAttachReadEnvelope reads and decrypts the next daemon→phone application

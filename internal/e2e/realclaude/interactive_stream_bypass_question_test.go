@@ -3,14 +3,15 @@
 package realclaude
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -103,35 +104,19 @@ func TestInteractiveStreamBypassQuestions(t *testing.T) {
 					t.Fatal("live child lost bypass mode")
 				}
 
-				var initSeen bool
-				requests, results := 0, 0
-				requestIDs := make(map[string]bool)
+				var tape claudetape.Tape
 				for {
 					select {
 					case observed := <-observations:
-						switch observed.Type {
-						case "system":
-							initSeen = true
-							if !slices.Contains(observed.Tools, "AskUserQuestion") || observed.PermissionMode != runningModeBypass {
-								t.Fatal("real init did not offer AskUserQuestion in bypass mode")
-							}
-						case "control_request":
-							if observed.Request.ToolName != "AskUserQuestion" {
-								t.Fatal("ordinary tool acquired a host permission prompt")
-							}
-							if observed.RequestID == "" || observed.Request.ToolUseID == "" || requestIDs[observed.RequestID] {
-								t.Fatal("question request identity missing or reused")
-							}
-							requestIDs[observed.RequestID] = true
-							requests++
-						case "result":
-							results++
+						raw, err := json.Marshal(observed)
+						if err != nil {
+							t.Fatal(err)
 						}
+						tape.Frames = append(tape.Frames, claudetape.Frame{Direction: "stdout", Data: raw})
 					default:
-						if !initSeen || requests != 2 || results < 3 {
-							t.Fatalf("incomplete live evidence: init=%v requests=%d results=%d", initSeen, requests, results)
+						if err := tape.RequireBypassQuestions(); err != nil {
+							t.Fatal(err)
 						}
-						t.Logf("bypass live proof: init offered AskUserQuestion; %d actual asks answered and resumed, %d completed results, ordinary tool without host approval", requests, results)
 						return
 					}
 				}

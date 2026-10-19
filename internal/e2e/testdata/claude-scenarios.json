@@ -14,7 +14,8 @@
         "Actual semantic memory remains with the three-turn live test."
       ],
       "live_contracts": {},
-      "claude_args": []
+      "claude_args": [],
+      "initial_yolo": false
     },
     {
       "name": "permission-deny",
@@ -27,10 +28,11 @@
         "Denied-file absence and current provider/transport behavior remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamPermissionDeny": "da0bb053d9db519ca5e629d5e10679def10d43d4eb7ee98d19db0a48113690fd",
-        "TestInteractiveStreamStdioPermissionDeny": "c03c3fb5d20d070bd17087e3dc47686d837190fdfaed972fe06737b65b4d57f7"
+        "TestInteractiveStreamPermissionDeny": "5ed055dd66eed49a78305eb368dbbcaf26c590d8090f485bcbb9380b6ed62f84",
+        "TestInteractiveStreamStdioPermissionDeny": "a70d6342ba3b9e13cdec72c8b5fa7ae54ea46681b2b33d2302b032ce38fb785a"
       },
-      "claude_args": []
+      "claude_args": [],
+      "initial_yolo": false
     },
     {
       "name": "reply",
@@ -42,9 +44,10 @@
         "Current provider compatibility remains live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamLiveness": "8265885fab754649d9c4057df7b424641838cce98f2365d0474e944c23ee2c3d"
+        "TestInteractiveStreamLiveness": "6106c1e45ea72eefc5a56980cb23b5d340ffdebe8b68fe1d4833f3ff7e4c329e"
       },
-      "claude_args": []
+      "claude_args": [],
+      "initial_yolo": false
     },
     {
       "name": "question-answer",
@@ -57,10 +60,11 @@
         "Unpredictable labels and current Claude interpretation remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamQuestionAnswer": "364eefb78fecae017d9ac748225b7109767b52d82eff383386a0e932a5047073",
-        "TestInteractiveStreamStdioQuestionAnswer": "be1fcad953eb3b9371ad814617709d5fb3202fcd935d931e2e78bc38cecb8f55"
+        "TestInteractiveStreamQuestionAnswer": "ec32ae6b6b3ebff58fcb8f04a60e5f51f279c6e2f6f7379e4c46c49730548ee5",
+        "TestInteractiveStreamStdioQuestionAnswer": "27a9dec5909728a05bb85fe91ea3ff78c505ae76c392bc3c9a2751410c528ef7"
       },
-      "claude_args": []
+      "claude_args": [],
+      "initial_yolo": false
     },
     {
       "name": "question-refuse",
@@ -72,9 +76,10 @@
         "Blocked-file absence and real provider refusal behavior remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamQuestionRefusal": "895dd795b724a394cd325547fd4b743b554166f9fd953600b8231f340a9dfb18"
+        "TestInteractiveStreamQuestionRefusal": "5f420b053c3d1991a9b3ec820a0943c1ac6f9b2271cb1b05134c3c5a5370df5c"
       },
-      "claude_args": []
+      "claude_args": [],
+      "initial_yolo": false
     },
     {
       "name": "permission-allow",
@@ -87,10 +92,11 @@
         "Actual file creation and current MCP/stdio behavior remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamModalResolution": "aa7c777ea893a40605b583a591656eb2cddc592787cd92d9744885bfc8df93ba",
-        "TestInteractiveStreamStdioModalAllow": "227006daa433035b99cff82ade1ec7b3d28e3d66a503e45b6d6e50c137f5da7d"
+        "TestInteractiveStreamModalResolution": "110b14f05cd3869c3b0bf71d67cf27e16d917e7e341a211be88646a5731fcfc1",
+        "TestInteractiveStreamStdioModalAllow": "9e6dcb0759980d431d30da11753244e59bce8f3d95571e871f06a162b00776d2"
       },
-      "claude_args": []
+      "claude_args": [],
+      "initial_yolo": false
     },
     {
       "name": "permission-cancel",
@@ -102,9 +108,10 @@
         "Actual denied-file absence and 30/60-second real-provider budgets remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamStdioCancelDeniesParkedPermission": "832976d71a7d0ce90a616b13cd21bac2acb5648080b231702d83ef2c1d7528a7"
+        "TestInteractiveStreamStdioCancelDeniesParkedPermission": "f95006aedbadbba7457cf7b02525946d1313feaa58bfed639421eaae18f93d93"
       },
-      "claude_args": []
+      "claude_args": [],
+      "initial_yolo": false
     },
     {
       "name": "send-now-placement",
@@ -116,13 +123,14 @@
         "Actual foreground Bash execution, current Claude interpretation, per-turn budgets and the three-second late-frame window remain live"
       ],
       "live_contracts": {
-        "TestRealClaude_SendQueuedNowPlacement": "928c48f3841143a39d5dad733499d4526ba3367787ed58a83edf4e65139b7aa0"
+        "TestRealClaude_SendQueuedNowPlacement": "4f68daac082d8250bb51cd878272bfb1bc99f155fa2b691b86e31e7a9c7a0966"
       },
       "claude_args": [
         "--model",
         "haiku",
         "--dangerously-skip-permissions"
-      ]
+      ],
+      "initial_yolo": false
     },
     {
       "name": "model-announced",
@@ -139,8 +147,9 @@
         "Current Claude alias resolution and live verbose-log privacy remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamModelAnnouncedFrame": "986c8a0ecebc3e9cbecde7f66b548e6465ebfa9ea79a4c1333a252f2fcb7ceb7"
-      }
+        "TestInteractiveStreamModelAnnouncedFrame": "394783e60fe7024fae66ae1d08f0713f2f4c807e2442871f6ba8286e2e93aa27"
+      },
+      "initial_yolo": false
     },
     {
       "name": "model-rejection",
@@ -156,8 +165,9 @@
         "Current advertised menu completeness, rejection behavior and retained live model remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamRejectsModelAbsentFromCurrentMenu": "0c28ce9ba17f07b56e140b404201bac1f2689770de9fae061a5fa6443d9bbb1d"
-      }
+        "TestInteractiveStreamRejectsModelAbsentFromCurrentMenu": "891fd89732505c440ad790840200b28b8ae4aa8373fbea5929523a36b4b74c00"
+      },
+      "initial_yolo": false
     },
     {
       "name": "tool-turn-clean",
@@ -174,7 +184,119 @@
         "Current Claude tool execution, filesystem effects and newly introduced stream shapes remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamNoUnrecognizedOnToolTurn": "566b46453200c92a174acdec2c698d171d885ed32d59f0f4f24f97250e48287c"
+        "TestInteractiveStreamNoUnrecognizedOnToolTurn": "2e90808e049d208fa1dd4f92bea3f03288d1481d7db22715d9447578a7c26572"
+      },
+      "initial_yolo": false
+    },
+    {
+      "name": "family-alias",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [
+        "--model",
+        "haiku"
+      ],
+      "live_tests": [
+        "TestInteractiveStreamPinnedModelFollowsItsFamily"
+      ],
+      "retained_live": [
+        "Current model menu, pinned-family resolution and actual live model transitions remain live."
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamPinnedModelFollowsItsFamily": "2eba8a4d4c3c638df2c3e08747a799359f2e016826fa032c41fdebcbcfa52ff7"
+      }
+    },
+    {
+      "name": "attachment-read",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [
+        "--model",
+        "haiku",
+        "--dangerously-skip-permissions"
+      ],
+      "live_tests": [
+        "TestInteractiveStreamAttachmentRead"
+      ],
+      "retained_live": [
+        "Unpredictable runtime token and actual Claude file opening remain live; daemon upload/storage checks also execute offline."
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamAttachmentRead": "ebfbecf89aa6cbcee7b3112cc8274ddef705cf967263f44ae227739d76a2310a"
+      }
+    },
+    {
+      "name": "bypass-questions-mcp-stored",
+      "stdio_permission": false,
+      "initial_yolo": true,
+      "claude_args": [
+        "--model",
+        "haiku"
+      ],
+      "live_tests": [
+        "TestInteractiveStreamBypassQuestions"
+      ],
+      "retained_live": [
+        "Unpredictable question labels/free text, actual ordinary Bash file effects and current provider bypass behavior remain live."
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamBypassQuestions": "cf0dcea523931a8c734896a4ad9725d43074889d1f0b90f2b424fd0e278ec394"
+      }
+    },
+    {
+      "name": "bypass-questions-mcp-operator",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [
+        "--model",
+        "haiku",
+        "--dangerously-skip-permissions"
+      ],
+      "live_tests": [
+        "TestInteractiveStreamBypassQuestions"
+      ],
+      "retained_live": [
+        "Unpredictable question labels/free text, actual ordinary Bash file effects and current provider bypass behavior remain live."
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamBypassQuestions": "cf0dcea523931a8c734896a4ad9725d43074889d1f0b90f2b424fd0e278ec394"
+      }
+    },
+    {
+      "name": "bypass-questions-stdio-stored",
+      "stdio_permission": true,
+      "initial_yolo": true,
+      "claude_args": [
+        "--model",
+        "haiku"
+      ],
+      "live_tests": [
+        "TestInteractiveStreamBypassQuestions"
+      ],
+      "retained_live": [
+        "Unpredictable question labels/free text, actual ordinary Bash file effects and current provider bypass behavior remain live."
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamBypassQuestions": "cf0dcea523931a8c734896a4ad9725d43074889d1f0b90f2b424fd0e278ec394"
+      }
+    },
+    {
+      "name": "bypass-questions-stdio-operator",
+      "stdio_permission": true,
+      "initial_yolo": false,
+      "claude_args": [
+        "--model",
+        "haiku",
+        "--dangerously-skip-permissions"
+      ],
+      "live_tests": [
+        "TestInteractiveStreamBypassQuestions"
+      ],
+      "retained_live": [
+        "Unpredictable question labels/free text, actual ordinary Bash file effects and current provider bypass behavior remain live."
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamBypassQuestions": "cf0dcea523931a8c734896a4ad9725d43074889d1f0b90f2b424fd0e278ec394"
       }
     }
   ],
@@ -199,18 +321,26 @@
       "model-announced",
       "model-rejection",
       "tool-turn-clean"
+    ],
+    "extended-protocol": [
+      "family-alias",
+      "attachment-read",
+      "bypass-questions-mcp-stored",
+      "bypass-questions-mcp-operator",
+      "bypass-questions-stdio-stored",
+      "bypass-questions-stdio-operator"
     ]
   },
   "reviews": {
     "TestRealClaude_OrdinaryQueuedPlacement": {
       "disposition": "needs_checkpoint",
       "reason": "Busy queue admission writes no Claude input; require a client-action checkpoint before fast replay.",
-      "contract_sha256": "9efedff18bded89e599d93d405ed5460de06ba7540ac19561f746c4f54194d28"
+      "contract_sha256": "d28c171efa6bb6d8cd07279f4e186e92d22b0f5af837385d944fca5f047370fc"
     },
     "TestInteractiveStreamMultiTurnContinuity": {
       "disposition": "live_only",
       "reason": "Requires current Claude semantic memory across three turns; sequential replay does not establish recall.",
-      "contract_sha256": "b0f16e70725c309ab574613fd46f9d3be3505edfcc7ddb7b64c47d3e4516a063"
+      "contract_sha256": "ef13324975aef1b7ba71c2da12be010849422bf0000e3e75a019f2c63e8f07b3"
     }
   }
 }

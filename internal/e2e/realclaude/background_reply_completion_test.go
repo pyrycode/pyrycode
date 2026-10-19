@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/streamsup"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 const backgroundReplyFixture = "testdata/background_reply_completion.json"
@@ -61,7 +63,7 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 		t.Fatal("runner did not start")
 	}
 	token := rand.Text()
-	prompt := "Use Agent exactly once with run_in_background=true. Tell the Agent: use Bash to execute " + backgroundReplyQuote(rig.path) + ", then reply with exactly pyry-3589-finished. Do not use other tools in the parent, do not wait for the Agent, and immediately reply pyry-3589-launched."
+	prompt := "Use Agent exactly once with run_in_background=true. Tell the Agent: use Bash to execute " + backgroundReplyQuote(rig.path) + ", then give a brief final response confirming completion. Do not use other tools in the parent, do not wait for the Agent, and immediately reply pyry-3589-launched."
 	if err := streamsup.WriteTurn(ctx, stdin, []byte(prompt)); err != nil {
 		t.Fatal("write rig prompt")
 	}
@@ -128,7 +130,7 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 		ProducingSession string                    `json:"producing_session"`
 		Execution        *backgroundReplyExecution `json:"execution"`
 		OS               string                    `json:"os"`
-	}{probeClaudeVersion(bin), strings.TrimSpace(string(revision)), time.Now().UTC().Format(time.RFC3339), indices, len(lines), len(lines) - len(replay), caps, replay, "physical hold witness joined by hook-provided tool ID; explicitly synthetic commands replace observed commands; stable aliased IDs; persistent production parser verified at every source index", childStart, releaseIndex, childResult, launch, mainEnd, final, alias(parent), alias("35890000-0000-4000-8000-000000000001"), &backgroundReplyExecution{Operation: alias(witness.Operation), Tool: alias(witness.Tool)}, runtime.GOOS}
+	}{probeClaudeVersion(bin), strings.TrimSpace(string(revision)), time.Now().UTC().Format(time.RFC3339), indices, len(lines), len(lines) - len(replay), caps, replay, "physical hold witness joined by hook-provided tool ID; explicitly synthetic commands and canonical completion text replace observed values; completion text is not verbatim observed prose; stable aliased IDs; persistent production parser verified at every source index under explicit privacy normalization", childStart, releaseIndex, childResult, launch, mainEnd, final, alias(parent), alias("35890000-0000-4000-8000-000000000001"), &backgroundReplyExecution{Operation: alias(witness.Operation), Tool: alias(witness.Tool)}, runtime.GOOS}
 	safeLines := backgroundReplyTestLines(replay)
 	l, m, f, s, r, p := backgroundReplyBoundary(safeLines, "rig-release-observed", record.Execution)
 	if l != launch || m != mainEnd || f != final || s != childStart || r != childResult || p != alias(parent) {
@@ -171,6 +173,7 @@ func backgroundReplyBoundary(lines []dropcapCaptured, token string, witness *bac
 		Type    string `json:"type"`
 		Subtype string `json:"subtype"`
 		Parent  string `json:"parent_tool_use_id"`
+		IsError bool   `json:"is_error"`
 		Message struct {
 			ID      string `json:"id"`
 			Role    string `json:"role"`
@@ -192,7 +195,11 @@ func backgroundReplyBoundary(lines []dropcapCaptured, token string, witness *bac
 	agents, tools := 0, 0
 	for i, line := range lines {
 		v := &frames[i]
-		if json.Unmarshal(line.Raw, v) != nil || v.Type != "assistant" || v.Message.ID == "" || v.Message.Role != "assistant" {
+		if json.Unmarshal(line.Raw, v) != nil {
+			*v = frame{}
+			continue
+		}
+		if v.Type != "assistant" || v.Message.ID == "" || v.Message.Role != "assistant" {
 			continue
 		}
 		for _, b := range v.Message.Content {
@@ -225,11 +232,20 @@ func backgroundReplyBoundary(lines []dropcapCaptured, token string, witness *bac
 		launch, parent = -1, ""
 		return
 	}
+	var completed []turnevent.TextChunk
+	parser := streamsup.NewParser(func(ev turnevent.Event) {
+		if text, ok := ev.(turnevent.TextChunk); ok && text.TextComplete && text.ParentToolCallID == parent && strings.TrimSpace(text.Text) != "" {
+			completed = append(completed, text)
+		}
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seenResponses := map[string]bool{}
 	for i, v := range frames {
-		if v.Type == "result" && v.Subtype == "success" && v.Parent == "" && mainEnd < 0 {
+		completed = nil
+		_, _ = parser.Write(append(append([]byte(nil), lines[i].Raw...), '\n'))
+		if v.Type == "result" && v.Subtype == "success" && !v.IsError && v.Parent == "" && i > launch && mainEnd < 0 {
 			mainEnd = i
 		}
-		if v.Type == "user" && v.Parent == parent {
+		if v.Type == "user" && v.Parent == parent && i > childStart {
 			for _, b := range v.Message.Content {
 				var output string
 				if b.Type == "tool_result" && b.ToolUseID == witness.Tool && !b.IsError && json.Unmarshal(b.Content, &output) == nil && strings.TrimSpace(output) == token && childResult < 0 {
@@ -237,14 +253,20 @@ func backgroundReplyBoundary(lines []dropcapCaptured, token string, witness *bac
 				}
 			}
 		}
-		if v.Type != "assistant" || v.Message.ID == "" || v.Message.Role != "assistant" {
+		if v.Type != "assistant" || v.Message.ID == "" || v.Message.Role != "assistant" || v.Parent != parent {
 			continue
 		}
+		// First observation owns a response identity even when its shape cannot
+		// intrinsically complete. A later replay cannot move it past release.
+		seen := seenResponses[v.Message.ID]
 		for _, b := range v.Message.Content {
-			if parent != "" && v.Parent == parent {
-				if b.Type == "text" && strings.TrimSpace(b.Text) == "pyry-3589-finished" && final < 0 {
-					final = i
-				}
+			if b.Type == "text" {
+				seenResponses[v.Message.ID] = true
+			}
+		}
+		for _, text := range completed {
+			if !seen && text.MessageID == v.Message.ID && mainEnd > launch && childResult > childStart && i > childResult && final < 0 {
+				final = i
 			}
 		}
 	}

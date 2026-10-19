@@ -245,8 +245,8 @@ func TestControlLiveContextFlights(t *testing.T) {
 	}
 	close(first.block)
 	old := <-oldDone
-	if string(old.Envelope.SessionID) != `"a"` {
-		t.Fatal("old reply lost its source")
+	if old.SessionGeneration != 0 {
+		t.Fatal("overtaken query answered without remembered fallback")
 	}
 	r := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeContextUsage, ""}]
 	if !bytes.Contains(r.Envelope.Payload, []byte("successor")) {

@@ -28,6 +28,7 @@ class ManifestTest(unittest.TestCase):
                            lambda m: m['scenarios'][0].update(retained_live=[]),
                            lambda m: m['scenarios'][0].update(unexpected=True),
                            lambda m: m['scenarios'][0].update(claude_args=None),
+                           lambda m: m['scenarios'][0].update(initial_yolo=1),
                            lambda m: m['scenarios'][0].update(claude_args=['']),
                            lambda m: m['scenarios'][0].update(claude_args=[1]),
                            lambda m: m['scenarios'][2].update(live_contracts={})):
