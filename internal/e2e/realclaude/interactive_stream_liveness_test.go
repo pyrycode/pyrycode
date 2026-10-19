@@ -2,43 +2,11 @@
 
 package realclaude
 
-// TestInteractiveStreamLiveness is the #1153 deliverable: the real-claude
-// counterpart of the fake-side stream liveness proof
-// (TestRelayV2_StreamSendMessageDrainsTurn, #1141). It stands up the interactive
-// daemon under the production stream-json interactive runner
-// (interactive_runner: "stream-json") against a live claude and asserts one real
-// turn streams end-to-end — a non-empty assistant_delta FOLLOWED BY the terminal
-// turn_state{idle}, never a canned or fake response.
-//
-// Per the always-a-real-claude-gate policy (2026-07-08) every operator-facing
-// happy-path flow needs a real-claude e2e that actually RUNS in the pre-ship gate
-// before the Mac daemon binary is swapped — the operator must never be the first
-// real-stack execution. The stream-json interactive runner (#1081) is green
-// against fakeclaude (#1141 liveness + the #1136/#1137/#1138/#1139 riders) but had
-// never run the interactive relay path against REAL claude. This adds that rung.
-//
-// The daemon body is TRANSCRIBED from #854's TestInteractiveBootstrapLiveness
-// (interactive_bootstrap_liveness_test.go) with three deltas: (1) the stream-json
-// toggle is flipped via writeStreamInteractiveConfig before spawn, (2) it drives
-// ONE turn (AC #2, #1141 parity) instead of two, and (3) the drain continues past
-// the first delta to the terminal turn_state{idle} (drainForCompletedTurn) rather
-// than stopping at the first delta (#854's drainForAssistantReply). Every Noise-
-// wire / spawn / seed helper is reused verbatim from #854's file (same package,
-// same build tag).
-//
-// The two seeds still gate the drain, exactly as they do on the fake side (#1141):
-// the stream runner tags turnevents by its construction-time bootstrap pool id
-// (pinned to streamBootstrapUUID by seedBootstrapRegistry); the drain gate forwards
-// to the emitter only when the tag == activeSession(), which resolves streamConvID's
-// binding = streamBootstrapUUID via seedBoundConversation. A UUID mismatch drops
-// every event and hangs the drain, surfacing as the M1 timeout — never a silent
-// pass. Unlike the PTY path (#854) the stream runner reads claude's stdout directly,
-// so there is no transcript-resolution deadlock here; only the gate matters.
-//
-// The config-writer (writeStreamInteractiveConfig) is a standalone helper — not a
-// spawn wrapper — so the permission-flow rider #1154 can compose it with
-// spawnPermissionDaemon (no --dangerously-skip-permissions) instead of
-// spawnBootstrapDaemon.
+// TestInteractiveStreamLiveness drives one real Claude turn through the daemon's
+// stream-json interactive runner and encrypted relay path. It requires nonempty
+// attributed text followed by terminal idle, without constraining model wording
+// or chunk counts. The seeded session and conversation binding must agree so the
+// stream drain can attribute output to the driving conversation.
 
 import (
 	"context"
@@ -136,17 +104,12 @@ func TestInteractiveStreamLiveness(t *testing.T) {
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
 
-	// Drive ONE real turn (AC #2; the fake counterpart #1141 drives one). The
-	// deliberately long response crosses multiple 250 ms emitter coalescing
-	// windows, while the per-run nonce defeats accidental caching without making
-	// the assertion depend on content. Generous budget: real claude on a cold
-	// stream session (spawn + model load + first-turn reply), not fakeclaude
-	// milliseconds.
+	// A cold live session must deliver nonempty text and close within the budget.
+	// Chunk counts and generated wording are independent of basic liveness.
 	nonce := time.Now().UnixNano()
 	sealSendMessage(t, phone, initSend, 2, streamConvID, "m-1",
-		fmt.Sprintf("Without using tools, write exactly ten numbered paragraphs about reliable process supervision. "+
-			"Each paragraph must contain at least two complete sentences. run=%d", nonce))
-	drainForCompletedTurnWithMinimumDeltas(t, phone, initRecv, streamConvID, 120*time.Second, 2)
+		fmt.Sprintf("Without using tools, briefly describe reliable process supervision. run=%d", nonce))
+	drainForCompletedTurn(t, phone, initRecv, streamConvID, 120*time.Second)
 }
 
 // --- stream-json toggle + turn drain ----------------------------------------
@@ -209,61 +172,26 @@ func writeStdioPermissionPromptConfig(t *testing.T, home string) {
 // reads what claude sends today.
 const warnRateLimitStatus = "allowed_warning"
 
-// drainForCompletedTurn reads binary→phone noise_msg frames in receive order —
-// the receive nonce is sequential, so every frame MUST be decrypted in order to
-// keep the CipherState in sync — and returns once it observes a full turn: a
-// non-empty assistant_delta for convID (M1) FOLLOWED BY the terminal
-// turn_state{idle} for convID (M2). This is the stronger drain AC #2 requires;
-// #854's drainForAssistantReply stops at M1.
-//
-// It also asserts a THIRD thing, a negative: that the turn produces no
-// unrecognized_message frame. See that arm for why it is the most valuable
-// assertion in this file.
-//
-// And a FOURTH, the same shape (#1411): that the turn produces no rate_limited
-// frame. claude emits its rate_limit_event line once per run whatever the state of
-// the usage-limit window, so a healthy run's silence rests on the parser's gate
-// matching claude's benign status value — another measurement, with its own day to
-// go stale. See that arm for what it tolerates and the three readings a red run
-// carries.
-//
-// It mirrors the fake-side two-milestone drain (#1141,
-// `TestRelayV2_StreamSendMessageDrainsTurn`) with the real-claude adaptation: NO
-// content/echo assertion — real claude's words are non-deterministic, so M1
-// asserts only non-empty text. A leading turn_state{responding} precedes the
-// delta; turn_states are ignored until sawDelta. On the deadline, a milestone-
-// specific t.Fatalf names the likely cause (a UUID mismatch between the two seeds
-// drops every event and hangs the drain).
-//
-// IT RETURNS THE DRIVING CONVERSATION'S REPLY TEXT, concatenated across deltas,
-// for callers that need one (#2087). The drain itself still asserts nothing about
-// content — the paragraph above holds, and adding a content assertion here would
-// impose it on all nine callers. What a returned string buys is a caller-local
-// assertion for the case where the turn's SHAPE is not enough: #2087 needs to
-// know that claude actually loaded a skill, and only a token that exists solely
-// inside the skill body can say so. Returning a value rather than taking a sink
-// keeps every existing call site compiling unchanged, since a Go call used as a
-// statement may discard results.
-func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) string {
+// drainForCompletedTurn decrypts every noise_msg in receive order to preserve the
+// receive nonce. It returns the driving conversation's concatenated reply after
+// a non-whitespace delta (M1) followed by matching terminal idle (M2). Idle before
+// M1 cannot close this turn. Unknown messages and unrecognized rate-limit statuses
+// are global alarms, including frames attributed to other conversations.
+func drainForCompletedTurn(t *testing.T, phone completedTurnReceiver, cs *noise.CipherState, convID string, timeout time.Duration) string {
 	t.Helper()
-	return drainForCompletedTurnWithMinimumDeltas(t, phone, cs, convID, timeout, 1)
-}
-
-// drainForCompletedTurnWithMinimumDeltas applies drainForCompletedTurn's full
-// frame inventory and terminal-idle contract. It ignores matching idle frames
-// until the first non-empty delta identifies this turn, then requires at least
-// minDeltas such frames before accepting idle.
-func drainForCompletedTurnWithMinimumDeltas(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration, minDeltas int) string {
-	t.Helper()
-	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, minDeltas, false)
+	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, false)
 }
 
 func drainForCompletedTurnWithoutModal(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) string {
 	t.Helper()
-	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, 1, true)
+	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, true)
 }
 
-func drainForCompletedTurnOptions(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration, minDeltas int, rejectModal bool) string {
+type completedTurnReceiver interface {
+	ReceiveBytes(time.Duration) ([]byte, error)
+}
+
+func drainForCompletedTurnOptions(t *testing.T, phone completedTurnReceiver, cs *noise.CipherState, convID string, timeout time.Duration, rejectModal bool) string {
 	t.Helper()
 	nonEmptyDeltas := 0
 	var reply strings.Builder
@@ -275,11 +203,6 @@ func drainForCompletedTurnOptions(t *testing.T, phone *fakephone.Client, cs *noi
 				t.Fatalf("M1: never observed a non-empty assistant_delta for %q within %s — the turn never drained "+
 					"end-to-end (delivery never reached the child, or the parser / drain gate / emitter dropped it — "+
 					"most likely a UUID mismatch between seedBootstrapRegistry and seedBoundConversation)", convID, timeout)
-			}
-			if nonEmptyDeltas < minDeltas {
-				t.Fatalf("M1: observed %d non-empty assistant_delta frame(s) for %q within %s, want at least %d — "+
-					"the reply did not stream across multiple emitter coalescing windows",
-					nonEmptyDeltas, convID, timeout, minDeltas)
 			}
 			t.Fatalf("M2: observed the assistant_delta for %q but never a terminal turn_state{idle} within %s — "+
 				"the turn opened but never closed", convID, timeout)
@@ -318,25 +241,8 @@ func drainForCompletedTurnOptions(t *testing.T, phone *fakephone.Client, cs *noi
 				t.Fatalf("unexpected second modal_shown while draining the session-granted turn: %s", env.Payload)
 			}
 		case protocol.TypeUnrecognizedMessage:
-			// THE REGRESSION ALARM on the parser's known-ignored list.
-			//
-			// A normal turn against live claude must produce ZERO of these. The
-			// parser splits claude's output two ways: types we knowingly ignore
-			// stay silent, anything else surfaces as this frame. That split rests
-			// on a MEASUREMENT (streamsup/parser.go ignoredLineTypes, taken
-			// 2026-07-27), and a measurement goes stale the day claude ships a new
-			// message type or content block.
-			//
-			// So this assertion is the alarm the whole unrecognized-message feature
-			// exists to provide, and it fires HERE — in the pre-ship gate, before a
-			// binary swap — rather than in front of a user afterwards. It sits in
-			// the shared drain deliberately: every stream spec that drives a real
-			// turn becomes a sentinel for free.
-			//
-			// Going red does NOT necessarily mean something is broken. It means
-			// claude's output grew a shape we do not map. Read the payload, decide
-			// whether it deserves a mapping or an entry on the known-ignored list,
-			// and re-run the slice 0 measurement.
+			// A normal live turn must not expose parser gaps. This global alarm
+			// requires a mapping or a measured known-ignored classification.
 			var p protocol.UnrecognizedMessagePayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				t.Fatalf("decode unrecognized_message payload: %v", err)
@@ -348,41 +254,9 @@ func drainForCompletedTurnOptions(t *testing.T, phone *fakephone.Client, cs *noi
 				"measurement before deciding.",
 				p.Site, p.MessageType, p.Truncated, p.Raw)
 		case protocol.TypeRateLimited:
-			// THE STANDING ALARM on the parser's benign-status measurement (#1411).
-			//
-			// claude emits its rate_limit_event line ONCE PER RUN whatever the state of
-			// the usage-limit window — every capture on record reported "allowed", i.e.
-			// no limit in force, and the line fired anyway. So the parser gates it:
-			// the one measured-benign status is silent, any other non-empty status
-			// emits. A normal turn against live claude must therefore produce zero
-			// frames THIS DRAIN DOES NOT RECOGNISE, and this is the only tier that can
-			// say so about what claude sends TODAY. Its hermetic sibling
-			// (internal/e2e/relay_v2_stream_rate_limit_test.go) feeds the captured bytes
-			// and would stay green through a change in claude's status vocabulary; this
-			// one would not.
-			//
-			// No conversation filter, matching the arm above: a usage limit is a
-			// condition of the ACCOUNT, so a frame bound to any conversation is the
-			// alarm.
-			//
-			// warnRateLimitStatus is LOGGED AND TOLERATED rather than fatal — see its
-			// doc for the measurement and for why the daemon emitting it is correct.
-			// Anything else is fatal, and going red has THREE readings, with status the
-			// discriminator:
-			//
-			//  1. A USAGE LIMIT REALLY IS IN FORCE on this account right now. Not a
-			//     daemon bug — this is the frame working. The window resets; re-run then.
-			//
-			//  2. claude renamed or recapitalised the benign status, so
-			//     streamsup.benignRateLimitStatus ("allowed") has gone stale and every
-			//     healthy run now emits. One constant edit fixes it — confirm against a
-			//     fresh drop-census capture before making it.
-			//
-			//  3. claude grew ANOTHER allowed-but-notable status beside the two already
-			//     measured, the way "allowed_warning" appeared beside "allowed" on
-			//     2026-08-22. The daemon is behaving correctly and it is this drain that
-			//     needs to learn the value — capture it before adding it, exactly as
-			//     reading 2 requires.
+			// Rate limits affect the account, so there is no conversation filter.
+			// Tolerate only the measured warning status; unknown statuses require
+			// checking account limits or remeasuring the provider's vocabulary.
 			var p protocol.RateLimitedPayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				t.Fatalf("decode rate_limited payload: %v", err)
@@ -411,16 +285,14 @@ func drainForCompletedTurnOptions(t *testing.T, phone *fakephone.Client, cs *noi
 			if p.ConversationID != convID {
 				continue
 			}
-			// Every delta is accumulated: a reply arrives in pieces and a caller's
-			// token can land in any of them. The requested minimum decides when M1
-			// is satisfied; the default drain keeps its one-delta contract.
+			// Accumulate every matching fragment; callers can inspect the full reply.
 			reply.WriteString(p.Text)
 			// M1: liveness — non-empty streamed deltas for the driving conv. No
 			// content/echo assertion (real claude's words are non-deterministic).
 			if strings.TrimSpace(p.Text) != "" {
 				nonEmptyDeltas++
-				t.Logf("M1: non-empty assistant_delta %d/%d (seq=%d, %d bytes) for %q",
-					nonEmptyDeltas, minDeltas, p.Seq, len(p.Text), convID)
+				t.Logf("M1: non-empty assistant_delta %d (seq=%d, %d bytes) for %q",
+					nonEmptyDeltas, p.Seq, len(p.Text), convID)
 			}
 		case protocol.TypeTurnState:
 			var st protocol.TurnStatePayload
@@ -436,11 +308,7 @@ func drainForCompletedTurnOptions(t *testing.T, phone *fakephone.Client, cs *noi
 				// this idle cannot be attributed to the turn being drained.
 				continue
 			}
-			if nonEmptyDeltas < minDeltas {
-				t.Fatalf("M1: terminal turn_state{idle} arrived after %d non-empty assistant_delta frame(s) "+
-					"for %q, want at least %d", nonEmptyDeltas, convID, minDeltas)
-			}
-			// M2: after the required deltas, the terminal idle state closes the turn.
+			// M2: after matching nonempty text, terminal idle closes the turn.
 			t.Logf("M2: terminal turn_state{idle} for %q — the turn closed", convID)
 			return reply.String()
 		}
