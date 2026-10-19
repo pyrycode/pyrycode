@@ -45,9 +45,9 @@ func TestRealClaude_BashTool_NonZeroExit(t *testing.T) {
 		// around the one command, and the budget counts every assistant
 		// message. A tight cap trips before the command runs. The task
 		// completes well under this and stops at end_turn. See Lessons 2026-06-03.
-		MaxTurns:     10,
-		Effort:       "low",
-		Model:        "claude-haiku-4-5",
+		MaxTurns: 10,
+		Effort:   "low",
+		Model:    "claude-haiku-4-5",
 	})
 
 	if result.ExitCode != 0 {
@@ -280,6 +280,9 @@ func TestRealClaude_LargePromptNearContextWindow(t *testing.T) {
 // skipping the test with a named-variable message when not found —
 // matches smoke_test.go's skip-with-context shape.
 func resolveClaudeBin(t *testing.T) string {
+	if c, ok := runnerRecordingCurrent(t); ok {
+		return c.Wrapper
+	}
 	t.Helper()
 	if env := os.Getenv("PYRY_CLAUDE_BIN"); env != "" {
 		envAbs, err1 := filepath.Abs(env)
@@ -382,4 +385,3 @@ func buildUserTurnEnvelope(prompt string) ([]byte, error) {
 	}
 	return append(b, '\n'), nil
 }
-

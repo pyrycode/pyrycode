@@ -214,7 +214,7 @@ func cedgeAwaitCompactTurn(c *cedgeCollector, wantEnds, sentAt int, quiet, budge
 func TestRealClaude_CompactingEdges(t *testing.T) {
 	runParallel(t)
 	claudeBin := resolveClaudeBin(t)
-	home := liveHome(t) // t.Skip when no credentials
+	home := runnerRecordingHome(t, true) // t.Skip when no credentials
 
 	// A fresh EMPTY directory, deliberately not a git repo: no branch names and no
 	// file contents can reach claude's context, and therefore none can reach a
@@ -223,7 +223,7 @@ func TestRealClaude_CompactingEdges(t *testing.T) {
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
 		t.Fatalf("#2227: create workdir: %v", err)
 	}
-	nonce := time.Now().UnixNano()
+	nonce := runnerRecordingNonce(t, time.Now().UnixNano())
 
 	collector := &cedgeCollector{}
 	// The SHIPPED parser, wired exactly as production wires it (Config.Stdout), so
@@ -259,6 +259,8 @@ func TestRealClaude_CompactingEdges(t *testing.T) {
 			t.Errorf("#2227: streamsup.Run did not return within %s of cancel", ccapRunExitWait)
 		}
 	})
+
+	t.Cleanup(func() { finishRunnerRecordingRole(t, "compact") })
 
 	stdin := dropcapWaitForChild(runner)
 	if stdin == nil {

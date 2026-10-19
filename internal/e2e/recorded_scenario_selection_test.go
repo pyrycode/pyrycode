@@ -51,7 +51,7 @@ func TestRecordedSelectionHelperProcess(t *testing.T) {
 		delete(recordedScenarioDrivers, "reply")
 	}
 	selected := selectedRecordedScenarios(t)
-	if name == "all" && len(selected) != len(recordedScenarioDrivers)+len(recordedPoolProfiles)+len(claudetape.DaemonSuiteProfiles())+len(claudetape.CLIProfiles()) {
+	if name == "all" && len(selected) != len(recordedScenarioDrivers)+len(recordedPoolProfiles)+len(claudetape.DaemonSuiteProfiles())+len(claudetape.CLIProfiles())+len(claudetape.RunnerProfiles()) {
 		t.Fatal("default selection omitted a registered case")
 	}
 	if name == "subset" && strings.Join(selected, ",") != "reply,permission-deny" {

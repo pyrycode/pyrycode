@@ -605,3 +605,28 @@ can launch an independent fallback-suggestion print process while the second
 conversation runs. The recorder rejects that unowned invocation. Supporting it
 requires capturing the print request and its causal connection to the first
 reply, including cancellation; it must not be suppressed for recording.
+
+
+### Direct runner query and parser profiles
+
+`--batch direct-runner` proposes the original two-arm applied-settings query and
+compacting-edge collector roots. The production runner/parser and independent
+raw `response.applied` tap remain inside the compiled original test binary.
+That binary is the runner checksum owner; these roots do not claim to use an
+otherwise unused daemon executable. Inherited and explicit settings arms have
+separate fixed session roles. The explicit effort still comes from the inherited
+arm's actual initialize menu, and explicit-null effort remains distinct from a
+missing field. Compaction keeps both original priming turns, the original compact
+request, event ordering, complete boundary fields and zero-gap assertions.
+
+Each role has closed argv, no input-file flags, and an empty controlled workdir
+whose relative path and mode are checked. Applied-settings retains its original
+empty `--setting-sources` value; provider-created HOME state between its two arms
+remains a current-provider obligation. A role seals before its original runner
+cancellation, and its wrapper waits boundedly through that cancellation. The
+original root and cleanup must pass before publication. Exclusive claims, full
+role inventories and immutable per-role artifact hashes reject additional,
+missing, failed, modified or late invocations. Replay has no Claude credentials
+and never launches a provider. Whole-role request comparisons preserve every
+control query and complete outgoing JSON field. Provider compaction behavior,
+settings defaults and menu accuracy remain covered by the original live roots.

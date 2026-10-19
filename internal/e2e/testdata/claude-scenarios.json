@@ -1050,6 +1050,40 @@
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
       ]
+    },
+    {
+      "name": "runner-applied-settings",
+      "boundary": "runner_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaudeAppliedSettingsBeforeFirstTurn"
+      ],
+      "live_contracts": {
+        "TestRealClaudeAppliedSettingsBeforeFirstTurn": "6ac880b70837267466bc09a8cc4291e00227c19a5b6fd74eb6bd82fb799a60cd"
+      },
+      "retained_live": [
+        "Current Claude model/effort menu, applied settings and compaction production; provider-created HOME state between settings arms; physical execution and provider timing."
+      ]
+    },
+    {
+      "name": "runner-compaction",
+      "boundary": "runner_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_CompactingEdges"
+      ],
+      "live_contracts": {
+        "TestRealClaude_CompactingEdges": "b42fe38fa36c1be6300885485e31773f23c6186bf8ebbf22ac79a1258bfad714"
+      },
+      "retained_live": [
+        "Current Claude model/effort menu, applied settings and compaction production; provider-created HOME state between settings arms; physical execution and provider timing."
+      ]
     }
   ],
   "batches": {
@@ -1175,6 +1209,10 @@
       "cli-role-developer",
       "cli-role-review",
       "cli-role-documentation"
+    ],
+    "direct-runner": [
+      "runner-applied-settings",
+      "runner-compaction"
     ]
   },
   "reviews": {
@@ -1278,11 +1316,6 @@
       "reason": "Suggestion fallback uses the persistent stream plus a separate print-mode Claude invocation. Need multi-invocation argv/EOF/exit/result support and an explicit suggestion-set checkpoint before clear; keep source-producer isolation assertions.",
       "contract_sha256": "af2855240be93777cb5d96309a2221bb4fce888e8392121bc815aecfdca482d6"
     },
-    "TestRealClaudeAppliedSettingsBeforeFirstTurn": {
-      "disposition": "needs_harness",
-      "reason": "Before-first-turn applied settings are two direct runner arms with independent raw response.applied versus production decoder comparisons. Add a runner-query recorder with explicit file/argv profile, nullable effort and advertised-menu evidence.",
-      "contract_sha256": "6ac880b70837267466bc09a8cc4291e00227c19a5b6fd74eb6bd82fb799a60cd"
-    },
     "TestRealClaudeComposerStopClosedInputKillsHeldTask": {
       "disposition": "live_only",
       "reason": "Closed stdin must leave held work alive until foreground release, then actually exit and remove its background FIFO reader. These are OS/process/descendant effects, not stdout assertions.",
@@ -1342,11 +1375,6 @@
       "disposition": "live_only",
       "reason": "Actual provider cache creation/read input-token warming across two fresh runs is the claim. Recorded usage counters cannot establish a cache hit.",
       "contract_sha256": "d252573bb109009c0477d30a469f78e3641fcc5ff4b429e7ae98ed192755023b"
-    },
-    "TestRealClaude_CompactingEdges": {
-      "disposition": "needs_harness",
-      "reason": "Compacting rise/fall, full boundary fields, event order and zero parser gaps are deterministic candidates in a direct parser/runner harness. Add that recording profile rather than changing the original event-collector assertions into weaker client frames; compaction effectiveness stays live.",
-      "contract_sha256": "b42fe38fa36c1be6300885485e31773f23c6186bf8ebbf22ac79a1258bfad714"
     },
     "TestRealClaude_CompactionCapture": {
       "disposition": "live_only",
