@@ -147,3 +147,26 @@ are allowed and dismissal and continuation may arrive in either order.
   Retain bounded, quoted tool-result diagnostics to distinguish child delivery
   from interpretation if it fails again. Security review remains PASS: only
   synthetic scenario text is logged under the existing cap; no new I/O is added.
+- 2026-10-19: prospective repair of verifier findings 1 and 2 at `c3db5a1f`.
+  Read `scenario.QuestionAnswer` and `scenario.alarm` in
+  `internal/e2e/internal/scenario/question.go`: the shared live driver must retain
+  their parked-batch identity and provider-alarm checks. Pass the original batch
+  explicitly to `awaitQuestionControl`; reject malformed repeated surfaces and
+  changed batch/conversation identities while accepting repeats of that identity.
+  Centralize error, unrecognized-message and rate-limit validation at
+  `receiveQuestionEnvelope`, permitting only `scenario.WarnRateLimitStatus`.
+  Credential-free `TestQuestionAnswerParkedSurface` and
+  `TestQuestionAnswerEnvelopeAlarm` cover these checks, including bounded, quoted
+  diagnostics. Existing dismissal-before-answer rejection remains in place.
+  No overlapping remote feature branches touch the repair files. This restores
+  one driver's existing delivery-proof invariant, with no independent consumer
+  or useful split. About 120 additional written lines bring the existing 736-line
+  branch above the 800-line ceiling; the handback floor preserves this inseparable
+  repair and its verification. Zero new exported types, two consumer updates,
+  four acceptance criteria and at most ten state-machine reject branches remain.
+  Security re-review: PASS. These validators fail closed on untrusted frames and
+  cap/quote diagnostics. Existing transport bounds, nonce ownership, credentials,
+  file access, subprocess cleanup, cryptography and single-owner concurrency are
+  unchanged. Run focused tagged race controls, tagged compilation/vet, full vet
+  and the daemon build on macOS. Counted live acceptance and complete suites stay
+  dispatcher-owned as the ticket requires; documentation handoff is unchanged.
