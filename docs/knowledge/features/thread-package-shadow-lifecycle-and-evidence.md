@@ -109,6 +109,28 @@ consumers before replacement even if withdrawal/reload races the status read.
 See [observation readiness](thread-package-background-store-replay.md#loading-and-replay-readiness)
 and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection).
 
+For journal diagnostics, each `daemonThreadPublisher.gap` invocation emits one
+Warn with message `relay: thread gap`, event `daemon.thread.gap` and a fixed
+`reason` identifying the rejecting branch:
+
+| Reason | Trigger |
+| --- | --- |
+| `state_not_usable` | `publish` finds unusable status while a publication cursor exists. |
+| `baseline_required` | The captured `Changes` result is unusable or requires a baseline. |
+| `compact_reset_required` | The captured `CompactChanges` result is unusable or requires a reset. |
+| `encode_failure` | `deliver` cannot encode an update or decode an encoded envelope. |
+
+The record contains only the fixed event/reason fields and normal log metadata
+(time, level and static message). It includes no history/content, payload bytes,
+credentials, filesystem paths, peer/conversation IDs or raw errors. This warning
+replaces `daemon.thread.encode_err`, so encoding failure emits one gap warning.
+An unusable status without an existing publication cursor stays silent.
+Logging preserves recipient selection, retirement and metadata-only cursor
+recovery: `Changes` rejection attempts replacement acquisition in the same
+pass; status, compact and encoding gaps leave acquisition to a later pass.
+Recovery never broadcasts a historical baseline; clients use authenticated
+catch-up and paging as described above.
+
 Recipient projection is per connection and conversation. `ActiveThreadConns`
 captures `ActiveConn.View` and `PendingView` together under `hostedMu`, with
 the negotiated `ThreadCompact` flag. Complete-only deployments do no
@@ -140,6 +162,10 @@ acquisition nor retirement publishes a baseline. Compact recovery remains an
 explicit query, even when compact catch-up can survive a lost complete
 publication range. The publication gate and publisher wait group own both
 families; publisher stop cancels and joins in-flight publication and reads.
+Publication prunes disconnected tracked recipients before checking compact
+continuity. Compact-gap retirement therefore excludes those already-pruned
+peers while still including currently eligible query-only consumers; expecting
+every previously tracked peer to retire would change existing recipient behavior.
 
 `daemonThreadUpdates` maps exported fold field names through `ThreadItem`'s JSON
 tags. Copying `EndedOrder` or `NoChild` directly would produce unusable wire
@@ -233,6 +259,16 @@ wire ordering or recipient projection errors. `TestDaemonThreadReadiness`,
 `TestDaemonThreadUnusable` and `TestDaemonThreadContinuity` cover usable zero,
 missing providers/views and lost ranges. `TestDaemonThreadQueriesReadiness`
 checks complete query installation, request cancellation and nonloading reads.
+
+`TestDaemonThreadGapReasons` enters through `publish`/`deliver`, checking all
+four gap reasons, unique recipient retirement and metadata-only recovery.
+Its exact JSON record allowlist also rejects unexpected fields; checking only
+for a known secret would miss other input leaking into logs. Private-looking
+content, identifiers and retirement errors must leave exactly one Warn.
+`TestDaemonThreadGapNoCursor` preserves silent unusable startup. The defensive
+envelope-decoding failure shares `encode_failure` by source review; the real
+encoder returns valid JSON, so this branch has no injected runtime proof.
+
 `TestDaemonThreadQueriesRecovery` checks authenticated clean-reopen catch-up,
 old-revision first appearances, escaped multiframe replies, page metadata and
 simultaneous legacy raw history. `TestDaemonThreadQueriesReset` checks explicit
