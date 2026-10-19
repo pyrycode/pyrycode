@@ -37,10 +37,5 @@ func RunDaemonProcess(c DaemonProcessConfig, args []string, input *os.File, outp
 	if err != nil {
 		return 0, err
 	}
-	for _, flag := range []string{"--settings", "--append-system-prompt-file", "--mcp-config"} {
-		if len(files[flag]) == 0 {
-			return 0, errors.New("incomplete daemon child input inventory")
-		}
-	}
 	return runBoundProcess(c.PoolProcessConfig, args, b, files, input, output, diagnostic)
 }

@@ -64,7 +64,10 @@ func NewDaemonBinding(args []string, home, workdir, daemon, socket string) (*Dae
 			return nil, fail
 		}
 	}
-	if p.session == "" {
+	// These roots always compose settings and a daemon system prompt. MCP
+	// configuration is optional: their original launch bypasses approvals and
+	// supplies no MCP flag. Every supplied MCP file is still inventoried.
+	if p.session == "" || p.filePaths["--settings"] == "" || p.filePaths["--append-system-prompt-file"] == "" {
 		return nil, fail
 	}
 	return p, nil

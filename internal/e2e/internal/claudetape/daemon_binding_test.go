@@ -76,3 +76,48 @@ func TestDaemonRoleBindings(t *testing.T) {
 		t.Fatal("settings input change ignored")
 	}
 }
+
+// The original per-conversation harness passes bypass permissions and no MCP
+// config. Preserve that argv contract rather than introducing a recording-only
+// MCP service. Supplied files remain mandatory and fully compared.
+func TestDaemonBindingOptionalMCP(t *testing.T) {
+	home := t.TempDir()
+	settings, prompt := filepath.Join(home, "settings.json"), filepath.Join(home, "prompt.txt")
+	for path, raw := range map[string]string{settings: `{}`, prompt: "complete daemon prompt"} {
+		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := []string{"--session-id", "11111111-1111-4111-8111-111111111111", "--dangerously-skip-permissions", "--settings", settings, "--append-system-prompt-file", prompt}
+	bind := func(argv []string) (*DaemonBinding, error) {
+		return NewDaemonBinding(argv, home, home, filepath.Join(home, "pyry"), filepath.Join(home, "socket"))
+	}
+	b, err := bind(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := b.Files()
+	if err != nil || len(files) != 3 || len(files["--settings"]) == 0 || len(files["--append-system-prompt-file"]) == 0 {
+		t.Fatal("complete bypass input inventory rejected", err)
+	}
+	for _, missing := range []string{"--settings", "--append-system-prompt-file"} {
+		var changed []string
+		for i := 0; i < len(args); i++ {
+			if args[i] == missing {
+				i++
+				continue
+			}
+			changed = append(changed, args[i])
+		}
+		if _, err := bind(changed); err == nil {
+			t.Fatal("mandatory input accepted when missing", missing)
+		}
+	}
+	b, err = bind(append(append([]string(nil), args...), "--mcp-config", filepath.Join(home, "missing-mcp.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Files(); err == nil {
+		t.Fatal("supplied missing MCP input ignored")
+	}
+}
