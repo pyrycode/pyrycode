@@ -87,3 +87,7 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-19
+
+## Revisions
+
+- 2026-10-19: reviewing duplicate notifications exposed that a routing-ID-only wake can outlive its original queue. `handlePushOverflow` must ignore a missing or unlatched queue, so a replacement without a terminal trigger is not classified as overflow. `TestPushRetirementStaleNotification` covers this boundary; the existing synchronization and notification API remain unchanged.

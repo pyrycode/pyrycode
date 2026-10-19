@@ -308,7 +308,8 @@ func (m *V2SessionManager) RetireLiveState(ctx context.Context, connID string) e
 	}
 	m.pushMu.Lock()
 	q, ok := m.queues[connID]
-	if ok {
+	if ok && !q.overflowed {
+		q.producerGap = true
 		q.overflowed = true
 	}
 	m.pushMu.Unlock()
