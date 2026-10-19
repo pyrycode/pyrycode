@@ -39,7 +39,7 @@ package realclaude
 //     the stream path) and this loop would have allowed it. A run in which the arm
 //     fires and the file still does not appear would be strictly stronger evidence,
 //     and there is no way to arrange one without breaking the behaviour under test.
-//   - maxAllowedModals and maxExtraRefusals were both untaken for the same reason.
+//   - The permission and re-ask caps were both untaken for the same reason.
 //     They stay: without the re-ask arm a re-asked batch parks the turn until the
 //     daemon's ten-minute approval window elapses, and the resulting wall-clock
 //     diagnostic would name nothing.
@@ -104,17 +104,11 @@ package realclaude
 // This slice captures no artefact, so nothing needs `git add`ing beyond this file.
 
 import (
-	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"strings"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
-	"github.com/pyrycode/pyrycode/internal/protocol"
-	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // wantRefusedOutcome is the dismissal outcome a refusal must produce, transcribed
@@ -131,16 +125,6 @@ const wantRefusedOutcome = "refused"
 // is the device gate) and that the daemon's dedup is the one-shot consume of the
 // batch id, so a fixed constant is correct rather than a shortcut.
 const questionRefusalToken = "e2e-1995-refusal-token"
-
-// The two bounds on the post-refusal drain, deliberately SEPARATE from the wall clock
-// so a non-terminating turn fails loud with a diagnostic that names which way it
-// failed to terminate. It is not proven that a refused claude gives up after any
-// bounded number of follow-ups — whether a refused turn always terminates is a
-// product question to raise separately, not a flake to widen a cap for.
-const (
-	maxAllowedModals = 4 // permission modals auto-approved after the refusal
-	maxExtraRefusals = 2 // re-asked batches refused after the first
-)
 
 // questionRefusalTrigger drives claude to ask a question that GATES REAL WORK, which
 // is the one place this file cannot reuse the sibling answer gate's trigger. That one
@@ -227,293 +211,14 @@ func TestInteractiveStreamQuestionRefusal(t *testing.T) {
 		obs.modalsAllowed, obs.extraRefusals, len(obs.continuation))
 }
 
-// refusalObservation is what the drain SAW, as distinct from what it asserted. AC 3
-// asks for a measured observation of how claude got to a terminal state — stopped,
-// re-asked, or something else — and pinning a stochastic choice as an assertion would
-// turn a legitimate change of strategy into a red. So these are counted, logged and
-// carried into the file header; only the milestones in settleRefusedTurn's doc block
-// are enforced.
+// Compatibility wrapper keeps the live refusal's filesystem witness in its caller.
 type refusalObservation struct {
-	modalsAllowed int
-	extraRefusals int
-	continuation  string
+	modalsAllowed, extraRefusals int
+	continuation                 string
 }
 
-// postRefusalTally is what reached the phone AFTER the dismissal of our batch, kept
-// only for the deadline's message (#2735). Without it that message could not tell a
-// claude that kept working from an upstream API stall: the drain drops every frame
-// it does not act on, api_retry among them, and a stall sends nothing at all.
-type postRefusalTally struct {
-	retries               int
-	lastAttempt, maxRetry int // Current/Total of the last active api_retry
-	textBytes             int
-	other                 map[string]int // every other envelope type, by count
-}
-
-func (p postRefusalTally) empty() bool {
-	return p.retries == 0 && p.textBytes == 0 && len(p.other) == 0
-}
-
-func (p postRefusalTally) String() string {
-	return fmt.Sprintf("%d api_retry frame(s) (last attempt %d of %d), %d byte(s) of assistant text, "+
-		"other frames by type %v", p.retries, p.lastAttempt, p.maxRetry, p.textBytes, p.other)
-}
-
-// settleRefusedTurn drives the post-refusal wire to its end and reports what it saw.
-// It enforces two milestones and actuates on two frame kinds.
-//
-// The milestones:
-//
-//   - ATTRIBUTION (AC 1): a question_dismissed for THIS batch carrying source
-//     "remote" and outcome "refused". That conjunction is the only thing pinning the
-//     resolution to the frame the test sent; the backstop's {unanswered, no_answer}
-//     is what a refusal that never produced a verdict looks like from out here and is
-//     rejected loudly. Every OTHER dismissal seen — a re-asked batch this loop
-//     refused — is held to the same pair, so attribution holds for every batch rather
-//     than only the first.
-//   - TERMINATION (AC 3): the terminal turn_state{idle} for convID.
-//
-// The actuating arms, each bounded by a counter whose diagnostic is distinct from the
-// wall clock's:
-//
-//   - modal_shown{permission} is ALLOWED with a fresh answer token and request id.
-//     This is what makes the caller's absence check non-vacuous; the header's second
-//     section carries the full argument. A non-permission modal is a hard fail rather
-//     than an auto-approval.
-//   - question_shown is a RE-ASK, and is refused with a fresh token and request id. A
-//     re-asked batch left outstanding parks the turn until the daemon's approval
-//     window elapses (ten minutes by default), which overruns this drain's budget and
-//     yields a wall-clock diagnostic naming nothing. Refusing keeps the turn moving by
-//     our explicit refusals and keeps the diagnostic specific.
-//
-// IT IS ONE DRAIN AND NOT SEVERAL, the sibling answer gate's design decision and for
-// its reason: RefuseQuestion fans the dismissal out ON ITS OWN GOROUTINE (its doc
-// block says why — the caller runs on the relay manager's Run goroutine and broadcast
-// funnels back onto it) while anything claude does next travels claude → parser →
-// emitter. A dismissal drain followed by a turn drain would assume an order it need
-// not win and would eat frames silently. This loop assumes no order.
-//
-// The frame loop is the package's standing one: read binary→phone frames in receive
-// order, decrypt EVERY noise_msg to keep the sequential receive nonce in sync, and
-// skip non-noise_msg control frames WITHOUT decrypting. A TypeError envelope at any
-// point is a hard fail, as in the sibling drains.
-//
-// Accepting the first idle-for-conv as terminal is sound for the deny arm's reason:
-// this drain is sequenced AFTER raiseRealQuestionBatch, which consumed the leading
-// turn_state{responding} and any pre-turn resting idle in order, so no earlier idle is
-// left on the wire.
-//
-// Claude-authored bytes — a modal title here, the accumulated text in the caller's
-// failure path — reach a message only through %q and truncateString: nothing on this
-// path strips terminal escapes and the pipeline salvages run logs. The batch id and
-// the modal id are daemon-asserted and logged plain.
 func settleRefusedTurn(t *testing.T, h *perConvHarness, convID, batchID string, startReqID uint64, timeout time.Duration) refusalObservation {
 	t.Helper()
-	var (
-		obs          refusalObservation
-		sawDismissal bool
-		text         strings.Builder
-		after        = postRefusalTally{other: map[string]int{}}
-	)
-	reqID := startReqID
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			if !sawDismissal {
-				t.Fatalf("no question_dismissed for batch %s within %s — the refusal never resolved the "+
-					"batch: it was denied at the device gate, lost the one-shot to the backstop, or never "+
-					"reached the resolver at all", batchID, timeout)
-			}
-			if after.empty() {
-				t.Fatalf("batch %s was dismissed as refused, but claude sent nothing for %q after the refusal "+
-					"within %s — no api_retry, no assistant text, no other frame. That is how an upstream API "+
-					"stall looks, not a claude that kept working", batchID, convID, timeout)
-			}
-			t.Fatalf("batch %s was dismissed as refused, but the turn for %q never reached terminal "+
-				"turn_state{idle} within %s (allowed %d modal(s), refused %d re-asked batch(es)) — claude "+
-				"neither stopped nor finished after being told to stop and wait. After the dismissal: %s",
-				batchID, convID, timeout, obs.modalsAllowed, obs.extraRefusals, after)
-		}
-		raw, err := h.phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // deadline reached — re-loop into the milestone-specific t.Fatalf above
-			}
-			t.Fatalf("phone receive (refused-turn drain): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame (refused-turn drain): %v", err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			// A non-noise_msg control frame (e.g. rekey) does not advance the receive
-			// nonce — skip without decrypting.
-			continue
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("decode inner data (refused-turn drain): %v", err)
-		}
-		plain, err := h.initRecv.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope (refused-turn drain): %v", err)
-		}
-		if sawDismissal && env.Type != protocol.TypeApiRetry && env.Type != protocol.TypeAssistantDelta {
-			after.other[env.Type]++
-		}
-		switch env.Type {
-		case protocol.TypeError:
-			t.Fatalf("unexpected error envelope while draining the refused turn: %s", string(env.Payload))
-
-		case protocol.TypeQuestionDismissed:
-			var dis protocol.QuestionDismissedPayload
-			if err := json.Unmarshal(env.Payload, &dis); err != nil {
-				t.Fatalf("decode question_dismissed payload: %v", err)
-			}
-			if dis.Source != wantQuestionSource {
-				t.Fatalf("question_dismissed for batch %s carried Source = %q, want %q — the resolution "+
-					"must be attributable to our explicit refusal, not to the no-answer backstop or any "+
-					"other path", dis.QuestionBatchID, dis.Source, wantQuestionSource)
-			}
-			if dis.Outcome != wantRefusedOutcome {
-				t.Fatalf("question_dismissed for batch %s carried Outcome = %q, want %q — %q is "+
-					"retireQuestion's backstop reporting that the approval window elapsed with no verdict, "+
-					"which is exactly what a refusal the daemon never applied looks like from here",
-					dis.QuestionBatchID, dis.Outcome, wantRefusedOutcome, dis.Outcome)
-			}
-			if dis.QuestionBatchID == batchID {
-				sawDismissal = true
-				t.Logf("question_dismissed{%s, %s} for batch %s — the resolution is attributable to our refusal",
-					dis.Outcome, dis.Source, batchID)
-			}
-
-		case protocol.TypeQuestionShown:
-			var shown protocol.QuestionShownPayload
-			if err := json.Unmarshal(env.Payload, &shown); err != nil {
-				t.Fatalf("decode re-asked question_shown payload: %v", err)
-			}
-			if shown.QuestionBatchID == "" {
-				t.Fatal("re-asked question_shown carried an empty question_batch_id — nothing could refuse it")
-			}
-			if shown.QuestionBatchID == batchID {
-				continue // the batch already refused; its one-shot is consumed
-			}
-			if obs.extraRefusals >= maxExtraRefusals {
-				t.Fatalf("claude re-asked more than %d time(s) for %q without reaching idle — it keeps "+
-					"reissuing AskUserQuestion past the cap; whether a refused turn always terminates is a "+
-					"product question to raise separately, not a test flake to widen the cap for",
-					maxExtraRefusals, convID)
-			}
-			obs.extraRefusals++
-			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-				ID:   reqID,
-				Type: protocol.TypeQuestionRefused,
-				TS:   time.Now().UTC(),
-				Payload: mustJSON(t, protocol.QuestionRefusedPayload{
-					QuestionBatchID: shown.QuestionBatchID,
-					AnswerToken:     fmt.Sprintf("e2e-1995-reask-token-%d", reqID),
-				}),
-			})
-			t.Logf("refused re-asked batch %s (%d question(s), refusal #%d) for %q",
-				shown.QuestionBatchID, len(shown.Questions), obs.extraRefusals, convID)
-			reqID++
-
-		case protocol.TypeModalShown:
-			var shown protocol.ModalShownPayload
-			if err := json.Unmarshal(env.Payload, &shown); err != nil {
-				t.Fatalf("decode modal_shown payload (refused-turn drain): %v", err)
-			}
-			if shown.Class != "permission" {
-				t.Fatalf("modal_shown Class = %q, want %q — this loop auto-approves what it meets, so a "+
-					"trust or onboarding modal must fail here rather than be allowed", shown.Class, "permission")
-			}
-			if shown.ModalID == "" {
-				t.Fatal("modal_shown carried an empty modal_id")
-			}
-			if obs.modalsAllowed >= maxAllowedModals {
-				t.Fatalf("claude raised more than %d permission modal(s) for %q after the refusal without "+
-					"reaching idle — it keeps reissuing gated tool calls past the cap; that is a product "+
-					"question about a refused turn, not a test flake to widen the cap for",
-					maxAllowedModals, convID)
-			}
-			obs.modalsAllowed++
-			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-				ID:   reqID,
-				Type: protocol.TypeModalAnswer,
-				TS:   time.Now().UTC(),
-				Payload: mustJSON(t, protocol.ModalAnswerPayload{
-					ModalID:     shown.ModalID,
-					OptionID:    string(turnevent.PermissionOptionKindAllowOnce),
-					AnswerToken: fmt.Sprintf("e2e-1995-allow-token-%d", reqID),
-				}),
-			})
-			// The title is TUI-authored text crossing the subprocess trust boundary;
-			// it is logged bounded and quoted so an allow of something unexpected is
-			// legible in a salvaged run record rather than silent.
-			t.Logf("ALLOWED permission modal %q (allow #%d) for %q, title %q — a claude that guessed an "+
-				"answer and pressed on could genuinely produce the artefact",
-				shown.ModalID, obs.modalsAllowed, convID,
-				truncateString(shown.Title, questionLabelLogCap))
-			reqID++
-
-		case protocol.TypeModalDismissed:
-			var dis protocol.ModalDismissedPayload
-			if err := json.Unmarshal(env.Payload, &dis); err != nil {
-				t.Fatalf("decode modal_dismissed payload (refused-turn drain): %v", err)
-			}
-			if dis.Source != wantQuestionSource {
-				t.Fatalf("modal_dismissed Source = %q, want %q — a modal resolved by the daemon's approval "+
-					"timeout means our allow was dropped and the gate fell closed on its own, which would "+
-					"make the absence check vacuous again", dis.Source, wantQuestionSource)
-			}
-
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload (refused-turn drain): %v", err)
-			}
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				text.WriteString(p.Text)
-			}
-			if sawDismissal && p.ConversationID == convID {
-				after.textBytes += len(p.Text)
-			}
-
-		case protocol.TypeApiRetry:
-			var p protocol.ApiRetryPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode api_retry payload (refused-turn drain): %v", err)
-			}
-			if sawDismissal && p.ConversationID == convID {
-				after.retries++
-				if p.Active {
-					after.lastAttempt, after.maxRetry = p.Current, p.Total
-				}
-			}
-
-		case protocol.TypeTurnState:
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload (refused-turn drain): %v", err)
-			}
-			if st.State != "idle" || st.ConversationID != convID {
-				continue
-			}
-			// Terminal. Attribution must already hold: an idle with no dismissal for
-			// our batch means the turn ended without the refusal ever resolving it.
-			if !sawDismissal {
-				t.Fatalf("turn for %q reached terminal idle with no question_dismissed for batch %s — the "+
-					"turn ended without the refusal ever resolving the batch", convID, batchID)
-			}
-			obs.continuation = text.String()
-			t.Logf("terminal turn_state{idle} for %q after the refusal; claude said %d byte(s): %q",
-				convID, len(obs.continuation), truncateString(obs.continuation, questionTextLogCap))
-			return obs
-		}
-	}
+	obs := scenario.RefusedTurn(t, modalScenarioWire(t, h, startReqID), convID, batchID, timeout)
+	return refusalObservation{modalsAllowed: obs.ModalsAllowed, extraRefusals: obs.ExtraRefusals, continuation: obs.Continuation}
 }

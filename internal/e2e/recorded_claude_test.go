@@ -29,7 +29,7 @@ const tapeSession = "ecda0000-0000-4000-8000-000000000001"
 const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
 
 func TestRecordedClaude(t *testing.T) {
-	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer"} {
+	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer", "question-refuse", "permission-allow"} {
 		t.Run(scenario, func(t *testing.T) { runRecordedClaude(t, scenario) })
 	}
 }
@@ -95,7 +95,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		c.Producer = claudetape.Producer{Revision: strings.TrimSpace(string(rev)), BinarySHA256: hex.EncodeToString(sum[:]), ClaudeVersion: strings.TrimSpace(string(version)), CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	}
 	wrapper := tapeWrapper(t, c)
-	writeStreamInteractiveConfig(t, home, scenario == "permission-deny" || scenario == "question-answer")
+	writeStreamInteractiveConfig(t, home, scenario != "two-turn" && scenario != "reply")
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 	relayURL := fr.URL() + "/v2/server"
@@ -188,76 +188,73 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		return protocol.Envelope{}
 	}
 
-	turn := func(text string, permission bool) {
+	turn := func(text string) {
 		t.Helper()
-		transmit(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: fmt.Sprintf("tape-%d", sequence), Text: text})
-		requestID := sequence
-		deadline := time.Now().Add(150 * time.Second)
-		sawAck, sawText, sawDismissed, sawIdle := false, false, false, false
-		var modalID string
-		for {
+		id := transmit(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: fmt.Sprintf("tape-%d", sequence), Text: text})
+		ack := false
+		receive := func(deadline time.Time) protocol.Envelope {
 			env := next(deadline)
-			switch env.Type {
-			case protocol.TypeError:
-				t.Fatal("daemon returned an error during the recorded scenario")
-			case protocol.TypeAck:
-				if env.InReplyTo != nil && *env.InReplyTo == requestID {
-					sawAck = true
-				}
-			case protocol.TypeModalShown:
-				if !permission || modalID != "" {
-					t.Fatal("unexpected or repeated permission request")
-				}
-				var shown protocol.ModalShownPayload
-				if json.Unmarshal(env.Payload, &shown) != nil || shown.Class != "permission" || shown.ModalID == "" || shown.ConversationID != tapeConversation || shown.Prompt != "Write" {
-					t.Fatal("invalid permission surface")
-				}
-				modalID = shown.ModalID
-				transmit(protocol.TypeModalAnswer, protocol.ModalAnswerPayload{ModalID: modalID, OptionID: "reject_once", AnswerToken: "tape-deny"})
-			case protocol.TypeModalDismissed:
-				var dismissed protocol.ModalDismissedPayload
-				if json.Unmarshal(env.Payload, &dismissed) != nil {
-					t.Fatal("invalid dismissal")
-				}
-				if dismissed.ModalID == modalID && modalID != "" {
-					if dismissed.Outcome != "reject_once" || dismissed.Source != "remote" {
-						t.Fatal("permission was not denied by this client")
-					}
-					sawDismissed = true
-				}
-			case protocol.TypeAssistantDelta:
-				var delta protocol.AssistantDeltaPayload
-				if json.Unmarshal(env.Payload, &delta) != nil {
-					t.Fatal("invalid reply")
-				}
-				if delta.ConversationID == tapeConversation && strings.TrimSpace(delta.Text) != "" {
-					sawText = true
-				}
-			case protocol.TypeTurnState:
-				var state protocol.TurnStatePayload
-				if json.Unmarshal(env.Payload, &state) != nil {
-					t.Fatal("invalid turn state")
-				}
-				if state.ConversationID == tapeConversation && state.State == "idle" && sawText {
-					sawIdle = true
-				}
+			if env.Type == protocol.TypeAck && env.InReplyTo != nil && *env.InReplyTo == id {
+				ack = true
 			}
-			if sawAck && sawText && sawIdle && (!permission || sawDismissed) {
-				return
-			}
+			return env
+		}
+		scenariohelpers.CompletedTurn(t, receive, tapeConversation, 150*time.Second, true)
+		if !ack {
+			t.Fatal("recorded turn lost its matching acknowledgement")
 		}
 	}
+	permission := func(prompt, option, token string) {
+		t.Helper()
+		id := transmit(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: fmt.Sprintf("tape-%d", sequence), Text: prompt})
+		ack := false
+		receive := func(deadline time.Time) protocol.Envelope {
+			env := next(deadline)
+			if env.Type == protocol.TypeAck && env.InReplyTo != nil && *env.InReplyTo == id {
+				ack = true
+			}
+			return env
+		}
+		shown := scenariohelpers.WaitPermission(t, receive, tapeConversation, 150*time.Second)
+		if shown.Prompt != "Write" {
+			t.Fatal("permission scenario did not surface Write")
+		}
+		scenariohelpers.ResolvePermission(t, scenariohelpers.Wire{Send: transmit, Next: receive}, tapeConversation, shown, option, token, 150*time.Second)
+		if !ack {
+			t.Fatal("permission trigger lost its matching acknowledgement")
+		}
+		decision := "deny"
+		if option == "allow_once" {
+			decision = "allow"
+		}
+		scenariohelpers.RequirePromptAnswerHistory(t, home, tapeConversation, shown.ModalID, decision, tapeSession)
+	}
+
 	switch scenario {
 	case "reply":
 		transmit(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: "reply", Text: "Without using tools, briefly describe reliable process supervision."})
 		scenariohelpers.CompletedTurn(t, next, tapeConversation, 120*time.Second, false)
 	case "question-answer":
 		scenariohelpers.QuestionAnswer(t, scenariohelpers.Wire{Send: transmit, Next: next}, scenariohelpers.QuestionConfig{Home: home, ConversationID: tapeConversation, SessionID: tapeSession, HistorySession: tapeSession, Prompt: scenariohelpers.RecordedQuestionPrompt(), Followup: "Without using tools, reply with a short greeting after the model change.", ExpectedModel: "claude-haiku-4-5-20251001", SurfaceBudget: 180 * time.Second, UpdateBudget: 30 * time.Second, TurnBudget: 150 * time.Second})
+	case "question-refuse":
+		transmit(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: "question-refusal-trigger", Text: scenariohelpers.RecordedRefusalPrompt()})
+		batch := scenariohelpers.WaitQuestion(t, next, tapeConversation, 180*time.Second)
+		transmit(protocol.TypeQuestionRefused, protocol.QuestionRefusedPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: "e2e-1995-refusal-token"})
+		scenariohelpers.RefusedTurn(t, scenariohelpers.Wire{Send: transmit, Next: next}, tapeConversation, batch.QuestionBatchID, 150*time.Second)
+		scenariohelpers.RequirePromptAnswerHistory(t, home, tapeConversation, batch.QuestionBatchID, "refusal", tapeSession)
+	case "permission-allow":
+		permission("Use the Write tool exactly once to create tape-allowed.txt in the current directory. Set file_path to its absolute path and content to exactly hello with no newline. Do not use other tools. After the decision, reply with one short sentence.", "allow_once", "tape-allow")
+		if mode == "capture" {
+			data, e := os.ReadFile(filepath.Join(home, "tape-allowed.txt"))
+			if e != nil || string(data) != "hello" {
+				t.Fatal("allowed Write did not create the exact live witness")
+			}
+		}
 	case "two-turn":
-		turn("Without using tools, reply with a short greeting.", false)
-		turn("Without using tools, reply with a short farewell.", false)
+		turn("Without using tools, reply with a short greeting.")
+		turn("Without using tools, reply with a short farewell.")
 	case "permission-deny":
-		turn("Use the Write tool exactly once to create a file named tape-denied.txt containing hello. If denied, do not retry and do not use other tools. Reply with one short sentence after the decision.", true)
+		permission("Use the Write tool exactly once to create a file named tape-denied.txt containing hello. If denied, do not retry and do not use other tools. Reply with one short sentence after the decision.", "reject_once", "tape-deny")
 		if mode == "capture" {
 			if _, e := os.Stat(filepath.Join(home, "tape-denied.txt")); !os.IsNotExist(e) {
 				t.Fatal("denied tool created its file")
@@ -297,7 +294,7 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 	if baseline == "" {
 		baseline = "testdata/claude-tapes"
 	}
-	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer"} {
+	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer", "question-refuse", "permission-allow"} {
 		t.Run(scenario, func(t *testing.T) {
 			load := func(dir string) *claudetape.Tape {
 				f, err := os.Open(filepath.Join(dir, scenario+".json"))

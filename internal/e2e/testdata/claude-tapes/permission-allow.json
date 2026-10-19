@@ -1,0 +1,2219 @@
+{
+  "version": 1,
+  "scenario": "permission-allow",
+  "producer": {
+    "revision": "368d62eebec1005d3e463c1b04ce259dfe12a2e3",
+    "binary_sha256": "531bb17d9e589abeeddb26c6b742ead2f847f5f74b36528d9fe0526d6fc6e225",
+    "claude_version": "2.1.280 (Claude Code)",
+    "captured_at": "2026-10-19T14:34:11.335277Z"
+  },
+  "args": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--forward-subagent-text",
+    "--replay-user-messages",
+    "--prompt-suggestions",
+    "--settings",
+    "${PILOT_HOME}/.pyry/test/session-settings/ecda0000-0000-4000-8000-000000000001.json",
+    "--append-system-prompt-file",
+    "${PILOT_HOME}/.pyry/test/system-prompt.txt",
+    "--dangerously-skip-permissions",
+    "--permission-mode",
+    "default",
+    "--permission-prompt-tool",
+    "stdio",
+    "--mcp-config",
+    "${PILOT_MCP_CONFIG}",
+    "--strict-mcp-config",
+    "--session-id",
+    "ecda0000-0000-4000-8000-000000000001"
+  ],
+  "frames": [
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "mode": "default",
+          "subtype": "set_permission_mode"
+        },
+        "request_id": "1",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "perTaskStopAffordance": true,
+          "subtype": "initialize"
+        },
+        "request_id": "2",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "1",
+          "response": {
+            "mode": "default"
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "permissionMode": "default",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": null,
+        "subtype": "status",
+        "type": "system",
+        "uuid": "a1c80726-f571-48a8-869b-d8608971202b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "pending_permission_requests": [],
+          "pending_user_dialog_requests": [],
+          "request_id": "2",
+          "response": {
+            "account": {
+              "apiProvider": "firstParty",
+              "tokenSource": "CLAUDE_CODE_OAUTH_TOKEN"
+            },
+            "agents": [
+              {
+                "description": "Catch-all for any task that doesn't fit a more specific agent. FleetView's default when no agent name is typed.",
+                "name": "claude"
+              },
+              {
+                "description": "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions.",
+                "model": "inherit",
+                "name": "Explore"
+              },
+              {
+                "description": "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
+                "name": "general-purpose"
+              },
+              {
+                "description": "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
+                "model": "inherit",
+                "name": "Plan"
+              },
+              {
+                "description": "Use this agent to configure the user's Claude Code status line setting.",
+                "model": "sonnet",
+                "name": "statusline-setup"
+              }
+            ],
+            "analytics_disabled": false,
+            "available_output_styles": [
+              "default",
+              "Proactive",
+              "Concise",
+              "Explanatory",
+              "Learning"
+            ],
+            "commands": [
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)",
+                "name": "deep-research"
+              },
+              {
+                "argumentHint": "consent | revoke",
+                "builtin": true,
+                "description": "Grant or revoke Claude agent access to your Design projects",
+                "name": "design"
+              },
+              {
+                "argumentHint": "[\u003cproject hint, e.g. \"Acme DS\"\u003e]",
+                "builtin": true,
+                "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+                "name": "design-sync"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".",
+                "name": "dataviz"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill to configure the Claude Code harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when claude stops show X\". For simple settings like theme/model, suggest the /config command.",
+                "name": "update-config"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior — drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) — there's nothing to observe.",
+                "name": "verify"
+              },
+              {
+                "argumentHint": "[issue description]",
+                "builtin": true,
+                "description": "Enable debug logging for this session and help diagnose issues",
+                "name": "debug"
+              },
+              {
+                "aliases": [
+                  "review"
+                ],
+                "argumentHint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [\u003cpr#\u003e|\u003cbranch\u003e|\u003cpath\u003e]",
+                "builtin": true,
+                "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level (low/medium: fewer, high-confidence findings; high→max: broader coverage, may include uncertain findings; ultra: deep multi-agent review in the cloud); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review. For ultra on a GitHub.com PR target, --post asks to post the finished review’s findings to the PR as a single comment from the user’s GitHub account (not a review; the launch dialog still confirms in interactive sessions, while non-interactive mode posts on the flag alone) and --no-post hides that option.",
+                "name": "code-review"
+              },
+              {
+                "argumentHint": "[\u003ctarget\u003e]",
+                "builtin": true,
+                "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that.",
+                "name": "simplify"
+              },
+              {
+                "argumentHint": "\u003cinstruction\u003e",
+                "builtin": true,
+                "description": "Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR.",
+                "name": "batch"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.",
+                "name": "fewer-permission-prompts"
+              },
+              {
+                "aliases": [
+                  "checkup"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health — what the `claude doctor` terminal diagnostics cover — from local data (duplicate or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local CLAUDE.md files against checked-in ones; trim checked-in CLAUDE.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded CLAUDE.md guidance into lazy skills and nested CLAUDE.md files; flag slow hooks and context-heavy extensions; check the installed version is current; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a doctor run, checkup, audit, tune-up, or cleanup of their Claude Code setup or configuration.",
+                "name": "doctor"
+              },
+              {
+                "aliases": [
+                  "proactive"
+                ],
+                "argumentHint": "[interval] [prompt]",
+                "builtin": true,
+                "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+                "name": "loop"
+              },
+              {
+                "aliases": [
+                  "routines"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Create, update, list, or run scheduled cloud agents (routines) that execute on a cron schedule.",
+                "name": "schedule"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER — read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) — never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named — don't Read the file).",
+                "name": "claude-api"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one.",
+                "name": "workflow-authoring"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).",
+                "name": "run"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Author or improve the run-\u003cunit\u003e skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment.",
+                "name": "run-skill-generator"
+              },
+              {
+                "argumentHint": "[fable|opus|sonnet|off]",
+                "builtin": true,
+                "description": "Let Claude consult a stronger model at key moments",
+                "name": "advisor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+                "name": "agents"
+              },
+              {
+                "argumentHint": "[--request-id \u003cuuid\u003e] (--wizard posture=… scope=… depth=… --propose | --expect-sha256 \u003c64-hex\u003e --apply-file \u003cpath\u003e)",
+                "builtin": true,
+                "description": "Teach auto mode about your environment, plus optional rule tweaks",
+                "name": "auto-mode-setup"
+              },
+              {
+                "argumentHint": "[auto|\u003ctokens\u003e]",
+                "builtin": true,
+                "description": "Configure the auto-compact window size",
+                "name": "autocompact"
+              },
+              {
+                "aliases": [
+                  "reset",
+                  "new"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+                "name": "clear"
+              },
+              {
+                "argumentHint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]",
+                "builtin": true,
+                "description": "Set the prompt bar color for this session",
+                "name": "color"
+              },
+              {
+                "argumentHint": "\u003coptional custom summarization instructions\u003e",
+                "builtin": true,
+                "description": "Free up context by summarizing the conversation so far",
+                "name": "compact"
+              },
+              {
+                "aliases": [
+                  "settings"
+                ],
+                "argumentHint": "key=value",
+                "builtin": true,
+                "description": "Set a setting by key",
+                "name": "config"
+              },
+              {
+                "argumentHint": "[style]",
+                "builtin": true,
+                "description": "List output styles or switch to one",
+                "name": "output-style"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show current context usage",
+                "name": "context"
+              },
+              {
+                "argumentHint": "\u003clow|medium|high|xhigh|max|ultracode|auto\u003e",
+                "builtin": true,
+                "description": "Set effort level for model usage",
+                "name": "effort"
+              },
+              {
+                "argumentHint": "[on|off]",
+                "builtin": true,
+                "description": "Toggle fast mode (Opus 5.5)",
+                "name": "fast"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+                "name": "heapdump"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Initialize a new CLAUDE.md file with codebase documentation",
+                "name": "init"
+              },
+              {
+                "argumentHint": "[reconnect|enable|disable [\u003cserver\u003e|all]]",
+                "builtin": true,
+                "description": "Manage MCP servers",
+                "name": "mcp"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Import config from another AI coding agent",
+                "name": "import"
+              },
+              {
+                "argumentHint": "\u003cmodel\u003e",
+                "builtin": true,
+                "description": "Set the AI model for Claude Code",
+                "name": "model"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Run the workflow script delivered in this session environment (server-launched sessions only)",
+                "name": "__remote-workflow"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+                "name": "workflow-launch-exec"
+              },
+              {
+                "argumentHint": "[--force]",
+                "builtin": true,
+                "description": "Activate pending plugin changes in the current session",
+                "name": "reload-plugins"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Pick up skills added or changed on disk during this session",
+                "name": "reload-skills"
+              },
+              {
+                "aliases": [
+                  "name"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Rename the current conversation",
+                "name": "rename"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Start a cloud agent that finds and verifies bugs in your branch (~15-25 min, $5-$25 USD) · Runs in a cloud session. See https://code.claude.com/docs/en/claude-code-on-the-web",
+                "name": "ultrareview"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Complete a security review of the pending changes on the current branch",
+                "name": "security-review"
+              },
+              {
+                "aliases": [
+                  "cost",
+                  "stats"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show session cost, plan usage, and what's contributing to your limits",
+                "name": "usage"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a report analyzing your Claude Code sessions",
+                "name": "insights"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a one-line session recap now",
+                "name": "recap"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show which loaded skills are unused and costing context",
+                "name": "skill-doctor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Set a goal — keep working until the condition is met",
+                "name": "goal"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Grant Claude agent access to your Design projects",
+                "name": "design-consent"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Revoke Claude agent access to your Design projects",
+                "name": "design-revoke"
+              },
+              {
+                "aliases": [
+                  "peers"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "List subagents, teammates, and other Claude sessions you can message",
+                "name": "list-agents"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Help teammates ramp on Claude Code with a guide from your usage",
+                "name": "team-onboarding"
+              }
+            ],
+            "current_permission_mode": "default",
+            "fast_mode_disabled_reason": "sdk_opt_in_required",
+            "fast_mode_state": "off",
+            "ide_rc_auto_enable_gate": true,
+            "models": [
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Default (recommended)",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "default"
+              },
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Sonnet",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "sonnet"
+              },
+              {
+                "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+                "displayName": "Fable",
+                "resolvedModel": "claude-fable-5-1",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "claude-fable-5-1"
+              },
+              {
+                "description": "Opus 5.5 · Best for everyday, complex tasks",
+                "displayName": "Opus",
+                "resolvedModel": "claude-opus-5-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "supportsFastMode": true,
+                "value": "opus"
+              },
+              {
+                "description": "Haiku 4.5 · Fastest for quick answers",
+                "displayName": "Haiku",
+                "resolvedModel": "claude-haiku-4-5-20251001",
+                "value": "haiku"
+              }
+            ],
+            "output_style": "default",
+            "pid": 54010,
+            "remote_control_auto_connect_default": false,
+            "remote_control_auto_enable": false,
+            "remote_control_auto_on_by_default": false,
+            "remote_control_available": true,
+            "session_state": "idle",
+            "user_output_styles_dir": "${PILOT_HOME}/.claude/output-styles"
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "subtype": "mcp_status"
+        },
+        "request_id": "3",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "3",
+          "response": {
+            "mcpServers": [
+              {
+                "config": {
+                  "args": [
+                    "mcp-approve",
+                    "-pyry-socket",
+                    "${PILOT_SOCKET}"
+                  ],
+                  "command": "${PILOT_DAEMON}",
+                  "type": "stdio"
+                },
+                "name": "pyry_approve",
+                "scope": "dynamic",
+                "serverInfo": {
+                  "name": "pyry_approve",
+                  "version": "dev"
+                },
+                "source": "dynamic",
+                "status": "connected",
+                "tools": [
+                  {
+                    "annotations": {},
+                    "name": "approve"
+                  }
+                ]
+              },
+              {
+                "config": {
+                  "args": [
+                    "mcp-files",
+                    "-pyry-socket",
+                    "${PILOT_SOCKET}"
+                  ],
+                  "command": "${PILOT_DAEMON}",
+                  "type": "stdio"
+                },
+                "name": "pyry_files",
+                "scope": "dynamic",
+                "serverInfo": {
+                  "name": "pyry_files",
+                  "version": "dev"
+                },
+                "source": "dynamic",
+                "status": "connected",
+                "tools": [
+                  {
+                    "annotations": {},
+                    "name": "send_file"
+                  }
+                ]
+              }
+            ]
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "text": "Use the Write tool exactly once to create tape-allowed.txt in the current directory. Set file_path to its absolute path and content to exactly hello with no newline. Do not use other tools. After the decision, reply with one short sentence.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "type": "user"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "agents": [
+          "claude",
+          "Explore",
+          "general-purpose",
+          "Plan",
+          "statusline-setup"
+        ],
+        "analytics_disabled": false,
+        "apiKeySource": "none",
+        "capabilities": [
+          "interrupt_receipt_v1",
+          "interrupt_cancel_queued_v1",
+          "msg_lifecycle_v1",
+          "mcp_read_resource_v1",
+          "mcp_tool_ui_meta_v1"
+        ],
+        "claude_code_version": "2.1.280",
+        "cwd": "${PILOT_HOME}",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "mcp_servers": [
+          {
+            "name": "pyry_approve",
+            "source": "dynamic",
+            "status": "connected"
+          },
+          {
+            "name": "pyry_files",
+            "source": "dynamic",
+            "status": "connected"
+          }
+        ],
+        "memory_paths": {
+          "auto": "${PILOT_HOME}/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-p-301-1979377893/memory/"
+        },
+        "messaging_socket_path": "/tmp/cc-socks/54010.sock",
+        "model": "claude-sonnet-5",
+        "output_style": "default",
+        "permissionMode": "default",
+        "plugins": [
+          {
+            "name": "telemetry",
+            "path": "builtin",
+            "source": "telemetry@builtin"
+          }
+        ],
+        "product_feedback_disabled": false,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "skills": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator"
+        ],
+        "slash_commands": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator",
+          "advisor",
+          "agents",
+          "auto-mode-setup",
+          "autocompact",
+          "clear",
+          "color",
+          "compact",
+          "config",
+          "output-style",
+          "context",
+          "effort",
+          "fast",
+          "heapdump",
+          "init",
+          "mcp",
+          "import",
+          "model",
+          "__remote-workflow",
+          "workflow-launch-exec",
+          "reload-plugins",
+          "reload-skills",
+          "rename",
+          "ultrareview",
+          "security-review",
+          "usage",
+          "insights",
+          "recap",
+          "skill-doctor",
+          "goal",
+          "design-consent",
+          "design-revoke",
+          "list-agents",
+          "team-onboarding"
+        ],
+        "subtype": "init",
+        "terminal_slash_commands": [
+          "doctor",
+          "color",
+          "reload-plugins"
+        ],
+        "tools": [
+          "Task",
+          "AskUserQuestion",
+          "Bash",
+          "CronCreate",
+          "CronDelete",
+          "CronList",
+          "DesignSync",
+          "Edit",
+          "EnterPlanMode",
+          "EnterWorktree",
+          "ExitPlanMode",
+          "ExitWorktree",
+          "ListAgents",
+          "Monitor",
+          "NotebookEdit",
+          "PushNotification",
+          "Read",
+          "RemoteTrigger",
+          "ReportFindings",
+          "ScheduleWakeup",
+          "SendMessage",
+          "Skill",
+          "TaskStop",
+          "ToolSearch",
+          "WebFetch",
+          "WebSearch",
+          "Workflow",
+          "Write",
+          "mcp__pyry_approve__approve",
+          "mcp__pyry_files__send_file"
+        ],
+        "type": "system",
+        "uuid": "f3e026e3-08c6-405a-8a93-3d286cba96ed"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "c7149216-7705-4f5e-9a17-5d219ba2f152"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "isReplay": true,
+        "message": {
+          "content": [
+            {
+              "text": "Use the Write tool exactly once to create tape-allowed.txt in the current directory. Set file_path to its absolute path and content to exactly hello with no newline. Do not use other tools. After the decision, reply with one short sentence.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:12.439Z",
+        "type": "user",
+        "uuid": "fe89b25d-0438-46a4-bf1a-23f4825c3467"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBm77nDc9Vj2fh3TCsrH",
+            "input_transformations": [],
+            "model": "claude-sonnet-5",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 9212,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 9212,
+              "cache_read_input_tokens": 20041,
+              "inference_geo": "global",
+              "input_tokens": 2,
+              "output_tokens": 2,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 1670,
+        "type": "stream_event",
+        "uuid": "024b7368-4661-4679-abaf-236788ef9989"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "signature": "",
+            "thinking": "",
+            "type": "thinking"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "65d45ef4-9c51-46d8-9d30-4c2b76f6bfe8"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 50,
+        "estimated_tokens_delta": 50,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "b4d09692-786f-41a6-b045-0301f65c583a"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": 50,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "8353827a-843f-45c5-b1bc-b7d63cb131a5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": null,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "65ed3c44-1e29-4db1-b8c9-ba823a515d8e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 158,
+        "estimated_tokens_delta": 108,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "d99f698e-737a-43bb-97cc-4c1d4b36ae0b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "signature": "EvEECusCCBIYAipAdHoV1T42DzVR/JWtwOEYOUUQNWWnvWY86DYnCl1GPqDqx6YgBGXndbWqTSaj90CPkZ7uFKp+Y+dZ8xQvbW1HmjIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ3N2IyNjYwZi02YjFlLTRmZTAtOWQ4MS0xYTVmY2QzMzlmOTZyENz2pw/VuZgI2GJTEUmOvfOIAQGaAREKD2NsYXVkZS1zb25uZXQtNagB5tTY1gawAQLCAUkICRAAGhsBeb8BjBsB/1UC5lIDTzcF8woFHosR5eoEJq0gBDIEEnHPJToEEucSQkIEPd+2M0oEruYRNFAMWgTZBeFWYAJoAXAD2gFgChZwcmVmaXhfYmVmb3JlX2Jsb2NrX3YxEiCq4REZ7vQvAvtzhaAqEUw6Vl33YM9xRwDhthDSBLS4SiIAMiDCwBPIapyS4i+Wbz2GF3aPi3pEyQKtzAl7+h4JivtOH0gDEgwZDcMO/132RI8pV5caDJ/HFU7nsNdCG38xTiIwDprpQxBn98mFpmFT2MUqgoWJnmMQ5+KTsJSvhchmZnK7hwT9v98zopKg8tY0eul3KrIB0Wct2BB93lgA66yYVoUaMDmB2W/KwVVF/eK1x5zgIvfRKagfZgmbsaa8Bg2cTeHvoV0mtgpekAAuFmOcnCW8OxeFCSUHzDeAnUICztLp8ddFWAvUyWd3RgQiU0nh7XccpUGxIJurFzia/e/WtVkjYF2xi7HRbbsc+q1zp7Pk4f+4yPMPBeQdr1txvoavW7u7sJGa5vDPd88tTPNuRJ+USPqTNin906npPKpRYUibLXrDAhgB",
+            "type": "signature_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "14c2a214-63ed-45e1-b107-3ae024fd7149"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "signature": "EvEECusCCBIYAipAdHoV1T42DzVR/JWtwOEYOUUQNWWnvWY86DYnCl1GPqDqx6YgBGXndbWqTSaj90CPkZ7uFKp+Y+dZ8xQvbW1HmjIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ3N2IyNjYwZi02YjFlLTRmZTAtOWQ4MS0xYTVmY2QzMzlmOTZyENz2pw/VuZgI2GJTEUmOvfOIAQGaAREKD2NsYXVkZS1zb25uZXQtNagB5tTY1gawAQLCAUkICRAAGhsBeb8BjBsB/1UC5lIDTzcF8woFHosR5eoEJq0gBDIEEnHPJToEEucSQkIEPd+2M0oEruYRNFAMWgTZBeFWYAJoAXAD2gFgChZwcmVmaXhfYmVmb3JlX2Jsb2NrX3YxEiCq4REZ7vQvAvtzhaAqEUw6Vl33YM9xRwDhthDSBLS4SiIAMiDCwBPIapyS4i+Wbz2GF3aPi3pEyQKtzAl7+h4JivtOH0gDEgwZDcMO/132RI8pV5caDJ/HFU7nsNdCG38xTiIwDprpQxBn98mFpmFT2MUqgoWJnmMQ5+KTsJSvhchmZnK7hwT9v98zopKg8tY0eul3KrIB0Wct2BB93lgA66yYVoUaMDmB2W/KwVVF/eK1x5zgIvfRKagfZgmbsaa8Bg2cTeHvoV0mtgpekAAuFmOcnCW8OxeFCSUHzDeAnUICztLp8ddFWAvUyWd3RgQiU0nh7XccpUGxIJurFzia/e/WtVkjYF2xi7HRbbsc+q1zp7Pk4f+4yPMPBeQdr1txvoavW7u7sJGa5vDPd88tTPNuRJ+USPqTNin906npPKpRYUibLXrDAhgB",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBm77nDc9Vj2fh3TCsrH",
+          "input_transformations": [],
+          "model": "claude-sonnet-5",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 9212,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 9212,
+            "cache_read_input_tokens": 20041,
+            "inference_geo": "global",
+            "input_tokens": 2,
+            "output_tokens": 2,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBm77Z5RVL2LXB8hsrHK",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:15.024Z",
+        "type": "assistant",
+        "uuid": "bb2594f8-c98c-42b3-bd23-9c1a692116f2"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "62ea0cbb-2ea0-45e5-bb28-542994a10721"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "caller": {
+              "type": "direct"
+            },
+            "id": "toolu_01GHriVgE2LqLwXHnjEAXmtx",
+            "input": {},
+            "name": "Write",
+            "type": "tool_use"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "9fab5d58-0691-4c4e-95de-0f8b68026822"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6c215e4d-4720-4112-b801-cd6d83072a5d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "{\"file_path\": \"/private/var",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "8d212288-edfa-4507-855f-35ffb79d287c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "/folders/k",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "9ca3a6c7-68d8-44d0-90e4-cf29d26c2209"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "0/g",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "02d4c911-25fe-4b9c-a7ab-1097d4b39499"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "c07",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6a522079-7c4f-422d-b64e-67a56f2f1146"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "w9",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "c44d5b0e-255d-4a59-b43a-79d94bc434ec"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ws319",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6446ef7c-ec6b-40b4-be6e-0eeddcf20f06"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "b",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "94e0c6ec-2057-4629-a2c6-13c69c7ae5ed"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "07",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "74581600-a362-4f38-826f-6521979643bf"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "n",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e1993b85-066e-4204-a6a9-5ec252988717"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "0",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "4001661b-628f-4b05-9b95-723c201233a0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "pl",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "d29f7d33-63f4-4f92-862f-13bd3c05f06b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "nw",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "ebe6bd8d-3bdb-4cdc-8499-7b72c324908f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "6",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "03af64d9-7418-471e-a9b9-381a9ad88869"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "y",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "84edd551-53e6-4ecd-a335-85fe3df887e9"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "8",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "8114d0ed-94f8-4933-8fa9-06332d25ee14"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "r",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "7583f0ef-b9ad-4cad-bd05-cfc2e85778e5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "0",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "ca33a8a1-67c3-4807-8a95-a2fe6c6c6b3e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "000",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "387ea65c-987d-41e5-bf8d-9bbc3298c1ec"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "g",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "db31fcf1-87f0-439d-87b8-a05e5d8e2737"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "n",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "2aef3391-12e6-4a14-8e7f-c2bb91a26603"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "/",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "d63fd53a-b5ce-46b8-8c46-a9d25ecb48b6"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "T/p",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0f1cddcb-6f7b-49a7-8de0-1367d00505b1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "-301",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "bf9d96ea-61fb-47c9-928f-fee28c599724"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "-1979",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "20aa1753-f095-4e99-bf61-b7fb21c5c989"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "377",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3d05ca93-671e-4796-a4bb-43a9dcacd642"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "893",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "c10cd142-7199-4e18-b4bc-42d33ed14770"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "/tape-allowed.",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3129e9b5-839f-40f3-b0c4-737b02a26a37"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "txt",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6c924ea7-776c-42a1-aff5-b9b3ea347b9d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\", \"content\": \"hello",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0b3b1afd-ddc2-47a5-a871-6c75bf770ba9"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\"}",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "f04bd3a5-16ac-489a-9e82-d412de893495"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "caller": {
+                "type": "direct"
+              },
+              "id": "toolu_01GHriVgE2LqLwXHnjEAXmtx",
+              "input": {
+                "content": "hello",
+                "file_path": "${PILOT_HOME}/tape-allowed.txt"
+              },
+              "name": "Write",
+              "type": "tool_use"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBm77nDc9Vj2fh3TCsrH",
+          "input_transformations": [],
+          "model": "claude-sonnet-5",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 9212,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 9212,
+            "cache_read_input_tokens": 20041,
+            "inference_geo": "global",
+            "input_tokens": 2,
+            "output_tokens": 2,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBm77Z5RVL2LXB8hsrHK",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:16.511Z",
+        "type": "assistant",
+        "uuid": "5ce79aeb-b7af-4959-8df8-3f26f7c4ea21",
+        "wire_tool_inputs": {
+          "toolu_01GHriVgE2LqLwXHnjEAXmtx": {
+            "content": "hello",
+            "file_path": "${PILOT_HOME}/tape-allowed.txt"
+          }
+        }
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "29663e10-b163-4a97-aae5-1575febd2710"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "request": {
+          "description": "tape-allowed.txt",
+          "display_name": "Write",
+          "input": {
+            "content": "hello",
+            "file_path": "${PILOT_HOME}/tape-allowed.txt"
+          },
+          "permission_suggestions": [
+            {
+              "destination": "session",
+              "mode": "acceptEdits",
+              "type": "setMode"
+            }
+          ],
+          "subtype": "can_use_tool",
+          "tool_name": "Write",
+          "tool_use_id": "toolu_01GHriVgE2LqLwXHnjEAXmtx"
+        },
+        "request_id": "b496369b-7ea3-4d1a-95ef-6ba1de873c37",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 9212,
+            "cache_read_input_tokens": 20041,
+            "input_tokens": 2,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 9212,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 9212,
+                "cache_read_input_tokens": 20041,
+                "input_tokens": 2,
+                "output_tokens": 181,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 181,
+            "output_tokens_details": {
+              "thinking_tokens": 55
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "81277c1e-b5d8-4e63-a514-fc1d97587438"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "response": {
+          "request_id": "b496369b-7ea3-4d1a-95ef-6ba1de873c37",
+          "response": {
+            "behavior": "allow",
+            "updatedInput": {
+              "content": "hello",
+              "file_path": "${PILOT_HOME}/tape-allowed.txt"
+            }
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "43b809ae-b358-4832-b4f6-770c0e7f34dd"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "b496369b-7ea3-4d1a-95ef-6ba1de873c37",
+          "response": {
+            "behavior": "allow",
+            "updatedInput": {
+              "content": "hello",
+              "file_path": "${PILOT_HOME}/tape-allowed.txt"
+            }
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "rate_limit_info": {
+          "isUsingOverage": false,
+          "overageDisabledReason": "org_level_disabled",
+          "overageStatus": "rejected",
+          "rateLimitType": "five_hour",
+          "resetsAt": 1792436400,
+          "status": "allowed",
+          "unifiedWindows": {
+            "five_hour": {
+              "resetsAt": 1792436400,
+              "utilization": 0.13
+            },
+            "seven_day": {
+              "resetsAt": 1792994400,
+              "utilization": 0.11
+            }
+          }
+        },
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "rate_limit_event",
+        "uuid": "5b25fc16-a41e-4c00-b22a-e6105f7aef33"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "content": "File created successfully at: ${PILOT_HOME}/tape-allowed.txt (file state is current in your context — no need to Read it back)",
+              "tool_use_id": "toolu_01GHriVgE2LqLwXHnjEAXmtx",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:16.546Z",
+        "tool_use_result": {
+          "content": "hello",
+          "filePath": "${PILOT_HOME}/tape-allowed.txt",
+          "originalFile": null,
+          "structuredPatch": [],
+          "type": "create",
+          "userModified": false
+        },
+        "type": "user",
+        "uuid": "b273ef97-cdfd-497b-a3fb-ebc14744e584"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "bcf6ece1-ae87-48fa-9407-d1385cde04be"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBm7RJQZpduKiz8dg2H3",
+            "input_transformations": [],
+            "model": "claude-sonnet-5",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 304,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 304,
+              "cache_read_input_tokens": 29253,
+              "inference_geo": "global",
+              "input_tokens": 2,
+              "output_tokens": 2,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 1534,
+        "type": "stream_event",
+        "uuid": "18b29082-a110-4e81-b582-1959f5b58ec1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "62edc93b-4ef2-484d-b56f-dedcca4be77e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "Created",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "85edc520-f20a-4a25-940e-44cf72678bca"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " tape-allowed.tx",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "543c8aa0-56b4-486a-9760-640b3e55e600"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "t with the",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1ec67e8b-1f9a-45fb-a706-668f9e3425f8"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " content",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "013dd971-4166-45c3-bbc2-c3a689c0f1e2"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " \"hello\".",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "7e315ebc-29e4-4efb-ac73-abfebdfac410"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "text": "Created tape-allowed.txt with the content \"hello\".",
+              "type": "text"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBm7RJQZpduKiz8dg2H3",
+          "input_transformations": [],
+          "model": "claude-sonnet-5",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 304,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 304,
+            "cache_read_input_tokens": 29253,
+            "inference_geo": "global",
+            "input_tokens": 2,
+            "output_tokens": 2,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBm7R3XomWzvii1vBD82",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:18.314Z",
+        "type": "assistant",
+        "uuid": "1346a1e2-2ec5-49d8-9997-a860e407700f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "026c7cc2-e079-4606-9ece-80f9be01a556"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 304,
+            "cache_read_input_tokens": 29253,
+            "input_tokens": 2,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 304,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 304,
+                "cache_read_input_tokens": 29253,
+                "input_tokens": 2,
+                "output_tokens": 20,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 20,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "23d9f851-dae1-49a9-8488-3c2bbf61fbc1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "d1d4a9d4-3264-405e-907b-7787f53636d7"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "api_error_status": null,
+        "duration_api_ms": 5870,
+        "duration_ms": 5923,
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "first_content_frame_ms": 1706,
+        "is_error": false,
+        "modelUsage": {
+          "claude-sonnet-5": {
+            "cacheCreationInputTokens": 9516,
+            "cacheReadInputTokens": 49294,
+            "canonicalModel": "claude-sonnet-5",
+            "contextWindow": 1000000,
+            "costBasis": "list",
+            "costUSD": 0.0499408,
+            "inputTokens": 4,
+            "maxOutputTokens": 64000,
+            "outputTokens": 201,
+            "provider": "firstParty",
+            "thinkingTokens": 55,
+            "webSearchRequests": 0
+          }
+        },
+        "num_turns": 2,
+        "permission_denials": [],
+        "queued_turn_count": 0,
+        "result": "Created tape-allowed.txt with the content \"hello\".",
+        "result_index": 0,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "stop_reason": "end_turn",
+        "subagent_stats": {
+          "by_type": {},
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "system": 0,
+            "user": 0
+          },
+          "max_depth": 0,
+          "refused": {
+            "budget": 0,
+            "concurrency_limit": 0,
+            "depth_limit": 0
+          },
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "spawned": 0,
+          "spawned_by_subagents": 0,
+          "started_in_background": 0
+        },
+        "subtype": "success",
+        "terminal_reason": "completed",
+        "time_to_request_ms": 34,
+        "total_cost_usd": 0.0499408,
+        "ttft_ms": 2595,
+        "ttft_stream_ms": 1705,
+        "type": "result",
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 9516,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 9516,
+          "cache_read_input_tokens": 49294,
+          "inference_geo": "global",
+          "input_tokens": 4,
+          "iterations": [
+            {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 304,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 304,
+              "cache_read_input_tokens": 29253,
+              "input_tokens": 2,
+              "output_tokens": 20,
+              "type": "message"
+            }
+          ],
+          "output_tokens": 201,
+          "output_tokens_details": {
+            "thinking_tokens": 55
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "uuid": "fd80e04a-0893-414f-9260-976376d4a35f"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "detail": "summary",
+          "subtype": "get_context_usage"
+        },
+        "request_id": "4",
+        "type": "control_request"
+      }
+    }
+  ],
+  "files": {
+    "--append-system-prompt-file": "You are running as a supervised child of the pyry daemon. Your replies are not displayed in a terminal: they leave this process as a structured stream and are rendered for the operator by a separate client application, which may be running on a different machine than the one your tools execute on. More than one client can be attached to a session, and which one is attached can change while the session runs.\n",
+    "--mcp-config": {
+      "mcpServers": {
+        "pyry_approve": {
+          "args": [
+            "mcp-approve",
+            "-pyry-socket",
+            "${PILOT_SOCKET}"
+          ],
+          "command": "${PILOT_DAEMON}"
+        },
+        "pyry_files": {
+          "args": [
+            "mcp-files",
+            "-pyry-socket",
+            "${PILOT_SOCKET}"
+          ],
+          "command": "${PILOT_DAEMON}"
+        }
+      }
+    },
+    "--settings": {
+      "enableAllProjectMcpServers": true,
+      "skipDangerousModePermissionPrompt": true
+    }
+  }
+}
