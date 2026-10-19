@@ -196,6 +196,8 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		for {
 			env := next(deadline)
 			switch env.Type {
+			case protocol.TypeError:
+				t.Fatal("daemon returned an error during the recorded scenario")
 			case protocol.TypeAck:
 				if env.InReplyTo != nil && *env.InReplyTo == requestID {
 					sawAck = true

@@ -4,6 +4,7 @@ package claudetape
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const MaxBytes = 8 << 20
@@ -61,6 +63,15 @@ func Decode(r io.Reader) (*Tape, error) {
 func (t *Tape) Validate() error {
 	if t.Version != 1 || t.Scenario == "" || len(t.Producer.Revision) != 40 || len(t.Producer.BinarySHA256) != 64 || t.Producer.ClaudeVersion == "" || t.Producer.CapturedAt == "" || len(t.Args) == 0 || len(t.Frames) == 0 || len(t.Frames) > MaxFrames {
 		return errors.New("incomplete tape provenance or inventory")
+	}
+	if raw, err := hex.DecodeString(t.Producer.Revision); err != nil || len(raw) != 20 {
+		return errors.New("invalid source revision")
+	}
+	if raw, err := hex.DecodeString(t.Producer.BinarySHA256); err != nil || len(raw) != 32 {
+		return errors.New("invalid producer checksum")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, t.Producer.CapturedAt); err != nil {
+		return errors.New("invalid capture timestamp")
 	}
 	inputs, outputs := 0, 0
 	for _, f := range t.Frames {
