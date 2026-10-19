@@ -38,6 +38,7 @@ const defaultMCPProtocolVersion = "2025-06-18"
 // value is read-only after construction — no shared mutable state, no locks.
 type approveServer struct {
 	socketPath string       // resolved control socket to forward approvals to
+	sessionID  string       // producer identity inherited from the spawned Claude process
 	log        *slog.Logger // stderr only — stdout is exclusively the JSON-RPC frame stream
 }
 
@@ -67,7 +68,7 @@ func runMCPApprove(args []string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger.Info("mcp-approve: serving MCP approve tool over stdio")
 
-	s := newMCPApproveServer(socketPath, logger)
+	s := newMCPApproveServer(socketPath, os.Getenv(envSessionID), logger)
 	return serveJSONRPCStdio(ctx, os.Stdin, os.Stdout, logger, s.register)
 }
 
@@ -85,9 +86,10 @@ func runMCPApprove(args []string) error {
 // the production shape through without starting a server. Named
 // newMCPApproveServer because newApproveServer is already taken by a test helper
 // in this package.
-func newMCPApproveServer(socketPath string, log *slog.Logger) *approveServer {
+func newMCPApproveServer(socketPath, sessionID string, log *slog.Logger) *approveServer {
 	return &approveServer{
 		socketPath: socketPath,
+		sessionID:  sessionID,
 		log:        log,
 	}
 }
@@ -232,6 +234,9 @@ func (s *approveServer) toolsCall(ctx context.Context, params json.RawMessage) (
 	if err := json.Unmarshal(call.Arguments, &payload); err != nil {
 		return s.deny("", "malformed approval request"), nil
 	}
+	// Attribution comes from the spawned process, never model-controlled arguments.
+	// An unbound process stays unresolved even if arguments supply an identity.
+	payload.SessionID = s.sessionID
 
 	// The Serve ctx goes to the daemon unwrapped: no per-call deadline, so an
 	// approval someone is still answering is never cut short from this end, and

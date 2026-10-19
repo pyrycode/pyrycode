@@ -122,7 +122,7 @@ func holdPeer() func(net.Conn) {
 // shape claude gets; that is safe for the parallel tests in this file because
 // construction reads no environment (the client carries no per-call bound).
 func newApproveServer(sock string) *approveServer {
-	return newMCPApproveServer(sock, testLogger(io.Discard))
+	return newMCPApproveServer(sock, "", testLogger(io.Discard))
 }
 
 // callApprove invokes the tools/call handler directly with a well-formed
@@ -294,7 +294,7 @@ func TestMCPApprove_DaemonMessageWinsAtEveryWindow(t *testing.T) {
 			sock := startApprovePeer(t, delayReplyPeer(peerDelay, control.Response{
 				Approve: &control.ApproveResult{Behavior: "deny", Message: daemonTimeoutMessage},
 			}))
-			s := newMCPApproveServer(sock, testLogger(io.Discard))
+			s := newMCPApproveServer(sock, "", testLogger(io.Discard))
 
 			tr := callApprove(t, s, `{"tool_name":"Bash","input":{},"tool_use_id":"tu_window"}`)
 			assertVerdict(t, tr, `{"behavior":"deny","message":"`+daemonTimeoutMessage+`"}`)
@@ -554,7 +554,7 @@ func TestMCPApprove_MalformedInput_NoByteLeak(t *testing.T) {
 	t.Parallel()
 	const secret = "SUPERSECRET_TOKEN_ac91"
 	var stderr bytes.Buffer
-	s := newMCPApproveServer("/nonexistent/p.sock", testLogger(&stderr))
+	s := newMCPApproveServer("/nonexistent/p.sock", "", testLogger(&stderr))
 
 	// Well-formed params, but arguments is an array carrying the secret — fails
 	// the ApprovePayload unmarshal → deny, and must not log the offending bytes.
