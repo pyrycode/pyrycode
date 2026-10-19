@@ -67,7 +67,7 @@ func TestDaemonThreadCompactRetirement(t *testing.T) {
 			}
 			s.publisher.publish(t.Context(), testConvID, cursor)
 			closed := w.await()
-			if closed.ConnID != "phone" || closed.CloseCode != uint16(relay.StatusQueueOverflow) || retirements != 1 || pushes != 0 {
+			if closed.ConnID != "phone" || closed.CloseCode != uint16(relay.StatusProducerGap) || retirements != 1 || pushes != 0 {
 				t.Fatalf("gap did not retire without baseline: close=%+v retirements=%d pushes=%d", closed, retirements, pushes)
 			}
 			w.open("again", false, caps...)
