@@ -109,6 +109,9 @@ func TestQuestionAnswerWitness(t *testing.T) {
 		}
 		seen[choice.witness] = true
 		values := entries[0].Values
+		if !strings.Contains(values[len(values)-1], "cache named "+choice.witness) {
+			t.Error("answer must tie the selected policy to its fresh cache name")
+		}
 		if !strings.Contains(values[len(values)-1], "include the answer witness verbatim: "+choice.witness) {
 			t.Error("free-text answer must explicitly request its witness in the reply")
 		}

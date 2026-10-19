@@ -40,9 +40,10 @@ func questionAnswerTrigger(nonce int64) string {
 	return fmt.Sprintf("Before writing anything, use the AskUserQuestion tool to ask me one "+
 		"clarifying question: for an in-memory key-value cache, which eviction policy should it use? "+
 		"Give the question a short header, offer four policies as options with a one-line description "+
-		"each, and explicitly allow only a single choice (multiSelect false). After I answer, "+
-		"confirm your interpretation of my selection and include the supplied answer witness verbatim. "+
-		"Do not write code or use any other tool. run=%d", nonce)
+		"each, and explicitly allow only a single choice (multiSelect false). My answer will also name "+
+		"the cache. After I answer, confirm the selected policy and repeat that supplied cache name "+
+		"verbatim as the answer witness. Your entire task is this question and confirmation; "+
+		"do not offer implementation, write code or use any other tool. run=%d", nonce)
 }
 
 func TestInteractiveStreamQuestionAnswer(t *testing.T) {
@@ -189,7 +190,7 @@ func chooseQuestionAnswers(t *testing.T, batch protocol.QuestionShownPayload, mu
 			selected = strings.Join(values, ", ")
 		}
 		if i == 0 {
-			answer := fmt.Sprintf("%s. In your reply, confirm this selection and include the answer witness verbatim: %s", selected, choice.witness)
+			answer := fmt.Sprintf("%s for the cache named %s. In your reply, confirm this selection and include the answer witness verbatim: %s", selected, choice.witness, choice.witness)
 			if multiple {
 				values = append(values, answer)
 			} else {
@@ -270,6 +271,9 @@ func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID,
 		env, ok := receiveQuestionEnvelope(t, h, deadline)
 		if !ok {
 			t.Fatalf("answer proof incomplete: dismissal=%v idle=%v; continuation=%q", proof.dismissed, proof.idle, truncateString(proof.text.String(), questionTextLogCap))
+		}
+		if env.Type == protocol.TypeToolResult {
+			t.Logf("question tool result: %q", truncateString(string(env.Payload), questionTextLogCap))
 		}
 		if err := proof.observe(env); err != nil {
 			t.Fatal(err)
