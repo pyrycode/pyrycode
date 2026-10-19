@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -19,71 +19,7 @@ func TestInteractiveStreamForwardsSubagentText(t *testing.T) {
 	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
 	nonce := time.Now().UnixNano()
-	sealSendMessage(t, h.phone, h.initSend, 2, convID, "m-subagent-2331",
-		fmt.Sprintf("Use the Agent tool exactly once and wait for it in the foreground. Ask the agent to write exactly twelve numbered paragraphs about reliable process supervision, with at least two complete sentences per paragraph, and not to use tools. After it returns, write your own distinct twelve numbered paragraphs on the same topic, again with at least two complete sentences each. Do not use any other tools. run=%d", nonce))
-
-	deadline := time.Now().Add(180 * time.Second)
-	var agentID string
-	lanes := map[string]*subagentTextLane{
-		"": {},
-	}
-	for {
-		env, ok := nextSubagentTextEnvelope(t, h, deadline)
-		if !ok {
-			t.Fatalf("turn did not reach terminal idle; Agent/Task id=%q main=%v child=%v",
-				agentID, lanes[""], lanes[agentID])
-		}
-		switch env.Type {
-		case protocol.TypeToolUse:
-			var p protocol.ToolUsePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode tool_use payload: %v", err)
-			}
-			if p.ConversationID != convID || (p.Name != "Agent" && p.Name != "Task") {
-				continue
-			}
-			if p.ParentToolUseID != "" {
-				t.Fatalf("foreground %s call has parent_tool_use_id %q, want empty", p.Name, p.ParentToolUseID)
-			}
-			if p.ToolUseID == "" {
-				t.Fatalf("foreground %s call has an empty tool_use_id", p.Name)
-			}
-			if agentID != "" {
-				t.Fatalf("observed multiple foreground Agent/Task calls: %q and %q", agentID, p.ToolUseID)
-			}
-			agentID = p.ToolUseID
-			lanes[agentID] = &subagentTextLane{}
-
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if p.ConversationID != convID || strings.TrimSpace(p.Text) == "" {
-				continue
-			}
-			if p.ParentToolUseID != "" && p.ParentToolUseID != agentID {
-				t.Fatalf("assistant_delta parent_tool_use_id = %q before/mismatch with foreground Agent/Task id %q",
-					p.ParentToolUseID, agentID)
-			}
-			lane := lanes[p.ParentToolUseID]
-			if lane == nil {
-				t.Fatalf("assistant_delta reached unregistered parent lane %q", p.ParentToolUseID)
-			}
-			lane.observe(t, p)
-
-		case protocol.TypeTurnState:
-			var p protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			if p.ConversationID != convID || p.State != "idle" {
-				continue
-			}
-			assertSubagentTextLanes(t, agentID, lanes)
-			return
-		}
-	}
+	scenario.SubagentText(t, sharedHarnessWire(t, h, 2), convID, fmt.Sprintf("Use the Agent tool exactly once and wait for it in the foreground. Ask the agent to write exactly twelve numbered paragraphs about reliable process supervision, with at least two complete sentences per paragraph, and not to use tools. After it returns, write your own distinct twelve numbered paragraphs on the same topic, again with at least two complete sentences each. Do not use any other tools. run=%d", nonce), 180*time.Second)
 }
 
 type subagentTextLane struct {

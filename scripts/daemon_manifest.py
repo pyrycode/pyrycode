@@ -25,7 +25,7 @@ def load(path=PATH):
     names(value['provider_roots'], r'[A-Za-z_][A-Za-z0-9_]*', True)
     seen = set()
     for row in value['scenarios']:
-        keys(row, 'name stdio_permission initial_yolo claude_args live_tests retained_live live_contracts')
+        keys(row, 'name stdio_permission initial_yolo claude_args live_tests retained_live live_contracts comparison_policy')
         if not isinstance(row['name'], str) or not re.fullmatch(r'[a-z][a-z0-9-]*', row['name']) or row['name'] in seen:
             raise ValueError('Invalid or duplicate scenario')
         seen.add(row['name'])
@@ -33,6 +33,9 @@ def load(path=PATH):
             raise ValueError('Permission configuration must be explicit')
         if not isinstance(row['claude_args'], list) or any(not isinstance(arg, str) or not arg.strip() for arg in row['claude_args']):
             raise ValueError('Claude arguments must be explicit nonempty strings')
+        policy = row['comparison_policy']
+        if policy not in ('strict_ordered', 'native_coding_prefix') or (policy == 'native_coding_prefix') != (row['name'] == 'native-suggestions'):
+            raise ValueError('Unsupported scenario comparison policy')
         names(row['live_tests'], r'Test[A-Za-z0-9_]+')
         if not isinstance(row['retained_live'], list) or not row['retained_live'] or any(not isinstance(x, str) or not x.strip() for x in row['retained_live']):
             raise ValueError('Retained live obligations must be explicit')
@@ -50,7 +53,7 @@ def load(path=PATH):
         if not re.fullmatch(r'Test[A-Za-z0-9_]+', name):
             raise ValueError('Invalid reviewed test name')
         keys(review, 'disposition reason contract_sha256')
-        if review['disposition'] not in ('candidate', 'needs_checkpoint', 'live_only', 'control') or not isinstance(review['reason'], str) or not review['reason'].strip() or not isinstance(review['contract_sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', review['contract_sha256']):
+        if review['disposition'] not in ('candidate', 'needs_checkpoint', 'needs_harness', 'live_only', 'control') or not isinstance(review['reason'], str) or not review['reason'].strip() or not isinstance(review['contract_sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', review['contract_sha256']):
             raise ValueError('Invalid boundary review')
     return value
 

@@ -16,13 +16,14 @@ import (
 var recordedManifestJSON []byte
 
 type recordedScenarioDefinition struct {
-	InitialYOLO     bool              `json:"initial_yolo"`
-	Name            string            `json:"name"`
-	ClaudeArgs      []string          `json:"claude_args"`
-	StdioPermission bool              `json:"stdio_permission"`
-	LiveTests       []string          `json:"live_tests"`
-	RetainedLive    []string          `json:"retained_live"`
-	LiveContracts   map[string]string `json:"live_contracts"`
+	ComparisonPolicy string            `json:"comparison_policy"`
+	InitialYOLO      bool              `json:"initial_yolo"`
+	Name             string            `json:"name"`
+	ClaudeArgs       []string          `json:"claude_args"`
+	StdioPermission  bool              `json:"stdio_permission"`
+	LiveTests        []string          `json:"live_tests"`
+	RetainedLive     []string          `json:"retained_live"`
+	LiveContracts    map[string]string `json:"live_contracts"`
 }
 
 type recordedManifest struct {
@@ -58,6 +59,12 @@ func recordedManifestFor(t *testing.T) recordedManifest {
 	for _, s := range m.Scenarios {
 		if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(s.Name) || names[s.Name] || recordedScenarioDrivers[s.Name] == nil {
 			t.Fatal("scenario manifest has duplicate, invalid or unimplemented driver")
+		}
+		if s.ComparisonPolicy != "strict_ordered" && (s.ComparisonPolicy != "native_coding_prefix" || s.Name != "native-suggestions") {
+			t.Fatal("unsupported scenario comparison policy")
+		}
+		if s.Name == "native-suggestions" && s.ComparisonPolicy != "native_coding_prefix" {
+			t.Fatal("native suggestions must declare their bounded comparison policy")
 		}
 		names[s.Name] = true
 	}

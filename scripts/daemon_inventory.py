@@ -95,5 +95,6 @@ def inventory(root, manifest, functions=None):
                         'recorded_scenarios': len(manifest['scenarios']),
                         'shared_live_entries': sum(row['disposition'] == 'shared_replay' for row in rows),
                         'remaining_eligibility_review': sum(row['disposition'] == 'unreviewed' and row['dependency'] == 'possible_provider_dependency' for row in rows),
+                        'reviewed_migration_backlog': dict(Counter(row['disposition'] for row in rows if row['disposition'] in ('candidate', 'needs_checkpoint', 'needs_harness'))),
                         'total_replay_eligible': None, 'live_tests_retired': 0},
             'issues': issues, 'existing_tests': rows}

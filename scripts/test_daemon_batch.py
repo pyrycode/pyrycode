@@ -15,6 +15,21 @@ import daemon_inventory as inventory
 
 
 class ManifestTest(unittest.TestCase):
+    def test_reviewed_harness_backlog_remains_visible(self):
+        node = dict(name='TestHarness', file='harness_test.go', test=True, live_tagged=True,
+                    references=[], source_sha256='a'*64, context_sha256='b'*64,
+                    provider_command=True, env_gates=[])
+        nodes = {node['name']: node}
+        value = dict(provider_roots=['TestHarness'], scenarios=[], reviews={
+            'TestHarness': dict(disposition='needs_harness', reason='Typed process roles are required',
+                                contract_sha256=inventory.contract_digest(nodes, {'TestHarness'}))})
+        audit = inventory.inventory(Path('/unused'), value, functions=[node])
+        self.assertEqual([], audit['issues'])
+        self.assertEqual({'needs_harness': 1}, audit['summary']['reviewed_migration_backlog'])
+        self.assertEqual(0, audit['summary']['remaining_eligibility_review'])
+        self.assertIsNone(audit['summary']['total_replay_eligible'])
+
+
     def test_selection_and_schema_reject_drift(self):
         value = manifest.load()
         self.assertEqual(['permission-deny', 'permission-allow', 'permission-cancel'], manifest.select(value, 'permissions'))
@@ -23,7 +38,9 @@ class ManifestTest(unittest.TestCase):
                 manifest.select(value, group, names)
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'manifest.json'
-            for mutate in (lambda m: m['scenarios'].append(m['scenarios'][0]),
+            for mutate in (lambda m: m['scenarios'][0].update(comparison_policy='unknown'),
+                           lambda m: m['scenarios'][0].update(comparison_policy='native_coding_prefix'),
+                           lambda m: m['scenarios'].append(m['scenarios'][0]),
                            lambda m: m['batches'].update(broken=['missing']),
                            lambda m: m['scenarios'][0].update(retained_live=[]),
                            lambda m: m['scenarios'][0].update(unexpected=True),

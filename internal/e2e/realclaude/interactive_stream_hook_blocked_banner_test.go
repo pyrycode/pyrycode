@@ -168,9 +168,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
-	"github.com/pyrycode/pyrycode/internal/history"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -247,105 +246,15 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 	convID := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, reqID, nil)
 	reqID++
 
-	// --- The blocked send: the window opens here -------------------------------
-	// oslcapBlockPrompt carries the rig marker the hook matches on. Its prose is
-	// otherwise a trivial request, so a lap where the hook does NOT fire produces a
-	// short ordinary turn rather than anything expensive — which is reading (b),
-	// and the witness assertion below is what names it as such.
-	var w hookBannerWindow
-	blockReqID := reqID
-	reqID++
-	sealSendMessage(t, h.phone, h.initSend, blockReqID, convID, "m-blocked", oslcapBlockPrompt(nonce))
-
-	// --- AC 1, first half: the refusal reaches the client ----------------------
-	banner := w.awaitBanner(t, h, rig, convID, perTurnReplyBudget)
-	if banner.ConversationID != convID {
-		t.Errorf("banner conversation_id = %q, want the driving conversation %q",
-			banner.ConversationID, convID)
-	}
-	if !strings.Contains(banner.Text, oslcapBlockReason) {
-		// The one place the prose itself is printed: the assertion has already
-		// failed and a human is reading. %q, per this file's header.
-		t.Errorf("the banner's text does not carry the hook's block reason %q — the frame arrived but the "+
-			"refusal did not survive the path.\ntext (%d bytes): %q",
-			oslcapBlockReason, len(banner.Text), banner.Text)
-	}
-	if banner.Truncated {
-		t.Errorf("banner truncated = true for a %d-byte text, well under the producer's 4 KiB bound — either "+
-			"claude's wrapper prose grew by three orders of magnitude or maxBannerText moved", len(banner.Text))
-	}
-	// level and stops_turn are LOGGED, not pinned. level is a documented open set
-	// (docs/protocol-mobile.md § banner) and pinning it to the one observed value
-	// would fail on a claude that legitimately picks another; stops_turn is
-	// claude's own report, so asserting it would assert claude's choice rather
-	// than the daemon's carriage of it. The capture is a summary — see the header.
-	t.Logf("CAPTURE (#2320): a live claude's hook refusal reached the client as a banner — level=%q "+
-		"text=%d bytes truncated=%v stops_turn=%v, and the text carries the hook's block reason. The daemon "+
-		"was in the path: it spawned claude, parsed the system/informational line and delivered the frame",
-		banner.Level, len(banner.Text), banner.Truncated, banner.StopsTurn)
-
-	// --- The witness: which of the four readings this run is -------------------
-	// Asserted on the GREEN path too, not only as a failure diagnostic. A banner
-	// that arrived without the hook having blocked would mean the frame came from
-	// something other than the refusal under test, and the whole assertion above
-	// would be about a line this file did not provoke.
-	verdicts := oslcapHookVerdicts(rig.WitnessPath)
-	if len(verdicts) == 0 || verdicts[0] != oslcapHookBlocked {
-		t.Fatalf("the hook witness reads %q, want it to open with %q. The rig did not refuse the marked "+
-			"prompt, so whatever reached the client above was not this file's subject. The witness was checked "+
-			"after waiting for the actual refusal; see the hook installation and spawn argv below.\n%s",
-			verdicts, oslcapHookBlocked, hookBannerSpawnArgv(h))
-	}
-
-	// --- AC 1, second half: the session still answers the next prompt ----------
-	// No wait for the refused turn to close, because it produces no client-visible
-	// boundary — by production design, for the reason the header gives. The absence
-	// is ASSERTED rather than stepped around: the refusal is given a full budget to
-	// emit something with nothing reading, and awaitCompletedTurn below attributes
-	// anything that arrives before turn 2's ack to it. Turn 2 is then sent on the
-	// banner: #2138's ordering after all, arrived at for a different reason than
-	// #2138's own.
-	letRefusedTurnSettle(t, hookBannerRefusedSettleBudget)
-
-	liveReqID := reqID
-	reqID++
-	sealSendMessage(t, h.phone, h.initSend, liveReqID, convID, "m-live", oslcapLivenessPrompt(nonce))
-	w.awaitCompletedTurn(t, h, convID, liveReqID, perTurnReplyBudget)
-
-	// The unblocked prompt must have PASSED the hook, which is what makes the
-	// reply above evidence that the refusal was prompt-scoped rather than evidence
-	// that the hook stopped running.
-	// CONTAINS a pass, rather than a pass at index 1. The property is that the
-	// unblocked prompt reached the hook and the hook let it through; pinning the
-	// position would additionally assert how many times claude submits a prompt,
-	// which is claude's business and not measured. The first entry is already
-	// pinned to `blocked` above, so any pass here is one that followed it.
-	verdicts = oslcapHookVerdicts(rig.WitnessPath)
-	if !slices.Contains(verdicts, oslcapHookPassed) {
-		t.Errorf("the hook witness reads %q and holds no %q — the unblocked prompt never passed the hook, so "+
-			"its reply does not show that a refusal is prompt-scoped rather than session-wide",
-			verdicts, oslcapHookPassed)
-	}
-
-	// Raw pages retain fact types; legacy wire pages project them all as banners.
-	store := history.New(filepath.Join(h.home, ".pyry", "test"))
-	var entries []history.Entry
-	cursor := ""
-	for {
-		page, err := store.Page(conversations.ConversationID(convID), cursor, 128)
-		if err != nil {
-			t.Fatalf("read raw hook-window history: %v", err)
+	scenario.HookBanner(t, sharedHarnessWire(t, h, reqID), scenario.HookBannerConfig{Home: h.home, ConversationID: convID, BlockPrompt: oslcapBlockPrompt(nonce), LivePrompt: oslcapLivenessPrompt(nonce), TurnBudget: perTurnReplyBudget, SettleBudget: hookBannerRefusedSettleBudget, CheckWitness: func(passed bool) {
+		verdicts := oslcapHookVerdicts(rig.WitnessPath)
+		if len(verdicts) == 0 || verdicts[0] != oslcapHookBlocked {
+			t.Fatal("hook witness did not begin blocked")
 		}
-		entries = append(entries, page.Entries...)
-		if page.AtStart {
-			break
+		if passed && !slices.Contains(verdicts, oslcapHookPassed) {
+			t.Fatal("unblocked prompt did not pass the hook")
 		}
-		cursor = page.Cursor
-	}
-	if err := hookBannerCheckWindow(convID, liveReqID, entries, w.frames); err != nil {
-		t.Fatalf("hook refusal/liveness window: %v", err)
-	}
-	t.Logf("the session answered send_message #%d after refusal; one refusal and five identified receipts crossed the window", liveReqID)
+	}})
 }
 
 // hookBannerInstallUserSettings writes the rig's settings JSON into the minted

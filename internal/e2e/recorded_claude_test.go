@@ -94,6 +94,12 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		}
 		c.Producer = claudetape.Producer{Revision: strings.TrimSpace(string(rev)), BinarySHA256: hex.EncodeToString(sum[:]), ClaudeVersion: strings.TrimSpace(string(version)), CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	}
+	var observer *recordedSourceObserver
+	switch scenario {
+	case "permission-context-absent", "permission-context-outside", "native-suggestions":
+		observer = newRecordedSourceObserver(t)
+		c.ObserverAddress = observer.listener.Addr().String()
+	}
 	wrapper := tapeWrapper(t, c)
 	definition := recordedManifestFor(t).scenario(scenario)
 	writeStreamInteractiveConfig(t, home, definition.StdioPermission)
@@ -123,12 +129,14 @@ func runRecordedClaude(t *testing.T, scenario string) {
 			t.Fatal(err)
 		}
 	}
-	seedBoundConversation(t, home, tapeConversation, tapeSession)
+	workdir := prepareRecordedWorkspace(t, scenario, home)
+	seedBoundConversation(t, home, tapeConversation, tapeSession, workdir)
 	extra := []string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1"}
 	if mode == "replay" {
 		extra = append(extra, "CLAUDE_CODE_OAUTH_TOKEN=", "ANTHROPIC_API_KEY=", "CLAUDE_CONFIG_DIR=")
 	}
-	_, cmd, stdout, stderr, done := spawnWith(t, home, spawnOpts{claudeBin: wrapper, claudeArgs: append([]string{}, definition.ClaudeArgs...), extraEnv: extra, extraFlags: []string{"-pyry-relay=" + relayURL, "-pyry-verbose", "-pyry-socket=" + c.Socket}})
+
+	_, cmd, stdout, stderr, done := spawnWith(t, home, spawnOpts{claudeBin: wrapper, claudeArgs: append([]string{}, definition.ClaudeArgs...), extraEnv: extra, extraFlags: []string{"-pyry-relay=" + relayURL, "-pyry-workdir=" + workdir, "-pyry-verbose", "-pyry-socket=" + c.Socket}})
 	h := &Harness{SocketPath: c.Socket, HomeDir: home, PID: cmd.Process.Pid, Stdout: stdout, Stderr: stderr, cmd: cmd, doneCh: done}
 	t.Cleanup(func() { h.Stop(t) })
 	if err = h.waitForReady(); err != nil {
@@ -159,23 +167,49 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		sendNoiseMsg(t, phone, cipher)
 		return sequence
 	}
+	type reading struct {
+		raw []byte
+		err error
+	}
+	var persistent chan reading
+	if scenario == "native-suggestions" {
+		persistent = make(chan reading, 128)
+		stop := make(chan struct{})
+		t.Cleanup(func() { close(stop) })
+		go func() {
+			for {
+				raw, err := phone.ReceiveBytes(15 * time.Minute)
+				select {
+				case persistent <- reading{raw, err}:
+				case <-stop:
+					return
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
 	next := func(deadline time.Time) protocol.Envelope {
 		t.Helper()
-		type reading struct {
-			raw []byte
-			err error
-		}
 		tick := time.NewTicker(50 * time.Millisecond)
 		defer tick.Stop()
 		for time.Now().Before(deadline) {
-			ch := make(chan reading, 1)
-			go func() { raw, err := phone.ReceiveBytes(time.Until(deadline)); ch <- reading{raw, err} }()
+			ch := persistent
+			if ch == nil {
+				ch = make(chan reading, 1)
+				go func() { raw, err := phone.ReceiveBytes(time.Until(deadline)); ch <- reading{raw, err} }()
+			}
+			timer := time.NewTimer(time.Until(deadline))
+			defer timer.Stop()
 			var result reading
 			waiting := true
 			for waiting {
 				select {
 				case result = <-ch:
 					waiting = false
+				case <-timer.C:
+					return protocol.Envelope{}
 				case <-tick.C:
 					if raw, e := os.ReadFile(c.Receipt); e == nil {
 						var receipt tapeReceipt
@@ -205,12 +239,33 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		return protocol.Envelope{}
 	}
 
-	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Home: home, Mode: mode, Wire: scenariohelpers.Wire{Send: transmit, Next: next}, Sequence: &sequence, DaemonLog: stderr.String})
+	reconnect := func() {
+		_ = phone.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var err error
+		phone, err = fakephone.Dial(ctx, fr.URL(), serverID, pairing.Token, "phone-a")
+		if err != nil {
+			t.Fatal("recorded phone reconnect failed")
+		}
+		send, recv = driveHandshakeToOpenDaemonInteractive(t, phone, pub, pairing.Token)
+	}
+	source := func() []claudetape.Frame {
+		if observer == nil {
+			t.Fatal("scenario requires a native source observer")
+		}
+		return observer.snapshot(t)
+	}
+	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Source: source, Reconnect: reconnect, Home: home, Workdir: workdir, Socket: c.Socket, Mode: mode, Wire: scenariohelpers.Wire{Send: transmit, Next: next}, Sequence: &sequence, DaemonLog: stderr.String})
 
 	if err = os.WriteFile(c.Finish, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	sealBudget := 10 * time.Second
+	if scenario == "native-suggestions" {
+		sealBudget = 120 * time.Second
+	}
+	deadline := time.Now().Add(sealBudget)
 	for time.Now().Before(deadline) {
 		if raw, e := os.ReadFile(c.Receipt); e == nil {
 			var receipt tapeReceipt
@@ -252,9 +307,28 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 				}
 				return tape
 			}
-			if err := claudetape.SameContract(load(baseline), load(fresh)); err != nil {
+			policy := recordedManifestFor(t).scenario(scenario).ComparisonPolicy
+			left, right := load(baseline), load(fresh)
+			report := map[string]any{"scenario": scenario, "policy": policy}
+			switch policy {
+			case "strict_ordered":
+				if err := claudetape.SameContract(left, right); err != nil {
+					t.Fatal(err)
+				}
+			case "native_coding_prefix":
+				a, b, err := claudetape.SameNativeSuggestionContract(left, right, scenariohelpers.NativeSuggestionPrompts("tape-native-suggestions"), scenariohelpers.NativeSuggestionClearPrompt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				report["baseline_coding_iterations"], report["fresh_coding_iterations"] = a, b
+			default:
+				t.Fatal("unsupported comparison policy")
+			}
+			raw, err := json.Marshal(report)
+			if err != nil {
 				t.Fatal(err)
 			}
+			t.Logf("CLAUDE_COMPARISON %s", raw)
 		})
 	}
 }

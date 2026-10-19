@@ -4,22 +4,35 @@ package e2e
 
 import (
 	"fmt"
-	scenariohelpers "github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
-	"github.com/pyrycode/pyrycode/internal/protocol"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
+	scenariohelpers "github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 type recordedScenarioContext struct {
-	Home, Mode string
-	Wire       scenariohelpers.Wire
-	Sequence   *uint64
-	DaemonLog  func() string
+	Source                      func() []claudetape.Frame
+	Reconnect                   func()
+	Home, Workdir, Socket, Mode string
+	Wire                        scenariohelpers.Wire
+	Sequence                    *uint64
+	DaemonLog                   func() string
 }
 
 var recordedScenarioDrivers = map[string]func(*testing.T, recordedScenarioContext){
+	"hook-banner":                     runTapeHookBanner,
+	"native-suggestions":              runTapeNativeSuggestions,
+	"permission-context-absent":       func(t *testing.T, c recordedScenarioContext) { runTapePermissionContext(t, c, false) },
+	"permission-context-outside":      func(t *testing.T, c recordedScenarioContext) { runTapePermissionContext(t, c, true) },
+	"mcp-reconnect":                   runTapeMCPReconnect,
+	"workspace-change":                runTapeWorkspace,
+	"skill-silence":                   runTapeSkill,
+	"confirmed-permission-settings":   runTapeConfirmedSettings,
+	"default-outside-read":            runTapeDefaultRead,
 	"family-alias":                    runTapeFamily,
 	"attachment-read":                 runTapeAttachment,
 	"bypass-questions-mcp-stored":     runTapeBypassQuestions,

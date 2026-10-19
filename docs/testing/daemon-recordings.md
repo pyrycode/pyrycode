@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Seventeen scenarios run the same assertions in live capture and offline replay:
+Twenty-six scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -95,6 +95,49 @@ Seventeen scenarios run the same assertions in live capture and offline replay:
   and no host approval for ordinary tools. Physical Bash effects and unpredictable
   labels/free text remain live proof.
 
+The `workspace-protocol` batch adds nine cases:
+
+- `workspace-change` checks correlated workspace changes, canonical returned and
+  persisted directories, and delivery of a second turn in the same conversation.
+- `skill-silence` requires the skill's file-only reply token, the known harness
+  drop witness, and absence of the skill body marker from daemon logs.
+- `confirmed-permission-settings` checks initial bypass, correlated confirmation
+  of default mode without a child restart, and a real Read permission round trip.
+- `default-outside-read` exercises the default-mode acknowledgement before the
+  first user input and the shared outside-workspace Read drain. The live test
+  retains its version-specific finding and unpredictable file-opening witness.
+- `mcp-reconnect` requires both production MCP servers to become healthy, a
+  deliberately broken named server with an error, and a correlated reconnect
+  after repairing its command. Replay checks the daemon protocol; actual MCP
+  process startup and command repair remain live proof.
+- `permission-context-absent` and `permission-context-outside` compare optional
+  context fields against native request bytes, including absent versus null,
+  reconnect the phone and require the identical modal, then deny it and correlate
+  the native denial result. The actual target remains absent in live runs.
+- `native-suggestions` requires source-native suggestions, a nonempty owned set
+  with a positive revision, and a higher-revision explicit-null clear on the next
+  user message. Continuous reads preserve ordinary no-suggestion windows. The
+  final typed user input must reach Claude stdin before sealing. The native
+  wrapper refuses non-stream invocations before producer admission, matching the
+  original live source-isolation rig, so fallback attempts cannot produce output.
+
+- `hook-banner` retains the five-second no-read refusal window, exact next-send
+  ACK barrier, subsequent text/idle milestones and all six durable banner joins.
+  Native source order must place the refused result before the liveness input.
+  Installed user settings, hook script bytes and modes are exact inputs. Actual
+  hook execution and original conversation creation remain live proof.
+
+Subagent text retains its live main/child identity and sequence assertions. Its
+recording awaits a first-client-delta checkpoint: burst playback otherwise lets
+the production text coalescer combine all main text into a single delta.
+
+These profiles retain the working directory as an exact input. The skill's full
+`SKILL.md` and native non-stream rejection policy and enable setting are captured
+and compared. Permission-context and native-suggestion checks observe selected
+native source objects through a bounded loopback channel in memory; this does
+not replace the daemon's parsing or client delivery. Old profiles keep their
+previous input inventories and fixtures.
+
 `make e2e` includes these cases in the ordinary offline integration selection.
 `make e2e-recorded-claude` runs just the recorded suite. Missing fixtures fail; nothing
 falls back to Claude. Replay removes provider credentials and uses disposable
@@ -152,8 +195,18 @@ invalid provenance and loss all fail. Diagnostics contain positions and counts,
 not application payloads. Original timing is not replayed.
 
 Verification separately reports fresh live capture, committed replay, fresh
-replay and strict outgoing request comparison. Comparison binds observed control
-IDs by producer direction and ordinal; it retains complete ordered requests.
+replay and outgoing request comparison under each explicit manifest policy.
+`strict_ordered` binds observed control IDs by producer direction and ordinal and
+retains complete ordered requests. Only `native-suggestions` declares
+`native_coding_prefix`: initialize, one to six exact source-declared coding
+prompts each immediately followed by one context query, then the exact clear
+input. The policy validates both entire traces independently and compares full
+initialize, user and context-query templates, including unknown fields. Only
+unique nonempty top-level control IDs and the checked prompt text slot vary;
+extra, missing, reordered or malformed requests fail. Reports name this policy
+and both coding iteration counts. It does not claim identical request counts.
+Replay itself still matches every stored input exactly, and the native source
+suggestion and client set/clear assertions remain required.
 Different provider wording and accounting do not themselves fail this comparison.
 Changed user choices, commands, recovery steps and request payloads do. Every
 stage must execute every selected named leaf with no failures or skips; default
@@ -192,9 +245,11 @@ The compatibility comparator does not scrub provider prose or loosen request
 comparison for these cases. Dismissal and terminal idle may arrive in either order;
 both are required after the matching continuation.
 
-Next candidates are ordinary queued placement, further model-control messages and thread
-folding. Each must preserve its
-original assertions and account for all external inputs before promotion.
+The reviewed backlog includes ordinary queued placement, further model-control
+messages and thread folding. `reviewed_migration_backlog` keeps candidates,
+checkpoint work and harness work visible even when no eligibility review remains.
+Classification does not count unsupported scenarios as migrated. Each must
+preserve its original assertions and account for all external inputs before promotion.
 Crash/restart, session files, real tool effects, signal handling, transport
 recovery, provider compatibility and measured timing retain explicit live or
 other dedicated deterministic integration proof. They cannot be represented by
@@ -231,7 +286,7 @@ python3 scripts/daemon-recordings.py batch --batch all --agents-repo /path/to/py
 ```
 
 `batch` audits the manifest, performs fresh capture, committed replay, fresh
-replay and strict request comparison, then runs `make check-common` **once for
+replay and declared-policy request comparison, then runs `make check-common` **once for
 the entire selected group**, its mapped live test roots once, the complete
 201-cut restoration proof once, and citation/documentation guards once. Live
 roots and restoration cuts are counted from Go JSON events: exit zero, skipped
@@ -258,7 +313,7 @@ conservative source evidence, not executed acceptance or automatic eligibility.
 Diagnostic probe environment gates are names only, never values.
 
 Reviewed manifest dispositions distinguish shared replay assertions, candidates,
-checkpoint work and live-only proof. Everything else remains explicitly
+checkpoint work, additional harness work, controls and live-only proof. Everything else remains explicitly
 unreviewed. Counts of recorded scenarios, shared live entrypoints, static test
 declarations and remaining eligibility reviews are separate; the total eligible
 migration count stays unknown until reviewed. No live requirement is retired.

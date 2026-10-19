@@ -54,7 +54,16 @@ class RecordedEvidenceTest(unittest.TestCase):
     def test_verify_uses_distinct_reports_for_baseline_named_fresh(self):
         def launch(command, **kwargs):
             name = 'TestClaudeTapeCompatibility' if '^TestClaudeTapeCompatibility$' in command else 'TestRecordedClaude'
-            return FakeRun([(name + '/' + scenario, 'pass') for scenario in RUNNER.SCENARIOS])
+            process = FakeRun([(name + '/' + scenario, 'pass') for scenario in RUNNER.SCENARIOS])
+            if name == 'TestClaudeTapeCompatibility':
+                contracts = []
+                for row in RUNNER.daemon_manifest.load()['scenarios']:
+                    contract = dict(scenario=row['name'], policy=row['comparison_policy'])
+                    if row['comparison_policy'] == 'native_coding_prefix':
+                        contract.update(baseline_coding_iterations=1, fresh_coding_iterations=2)
+                    contracts.append(json.dumps(dict(Action='output', Test=name + '/' + row['name'], Output='CLAUDE_COMPARISON ' + json.dumps(contract))) + '\n')
+                process.stdout = iter(contracts + list(process.stdout))
+            return process
 
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / 'baseline/fresh'
@@ -64,6 +73,20 @@ class RecordedEvidenceTest(unittest.TestCase):
             self.assertEqual({'capture.json', 'saved-replay.json', 'fresh-replay.json', 'request-contract.json'},
                              {path.name for path in (output / 'reports').glob('*.json')})
             self.assertTrue(json.loads((output / 'summary.json').read_text())['success'])
+
+    def test_comparison_requires_exact_policy_evidence(self):
+        name = 'TestClaudeTapeCompatibility/native-suggestions'
+        good = dict(scenario='native-suggestions', policy='native_coding_prefix', baseline_coding_iterations=1, fresh_coding_iterations=2)
+        for mutate in (None, lambda r: r.update(policy='strict_ordered'), lambda r: r.update(fresh_coding_iterations=7), lambda r: r.update(fresh_coding_iterations=True), lambda r: r.update(extra='unknown')):
+            row = good.copy()
+            if mutate:
+                mutate(row)
+            process = FakeRun([(name, 'pass')])
+            process.stdout = iter([json.dumps(dict(Action='output', Test=name, Output='CLAUDE_COMPARISON ' + json.dumps(row))) + '\n'] + list(process.stdout))
+            with patch.object(RUNNER.subprocess, 'Popen', return_value=process), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mutate is None, RUNNER.run('replay', Path('/baseline'), None, compare=Path('/fresh'), scenarios=['native-suggestions']))
+        with patch.object(RUNNER.subprocess, 'Popen', return_value=FakeRun([(name, 'pass')])), contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(RUNNER.run('replay', Path('/baseline'), None, compare=Path('/fresh'), scenarios=['native-suggestions']))
 
     def test_batch_cli_runs_four_comparisons_and_one_gate_group(self):
         calls = []
