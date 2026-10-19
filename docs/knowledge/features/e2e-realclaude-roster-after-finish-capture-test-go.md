@@ -75,10 +75,12 @@ the first live run, not discovered after one comes back empty and gets refused a
 
 ### Stop completion needs a held task and all terminal signals
 
-`TestRealClaudeStopBackgroundTaskCompletion` uses `rafcapPrompt` to explicitly
-request background execution, then waits for the FIFO task's untruncated id in
-the daemon's roster and for the FIFO rendezvous before sending the client stop
-(#2796). Roster descriptions cannot establish task identity: the
+`TestRealClaudeStopBackgroundTaskCompletion` uses its own
+`stopHoldOperation.prompt` to request exactly one background Bash invocation of
+a rig-owned hold executable without arguments. It waits for the identified
+task's untruncated id in the daemon's roster and for the FIFO rendezvous before
+sending the client stop (#2796). Roster descriptions cannot establish task
+identity: the
 [reproduced setup failure](https://github.com/pyrycode/pyrycode/issues/2848#issuecomment-5999232779)
 observed the exact background Bash command, an untruncated `local_bash` roster
 row and FIFO arrival, but the description omitted the literal FIFO path. The
@@ -87,30 +89,81 @@ matched the description. This diagnoses task identification, with successful
 staging and no evidence of a stop product failure. Conversely, an unrelated
 task's description can contain the path without identifying the rig's command.
 
-`stopHeldTaskSetup.observe` matches the bound conversation's `ToolUsePayload`
-for `Bash`, exact `Input["command"] == "cat " + fifo` and
-`Input["run_in_background"] == "true"`, retaining its non-empty `ToolUseID`.
+[The quoting repair (#3615)](https://github.com/pyrycode/pyrycode/issues/3615)
+addresses a source-audit risk, distinct from #2848's reproduced failure:
+equivalent quoted commands could open the FIFO without satisfying the old
+exact `cat`-string predicate. `newStopHoldOperation` creates a private executable
+that appends one byte to its execution witness, then execs `cat` on the held
+FIFO. Identification requires exactly one witnessed execution; missing or
+unreadable evidence and repeated execution reject attribution. FIFO arrival
+alone, a path/token in command text, and description or assistant prose cannot
+establish the operation's identity.
+
+`stopHoldOperation.matches` accepts only the executable token: a shell-safe
+bare path, or the path quoted by `stopShellQuote` or `stopDoubleQuote`, including
+quoted paths containing spaces. An optional `exec ` prefix, surrounding
+whitespace and one trailing semicolon are supported. Arguments, compound
+commands and command substitutions are outside this bounded contract.
+`stopHeldTaskSetup.observe` requires the bound conversation's `ToolUsePayload`
+for `Bash`, `Input["run_in_background"] == "true"` and a non-empty `ToolUseID`.
+Matching calls are tracked across conversations and foreground/background
+eligibility: there must be exactly one matching tool identity, and it must be
+eligible. A
+foreground or wrong-conversation invocation cannot lend its physical witness
+to a later eligible claim. Any Bash command mentioning the operation through
+an unsupported form vetoes attribution; substring occurrence only rejects,
+never identifies. Other users of `rafcapPrompt` and `tpcapHoldFIFO` keep their
+existing contracts; Composer Stop retains the shared setup's FIFO-command mode.
+
 `stopHeldTaskID` requires an untruncated `local_bash` task id in the latest bound
 roster. It joins that row either directly through its untruncated `ToolCallID`
 or through `BackgroundTaskStartedPayload`, whose untruncated task/tool ids link
-the row to the observed Bash call. The live roster preceded task-start metadata
-and initially lacked a tool id: retaining the latest roster allows the later
-start to complete the join. Waiting only for a newly enriched roster would
-still time out. A task start alone cannot prove roster membership; descriptions
-are diagnostic only, including when truncated.
+the row to the observed Bash call. A valid start can supply the join when the
+roster tool key is missing or truncated, but cannot override a contradictory
+untruncated key. Competing task ids, conflicting starts and contradictory
+duplicate roster rows yield no target; taking the first roster match or last
+start would hide ambiguity. Identical observations are harmless, and unrelated
+starts cannot erase a valid join. The live roster preceded task-start metadata
+and initially lacked a tool id: retaining the latest roster and valid starts
+allows any tool/start/roster arrival order to complete the join. Waiting only
+for a newly enriched roster would still time out. A task start alone cannot
+prove membership in the latest roster; descriptions are diagnostic only,
+including when truncated.
+
+The execution witness can arrive after all task metadata, so setup polls its
+readiness within `perTurnReplyBudget`. Polling must not cancel a socket read:
+coder/websocket closes the connection on read-context expiry, even when a
+helper reports only a receive-timeout sentinel. `stopTaskReader` owns one
+bounded socket reader throughout setup and terminal proof, delivering raw
+frames through an unbuffered channel. Consumer timeouts only stop waiting on
+that channel; decryption remains ordered on the test goroutine. Shutdown
+cancels delivery, closes the phone to unblock I/O and bounds the wait for reader
+exit; repeated shutdown is harmless. The
+[socket failure](https://github.com/pyrycode/pyrycode/pull/3624#issuecomment-6267341685)
+was reproduced offline, without claiming a live failure. See also
+[optional event waits](e2e-realclaude-test-infrastructure.md#test-infrastructure).
 
 `TestStopHeldTaskID` and `TestStopHeldTaskSetup` cover summarized descriptions,
-unrelated path-bearing prose, truncated join keys, conversation isolation and
-roster/start ordering. Setup diagnostics expose counts and match booleans,
-including FIFO arrival, rather than commands, paths, descriptions or ids. Setup
-uses `perTurnReplyBudget`, rendezvous has a ten-second wait, completion has a
-45-second wait, and `tpcapHoldFIFO` retains its bounded, idempotent cleanup.
+truncated join keys, latest-roster membership, conversation isolation,
+ambiguity and all six tool/start/roster orders. `TestStopHoldOperation` executes
+the real hold under each supported spelling, checks execution before and after
+metadata, rejects borrowed or repeated witnesses, and verifies blocked exit
+until release and harmless repeated release. `TestStopHoldOperationRejectsMentions`
+rejects text-only claims and FIFO arrival from an unrelated reader.
+`TestStopTaskReader` exercises metadata before execution, 300 ms of idle
+polling, subsequent encrypted traffic and outbound stop on a real loopback
+WebSocket; `TestStopTaskReaderShutdown` covers blocked reads and unconsumed
+frames. Setup diagnostics expose counts and booleans, including witness and
+FIFO arrival, rather than commands, paths, descriptions or ids. Rendezvous has
+a ten-second wait, completion has a 45-second wait, and `tpcapHoldFIFO` retains
+its bounded, idempotent cleanup.
 
 The FIFO remains held until terminal evidence or teardown; otherwise a
 natural finish could make an unwired stop look successful. A control acceptance
 alone cannot pass. The completion drain accepts either `background_task_updated`
-with `status: stopped` or a subsequent roster omitting that previously held id,
-without requiring one signal to precede the other.
+with `status: stopped` for that task in the bound conversation, or a subsequent
+bound-conversation roster omitting that previously held id, without requiring
+one signal to precede the other.
 
 The authenticated live gate observed **roster omission while the FIFO stayed
 held**, not a stopped update as its passing signal. Requiring the update would

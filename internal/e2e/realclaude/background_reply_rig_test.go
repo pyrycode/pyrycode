@@ -106,7 +106,10 @@ func TestBackgroundReplyHelperProcess(t *testing.T) {
 			os.Exit(2)
 		}
 		in.Input["command"] = "export PYRY_REPLY_TOOL=" + backgroundReplyQuote(in.Tool) + "; " + command
-		if json.NewEncoder(os.Stdout).Encode(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "updatedInput": in.Input}}) != nil {
+		// Apply the synchronous Bash contract to the identity-bearing command in
+		// one hook response; separate hook updates could overwrite each other.
+		raw, err := json.Marshal(map[string]any{"tool_name": in.Name, "tool_input": in.Input})
+		if err != nil || backgroundReplySyncHook(strings.NewReader(string(raw)), os.Stdout) != nil {
 			os.Exit(2)
 		}
 		os.Exit(0)

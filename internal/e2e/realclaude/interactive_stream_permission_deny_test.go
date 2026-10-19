@@ -49,9 +49,6 @@ package realclaude
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -61,9 +58,8 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/control"
-	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
-	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 func TestInteractiveStreamPermissionDeny(t *testing.T) {
@@ -96,58 +92,9 @@ func driveInteractiveStreamPermissionDeny(t *testing.T, h *perConvHarness, convI
 	// Without a denial path, Claude can keep retrying past the bounded drain
 	// (#2851). Keep this instruction local to the denial driver.
 	prompt := writeFileTrigger(nonce) + " If the tool call is denied, do not retry it, do not use any other tool, and reply with one short word."
-	modalID := raiseRealPermissionModal(t, h, 2, convID, prompt)
-
-	// Answer DENY. The ONLY change from #1154's allow envelope is
-	// allow_once → reject_once. AnswerToken is a client-minted idempotency key,
-	// NOT authorization (authorization is ModalID validity + the device gate).
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   3,
-		Type: protocol.TypeModalAnswer,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.ModalAnswerPayload{
-			ModalID:     modalID,
-			OptionID:    string(turnevent.PermissionOptionKindRejectOnce),
-			AnswerToken: "e2e-1175-answer-token",
-		}),
-	})
-
-	// Attribution — the deny is OURS, not a timeout or a dropped answer. Drain to
-	// modal_dismissed and assert Source == "remote" && Outcome == "reject_once"
-	// for the answered modal. remote is set only on the gated-answer path
-	// (modal_resolve_v2.go), never on the #725 timeout path — so a timeout-deny
-	// (source=timeout) or a gate-rejected answer (no dismissal at all) cannot
-	// green in place of this explicit reject.
-	dismissedEnv := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeModalDismissed, modalSurfaceBudget)
-	var dis protocol.ModalDismissedPayload
-	if err := json.Unmarshal(dismissedEnv.Payload, &dis); err != nil {
-		t.Fatalf("decode modal_dismissed payload: %v", err)
-	}
-	if dis.ModalID != modalID {
-		t.Errorf("modal_dismissed ModalID = %q, want %q", dis.ModalID, modalID)
-	}
-	if dis.Source != "remote" {
-		t.Errorf("modal_dismissed Source = %q, want %q — the deny must be attributable to our explicit answer, not a timeout or a dropped/gate-rejected answer", dis.Source, "remote")
-	}
-	if dis.Outcome != string(turnevent.PermissionOptionKindRejectOnce) {
-		t.Errorf("modal_dismissed Outcome = %q, want %q", dis.Outcome, string(turnevent.PermissionOptionKindRejectOnce))
-	}
-
-	// AC #3: the turn resolves (aware it was denied) rather than hanging on the
-	// denied modal. Real claude retries a denied tool at least once (the #1175
-	// operator run: haiku reissued the Write as a second, distinct tool_use), so a
-	// single reject does not resolve the turn — the retry modal sits unanswered and
-	// the turn hangs on it. denyModalsUntilIdle answers EVERY retry modal with a
-	// fresh reject_once until terminal turn_state{idle}, bounded on two axes so a
-	// non-terminating turn fails loud: at most maxRetryDenies retry modals (proven:
-	// claude retries once; NOT proven it gives up after N — the cap keeps the loop
-	// finite and its diagnostic distinct from the wall-clock's), and within
-	// perTurnReplyBudget.
-	const (
-		firstRetryReqID uint64 = 4 // the trigger used reqID 2, the first answer reqID 3
-		maxRetryDenies         = 4 // observed one retry; cap well above that, still bounded
-	)
-	denyModalsUntilIdle(t, h, convID, firstRetryReqID, maxRetryDenies, perTurnReplyBudget)
+	shown := raiseRealPermissionModalPayload(t, h, 2, convID, prompt)
+	modalID := shown.ModalID
+	scenario.ResolvePermission(t, modalScenarioWire(t, h, 3), convID, shown, "reject_once", "e2e-1175-answer-token", perTurnReplyBudget)
 
 	// AC #2, fail-closed observable: the gated Write did NOT execute — its file is
 	// absent under the daemon workdir. Checked AFTER idle so the tool phase is
@@ -193,93 +140,7 @@ func driveInteractiveStreamPermissionDeny(t *testing.T, h *perConvHarness, convI
 // first answer 3, so retries start at 4); each answer increments it.
 func denyModalsUntilIdle(t *testing.T, h *perConvHarness, convID string, startReqID uint64, maxRetryDenies int, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	reqID := startReqID
-	retryDenies := 0
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("turn for %q never reached terminal turn_state{idle} within %s after %d retry reject(s) — the turn hung on a denied modal our reject never resolved", convID, timeout, retryDenies)
-		}
-		raw, err := h.phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // deadline reached — re-loop into the t.Fatalf above
-			}
-			t.Fatalf("phone receive (deny-until-idle): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame (deny-until-idle): %v", err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			// A non-noise_msg control frame (e.g. rekey) does not advance the
-			// receive nonce — skip without decrypting.
-			continue
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("decode inner data (deny-until-idle): %v", err)
-		}
-		plain, err := h.initRecv.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope (deny-until-idle): %v", err)
-		}
-		switch env.Type {
-		case protocol.TypeError:
-			t.Fatalf("unexpected error envelope while denying to idle: %s", string(env.Payload))
-		case protocol.TypeModalShown:
-			var shown protocol.ModalShownPayload
-			if err := json.Unmarshal(env.Payload, &shown); err != nil {
-				t.Fatalf("decode retry modal_shown payload: %v", err)
-			}
-			if shown.Class != "permission" {
-				t.Fatalf("retry modal_shown Class = %q, want %q", shown.Class, "permission")
-			}
-			if shown.ModalID == "" {
-				t.Fatal("retry modal_shown carried an empty modal_id")
-			}
-			if retryDenies >= maxRetryDenies {
-				t.Fatalf("claude raised more than %d retry permission modals for %q without reaching idle — it keeps reissuing the denied tool past the cap; whether a fully-denied turn ever terminates is a product question to raise separately, not a test flake to widen the cap for", maxRetryDenies, convID)
-			}
-			retryDenies++
-			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-				ID:   reqID,
-				Type: protocol.TypeModalAnswer,
-				TS:   time.Now().UTC(),
-				Payload: mustJSON(t, protocol.ModalAnswerPayload{
-					ModalID:     shown.ModalID,
-					OptionID:    string(turnevent.PermissionOptionKindRejectOnce),
-					AnswerToken: fmt.Sprintf("e2e-1175-retry-token-%d", reqID),
-				}),
-			})
-			t.Logf("denied retry permission modal %q (reject #%d) for %q", shown.ModalID, retryDenies, convID)
-			reqID++
-		case protocol.TypeModalDismissed:
-			var dis protocol.ModalDismissedPayload
-			if err := json.Unmarshal(env.Payload, &dis); err != nil {
-				t.Fatalf("decode retry modal_dismissed payload: %v", err)
-			}
-			if dis.Source != "remote" {
-				t.Fatalf("retry modal_dismissed Source = %q, want %q — a modal resolved by the daemon's approval timeout (or any non-remote source) means the turn fell closed on its own, not by our explicit reject; the deny attribution must hold for every modal, not only the first", dis.Source, "remote")
-			}
-		case protocol.TypeTurnState:
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			if st.State == "idle" && st.ConversationID == convID {
-				t.Logf("terminal turn_state{idle} for %q after %d retry reject(s) — the turn resolved without hanging", convID, retryDenies)
-				return
-			}
-		}
-		// assistant_delta / tool_use / turn_end / ack — decrypted above (the receive
-		// nonce stays in sync) and drained in order.
-	}
+	scenario.DenyRetries(t, modalScenarioWire(t, h, startReqID), convID, maxRetryDenies, timeout)
 }
 
 // requireTriggerFileAbsent walks the daemon workdir subtree and fails if any

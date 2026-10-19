@@ -443,10 +443,11 @@ type RekeyPayload struct {
 
 // ApprovePayload is the forwarded tool-approval request the `pyry
 // mcp-approve` subcommand marshals from claude's --permission-prompt-tool
-// call and dials over the control socket. Fields mirror permbridge.Request
+// call and dials over the control socket. Tool fields mirror permbridge.Request
 // with the snake_case tags of the T1 spike contract
-// (fixture-p4-approval-contract.json) so the subcommand marshals straight
-// from claude's tool input.
+// (fixture-p4-approval-contract.json). SessionID comes from the MCP process's
+// inherited environment, independently of Claude's tool input. Unbound callers
+// omit it and retain unresolved producer provenance.
 //
 // Input is opaque tool-input carried as json.RawMessage so it round-trips
 // byte-verbatim into the registry; the daemon never parses or dispatches on
@@ -457,6 +458,7 @@ type ApprovePayload struct {
 	ToolName  string          `json:"tool_name"`
 	Input     json.RawMessage `json:"input"`
 	ToolUseID string          `json:"tool_use_id"`
+	SessionID string          `json:"session_id,omitempty"`
 }
 
 // ApproveResult is the allow/deny verdict returned to the socket caller.

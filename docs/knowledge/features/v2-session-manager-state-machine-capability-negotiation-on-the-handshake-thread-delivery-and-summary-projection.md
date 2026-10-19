@@ -310,11 +310,20 @@ grow the codec's supplied `SessionID`. See the
 [summary contract](../../protocol-mobile.md#conversations).
 
 **Retirement quarantines before teardown.** A fold continuity loss uses
-`RetireLiveState`'s existing queue-overflow gap close. Latching the queue must
+`RetireLiveState`'s producer-gap close, `StatusProducerGap` (`4414`), rather than
+the actual push-queue byte ceiling (`4413`). The first terminal cause latched
+under `pushMu` wins: prior byte overflow stays `4413`, and pushes after retirement
+cannot relabel it or grow the queue. Latching the queue must
 immediately stop `drainOnce`, `drainLiveOnce` and `signalLiveDrain` from consuming
 dependent items or current readings: Run may select a ready drain before the
 queued teardown. `TestRetiredThreadQueueDoesNotDrain` authenticates a held
 append and explicitly drains in that order before checking final removal.
+`TestRetiredLivePendingDoesNotDrain` also preserves the pending reading and
+avoids invoking its snapshot reader. Recovery uses a fresh Noise handshake,
+current transient-state reconciliation and explicit thread catch-up from the
+last completed checkpoint; live publication cannot backfill the missing range.
+See [close codes and recovery](../../protocol-mobile.md#error-codes) and
+[hosted-admission quarantine](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).
 
 `ActiveThreadConns(ctx, conversation)` enumerates on Run using delivery's
 shared conversation/interactive/agent gates, excluding latched queues. Ordinary

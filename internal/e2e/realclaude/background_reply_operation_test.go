@@ -28,7 +28,7 @@ func TestBackgroundReplyOperation(t *testing.T) {
 			} else if spelling == "mention" {
 				command = "printf '%s' '" + command + "'"
 			}
-			input, _ := json.Marshal(map[string]any{"tool_name": "Bash", "tool_use_id": "held-tool", "tool_input": map[string]any{"command": command, "timeout": 20000}})
+			input, _ := json.Marshal(map[string]any{"tool_name": "Bash", "tool_use_id": "held-tool", "tool_input": map[string]any{"command": command, "timeout": 1, "run_in_background": true}})
 			hook := exec.Command(rig.hook)
 			hook.Stdin = strings.NewReader(string(input))
 			out, err := hook.Output()
@@ -38,13 +38,14 @@ func TestBackgroundReplyOperation(t *testing.T) {
 			var response struct {
 				Output struct {
 					Input struct {
-						Command string `json:"command"`
-						Timeout int    `json:"timeout"`
+						Command    string `json:"command"`
+						Timeout    int    `json:"timeout"`
+						Background *bool  `json:"run_in_background"`
 					} `json:"updatedInput"`
 				} `json:"hookSpecificOutput"`
 			}
-			if json.Unmarshal(out, &response) != nil || response.Output.Input.Timeout != 20000 {
-				t.Fatal("hook lost tool input")
+			if json.Unmarshal(out, &response) != nil || response.Output.Input.Timeout != 240000 || response.Output.Input.Background == nil || *response.Output.Input.Background {
+				t.Fatal("identity hook lost synchronous Bash execution constraints")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
