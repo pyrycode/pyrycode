@@ -5782,34 +5782,52 @@ so match it by `in_reply_to` rather than by arrival order. A connection holds
 at most 4 such deferred asks at once; a fifth is refused immediately with a
 retryable `context_usage.unavailable`.
 
+**A request arriving during Reset session rotation waits for the entitled
+successor binding (#3639).** After the turn-idle deferral above, readiness and
+the `detail:"full"` query share one 30-second deadline. Further rotations before
+binding follow the latest entitled successor without restarting that deadline;
+an intermediate bind that cannot release the rotation gate is not ready. The
+original request receives the successor reading once it binds and answers,
+without another message or usage request. Before querying, the daemon revalidates
+the conversation's current session and the runner's child generation. A successful
+supplied answer carries that queried successor's session provenance and live
+generation; the legacy path receives the corresponding payload. A result overtaken
+before settlement cannot become a fresh reply, replace remembered usage, or
+publish as successor live state.
+
 **Two requests for the same conversation close together produce one round
 trip to claude, and both are answered from its result** — whether the second
 arrives while the first is still in flight or just after it completed. The
-collapsing is per **conversation**, not per connection: two different clients
-asking about the same conversation moments apart collapse exactly like one
-client asking twice, because each ask spends real operator tokens. A refusal
+collapsing is per **conversation and source generation**, not per connection:
+two different clients asking about the same conversation moments apart collapse
+exactly like one client asking twice, because each ask spends real operator tokens. A refusal
 collapses the same way a successful reading does, for the same short window,
 so a retryable reject clears quickly rather than being held past usefulness.
+The completed-result window is two seconds within a source generation. Callers
+may share a readiness wait across rotation only while querying has not begun and
+the underlying runner is unchanged. Each reply keeps its own `in_reply_to`.
+Cancelling a caller ends its wait without a successful answer, including from
+memory, and leaves other callers' shared flight running. Daemon shutdown ends
+the shared wait.
 
-**A dormant conversation is answered from memory rather than refused, when the
-daemon has something remembered to answer with (#2461).** A conversation with
-no bound session, no live child, a rotation in flight, or an unusable reply is
-not refused outright: the daemon first checks the conversation's own registry
-row for the summary of the last reading claude reported, and if one exists it
-answers with that summary instead, stamped with [`as_of`](#context_usage) so
-the client can tell it apart from a live reading. The fallback asks the child
-nothing — it is a local registry read, not a second round trip, and it does
-not participate in the collapsing above. Only a conversation with neither a
-fresh reading available nor a stored one still draws the retryable reject
-below; every conversation between a daemon restart and its first completed
-turn has no stored reading yet and is refused exactly as before.
+**When a fresh reading cannot be served, the daemon falls back to memory
+if available (#2461).** No bound session, no live child outside rotation, an
+unusable reply, or expiry of the shared readiness/query deadline leads to a
+lookup of the conversation's own stored summary. An active rotation therefore
+does not immediately answer from predecessor memory. A remembered answer keeps
+its original [`as_of`](#context_usage) and producer provenance; it is never
+re-recorded or relabelled as a fresh successor reading. The fallback lookup is
+local and makes no additional child request. On the supplied thread path it
+remains subject to stale-source rejection above, so predecessor memory cannot
+be published as successor live state. With no remembered summary, the daemon
+returns retryable `context_usage.unavailable`.
 
 **Two rejects, and the difference is worth branching on:**
 
 | Condition | Code | Retryable |
 |---|---|---|
 | `conversation_id` names no hosted conversation | [`conversation.not_found`](#error-codes) | no |
-| The hosted conversation has no fresh reading to give — no bound session, no live child, a rotation in flight, or an unusable reply — **and no stored reading to fall back to (#2461)** | [`context_usage.unavailable`](#error-codes) | yes, after a backoff |
+| The hosted conversation has no fresh reading to give — no bound session, no live child outside rotation, an unusable reply, or expiry of the shared 30-second successor-readiness/query deadline — **and no stored reading to fall back to (#2461)** | [`context_usage.unavailable`](#error-codes) | yes, after a backoff |
 
 Neither reject is met with silence, and neither answers with an empty or
 zero-valued `context_usage` — a reading of all zeros is a shape a client
@@ -8839,7 +8857,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | **`history.invalid_cursor`** | no | A [`request_history`](#request_history) whose `cursor` does not decode, was minted for another conversation, or names a position not in this log (#2116). **Deliberately indistinguishable** across all three — a disclosure decision, not an imprecision: the distinctions are exactly what a probe would want, and the daemon's log raises one sentinel for all three, so the handler *cannot* branch on what it must not distinguish. The refusal **never echoes the cursor back**. Repair: restart the walk with an empty cursor. |
 | **`model_list.unavailable`** | yes, after a backoff | A [`request_model_list`](#asking-for-a-model-list-on-demand) naming a conversation the daemon **does** host, for which it has **no model vocabulary to answer with** (#2125), or a [`set_session_settings`](#set_session_settings) whose non-empty model cannot be checked conclusively because the retained vocabulary is missing, empty, reports dropped rows, or contains any row whose `value` was truncated (#2281). **It is not an empty menu**, and that distinction is the reason the code exists: `models` is documented never-`null` and never a stand-in for "unknown", so "no list" has to be said in an `error` frame rather than in a degraded `model_list`. On the settings path it refuses the whole frame before persistence or live delivery. These incomplete-vocabulary causes deliberately share one code because the client's repair is identical and the dominant cause clears on its own: back off until a complete menu may have arrived, then retry. Contrast a model absent from a complete menu (`protocol.malformed`, permanent for that value) and `conversation.not_found` (permanent for that request). The message is the static `model list is unavailable` and names no model, conversation or path. |
 | **`mcp_status.unavailable`** | yes, after a backoff | An [`mcp_status_request`](#asking-for-mcp-status-on-demand) naming a conversation the daemon **does** host, for which the configured resolver has no current status (#2381), **the daemon's wait for it ran past its own bound, or this connection already had four other asks waiting (#2702)** — merged deliberately, since the client's repair is identical for every cause: back off and retry. **It is not an empty or retained snapshot**: the handler emits an error rather than fabricate or reuse an `mcp_status`, so the same request may be retried after the live source becomes available. The message is static and names no conversation, server, or resolver detail. |
-| **`context_usage.unavailable`** | yes, after a backoff | A [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) naming a conversation the daemon **does** host, for which there is no fresh reading to give (#2431) **and no stored one to fall back to (#2461)**: no bound session, no live child, a rotation in flight, or an unusable reply, and the conversation's registry row carries no remembered reading either — merged deliberately, on `model_list.unavailable`'s reasoning, since the client's repair is identical for every cause and distinguishing them would publish facts about the machine rather than the request. **Since #2461 this code no longer fires for every dormant conversation** — one with a remembered reading is answered from it instead, stamped [`as_of`](#context_usage); this code now fires only for a conversation with neither a fresh reading nor a stored one, which in practice means every conversation between a daemon restart and its first completed turn. **It is not a zero-valued `context_usage`**, which a client cannot distinguish from a genuinely empty context. Cached for the same short window a successful reading is, so a retry inside that window answers from the same refusal. The message is static and names no conversation. |
+| **`context_usage.unavailable`** | yes, after a backoff | A [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) naming a hosted conversation has neither a fresh reading nor a remembered summary (#2431/#2461). Causes include no bound session, no live child outside rotation, an unusable reply, or expiry of the shared readiness/query budget (#3639). After turn-idle deferral, successor readiness and query share 30 seconds; repeated rotations do not renew it, and success belongs to the entitled successor. Timeout uses remembered fallback when present, preserving its original `as_of` and producer provenance without re-recording or relabelling it; supplied replies retain stale-source rejection. With no summary, this code is returned instead of a zero-valued `context_usage`. Causes deliberately share one code because the client's repair is identical and machine details are private. Refusals collapse for the same two-second window as success within one source generation. A connection's fifth concurrent deferred ask is also refused immediately. The message is static and names no conversation. |
 | **`mcp_actuation.refused`** | **no** | The single answer to **every** refusal of an [`mcp_reconnect`](#actuating-mcp-servers-on-demand) or [`mcp_toggle`](#actuating-mcp-servers-on-demand) actuation, once membership has passed: the device is not authorized, the named server is unknown, the live child is gone, or the actuation itself failed (#2419). **Deliberately indistinguishable across all four**, and non-retryable for all four — a disclosure decision, not an imprecision: splitting authorization from server-existence would make the verb a server-enumeration oracle, and splitting authorization from actuation-failure would tell an unprivileged device the one fact it must never learn about itself, while a retryable flag on only one cause would re-open the same split through the back door. The message is static and names no server or conversation. The daemon-side audit record, not this code, is where the causes stay apart. |
 | **`workspace.not_found`** | no | A [`rename_workspace`](#renaming-a-workspace) whose `path` matches no stored conversation's `cwd` (#2207). Comparison is **byte-exact** and includes archived conversations, so a near-miss — a trailing separator, a trailing space, a case difference — is a miss. **Not `conversation.not_found`**, and the distinction is the point rather than a naming preference: this request names no conversation at all, so the conversation code would send a client looking for a row it never asked about and could not act on. It applies to a **clear as much as to a set** — a `null` label at an unmatched path is refused, not silently accepted. Permanent for the request as sent: the same path fails identically until a conversation exists there, which is not something a retry accomplishes. The message is static and **never echoes the requested path**, which matters more here than on the conversation verbs because a path is a filesystem location on the daemon's host. |
 | **`pairing.not_permitted`** | no | A [`mint_pairing`](#mint_pairing) from a device that does not hold the daemon-side `allow_remote_permissions` flag (#2127). **Nothing is created** — the gate fires before the token is drawn, and the refusal is written to the daemon's audit sink as `denied_unauthorized`. **Not `auth.invalid_token`**, and the distinction is the group's defining decision: a frame reaching this handler has already presented a token the handshake validated, so an auth code would tell a legitimate client its credential was rejected and invite it to re-pair — the one repair that cannot help. The device is authenticated; what it lacks is privilege. **It is not an oracle**: it reports only that the asking device may not mint, a fact that device can already establish by answering any permission [modal](#modal-v2) and being denied, and it is not conditioned on the requested `device_name`, so it cannot probe which labels exist. Permanent for the device as paired — only `pyry pair --allow-remote-permissions` at a shell on the host changes it. |
