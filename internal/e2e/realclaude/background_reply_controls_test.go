@@ -100,6 +100,156 @@ func TestBackgroundReplyWitness(t *testing.T) {
 	}
 }
 
+func TestBackgroundReplyWording(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"punctuation", "narration", "other wording", "vocabulary word",
+		"empty", "whitespace", "missing", "wrong child", "missing identity", "wrong role",
+		"malformed", "multiple blocks", "open partial", "closed partial",
+		"pre-release", "replayed response", "replayed incomplete response", "fresh response after narration", "failed main", "main before launch", "missing main",
+		"failed tool", "wrong tool", "wrong token", "missing tool", "wrong result child",
+	} {
+		t.Run(name, func(t *testing.T) {
+			wording := "pyry-3589-finished"
+			switch name {
+			case "punctuation", "closed partial":
+				wording += "."
+			case "narration":
+				wording = "The held operation finished successfully. private-prose-sentinel"
+			case "other wording":
+				wording = "All set! private-prose-sentinel"
+			case "vocabulary word":
+				wording = "success"
+			case "empty":
+				wording = ""
+			case "whitespace":
+				wording = " \t\n\r "
+			}
+			response := fmt.Sprintf(`{"type":"assistant","parent_tool_use_id":"agent","message":{"id":"final","role":"assistant","content":[{"type":"text","text":%q}]}}`, wording)
+			frames := []string{
+				`{"type":"assistant","message":{"id":"launch","role":"assistant","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"run_in_background":true}}]}}`,
+				`{"type":"assistant","parent_tool_use_id":"agent","message":{"id":"hold","role":"assistant","content":[{"type":"tool_use","id":"wait","name":"Bash","input":{"command":"private-command"}}]}}`,
+				`{"type":"result","subtype":"success"}`,
+				`{"type":"user","parent_tool_use_id":"agent","message":{"content":[{"type":"tool_result","tool_use_id":"wait","content":"private-witness","is_error":false}]}}`,
+				response,
+			}
+			release := 3
+			want := name == "punctuation" || name == "narration" || name == "other wording" || name == "vocabulary word" || name == "closed partial" || name == "fresh response after narration"
+			switch name {
+			case "missing":
+				frames = frames[:4]
+			case "wrong child":
+				frames[4] = strings.ReplaceAll(response, `"agent"`, `"other"`)
+			case "missing identity":
+				frames[4] = strings.ReplaceAll(response, `"id":"final",`, "")
+			case "wrong role":
+				frames[4] = strings.ReplaceAll(response, `"role":"assistant"`, `"role":"user"`)
+			case "malformed":
+				frames[4] = response[:len(response)-1]
+			case "multiple blocks":
+				frames[4] = strings.ReplaceAll(response, `}]`, `},{"type":"text","text":"extra"}]`)
+			case "open partial", "closed partial":
+				frames = append(frames[:4],
+					`{"type":"stream_event","event":{"type":"message_start","message":{"id":"final"}}}`,
+					`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}`,
+					`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"private-prose-sentinel"}}}`)
+				if name == "closed partial" {
+					frames = append(frames, `{"type":"stream_event","event":{"type":"content_block_stop","index":0}}`)
+				}
+				frames = append(frames, response)
+			case "pre-release", "replayed response", "replayed incomplete response", "fresh response after narration":
+				early := response
+				if name == "replayed incomplete response" {
+					early = strings.ReplaceAll(response, `}]`, `},{"type":"text","text":"extra"}]`)
+				}
+				if name == "fresh response after narration" {
+					early = strings.ReplaceAll(response, `"id":"final"`, `"id":"progress"`)
+					early = strings.ReplaceAll(early, wording, "private-prose-sentinel")
+				}
+				frames = append(frames[:3], early, frames[3])
+				if name != "pre-release" {
+					frames = append(frames, response)
+				}
+				release = 4
+			case "failed main":
+				frames[2] = `{"type":"result","subtype":"success","is_error":true}`
+			case "main before launch":
+				frames[0], frames[2] = frames[2], frames[0]
+			case "missing main":
+				frames[2] = `{}`
+			case "failed tool":
+				frames[3] = strings.ReplaceAll(frames[3], "false", "true")
+			case "wrong tool":
+				frames[3] = strings.ReplaceAll(frames[3], `"wait"`, `"other"`)
+			case "wrong token":
+				frames[3] = strings.ReplaceAll(frames[3], "private-witness", "wrong-witness")
+			case "missing tool":
+				frames[3] = `{}`
+			case "wrong result child":
+				frames[3] = strings.ReplaceAll(frames[3], `"agent"`, `"other"`)
+			}
+			lines := backgroundReplyTestLines(frames)
+			witness := &backgroundReplyExecution{Operation: "operation", Tool: "wait"}
+			_, end, final, _, result, parent := backgroundReplyBoundary(lines, "private-witness", witness)
+			if got := backgroundReplyReleased(end, release, result, final); got != want {
+				t.Fatalf("completion accepted=%t want=%t", got, want)
+			}
+			if !want {
+				return
+			}
+			replay, indices, alias, err := backgroundReplyReplay(t, lines, parent, "private-witness", final, witness)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var safe struct {
+				Parent  string `json:"parent_tool_use_id"`
+				Message struct {
+					ID      string `json:"id"`
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"message"`
+			}
+			if json.Unmarshal([]byte(replay[final]), &safe) != nil || safe.Parent != alias("agent") || safe.Message.ID != alias("final") || len(safe.Message.Content) != 1 || safe.Message.Content[0].Text != "pyry-3589-finished" {
+				t.Fatal("selected completion did not retain identity with synthetic text")
+			}
+			for i, index := range indices {
+				if i != index {
+					t.Fatal("source order changed")
+				}
+			}
+			if strings.Contains(strings.Join(replay, ""), "private-prose-sentinel") || strings.Contains(strings.Join(replay, ""), "private-witness") {
+				t.Fatal("private observation published")
+			}
+		})
+	}
+}
+
+func TestBackgroundReplyReplaySelection(t *testing.T) {
+	t.Parallel()
+	response := `{"type":"assistant","parent_tool_use_id":"agent","message":{"id":"final","role":"assistant","content":[{"type":"text","text":"private-prose-sentinel"}]}}`
+	for _, name := range []string{"absent", "outside", "wrong child", "blank", "multiple blocks"} {
+		t.Run(name, func(t *testing.T) {
+			frames, final := []string{response}, 0
+			switch name {
+			case "absent":
+				final = -1
+			case "outside":
+				final = 1
+			case "wrong child":
+				frames[0] = strings.ReplaceAll(response, `"agent"`, `"other"`)
+			case "blank":
+				frames[0] = strings.ReplaceAll(response, "private-prose-sentinel", " ")
+			case "multiple blocks":
+				frames[0] = strings.ReplaceAll(response, `}]`, `},{"type":"text","text":"extra"}]`)
+			}
+			if _, _, _, err := backgroundReplyReplay(t, backgroundReplyTestLines(frames), "agent", "token", final); err == nil || strings.Contains(err.Error(), "private-prose-sentinel") {
+				t.Fatal("invalid selection did not fail privately")
+			}
+		})
+	}
+}
+
 func TestBackgroundReplyReplayOpenPartial(t *testing.T) {
 	t.Parallel()
 	frames := []string{
