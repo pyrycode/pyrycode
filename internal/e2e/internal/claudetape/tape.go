@@ -30,11 +30,12 @@ type Frame struct {
 }
 
 type Tape struct {
-	Version  int      `json:"version"`
-	Scenario string   `json:"scenario"`
-	Producer Producer `json:"producer"`
-	Args     []string `json:"args"`
-	Frames   []Frame  `json:"frames"`
+	Version  int                        `json:"version"`
+	Scenario string                     `json:"scenario"`
+	Producer Producer                   `json:"producer"`
+	Args     []string                   `json:"args"`
+	Frames   []Frame                    `json:"frames"`
+	Files    map[string]json.RawMessage `json:"files"`
 }
 
 func Decode(r io.Reader) (*Tape, error) {
@@ -313,7 +314,7 @@ func SameContract(a, b *Tape) error {
 		}
 		return requests, nil
 	}
-	if a.Scenario != b.Scenario || !reflect.DeepEqual(a.Args, b.Args) {
+	if a.Scenario != b.Scenario || !reflect.DeepEqual(a.Args, b.Args) || !reflect.DeepEqual(a.Files, b.Files) {
 		return errors.New("scenario or Claude arguments changed")
 	}
 	left, err := contract(a)

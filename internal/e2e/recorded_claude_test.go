@@ -48,7 +48,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := tapeProcessConfig{Mode: mode, Path: filepath.Join(dir, scenario+".json"), Home: home, Scenario: scenario, Finish: filepath.Join(home, "finish"), Receipt: filepath.Join(home, "receipt"), Claim: filepath.Join(home, "claimed")}
+	c := tapeProcessConfig{Daemon: ensurePyryBuilt(t), Socket: shortSocketPath(t), Mode: mode, Path: filepath.Join(dir, scenario+".json"), Home: home, Scenario: scenario, Finish: filepath.Join(home, "finish"), Receipt: filepath.Join(home, "receipt"), Claim: filepath.Join(home, "claimed")}
 	if mode == "capture" {
 		if os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") == "" && os.Getenv("ANTHROPIC_API_KEY") == "" {
 			t.Fatal("capture requires explicit Claude test credentials; no tests skipped")
@@ -112,8 +112,8 @@ func runRecordedClaude(t *testing.T, scenario string) {
 	if mode == "replay" {
 		extra = append(extra, "CLAUDE_CODE_OAUTH_TOKEN=", "ANTHROPIC_API_KEY=", "CLAUDE_CONFIG_DIR=")
 	}
-	socket, cmd, stdout, stderr, done := spawnWith(t, home, spawnOpts{claudeBin: wrapper, claudeArgs: []string{}, extraEnv: extra, extraFlags: []string{"-pyry-relay=" + relayURL, "-pyry-verbose"}})
-	h := &Harness{SocketPath: socket, HomeDir: home, PID: cmd.Process.Pid, Stdout: stdout, Stderr: stderr, cmd: cmd, doneCh: done}
+	_, cmd, stdout, stderr, done := spawnWith(t, home, spawnOpts{claudeBin: wrapper, claudeArgs: []string{}, extraEnv: extra, extraFlags: []string{"-pyry-relay=" + relayURL, "-pyry-verbose", "-pyry-socket=" + c.Socket}})
+	h := &Harness{SocketPath: c.Socket, HomeDir: home, PID: cmd.Process.Pid, Stdout: stdout, Stderr: stderr, cmd: cmd, doneCh: done}
 	t.Cleanup(func() { h.Stop(t) })
 	if err = h.waitForReady(); err != nil {
 		t.Fatal("recorded daemon did not become ready")
@@ -144,22 +144,38 @@ func runRecordedClaude(t *testing.T, scenario string) {
 	}
 	next := func(deadline time.Time) protocol.Envelope {
 		t.Helper()
+		type reading struct {
+			raw []byte
+			err error
+		}
+		tick := time.NewTicker(50 * time.Millisecond)
+		defer tick.Stop()
 		for time.Now().Before(deadline) {
-			if raw, e := os.ReadFile(c.Receipt); e == nil {
-				var receipt tapeReceipt
-				if json.Unmarshal(raw, &receipt) != nil {
-					t.Fatal("invalid Claude tape receipt")
-				}
-				if !receipt.Success {
-					t.Fatalf("Claude tape failed: %s", receipt.Error)
+			ch := make(chan reading, 1)
+			go func() { raw, err := phone.ReceiveBytes(time.Until(deadline)); ch <- reading{raw, err} }()
+			var result reading
+			waiting := true
+			for waiting {
+				select {
+				case result = <-ch:
+					waiting = false
+				case <-tick.C:
+					if raw, e := os.ReadFile(c.Receipt); e == nil {
+						var receipt tapeReceipt
+						if json.Unmarshal(raw, &receipt) != nil {
+							t.Fatal("invalid Claude tape receipt")
+						}
+						if !receipt.Success {
+							t.Fatalf("Claude tape failed: %s", receipt.Error)
+						}
+					}
 				}
 			}
-			raw, e := phone.ReceiveBytes(250 * time.Millisecond)
-			if e != nil {
-				continue
+			if result.err != nil {
+				t.Fatal("test client connection ended before scenario completed")
 			}
 			var inner protocol.InnerFrameV2
-			if json.Unmarshal(raw, &inner) != nil {
+			if json.Unmarshal(result.raw, &inner) != nil {
 				t.Fatal("invalid phone frame")
 			}
 			if inner.Type == protocol.TypeNoiseMsg {
@@ -169,12 +185,13 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		t.Fatal("recorded daemon scenario deadline exceeded")
 		return protocol.Envelope{}
 	}
+
 	turn := func(text string, permission bool) {
 		t.Helper()
 		transmit(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: fmt.Sprintf("tape-%d", sequence), Text: text})
 		requestID := sequence
 		deadline := time.Now().Add(150 * time.Second)
-		sawAck, sawText, sawDismissed := false, false, false
+		sawAck, sawText, sawDismissed, sawIdle := false, false, false, false
 		var modalID string
 		for {
 			env := next(deadline)
@@ -218,11 +235,11 @@ func runRecordedClaude(t *testing.T, scenario string) {
 					t.Fatal("invalid turn state")
 				}
 				if state.ConversationID == tapeConversation && state.State == "idle" && sawText {
-					if !sawAck || permission && !sawDismissed {
-						t.Fatal("turn completed without request/permission evidence")
-					}
-					return
+					sawIdle = true
 				}
+			}
+			if sawAck && sawText && sawIdle && (!permission || sawDismissed) {
+				return
 			}
 		}
 	}
@@ -248,6 +265,9 @@ func runRecordedClaude(t *testing.T, scenario string) {
 				t.Fatalf("incomplete Claude tape: %s", receipt.Error)
 			}
 			h.Stop(t)
+			if _, err := os.Stat(c.Claim + ".duplicate"); err == nil {
+				t.Fatal("unrecorded additional Claude process")
+			}
 			t.Logf("mode=%s scenario=%s frames=%d", mode, scenario, receipt.Frames)
 			return
 		}

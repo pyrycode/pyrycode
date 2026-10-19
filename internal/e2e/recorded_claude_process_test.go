@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,15 +21,18 @@ import (
 )
 
 type tapeProcessConfig struct {
-	Mode     string
-	Path     string
-	Home     string
-	Finish   string
-	Receipt  string
-	Claim    string
-	Claude   string
-	Scenario string
-	Producer claudetape.Producer
+	Mode      string
+	Path      string
+	Home      string
+	Finish    string
+	Receipt   string
+	Claim     string
+	Claude    string
+	Scenario  string
+	Daemon    string
+	Socket    string
+	MCPConfig string
+	Producer  claudetape.Producer
 }
 
 type tapeReceipt struct {
@@ -111,7 +115,7 @@ func tapeLines(ctx context.Context, r io.Reader) <-chan tapeLine {
 	return ch
 }
 
-func tapeNormalize(raw []byte, home string, restore bool) ([]byte, error) {
+func tapeNormalize(raw []byte, c tapeProcessConfig, restore bool) ([]byte, error) {
 	var value any
 	d := json.NewDecoder(strings.NewReader(string(raw)))
 	d.UseNumber()
@@ -130,22 +134,80 @@ func tapeNormalize(raw []byte, home string, restore bool) ([]byte, error) {
 				x[i] = walk(value)
 			}
 		case string:
-			if restore {
-				return strings.ReplaceAll(x, "${PILOT_HOME}", home)
-			}
-			return strings.ReplaceAll(x, home, "${PILOT_HOME}")
+			return tapeString(x, c, restore)
 		}
 		return v
 	}
 	return json.Marshal(walk(value))
 }
 
-func tapeArgs(args []string, home string) []string {
+func tapeString(s string, c tapeProcessConfig, restore bool) string {
+	for _, binding := range []struct{ value, label string }{{c.MCPConfig, "${PILOT_MCP_CONFIG}"}, {c.Daemon, "${PILOT_DAEMON}"}, {c.Socket, "${PILOT_SOCKET}"}, {c.Home, "${PILOT_HOME}"}} {
+		if binding.value == "" {
+			continue
+		}
+		if restore {
+			s = strings.ReplaceAll(s, binding.label, binding.value)
+		} else {
+			s = strings.ReplaceAll(s, binding.value, binding.label)
+		}
+	}
+	return s
+}
+
+func tapeArgs(args []string, c tapeProcessConfig) []string {
 	out := make([]string, len(args))
 	for i, arg := range args {
-		out[i] = strings.ReplaceAll(arg, home, "${PILOT_HOME}")
+		out[i] = tapeString(arg, c, false)
 	}
 	return out
+}
+
+func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage, error) {
+	for i, arg := range args {
+		if arg == "--mcp-config" && i+1 < len(args) {
+			c.MCPConfig = args[i+1]
+		}
+	}
+	files := map[string]json.RawMessage{}
+	for i, arg := range args {
+		if arg != "--settings" && arg != "--mcp-config" && arg != "--append-system-prompt-file" {
+			continue
+		}
+		if i+1 >= len(args) || !filepath.IsAbs(args[i+1]) {
+			return nil, errors.New("pilot requires file-based Claude inputs")
+		}
+		f, err := os.Open(args[i+1])
+		if err != nil {
+			return nil, errors.New("missing Claude input file")
+		}
+		raw, err := io.ReadAll(io.LimitReader(f, claudetape.MaxBytes+1))
+		_ = f.Close()
+		if err != nil || len(raw) > claudetape.MaxBytes {
+			return nil, errors.New("Claude input file exceeded bound")
+		}
+		if arg == "--append-system-prompt-file" {
+			raw, err = json.Marshal(string(raw))
+			if err != nil {
+				return nil, err
+			}
+		}
+		normalized, err := tapeNormalize(raw, *c, false)
+		if err != nil {
+			return nil, err
+		}
+		if err = claudetape.Safe(normalized); err != nil {
+			return nil, err
+		}
+		if _, exists := files[arg]; exists {
+			return nil, errors.New("duplicate Claude input file flag")
+		}
+		files[arg] = normalized
+	}
+	if len(files) != 3 {
+		return nil, errors.New("incomplete pilot Claude input files")
+	}
+	return files, nil
 }
 
 var errTapeDuplicate = errors.New("pilot allows exactly one Claude process")
@@ -157,6 +219,10 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		return 0, errTapeDuplicate
 	}
 	_ = claim.Close()
+	files, err := tapeFiles(args, &c)
+	if err != nil {
+		return 0, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	inputs := tapeLines(ctx, os.Stdin)
@@ -190,7 +256,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		}
 		defer func() { cancel(); _ = stdin.Close(); _ = child.Wait() }()
 		outputs = tapeLines(ctx, stdout)
-		tape = &claudetape.Tape{Version: 1, Scenario: c.Scenario, Producer: c.Producer, Args: tapeArgs(args, c.Home)}
+		tape = &claudetape.Tape{Version: 1, Scenario: c.Scenario, Producer: c.Producer, Args: tapeArgs(args, c), Files: files}
 	} else if c.Mode == "replay" {
 		f, e := os.Open(c.Path)
 		if e != nil {
@@ -204,7 +270,10 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		if tape.Scenario != c.Scenario {
 			return 0, errors.New("Claude tape scenario mismatch")
 		}
-		player, err = claudetape.New(tape, tapeArgs(args, c.Home))
+		if !reflect.DeepEqual(tape.Files, files) {
+			return 0, errors.New("Claude input file contents changed")
+		}
+		player, err = claudetape.New(tape, tapeArgs(args, c))
 		if err != nil {
 			return 0, err
 		}
@@ -215,7 +284,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 	bytes := 0
 	emit := func(lines []json.RawMessage) error {
 		for _, line := range lines {
-			data, e := tapeNormalize(line, c.Home, true)
+			data, e := tapeNormalize(line, c, true)
 			if e != nil {
 				return e
 			}
@@ -249,7 +318,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 			if line.err != nil || line.data == nil {
 				return frames, errors.New("daemon stdin ended before scenario seal")
 			}
-			normalized, e := tapeNormalize(line.data, c.Home, false)
+			normalized, e := tapeNormalize(line.data, c, false)
 			if e != nil {
 				return frames, e
 			}
@@ -280,7 +349,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 			if line.err != nil || line.data == nil {
 				return frames, errors.New("Claude stdout ended before scenario seal")
 			}
-			normalized, e := tapeNormalize(line.data, c.Home, false)
+			normalized, e := tapeNormalize(line.data, c, false)
 			if e != nil {
 				return frames, e
 			}
