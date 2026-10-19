@@ -191,7 +191,8 @@ func (s *threadShadow) publishThread(ctx context.Context, id conversations.Conve
 	return w.threadEpoch != ""
 }
 
-func (p *daemonThreadPublisher) gap(ctx context.Context, id conversations.ConversationID, w *shadowConversation) {
+func (p *daemonThreadPublisher) gap(ctx context.Context, id conversations.ConversationID, w *shadowConversation, reason string) {
+	p.log.Warn("relay: thread gap", "event", "daemon.thread.gap", "reason", reason)
 	// Queries can initialize a consumer without any successful live push.
 	peers := w.threadPeers
 	if peers == nil {
@@ -216,7 +217,7 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 	status := p.store.Status(id)
 	if status.State != thread.StateUsable {
 		if w.threadEpoch != "" {
-			p.gap(ctx, id, w)
+			p.gap(ctx, id, w, "state_not_usable")
 		}
 		return
 	}
@@ -231,7 +232,7 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 			return
 		}
 		if o.State != thread.StateUsable || o.BaselineRequired {
-			p.gap(ctx, id, w)
+			p.gap(ctx, id, w, "baseline_required")
 			o, err = p.store.Changes(ctx, id, "", 0)
 			if err != nil || o.State != thread.StateUsable {
 				return
@@ -290,7 +291,7 @@ func (p *daemonThreadPublisher) publish(ctx context.Context, id conversations.Co
 				return
 			}
 			if r.State != thread.StateUsable || r.ResetRequired {
-				p.gap(ctx, id, w)
+				p.gap(ctx, id, w, "compact_reset_required")
 				return
 			}
 			updates = daemonThreadCompactUpdates(string(id), w.threadVersion, r)
@@ -311,14 +312,13 @@ func (p *daemonThreadPublisher) deliver(ctx context.Context, id conversations.Co
 	for _, update := range updates {
 		frames, err := protocol.EncodeThreadUpdate(protocol.Envelope{TS: time.Now().UTC()}, update)
 		if err != nil {
-			p.log.Warn("relay: thread encoding failed", "event", "daemon.thread.encode_err")
-			p.gap(ctx, id, w)
+			p.gap(ctx, id, w, "encode_failure")
 			return false
 		}
 		for _, raw := range frames {
 			var e protocol.Envelope
 			if err := json.Unmarshal(raw, &e); err != nil {
-				p.gap(ctx, id, w)
+				p.gap(ctx, id, w, "encode_failure")
 				return false
 			}
 			e.ID = p.nextID.Add(1)
