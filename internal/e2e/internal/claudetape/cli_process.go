@@ -107,7 +107,7 @@ func RunCLIProcess(c CLIProcessConfig, args []string, input io.Reader, output, d
 		return 0, fail
 	}
 	t := &CLITape{Version: 1, Scenario: c.Scenario, Producer: c.Producer, DaemonSHA256: c.DaemonSHA256, Args: b.Args(), Files: files, Input: b.Text(string(raw), false), InputEOF: true}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Claude, args...)
 	cmd.Dir = c.Home
