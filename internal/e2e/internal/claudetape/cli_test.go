@@ -108,3 +108,40 @@ func TestCLIPrivacyCarriers(t *testing.T) {
 		})
 	}
 }
+
+// Repeated keys must not hide an earlier escaped credential from a map-based
+// audit while the byte-preserving recording still stores it. All material below
+// is a synthetic credential-shaped marker, never an account credential.
+func TestCLIDuplicateJSONPrivacyCarriers(t *testing.T) {
+	hidden := `{"shadow":"\u0073k-ant-synthetic-credential-1234567890","shadow":"clean"}`
+	add := func(raw string) string {
+		return strings.TrimSuffix(strings.TrimSpace(raw), "}") + `,"shadow":"\u0073k-ant-synthetic-credential-1234567890","shadow":"clean"}` + "\n"
+	}
+	for _, carrier := range []string{"stdout", "nested-stdout", "snapshot", "input", "file-content", "metadata"} {
+		t.Run(carrier, func(t *testing.T) {
+			tape := cliControl()
+			switch carrier {
+			case "stdout":
+				tape.Frames[0].Data = add(tape.Frames[0].Data)
+			case "nested-stdout":
+				encoded, _ := json.Marshal(hidden)
+				tape.Frames[0].Data = strings.TrimSuffix(strings.TrimSpace(tape.Frames[0].Data), "}") + `,"nested":` + string(encoded) + "}\n"
+			case "snapshot":
+				tape.Snapshot.Data = add(tape.Snapshot.Data)
+			case "input":
+				tape.Input = add(tape.Input)
+			case "file-content":
+				raw, _ := json.Marshal(struct {
+					Content string `json:"content"`
+					Mode    uint32 `json:"mode"`
+				}{hidden, 0600})
+				tape.Files["--settings"] = raw
+			case "metadata":
+				tape.Producer.ClaudeVersion = hidden
+			}
+			if tape.Validate() == nil {
+				t.Fatal("duplicate-key privacy carrier accepted")
+			}
+		})
+	}
+}
