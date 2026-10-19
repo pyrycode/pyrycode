@@ -61,7 +61,7 @@ func Decode(r io.Reader) (*Tape, error) {
 }
 
 func (t *Tape) Validate() error {
-	if t.Version != 1 || t.Scenario == "" || len(t.Producer.Revision) != 40 || len(t.Producer.BinarySHA256) != 64 || t.Producer.ClaudeVersion == "" || t.Producer.CapturedAt == "" || len(t.Args) == 0 || len(t.Frames) == 0 || len(t.Frames) > MaxFrames {
+	if (t.Version != 1 && t.Version != 2) || t.Scenario == "" || len(t.Producer.Revision) != 40 || len(t.Producer.BinarySHA256) != 64 || t.Producer.ClaudeVersion == "" || t.Producer.CapturedAt == "" || len(t.Args) == 0 || len(t.Frames) == 0 || len(t.Frames) > MaxFrames {
 		return errors.New("incomplete tape provenance or inventory")
 	}
 	if raw, err := hex.DecodeString(t.Producer.Revision); err != nil || len(raw) != 20 {
@@ -73,12 +73,31 @@ func (t *Tape) Validate() error {
 	if _, err := time.Parse(time.RFC3339Nano, t.Producer.CapturedAt); err != nil {
 		return errors.New("invalid capture timestamp")
 	}
-	inputs, outputs := 0, 0
+	if (t.Version == 2) != RequiresClientCheckpoint(t.Scenario) {
+		return errors.New("checkpoint tape profile is not supported")
+	}
+	inputs, outputs, actions := 0, 0, 0
 	for _, f := range t.Frames {
 		if f.Direction == "stdin" {
 			inputs++
 		} else if f.Direction == "stdout" {
 			outputs++
+		} else if f.Direction == ClientCheckpointDirection && t.Version == 2 {
+			action, err := DecodeClientCheckpoint(f.Data)
+			actions++
+			if err != nil || action.Sequence != uint64(actions) {
+				return errors.New("invalid or nonsequential client checkpoint")
+			}
+			if t.Scenario == "ordinary-queue-placement" && action.Action != "queue_admitted" {
+				return errors.New("wrong checkpoint action for queue profile")
+			}
+			if t.Scenario == "interrupt-running" && (action.Action != "interrupt_phase" || action.Phase != "responding") {
+				return errors.New("wrong running interrupt checkpoint")
+			}
+			if t.Scenario == "interrupt-thinking" && (action.Action != "interrupt_phase" || action.Phase != "thinking") {
+				return errors.New("wrong thinking interrupt checkpoint")
+			}
+
 		} else {
 			return errors.New("unknown tape direction")
 		}
@@ -87,7 +106,7 @@ func (t *Tape) Validate() error {
 			return errors.New("invalid stream-json frame")
 		}
 	}
-	if inputs == 0 || outputs == 0 {
+	if (t.Version == 2 && actions != 1) || inputs == 0 || outputs == 0 {
 		return errors.New("tape has no complete exchange")
 	}
 	return nil
@@ -319,6 +338,14 @@ func SameContract(a, b *Tape) error {
 				counters[f.Direction]++
 				ids[id] = fmt.Sprintf("${%s-control-%d}", f.Direction, counters[f.Direction])
 			}
+			if f.Direction == ClientCheckpointDirection {
+				// Action identifiers never participate in native control bindings.
+				raw, err := json.Marshal(v)
+				if err != nil {
+					return nil, err
+				}
+				requests = append(requests, ClientCheckpointDirection+":"+string(raw))
+			}
 			if f.Direction == "stdin" {
 				raw, err := json.Marshal(rewrite(v, ids))
 				if err != nil {
@@ -329,7 +356,7 @@ func SameContract(a, b *Tape) error {
 		}
 		return requests, nil
 	}
-	if a.Scenario != b.Scenario || !reflect.DeepEqual(a.Args, b.Args) || a.CheckFiles(b.Files) != nil {
+	if a.Version != b.Version || a.Scenario != b.Scenario || !reflect.DeepEqual(a.Args, b.Args) || a.CheckFiles(b.Files) != nil {
 		return errors.New("scenario or Claude arguments changed")
 	}
 	left, err := contract(a)
