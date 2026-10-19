@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -285,10 +286,14 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 }
 
 func TestLifecycleBlockedPipesFailWithinWriteDeadline(t *testing.T) {
-	for _, side := range []string{"input-pressure", "output-pressure"} {
+	for _, side := range []string{"input-pressure", "output-pressure", "trickle-output"} {
 		t.Run(side, func(t *testing.T) {
 			root := t.TempDir()
 			c := LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: "capture", Scenario: "lifecycle-" + side, Path: filepath.Join(root, "tape.json"), Claim: filepath.Join(root, "claim"), Finish: filepath.Join(root, "finish"), Producer: Producer{Revision: strings.Repeat("a", 40), BinarySHA256: strings.Repeat("b", 64), ClaudeVersion: "test-owned", CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}}, End: "kill", Kill: filepath.Join(root, "kill.json")}
+			if side == "trickle-output" {
+				c.Scenario = "lifecycle-output-pressure"
+				c.Deadline = time.Now().Add(2 * time.Second)
+			}
 			path := filepath.Join(root, "job.json")
 			if probeWrite(path, lifecycleProbeJob{Config: c, Root: root}) != nil {
 				t.Fatal("job")
@@ -312,6 +317,23 @@ func TestLifecycleBlockedPipesFailWithinWriteDeadline(t *testing.T) {
 			if side == "input-pressure" {
 				request = `{"type":"user","message":{"content":"` + strings.Repeat("x", 1<<20) + `"}}` + "\n"
 			}
+			var progressed atomic.Int64
+			var readDone chan struct{}
+			if side == "trickle-output" {
+				readDone = make(chan struct{})
+				go func() {
+					defer close(readDone)
+					var b [1024]byte
+					for {
+						n, e := out.Read(b[:])
+						progressed.Add(int64(n))
+						if e != nil {
+							return
+						}
+						time.Sleep(20 * time.Millisecond)
+					}
+				}()
+			}
 			sent := make(chan struct{})
 			go func() { _, _ = io.WriteString(in, request); close(sent) }()
 			done := make(chan error, 1)
@@ -321,8 +343,20 @@ func TestLifecycleBlockedPipesFailWithinWriteDeadline(t *testing.T) {
 				if e == nil {
 					t.Fatal("blocked pipe unexpectedly succeeded")
 				}
-			case <-time.After(20 * time.Second):
+			case <-time.After(func() time.Duration {
+				if side == "trickle-output" {
+					return 5 * time.Second
+				}
+				return 20 * time.Second
+			}()):
 				t.Fatal("write deadline did not stop blocked forwarding")
+			}
+			_ = out.Close()
+			if readDone != nil {
+				<-readDone
+				if progressed.Load() == 0 {
+					t.Fatal("trickling control observed no partial progress")
+				}
 			}
 			_ = in.Close()
 			<-sent

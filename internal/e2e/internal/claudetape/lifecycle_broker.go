@@ -87,6 +87,7 @@ func (t *LifecycleTape) Save(path string) error {
 type LifecycleBrokerConfig struct {
 	PoolProcessConfig
 	OwnerPID  int
+	Deadline  time.Time
 	End, Kill string
 	OnSeal    func(int) error `json:"-"`
 }
@@ -168,11 +169,26 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	frames, total := 0, 0
 	sealed := false
 	sealDeadline := time.Time{}
+	deadline := time.Now().Add(20 * time.Minute)
+	if !c.Deadline.IsZero() && c.Deadline.Before(deadline) {
+		deadline = c.Deadline
+	}
+	expired := func() bool { return !time.Now().Before(deadline) || (sealed && !time.Now().Before(sealDeadline)) }
 	write := func(f *os.File, raw []byte) error {
 		if len(raw) == 0 {
 			return nil
 		}
-		if f.SetWriteDeadline(time.Now().Add(10*time.Second)) != nil {
+		if expired() {
+			return errors.New("lifecycle forwarding deadline exceeded")
+		}
+		writeDeadline := time.Now().Add(10 * time.Second)
+		if deadline.Before(writeDeadline) {
+			writeDeadline = deadline
+		}
+		if sealed && sealDeadline.Before(writeDeadline) {
+			writeDeadline = sealDeadline
+		}
+		if f.SetWriteDeadline(writeDeadline) != nil {
 			return fail
 		}
 		_, err := f.Write(raw)
@@ -252,6 +268,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		var buf [4096]byte
 		quantum := 0
 		for {
+			if expired() {
+				return errors.New("lifecycle forwarding deadline exceeded")
+			}
 			n, e := syscall.Read(fd, buf[:])
 			if n > 0 {
 				quantum += n
@@ -334,7 +353,6 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		return frames, tape.Save(c.Path)
 	}
-	deadline := time.Now().Add(20 * time.Minute)
 	for time.Now().Before(deadline) {
 		if err := read(inputFD, &pendingInput, &inputEOF, "stdin"); err != nil {
 			return frames, err
