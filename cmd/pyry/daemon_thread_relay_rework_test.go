@@ -44,7 +44,7 @@ func TestDaemonThreadGapPreservesAgentIneligiblePeer(t *testing.T) {
 	}
 	s.publisher.gap(t.Context(), testConvIDB, codex)
 	closed := wire.await()
-	if closed.ConnID != "again" || closed.CloseCode != uint16(relay.StatusQueueOverflow) {
+	if closed.ConnID != "again" || closed.CloseCode != uint16(relay.StatusProducerGap) {
 		t.Fatalf("gap retired an unaffected peer: %#v", closed)
 	}
 	testShadowWait(t, func() bool { return len(mgr.ActiveConns(t.Context())) < 2 })

@@ -44,46 +44,21 @@ const (
 	// § Error codes, close-code row 4426.
 	StatusHandshakeFailure websocket.StatusCode = 4426
 
-	// StatusQueueOverflow is the WS close code the binary asks the relay to
-	// apply when a v2 session's push queue exceeds pushQueueByteCeiling and
-	// handlePushOverflow tears it down (#1505). Echoes HTTP 413 (Content Too
-	// Large), consistent with the 44xx←HTTP convention. Deliberately NOT
-	// StatusIdleTimeout: reusing 4408 would mislabel an overflow as an idle
-	// session, the same class of mistake #912 documented when a transport
-	// outage surfaced as noise.rekey_failed. Wire spec:
-	// docs/protocol-mobile.md § Error codes, close-code row 4413.
-	//
-	// closeWith is called with a NIL frame on this path — nothing is sealed.
-	// The trip condition is a parked drain, which in the #874 case means the
-	// transport is down, so sealing an error envelope would burn a Noise
-	// send-nonce for a frame that cannot arrive and gap the phone's recv nonce
-	// (the #912 hazard). The idle sweep already sets this precedent, and the
-	// close code alone suffices because the phone's recovery is a fresh
-	// handshake, not a message. A future change that adds a sealed error frame
-	// here reintroduces the nonce hazard.
+	// StatusQueueOverflow closes sessions after an actual pushQueueByteCeiling
+	// rejection. Recovery requires a fresh handshake and reconciliation. The nil
+	// close frame avoids spending a Noise nonce on an unavailable transport.
+	// Independent hosted-lane capacity limits also use this code.
 	StatusQueueOverflow websocket.StatusCode = 4413
 
-	// StatusSessionGone is the WS close code the binary asks the relay to
-	// apply when a noise_msg arrives on a conn the manager holds no session
-	// for (#2488). handleFrame creates a bare V2StateAwaitingInit session for
-	// any unheld conn id, so the frame reaches handleNoiseMsg with no
-	// CipherStates: it can be neither decrypted nor answered with a sealed
-	// error, and the close code is the only signal. Echoes HTTP 410 (Gone),
-	// consistent with the 44xx←HTTP convention. Wire spec:
-	// docs/protocol-mobile.md § Error codes, close-code row 4410.
-	//
-	// Deliberately NOT StatusProtocolMismatch, which this arm used before:
-	// clients treat 4421 as a permanent mismatch and stop re-dialling, yet a
-	// legitimate client lands here whenever it still holds cipher state for a
-	// session the daemon dropped. Because closeWith deletes the conn from the
-	// session map, all three causes — a daemon restart, an idle sweep (4408)
-	// and the push-queue ceiling (4413) — reduce to a conn id the manager no
-	// longer holds, and the documented recovery for each is a fresh Noise
-	// handshake, which only a retryable close lets the client reach.
-	//
-	// Deliberately NOT StatusIdleTimeout either: 4408 means "your session
-	// idled out", and a restart or an overflow is not that — the same mislabel
-	// StatusQueueOverflow's comment already records rejecting.
+	// StatusProducerGap requires a fresh Noise handshake, transient-state
+	// reconciliation and thread catch-up after a producer handoff continuity gap.
+	// Retirement closes with a nil frame and quarantines pending output first.
+	StatusProducerGap websocket.StatusCode = 4414
+
+	// StatusSessionGone requests a fresh Noise handshake when noise_msg arrives
+	// without session cipher state. Restart, idle timeout, queue overflow and
+	// producer-gap retirement all leave the previous session unavailable. With
+	// no receive keys, only an unsealed close code can signal recovery.
 	StatusSessionGone websocket.StatusCode = 4410
 
 	// StatusClientUpdateRequired is the WS close code the binary asks the
@@ -583,21 +558,10 @@ type V2SessionManager struct {
 	// forwardToRun.
 	appReply chan appReplyMsg
 
-	// pushOverflow carries the connID of a session whose push queue latched
-	// pushQueue.overflowed from the off-Run producer goroutine inside Push to
-	// the Run goroutine, which tears the session down in handlePushOverflow
-	// (#1505). Mirrors wake's shape — buffered (wakeBufferSize), carrying the
-	// affected conn — because enqueue runs off-Run under pushMu and closeWith is
-	// Run-owned, exactly the split wake bridges for its timer callbacks.
-	//
-	// The send is NON-blocking (the drainCh idiom), unlike armIdleTimer's
-	// blocking send: armIdleTimer blocks a fresh time.AfterFunc goroutine, while
-	// Push runs on the producer's goroutine, where blocking would break the
-	// never-blocks-the-producer contract this whole queue exists to uphold. The
-	// signal is level-triggered instead — the latch is never cleared, so every
-	// subsequent Push re-drives a send a full buffer dropped. With no further
-	// pushes the queue is frozen at <= the ceiling and the idle sweep reaps it,
-	// which is the pre-#1505 bound and strictly no worse.
+	// pushOverflow wakes Run for byte-overflow or producer-gap teardown. The
+	// terminal cause stays on the queue under pushMu; notifications cannot relabel
+	// it. Push sends nonblocking and level-triggered to keep producers responsive;
+	// RetireLiveState waits for notification admission or context cancellation.
 	pushOverflow chan string
 
 	// bundleReady carries one finished debug-bundle assembly from its off-Run
