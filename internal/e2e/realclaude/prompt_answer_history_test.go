@@ -4,8 +4,6 @@ package realclaude
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -58,43 +56,7 @@ func requirePromptAnswerHistory(t *testing.T, h *perConvHarness, convID, id, dec
 // checkQuestionAnswerHistory compares the original surfaced batch and exact sent
 // values with the durable projection, independently of the assistant's prose.
 func checkQuestionAnswerHistory(e history.Entry, batch protocol.QuestionShownPayload, answers []protocol.QuestionAnswerEntry) error {
-	var fact struct {
-		ConversationID string `json:"conversation_id"`
-		CorrelationID  string `json:"correlation_id"`
-		SessionID      string `json:"session_id"`
-		Truncated      bool   `json:"truncated"`
-		Context        struct {
-			Questions []struct {
-				Index       int    `json:"index"`
-				Text        string `json:"text"`
-				MultiSelect bool   `json:"multi_select"`
-				Values      []struct {
-					Text string `json:"text"`
-				} `json:"values"`
-			} `json:"questions"`
-		} `json:"context"`
-	}
-	if err := json.Unmarshal(e.Payload, &fact); err != nil {
-		return fmt.Errorf("decode answer context: %w", err)
-	}
-	if fact.ConversationID != batch.ConversationID || fact.CorrelationID != batch.QuestionBatchID || fact.SessionID != streamModalBootstrapUUID || fact.Truncated || e.Session == nil || e.Session.Kind != "claude" || e.Session.SessionID != streamModalBootstrapUUID {
-		return errors.New("answer context lost original conversation, batch or asking session")
-	}
-	if len(fact.Context.Questions) != len(batch.Questions) || len(answers) != len(batch.Questions) {
-		return errors.New("answer context question count mismatch")
-	}
-	for i, q := range batch.Questions {
-		saved, sent := fact.Context.Questions[i], answers[i]
-		if saved.Index != i || saved.Text != q.Text || saved.MultiSelect != q.MultiSelect || sent.QuestionIndex != i || len(saved.Values) != len(sent.Values) {
-			return fmt.Errorf("answer context question %d mismatch", i)
-		}
-		for j, value := range sent.Values {
-			if saved.Values[j].Text != value {
-				return fmt.Errorf("answer context question %d value %d mismatch", i, j)
-			}
-		}
-	}
-	return nil
+	return scenario.CheckQuestionAnswerHistory(e, batch, answers, streamModalBootstrapUUID)
 }
 
 // readPromptAnswerHistory selects regular segment leaves using the contracts of

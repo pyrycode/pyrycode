@@ -81,6 +81,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -91,40 +92,7 @@ import (
 func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
-
-	// AC1: put a genuinely-running live turn in flight. driveRunningTurn sends id 2
-	// (first post-handshake message) with the 40s foreground-Bash-loop prompt;
-	// drainForResponding blocks until turn_state{responding} for convID — and by its
-	// in-order-drain construction NO terminal turn_state{idle} has been observed yet,
-	// so the turn is genuinely mid-stream. Generous budget: cold claude spawn + model
-	// load, not fakeclaude milliseconds. (Return value t0 is unused — the interrupt is
-	// fired immediately, deep inside the 40s loop, so no timing window is measured.)
-	driveRunningTurn(t, h, 2, convID, runningTurnHold)
-	drainForResponding(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
-
-	// AC2: fire the payload-less interrupt IMMEDIATELY (no intervening wait). A
-	// payload-less interrupt routes to the ACTIVE conversation — stamped convID by the
-	// send_message above → activeInterrupter.SendEsc() → resolveBoundRunner(convID) →
-	// the bootstrap runner running the live turn → streamsup.Runner.Interrupt() →
-	// control_request to the real claude child.
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   3,
-		Type: protocol.TypeInterrupt,
-		TS:   time.Now().UTC(),
-	})
-
-	// AC3: the running turn terminates as cancelled, not run-to-completion. Fails loud
-	// on the first non-cancelled turn_end (the spontaneous-end guard).
-	drainForCancelledTurnEnd(t, h.phone, h.initRecv, convID, perTurnReplyBudget, false)
-
-	// AC4: the session stays usable — a subsequent trivial turn on the same conversation
-	// runs to a terminal turn_state{idle}. NOT driveRunningTurn (that would launch
-	// another 40s loop); a single-short-word prompt with a per-run nonce, matching the
-	// #1153 liveness shape. drainForCompletedTurn decrypts-and-skips the leftover
-	// turn_state{idle} from the cancelled turn before its own M1.
-	sealSendMessage(t, h.phone, h.initSend, 4, convID, "m-4",
-		fmt.Sprintf("Reply with a single short word. run=%d", time.Now().UnixNano()))
-	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	scenario.InterruptTurn(t, checkpointHarnessWire(t, h), scenario.InterruptConfig{ConversationID: convID, Prompt: runningTurnPrompt(int((runningTurnHold + runningTurnLoopSlack).Seconds()), time.Now().UnixNano()), HealthPrompt: fmt.Sprintf("Reply with a single short word. run=%d", time.Now().UnixNano()), Budget: perTurnReplyBudget})
 }
 
 // TestInteractiveStreamInterruptStopsInitialThinkingTurn waits for the server's
@@ -133,17 +101,20 @@ func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 func TestInteractiveStreamInterruptStopsInitialThinkingTurn(t *testing.T) {
 	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
+	scenario.InterruptTurn(t, checkpointHarnessWire(t, h), scenario.InterruptConfig{ConversationID: convID, Prompt: scenario.InitialThinkingPrompt(fmt.Sprint(time.Now().UnixNano())), InitialThinking: true, Budget: perTurnReplyBudget})
+}
 
-	driveInitialThinkingTurn(t, h, 2, convID)
-	drainForInitialThinking(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
-
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:      3,
-		Type:    protocol.TypeInterrupt,
-		TS:      time.Now().UTC(),
-		Payload: mustJSON(t, protocol.InterruptPayload{ConversationID: convID}),
-	})
-	drainForCancelledTurnEnd(t, h.phone, h.initRecv, convID, perTurnReplyBudget, true)
+func checkpointHarnessWire(t *testing.T, h *perConvHarness) scenario.Wire {
+	sequence := uint64(1)
+	return scenario.Wire{Next: scenario.Receive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
+		sequence++
+		var raw json.RawMessage
+		if payload != nil {
+			raw = mustJSON(t, payload)
+		}
+		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: raw})
+		return sequence
+	}}
 }
 
 // driveInitialThinkingTurn asks for a deliberately multi-step, tool-free proof.

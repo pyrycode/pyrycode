@@ -21,6 +21,7 @@ def inherited_admission():
 def plan(root, manifest, scenarios, audit):
     selected = [row for row in manifest['scenarios'] if row['name'] in scenarios]
     return {'scenarios': scenarios,
+            'boundaries': {row['name']: row['boundary'] for row in selected},
             'live_tests': sorted({name for row in selected for name in row['live_tests']}),
             'retained_live': {row['name']: row['retained_live'] for row in selected},
             'inventory_summary': audit['summary'],
@@ -45,7 +46,7 @@ def scaffold(root, args, audit):
     if output == root or root in output.parents:
         raise ValueError('Scaffold proposals must be outside the checkout')
     output.mkdir(parents=True, exist_ok=False)
-    row = {'name': args.name, 'stdio_permission': args.stdio_permission, 'initial_yolo': False, 'claude_args': [],
+    row = {'boundary': 'daemon_stdio', 'comparison_policy': 'strict_ordered', 'name': args.name, 'stdio_permission': args.stdio_permission, 'initial_yolo': False, 'claude_args': [],
            'live_tests': args.live_test, 'retained_live': args.retained_live,
            'live_contracts': {name: indexed[name]['contract_sha256'] for name in args.live_test}}
     (output / 'manifest-fragment.json').write_text(json.dumps({'scenario': row, 'batch': {args.name: [args.name]}}, indent=2) + '\n')
@@ -109,6 +110,7 @@ def gates(root, manifest, scenarios, output, agents_repo):
     offline = live.copy()
     for key in ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR'):
         offline.pop(key, None)
+    live['PYRY_REALCLAUDE_EVIDENCE_DIR'] = str(output / 'live-evidence')
     logs = output / 'gates'
     logs.mkdir()
     stages = []
@@ -137,7 +139,7 @@ def gates(root, manifest, scenarios, output, agents_repo):
     roots = sorted({name for row in manifest['scenarios'] if row['name'] in scenarios for name in row['live_tests']})
     if success and roots:
         pattern = '^(' + '|'.join(roots) + ')$'
-        success = stage('selected-live', ['go', 'test', '-race', '-tags=e2e_realclaude', '-count=1', '-timeout=15m', '-json', '-run', pattern, './internal/e2e/realclaude'], live, roots=roots)
+        success = stage('selected-live', ['go', 'test', '-race', '-tags=e2e_realclaude', '-count=1', '-timeout=180m', '-json', '-run', pattern, './internal/e2e/realclaude'], live, roots=roots)
     if success:
         # The older check-restoration wrapper does not preserve an outer admission FD.
         success = stage('restoration', ['go', 'test', '-race', '-count=1', '-timeout=30m', '-json', '-run', '^TestCheckpointResumeCorpus$', './internal/thread'], dict(offline, PYRY_EXHAUSTIVE_TESTS='1'), cuts=True)

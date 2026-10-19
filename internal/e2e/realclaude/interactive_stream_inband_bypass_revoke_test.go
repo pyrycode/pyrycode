@@ -484,8 +484,8 @@ func seedBypassRegistry(t *testing.T, path string, yolo bool) sessions.SessionID
 // system/init announcement that the revocation reached the child, and that the
 // same process served both turns.
 func TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode(t *testing.T) {
-	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
-	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+	claudeBin, home, finishRecording := poolProviderEnvironment(t)
+	defer finishRecording()
 
 	workdir := filepath.Join(home, revokeWorkdirName)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
@@ -786,8 +786,8 @@ func firstOrEmpty(s []string) string {
 // skipped run from a passing one — with no credentials every test here skips and the
 // suite still exits 0.
 func TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows(t *testing.T) {
-	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
-	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+	claudeBin, home, finishRecording := poolProviderEnvironment(t)
+	defer finishRecording()
 
 	workdir := filepath.Join(home, revokeWorkdirName+"-2064")
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
@@ -1036,8 +1036,8 @@ func TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows(t *testing
 // Claude login, so this test SKIPS there and a skip exits 0. Read the count of
 // `=== RUN` lines that reported PASS — never the exit code.
 func TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode(t *testing.T) {
-	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
-	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+	claudeBin, home, finishRecording := poolProviderEnvironment(t)
+	defer finishRecording()
 
 	workdir := filepath.Join(home, revokeWorkdirName+"-2066")
 	if err := os.MkdirAll(workdir, 0o700); err != nil {

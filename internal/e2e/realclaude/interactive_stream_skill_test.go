@@ -74,13 +74,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // Fixed identifiers for the seeded state. The Go names are distinct from every
@@ -131,28 +132,7 @@ const skillDropMsg = "streamsup: dropping known harness user block"
 // 0o700 on the directories and 0o600 on the file, matching the mode
 // WithWorktreeAuthenticated already uses for the credential file it seeds beside
 // them.
-func writeProbeSkill(t *testing.T, home string) {
-	t.Helper()
-	dir := filepath.Join(home, ".claude", "skills", skillName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("realclaude: mkdir skill dir: %v", err)
-	}
-	body := "---\n" +
-		"name: " + skillName + "\n" +
-		"description: Pyrycode end-to-end probe skill. Use this skill whenever the user asks " +
-		"you to use the " + skillName + " skill. It asks only for a short spoken reply.\n" +
-		"---\n\n" +
-		"# Pyrycode probe skill\n\n" +
-		"This document exists so that an automated test can observe what happens on the\n" +
-		"daemon's stream when a skill is loaded. It asks for nothing that touches the\n" +
-		"filesystem, the network, or any tool.\n\n" +
-		"Internal identifier: " + skillBodyMarker + "\n\n" +
-		"When this skill is invoked, reply with the single word " + skillReplyToken + " and\n" +
-		"nothing else. Never repeat the internal identifier above in your reply.\n"
-	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o600); err != nil {
-		t.Fatalf("realclaude: write SKILL.md: %v", err)
-	}
-}
+func writeProbeSkill(t *testing.T, home string) { scenario.WriteProbeSkill(t, home) }
 
 func TestInteractiveStreamSkillInvocationIsSilent(t *testing.T) {
 	runParallel(t)
@@ -224,69 +204,11 @@ func TestInteractiveStreamSkillInvocationIsSilent(t *testing.T) {
 	// invites a Read, which delivers the body as a tool_result and exercises none
 	// of the arm under test.
 	nonce := time.Now().UnixNano()
-	sealSendMessage(t, phone, initSend, 2, skillConvID, "m-1",
-		fmt.Sprintf("Use the %s skill, then do exactly what it says. run=%d", skillName, nonce))
-
-	// The zero-unrecognized assertion is inside this drain: it fails on the FIRST
-	// unrecognized_message frame, naming the offending site, type and raw payload.
-	// Before #2087 a skill turn failed here with an 87 KB user_block payload.
-	reply := drainForCompletedTurn(t, phone, initRecv, skillConvID, 180*time.Second)
-
-	daemonLog := d.stderr.String()
-
-	// WITNESS LEG 1 — the skill actually loaded. The token lives only inside the
-	// body written above, and the prompt withholds both the token and the file's
-	// path, so a reply carrying it came from a claude that read the body. Asserted
-	// FIRST because it is the leg that separates "claude ignored the skill" from
-	// "the daemon stopped suppressing", and those need different fixes.
-	if !strings.Contains(reply, skillReplyToken) {
-		t.Fatalf("the reply for %q never carried %q, so there is no evidence claude loaded the "+
-			"%s skill on this turn, and the drain's zero-unrecognized pass is VACUOUS rather "+
-			"than a proof.\nreply: %q\n\n"+
-			"The likely cause is model compliance, not the daemon: --model haiku was asked to "+
-			"use a skill and reply with one word. Tighten the PROMPT or the skill's description, "+
-			"not this assertion — an assertion loosened here is one that can no longer tell a "+
-			"working suppression from an absent skill.",
-			skillConvID, skillReplyToken, skillName, reply)
-	}
-
-	// WITNESS LEG 2 — a harness-authored user/text block reached the parser and was
-	// dropped. Emitted only from the drop site in streamsup.emitUser, so its absence
-	// means nothing was suppressed at all. Leg 1 having passed, the skill body is
-	// what arrived: had the skill's line NOT been suppressed the drain above would
-	// already have failed on its body, and had no such line arrived this record
-	// would be missing.
-	if !strings.Contains(daemonLog, skillDropMsg) {
-		t.Fatalf("claude loaded the %s skill (leg 1 passed) but the daemon never logged %q, so "+
-			"nothing was suppressed at streamsup.emitUser on this turn. Two readings:\n"+
-			"  1. claude no longer stamps the line-level synthetic flag on a skill line — the "+
-			"ONE hop in streamsup.harnessNoOutputNudge's #2087 provenance that no committed "+
-			"capture pins. That is the inference expiring, and the prefix fallback that docblock "+
-			"names becomes a real ticket. Note the drain passed, so the body did not surface "+
-			"either: check whether the skill still reaches the stream as a user/text block at "+
-			"all before writing that ticket;\n"+
-			"  2. the daemon is not logging at Debug, which would mean this test stopped using "+
-			"spawnBootstrapDaemonVerbose.",
-			skillName, skillDropMsg)
-	}
-	t.Logf("#2087: claude loaded the %s skill (reply carried %q), the daemon dropped a "+
-		"harness-authored user/text block, and zero unrecognized_message frames left the "+
-		"daemon — the invocation leaves no row in the chat", skillName, skillReplyToken)
-
-	// AC1's content-free rule, proved on the live surface rather than only against
-	// a synthesised line. A skill body is operator-authored instruction, up to tens
-	// of kilobytes of it, and the drop path is one careless attribute away from
-	// writing all of it into stderr and journald — which would reintroduce one
-	// layer down exactly the disclosure this ticket removes.
-	//
-	// Two readings if this reddens, and they need different fixes: the daemon
-	// logged the body (a real regression at the drop site), or claude repeated the
-	// identifier despite the body telling it not to (a prompt problem, worth a
-	// human look before anything here changes).
-	if idx := strings.Index(daemonLog, skillBodyMarker); idx >= 0 {
-		t.Errorf("the skill body's internal identifier appears in the daemon's own debug-level "+
-			"stderr at offset %d — the drop site logs site and type only, and nothing else in "+
-			"the daemon may carry claude's payload either.\ncontext: %q",
-			idx, logContextAround(daemonLog, idx, len(skillBodyMarker)))
-	}
+	sequence := uint64(1)
+	w := scenario.Wire{Send: func(kind string, payload any) uint64 {
+		sequence++
+		sealEnvelope(t, phone, initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+		return sequence
+	}, Next: scenario.Receive(t, phone, initRecv)}
+	scenario.SkillSilence(t, w, skillConvID, fmt.Sprintf("Use the %s skill, then do exactly what it says. run=%d", skillName, nonce), 180*time.Second, d.stderr.String)
 }

@@ -35,11 +35,17 @@ def run(mode, directory, report_dir, compare=None, label=None, scenarios=None):
         name = 'TestClaudeTapeCompatibility'
     else:
         env.pop('PYRY_CLAUDE_TAPE_FRESH', None)
+    if report_dir:
+        evidence = report_dir / ((label or mode) + '-native-events')
+        evidence.mkdir(parents=True, exist_ok=False)
+        env['PYRY_CLAUDE_TAPE_EVIDENCE'] = str(evidence.resolve())
+    else:
+        env.pop('PYRY_CLAUDE_TAPE_EVIDENCE', None)
     if mode == 'replay':
         for key in ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR'):
             env.pop(key, None)
     cmd = [sys.executable, str(ROOT / 'scripts/test-admission.py'), '--', 'go', 'test',
-           '-tags=e2e', '-count=1', '-timeout=10m', '-json', '-run', '^' + name + '$', './internal/e2e']
+           '-tags=e2e', '-count=1', '-timeout=180m', '-json', '-run', '^' + name + '$', './internal/e2e']
     started = time.monotonic()
     # Preserve the admission descriptor when an operator reserves one slot for
     # the whole compatibility command. The nested launcher validates its inode.
@@ -54,6 +60,7 @@ def run(mode, directory, report_dir, compare=None, label=None, scenarios=None):
                                stderr=subprocess.STDOUT, text=True, pass_fds=inherited)
     leaves, events, durations, counts = {}, [], {}, Counter()
     rejected = False
+    comparisons = {}
     for line in process.stdout:
         try:
             event = json.loads(line)
@@ -68,12 +75,34 @@ def run(mode, directory, report_dir, compare=None, label=None, scenarios=None):
             leaves[event['Test']] = event['Action']
             durations[event['Test']] = event.get('Elapsed')
         if event.get('Action') == 'output':
+            output = event.get('Output', '')
+            if 'CLAUDE_COMPARISON ' in output:
+                try:
+                    contract = json.loads(output.split('CLAUDE_COMPARISON ', 1)[1])
+                    scenario = contract['scenario']
+                    if scenario not in scenarios or event.get('Test') != name + '/' + scenario or scenario in comparisons:
+                        rejected = True
+                    else:
+                        comparisons[scenario] = contract
+                except (ValueError, KeyError, TypeError):
+                    rejected = True
             print(event.get('Output', ''), end='', flush=True)
     code = process.wait()
     expected = {name + '/' + scenario for scenario in scenarios}
     success = code == 0 and not rejected and set(leaves) == expected and all(result == 'pass' for result in leaves.values()) and all(value == 1 for value in counts.values())
+    if compare:
+        expected_policies = {row['name']: row['comparison_policy'] for row in daemon_manifest.load()['scenarios'] if row['name'] in scenarios}
+        def valid_contract(name, policy):
+            row = comparisons.get(name, {})
+            required = {'scenario', 'policy'}
+            if policy == 'native_coding_prefix':
+                required |= {'baseline_coding_iterations', 'fresh_coding_iterations'}
+                if any(type(row.get(k)) is not int or not 1 <= row[k] <= 6 for k in required - {'scenario', 'policy'}):
+                    return False
+            return set(row) == required and row.get('scenario') == name and row.get('policy') == policy
+        success = success and set(comparisons) == set(expected_policies) and all(valid_contract(n, p) for n, p in expected_policies.items())
     report = {'mode': 'compare' if compare else mode, 'success': success,
-              'seconds': round(time.monotonic() - started, 3), 'results': leaves, 'scenario_seconds': durations, 'exit_code': code, 'scenarios': scenarios}
+              'seconds': round(time.monotonic() - started, 3), 'results': leaves, 'scenario_seconds': durations, 'exit_code': code, 'scenarios': scenarios, 'comparison_contracts': comparisons}
     if report_dir:
         report_dir.mkdir(parents=True, exist_ok=True)
         label = label or report['mode'] + '-' + directory.name

@@ -23,18 +23,20 @@ import (
 )
 
 type tapeProcessConfig struct {
-	Mode      string
-	Path      string
-	Home      string
-	Finish    string
-	Receipt   string
-	Claim     string
-	Claude    string
-	Scenario  string
-	Daemon    string
-	Socket    string
-	MCPConfig string
-	Producer  claudetape.Producer
+	CheckpointDir   string
+	ObserverAddress string
+	Mode            string
+	Path            string
+	Home            string
+	Finish          string
+	Receipt         string
+	Claim           string
+	Claude          string
+	Scenario        string
+	Daemon          string
+	Socket          string
+	MCPConfig       string
+	Producer        claudetape.Producer
 	// Ready is created once a replay has delivered every frame before the
 	// daemon's first user turn. The scenario driver waits for it in replay.
 	Ready string
@@ -73,7 +75,7 @@ func TestClaudeTapeProcess(t *testing.T) {
 		}
 	}
 	frames, err := runClaudeTapeProcess(c, args)
-	if errors.Is(err, errTapeDuplicate) {
+	if errors.Is(err, errTapeDuplicate) || errors.Is(err, errTapeNativePrintRefused) {
 		os.Exit(1)
 	}
 	receipt := tapeReceipt{Success: err == nil, Frames: frames}
@@ -260,6 +262,14 @@ func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage,
 			c.MCPConfig = args[i+1]
 		}
 	}
+	if c.Scenario == "mcp-reconnect" {
+		if c.MCPConfig == "" {
+			return nil, errors.New("MCP reconnect profile requires the production config path")
+		}
+		if err := scenariohelpers.InjectMCPReconnectServer(c.MCPConfig, filepath.Join(c.Home, "reconnect-command")); err != nil {
+			return nil, errors.New("MCP reconnect config preparation failed")
+		}
+	}
 	files := map[string]json.RawMessage{}
 	for i, arg := range args {
 		if arg != "--settings" && arg != "--mcp-config" && arg != "--append-system-prompt-file" {
@@ -301,23 +311,106 @@ func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage,
 	if len(files["--settings"]) == 0 || len(files["--append-system-prompt-file"]) == 0 {
 		return nil, errors.New("incomplete pilot Claude input files")
 	}
+	switch c.Scenario {
+	case "question-answer-witness", "bypass-witness-mcp-stored", "bypass-witness-mcp-operator", "bypass-witness-stdio-stored", "bypass-witness-stdio-operator", "ordinary-queue-placement", "interrupt-running", "interrupt-thinking", "subagent-text", "hook-banner", "workspace-change", "skill-silence", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, errors.New("scenario cwd unavailable")
+		}
+		raw, _ := json.Marshal(cwd)
+		normalized, err := tapeNormalize(raw, *c, false)
+		if err != nil {
+			return nil, err
+		}
+		if err = claudetape.Safe(normalized); err != nil {
+			return nil, err
+		}
+		files["$cwd"] = normalized
+	}
+	if c.Scenario == "hook-banner" {
+		for key, path := range map[string]string{"$hook/user-settings": filepath.Join(c.Home, ".claude", "settings.json"), "$hook/script": filepath.Join(c.Home, scenariohelpers.HookRigDir, "hook.sh")} {
+			raw, err := os.ReadFile(path)
+			if err != nil || len(raw) > claudetape.MaxBytes {
+				return nil, errors.New("hook input unavailable or oversized")
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				return nil, errors.New("hook input mode unavailable")
+			}
+			encoded, _ := json.Marshal(struct {
+				Text string
+				Mode uint32
+			}{string(raw), uint32(info.Mode().Perm())})
+			normalized, err := tapeNormalize(encoded, *c, false)
+			if err != nil {
+				return nil, err
+			}
+			if err = claudetape.Safe(normalized); err != nil {
+				return nil, err
+			}
+			files[key] = normalized
+		}
+	}
+	if c.Scenario == "skill-silence" {
+		raw, err := os.ReadFile(filepath.Join(c.Home, ".claude", "skills", scenariohelpers.SkillName, "SKILL.md"))
+		if err != nil || len(raw) > claudetape.MaxBytes {
+			return nil, errors.New("scenario skill input unavailable or oversized")
+		}
+		encoded, _ := json.Marshal(string(raw))
+		normalized, err := tapeNormalize(encoded, *c, false)
+		if err != nil {
+			return nil, err
+		}
+		if err = claudetape.Safe(normalized); err != nil {
+			return nil, err
+		}
+		files["$skill/pyry-probe"] = normalized
+	}
+	if c.Scenario == "native-suggestions" {
+		policy, _ := json.Marshal("reject-non-stream-before-producer-claim")
+		files["$native/non-stream-policy"] = policy
+		enabled, _ := json.Marshal(os.Getenv("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"))
+		files["$native/enable"] = enabled
+	}
 	return files, nil
 }
 
 var errTapeDuplicate = errors.New("pilot allows exactly one Claude process")
+var errTapeNativePrintRefused = errors.New("native profile refuses non-stream invocation")
+
+func nativeStreamArgs(args []string) bool {
+	for i, arg := range args {
+		if arg == "--input-format" && i+1 < len(args) && args[i+1] == "stream-json" {
+			return true
+		}
+	}
+	return false
+}
 
 func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
+	if c.Scenario == "native-suggestions" && !nativeStreamArgs(args) {
+		return 0, errTapeNativePrintRefused
+	}
+	if c.Scenario == "native-suggestions" {
+		if err := os.Setenv("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "1"); err != nil {
+			return 0, errors.New("native suggestion enable unavailable")
+		}
+	}
 	claim, err := os.OpenFile(c.Claim, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		_ = os.WriteFile(c.Claim+".duplicate", nil, 0o600)
 		return 0, errTapeDuplicate
 	}
 	_ = claim.Close()
+	if (c.CheckpointDir != "") != claudetape.RequiresClientCheckpoint(c.Scenario) {
+		return 0, errors.New("client checkpoint configuration changed")
+	}
 	files, err := tapeFiles(args, &c)
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	budget := 30 * time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	inputs, err := newTapeInput(os.Stdin)
 	if err != nil {
@@ -380,8 +473,13 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 	} else {
 		return 0, errors.New("unknown Claude tape mode")
 	}
+	if claudetape.RequiresClientCheckpoint(c.Scenario) && c.Mode == "capture" {
+		tape.Version = 2
+	}
+	checkpoint := recordedCheckpointState{dir: c.CheckpointDir}
 	frames := 0
 	bytes := 0
+	finalInputSeen := c.Scenario != "native-suggestions"
 	initializeID := ""
 	holdPending := c.HoldInitialize > 0
 	ready := false
@@ -395,6 +493,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		}
 		return nil
 	}
+
 	emit := func(lines []json.RawMessage) error {
 		for _, line := range lines {
 			if err := checkTapePermission(line, c); err != nil {
@@ -406,6 +505,9 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 			}
 			data, e := tapeNormalize(line, c, true)
 			if e != nil {
+				return e
+			}
+			if e = publishRecordedSource(c, data); e != nil {
 				return e
 			}
 			if _, e = os.Stdout.Write(append(data, '\n')); e != nil {
@@ -424,6 +526,9 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		}
 	}
 	handleInput := func(raw []byte) error {
+		if c.Scenario == "native-suggestions" && claudetape.IsUserText(raw, scenariohelpers.NativeSuggestionClearPrompt) {
+			finalInputSeen = true
+		}
 		normalized, e := tapeNormalize(raw, c, false)
 		if e != nil {
 			return e
@@ -460,8 +565,17 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 
 		return nil
 	}
+	pollCheckpoint := func() error {
+		return checkpoint.poll(tape, player, func(raw []byte) ([]byte, error) { return tapeNormalize(raw, c, false) }, emit, &bytes, &frames, func() error { return inputs.drain(handleInput) })
+	}
 	for {
+		// Consume already-written native stdin before a newly published client
+		// observation. Otherwise the file can overtake its preceding pipe write
+		// merely because both become ready before this helper is scheduled.
 		if err := inputs.drain(handleInput); err != nil {
+			return frames, err
+		}
+		if err := pollCheckpoint(); err != nil {
 			return frames, err
 		}
 		select {
@@ -475,10 +589,22 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 				if len(inputs.pending) != 0 {
 					return frames, errors.New("unterminated daemon input at scenario seal")
 				}
+				if !finalInputSeen {
+					continue
+				}
+				if err := pollCheckpoint(); err != nil {
+					return frames, err
+				}
 				if player != nil {
-					return frames, player.Complete()
+					if err := player.Complete(); err != nil {
+						return frames, err
+					}
+					return frames, checkpoint.seal()
 				}
 				if err := checkTapeCheckpoint(tape); err != nil {
+					return frames, err
+				}
+				if err := checkpoint.seal(); err != nil {
 					return frames, err
 				}
 				if err := tape.Save(c.Path); err != nil {
@@ -506,6 +632,9 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 			}
 			tape.Frames = append(tape.Frames, claudetape.Frame{Direction: "stdout", Data: normalized})
 			frames++
+			if e = publishRecordedSource(c, line.data); e != nil {
+				return frames, e
+			}
 			if _, e = os.Stdout.Write(append(line.data, '\n')); e != nil {
 				return frames, errors.New("claude stdout delivery failed")
 			}
@@ -565,7 +694,33 @@ func tapeWrapper(t *testing.T, c tapeProcessConfig) string {
 // The busy-turn scenario must not be promoted unless a real daemon stdin write
 // gates the recorded tool result. Apply the same audit on every replay.
 func checkTapeCheckpoint(tape *claudetape.Tape) error {
-	if strings.HasPrefix(tape.Scenario, "bypass-questions-") {
+	switch tape.Scenario {
+	case "ordinary-queue-placement":
+		return tape.RequireQueueAdmission(tapeConversation, recordedOrdinaryQueuePrompt, scenariohelpers.OrdinaryQueuedText)
+	case "interrupt-running":
+		return tape.RequireInterruptBoundary(tapeConversation, recordedRunningInterruptPrompt, recordedInterruptHealthPrompt, false)
+	case "interrupt-thinking":
+		return tape.RequireInterruptBoundary(tapeConversation, scenariohelpers.InitialThinkingPrompt("tape-interrupt-thinking"), "", true)
+	case "subagent-text":
+		return tape.RequireSubagentMainObservation(tapeConversation, recordedSubagentPrompt)
+	}
+
+	if tape.Scenario == "hook-banner" {
+		return tape.RequireHookOrder(scenariohelpers.HookBlockPrompt, scenariohelpers.HookLivePrompt)
+	}
+	if tape.Scenario == "native-suggestions" {
+		if err := tape.RequireNativeSuggestion(); err != nil {
+			return err
+		}
+		return tape.RequireUserText(scenariohelpers.NativeSuggestionClearPrompt)
+	}
+	if tape.Scenario == "default-outside-read" {
+		return tape.RequireModeBeforeUser("default", 1)
+	}
+	if tape.Scenario == "confirmed-permission-settings" {
+		return tape.RequireModeBeforeUser("default", 2)
+	}
+	if strings.HasPrefix(tape.Scenario, "bypass-questions-") || strings.HasPrefix(tape.Scenario, "bypass-witness-") {
 		return tape.RequireBypassQuestions()
 	}
 	if tape.Scenario == "send-now-placement" {

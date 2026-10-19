@@ -5,7 +5,20 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Seventeen scenarios run the same assertions in live capture and offline replay:
+Thirty-nine scenarios run the same assertions in live capture and offline replay:
+
+The manifest associates 32 original live roots with these recordings.
+The legacy `question-answer` and four bypass-question recordings retain their
+original assertions and fixtures without owning current live roots. Five new
+witness profiles share the stronger proof introduced by PR #3622: a fresh
+answer-only named-cache witness, exact durable question/answer values, final
+owned idle state and a controlled post-model turn. The two primary question roots
+use non-bypass stdio permissions. All five new profiles use the original explicit
+Sonnet model; the parked question changes to Haiku before the follow-up turn.
+Live runs generate unpredictable witnesses and check physical Bash effects;
+recordings use fixed witnesses for exact request comparison. The original
+negative controls for transport, history, witness leakage, model ownership and
+parked-question preservation remain enabled and unchanged.
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -95,6 +108,49 @@ Seventeen scenarios run the same assertions in live capture and offline replay:
   and no host approval for ordinary tools. Physical Bash effects and unpredictable
   labels/free text remain live proof.
 
+The `workspace-protocol` batch adds nine cases:
+
+- `workspace-change` checks correlated workspace changes, canonical returned and
+  persisted directories, and delivery of a second turn in the same conversation.
+- `skill-silence` requires the skill's file-only reply token, the known harness
+  drop witness, and absence of the skill body marker from daemon logs.
+- `confirmed-permission-settings` checks initial bypass, correlated confirmation
+  of default mode without a child restart, and a real Read permission round trip.
+- `default-outside-read` exercises the default-mode acknowledgement before the
+  first user input and the shared outside-workspace Read drain. The live test
+  retains its version-specific finding and unpredictable file-opening witness.
+- `mcp-reconnect` requires both production MCP servers to become healthy, a
+  deliberately broken named server with an error, and a correlated reconnect
+  after repairing its command. Replay checks the daemon protocol; actual MCP
+  process startup and command repair remain live proof.
+- `permission-context-absent` and `permission-context-outside` compare optional
+  context fields against native request bytes, including absent versus null,
+  reconnect the phone and require the identical modal, then deny it and correlate
+  the native denial result. The actual target remains absent in live runs.
+- `native-suggestions` requires source-native suggestions, a nonempty owned set
+  with a positive revision, and a higher-revision explicit-null clear on the next
+  user message. Continuous reads preserve ordinary no-suggestion windows. The
+  final typed user input must reach Claude stdin before sealing. The native
+  wrapper refuses non-stream invocations before producer admission, matching the
+  original live source-isolation rig, so fallback attempts cannot produce output.
+
+- `hook-banner` retains the five-second no-read refusal window, exact next-send
+  ACK barrier, subsequent text/idle milestones and all six durable banner joins.
+  Native source order must place the refused result before the liveness input.
+  Installed user settings, hook script bytes and modes are exact inputs. Actual
+  hook execution and original conversation creation remain live proof.
+
+Subagent text retains its live main/child identity and sequence assertions. Its
+first-client-delta checkpoint lets the production coalescer flush a main delta
+before receiving the remaining text during replay.
+
+These profiles retain the working directory as an exact input. The skill's full
+`SKILL.md` and native non-stream rejection policy and enable setting are captured
+and compared. Permission-context and native-suggestion checks observe selected
+native source objects through a bounded loopback channel in memory; this does
+not replace the daemon's parsing or client delivery. Old profiles keep their
+previous input inventories and fixtures.
+
 `make e2e` includes these cases in the ordinary offline integration selection.
 `make e2e-recorded-claude` runs just the recorded suite. Missing fixtures fail; nothing
 falls back to Claude. Replay removes provider credentials and uses disposable
@@ -152,8 +208,18 @@ invalid provenance and loss all fail. Diagnostics contain positions and counts,
 not application payloads. Original timing is not replayed.
 
 Verification separately reports fresh live capture, committed replay, fresh
-replay and strict outgoing request comparison. Comparison binds observed control
-IDs by producer direction and ordinal; it retains complete ordered requests.
+replay and outgoing request comparison under each explicit manifest policy.
+`strict_ordered` binds observed control IDs by producer direction and ordinal and
+retains complete ordered requests. Only `native-suggestions` declares
+`native_coding_prefix`: initialize, one to six exact source-declared coding
+prompts each immediately followed by one context query, then the exact clear
+input. The policy validates both entire traces independently and compares full
+initialize, user and context-query templates, including unknown fields. Only
+unique nonempty top-level control IDs and the checked prompt text slot vary;
+extra, missing, reordered or malformed requests fail. Reports name this policy
+and both coding iteration counts. It does not claim identical request counts.
+Replay itself still matches every stored input exactly, and the native source
+suggestion and client set/clear assertions remain required.
 Different provider wording and accounting do not themselves fail this comparison.
 Changed user choices, commands, recovery steps and request payloads do. Every
 stage must execute every selected named leaf with no failures or skips; default
@@ -192,9 +258,11 @@ The compatibility comparator does not scrub provider prose or loosen request
 comparison for these cases. Dismissal and terminal idle may arrive in either order;
 both are required after the matching continuation.
 
-Next candidates are ordinary queued placement, further model-control messages and thread
-folding. Each must preserve its
-original assertions and account for all external inputs before promotion.
+The reviewed backlog includes ordinary queued placement, further model-control
+messages and thread folding. `reviewed_migration_backlog` keeps candidates,
+checkpoint work and harness work visible even when no eligibility review remains.
+Classification does not count unsupported scenarios as migrated. Each must
+preserve its original assertions and account for all external inputs before promotion.
 Crash/restart, session files, real tool effects, signal handling, transport
 recovery, provider compatibility and measured timing retain explicit live or
 other dedicated deterministic integration proof. They cannot be represented by
@@ -231,7 +299,7 @@ python3 scripts/daemon-recordings.py batch --batch all --agents-repo /path/to/py
 ```
 
 `batch` audits the manifest, performs fresh capture, committed replay, fresh
-replay and strict request comparison, then runs `make check-common` **once for
+replay and declared-policy request comparison, then runs `make check-common` **once for
 the entire selected group**, its mapped live test roots once, the complete
 201-cut restoration proof once, and citation/documentation guards once. Live
 roots and restoration cuts are counted from Go JSON events: exit zero, skipped
@@ -258,7 +326,7 @@ conservative source evidence, not executed acceptance or automatic eligibility.
 Diagnostic probe environment gates are names only, never values.
 
 Reviewed manifest dispositions distinguish shared replay assertions, candidates,
-checkpoint work and live-only proof. Everything else remains explicitly
+checkpoint work, additional harness work, controls and live-only proof. Everything else remains explicitly
 unreviewed. Counts of recorded scenarios, shared live entrypoints, static test
 declarations and remaining eligibility reviews are separate; the total eligible
 migration count stays unknown until reviewed. No live requirement is retired.
@@ -323,8 +391,8 @@ The live send-now test still supplies a fresh run nonce. Recorded requests use a
 fixed run suffix so their complete stdin contracts remain comparable; the shell
 command, marker and all queue/order assertions are unchanged. The ordinary-queue
 live test uses the extracted classifier with its original assertions intact.
-Ordinary queue admission does not itself write Claude stdin, so its separate
-client-action checkpoint requirement remains unresolved and it is not migrated.
+Ordinary queue admission does not itself write Claude stdin. Its separate
+client-action checkpoint profile below records the actual client observation.
 
 ### Three-scenario protocol batch
 
@@ -386,3 +454,92 @@ A fixed replay token establishes deterministic protocol/data assertions only;
 it does not replace the original live random-token non-guessability claim.
 No dynamic session-ID rebinding, multi-process playback, queue checkpoint support,
 production changes or live-test retirement are introduced by this batch.
+
+
+### Client observation checkpoint batch
+
+`--batch client-checkpoints` groups ordinary queue placement, running and initial
+thinking interrupts, and subagent text. These four profiles alone use version 2
+tapes, with exactly one typed `client_checkpoint` in addition to native stdin and
+stdout. Legacy profiles remain version 1. No checkpoint is written to Claude
+stdin or allowed to rebind native identifiers. The strict comparison includes
+the complete action object in its ordered request sequence.
+
+The driver publishes only after checking the owned queue admission, requested
+interrupt phase, or first owned nonempty main text delta with a valid initial
+sequence/turn identity. Replay holds its output tail at that action until the
+same real daemon/client observation occurs. Capture polls actions without
+waiting or suppressing native stdout. Native source audits require queue
+admission between Bash use and matching result, interrupt input between phase
+observation and the cancelled result, or nonempty native main text on both
+sides of the client main-delta observation. Early/late checkpoints fail capture;
+a timestamp, sleep, retrospective marker or provider stdout alone cannot replace
+the client observation.
+
+Each run uses a new private action directory. Closed canonical files are
+published exclusively and acknowledged only after capture append or successful
+replay matching and output delivery. Before save or successful receipt, the
+helper requires complete input consumption and exactly one accepted action,
+atomically revokes the publisher's directory pathname and audits the frozen
+exact ready/ack inventory. Missing, extra, partial or changed action evidence
+fails. The daemon pipe helper allows thirty minutes, preserving all original
+cumulative phase budgets. The selected serial recording and live cohorts allow
+180 minutes overall; individual driver phase deadlines remain unchanged.
+
+Physical Bash execution, measured queue duration, actual provider interruption
+and latency remain live obligations. Every original live root stays enabled
+with its original trigger, budget and assertions; live callbacks are omitted.
+Subagent replay preserves the requirement for at least two main lane deltas,
+nonempty child text and distinct stable main/child turn identities.
+
+
+### Direct pool control batch
+
+`--batch pool-controls` covers model changes, stored bypass revocation,
+re-escalation and the spawn posture gate. These profiles declare `pool_stdio`
+and run the complete original live test bodies in a separately compiled test
+binary. Their pool, concrete runner, raw native control/init taps, response
+counts, operator provenance, model/menu resolution, unchanged supervised PID and
+spawn-count assertions all remain in place. Only the executable/isolated HOME
+setup acquires an optional recording adapter. Normal live runs use the original
+credential setup. No test is removed or retagged.
+
+The single fresh provider child is captured behind the original runner's pipes.
+Capture refuses an external `CLAUDE_CONFIG_DIR` and the closed argv profile
+rejects new or unknown flags until their input contracts are reviewed.
+Replay uses no provider credentials/configuration and never starts Claude.
+The profile refuses resume, continuation or a second child. Every supplied
+settings, system-prompt or MCP file is included with its complete content and
+mode; settings are mandatory. Complete argv and cwd remain compared. The
+manifest's daemon seed/extra-argument fields stay unused and false/empty for
+pool profiles: their original test bodies compose the actual spawn configuration,
+which is recorded and checked at the lower pipe boundary.
+
+A typed identity binding permits only the exact `--session-id` argument and
+matching top-level native `session_id` to use the fresh pool session identity.
+System-init cwd metadata binds only to the declared, checked actual working
+directory. Nested identities, user/tool text and all other fields stay literal.
+File argument paths are explicit file handles with independently compared
+contents/modes, never recursive path scrubbing. Unexpected private paths fail
+capture. The helper checks the original runner's actual cwd and HOME and inherits
+them when starting native Claude; it cannot repair an incorrect environment.
+
+The original root must run exactly once and pass, with no skipped/failing event.
+Before runner cleanup, its recording must seal with complete input consumption;
+source failures cannot publish successful candidates. Capture provenance names
+the compiled original-test binary's checksum and pinned clean source revision.
+Error-only version diagnostics use the same capture's provider version. Private
+original-root JSON events are retained alongside each stage's reports. The four
+serial pool roots receive adequate whole-run limits; bounded native pipe helpers
+allow twenty minutes per root. Real provider application of the controls remains
+an explicit live obligation.
+
+### Combined migration batch
+
+`--batch remaining-protocol` groups the nine workspace cases, four client
+checkpoints, four pool controls and five stronger question witness profiles.
+The automation checks all 22 fresh captures, saved and fresh replay, exact
+request contracts, original mapped live roots, the full common regression,
+201 restoration cuts and documentation guards once per stable source revision.
+Fresh candidates require independent privacy, provenance and boundary review
+before fixture promotion. A failed run remains separate evidence.

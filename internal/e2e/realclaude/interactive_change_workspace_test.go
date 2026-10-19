@@ -69,6 +69,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -170,58 +171,13 @@ func TestInteractiveChangeWorkspace(t *testing.T) {
 	// about the daemon/child never coming up and implies nothing about the verb;
 	// drainForCompletedTurn's milestone-specific fatals already say so, and its
 	// standing unrecognized_message / rate_limited alarms are inherited on purpose.
-	sealSendMessage(t, phone, initSend, 2, changeWSConvID, "m-1",
-		fmt.Sprintf("Reply with a single short word. run=%d turn=1", nonce))
-	drainForCompletedTurn(t, phone, initRecv, changeWSConvID, perTurnReplyBudget)
-
-	// The verb. A red on this drain means no correlated conversation_updated
-	// arrived against a quiescent wire — check the REJECT case first: a rejected
-	// path replies with an `error` envelope, which drainForReply skips, so a
-	// rejection is invisible here and looks exactly like an unwired route.
-	sealEnvelope(t, phone, initSend, protocol.Envelope{
-		ID:   3,
-		Type: protocol.TypeChangeWorkspace,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.ChangeWorkspacePayload{
-			ConversationID: changeWSConvID,
-			Cwd:            requested,
-		}),
-	})
-	changed := drainForReply(t, phone, initRecv, protocol.TypeConversationUpdated, 3, metaVerbReplyBudget)
-
-	// The reply carries the $HOME-confined realpath, not the raw requested path.
-	// drainForReply already correlated in_reply_to. A red here (or on the on-disk
-	// read below) means the confine/store contract changed: if the fake tier's
-	// TestRelayV2_ChangeWorkspace is also red the fault is the handler, if only
-	// this one is red the fault is in resolveWorkspaceDir's $HOME resolution under
-	// the tempdir HOME.
-	assertConversationUpdated(t, "change_workspace", changed, changeWSConvID, func(p protocol.ConversationUpdatedPayload) {
-		if p.Cwd == requested {
-			t.Errorf("change_workspace reply Cwd = %q — the RAW requested path, not the resolved realpath", p.Cwd)
-		}
-		if p.Cwd != wantCwd {
-			t.Errorf("change_workspace reply Cwd = %q, want the $HOME-confined realpath %q", p.Cwd, wantCwd)
-		}
-	})
-
-	// The change is persisted. The handler eager-Saves BEFORE replying, so a read
-	// straight after the reply is correct — a poll loop here would hide a
-	// regression in exactly that ordering.
-	if got := readConversationCwdOnDisk(t, home, changeWSConvID); got != wantCwd {
-		t.Errorf("on-disk cwd for %q = %q, want %q", changeWSConvID, got, wantCwd)
-	}
-
-	// Turn 2 — the liveness assertion this file exists for. drainForAssistantReply's
-	// built-in fatal blames the #854 fresh-daemon deadlock, which is the wrong
-	// explanation here; this log line is the right one, and it lands directly above
-	// that fatal in the output.
-	t.Logf("turn 1 was green and the change_workspace round-trip landed: a failure on turn 2 means the VERB disturbed "+
-		"the live supervised session (most likely a newly-added reader of the stored conv.Cwd on the live path), NOT the "+
-		"fresh-daemon deadlock the next fatal names. The child still runs at the conversation's ORIGINAL cwd %q — this "+
-		"turn is liveness, never cwd adoption.", workdir)
-	sealSendMessage(t, phone, initSend, 4, changeWSConvID, "m-2",
-		fmt.Sprintf("Reply with a single short word. run=%d turn=2", nonce))
-	drainForAssistantReply(t, phone, initRecv, changeWSConvID, 2, perTurnReplyBudget)
+	sequence := uint64(1)
+	w := scenario.Wire{Send: func(kind string, payload any) uint64 {
+		sequence++
+		sealEnvelope(t, phone, initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+		return sequence
+	}, Next: scenario.Receive(t, phone, initRecv)}
+	scenario.WorkspaceChange(t, w, scenario.WorkspaceConfig{Home: home, ConversationID: changeWSConvID, Requested: requested, Resolved: wantCwd, FirstPrompt: fmt.Sprintf("Reply with a single short word. run=%d turn=1", nonce), SecondPrompt: fmt.Sprintf("Reply with a single short word. run=%d turn=2", nonce), TurnBudget: perTurnReplyBudget, VerbBudget: metaVerbReplyBudget})
 }
 
 // readConversationCwdOnDisk returns the cwd recorded for convID in the "test"

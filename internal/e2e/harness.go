@@ -559,11 +559,15 @@ func premarkWorkspaceSeeded(t *testing.T, home string) {
 // starts; boundSessionID MUST equal the bootstrap session's pool id, which is
 // now pinned deterministically to the daemon's --session-id (#839), seeded via
 // seedBootstrapRegistry — i.e. the caller's initialUUID.
-func seedBoundConversation(t *testing.T, home, convID, boundSessionID string) {
+func seedBoundConversation(t *testing.T, home, convID, boundSessionID string, workspace ...string) {
+	cwd := home
+	if len(workspace) > 0 {
+		cwd = workspace[0]
+	}
 	t.Helper()
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
 	convJSON := []byte(`{"conversations":[{"id":"` + convID +
-		`","cwd":"` + home +
+		`","cwd":"` + cwd +
 		`","current_session_id":"` + boundSessionID +
 		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
 	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {

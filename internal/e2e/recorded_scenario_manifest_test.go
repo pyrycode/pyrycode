@@ -16,13 +16,15 @@ import (
 var recordedManifestJSON []byte
 
 type recordedScenarioDefinition struct {
-	InitialYOLO     bool              `json:"initial_yolo"`
-	Name            string            `json:"name"`
-	ClaudeArgs      []string          `json:"claude_args"`
-	StdioPermission bool              `json:"stdio_permission"`
-	LiveTests       []string          `json:"live_tests"`
-	RetainedLive    []string          `json:"retained_live"`
-	LiveContracts   map[string]string `json:"live_contracts"`
+	Boundary         string            `json:"boundary"`
+	ComparisonPolicy string            `json:"comparison_policy"`
+	InitialYOLO      bool              `json:"initial_yolo"`
+	Name             string            `json:"name"`
+	ClaudeArgs       []string          `json:"claude_args"`
+	StdioPermission  bool              `json:"stdio_permission"`
+	LiveTests        []string          `json:"live_tests"`
+	RetainedLive     []string          `json:"retained_live"`
+	LiveContracts    map[string]string `json:"live_contracts"`
 }
 
 type recordedManifest struct {
@@ -56,12 +58,31 @@ func recordedManifestFor(t *testing.T) recordedManifest {
 	}
 	names := map[string]bool{}
 	for _, s := range m.Scenarios {
-		if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(s.Name) || names[s.Name] || recordedScenarioDrivers[s.Name] == nil {
+		if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(s.Name) || names[s.Name] || (recordedScenarioDrivers[s.Name] == nil && recordedPoolProfiles[s.Name].Root == "") {
 			t.Fatal("scenario manifest has duplicate, invalid or unimplemented driver")
+		}
+		if s.ComparisonPolicy != "strict_ordered" && (s.ComparisonPolicy != "native_coding_prefix" || s.Name != "native-suggestions") {
+			t.Fatal("unsupported scenario comparison policy")
+		}
+		if s.Name == "native-suggestions" && s.ComparisonPolicy != "native_coding_prefix" {
+			t.Fatal("native suggestions must declare their bounded comparison policy")
+		}
+		switch s.Boundary {
+		case "daemon_stdio":
+			if recordedScenarioDrivers[s.Name] == nil {
+				t.Fatal("daemon boundary has no registered driver")
+			}
+		case "pool_stdio":
+			p, ok := recordedPoolProfiles[s.Name]
+			if !ok || recordedScenarioDrivers[s.Name] != nil || len(s.LiveTests) != 1 || s.LiveTests[0] != p.Root || len(s.ClaudeArgs) != 0 || s.InitialYOLO || s.StdioPermission {
+				t.Fatal("pool boundary does not own its exact original root/configuration")
+			}
+		default:
+			t.Fatal("unsupported recording boundary")
 		}
 		names[s.Name] = true
 	}
-	if len(names) != len(recordedScenarioDrivers) {
+	if len(names) != len(recordedScenarioDrivers)+len(recordedPoolProfiles) {
 		t.Fatal("registered driver is missing from scenario manifest")
 	}
 	return m

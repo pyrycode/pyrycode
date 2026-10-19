@@ -18,8 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/protocol"
-	"github.com/pyrycode/pyrycode/internal/turnevent"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 )
 
 // Only selected source fields cross this test-only socket. They stay in memory,
@@ -210,61 +209,18 @@ func TestInteractiveStreamStdioModalResolution(t *testing.T) {
 			if outside {
 				prompt = fmt.Sprintf("Use the Write tool to create a file containing exactly the word hello at %s. Then briefly report the outcome.", target)
 			}
-			sealSendMessage(t, h.phone, h.initSend, 2, convID, "m-2", prompt)
-			initial := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeModalShown, modalSurfaceBudget)
-			var shown protocol.ModalShownPayload
-			if json.Unmarshal(initial.Payload, &shown) != nil || shown.Class != "permission" || shown.ModalID == "" {
-				t.Fatal("expected a permission modal with a non-empty ID")
-			}
-			source := nextPermissionObservation(t, observations, "control_request")
-			matches := source.Request.ToolName == "Bash" && source.Request.Input.Command == command
-			if outside {
-				matches = source.Request.ToolName == "Write" && source.Request.Input.FilePath == target
-			}
-			if source.RequestID == "" || source.Request.ToolUseID == "" || !matches {
-				t.Fatal("source precondition failed: expected the correlated test-owned request")
-			}
-			if outside {
-				var reasonText string
-				var reasonType string
-				if json.Unmarshal(source.Request.ReasonType, &reasonType) != nil || reasonType != "workingDir" || json.Unmarshal(source.Request.Reason, &reasonText) != nil || reasonText == "" {
-					t.Fatal("source precondition failed: outside-directory ask did not supply workingDir and reason; not a forwarding pass")
+			scenario.PermissionContext(t, sharedHarnessWire(t, h, 2), scenario.PermissionContextConfig{ConversationID: convID, Target: target, Prompt: prompt, Outside: outside, SurfaceBudget: modalSurfaceBudget, TurnBudget: perTurnReplyBudget, Reconnect: reconnect, RequireAbsent: func() { requirePermissionWitnessAbsent(t, target) }, Source: func(kind string) scenario.PermissionContextSource {
+				raw, err := json.Marshal(nextPermissionObservation(t, observations, kind))
+				if err != nil {
+					t.Fatal("native permission observation encoding failed")
 				}
-			} else if len(source.Request.ReasonType) != 0 || len(source.Request.Reason) != 0 {
-				t.Fatal("source precondition failed: ordinary ask no longer omits both reason fields")
-			}
-			requirePermissionContext(t, source, initial.Payload)
-			requirePermissionWitnessAbsent(t, target)
-			reconnect()
-			env := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeModalShown, modalSurfaceBudget)
-			var reconciled protocol.ModalShownPayload
-			if json.Unmarshal(env.Payload, &reconciled) != nil {
-				t.Fatal("reconnect modal decode failed")
-			}
-			if !reflect.DeepEqual(shown, reconciled) {
-				t.Fatal("reconnect modal differs from initial modal")
-			}
-			requirePermissionContext(t, source, env.Payload)
-			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-				ID: 3, Type: protocol.TypeModalAnswer, TS: time.Now().UTC(),
-				Payload: mustJSON(t, protocol.ModalAnswerPayload{ModalID: shown.ModalID,
-					OptionID: string(turnevent.PermissionOptionKindRejectOnce), AnswerToken: "permission-context-deny"}),
-			})
-			dismissed := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeModalDismissed, modalSurfaceBudget)
-			var dis protocol.ModalDismissedPayload
-			if json.Unmarshal(dismissed.Payload, &dis) != nil || dis.ModalID != shown.ModalID || dis.Source != "remote" || dis.Outcome != string(turnevent.PermissionOptionKindRejectOnce) {
-				t.Fatal("modal denial was not attributed to this phone answer")
-			}
-			denyModalsUntilIdle(t, h, convID, 4, 4, perTurnReplyBudget)
-			result := nextPermissionObservation(t, observations, "result")
-			correlated := false
-			for _, denial := range result.PermissionDenials {
-				correlated = correlated || denial.ToolUseID == source.Request.ToolUseID
-			}
-			if !correlated {
-				t.Fatal("Claude result did not confirm the correlated denial")
-			}
-			requirePermissionWitnessAbsent(t, target)
+				var source scenario.PermissionContextSource
+				if json.Unmarshal(raw, &source) != nil {
+					t.Fatal("native permission observation decoding failed")
+				}
+				return source
+			}})
+
 		})
 	}
 }
@@ -293,35 +249,15 @@ func requirePermissionWitnessAbsent(t *testing.T, path string) {
 }
 
 func requirePermissionContext(t *testing.T, source permissionObservation, raw json.RawMessage) {
-	t.Helper()
-	var reasonType string
-	if len(source.Request.ReasonType) != 0 && json.Unmarshal(source.Request.ReasonType, &reasonType) != nil {
-		t.Fatal("source reason type could not be decoded")
-	}
-	expected := protocol.ModalShownPayload{Reason: source.Request.Reason, ReasonType: reasonType,
-		BlockedPath: source.Request.BlockedPath, Description: source.Request.Description, DefaultToNo: source.Request.DefaultToNo}
-	encoded, err := json.Marshal(expected)
+	encoded, err := json.Marshal(source)
 	if err != nil {
-		t.Fatal("source context could not be encoded")
+		t.Fatal(err)
 	}
-	var actual, want map[string]json.RawMessage
-	if json.Unmarshal(raw, &actual) != nil || json.Unmarshal(encoded, &want) != nil {
-		t.Fatal("context JSON could not be decoded")
+	var selected scenario.PermissionContextSource
+	if json.Unmarshal(encoded, &selected) != nil {
+		t.Fatal("invalid selected permission source")
 	}
-	for _, key := range []string{"reason", "reason_type", "blocked_path", "description", "default_to_no"} {
-		gotValue, gotPresent := actual[key]
-		wantValue, wantPresent := want[key]
-		if gotPresent != wantPresent {
-			t.Fatalf("phone context presence differs from source for %s", key)
-		}
-		if !wantPresent {
-			continue
-		}
-		var gotJSON, wantJSON any
-		if json.Unmarshal(gotValue, &gotJSON) != nil || json.Unmarshal(wantValue, &wantJSON) != nil || !reflect.DeepEqual(gotJSON, wantJSON) {
-			t.Fatalf("phone context value differs from source for %s", key)
-		}
-	}
+	scenario.RequirePermissionContext(t, selected, raw)
 }
 
 // The observer re-encodes selected fields over its private socket. Omitting an

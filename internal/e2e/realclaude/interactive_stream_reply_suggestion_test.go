@@ -32,6 +32,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -229,48 +230,28 @@ func TestInteractiveStream_NativeReplySuggestionSetThenClear(t *testing.T) {
 	// Coding steps with an obvious next one: claude's suggestion prompt stays
 	// silent when the next step is not obvious, so open questions to the user
 	// (the first version of this test) drew no suggestion in six turns.
-	prompts := []string{
-		fmt.Sprintf("Write a Go function that reverses a string. Reply in chat only, do not create files. Just the code, briefly. run=%d", nonce),
-		"Now add a unit test for it. Just the code.",
-		"Now make it handle unicode correctly. Just the code.",
-		"Now add a benchmark for it. Just the code.",
-		"Now add a doc comment to the function. Just the code.",
-		"Now add an example test for it. Just the code.",
-	}
+	prompts := scenario.NativeSuggestionPrompts(strconv.FormatInt(nonce, 10))
 
-	w := &suggestWatch{}
-	var envID uint64 = 1
-	turns := 0
-	for ; turns < suggestTurnBudget && w.setRev == 0; turns++ {
-		envID++
-		w.sawDelta, w.idle = false, false
-		sealSendMessage(t, h.phone, h.initSend, envID, suggestConvID, fmt.Sprintf("m-%d", turns+1), prompts[turns])
-		if !w.pumpUntil(t, frames, perTurnReplyBudget, func() bool { return w.idle }) {
-			t.Fatalf("turn %d never reached turn_state{idle} for %q within %s (sawDelta=%v)",
-				turns+1, suggestConvID, perTurnReplyBudget, w.sawDelta)
+	next := func(deadline time.Time) protocol.Envelope {
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
+		select {
+		case f, ok := <-frames:
+			if !ok || f.err != nil {
+				t.Fatal("native suggestion phone reader failed")
+			}
+			return f.env
+		case <-timer.C:
+			return protocol.Envelope{}
 		}
-		w.pumpUntil(t, frames, suggestWindow, func() bool { return w.setRev != 0 })
-		source := readSuggestSource(t, evidence)
-		t.Logf("native source: streams=%d results=%d suggestion_events=%d nonempty_suggestions=%d suggestion_bytes=%d allowed_warning=%d",
-			source.Streams, source.Results, source.Events, source.Suggestions, source.Bytes, source.Warnings)
 	}
-	if w.setRev == 0 {
-		t.Fatalf("no non-empty reply_suggestion for %q after %d completed turns (each followed by a %s window)",
-			suggestConvID, turns, suggestWindow)
-	}
-	if source := readSuggestSource(t, evidence); source.Streams != 1 || source.Suggestions == 0 {
-		t.Fatal("wire set lacks a nonempty native suggestion from one persistent stream child")
-	}
-	t.Logf("suggestion set at revision %d after %d turn(s)", w.setRev, turns)
-
-	envID++
-	sealSendMessage(t, h.phone, h.initSend, envID, suggestConvID, "m-clear",
-		"Sounds good, thank you. Reply with a single short sentence.")
-	if !w.pumpUntil(t, frames, perTurnReplyBudget, func() bool { return w.clearRev != 0 }) {
-		t.Fatalf("no reply_suggestion with suggested_reply null and revision > %d for %q within %s after the "+
-			"accepted send_message", w.setRev, suggestConvID, perTurnReplyBudget)
-	}
-	t.Logf("suggestion cleared at revision %d (set was %d)", w.clearRev, w.setRev)
+	w := sharedHarnessWire(t, h, 2)
+	w.Next = next
+	scenario.NativeSuggestions(t, w, scenario.NativeSuggestionConfig{ConversationID: suggestConvID, Prompts: prompts, TurnBudget: perTurnReplyBudget, Window: suggestWindow, CheckNative: func() {
+		if source := readSuggestSource(t, evidence); source.Streams != 1 || source.Suggestions == 0 {
+			t.Fatal("wire suggestion lacks native source from one persistent stream child")
+		}
+	}})
 }
 
 // installSuggestCLI separates the native and fallback producers using the real
