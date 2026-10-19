@@ -11,9 +11,9 @@ Two scenarios share exactly the same driver in live capture and offline replay:
   followed by terminal idle in the correct conversation. Wording is unrestricted.
   This checks sequential delivery, not semantic recall or response chunk counts.
 - `permission-deny`: a real Write permission request surfaces to the client;
-  its explicit rejection dismisses that modal with remote attribution and the
-  conversation completes. Live capture also checks that the denied file does
-  not exist. Replay cannot prove that Claude obeys a denial or performs no IO.
+  its tool, target path and conversation are checked before explicit rejection
+  dismisses that modal with remote attribution and the conversation completes.
+  Live capture also checks that the denied file does not exist. Replay cannot prove that Claude obeys a denial or performs no IO.
 
 `make e2e` includes these cases in the ordinary offline integration selection.
 `make e2e-recorded-claude` runs just the pilot. Missing fixtures fail; nothing
@@ -40,7 +40,9 @@ copying them into `internal/e2e/testdata/claude-tapes/` and committing them.
 The wrapper records complete JSONL objects on both pipes before forwarding them.
 Every forwarded frame is recorded first, in order, with an 8 MiB / 10000-frame
 bound. The successful driver seals the captured prefix before teardown; later
-process activity is outside this pilot. Paths inside the disposable HOME bind
+process activity is outside this pilot. The helper drains all readable daemon
+stdin before sealing and rejects a pending partial line; the final nonblocking
+drain defines the captured prefix. Paths inside the disposable HOME bind
 to `${PILOT_HOME}`. The test daemon executable, its control socket and generated
 MCP configuration filename have their own explicit path bindings. Complete
 settings, appended system prompt and MCP configuration file contents are also

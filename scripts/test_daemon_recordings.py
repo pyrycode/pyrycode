@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -41,6 +42,20 @@ class RecordedEvidenceTest(unittest.TestCase):
             with self.subTest(outcomes=outcomes, code=code):
                 success, _ = self.execute(outcomes, code)
                 self.assertFalse(success)
+
+    def test_verify_uses_distinct_reports_for_baseline_named_fresh(self):
+        def launch(command, **kwargs):
+            name = 'TestClaudeTapeCompatibility' if '^TestClaudeTapeCompatibility$' in command else 'TestRecordedClaude'
+            return FakeRun([(name + '/' + scenario, 'pass') for scenario in RUNNER.SCENARIOS])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / 'baseline/fresh'
+            output = Path(temporary) / 'verify'
+            with patch.object(RUNNER.sys, 'argv', ['daemon-recordings.py', 'verify', '--directory', str(directory), '--output', str(output)]), patch.object(RUNNER.subprocess, 'Popen', side_effect=launch), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(0, RUNNER.main())
+            self.assertEqual({'capture.json', 'saved-replay.json', 'fresh-replay.json', 'request-contract.json'},
+                             {path.name for path in (output / 'reports').glob('*.json')})
+            self.assertTrue(json.loads((output / 'summary.json').read_text())['success'])
 
     def test_replay_drops_both_provider_credentials(self):
         with patch.dict(os.environ, {'CLAUDE_CODE_OAUTH_TOKEN': 'unit-oauth-sentinel',

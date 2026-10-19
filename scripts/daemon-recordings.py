@@ -26,7 +26,7 @@ def inventory():
             'pilot_scenarios': list(SCENARIOS), 'existing_tests': rows}
 
 
-def run(mode, directory, report_dir, compare=None):
+def run(mode, directory, report_dir, compare=None, label=None):
     env = os.environ.copy()
     env['PYRY_CLAUDE_TAPE_MODE'] = mode
     env['PYRY_CLAUDE_TAPE_DIR'] = str(directory.resolve())
@@ -73,7 +73,7 @@ def run(mode, directory, report_dir, compare=None):
               'seconds': round(time.monotonic() - started, 3), 'results': leaves, 'scenario_seconds': durations, 'exit_code': code}
     if report_dir:
         report_dir.mkdir(parents=True, exist_ok=True)
-        label = report['mode'] + '-' + directory.name
+        label = label or report['mode'] + '-' + directory.name
         # Reports are separate from fixtures and retain failures, too.
         with (report_dir / (label + '.json')).open('x') as handle:
             json.dump({'summary': report, 'events': events}, handle, indent=2)
@@ -101,14 +101,14 @@ def main():
     fresh = output / 'fresh'
     fresh.mkdir()
     reports = output / 'reports'
-    capture = run('capture', fresh, reports)
+    capture = run('capture', fresh, reports, label='capture')
     if args.command == 'capture':
         return 0 if capture else 1
     # Keep execution results distinct. A comparison failure never erases a
     # successful replay and cannot produce a successful compatibility receipt.
-    saved_replay = run('replay', args.directory, reports)
-    fresh_replay = run('replay', fresh, reports) if capture else False
-    comparison = run('replay', args.directory, reports, compare=fresh) if capture else False
+    saved_replay = run('replay', args.directory, reports, label='saved-replay')
+    fresh_replay = run('replay', fresh, reports, label='fresh-replay') if capture else False
+    comparison = run('replay', args.directory, reports, compare=fresh, label='request-contract') if capture else False
     summary = {'capture': capture, 'saved_replay': saved_replay, 'fresh_replay': fresh_replay,
                'request_contract': comparison, 'success': all((capture, saved_replay, fresh_replay, comparison))}
     with (output / 'summary.json').open('x') as handle:

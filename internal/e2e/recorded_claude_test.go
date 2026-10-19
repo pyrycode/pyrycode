@@ -207,7 +207,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 					t.Fatal("unexpected or repeated permission request")
 				}
 				var shown protocol.ModalShownPayload
-				if json.Unmarshal(env.Payload, &shown) != nil || shown.Class != "permission" || shown.ModalID == "" {
+				if json.Unmarshal(env.Payload, &shown) != nil || shown.Class != "permission" || shown.ModalID == "" || shown.ConversationID != tapeConversation || shown.Prompt != "Write" {
 					t.Fatal("invalid permission surface")
 				}
 				modalID = shown.ModalID

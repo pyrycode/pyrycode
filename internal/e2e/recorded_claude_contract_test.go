@@ -17,7 +17,7 @@ import (
 )
 
 func TestClaudeTapeProcessContract(t *testing.T) {
-	for _, variant := range []string{"complete", "changed-settings", "wrong-request", "incomplete", "extra-request"} {
+	for _, variant := range []string{"complete", "changed-settings", "wrong-request", "incomplete", "extra-request", "extra-at-seal", "partial-at-seal"} {
 		t.Run(variant, func(t *testing.T) {
 			home := t.TempDir()
 			c := tapeProcessConfig{Mode: "replay", Home: home, Daemon: filepath.Join(home, "pyry"), Socket: filepath.Join(home, "socket"), Scenario: "unit-process", Path: filepath.Join(home, "fixture.json"), Finish: filepath.Join(home, "finish"), Receipt: filepath.Join(home, "receipt"), Claim: filepath.Join(home, "claim")}
@@ -97,13 +97,20 @@ func TestClaudeTapeProcessContract(t *testing.T) {
 						if _, err = reader.ReadString('\n'); err != nil {
 							t.Fatal(err)
 						}
-						if variant == "extra-request" {
+						if variant == "partial-at-seal" {
+							if _, err = stdin.Write([]byte(`{"type":"user"`)); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if variant == "extra-request" || variant == "extra-at-seal" {
 							if _, err = stdin.Write([]byte(`{"type":"user","message":{"content":"extra"}}` + "\n")); err != nil {
 								t.Fatal(err)
 							}
-							// EOF witnesses the rejected extra input before the scenario seal.
-							if _, err = reader.ReadString('\n'); err == nil {
-								t.Fatal("extra request produced a reply")
+							if variant == "extra-request" {
+								// EOF witnesses rejection before the seal in this variant.
+								if _, err = reader.ReadString('\n'); err == nil {
+									t.Fatal("extra request produced a reply")
+								}
 							}
 						}
 					}
@@ -145,5 +152,27 @@ func TestTapeNormalizeRejectsTrailingJSON(t *testing.T) {
 		if _, err := tapeNormalize([]byte(raw), tapeProcessConfig{}, false); err == nil {
 			t.Fatal("normalizer discarded trailing JSONL bytes")
 		}
+	}
+}
+
+func TestTapePermissionTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool, path string
+		valid            bool
+	}{
+		{"expected", "Write", "${PILOT_HOME}/tape-denied.txt", true},
+		{"other-tool", "Bash", "${PILOT_HOME}/tape-denied.txt", false},
+		{"other-path", "Write", "${PILOT_HOME}/other.txt", false},
+		{"missing-path", "Write", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{"type": "control_request", "request": map[string]any{"subtype": "can_use_tool", "tool_name": tc.tool, "input": map[string]string{"file_path": tc.path}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := checkTapePermission(raw, tapeProcessConfig{Scenario: "permission-deny"}); (err == nil) != tc.valid {
+				t.Fatal("permission target validation disagrees with scenario")
+			}
+		})
 	}
 }

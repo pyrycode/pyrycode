@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -112,6 +114,80 @@ func tapeLines(ctx context.Context, r io.Reader) <-chan tapeLine {
 		}
 	}()
 	return ch
+}
+
+// tapeInput owns stdin reads so sealing cannot race a separate reader goroutine.
+// A drain's EAGAIN marks the captured prefix; later input is outside that prefix.
+type tapeInput struct {
+	fd      int
+	pending []byte
+}
+
+func newTapeInput(f *os.File) (*tapeInput, error) {
+	fd := int(f.Fd())
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		return nil, errors.New("cannot poll daemon stdin")
+	}
+	return &tapeInput{fd: fd}, nil
+}
+
+func (input *tapeInput) drain(accept func([]byte) error) error {
+	var buffer [4096]byte
+	for {
+		n, err := syscall.Read(input.fd, buffer[:])
+		if n > 0 {
+			input.pending = append(input.pending, buffer[:n]...)
+			for {
+				end := bytes.IndexByte(input.pending, '\n')
+				if end < 0 {
+					break
+				}
+				if end > claudetape.MaxBytes {
+					return errors.New("daemon stdin frame exceeded bound")
+				}
+				if err := accept(input.pending[:end]); err != nil {
+					return err
+				}
+				input.pending = input.pending[end+1:]
+			}
+			if len(input.pending) > claudetape.MaxBytes {
+				return errors.New("daemon stdin frame exceeded bound")
+			}
+		}
+		if err == syscall.EINTR {
+			continue
+		}
+		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+			return nil
+		}
+		if err != nil || n == 0 {
+			return errors.New("daemon stdin ended before scenario seal")
+		}
+	}
+}
+
+func checkTapePermission(raw []byte, c tapeProcessConfig) error {
+	if c.Scenario != "permission-deny" {
+		return nil
+	}
+	var frame struct {
+		Type    string `json:"type"`
+		Request struct {
+			Subtype  string `json:"subtype"`
+			ToolName string `json:"tool_name"`
+			Input    struct {
+				FilePath string `json:"file_path"`
+			} `json:"input"`
+		} `json:"request"`
+	}
+	if json.Unmarshal(raw, &frame) != nil {
+		return errors.New("invalid permission frame")
+	}
+	if frame.Type == "control_request" && frame.Request.Subtype == "can_use_tool" &&
+		(frame.Request.ToolName != "Write" || frame.Request.Input.FilePath != "${PILOT_HOME}/tape-denied.txt") {
+		return errors.New("permission scenario requested a different tool or target")
+	}
+	return nil
 }
 
 func tapeNormalize(raw []byte, c tapeProcessConfig, restore bool) ([]byte, error) {
@@ -224,7 +300,10 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	inputs := tapeLines(ctx, os.Stdin)
+	inputs, err := newTapeInput(os.Stdin)
+	if err != nil {
+		return 0, err
+	}
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	var player *claudetape.Player
@@ -283,6 +362,9 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 	bytes := 0
 	emit := func(lines []json.RawMessage) error {
 		for _, line := range lines {
+			if err := checkTapePermission(line, c); err != nil {
+				return err
+			}
 			data, e := tapeNormalize(line, c, true)
 			if e != nil {
 				return e
@@ -299,12 +381,52 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 			return frames, err
 		}
 	}
+	handleInput := func(raw []byte) error {
+		normalized, e := tapeNormalize(raw, c, false)
+		if e != nil {
+			return e
+		}
+		if player != nil {
+			out, e := player.Input(normalized)
+			if e != nil {
+				return e
+			}
+			frames++
+			if e = emit(out); e != nil {
+				return e
+			}
+		} else {
+			bytes += len(normalized)
+			if bytes > claudetape.MaxBytes || len(tape.Frames) >= claudetape.MaxFrames {
+				return errors.New("capture exceeded bound")
+			}
+			if e = claudetape.Safe(normalized); e != nil {
+				return fmt.Errorf("stdin frame %d: %w", frames, e)
+			}
+			tape.Frames = append(tape.Frames, claudetape.Frame{Direction: "stdin", Data: normalized})
+			frames++
+			if _, e = stdin.Write(append(raw, '\n')); e != nil {
+				return errors.New("claude stdin delivery failed")
+			}
+		}
+
+		return nil
+	}
 	for {
+		if err := inputs.drain(handleInput); err != nil {
+			return frames, err
+		}
 		select {
 		case <-ctx.Done():
 			return frames, errors.New("claude tape deadline exceeded")
 		case <-tick.C:
 			if _, err := os.Stat(c.Finish); err == nil {
+				if err := inputs.drain(handleInput); err != nil {
+					return frames, err
+				}
+				if len(inputs.pending) != 0 {
+					return frames, errors.New("unterminated daemon input at scenario seal")
+				}
 				if player != nil {
 					return frames, player.Complete()
 				}
@@ -313,43 +435,15 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 				}
 				return frames, nil
 			}
-		case line := <-inputs:
-			if line.err != nil || line.data == nil {
-				return frames, errors.New("daemon stdin ended before scenario seal")
-			}
-			normalized, e := tapeNormalize(line.data, c, false)
-			if e != nil {
-				return frames, e
-			}
-			if player != nil {
-				out, e := player.Input(normalized)
-				if e != nil {
-					return frames, e
-				}
-				frames++
-				if e = emit(out); e != nil {
-					return frames, e
-				}
-			} else {
-				bytes += len(normalized)
-				if bytes > claudetape.MaxBytes || len(tape.Frames) >= claudetape.MaxFrames {
-					return frames, errors.New("capture exceeded bound")
-				}
-				if e = claudetape.Safe(normalized); e != nil {
-					return frames, fmt.Errorf("stdin frame %d: %w", frames, e)
-				}
-				tape.Frames = append(tape.Frames, claudetape.Frame{Direction: "stdin", Data: normalized})
-				frames++
-				if _, e = stdin.Write(append(line.data, '\n')); e != nil {
-					return frames, errors.New("claude stdin delivery failed")
-				}
-			}
 		case line := <-outputs:
 			if line.err != nil || line.data == nil {
 				return frames, errors.New("claude stdout ended before scenario seal")
 			}
 			normalized, e := tapeNormalize(line.data, c, false)
 			if e != nil {
+				return frames, e
+			}
+			if e = checkTapePermission(normalized, c); e != nil {
 				return frames, e
 			}
 			bytes += len(normalized)
