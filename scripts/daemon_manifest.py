@@ -46,10 +46,12 @@ def load(path=PATH):
             'conversation-prompt-argv': 'TestInteractiveSystemPromptFile_LiveSpawnArgv',
         }
         cli_roots = {'cli-prompt-ascii': 'TestRealClaude_PromptFidelity', 'cli-prompt-unicode': 'TestRealClaude_PromptFidelity_Unicode', 'cli-doctor': 'TestRealClaude_DoctorPoisoningRegression', 'cli-bash-nonzero': 'TestRealClaude_BashTool_NonZeroExit', 'cli-max-turns': 'TestRealClaude_MaxTurnsHonored', 'cli-large-prompt': 'TestRealClaude_LargePromptNearContextWindow', 'cli-long-session': 'TestRealClaude_LongSessionJSONLIntegrity', 'cli-tool-loop': 'TestRealClaude_ToolLoopIntegrity', 'cli-role-po': 'TestRealClaude_PO_RoleLoop', 'cli-role-architect': 'TestRealClaude_Architect_RoleLoop', 'cli-role-developer': 'TestRealClaude_Developer_RoleLoop', 'cli-role-review': 'TestRealClaude_CodeReview_RoleLoop', 'cli-role-documentation': 'TestRealClaude_Documentation_RoleLoop'}
+        runner_roots = {'runner-applied-settings': 'TestRealClaudeAppliedSettingsBeforeFirstTurn', 'runner-compaction': 'TestRealClaude_CompactingEdges'}
+        recovery_roots = {'daemon-session-recovery':'TestInteractiveSessionErrorRecovery'}
         boundary = row['boundary']
-        if boundary not in ('daemon_stdio', 'pool_stdio', 'daemon_suite', 'cli_process') or (boundary == 'pool_stdio') != (row['name'] in pool_roots) or (boundary == 'daemon_suite') != (row['name'] in suite_roots) or (boundary == 'cli_process') != (row['name'] in cli_roots):
+        if boundary not in ('daemon_stdio', 'pool_stdio', 'daemon_suite', 'cli_process', 'runner_suite', 'recovery_suite') or (boundary == 'pool_stdio') != (row['name'] in pool_roots) or (boundary == 'daemon_suite') != (row['name'] in suite_roots) or (boundary == 'cli_process') != (row['name'] in cli_roots) or (boundary == 'runner_suite') != (row['name'] in runner_roots) or (boundary == 'recovery_suite') != (row['name'] in recovery_roots):
             raise ValueError('Unsupported recording boundary')
-        roots = pool_roots if boundary == 'pool_stdio' else cli_roots if boundary == 'cli_process' else suite_roots
+        roots = pool_roots if boundary == 'pool_stdio' else cli_roots if boundary == 'cli_process' else runner_roots if boundary == 'runner_suite' else recovery_roots if boundary == 'recovery_suite' else suite_roots
         if boundary != 'daemon_stdio' and (row['live_tests'] != [roots[row['name']]] or row['stdio_permission'] or row['initial_yolo'] or row['claude_args']):
             raise ValueError('Original-root recording must own exact configuration/root')
         policy = row['comparison_policy']

@@ -175,6 +175,8 @@ func runLiveAppliedSettingsArm(t *testing.T, claudeBin, home string, arm liveApp
 		}
 	}()
 
+	defer finishRunnerRecordingRole(t, arm.name)
+
 	if !inbandWaitForChild(inbandRunner{Runner: runner}) {
 		t.Fatalf("%s child did not become live within %s", arm.name, inbandSpawnWait)
 	}
@@ -233,7 +235,7 @@ func assertLiveAppliedSettingsMatch(t *testing.T, name string, got streamsup.App
 
 func TestRealClaudeAppliedSettingsBeforeFirstTurn(t *testing.T) {
 	claudeBin := resolveClaudeBin(t)
-	home := WithWorktreeAuthenticated(t)
+	home := runnerRecordingHome(t, false)
 
 	inherited, inheritedRaw, menu := runLiveAppliedSettingsArm(t, claudeBin, home, liveAppliedSettingsArm{
 		name:        "inherited",

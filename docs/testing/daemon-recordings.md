@@ -5,9 +5,9 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Forty-four scenarios run the same assertions in live capture and offline replay:
+Fifty-nine scenarios run the same assertions in live capture and offline replay:
 
-The manifest associates 37 original live roots with these recordings.
+The manifest associates 52 original live roots with these recordings.
 The legacy `question-answer` and four bypass-question recordings retain their
 original assertions and fixtures without owning current live roots. Five new
 witness profiles share the stronger proof introduced by PR #3622: a fresh
@@ -605,3 +605,63 @@ can launch an independent fallback-suggestion print process while the second
 conversation runs. The recorder rejects that unowned invocation. Supporting it
 requires capturing the print request and its causal connection to the first
 reply, including cancellation; it must not be suppressed for recording.
+
+
+### Direct runner query and parser profiles
+
+`--batch direct-runner` proposes the original two-arm applied-settings query and
+compacting-edge collector roots. The production runner/parser and independent
+raw `response.applied` tap remain inside the compiled original test binary.
+That binary is the runner checksum owner; these roots do not claim to use an
+otherwise unused daemon executable. Inherited and explicit settings arms have
+separate fixed session roles. The explicit effort still comes from the inherited
+arm's actual initialize menu, and explicit-null effort remains distinct from a
+missing field. Compaction keeps both original priming turns, the original compact
+request, event ordering, complete boundary fields and zero-gap assertions.
+
+Each role has closed argv, no input-file flags, and an empty controlled workdir
+whose relative path and mode are checked. Applied-settings retains its original
+empty `--setting-sources` value; provider-created HOME state between its two arms
+remains a current-provider obligation. A role seals before its original runner
+cancellation, and its wrapper waits boundedly through that cancellation. The
+original root and cleanup must pass before publication. Exclusive claims, full
+role inventories and immutable per-role artifact hashes reject additional,
+missing, failed, modified or late invocations. Replay has no Claude credentials
+and never launches a provider. Whole-role request comparisons preserve every
+control query and complete outgoing JSON field. Provider compaction behavior,
+settings defaults and menu accuracy remain covered by the original live roots.
+
+
+### Same-daemon error recovery
+
+`--batch session-recovery` proposes the original retained/dropped session-error
+root. Its deliberately failing executable still closes stdin, advertises
+readiness, writes its original failure marker and exits through the original
+external gate. Production retry/backoff and the dropped arm's original
+three-second give-up window remain unchanged in capture and replay. Only the
+final recovered Claude child is recorded, once per independent retained/dropped
+HOME. The original root still decrypts all queue/error frames, checks daemon and
+session identity, distinguishes held versus fresh delivery and reads its JSONL.
+
+A private parent builds the same bridge-enabled daemon tag as the original root;
+its actual source stamp/checksum and the compiled original-test binary identify
+the capture. The normal live root still builds its own bridge-enabled daemon and
+ignores the ordinary `PYRY_E2E_BIN`. Role selection uses the exact owned HOME,
+never retry count or launch order. The original failing script is not replaced
+by a tape or counted as a recorded Claude launch.
+
+After the root itself observes completion, correct delivery and an empty queue,
+a recording-only hook captures the actual native JSONL before the unchanged
+marker checks. Replay restores those exact bytes and mode at the production
+session path, preserving Unicode and escaping with only declared path bindings.
+Each JSONL object retains its actual session identity. This is a captured file
+witness; current Claude startup, interpretation and physical transcript creation
+remain obligations of the original live run. Settings, appended prompts and any
+supplied MCP file remain complete inputs to the strict native pipe recorder.
+
+Each role seals before original daemon cleanup. A final exact private inventory
+pins its endpoint, request tape, transcript, exclusive claim, receipt and seal
+across that cleanup. Candidate publication requires exactly one run/pass for the
+outer root and both subtests, no skipped/failed event, matching source checksums
+and successful post-cleanup audits. Unknown or duplicate children fail closed.
+`--batch runner-recovery` groups this root with the two direct-runner profiles.
