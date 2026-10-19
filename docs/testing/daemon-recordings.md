@@ -575,3 +575,33 @@ through cleanup to avoid causing a respawn. Activity after the sealed prefix is
 outside this recording proof. Replay runs the actual daemon without provider credentials or
 Claude; strict comparison checks each role independently. Current Claude startup,
 interpretation, physical effects and provider timing remain live obligations.
+
+
+### CLI process and transcript recordings
+
+`--batch cli-process` proposes thirteen original `pyry agent-run` roots covering
+ASCII/Unicode prompt fidelity, doctor contamination, nonzero Bash, turn limits,
+large prompts, long sessions, tool loops and five dispatcher role stand-ins.
+The original bodies and their transcript readers remain the acceptance tests.
+A private HOME and a native CLI executable wrapper are the recording seams.
+The actual daemon binary and original test binary have independent source and
+checksum provenance. No fixture is accepted merely because its helper completed.
+
+The CLI boundary checks the full native argv, every supplied input file and
+mode, and the complete workspace file inventory. Only `.pyry-test-recording`
+contains excluded test bookkeeping. It records the one actual JSON request and
+its EOF, both native output streams, the process exit status, and the actual
+session JSONL bytes. Path bindings preserve Unicode and literal JSON escaping.
+Replay waits for EOF, rejects changed requests/files and duplicate invocations,
+never starts Claude, and installs the captured session file before returning
+its captured exit status. The original tests then use the real transcript reader.
+Publication requires exactly one successful original root, no skips/failures,
+and a final private artifact/receipt/hash audit after original cleanup. Fresh
+comparison checks all outgoing inputs; current provider interpretation, real
+execution, context limits, and role behavior remain live obligations.
+
+The active-switch daemon prototype remains pending: the first completed turn
+can launch an independent fallback-suggestion print process while the second
+conversation runs. The recorder rejects that unowned invocation. Supporting it
+requires capturing the print request and its causal connection to the first
+reply, including cancellation; it must not be suppressed for recording.

@@ -846,6 +846,227 @@
       "retained_live": [
         "Original real Claude startup, fresh conversation interpretation and provider timing remain live. Strict role tapes share daemon routing and original client/argv assertions."
       ]
+    },
+    {
+      "name": "cli-prompt-ascii",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_PromptFidelity"
+      ],
+      "live_contracts": {
+        "TestRealClaude_PromptFidelity": "c7edc2eefa3a3ea21e4c261bc93622439ae54d17abef32acfa6b04895a67a981"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-prompt-unicode",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_PromptFidelity_Unicode"
+      ],
+      "live_contracts": {
+        "TestRealClaude_PromptFidelity_Unicode": "ba7e3606645fb1c24ba379dec77cf4a19aa8b362ba88aa19c0734923b0fa8f4d"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-doctor",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_DoctorPoisoningRegression"
+      ],
+      "live_contracts": {
+        "TestRealClaude_DoctorPoisoningRegression": "5057c08abe02616fdbc30028a946bbe5959e0f97eb17f59a8ee03a37accbe6ad"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-bash-nonzero",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_BashTool_NonZeroExit"
+      ],
+      "live_contracts": {
+        "TestRealClaude_BashTool_NonZeroExit": "c6dd3254b6a5cb83340f54543c230e4c59c0555a1f5a8991b891b0425d65ada3"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-max-turns",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_MaxTurnsHonored"
+      ],
+      "live_contracts": {
+        "TestRealClaude_MaxTurnsHonored": "1ec1e6056a3f5241ef6b68d54acc8db09b18389f1c460c3b4ab1f755b7ddfbef"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-large-prompt",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_LargePromptNearContextWindow"
+      ],
+      "live_contracts": {
+        "TestRealClaude_LargePromptNearContextWindow": "a00db371c6f546ed7d9a8e5be1d6e136e74f8b69a6993f5b5c976fec3f05853c"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-long-session",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_LongSessionJSONLIntegrity"
+      ],
+      "live_contracts": {
+        "TestRealClaude_LongSessionJSONLIntegrity": "9cec0eec9f48dcebe022edb892791afbbbabec4ebb0083dd610ea6a42572c39c"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-tool-loop",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_ToolLoopIntegrity"
+      ],
+      "live_contracts": {
+        "TestRealClaude_ToolLoopIntegrity": "ff1f2e9c08a1a8e3d14752cf2be4faa1f0520d72f2ce9bc304cd0450afed63b0"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-role-po",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_PO_RoleLoop"
+      ],
+      "live_contracts": {
+        "TestRealClaude_PO_RoleLoop": "d32d93c9015b30f1e1b007d403dd17fdb82f6ca36f0cd2f64d9bea9576201051"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-role-architect",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_Architect_RoleLoop"
+      ],
+      "live_contracts": {
+        "TestRealClaude_Architect_RoleLoop": "d0459f16d8a7f7fa8901c0eee8e7bda1de6e63bc1d3e3f58791a06a200a0b048"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-role-developer",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_Developer_RoleLoop"
+      ],
+      "live_contracts": {
+        "TestRealClaude_Developer_RoleLoop": "bf11f9c4f54adfa7e32fa74423fd08bdfe26363c71a392a05c8181c2739a660b"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-role-review",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_CodeReview_RoleLoop"
+      ],
+      "live_contracts": {
+        "TestRealClaude_CodeReview_RoleLoop": "58e8fc71ea6214bc0470f30e020449636c09f0021bb066549a3a46a92b87b303"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
+    },
+    {
+      "name": "cli-role-documentation",
+      "boundary": "cli_process",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaude_Documentation_RoleLoop"
+      ],
+      "live_contracts": {
+        "TestRealClaude_Documentation_RoleLoop": "896eee45d0b4dadc49d1a6c79a109c66497b3eae3d1670dc94188d9b13c24343"
+      },
+      "retained_live": [
+        "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
+      ]
     }
   ],
   "batches": {
@@ -938,6 +1159,41 @@
       "conversation-active-switch",
       "conversation-turn-state",
       "conversation-prompt-argv"
+    ],
+    "cli-process": [
+      "cli-prompt-ascii",
+      "cli-prompt-unicode",
+      "cli-doctor",
+      "cli-bash-nonzero",
+      "cli-max-turns",
+      "cli-large-prompt",
+      "cli-long-session",
+      "cli-tool-loop",
+      "cli-role-po",
+      "cli-role-architect",
+      "cli-role-developer",
+      "cli-role-review",
+      "cli-role-documentation"
+    ],
+    "conversation-cli": [
+      "conversation-default",
+      "conversation-workspace",
+      "conversation-active-switch",
+      "conversation-turn-state",
+      "conversation-prompt-argv",
+      "cli-prompt-ascii",
+      "cli-prompt-unicode",
+      "cli-doctor",
+      "cli-bash-nonzero",
+      "cli-max-turns",
+      "cli-large-prompt",
+      "cli-long-session",
+      "cli-tool-loop",
+      "cli-role-po",
+      "cli-role-architect",
+      "cli-role-developer",
+      "cli-role-review",
+      "cli-role-documentation"
     ]
   },
   "reviews": {
@@ -1071,11 +1327,6 @@
       "reason": "Actual Claude --allowed-tools enforcement and absent file plus visible refusal are the primary proof. A fake executable would merely obey the fixture; deterministic adapter policy assertions may be tested separately.",
       "contract_sha256": "f88e2f08b7b23f1f347607028446f73e97e09ee49144f4b7d0939d6c1e547def"
     },
-    "TestRealClaude_Architect_RoleLoop": {
-      "disposition": "needs_harness",
-      "reason": "Architect role smoke uses agent-run exit/trailer and actual session JSONL tail. Needs a separate CLI/PTY-or-stream process/exit/transcript fixture boundary, not this daemon tape harness.",
-      "contract_sha256": "d0459f16d8a7f7fa8901c0eee8e7bda1de6e63bc1d3e3f58791a06a200a0b048"
-    },
     "TestRealClaude_AskUserQuestion_CapturesTheCall": {
       "disposition": "live_only",
       "reason": "Fresh AskUserQuestion capture verifies current Claude tool offering and a real MCP approval call reaching the test socket. Client question delivery already has replay ownership; current provider capability/source discovery stays live.",
@@ -1096,11 +1347,6 @@
       "reason": "Late subagent reply completion after foreground result and physical hook release can yield deterministic parser/delivery proof, but needs explicit external release and direct-runner checkpoint support. Existing synthetic replay fixture is partial, not fresh physical proof.",
       "contract_sha256": "0dd7fb2b786308ae5e453667ce242d24dd2c8896ce089e264b22ed3c659f34a5"
     },
-    "TestRealClaude_BashTool_NonZeroExit": {
-      "disposition": "needs_harness",
-      "reason": "Agent-run nonzero Bash result and subsequent assistant/trailer are valuable offline parser/CLI contracts, but current test reads Claude-written session JSONL and process exit. Add an explicit CLI/transcript boundary; real command execution remains live.",
-      "contract_sha256": "c6dd3254b6a5cb83340f54543c230e4c59c0555a1f5a8991b891b0425d65ada3"
-    },
     "TestRealClaude_BypassApprovalArgv_Probe": {
       "disposition": "live_only",
       "reason": "Bypass/approval argv probe captures installed Claude/MCP launch behavior across alternate argument arms and diagnoses viability. Replaying the observed answer is not a fresh answer to those provider capability questions.",
@@ -1116,11 +1362,6 @@
       "reason": "Actual provider cache creation/read input-token warming across two fresh runs is the claim. Recorded usage counters cannot establish a cache hit.",
       "contract_sha256": "64bd3dd4975921ff050ed8c2b8d3e40dbebac06747607642d1624089d87d1e12"
     },
-    "TestRealClaude_CodeReview_RoleLoop": {
-      "disposition": "needs_harness",
-      "reason": "Code-review role smoke asserts agent-run exit/trailer/session-file tail, requiring the separate CLI/PTY and transcript input/output harness before replay can share it.",
-      "contract_sha256": "58e8fc71ea6214bc0470f30e020449636c09f0021bb066549a3a46a92b87b303"
-    },
     "TestRealClaude_CompactingEdges": {
       "disposition": "needs_harness",
       "reason": "Compacting rise/fall, full boundary fields, event order and zero parser gaps are deterministic candidates in a direct parser/runner harness. Add that recording profile rather than changing the original event-collector assertions into weaker client frames; compaction effectiveness stays live.",
@@ -1135,21 +1376,6 @@
       "disposition": "live_only",
       "reason": "Fresh get_context_usage capture records versioned provider response vocabulary/shape and promotability. Raw source collection is distinct from deterministic parser/query tests; do not count an old capture as fresh compatibility.",
       "contract_sha256": "d72048f9303d491b7c8bf4c81a401adfea9cd58744c0d24b6c993d74a59b0c09"
-    },
-    "TestRealClaude_Developer_RoleLoop": {
-      "disposition": "needs_harness",
-      "reason": "Developer role smoke is an agent-run process/trailer/session JSONL contract; add CLI/transcript fixture support and retain provider execution smoke.",
-      "contract_sha256": "bf11f9c4f54adfa7e32fa74423fd08bdfe26363c71a392a05c8181c2739a660b"
-    },
-    "TestRealClaude_DoctorPoisoningRegression": {
-      "disposition": "needs_harness",
-      "reason": "Doctor-poisoning regression reads the first actual user JSONL and requires assistant presence. Add CLI startup/exit/stderr/session-file capture if sharing deterministic startup handling; current Claude settings acceptance remains live.",
-      "contract_sha256": "5057c08abe02616fdbc30028a946bbe5959e0f97eb17f59a8ee03a37accbe6ad"
-    },
-    "TestRealClaude_Documentation_RoleLoop": {
-      "disposition": "needs_harness",
-      "reason": "Documentation role smoke needs the agent-run process/trailer/session-file harness; no daemon client scenario currently reaches its observation boundary.",
-      "contract_sha256": "896eee45d0b4dadc49d1a6c79a109c66497b3eae3d1670dc94188d9b13c24343"
     },
     "TestRealClaude_DroppedLineCapture": {
       "disposition": "live_only",
@@ -1175,16 +1401,6 @@
       "disposition": "live_only",
       "reason": "Initialize send-point arms measure current installed Claude control response behavior and publish distinct source fixtures. This capture freshness/argv compatibility purpose remains live despite replayable decoders.",
       "contract_sha256": "3f5350447fba330a7042e786550bf30ff4841969ce52647bde22566013aa9671"
-    },
-    "TestRealClaude_LargePromptNearContextWindow": {
-      "disposition": "needs_harness",
-      "reason": "Large prompt success-or-controlled-error and process exit/trailer are reproducible CLI adapter contracts. Requires the CLI stdout/stderr/exit recorder, while actual context-window limits remain provider proof.",
-      "contract_sha256": "a00db371c6f546ed7d9a8e5be1d6e136e74f8b69a6993f5b5c976fec3f05853c"
-    },
-    "TestRealClaude_LongSessionJSONLIntegrity": {
-      "disposition": "needs_harness",
-      "reason": "At least ten actual JSONL assistant entries, turn counts and scanner integrity span agent-run and provider session files. A CLI/transcript profile can share parsing/integrity assertions; it cannot replace current Claude long-session production.",
-      "contract_sha256": "9cec0eec9f48dcebe022edb892791afbbbabec4ebb0083dd610ea6a42572c39c"
     },
     "TestRealClaude_MCPStatusCapture": {
       "disposition": "live_only",
@@ -1216,11 +1432,6 @@
       "reason": "Sends malformed stdin directly to the installed Claude executable and asserts its own timely nonzero exit and parse diagnostic. This tests upstream CLI grammar/error behavior, not daemon parsing of output.",
       "contract_sha256": "c6b6e79a7504a4ffe5eb0390f0f4e2a5e941fc972e0bc29c7254d80e24372daa"
     },
-    "TestRealClaude_MaxTurnsHonored": {
-      "disposition": "needs_harness",
-      "reason": "Agent-run max-turn exhaustion trailer, terminal reason, bounded count and exit are deterministic CLI contracts once stdout/stderr/EOF/exit/transcript support exists. Provider enforcement of the budget remains live.",
-      "contract_sha256": "1ec1e6056a3f5241ef6b68d54acc8db09b18389f1c460c3b4ab1f755b7ddfbef"
-    },
     "TestRealClaude_MidTurnUserCapture": {
       "disposition": "live_only",
       "reason": "Multi-arm mid-turn user source collector empirically compares real echo/result behavior and execution timing. Existing send-now replay already shares one causal daemon contract; fresh raw behavior acquisition remains live.",
@@ -1230,11 +1441,6 @@
       "disposition": "live_only",
       "reason": "Operator-system-lines collector invokes real hooks, command inventory changes and notification triggers and publishes source-shape evidence. Physical trigger nonvacuity/provider source acquisition stays live.",
       "contract_sha256": "f278c5802b12ecea4c71e85ac09d9cda1a1d44587fe21962148653b7eac3ead5"
-    },
-    "TestRealClaude_PO_RoleLoop": {
-      "disposition": "needs_harness",
-      "reason": "PO role smoke uses the same agent-run process/trailer/JSONL-tail contract; include it in the reusable CLI/transcript harness rather than declaring it permanently unsupported.",
-      "contract_sha256": "d32d93c9015b30f1e1b007d403dd17fdb82f6ca36f0cd2f64d9bea9576201051"
     },
     "TestRealClaude_ParentToolUseCapture": {
       "disposition": "live_only",
@@ -1250,16 +1456,6 @@
       "disposition": "live_only",
       "reason": "Direct real Claude must complete and exit cleanly after stdin EOF within 60s. A wrapper implementing its own EOF policy would not test the upstream lifecycle contract.",
       "contract_sha256": "dab87e814fca87dd0b9eef12368d4aab5498f909a541d857f7b1c7c79d099c5a"
-    },
-    "TestRealClaude_PromptFidelity": {
-      "disposition": "needs_harness",
-      "reason": "Prompt fidelity is asserted in actual Claude-written first-user session JSONL through agent-run. Requires an explicit CLI/transcript boundary to share byte preservation; physical producer fidelity stays live.",
-      "contract_sha256": "c7edc2eefa3a3ea21e4c261bc93622439ae54d17abef32acfa6b04895a67a981"
-    },
-    "TestRealClaude_PromptFidelity_Unicode": {
-      "disposition": "needs_harness",
-      "reason": "Unicode fidelity has the same CLI/session-file boundary as prompt fidelity and must retain exact Unicode bytes; no text normalization or broad path/prose rewriting.",
-      "contract_sha256": "ba7e3606645fb1c24ba379dec77cf4a19aa8b362ba88aa19c0734923b0fa8f4d"
     },
     "TestRealClaude_ResumeAbsentTranscript": {
       "disposition": "live_only",
@@ -1315,11 +1511,6 @@
       "disposition": "live_only",
       "reason": "Teardown rig measures real process/descendant/FIFO liveness after pyry cancellation under PTY or stream execution. It is not an ordinary stdout parser assertion.",
       "contract_sha256": "df00289167a685eb924f50a55ed297a5ee08047ade16244b4c3534f8fedc903d"
-    },
-    "TestRealClaude_ToolLoopIntegrity": {
-      "disposition": "needs_harness",
-      "reason": "Agent-run tool-loop IDs/results/final text, trailer stop reason and denial count can share a CLI/transcript driver. Preserve actual Bash and provider-generated session JSONL as live evidence.",
-      "contract_sha256": "ff1f2e9c08a1a8e3d14752cf2be4faa1f0520d72f2ce9bc304cd0450afed63b0"
     },
     "TestRealClaude_ToolProgressCapture": {
       "disposition": "live_only",

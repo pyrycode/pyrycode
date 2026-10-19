@@ -86,7 +86,7 @@ func WithWorktree(t *testing.T) string {
 // HOME without reading or copying the operator's onboarding configuration.
 func WithWorktreeAuthenticated(t *testing.T) string {
 	t.Helper()
-	dir := authenticatedHome(t)
+	dir := cliRecordingHome(t)
 	t.Setenv("HOME", dir)
 	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
 		t.Setenv("ANTHROPIC_API_KEY", apiKey)
@@ -249,7 +249,7 @@ func RunPyryAgentRun(t *testing.T, opts RunOpts) RunResult {
 		"--workdir="+opts.Workdir,
 		"--output-format=stream-json",
 	)
-	cmd.Env = append(os.Environ(), opts.ExtraEnv...)
+	cmd.Env = append(os.Environ(), cliRecordingRunEnvironment(t, opts, bin)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
