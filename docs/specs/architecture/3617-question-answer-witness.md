@@ -138,3 +138,12 @@ are allowed and dismissal and continuation may arrive in either order.
   SHOULD FIX: generated answer instructions must explicitly request the witness;
   all logged model/value/context bytes must remain quoted and capped. No new
   subprocesses, file paths, crypto, network listeners or goroutines are added.
+- 2026-10-19: focused live source `37ed1f63` failed (1 executed, 0 passed,
+  1 failed, 0 skipped): exact stdio provenance/context passed but the resumed
+  response omitted the witness. Make the witness meaningful answer data: a fresh
+  cache name tied to the selected policy, requested verbatim by the original
+  trigger and the free-text answer. This still introduces its value only after
+  surfacing, leaves prose unrestricted, and preserves the same exact proof.
+  Retain bounded, quoted tool-result diagnostics to distinguish child delivery
+  from interpretation if it fails again. Security review remains PASS: only
+  synthetic scenario text is logged under the existing cap; no new I/O is added.
