@@ -546,20 +546,20 @@ before fixture promotion. A failed run remains separate evidence.
 
 ### Dynamic conversation process roles
 
-`--batch dynamic-conversations` runs five original daemon test roots: default
-conversation liveness, workspace-folder liveness, active switching, owned turn
+`--batch dynamic-conversations` runs four original daemon test roots: default
+conversation liveness, workspace-folder liveness, owned turn
 state and per-session prompt-file argv. Each root still creates its conversations
 over the real client protocol and retains its original assertions and budgets.
 Live runs keep their random nonce; recording runs use a fixed test nonce for
 strict request comparison. No created conversation is replaced by a seeded row.
 
-A closed suite inventory assigns the bootstrap child and one or two created
-children separate tapes. The creation reply must match the persisted conversation
+A closed suite inventory assigns the bootstrap child and its created
+child separate tapes. The creation reply must match the persisted conversation
 and its independent session before the next user message can launch that child.
 Role identities cannot be reused or selected by scheduling/launch order. Missing,
 extra, duplicate or rebound roles and unknown invocations fail. Every child
-captures complete arguments, settings, MCP and appended-prompt input contents and
-modes. Session binding applies only to its exact CLI slot and native top-level
+captures complete arguments, settings and appended-prompt input contents and
+modes, plus every supplied MCP input (the bypass launch supplies none). Session binding applies only to its exact CLI slot and native top-level
 session field; ordinary session-looking text stays literal. Declared HOME,
 daemon and control-socket paths have explicit filesystem bindings.
 

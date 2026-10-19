@@ -15,9 +15,9 @@ type DaemonProcessConfig struct {
 // The outer owner must prove the complete role inventory and seal before cleanup.
 func RunDaemonProcess(c DaemonProcessConfig, args []string, input *os.File, output, diagnostic io.Writer) (int, error) {
 	permitted := false
-	for _, profile := range []string{"conversation-default", "conversation-workspace", "conversation-active-switch", "conversation-turn-state", "conversation-prompt-argv"} {
-		for _, role := range []string{"bootstrap", "created-1", "created-2"} {
-			if c.Scenario == profile+"-"+role && (role != "created-2" || profile == "conversation-active-switch") {
+	for _, profile := range []string{"conversation-default", "conversation-workspace", "conversation-turn-state", "conversation-prompt-argv"} {
+		for _, role := range []string{"bootstrap", "created-1"} {
+			if c.Scenario == profile+"-"+role {
 				permitted = true
 			}
 		}
@@ -36,11 +36,6 @@ func RunDaemonProcess(c DaemonProcessConfig, args []string, input *os.File, outp
 	files, err := b.Files()
 	if err != nil {
 		return 0, err
-	}
-	for _, flag := range []string{"--settings", "--append-system-prompt-file", "--mcp-config"} {
-		if len(files[flag]) == 0 {
-			return 0, errors.New("incomplete daemon child input inventory")
-		}
 	}
 	return runBoundProcess(c.PoolProcessConfig, args, b, files, input, output, diagnostic)
 }

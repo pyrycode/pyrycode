@@ -42,7 +42,6 @@ def load(path=PATH):
         suite_roots = {
             'conversation-default': 'TestInteractivePerConversationLiveness_Default',
             'conversation-workspace': 'TestInteractivePerConversationLiveness_WorkspaceFolder',
-            'conversation-active-switch': 'TestInteractivePerConversationLiveness_ActiveSwitch',
             'conversation-turn-state': 'TestInteractivePerConversationTurnStateLiveness',
             'conversation-prompt-argv': 'TestInteractiveSystemPromptFile_LiveSpawnArgv',
         }

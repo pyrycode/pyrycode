@@ -205,6 +205,22 @@ func runRecordedDaemonSuite(t *testing.T, name string) {
 	}
 	err = cmd.Wait()
 	if err != nil || scan.Err() != nil || ctx.Err() != nil || rejected || runs != 1 || passed != 1 {
+		if raw, readErr := os.ReadFile(filepath.Join(home, "recording-unexpected")); readErr == nil && len(raw) < 4096 && claudetape.Safe(raw) == nil {
+			t.Logf("daemon unexpected invocation: %s", raw)
+		}
+		// Preserve bounded helper failures before the disposable HOME is removed.
+		// Native transcript bytes and operator data never enter this diagnostic.
+		for _, role := range profile.Roles {
+			var r struct {
+				Success bool   `json:"success"`
+				Frames  int    `json:"frames"`
+				Error   string `json:"error"`
+			}
+			raw, readErr := os.ReadFile(filepath.Join(children, role+".receipt"))
+			if readErr == nil && len(raw) < 16384 && json.Unmarshal(raw, &r) == nil && len(r.Error) < 512 && claudetape.Safe([]byte(r.Error)) == nil {
+				t.Logf("daemon helper role=%s success=%t frames=%d error=%q", role, r.Success, r.Frames, r.Error)
+			}
+		}
 		t.Fatalf("original daemon assertions failed: mode=%s root=%s runs=%d passed=%d; private evidence=%s", mode, profile.Root, runs, passed, evidence.Name())
 	}
 	var receipt struct {
