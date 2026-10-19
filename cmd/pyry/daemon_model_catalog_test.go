@@ -59,8 +59,12 @@ func testCatalogWireReply(t *testing.T, w *switchWire, request uint64, conv, sou
 		if e.Type != protocol.TypeModelList || string(e.ConversationID) != `"`+conv+`"` {
 			continue
 		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
 		if e.SessionStateCleared {
-			if string(e.Payload) != `{}` || e.InReplyTo != nil {
+			if string(e.Payload) != `{}` || e.InReplyTo != nil || string(fields["session_id"]) != source {
 				t.Fatalf("invalid catalog clear: %s", raw)
 			}
 			clears++
@@ -72,10 +76,6 @@ func testCatalogWireReply(t *testing.T, w *switchWire, request uint64, conv, sou
 		}
 		if (clear && clears != 1) || (!clear && clears != 0) {
 			t.Fatalf("catalog clears = %d, want clear = %t", clears, clear)
-		}
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil {
-			t.Fatal(err)
 		}
 		if string(fields["session_id"]) != source {
 			t.Fatalf("source tag = %s, want %s", fields["session_id"], source)
