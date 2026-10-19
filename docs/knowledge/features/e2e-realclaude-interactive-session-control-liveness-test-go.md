@@ -43,29 +43,25 @@
   survives both respawns. Last child of #963. See
   [`codebase/1031.md`](../codebase/1031.md).
 
-- `interactive_stream_liveness_test.go` (#1153) — first real-`claude` coverage
-  of the **stream-json interactive runner** (`interactive_runner:
-  "stream-json"`, #1081); every prior interactive-relay real-claude test
-  (#854/#997/#1028/#1030/#1031) runs under the default PTY runner.
-  `TestInteractiveStreamLiveness` transcribes #854's daemon body (pair → seed
-  bootstrap registry + bound conversation → spawn → handshake) with three
-  deltas: the new `writeStreamInteractiveConfig(t, home)` helper flips the
-  production config toggle (writes `<home>/.pyry/config.json =
-  {"interactive_runner":"stream-json"}` before spawn — `resolveConfigPath`
-  reads it once at startup) before `spawnBootstrapDaemon`; it drives **one**
-  turn (AC parity with #1141) instead of #854's two; and it drains to
-  completion via the new `drainForCompletedTurn` helper — the two-milestone
-  drain #1141's fake-side spec requires (non-empty `assistant_delta` **then**
-  terminal `turn_state{idle}`), where #854's `drainForAssistantReply` stops
-  at the first delta. No content/echo assertion on M1 (real claude's words
-  are non-deterministic, unlike #1141's fakeclaude echo). The config-writer
-  is deliberately a standalone helper, not folded into a spawn wrapper, so
-  the permission-flow rider #1154 (blocked-by this ticket) can compose it
-  with `spawnPermissionDaemon` instead. Fresh package-private seed constants
-  (`streamBootstrapUUID`/`streamConvID`) — #854's `liveBootstrapUUID`/
-  `liveConvID` are file-private and would redeclare in the same package/tag
-  namespace. Zero production files touched. See
-  [`codebase/1153.md`](../codebase/1153.md).
+- `interactive_stream_liveness_test.go` — `TestInteractiveStreamLiveness`
+  pairs, seeds a bootstrap session and bound conversation, spawns the daemon
+  with `writeStreamInteractiveConfig`, then handshakes and sends one brief
+  tool-free prompt. `drainForCompletedTurn` requires at least one
+  non-whitespace `assistant_delta` for the driving conversation, followed by
+  that conversation's terminal `turn_state{idle}`, within 120 seconds.
+  It accumulates every matching text fragment and decrypts every Noise frame
+  in receive order, including foreign-conversation traffic, to preserve nonce
+  synchronization. Empty or whitespace-only text and foreign delta/idle frames
+  cannot satisfy the milestones. An idle queued before the first matching
+  nonempty delta is ignored: cancellation can leave that idle behind when
+  `drainForCancelledTurnEnd` returns at `turn_end`, so a later idle is still
+  required. The interrupt test's subsequent healthy turn exercises this path.
+  Generated wording, paragraph counts and provider-dependent chunk counts are
+  outside basic liveness: a valid response can coalesce into one delta.
+  The former two-chunk requirement from #2271 was removed after source audit
+  in #3616; no live failure was reproduced. Incremental delivery is proved by
+  the [deterministic parser/emitter test](streamsup-package-draining-turnevents-into-the-interactive-emitter-fan-in.md#incremental-delivery-proof).
+  See [controls and counted evidence](#stream-liveness-controls-and-evidence).
 
   **Known gap (found reviewing #2250, not fixed there): the `protocol.TypeRateLimited` arm of
   `drainForCompletedTurn` can false-red since `internal/streamsup`'s rate-limit gate grew a falling
@@ -172,3 +168,72 @@
   (unit-owned deterministically by #1121). No new package-level constants,
   zero production files touched. Split from #1083. See
   [`codebase/1176.md`](../codebase/1176.md).
+
+## Stream liveness controls and evidence
+
+`TestCompletedTurnDrainControls` drives the same `drainForCompletedTurn` used
+by live liveness through the local `completedTurnReceiver` interface. Fresh
+paired Noise states encrypt in-memory frames; no Claude credentials, daemon or
+network are required. Fourteen cases cover single/multiple chunks, empty and
+whitespace-only text, foreign deltas and idle, missing closure, queued idle
+without/with a later closure, mixed foreign/valid traffic, and whitespace then
+idle then text without another idle. Invalid evidence must fail with the
+appropriate M1/M2 diagnostic. Bounded helper subprocesses isolate expected
+`Fatalf` outcomes and check their diagnostic, rather than accepting any failure.
+
+The remaining controls retain the global `unrecognized_message` alarm and
+`rate_limited` alarm. Rate limits have no conversation filter: even a foreign
+conversation's unknown status fails. Only the measured `allowed_warning`
+status is tolerated; it still needs valid response and closure evidence.
+
+**Shared-helper controls need a caller check.** One-delta controls would stay
+green if the live test still called a separate minimum-two-chunk drain.
+`TestInteractiveStreamLivenessUsesCompletedTurnDrain` parses the live test and
+requires its call to the checked helper. It failed against the old caller,
+without pinning generated text. Keep that connection when changing the drain.
+
+Focused credential-free race selectors, from the repository root:
+
+```sh
+python3 scripts/test-admission.py -- go test -timeout=30m -tags e2e_realclaude -race -count=1 -run '^(TestCompletedTurnDrainControls|TestInteractiveStreamLivenessUsesCompletedTurnDrain)$' ./internal/e2e/realclaude
+python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -run '^(TestStreamTurnDrainV2_FlushTimerCoalesces|TestInteractiveTurnEmitterV2_TimerFlushMidMessage|TestInteractiveTurnEmitterV2_FlushAtTurnBoundary)$' ./cmd/pyry
+```
+
+The parser/emitter selector is untagged. The drain controls require
+`e2e_realclaude` even though they are credential-free. Tagged compilation alone
+does not prove live liveness; its named body must execute and pass, with zero
+skips. See [live-suite evidence rules](e2e-realclaude.md).
+
+### Counted macOS acceptance for #3616
+
+The [verifier record](https://github.com/pyrycode/pyrycode/pull/3621#issuecomment-6265012109)
+binds focused race checks to `c19a849d61a5dd91bae0cd8db61bf298b80724fe` on
+`macbook`, macOS 26.6.2 (25G83), Darwin 25.6.0 arm64. Drain controls plus the
+caller check passed 16/16 test events (14 cases, their parent and the caller
+check), with zero failures/skips. The affected drain/emitter selection passed
+13/13, including all three tests in the selector above, with zero failures/skips.
+Tagged live-package vet/compilation also passed.
+
+The [dispatcher live report](https://github.com/pyrycode/pyrycode/issues/3616#issuecomment-6265961868)
+ran on the macOS `macbook` host against that candidate merged with
+`origin/main` at `664305939d73e5a146457503081d8232fcca5407`.
+Run `b6c99de33f64bf07f4f3bfb20e5313403780c7b56d1e3c38f89afe379c8e913c`,
+output `2026-10-19T10-58-51-851Z`, used
+`go test -tags e2e_realclaude -timeout 20m -json ./internal/e2e/realclaude/...`.
+The daemon was built from that tested tree. Named outcomes from its Go JSON:
+
+| Test selection | Executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| `TestInteractiveStreamLiveness` (7.34 s) | 1 | 1 | 0 | 0 |
+| `TestInteractiveStreamInterruptStopsRunningTurn` (5.59 s) | 1 | 1 | 0 | 0 |
+| `TestInteractiveStreamLivenessUsesCompletedTurnDrain` | 1 | 1 | 0 | 0 |
+| `TestCompletedTurnDrainControls` cases (excluding parent) | 14 | 14 | 0 | 0 |
+| Complete live suite, original run | 2025 | 2023 | 2 | 25 |
+
+The full suite exited 1. The dispatcher accepted the inherited
+`TestRealClaude_BackgroundReplyCompletion` failure after same-tree and base
+failures, tracked in [#3623](https://github.com/pyrycode/pyrycode/issues/3623).
+`TestCodexQuestionLive` failed initially and passed on the same-tree rerun.
+Those original failures remain failures; liveness itself executed and passed.
+The accepted live-stage record and evidence bundle retain the run identity
+above. Linux verification is outside this macOS ticket's scope.
