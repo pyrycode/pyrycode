@@ -167,7 +167,7 @@ func New(t *Tape, args []string) (*Player, error) {
 		return nil, err
 	}
 	if !reflect.DeepEqual(t.Args, args) {
-		return nil, errors.New("Claude spawn arguments changed")
+		return nil, errors.New("claude spawn arguments changed")
 	}
 	return &Player{tape: t, bindings: map[string]string{}, used: map[string]string{}}, nil
 }
@@ -203,7 +203,7 @@ func (p *Player) Input(raw []byte) ([]json.RawMessage, error) {
 		return nil, p.err
 	}
 	fail := func() ([]json.RawMessage, error) {
-		p.err = fmt.Errorf("Claude input contract changed at frame %d", p.next)
+		p.err = fmt.Errorf("claude input contract changed at frame %d", p.next)
 		return nil, p.err
 	}
 	if p.next >= len(p.tape.Frames) || p.tape.Frames[p.next].Direction != "stdin" {

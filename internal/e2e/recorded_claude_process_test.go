@@ -184,7 +184,7 @@ func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage,
 		raw, err := io.ReadAll(io.LimitReader(f, claudetape.MaxBytes+1))
 		_ = f.Close()
 		if err != nil || len(raw) > claudetape.MaxBytes {
-			return nil, errors.New("Claude input file exceeded bound")
+			return nil, errors.New("claude input file exceeded bound")
 		}
 		if arg == "--append-system-prompt-file" {
 			raw, err = json.Marshal(string(raw))
@@ -245,14 +245,14 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		child.WaitDelay = 2 * time.Second
 		stdin, err = child.StdinPipe()
 		if err != nil {
-			return 0, errors.New("Claude stdin setup failed")
+			return 0, errors.New("claude stdin setup failed")
 		}
 		stdout, e := child.StdoutPipe()
 		if e != nil {
-			return 0, errors.New("Claude stdout setup failed")
+			return 0, errors.New("claude stdout setup failed")
 		}
 		if child.Start() != nil {
-			return 0, errors.New("Claude launch failed")
+			return 0, errors.New("claude launch failed")
 		}
 		defer func() { cancel(); _ = stdin.Close(); _ = child.Wait() }()
 		outputs = tapeLines(ctx, stdout)
@@ -268,10 +268,10 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 			return 0, err
 		}
 		if tape.Scenario != c.Scenario {
-			return 0, errors.New("Claude tape scenario mismatch")
+			return 0, errors.New("claude tape scenario mismatch")
 		}
 		if !reflect.DeepEqual(tape.Files, files) {
-			return 0, errors.New("Claude input file contents changed")
+			return 0, errors.New("claude input file contents changed")
 		}
 		player, err = claudetape.New(tape, tapeArgs(args, c))
 		if err != nil {
@@ -289,7 +289,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 				return e
 			}
 			if _, e = os.Stdout.Write(append(data, '\n')); e != nil {
-				return errors.New("Claude replay delivery failed")
+				return errors.New("claude replay delivery failed")
 			}
 			frames++
 		}
@@ -303,7 +303,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return frames, errors.New("Claude tape deadline exceeded")
+			return frames, errors.New("claude tape deadline exceeded")
 		case <-tick.C:
 			if _, err := os.Stat(c.Finish); err == nil {
 				if player != nil {
@@ -342,12 +342,12 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 				tape.Frames = append(tape.Frames, claudetape.Frame{Direction: "stdin", Data: normalized})
 				frames++
 				if _, e = stdin.Write(append(line.data, '\n')); e != nil {
-					return frames, errors.New("Claude stdin delivery failed")
+					return frames, errors.New("claude stdin delivery failed")
 				}
 			}
 		case line := <-outputs:
 			if line.err != nil || line.data == nil {
-				return frames, errors.New("Claude stdout ended before scenario seal")
+				return frames, errors.New("claude stdout ended before scenario seal")
 			}
 			normalized, e := tapeNormalize(line.data, c, false)
 			if e != nil {
@@ -363,7 +363,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 			tape.Frames = append(tape.Frames, claudetape.Frame{Direction: "stdout", Data: normalized})
 			frames++
 			if _, e = os.Stdout.Write(append(line.data, '\n')); e != nil {
-				return frames, errors.New("Claude stdout delivery failed")
+				return frames, errors.New("claude stdout delivery failed")
 			}
 		}
 	}
