@@ -383,14 +383,11 @@ func daemonThreadUpdates(conv, epoch string, c thread.Change) []any {
 			fields[strings.Split(f.Tag.Get("json"), ",")[0]] = value
 		}
 	}
-	var updates []any
-	base := c.PreviousRev
+	if len(fields) > 0 && c.TextAppend != "" {
+		fields["content"] = c.ResultContent
+	}
 	if len(fields) > 0 || c.TextAppend == "" {
-		updates = append(updates, protocol.ThreadItemChangedPayload{ConversationID: conv, Epoch: epoch, Version: c.Version, ItemID: c.ID, BaseRev: base, Rev: c.Rev, Changes: fields})
-		base = c.Rev
+		return []any{protocol.ThreadItemChangedPayload{ConversationID: conv, Epoch: epoch, Version: c.Version, ItemID: c.ID, BaseRev: c.PreviousRev, Rev: c.Rev, Changes: fields}}
 	}
-	if c.TextAppend != "" {
-		updates = append(updates, protocol.ThreadTextAppendPayload{ConversationID: conv, Epoch: epoch, Version: c.Version, ItemID: c.ID, BaseRev: base, Rev: c.Rev, Text: c.TextAppend})
-	}
-	return updates
+	return []any{protocol.ThreadTextAppendPayload{ConversationID: conv, Epoch: epoch, Version: c.Version, ItemID: c.ID, BaseRev: c.PreviousRev, Rev: c.Rev, Text: c.TextAppend}}
 }

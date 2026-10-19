@@ -50,14 +50,20 @@ worth one file to avoid.
    `HistoryPager`'s block already gives: a router additionally refuses a
    known conversation with **no bound session**, which is exactly the
    conversation this verb exists to serve.
-4. **Resolve via `ModelListFor`, comma-ok honoured.** A nil seam and a false
-   comma-ok both land on the same retryable `model_list.unavailable` — see
-   the merge below.
-5. **Reply.** One `model_list` envelope, `InReplyTo` set, `EventID` **nil**
+4. **Resolve once, comma-ok honoured.** A thread connection selects an installed
+   `ModelListReadingFor` and passes the negotiated `multiAgent` value. Otherwise
+   it uses `ModelListFor`. A nil legacy seam or a false comma-ok lands on the
+   same retryable `model_list.unavailable`; a selected supplied provider never
+   retries the legacy provider.
+5. **Reply.** One fresh `model_list` envelope, `InReplyTo` set, `EventID` **nil**
    (never enters the `#647` replay ring, advances no client cursor — the
    reconcile's own choice), payload forwarded byte for byte: `ConversationID`
    comes out of the resolver's own registry record and `DroppedModels` rides
-   through **never recomputed from `len(Models)`**.
+   through **never recomputed from `len(Models)`**. Supplied delivery uses
+   `pushLiveReply` / `PushLiveState`, preserving captured routing, ordering and
+   producer evidence, with an uncorrelated `{}` clear before the first fresh
+   catalog in each target generation. Recipient capability projection remains
+   relay-owned; supplied replies and clears carry no ring/history IDs.
 
 **Never an empty `models` array standing in for "unknown."**
 `turnevent.ModelList.Models` is documented never-empty and the resolver's
@@ -98,10 +104,11 @@ payload is claude-authored, untrusted text.
 ## Concurrency
 
 No goroutine is spawned. The handler runs synchronously on the manager's
-single `Run` dispatch goroutine and replies through `forwardEnvelope` — the
-same seal-under-`s.send` route `handleRequestSessionSettings` uses, **not**
-`request_history`'s `forwardToRun`, because this handler never leaves `Run`
-in the first place. This distinction is load-bearing rather than stylistic:
+single `Run` dispatch goroutine. The legacy path replies through `forwardEnvelope`;
+the supplied path queues via `pushLiveReply`, leaving ordering and sealing on
+`Run`. The legacy path uses `forwardEnvelope` rather than
+`request_history`'s `forwardToRun`, because this handler never leaves `Run`.
+This distinction is load-bearing rather than stylistic:
 the send `CipherState` is single-owner, so sealing from any goroutine but
 `Run` would be a concurrent `Encrypt` — a nonce reuse, a real break rather
 than a race annoyance. **A future edit that moves this arm to
@@ -117,6 +124,39 @@ moves an existing lock chain onto `Run`, where
 already runs it once per handshake; this verb runs it once per request. A
 conn's frames dispatch in order on one goroutine, so a client cannot overlap
 two of its own requests.
+
+## Target ordering and catalog provenance
+
+`daemonModelListReadingFor` delegates to `modelListResultFor`, which captures a
+target reservation before inventory resolution. `liveInventoryResult` keeps
+that target conversation/generation/revision for `TypeModelList` and copies only
+the inventory's producing-session evidence. A foreign bootstrap cache and a
+same-conversation predecessor cache both remain reply-only when their captured
+conversation or generation differs. Comparing conversation IDs alone misses the
+predecessor case: copying its cached ordering rejects a valid fresh resolution,
+while granting it target retention would turn predecessor bytes into live state.
+Neither resolution nor reply correlation may rewrite the producer cache.
+
+Separate fresh resolution from delayed delivery in tests: the former can use
+predecessor vocabulary with current target ordering, while a reply captured
+before a transition keeps its old ordering and is suppressed after successor
+delivery, even with the same session string. `TestDaemonLiveRelayRequestedCatalog`
+exercises that distinction through the authenticated real request/resolver path
+under both capability projections, together with target-only clears, source
+replacement and equal/older revision delivery.
+
+Clients route by top-level `conversation_id`, matching any payload identity, and
+admit `model_list` inventory independently of current-session admission on the
+active authenticated connection. Retain connection/incarnation and ordering
+checks. Omitted `session_id` is unresolved, `null` means positively no producing
+session, and a string is the actual captured producer; a merged menu is not proof
+that all rows came from that producer. Catalog admission neither changes
+settings/model/effort nor grants session authority to other readings. Source
+replacement in the same target generation replaces the full menu without a new
+clear. See [catalog admission](protocol-package-model-list-payload.md#catalog-admission-and-source-evidence)
+for the consumer boundary and [daemon retention](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#control-and-on-demand-readings)
+for cache/projection details. Reconnect fallback remains
+[#3611](https://github.com/pyrycode/pyrycode/issues/3611).
 
 ## The seam
 
