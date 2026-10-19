@@ -325,7 +325,7 @@ func SameContract(a, b *Tape) error {
 		}
 		return requests, nil
 	}
-	if a.Scenario != b.Scenario || !reflect.DeepEqual(a.Args, b.Args) || !reflect.DeepEqual(a.Files, b.Files) {
+	if a.Scenario != b.Scenario || !reflect.DeepEqual(a.Args, b.Args) || a.CheckFiles(b.Files) != nil {
 		return errors.New("scenario or Claude arguments changed")
 	}
 	left, err := contract(a)
@@ -338,6 +338,38 @@ func SameContract(a, b *Tape) error {
 	}
 	if !reflect.DeepEqual(left, right) {
 		return errors.New("ordered daemon request contract changed")
+	}
+	return nil
+}
+
+// CheckFiles compares parsed input-file JSON, including string-valued system
+// prompts. Presentation whitespace cannot change a file's logical contract.
+func (t *Tape) CheckFiles(actual map[string]json.RawMessage) error {
+	if len(t.Files) != len(actual) {
+		return errors.New("claude input file inventory changed")
+	}
+	canonical := func(raw []byte) ([]byte, error) {
+		d := json.NewDecoder(bytes.NewReader(raw))
+		d.UseNumber()
+		var value any
+		if err := d.Decode(&value); err != nil {
+			return nil, err
+		}
+		if d.Decode(new(any)) != io.EOF {
+			return nil, errors.New("trailing file JSON")
+		}
+		return json.Marshal(value)
+	}
+	for key, want := range t.Files {
+		got, ok := actual[key]
+		if !ok {
+			return errors.New("claude input file missing")
+		}
+		left, a := canonical(want)
+		right, b := canonical(got)
+		if a != nil || b != nil || !bytes.Equal(left, right) {
+			return errors.New("claude input file contents changed")
+		}
 	}
 	return nil
 }

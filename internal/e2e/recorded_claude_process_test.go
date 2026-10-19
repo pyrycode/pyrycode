@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -270,8 +269,8 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		if tape.Scenario != c.Scenario {
 			return 0, errors.New("claude tape scenario mismatch")
 		}
-		if !reflect.DeepEqual(tape.Files, files) {
-			return 0, errors.New("claude input file contents changed")
+		if err = tape.CheckFiles(files); err != nil {
+			return 0, err
 		}
 		player, err = claudetape.New(tape, tapeArgs(args, c))
 		if err != nil {

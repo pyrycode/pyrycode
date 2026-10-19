@@ -162,3 +162,29 @@ func TestCredentialSourceLabels(t *testing.T) {
 		}
 	}
 }
+
+func TestInputFileRoundTrip(t *testing.T) {
+	tape := rigTape()
+	tape.Files = map[string]json.RawMessage{"settings": json.RawMessage(`{"effort":"low","extra":false}`), "system": json.RawMessage(`"Exact system prose."`)}
+	raw, err := json.MarshalIndent(tape, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := map[string]json.RawMessage{"settings": json.RawMessage(`{ "extra": false, "effort": "low" }`), "system": json.RawMessage(`"Exact system prose."`)}
+	if err = saved.CheckFiles(actual); err != nil {
+		t.Fatal("serialized input-file formatting changed the contract")
+	}
+	actual["settings"] = json.RawMessage(`{"effort":"high","extra":false}`)
+	if saved.CheckFiles(actual) == nil {
+		t.Fatal("changed setting passed")
+	}
+	actual["settings"] = tape.Files["settings"]
+	actual["system"] = json.RawMessage(`"Changed system prose."`)
+	if saved.CheckFiles(actual) == nil {
+		t.Fatal("changed prompt passed")
+	}
+}
