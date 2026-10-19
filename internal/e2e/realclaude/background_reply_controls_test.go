@@ -319,8 +319,11 @@ func TestBackgroundReplyReplayTaskPatch(t *testing.T) {
 
 func TestBackgroundReplyReplayUnknownTaskPatch(t *testing.T) {
 	for _, patch := range []string{`{"unknown_key":"private-patch-sentinel"}`, `{"end_time":"private-patch-sentinel"}`} {
-		frames := []string{`{"type":"system","subtype":"task_updated","task_id":"task","patch":` + patch + `}`}
-		_, _, _, err := backgroundReplyReplay(t, backgroundReplyTestLines(frames), "agent", "token", -1)
+		frames := []string{
+			`{"type":"system","subtype":"task_updated","task_id":"task","patch":` + patch + `}`,
+			`{"type":"assistant","parent_tool_use_id":"agent","message":{"id":"final","role":"assistant","content":[{"type":"text","text":"pyry-3589-finished"}]}}`,
+		}
+		_, _, _, err := backgroundReplyReplay(t, backgroundReplyTestLines(frames), "agent", "token", 1)
 		if err == nil || strings.Contains(err.Error(), "private-patch-sentinel") {
 			t.Fatal("unrecognized or mistyped patch field did not fail closed privately")
 		}
