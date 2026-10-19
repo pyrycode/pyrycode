@@ -210,3 +210,40 @@ func TestControlBindingPreservesPayloadIDs(t *testing.T) {
 		t.Fatal("compatibility ignored changed payload request_id")
 	}
 }
+
+func TestAwaitsTurnFollowsStartupExchange(t *testing.T) {
+	p, err := New(rigTape(), []string{"--stream"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Prefix()
+	if p.AwaitsTurn() {
+		t.Fatal("ready for a turn before the recorded initialize request")
+	}
+	if _, err = p.Input([]byte(`{"type":"control_request","request_id":"fresh","request":{"subtype":"initialize"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !p.AwaitsTurn() {
+		t.Fatal("startup exchange replayed but no turn awaited")
+	}
+	if _, err = p.Input([]byte(`{"type":"user","message":{"role":"user","content":"hello"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if p.AwaitsTurn() {
+		t.Fatal("awaited a turn while a permission answer is next")
+	}
+}
+
+func TestReorderedTurnNamesBothFrames(t *testing.T) {
+	p, err := New(rigTape(), []string{"--stream"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Input([]byte(`{"type":"user","message":{"role":"user","content":"secret prompt text"}}`))
+	if err == nil || err.Error() != "claude input contract changed at frame 0: want stdin control_request initialize, got stdin user" {
+		t.Fatalf("reordering error: %v", err)
+	}
+	if p.AwaitsTurn() {
+		t.Fatal("failed player still awaits a turn")
+	}
+}
