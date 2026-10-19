@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Six scenarios run the same assertions in live capture and offline replay:
+Seven scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -41,6 +41,16 @@ Six scenarios run the same assertions in live capture and offline replay:
   and allows at most four post-refusal permissions, requiring matching remote
   dismissal of every decision. This preserves the live refusal test's independent
   absence witness: permissions must not silently block forbidden work for it.
+
+- `permission-cancel`: the original live Write trigger surfaces an owned
+  permission, then `modal_cancel` must produce a matching `{cancelled, remote}`
+  dismissal and an owned `turn_end`. The shared drain preserves the live
+  30-second dismissal budget and 60-second warm completion budget starting at
+  dismissal, and retains completion if its independent broadcast arrived first.
+  An idle frame or another conversation's turn cannot substitute for completion.
+  Exactly one durable cancel fact must retain the asking session. Live capture
+  and the original live gate also require the denied file to be absent. Replay
+  cannot establish actual filesystem effects or elapsed provider time.
 
 `make e2e` includes these cases in the ordinary offline integration selection.
 `make e2e-recorded-claude` runs just the recorded suite. Missing fixtures fail; nothing
@@ -103,7 +113,7 @@ replay and strict outgoing request comparison. Comparison binds observed control
 IDs by producer direction and ordinal; it retains complete ordered requests.
 Different provider wording and accounting do not themselves fail this comparison.
 Changed user choices, commands, recovery steps and request payloads do. Every
-stage must execute all six named leaves with no failures or skips. A failing stage
+stage must execute all seven named leaves with no failures or skips. A failing stage
 cannot produce a successful compatibility summary, even if the others passed.
 Verification never replaces the reviewed baseline.
 
@@ -123,6 +133,7 @@ preship remains unchanged, and dispatcher routing is unchanged.
 | `TestInteractiveStreamQuestionAnswer` and stdio counterpart | `question-answer`, same question/model/history driver | Unpredictable question labels and current Claude interpretation |
 | Three-turn memory continuity | None in this batch | Actual Claude context retention |
 | Question refusal | `question-refuse`, same refusal drain and history checks | Unpredictable question labels, blocked Write absence and actual provider refusal behavior |
+| Permission cancellation | `permission-cancel`, same cancellation/history checks | Denied-file absence, real parked-completer timing and current stdio behavior |
 | Permission allow/deny | `permission-allow` and `permission-deny`, same resolution/history drivers | Actual file creation/absence, current approval transport and settings-respawn behavior |
 
 The recorded question trigger supplies a complete fixed AskUserQuestion input so
@@ -133,8 +144,8 @@ The compatibility comparator does not scrub provider prose or loosen request
 comparison for these cases. Dismissal and terminal idle may arrive in either order;
 both are required after the matching continuation.
 
-Next candidates are permission cancellation, queue actions, further model-control
-messages and thread folding. Each must preserve its
+Next candidates are queue actions, further model-control messages and thread
+folding. Each must preserve its
 original assertions and account for all external inputs before promotion.
 Crash/restart, session files, real tool effects, signal handling, transport
 recovery, provider compatibility and measured timing retain explicit live or

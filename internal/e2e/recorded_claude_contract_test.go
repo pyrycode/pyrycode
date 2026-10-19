@@ -156,11 +156,14 @@ func TestTapeNormalizeRejectsTrailingJSON(t *testing.T) {
 }
 
 func TestTapePermissionTarget(t *testing.T) {
-	for _, scenario := range []string{"permission-deny", "permission-allow"} {
+	for _, scenario := range []string{"permission-deny", "permission-allow", "permission-cancel"} {
 		t.Run(scenario, func(t *testing.T) {
 			target := "${PILOT_HOME}/tape-denied.txt"
 			if scenario == "permission-allow" {
 				target = "${PILOT_HOME}/tape-allowed.txt"
+			}
+			if scenario == "permission-cancel" {
+				target = "${PILOT_HOME}/pyrycode-cancel-denied-witness.txt"
 			}
 			for _, tc := range []struct {
 				name, tool, path string
