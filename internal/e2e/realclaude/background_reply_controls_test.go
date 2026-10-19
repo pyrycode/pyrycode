@@ -45,12 +45,13 @@ func TestBackgroundReplyWitness(t *testing.T) {
 		name, command, tool, parent, output string
 		failed, want                        bool
 	}{
-		{"observed", backgroundReplyWait, "wait", "agent", "private-witness", false, true},
+		{"observed", "/rig/hold", "wait", "agent", "private-witness", false, true},
+		{"quoted", "'some equivalent operation'", "wait", "agent", "private-witness", false, true},
 		{"mention only", "echo release", "wait", "agent", "private-witness", false, false},
-		{"wrong tool", backgroundReplyWait, "other", "agent", "private-witness", false, false},
-		{"wrong child", backgroundReplyWait, "wait", "other", "private-witness", false, false},
-		{"wrong output", backgroundReplyWait, "wait", "agent", "release", false, false},
-		{"failed", backgroundReplyWait, "wait", "agent", "private-witness", true, false},
+		{"wrong tool", "/rig/hold", "other", "agent", "private-witness", false, false},
+		{"wrong child", "/rig/hold", "wait", "other", "private-witness", false, false},
+		{"wrong output", "/rig/hold", "wait", "agent", "release", false, false},
+		{"failed", "/rig/hold", "wait", "agent", "private-witness", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			frames := []string{
@@ -61,19 +62,31 @@ func TestBackgroundReplyWitness(t *testing.T) {
 				`{"type":"assistant","parent_tool_use_id":"agent","message":{"id":"final","role":"assistant","content":[{"type":"text","text":"pyry-3589-finished"}]}}`,
 			}
 			lines := backgroundReplyTestLines(frames)
-			_, end, final, _, result, _ := backgroundReplyBoundary(lines, "private-witness")
+			witness := &backgroundReplyExecution{Operation: "private-operation", Tool: "wait"}
+			if tc.name == "mention only" {
+				witness = nil
+			}
+			_, end, final, _, result, _ := backgroundReplyBoundary(lines, "private-witness", witness)
 			if got := backgroundReplyReleased(end, 3, result, final); got != tc.want {
 				t.Fatalf("witness accepted=%t want=%t", got, tc.want)
 			}
 			if tc.want {
-				replay, indices, _, err := backgroundReplyReplay(t, lines, "agent", "private-witness", final)
+				replay, indices, alias, err := backgroundReplyReplay(t, lines, "agent", "private-witness", final, witness)
 				if err != nil || len(replay) != len(frames) || len(indices) != len(frames) || strings.Contains(strings.Join(replay, ""), "private-witness") {
 					t.Fatalf("sequence scrub failed: %v", err)
+				}
+				if strings.Contains(strings.Join(replay, ""), tc.command) || !strings.Contains(strings.Join(replay, ""), "rig-synthetic-operation:"+alias(witness.Operation)) {
+					t.Fatal("raw command retained or synthetic command unmarked")
+				}
+				safeWitness := &backgroundReplyExecution{Operation: alias(witness.Operation), Tool: alias(witness.Tool)}
+				_, safeEnd, safeFinal, _, safeResult, safeParent := backgroundReplyBoundary(backgroundReplyTestLines(replay), "rig-release-observed", safeWitness)
+				if safeEnd != end || safeFinal != final || safeResult != result || safeParent != alias("agent") {
+					t.Fatal("scrubbing lost tool correlation")
 				}
 				// A marker already captured before release cannot be replaced by a
 				// later duplicate after a successful witness result.
 				frames = append(frames[:3], frames[4], frames[3], frames[4])
-				_, end, final, _, result, _ = backgroundReplyBoundary(backgroundReplyTestLines(frames), "private-witness")
+				_, end, final, _, result, _ = backgroundReplyBoundary(backgroundReplyTestLines(frames), "private-witness", witness)
 				if backgroundReplyReleased(end, 4, result, final) {
 					t.Fatal("accepted final already present at release")
 				}

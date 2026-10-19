@@ -58,3 +58,6 @@ Pending documentation stage: in `docs/knowledge/features/e2e-realclaude-test-inf
 - Concurrency: recorder lock still spans physical release. Atomic witness publication prevents a partial file from becoming setup; no new lock ordering.
 - Threat model: authenticated isolated live test rig, not a sandbox against a malicious model with arbitrary file access. Production relay/mobile security is unchanged.
 **Reviewer:** builder self-review. **Date:** 2026-10-19.
+
+## Revisions
+- 2026-10-19: Retained correlation uses an explicitly synthetic operation command on the witnessed tool, plus aliased witness metadata. This lets the reader reject a mismatched operation as well as a mismatched tool. The exact old capture revision remains historical until artifact return. Direct Runner settings carry the hook without modifying HOME. Hold output waits for a complete newline-terminated release file to avoid observing its creation before token bytes are written.

@@ -59,6 +59,13 @@ func TestRecordedBackgroundReplyCompletion(t *testing.T) {
 	if record.Launch < 0 || record.MainEnd <= record.Launch || record.ChildStart <= record.Launch || record.ReleaseIndex <= record.MainEnd || record.ChildResult < record.ReleaseIndex || record.ChildResult <= record.ChildStart || record.Final <= record.ChildResult || record.Final >= record.CapturedLines || record.OmittedLines != 0 || record.Loss == nil || record.Loss.LinesOverCap != 0 || record.Loss.BytesOverCap != 0 || record.Loss.PartialsDropped != 0 || record.Loss.UnterminatedPartial != 0 {
 		t.Fatal("incomplete background or loss evidence")
 	}
+	if record.Execution != nil || record.Revision != "9c5de672a041e52dbb82c585758f3545fe008b59" {
+		if err := validateBackgroundCompletionCorrelation(&record); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Log("historical pre-witness capture; current physical execution evidence pending dispatcher artifact return")
+	}
 	testChildCompletionPipeline(t, &record)
 }
 
@@ -78,6 +85,76 @@ type backgroundCompletionRecord struct {
 	CapturedLines    int                                                                             `json:"captured_lines"`
 	OmittedLines     int                                                                             `json:"omitted_lines"`
 	Loss             *struct{ LinesOverCap, BytesOverCap, PartialsDropped, UnterminatedPartial int } `json:"loss"`
+	Execution        *struct {
+		Operation string `json:"operation_id"`
+		Tool      string `json:"tool_use_id"`
+	} `json:"execution"`
+	OS string `json:"os"`
+}
+
+func validateBackgroundCompletionCorrelation(r *backgroundCompletionRecord) error {
+	if r.Execution == nil || !strings.HasPrefix(r.Execution.Operation, "rig-id-") || !strings.HasPrefix(r.Execution.Tool, "rig-id-") || r.Execution.Operation == r.Execution.Tool || (r.OS != "linux" && r.OS != "darwin") || r.ReleaseIndex <= r.ChildStart {
+		return fmt.Errorf("missing physical execution correlation")
+	}
+	agents, tools, operations, results := 0, 0, 0, 0
+	for i, line := range r.Replay {
+		var v struct {
+			Type    string `json:"type"`
+			Parent  string `json:"parent_tool_use_id"`
+			Message struct {
+				ID      string `json:"id"`
+				Role    string `json:"role"`
+				Content []struct {
+					Type    string          `json:"type"`
+					ID      string          `json:"id"`
+					Name    string          `json:"name"`
+					Tool    string          `json:"tool_use_id"`
+					Content json.RawMessage `json:"content"`
+					Failed  bool            `json:"is_error"`
+					Input   struct {
+						Background bool   `json:"run_in_background"`
+						Command    string `json:"command"`
+					} `json:"input"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &v) != nil {
+			return fmt.Errorf("invalid correlation replay")
+		}
+		for _, b := range v.Message.Content {
+			if v.Type == "assistant" && b.Type == "tool_use" {
+				if v.Message.ID == "" || v.Message.Role != "assistant" {
+					return fmt.Errorf("invalid tool declaration")
+				}
+				if b.Name == "Agent" && v.Parent == "" {
+					agents++
+					if i != r.Launch || b.ID != r.Parent || !b.Input.Background {
+						return fmt.Errorf("mismatched background Agent")
+					}
+				}
+				if b.ID == r.Execution.Tool {
+					tools++
+					if i != r.ChildStart || v.Parent != r.Parent || b.Name != "Bash" || b.Input.Command != "rig-synthetic-operation:"+r.Execution.Operation {
+						return fmt.Errorf("mismatched witnessed Bash operation")
+					}
+				}
+				if strings.HasPrefix(b.Input.Command, "rig-synthetic-operation:") {
+					operations++
+				}
+			}
+			if v.Type == "user" && b.Type == "tool_result" && b.Tool == r.Execution.Tool {
+				results++
+				var content string
+				if i != r.ChildResult || v.Parent != r.Parent || b.Failed || json.Unmarshal(b.Content, &content) != nil || strings.TrimSpace(content) != "rig-release-observed" {
+					return fmt.Errorf("mismatched witnessed result")
+				}
+			}
+		}
+	}
+	if agents != 1 || tools != 1 || operations != 1 || results != 1 {
+		return fmt.Errorf("ambiguous physical execution correlation")
+	}
+	return nil
 }
 
 func testChildCompletionPipeline(t *testing.T, recorded *backgroundCompletionRecord) {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +19,6 @@ import (
 )
 
 const backgroundReplyFixture = "testdata/background_reply_completion.json"
-
-const backgroundReplyWait = "while [ ! -f release ]; do sleep 0.1; done; cat release"
 
 // This scenario always runs under the live gate. Raw stdout stays in the private
 // artifact directory; the published replay contains only rig-authored values.
@@ -34,11 +33,13 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	if err := os.MkdirAll(work, 0o700); err != nil {
 		t.Fatal("create rig directory")
 	}
+	rig := newBackgroundReplyOperation(t, work)
+	settings, _ := json.Marshal(map[string]any{"hooks": map[string]any{"PreToolUse": []any{map[string]any{"matcher": "Bash", "hooks": []any{map[string]any{"type": "command", "command": backgroundReplyQuote(rig.hook)}}}}}})
 	recorder := newDropcapRecorder()
 	argvHandler, _ := newDropcapArgvHandler()
 	runner, err := streamsup.New(streamsup.Config{
 		ClaudeBin: bin, WorkDir: work, SessionID: "35890000-0000-4000-8000-000000000001",
-		Args: ptucArgs, Stdout: recorder, Logger: slog.New(argvHandler),
+		Args: append(append([]string(nil), ptucArgs...), "--settings", string(settings)), Stdout: recorder, Logger: slog.New(argvHandler),
 	})
 	if err != nil {
 		t.Fatal("create runner")
@@ -47,6 +48,7 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); _ = runner.Run(ctx) }()
 	t.Cleanup(func() {
+		rig.release()
 		cancel()
 		select {
 		case <-done:
@@ -59,7 +61,7 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 		t.Fatal("runner did not start")
 	}
 	token := rand.Text()
-	prompt := "Use Agent exactly once with run_in_background=true. Tell the Agent: use Bash to run exactly `" + backgroundReplyWait + "`, then reply with exactly pyry-3589-finished. Do not use other tools in the parent, do not wait for the Agent, and immediately reply pyry-3589-launched."
+	prompt := "Use Agent exactly once with run_in_background=true. Tell the Agent: use Bash to execute " + backgroundReplyQuote(rig.path) + ", then reply with exactly pyry-3589-finished. Do not use other tools in the parent, do not wait for the Agent, and immediately reply pyry-3589-launched."
 	if err := streamsup.WriteTurn(ctx, stdin, []byte(prompt)); err != nil {
 		t.Fatal("write rig prompt")
 	}
@@ -69,11 +71,13 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	var caps dropcapCaps
 	var launch, mainEnd, final, childStart, childResult int
 	var parent string
+	var witness *backgroundReplyExecution
 	for time.Now().Before(deadline) {
 		lines, caps = recorder.snapshot()
-		launch, mainEnd, final, childStart, childResult, parent = backgroundReplyBoundary(lines, token)
-		if mainEnd >= 0 && releaseIndex < 0 {
-			releaseIndex, err = backgroundReplyRelease(recorder, filepath.Join(work, "release"), token)
+		witness = rig.witness()
+		launch, mainEnd, final, childStart, childResult, parent = backgroundReplyBoundary(lines, token, witness)
+		if mainEnd > launch && childStart > launch && releaseIndex < 0 && rig.held(witness) {
+			releaseIndex, err = backgroundReplyRelease(recorder, filepath.Join(rig.dir, "release"), token)
 			if err != nil {
 				t.Fatal("release rig child")
 			}
@@ -96,7 +100,7 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	if launch < 0 || mainEnd <= launch || childStart <= launch || childStart >= childResult || !backgroundReplyReleased(mainEnd, releaseIndex, childResult, final) || parent == "" || caps.LinesOverCap != 0 || caps.BytesOverCap != 0 || caps.PartialsDropped != 0 || caps.UnterminatedPartial != 0 {
 		t.Fatal("genuine loss-free background completion boundary was not observed")
 	}
-	replay, indices, alias, err := backgroundReplyReplay(t, lines, parent, token, final)
+	replay, indices, alias, err := backgroundReplyReplay(t, lines, parent, token, final, witness)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,27 +109,37 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 		t.Fatal("read candidate revision")
 	}
 	record := struct {
-		ClaudeVersion    string      `json:"claude_version"`
-		Revision         string      `json:"revision"`
-		CapturedAt       string      `json:"captured_at"`
-		SourceIndices    []int       `json:"source_indices"`
-		CapturedLines    int         `json:"captured_lines"`
-		OmittedLines     int         `json:"omitted_lines"`
-		Loss             dropcapCaps `json:"loss"`
-		Replay           []string    `json:"replay"`
-		Provenance       string      `json:"provenance"`
-		ChildStart       int         `json:"child_start"`
-		ReleaseIndex     int         `json:"release_index"`
-		ChildResult      int         `json:"child_result"`
-		Launch           int         `json:"launch"`
-		MainEnd          int         `json:"main_end"`
-		Final            int         `json:"final"`
-		Parent           string      `json:"parent"`
-		ProducingSession string      `json:"producing_session"`
-	}{probeClaudeVersion(bin), strings.TrimSpace(string(revision)), time.Now().UTC().Format(time.RFC3339), indices, len(lines), len(lines) - len(replay), caps, replay, "rig-authored allowlisted sequence; stable aliased IDs; prose replaced; omitted lines verified against persistent production parser at every source index", childStart, releaseIndex, childResult, launch, mainEnd, final, alias(parent), alias("35890000-0000-4000-8000-000000000001")}
+		ClaudeVersion    string                    `json:"claude_version"`
+		Revision         string                    `json:"revision"`
+		CapturedAt       string                    `json:"captured_at"`
+		SourceIndices    []int                     `json:"source_indices"`
+		CapturedLines    int                       `json:"captured_lines"`
+		OmittedLines     int                       `json:"omitted_lines"`
+		Loss             dropcapCaps               `json:"loss"`
+		Replay           []string                  `json:"replay"`
+		Provenance       string                    `json:"provenance"`
+		ChildStart       int                       `json:"child_start"`
+		ReleaseIndex     int                       `json:"release_index"`
+		ChildResult      int                       `json:"child_result"`
+		Launch           int                       `json:"launch"`
+		MainEnd          int                       `json:"main_end"`
+		Final            int                       `json:"final"`
+		Parent           string                    `json:"parent"`
+		ProducingSession string                    `json:"producing_session"`
+		Execution        *backgroundReplyExecution `json:"execution"`
+		OS               string                    `json:"os"`
+	}{probeClaudeVersion(bin), strings.TrimSpace(string(revision)), time.Now().UTC().Format(time.RFC3339), indices, len(lines), len(lines) - len(replay), caps, replay, "physical hold witness joined by hook-provided tool ID; explicitly synthetic commands replace observed commands; stable aliased IDs; persistent production parser verified at every source index", childStart, releaseIndex, childResult, launch, mainEnd, final, alias(parent), alias("35890000-0000-4000-8000-000000000001"), &backgroundReplyExecution{Operation: alias(witness.Operation), Tool: alias(witness.Tool)}, runtime.GOOS}
+	safeLines := backgroundReplyTestLines(replay)
+	l, m, f, s, r, p := backgroundReplyBoundary(safeLines, "rig-release-observed", record.Execution)
+	if l != launch || m != mainEnd || f != final || s != childStart || r != childResult || p != alias(parent) {
+		t.Fatal("scrubbing changed execution correlation")
+	}
 	blob, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		t.Fatal("encode replay")
+	}
+	if strings.Contains(string(blob), token) || strings.Contains(string(blob), rig.operation) {
+		t.Fatal("private rig identity retained")
 	}
 	scanner := newDropcapScanner(home, dir, work)
 	if hits, _ := scanner.scan(blob); len(hits) != 0 {
@@ -148,42 +162,77 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	t.Logf("safe replay artifact: %s", filepath.Join(dir, "background_reply_completion.json"))
 }
 
-func backgroundReplyBoundary(lines []dropcapCaptured, token string) (launch, mainEnd, final, childStart, childResult int, parent string) {
+func backgroundReplyBoundary(lines []dropcapCaptured, token string, witness *backgroundReplyExecution) (launch, mainEnd, final, childStart, childResult int, parent string) {
 	launch, mainEnd, final, childStart, childResult = -1, -1, -1, -1, -1
-	var childTool string
+	if witness == nil || witness.Operation == "" || witness.Tool == "" {
+		return
+	}
+	type frame struct {
+		Type    string `json:"type"`
+		Subtype string `json:"subtype"`
+		Parent  string `json:"parent_tool_use_id"`
+		Message struct {
+			ID      string `json:"id"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type      string          `json:"type"`
+				ID        string          `json:"id"`
+				Name      string          `json:"name"`
+				Text      string          `json:"text"`
+				ToolUseID string          `json:"tool_use_id"`
+				Content   json.RawMessage `json:"content"`
+				IsError   bool            `json:"is_error"`
+				Input     struct {
+					Background bool `json:"run_in_background"`
+				} `json:"input"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	frames := make([]frame, len(lines))
+	agents, tools := 0, 0
 	for i, line := range lines {
-		var v struct {
-			Type    string `json:"type"`
-			Subtype string `json:"subtype"`
-			Parent  string `json:"parent_tool_use_id"`
-			Message struct {
-				ID      string `json:"id"`
-				Role    string `json:"role"`
-				Content []struct {
-					Type      string          `json:"type"`
-					ID        string          `json:"id"`
-					Name      string          `json:"name"`
-					Text      string          `json:"text"`
-					ToolUseID string          `json:"tool_use_id"`
-					Content   json.RawMessage `json:"content"`
-					IsError   bool            `json:"is_error"`
-					Input     struct {
-						Background bool   `json:"run_in_background"`
-						Command    string `json:"command"`
-					} `json:"input"`
-				} `json:"content"`
-			} `json:"message"`
-		}
-		if json.Unmarshal(line.Raw, &v) != nil {
+		v := &frames[i]
+		if json.Unmarshal(line.Raw, v) != nil || v.Type != "assistant" || v.Message.ID == "" || v.Message.Role != "assistant" {
 			continue
 		}
+		for _, b := range v.Message.Content {
+			if b.Type != "tool_use" {
+				continue
+			}
+			if b.Name == "Agent" && v.Parent == "" {
+				agents++
+				if b.Input.Background && b.ID != "" {
+					launch, parent = i, b.ID
+				}
+			}
+			if b.ID == witness.Tool {
+				tools++
+			}
+		}
+	}
+	if agents != 1 || launch < 0 || tools != 1 {
+		launch, parent = -1, ""
+		return
+	}
+	for i, v := range frames {
+		for _, b := range v.Message.Content {
+			if v.Type == "assistant" && v.Message.Role == "assistant" && v.Message.ID != "" && v.Parent == parent && b.Type == "tool_use" && b.Name == "Bash" && b.ID == witness.Tool && i > launch {
+				childStart = i
+			}
+		}
+	}
+	if childStart < 0 {
+		launch, parent = -1, ""
+		return
+	}
+	for i, v := range frames {
 		if v.Type == "result" && v.Subtype == "success" && v.Parent == "" && mainEnd < 0 {
 			mainEnd = i
 		}
-		if v.Type == "user" && v.Parent == parent && childTool != "" {
+		if v.Type == "user" && v.Parent == parent {
 			for _, b := range v.Message.Content {
 				var output string
-				if b.Type == "tool_result" && b.ToolUseID == childTool && !b.IsError && json.Unmarshal(b.Content, &output) == nil && strings.TrimSpace(output) == token {
+				if b.Type == "tool_result" && b.ToolUseID == witness.Tool && !b.IsError && json.Unmarshal(b.Content, &output) == nil && strings.TrimSpace(output) == token && childResult < 0 {
 					childResult = i
 				}
 			}
@@ -192,13 +241,7 @@ func backgroundReplyBoundary(lines []dropcapCaptured, token string) (launch, mai
 			continue
 		}
 		for _, b := range v.Message.Content {
-			if b.Type == "tool_use" && b.Name == "Agent" && b.Input.Background && v.Parent == "" && launch < 0 {
-				launch, parent = i, b.ID
-			}
 			if parent != "" && v.Parent == parent {
-				if b.Type == "tool_use" && b.Name == "Bash" && b.Input.Command == backgroundReplyWait && childStart < 0 {
-					childStart, childTool = i, b.ID
-				}
 				if b.Type == "text" && strings.TrimSpace(b.Text) == "pyry-3589-finished" && final < 0 {
 					final = i
 				}
