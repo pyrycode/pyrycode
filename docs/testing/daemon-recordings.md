@@ -677,8 +677,12 @@ normalization. The complete supplied files, modes, argv and strict stdin remain
 part of the outgoing contract.
 
 Capture execs the real Claude executable at the daemon-owned PID. A separate
-broker owns the recording pipes in a separate process group, so termination of
-that provider leaves its evidence available. Replay runs an owned stand-in and
+broker owns the recording pipes as a child of the outer test process, in its own
+process group. A private Unix socket transfers exactly seven distinct pipe ends
+with fixed read/write directions and EOF-framed job identity. Kernel peer PID and
+UID, the closed current role/job/source, and the broker's actual parent must all
+match before readiness. This keeps the observer outside the provider descendant
+tree that production legitimately reaps before signalling Claude. Replay runs an owned stand-in and
 never executes a provider. Before the unchanged original delete envelope, the
 client hook asks the broker to acknowledge a typed `lifecycle_delete` checkpoint.
 The checkpoint orders replay with the original client deletion. Every subsequent
@@ -698,6 +702,11 @@ or seal deadline. Original stdin EOF is forwarded, and failure cleanup addresses
 only the private jobs belonging to this test. Changed tapes, roles, launch
 arguments, owned action/acknowledgment, failed terminal receipts,
 public controls, duplicate launches and extra artifacts fail the final audit.
-The complete original root and cleanup must pass before an external candidate is
-published. Stderr bytes belong to the saved prefix; their separate diagnostic
+The outer parent closes the FD listener and joins its actual broker processes
+after the complete original root and cleanup, then performs the immutable final
+audit before publishing any candidate. A timeout kills only actual exec children
+owned by that parent. It never signals a provider using a fixture PID. Controls
+run the production descendant reaper against an actual detached owned witness,
+then signal the provider while holding its stdin open, proving that the external
+broker survives both native capture and offline replay teardown. Stderr bytes belong to the saved prefix; their separate diagnostic
 stream order is not an asserted deletion property.

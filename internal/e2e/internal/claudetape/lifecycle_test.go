@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
 type lifecycleProbeBinding struct{}
@@ -26,9 +29,10 @@ func (lifecycleProbeBinding) Files() (map[string]json.RawMessage, error) {
 }
 
 type lifecycleProbeJob struct {
-	Config   LifecycleBrokerConfig
-	Root     string
-	Provider string
+	Config       LifecycleBrokerConfig
+	Root         string
+	Provider     string
+	BrokerSocket string
 }
 type lifecycleProbeReceipt struct {
 	Success          bool
@@ -72,14 +76,35 @@ func TestLifecycleProbeProcess(t *testing.T) {
 		if j.Provider != "" {
 			provider = j.Provider
 		}
-		e = ExecLifecycleChild([]string{"-test.run=^TestLifecycleProbeProcess$"}, env, provider, []string{"-test.run=^TestLifecycleProbeProcess$"}, j.Config.Mode == "capture")
+		if j.BrokerSocket != "" {
+			e = ExecLifecycleChildViaBroker(j.BrokerSocket, path, provider, []string{"-test.run=^TestLifecycleProbeProcess$"}, j.Config.Mode == "capture")
+		} else {
+			e = ExecLifecycleChild([]string{"-test.run=^TestLifecycleProbeProcess$"}, env, provider, []string{"-test.run=^TestLifecycleProbeProcess$"}, j.Config.Mode == "capture")
+		}
 		if e != nil {
 			os.Exit(2)
 		}
 		os.Exit(0)
+	case "sentinel":
+		for {
+			time.Sleep(time.Hour)
+		}
 	case "native":
 		if probeWrite(filepath.Join(j.Root, "native-pid.json"), os.Getpid()) != nil {
 			os.Exit(2)
+		}
+		if j.BrokerSocket != "" {
+			sentinel := exec.Command(os.Args[0], "-test.run=^TestLifecycleProbeProcess$")
+			sentinel.Env = append(os.Environ(), "PYRY_LIFECYCLE_PROBE=sentinel")
+			sentinel.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if sentinel.Start() != nil || probeWrite(filepath.Join(j.Root, "sentinel-pid.json"), sentinel.Process.Pid) != nil {
+				os.Exit(2)
+			}
+			go func() {
+				err := sentinel.Wait()
+				status, ok := sentinel.ProcessState.Sys().(syscall.WaitStatus)
+				_ = probeWrite(filepath.Join(j.Root, "sentinel-reaped.json"), err != nil && ok && status.Signaled() && status.Signal() == syscall.SIGKILL)
+			}()
 		}
 		if strings.Contains(j.Config.Scenario, "input-pressure") {
 			for {
@@ -130,7 +155,7 @@ func waitLifecycleProbe(t *testing.T, path string, target any) {
 func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 	producer := Producer{Revision: strings.Repeat("a", 40), BinarySHA256: strings.Repeat("b", 64), ClaudeVersion: "test-owned", CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	saved := map[string]*LifecycleTape{}
-	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-seal-kill", "replay-seal-kill", "capture-delete", "replay-delete", "capture-delete-partial", "replay-delete-partial", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
+	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-seal-kill", "replay-seal-kill", "capture-seal-reap", "replay-seal-reap", "capture-delete", "replay-delete", "capture-delete-partial", "replay-delete-partial", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
 		t.Run(variant, func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.Chmod(root, 0700); err != nil {
@@ -163,7 +188,39 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 				}
 			}
 			jobPath := filepath.Join(root, "job.json")
-			if e := probeWrite(jobPath, lifecycleProbeJob{Config: c, Root: root}); e != nil {
+			job := lifecycleProbeJob{Config: c, Root: root}
+			var server *LifecycleBrokerServer
+			if strings.HasSuffix(variant, "-seal-reap") {
+				job.Config.BrokerParentPID = os.Getpid()
+				c.BrokerParentPID = os.Getpid()
+				// macOS limits Unix socket paths to104bytes; TempDir names may be long.
+				socketDir, err := os.MkdirTemp("/tmp", "lifecycle-broker-")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+				job.BrokerSocket = filepath.Join(socketDir, "socket")
+				brokerJob := filepath.Join(root, "broker-job.json")
+				server, err = NewLifecycleBrokerServer(job.BrokerSocket, []string{brokerJob}, func(path string, peer int) (*exec.Cmd, error) {
+					var got lifecycleProbeJob
+					if ReadLifecycleControl(path, MaxBytes, &got) != nil {
+						return nil, os.ErrInvalid
+					}
+					expected := job
+					expected.Config.OwnerPID = peer
+					if !reflect.DeepEqual(got, expected) {
+						return nil, os.ErrInvalid
+					}
+					cmd := exec.Command(os.Args[0], "-test.run=^TestLifecycleProbeProcess$")
+					cmd.Env = append(os.Environ(), "PYRY_LIFECYCLE_PROBE=broker", "PYRY_LIFECYCLE_PROBE_JOB="+path)
+					return cmd, nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = server.Join(2 * time.Second) })
+			}
+			if e := probeWrite(jobPath, job); e != nil {
 				t.Fatal(e)
 			}
 			cmd := exec.Command(os.Args[0], "-test.run=^TestLifecycleProbeProcess$")
@@ -314,7 +371,31 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal("broker ended before original cleanup")
 				}
 			}
-			if strings.HasSuffix(variant, "-seal-kill") {
+			if strings.HasSuffix(variant, "-seal-reap") {
+				if mode == "capture" {
+					var sentinelPID int
+					waitLifecycleProbe(t, filepath.Join(root, "sentinel-pid.json"), &sentinelPID)
+					if sentinelPID <= 1 || syscall.Kill(sentinelPID, 0) != nil {
+						t.Fatal("owned detached descendant absent before reap")
+					}
+				}
+				agentrun.ReapDescendantGroups(cmd.Process.Pid, slog.New(slog.NewTextHandler(io.Discard, nil)))
+				if mode == "capture" {
+					var reaped bool
+					waitLifecycleProbe(t, filepath.Join(root, "sentinel-reaped.json"), &reaped)
+					if !reaped {
+						t.Fatal("production descendant reaper did not kill owned witness")
+					}
+				}
+				var brokerPID int
+				waitLifecycleProbe(t, filepath.Join(root, "broker-pid.json"), &brokerPID)
+				if syscall.Kill(brokerPID, 0) != nil {
+					t.Fatal("production reaper killed outer-owned broker")
+				}
+				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
+			} else if strings.HasSuffix(variant, "-seal-kill") {
 				// Keep the owner's input writer open while it waits for output
 				// drain, just as exec.Cmd.Wait may do after killing the child.
 				if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
@@ -330,13 +411,22 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 			}
 			e = cmd.Wait()
 			_ = in.Close()
-			if (c.End == "seal" || c.End == "eof" || (c.End == "delete-conversation" && variant != "delete-without-checkpoint")) && e != nil && !strings.HasSuffix(variant, "-seal-kill") {
+			if (c.End == "seal" || c.End == "eof" || (c.End == "delete-conversation" && variant != "delete-without-checkpoint")) && e != nil && !strings.HasSuffix(variant, "-seal-kill") && !strings.HasSuffix(variant, "-seal-reap") {
 				t.Fatal("original stdin EOF did not shut down owned process", e)
 			}
 			if c.End == "kill" && variant != "changed-input" {
 				status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
 				if e == nil || !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
 					t.Fatal("original kill did not terminate ownedPID")
+				}
+			}
+			if strings.HasSuffix(variant, "-seal-reap") {
+				status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+				if e == nil || !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
+					t.Fatal("original owner signal boundary changed")
+				}
+				if err := server.Join(5 * time.Second); err != nil {
+					t.Fatal(err)
 				}
 			}
 			var r lifecycleProbeReceipt

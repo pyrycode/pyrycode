@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func lifecycleSuiteControl() *LifecycleSuite {
@@ -121,7 +122,7 @@ func TestLifecycleArtifactsPinPrefixThroughOriginalCleanup(t *testing.T) {
 					write(prefix+".action.ready", LifecycleKill{PID: 1001 + index, Signal: "delete-conversation"})
 				}
 			}
-			before, _, e := AuditLifecycleArtifacts(home, suite.Scenario, suite.Producer.Revision, suite.Producer.BinarySHA256, suite.DaemonSHA256, false)
+			before, _, e := AuditLifecycleArtifacts(home, suite.Scenario, suite.Producer.Revision, suite.Producer.BinarySHA256, suite.DaemonSHA256, 0, false)
 			if e != nil {
 				t.Fatal("valid prefix rejected", e)
 			}
@@ -175,13 +176,93 @@ func TestLifecycleArtifactsPinPrefixThroughOriginalCleanup(t *testing.T) {
 				j.Args[1] = createdID
 				write(bootstrap+".job", j)
 			}
-			after, tapes, e := AuditLifecycleArtifacts(home, suite.Scenario, suite.Producer.Revision, suite.Producer.BinarySHA256, suite.DaemonSHA256, true)
+			after, tapes, e := AuditLifecycleArtifacts(home, suite.Scenario, suite.Producer.Revision, suite.Producer.BinarySHA256, suite.DaemonSHA256, 0, true)
 			if mutation == "valid" {
 				if e != nil || before != after || len(tapes) != 2 {
 					t.Fatal("original cleanup changed immutable prefix", e)
 				}
 			} else if e == nil && before == after {
 				t.Fatal("late lifecycle mutation accepted")
+			}
+		})
+	}
+}
+
+func TestLifecycleLaunchRequiresKernelPeerAndClosedCurrentJob(t *testing.T) {
+	home := t.TempDir()
+	for _, dir := range []string{"recording-children", "recording-roles", "work"} {
+		if os.Mkdir(filepath.Join(home, dir), 0700) != nil {
+			t.Fatal("mkdir")
+		}
+	}
+	base := PoolProcessConfig{Mode: "capture", Scenario: "conversation-lifecycle", Home: home, WorkDir: filepath.Join(home, "work"), Claude: filepath.Join(home, "native"), Finish: filepath.Join(home, "finish"), Producer: suiteControl().Producer}
+	daemon, socket := filepath.Join(home, "pyry"), filepath.Join(home, "socket")
+	write := func(path string, v any) {
+		raw, _ := json.Marshal(v)
+		if os.WriteFile(path, raw, 0600) != nil {
+			t.Fatal("write")
+		}
+	}
+	write(filepath.Join(home, "recording-endpoint.json"), map[string]string{"Daemon": daemon, "Socket": socket})
+	sourceSHA := base.Producer.BinarySHA256
+	parent, peer := os.Getpid(), os.Getpid()+100
+	prefix := filepath.Join(home, "recording-children", "bootstrap")
+	process := base
+	process.Scenario += "-bootstrap"
+	process.Path = prefix + ".json"
+	process.Claim = prefix + ".claim"
+	initial := LifecycleJob{Config: LifecycleBrokerConfig{PoolProcessConfig: process, OwnerPID: peer, BrokerParentPID: parent, End: "seal", Kill: prefix + ".action", Abort: prefix + ".abort"}, Args: []string{"--session-id", LifecycleBootstrapSession, "--settings", filepath.Join(home, "settings.json"), "--append-system-prompt-file", filepath.Join(home, "prompt.txt")}, Role: "bootstrap", SessionID: LifecycleBootstrapSession, WorkDir: base.WorkDir, Daemon: daemon, Socket: socket, SourceBinarySHA256: sourceSHA}
+	jobPath := prefix + ".job"
+	if err := ValidateLifecycleLaunch(initial, jobPath, peer, parent, base, sourceSHA, daemon); err != nil {
+		t.Fatal("valid current launch", err)
+	}
+	for _, kind := range []string{"kernel-peer", "parent", "source", "producer", "mode", "unknown-role", "foreign-output", "foreign-claim", "foreign-abort", "foreign-finish", "deadline", "foreign-endpoint", "foreign-argv-session", "foreign-role-session", "unknown-argument", "resume", "cwd", "native-executable"} {
+		t.Run(kind, func(t *testing.T) {
+			raw, _ := json.Marshal(initial)
+			var j LifecycleJob
+			if json.Unmarshal(raw, &j) != nil {
+				t.Fatal("clone")
+			}
+			switch kind {
+			case "kernel-peer":
+				j.Config.OwnerPID++
+			case "parent":
+				j.Config.BrokerParentPID++
+			case "source":
+				j.SourceBinarySHA256 = "foreign"
+			case "producer":
+				j.Config.Producer.Revision = "foreign"
+			case "mode":
+				j.Config.Mode = "replay"
+			case "unknown-role":
+				j.Role = "extra"
+			case "foreign-output":
+				j.Config.Path = filepath.Join(home, "foreign.json")
+			case "foreign-claim":
+				j.Config.Claim += "-foreign"
+			case "foreign-abort":
+				j.Config.Abort += "-foreign"
+			case "foreign-finish":
+				j.Config.Finish += "-foreign"
+			case "deadline":
+				j.Config.Deadline = time.Now()
+			case "foreign-endpoint":
+				j.Socket += "-foreign"
+			case "foreign-argv-session":
+				j.Args[1] = "11111111-1111-4111-8111-111111111111"
+			case "foreign-role-session":
+				j.SessionID = "11111111-1111-4111-8111-111111111111"
+			case "unknown-argument":
+				j.Args = append(j.Args, "--foreign")
+			case "resume":
+				j.Args[0] = "--resume"
+			case "cwd":
+				j.WorkDir += "-foreign"
+			case "native-executable":
+				j.Config.Claude += "-foreign"
+			}
+			if err := ValidateLifecycleLaunch(j, jobPath, peer, parent, base, sourceSHA, daemon); err == nil {
+				t.Fatal("unowned launch accepted")
 			}
 		})
 	}

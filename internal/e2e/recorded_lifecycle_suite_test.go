@@ -148,10 +148,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal("cannot prepare daemon recording wrapper")
 	}
 	config := struct {
+		BrokerParentPID                          int
 		Process                                  claudetape.PoolProcessConfig
 		Root, Receipt, Wrapper                   string
 		DaemonSHA256, Daemon, SourceBinarySHA256 string
-	}{process, profile.Root, filepath.Join(home, "receipt"), wrapper, hex.EncodeToString(daemonSum[:]), daemon, sourceSHA}
+	}{os.Getpid(), process, profile.Root, filepath.Join(home, "receipt"), wrapper, hex.EncodeToString(daemonSum[:]), daemon, sourceSHA}
 	raw, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
@@ -160,6 +161,28 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	if err := os.WriteFile(configPath, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
+
+	var brokerJobs []string
+	for _, role := range profile.Roles {
+		brokerJobs = append(brokerJobs, filepath.Join(children, role+".job"))
+	}
+	server, err := claudetape.NewLifecycleBrokerServer(filepath.Join(home, "broker.sock"), brokerJobs, func(jobPath string, peer int) (*exec.Cmd, error) {
+		var job claudetape.LifecycleJob
+		if claudetape.ReadLifecycleControl(jobPath, claudetape.MaxBytes, &job) != nil || claudetape.ValidateLifecycleLaunch(job, jobPath, peer, os.Getpid(), process, sourceSHA, daemon) != nil {
+			return nil, os.ErrInvalid
+		}
+		cmd := exec.Command(binary, "-test.run=^TestLifecycleTapeBrokerProcess$", "--", jobPath)
+		cmd.Env = os.Environ()
+		if mode == "replay" {
+			cmd.Env = recordedPoolOfflineEnv()
+		}
+		cmd.Env = append(cmd.Env, "PYRY_LIFECYCLE_RECORDING_CONFIG="+configPath)
+		return cmd, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Join(2 * time.Second) })
 
 	// A failed original process cannot leave a detached broker/provider behind.
 	// Abort files address only these closed per-role jobs; no captured PID is used.
@@ -295,6 +318,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	if e != nil || afterSum != daemonSum {
 		t.Fatal("lifecycle daemon image changed")
 	}
+	if err := server.Join(15 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	// Detached brokers close after provider EOF, independently of the original
 	// root's test2json exit. Join their bounded terminal publication before the
 	// immutable final audit; process exit alone is not a receipt barrier.
@@ -311,7 +337,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	digest, tapes, err := claudetape.AuditLifecycleArtifacts(home, name, revision, sourceSHA, config.DaemonSHA256, true)
+	digest, tapes, err := claudetape.AuditLifecycleArtifacts(home, name, revision, sourceSHA, config.DaemonSHA256, os.Getpid(), true)
 	if err != nil || digest != receipt.ArtifactSHA256 {
 		for _, role := range profile.Roles {
 			var terminal claudetape.LifecycleReceipt

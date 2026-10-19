@@ -18,6 +18,7 @@ import (
 )
 
 type lifecycleRecordingConfig struct {
+	BrokerParentPID                                                  int
 	Process                                                          claudetape.PoolProcessConfig
 	Root, Receipt, Wrapper, Daemon, DaemonSHA256, SourceBinarySHA256 string
 }
@@ -29,7 +30,7 @@ func readLifecycleRecordingConfig(path string) (lifecycleRecordingConfig, error)
 		return c, e
 	}
 	p, ok := claudetape.LifecycleProfiles()[c.Process.Scenario]
-	if !ok || p.Root != c.Root || poolRecordedRevision == "" || c.Process.Producer.Revision != poolRecordedRevision || !filepath.IsAbs(c.Process.Home) || c.Process.WorkDir != filepath.Join(c.Process.Home, "work") || c.Process.Finish != filepath.Join(c.Process.Home, "finish") || c.Receipt != filepath.Join(c.Process.Home, "receipt") || c.Wrapper != filepath.Join(c.Process.Home, "recording-bin", "claude") || !filepath.IsAbs(c.Daemon) || len(c.SourceBinarySHA256) != 64 || len(c.DaemonSHA256) != 64 {
+	if !ok || c.BrokerParentPID <= 1 || p.Root != c.Root || poolRecordedRevision == "" || c.Process.Producer.Revision != poolRecordedRevision || !filepath.IsAbs(c.Process.Home) || c.Process.WorkDir != filepath.Join(c.Process.Home, "work") || c.Process.Finish != filepath.Join(c.Process.Home, "finish") || c.Receipt != filepath.Join(c.Process.Home, "receipt") || c.Wrapper != filepath.Join(c.Process.Home, "recording-bin", "claude") || !filepath.IsAbs(c.Daemon) || len(c.SourceBinarySHA256) != 64 || len(c.DaemonSHA256) != 64 {
 		return c, os.ErrInvalid
 	}
 	exe, e := os.Executable()
@@ -202,7 +203,7 @@ func finishLifecycleRecording(t *testing.T) {
 	for _, role := range profile.Roles {
 		_ = waitLifecycleReceipt(t, filepath.Join(c.Process.Home, "recording-children", role+".prefix"))
 	}
-	digest, _, e := claudetape.AuditLifecycleArtifacts(c.Process.Home, c.Process.Scenario, poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256, false)
+	digest, _, e := claudetape.AuditLifecycleArtifacts(c.Process.Home, c.Process.Scenario, poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256, c.BrokerParentPID, false)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -271,11 +272,11 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 	process.Path = prefix + ".json"
 	process.Claim = prefix + ".claim"
 	process.WorkDir = role.WorkDir
-	job := claudetape.LifecycleJob{Config: claudetape.LifecycleBrokerConfig{PoolProcessConfig: process, OwnerPID: os.Getpid(), End: claudetape.LifecycleEnd(c.Process.Scenario, role.Role), Kill: prefix + ".action", Abort: prefix + ".abort"}, Args: args, Role: role.Role, ConversationID: role.ConversationID, SessionID: role.SessionID, WorkDir: role.WorkDir, Daemon: endpoint.Daemon, Socket: endpoint.Socket, SourceBinarySHA256: c.SourceBinarySHA256}
+	job := claudetape.LifecycleJob{Config: claudetape.LifecycleBrokerConfig{PoolProcessConfig: process, OwnerPID: os.Getpid(), BrokerParentPID: c.BrokerParentPID, End: claudetape.LifecycleEnd(c.Process.Scenario, role.Role), Kill: prefix + ".action", Abort: prefix + ".abort"}, Args: args, Role: role.Role, ConversationID: role.ConversationID, SessionID: role.SessionID, WorkDir: role.WorkDir, Daemon: endpoint.Daemon, Socket: endpoint.Socket, SourceBinarySHA256: c.SourceBinarySHA256}
 	if daemonRecordingWrite(prefix+".job", job) != nil {
 		fail()
 	}
-	if claudetape.ExecLifecycleChild([]string{"-test.run=^TestLifecycleTapeBrokerProcess$", "--", prefix + ".job"}, os.Environ(), process.Claude, args, process.Mode == "capture") != nil {
+	if claudetape.ExecLifecycleChildViaBroker(filepath.Join(c.Process.Home, "broker.sock"), prefix+".job", process.Claude, args, process.Mode == "capture") != nil {
 		fail()
 	}
 	os.Exit(0)
@@ -296,7 +297,7 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		}
 	}
 	job, e := readLifecycleJob(jobPath)
-	if e != nil || claudetape.LifecycleEnd(c.Process.Scenario, job.Role) == "" || jobPath != filepath.Join(c.Process.Home, "recording-children", job.Role+".job") || job.SourceBinarySHA256 != c.SourceBinarySHA256 || job.Config.OwnerPID != os.Getppid() || job.Config.Home != c.Process.Home || job.Config.Producer.Revision != poolRecordedRevision {
+	if e != nil || claudetape.LifecycleEnd(c.Process.Scenario, job.Role) == "" || jobPath != filepath.Join(c.Process.Home, "recording-children", job.Role+".job") || job.SourceBinarySHA256 != c.SourceBinarySHA256 || job.Config.BrokerParentPID != c.BrokerParentPID || os.Getppid() != c.BrokerParentPID || job.Config.OwnerPID <= 1 || job.Config.Home != c.Process.Home || job.Config.Producer.Revision != poolRecordedRevision {
 		os.Exit(2)
 	}
 	prefix := filepath.Join(c.Process.Home, "recording-children", job.Role)

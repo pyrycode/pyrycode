@@ -3,6 +3,7 @@ package claudetape
 import (
 	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,15 @@ import (
 // 3/4/5, provider stdin/stdout/stderr at 6/7/8, and a ready writer at fd 9.
 // The caller supplies a closed, source-bound broker invocation and environment.
 func ExecLifecycleChild(brokerArgs, brokerEnv []string, provider string, args []string, capture bool) error {
+	return execLifecycleChild(brokerArgs, brokerEnv, provider, args, capture, "", "")
+}
+
+// ExecLifecycleChildViaBroker delegates the pipe capability to the outer test
+// parent, so production's native descendant reaper cannot kill the recorder.
+func ExecLifecycleChildViaBroker(socket, job, provider string, args []string, capture bool) error {
+	return execLifecycleChild(nil, nil, provider, args, capture, socket, job)
+}
+func execLifecycleChild(brokerArgs, brokerEnv []string, provider string, args []string, capture bool, socket, job string) error {
 	fail := errors.New("lifecycle exec setup failed")
 	if capture {
 		info, err := os.Stat(provider)
@@ -51,17 +61,43 @@ func ExecLifecycleChild(brokerArgs, brokerEnv []string, provider string, args []
 	}
 	defer readyR.Close()
 	defer readyW.Close()
-	cmd := exec.Command(exe, brokerArgs...)
-	cmd.Env = brokerEnv
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.ExtraFiles = []*os.File{os.Stdin, os.Stdout, os.Stderr, inW, outR, errR, readyW}
-	if cmd.Start() != nil {
-		return fail
+	var cmd *exec.Cmd
+	var connection *net.UnixConn
+	if socket == "" {
+		cmd = exec.Command(exe, brokerArgs...)
+		cmd.Env = brokerEnv
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.ExtraFiles = []*os.File{os.Stdin, os.Stdout, os.Stderr, inW, outR, errR, readyW}
+		if cmd.Start() != nil {
+			return fail
+		}
+	} else {
+		if !filepath.IsAbs(socket) || !filepath.IsAbs(job) || len(job) >= 4096 {
+			return fail
+		}
+		connection, err = net.DialUnix("unix", nil, &net.UnixAddr{Name: socket, Net: "unix"})
+		if err != nil {
+			return fail
+		}
+		defer connection.Close()
+		_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		files := []*os.File{os.Stdin, os.Stdout, os.Stderr, inW, outR, errR, readyW}
+		var fds []int
+		for _, f := range files {
+			fds = append(fds, int(f.Fd()))
+		}
+		n, oob, err := connection.WriteMsgUnix([]byte(job), syscall.UnixRights(fds...), nil)
+		if err != nil || n != len(job) || oob != len(syscall.UnixRights(fds...)) {
+			return fail
+		}
+		if connection.CloseWrite() != nil {
+			return fail
+		}
 	}
 	cleanupBroker := true
 	var waitDone <-chan error
 	defer func() {
-		if cleanupBroker {
+		if cleanupBroker && cmd != nil {
 			_ = cmd.Process.Kill()
 			if waitDone != nil {
 				<-waitDone
@@ -114,7 +150,20 @@ func ExecLifecycleChild(brokerArgs, brokerEnv []string, provider string, args []
 	_ = os.Stderr.Close()
 	done := make(chan error, 1)
 	waitDone = done
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		if cmd != nil {
+			done <- cmd.Wait()
+			return
+		}
+		_ = connection.SetReadDeadline(time.Now().Add(10 * time.Second))
+		var status [1]byte
+		_, e := io.ReadFull(connection, status[:])
+		if e != nil || status[0] != 1 {
+			done <- fail
+		} else {
+			done <- nil
+		}
+	}()
 	select {
 	case brokerErr := <-done:
 		cleanupBroker = false

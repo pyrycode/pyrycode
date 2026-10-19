@@ -87,6 +87,7 @@ func (t *LifecycleTape) Save(path string) error {
 type LifecycleBrokerConfig struct {
 	PoolProcessConfig
 	OwnerPID         int
+	BrokerParentPID  int
 	Deadline         time.Time
 	End, Kill, Abort string
 	OnSeal           func(int) error `json:"-"`
@@ -102,11 +103,15 @@ type LifecycleKill struct {
 // SIGKILL authorization. A seal-ended role must still be alive at its seal.
 func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count int, resultErr error) {
 	fail := errors.New("lifecycle broker failed")
-	if c.OwnerPID <= 1 || os.Getppid() != c.OwnerPID || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation") {
+	parent := c.OwnerPID
+	if c.BrokerParentPID != 0 {
+		parent = c.BrokerParentPID
+	}
+	if c.OwnerPID <= 1 || parent <= 1 || os.Getppid() != parent || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation") {
 		return 0, fail
 	}
 	defer func() {
-		if resultErr != nil && os.Getppid() == c.OwnerPID {
+		if resultErr != nil && c.BrokerParentPID == 0 && os.Getppid() == c.OwnerPID {
 			_ = syscall.Kill(c.OwnerPID, syscall.SIGKILL)
 		}
 	}()

@@ -16,7 +16,7 @@ import (
 // AuditLifecycleArtifacts pins all prefix evidence before original cleanup and
 // again afterwards. A seal-ended child gains only its final EOF receipt during
 // cleanup; its tape and every other launch/action artifact remain immutable.
-func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA string, complete bool) (string, map[string]*LifecycleTape, error) {
+func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA string, brokerParentPID int, complete bool) (string, map[string]*LifecycleTape, error) {
 	fail := errors.New("lifecycle artifact inventory changed")
 	profile, ok := LifecycleProfiles()[scenario]
 	if !ok {
@@ -126,7 +126,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			session, conversation = created.SessionID, created.ConversationID
 		}
 		c := job.Config
-		if job.Role != role || job.SessionID != session || job.ConversationID != conversation || job.WorkDir != filepath.Join(home, "work") || job.SourceBinarySHA256 != sourceSHA || job.Daemon != endpoint.Daemon || job.Socket != endpoint.Socket || c.Scenario != scenario+"-"+role || c.Home != home || c.WorkDir != job.WorkDir || c.Path != prefix+".json" || c.Claim != prefix+".claim" || c.Finish != filepath.Join(home, "finish") || c.Kill != prefix+".action" || c.Abort != prefix+".abort" || c.End != end || !c.Deadline.IsZero() || c.Producer.Revision != revision || (c.Mode != "capture" && c.Mode != "replay") {
+		if job.Role != role || job.SessionID != session || job.ConversationID != conversation || job.WorkDir != filepath.Join(home, "work") || job.SourceBinarySHA256 != sourceSHA || job.Daemon != endpoint.Daemon || job.Socket != endpoint.Socket || c.Scenario != scenario+"-"+role || c.Home != home || c.WorkDir != job.WorkDir || c.Path != prefix+".json" || c.Claim != prefix+".claim" || c.Finish != filepath.Join(home, "finish") || c.Kill != prefix+".action" || c.Abort != prefix+".abort" || c.End != end || !c.Deadline.IsZero() || c.Producer.Revision != revision || c.BrokerParentPID != brokerParentPID || (c.Mode != "capture" && c.Mode != "replay") {
 			return "", nil, fail
 		}
 		if c.Mode == "capture" && (!reflect.DeepEqual(c.Producer, tape.Tape.Producer) || c.Producer.BinarySHA256 != sourceSHA) {
@@ -204,4 +204,33 @@ func PublishLifecycleControl(path string, value any) error {
 		return errors.New("invalid lifecycle control publication")
 	}
 	return publishClosedFile(filepath.Dir(path), filepath.Base(path), raw)
+}
+
+// ValidateLifecycleLaunch checks the kernel-identified current provider before
+// an outer-owned broker can touch job paths or acknowledge readiness.
+func ValidateLifecycleLaunch(j LifecycleJob, jobPath string, peer, parent int, base PoolProcessConfig, sourceSHA, daemon string) error {
+	fail := errors.New("unowned lifecycle broker launch")
+	prefix := filepath.Join(base.Home, "recording-children", j.Role)
+	end := LifecycleEnd(base.Scenario, j.Role)
+	c := j.Config
+	if end == "" || peer <= 1 || peer == parent || c.OwnerPID != peer || c.BrokerParentPID != parent || jobPath != prefix+".job" || j.SourceBinarySHA256 != sourceSHA || j.Daemon != daemon || j.WorkDir != base.WorkDir || c.Mode != base.Mode || c.Claude != base.Claude || c.Home != base.Home || c.WorkDir != base.WorkDir || c.Scenario != base.Scenario+"-"+j.Role || c.Path != prefix+".json" || c.Claim != prefix+".claim" || c.Finish != base.Finish || c.Kill != prefix+".action" || c.Abort != prefix+".abort" || c.End != end || !c.Deadline.IsZero() || !reflect.DeepEqual(c.Producer, base.Producer) {
+		return fail
+	}
+	var endpoint struct{ Daemon, Socket string }
+	if ReadLifecycleControl(filepath.Join(base.Home, "recording-endpoint.json"), 16384, &endpoint) != nil || endpoint.Daemon != daemon || endpoint.Socket != j.Socket || !filepath.IsAbs(j.Socket) {
+		return fail
+	}
+	session, conv := LifecycleBootstrapSession, ""
+	if j.Role == "created-1" {
+		var binding struct{ Role, ConversationID, SessionID, WorkDir string }
+		if ReadLifecycleControl(filepath.Join(base.Home, "recording-roles", "created-1.json"), 16384, &binding) != nil || binding.Role != j.Role || binding.WorkDir != base.WorkDir || !poolUUID.MatchString(binding.SessionID) || binding.SessionID == LifecycleBootstrapSession || !poolUUID.MatchString(binding.ConversationID) {
+			return fail
+		}
+		session, conv = binding.SessionID, binding.ConversationID
+	}
+	b, err := NewDaemonBinding(j.Args, base.Home, base.WorkDir, j.Daemon, j.Socket)
+	if err != nil || b.session != session || j.SessionID != session || j.ConversationID != conv {
+		return fail
+	}
+	return nil
 }
