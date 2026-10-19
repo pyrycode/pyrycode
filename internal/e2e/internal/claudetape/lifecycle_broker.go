@@ -11,9 +11,10 @@ import (
 )
 
 // LifecycleTape records a provider killed by an original operator action, or
-// a still-live prefix sealed after all original assertions. Captured host PIDs
-// never enter replay fixtures. Kill authorization is an ephemeral owned-PID
-// witness checked by the broker and the outer original-test parent.
+// a still-live prefix sealed after all original assertions. Ownership and action
+// PIDs stay in private launch evidence. Native protocol PID metadata remains
+// literal, opaque data and is never used as a process or signal target. Kill
+// authorization uses the current owned launch, checked by the outer test parent.
 type LifecycleTape struct {
 	Version int    `json:"version"`
 	Tape    *Tape  `json:"tape"`
