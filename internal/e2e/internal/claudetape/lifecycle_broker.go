@@ -399,14 +399,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		frames++
 		actionAccepted = true
-		ack, _ := json.Marshal(LifecycleKill{PID: c.OwnerPID, Signal: "delete-conversation"})
-		f, err := os.OpenFile(c.Kill+".ready", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err != nil {
-			return fail
-		}
-		_, err = f.Write(ack)
-		closeErr := f.Close()
-		if err != nil || closeErr != nil {
+		if err := PublishLifecycleControl(c.Kill+".ready", LifecycleKill{PID: c.OwnerPID, Signal: "delete-conversation"}); err != nil {
 			return fail
 		}
 		return nil

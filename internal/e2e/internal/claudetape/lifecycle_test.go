@@ -130,7 +130,7 @@ func waitLifecycleProbe(t *testing.T, path string, target any) {
 func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 	producer := Producer{Revision: strings.Repeat("a", 40), BinarySHA256: strings.Repeat("b", 64), ClaudeVersion: "test-owned", CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	saved := map[string]*LifecycleTape{}
-	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-delete", "replay-delete", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
+	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-delete", "replay-delete", "capture-delete-partial", "replay-delete-partial", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
 		t.Run(variant, func(t *testing.T) {
 			root := t.TempDir()
 			mode := "capture"
@@ -138,7 +138,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 				mode = "replay"
 			}
 			c := LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: mode, Scenario: "lifecycle-probe", Path: filepath.Join(root, "tape.json"), Claim: filepath.Join(root, "claim"), Finish: filepath.Join(root, "finish"), Producer: producer}, End: "kill", Kill: filepath.Join(root, "kill.json")}
-			if strings.HasSuffix(variant, "-delete") || variant == "delete-without-checkpoint" {
+			if strings.Contains(variant, "-delete") || variant == "delete-without-checkpoint" {
 				c.End = "delete-conversation"
 				c.Scenario = "conversation-lifecycle-created-1"
 			}
@@ -214,13 +214,47 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 				if variant == "foreign-pid" {
 					pid++
 				}
-				if e := probeWrite(c.Kill, LifecycleKill{PID: pid, Signal: func() string {
+				action := LifecycleKill{PID: pid, Signal: func() string {
 					if c.End == "delete-conversation" {
 						return "delete-conversation"
 					}
 					return "SIGKILL"
-				}()}); e != nil {
-					t.Fatal(e)
+				}()}
+				if strings.HasSuffix(variant, "-partial") {
+					// Hold a genuinely partial pending file while the live broker
+					// polls. It must neither accept nor reject this unpublished action.
+					raw, _ := json.Marshal(action)
+					pending := c.Kill + ".pending"
+					f, err := os.OpenFile(pending, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err = f.Write(raw[:len(raw)/2]); err != nil {
+						t.Fatal(err)
+					}
+					time.Sleep(150 * time.Millisecond)
+					if cmd.Process.Signal(syscall.Signal(0)) != nil {
+						t.Fatal("partial pending action killed provider")
+					}
+					for _, path := range []string{c.Kill + ".ready", filepath.Join(root, "receipt.json")} {
+						if _, err := os.Lstat(path); !os.IsNotExist(err) {
+							t.Fatal("pending action affected broker")
+						}
+					}
+					if _, err = f.Write(raw[len(raw)/2:]); err != nil {
+						t.Fatal(err)
+					}
+					if err = f.Close(); err != nil {
+						t.Fatal(err)
+					}
+					if err = os.Link(pending, c.Kill); err != nil {
+						t.Fatal(err)
+					}
+					if err = os.Remove(pending); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := PublishLifecycleControl(c.Kill, action); err != nil {
+					t.Fatal(err)
 				}
 			}
 			if variant == "partial-input" {
@@ -433,5 +467,30 @@ func TestLifecycleFailedExecReapsDetachedBroker(t *testing.T) {
 	}
 	if _, e := os.Lstat(c.Path); !os.IsNotExist(e) {
 		t.Fatal("failed exec published prefix")
+	}
+}
+
+func TestLifecycleControlPublicationIsExclusiveAndClosed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "action")
+	want := LifecycleKill{PID: 42, Signal: "delete-conversation"}
+	if err := PublishLifecycleControl(path, want); err != nil {
+		t.Fatal(err)
+	}
+	var got LifecycleKill
+	if err := ReadLifecycleControl(path, 16384, &got); err != nil || got != want {
+		t.Fatal("complete published control missing", err)
+	}
+	if _, err := os.Lstat(path + ".pending"); !os.IsNotExist(err) {
+		t.Fatal("pending publication remains")
+	}
+	if err := PublishLifecycleControl(path, LifecycleKill{PID: 43, Signal: "delete-conversation"}); err == nil {
+		t.Fatal("publication overwrote authorization")
+	}
+	if err := ReadLifecycleControl(path, 16384, &got); err != nil || got != want {
+		t.Fatal("exclusive publication altered original", err)
 	}
 }

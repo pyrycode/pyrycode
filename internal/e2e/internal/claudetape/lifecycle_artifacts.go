@@ -202,3 +202,13 @@ func ReadLifecycleControl(path string, limit int, target any) error {
 	}
 	return nil
 }
+
+// PublishLifecycleControl exposes an immutable control only after its complete
+// bytes have been closed. Readers never observe an in-progress authorization.
+func PublishLifecycleControl(path string, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil || len(raw) > 16384 {
+		return errors.New("invalid lifecycle control publication")
+	}
+	return publishClosedFile(filepath.Dir(path), filepath.Base(path), raw)
+}

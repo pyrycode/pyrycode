@@ -149,7 +149,7 @@ func lifecycleRecordingBeforeDelete(t *testing.T, home, conv string) {
 		t.Fatal("lifecycle child was not alive before original deletion")
 	}
 	// This marks the unchanged original wire action; it sends no signal itself.
-	if daemonRecordingWrite(prefix+".action", claudetape.LifecycleKill{PID: job.Config.OwnerPID, Signal: "delete-conversation"}) != nil {
+	if claudetape.PublishLifecycleControl(prefix+".action", claudetape.LifecycleKill{PID: job.Config.OwnerPID, Signal: "delete-conversation"}) != nil {
 		t.Fatal("lifecycle deletion checkpoint repeated")
 	}
 	deadline := time.Now().Add(15 * time.Second)
