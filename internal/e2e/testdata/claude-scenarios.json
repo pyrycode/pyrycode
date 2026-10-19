@@ -30,8 +30,8 @@
         "Denied-file absence and current provider/transport behavior remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamPermissionDeny": "2952125ffb6c0a6ce4a010695d1038fdc5fc0cd8616c5a572fea8938d0220450",
-        "TestInteractiveStreamStdioPermissionDeny": "cf3b92088fce89170fd044a550c74a9a8cb4eec9e6f6d9cadead60496fd30ab6"
+        "TestInteractiveStreamPermissionDeny": "febe049e35b7e967527b1d09722150ec4c3941b03b3c90479ae41c0a79582413",
+        "TestInteractiveStreamStdioPermissionDeny": "882c903db397625925ac572133cd4fddd6e2683aab84d846638f2e461d635b6a"
       },
       "claude_args": [],
       "initial_yolo": false,
@@ -48,7 +48,7 @@
         "Current provider compatibility remains live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamLiveness": "386a7727625ae41c23f3c255eabf020dec128d60dda581c2d034fb9d84737b1c"
+        "TestInteractiveStreamLiveness": "d52dea213f6caf575d35d5ffa3834546613a9aa31025045741d6e9ee9b19a21e"
       },
       "claude_args": [],
       "initial_yolo": false,
@@ -79,7 +79,7 @@
         "Blocked-file absence and real provider refusal behavior remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamQuestionRefusal": "df280586266c413026328ab4794764a9865a604ddd75bb5dd2d2511f1f0fee64"
+        "TestInteractiveStreamQuestionRefusal": "a1b0feeb60200d7624b48563f3872f94d8f6152e3f437cc8748f4744ec007d9e"
       },
       "claude_args": [],
       "initial_yolo": false,
@@ -97,8 +97,8 @@
         "Actual file creation and current MCP/stdio behavior remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamModalResolution": "ecb153514a64a4a6f0534bfb6abfd7e7848770a3bc164ae7f90652d1065b14e8",
-        "TestInteractiveStreamStdioModalAllow": "0eec2250eea53a796c071b0fb3c025f1028b7390f0f6f9ef7755b52b786d4b73"
+        "TestInteractiveStreamModalResolution": "66d1c4a00202f27f3467e57623b0e4d198516a2c033bc723f0932e332df46b3f",
+        "TestInteractiveStreamStdioModalAllow": "62e4376e3c11f5b834836bc46bec2bd4327fa993dc317addddd478203d946c4a"
       },
       "claude_args": [],
       "initial_yolo": false,
@@ -115,7 +115,7 @@
         "Actual denied-file absence and 30/60-second real-provider budgets remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamStdioCancelDeniesParkedPermission": "b142840fe57f551af7284853499dd886d1d908160fe8bca2436797902be1c26e"
+        "TestInteractiveStreamStdioCancelDeniesParkedPermission": "8bac95efb9be64ec558d9dcdfb9ce1c14698ffe2a7cbb5eb935270304a2d7a4e"
       },
       "claude_args": [],
       "initial_yolo": false,
@@ -132,7 +132,7 @@
         "Actual foreground Bash execution, current Claude interpretation, per-turn budgets and the three-second late-frame window remain live"
       ],
       "live_contracts": {
-        "TestRealClaude_SendQueuedNowPlacement": "d2767d446137247cccc84be64b775d062fcd8824378c98841a6813346369682f"
+        "TestRealClaude_SendQueuedNowPlacement": "1aa22a33182940dca21018f56b067fa8cc8cfcc9586df3fc8ed2f8f56f9ebe5e"
       },
       "claude_args": [
         "--model",
@@ -158,7 +158,7 @@
         "Current Claude alias resolution and live verbose-log privacy remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamModelAnnouncedFrame": "85093518110d03613e41c8fe56efbd696688e0d459a41f7ba9a58bb6b1094eb4"
+        "TestInteractiveStreamModelAnnouncedFrame": "4abb2d282735084b89a33046a301fef2b2d019010eca3082644d357accfa4e70"
       },
       "initial_yolo": false,
       "comparison_policy": "strict_ordered",
@@ -178,7 +178,7 @@
         "Current advertised menu completeness, rejection behavior and retained live model remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamRejectsModelAbsentFromCurrentMenu": "56646429cea57d5fc4371c1413cad1d89f569b04f4f1039ec79393a7ab553e4e"
+        "TestInteractiveStreamRejectsModelAbsentFromCurrentMenu": "5d357a03011d59e65c4295440654a78e32b7c3dd15420ca728a81ef298b17a6a"
       },
       "initial_yolo": false,
       "comparison_policy": "strict_ordered",
@@ -199,7 +199,7 @@
         "Current Claude tool execution, filesystem effects and newly introduced stream shapes remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamNoUnrecognizedOnToolTurn": "06cde5260dde3a35adf50b93c1456d2d9314ac9f0f38ca62bce151803ad739f7"
+        "TestInteractiveStreamNoUnrecognizedOnToolTurn": "3383a1e776984a59c285f5151f11d4a1719dfabff4cd3ba9c527085d8c93cc7c"
       },
       "initial_yolo": false,
       "comparison_policy": "strict_ordered",
@@ -220,7 +220,7 @@
         "Current model menu, pinned-family resolution and actual live model transitions remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamPinnedModelFollowsItsFamily": "1c6c58dacc9dd9c40ae19bc0ce352826ad5fc12a99db2a61efc1332985bf9737"
+        "TestInteractiveStreamPinnedModelFollowsItsFamily": "4cece55e2ad00702c08c658e29e94f9aabfecfff29165ac3a680370f62e40e72"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -241,7 +241,7 @@
         "Unpredictable runtime token and actual Claude file opening remain live; daemon upload/storage checks also execute offline."
       ],
       "live_contracts": {
-        "TestInteractiveStreamAttachmentRead": "a73a6f4b06052f426fc9e96116bd318c4eb028ec741abb7e6d9c8026c961106a"
+        "TestInteractiveStreamAttachmentRead": "9515c8a61061ae457ac031159848630be8a9c333b9d87524d6ec6561da345e4e"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -332,7 +332,7 @@
         "Live workspace path confinement, real provider continuity and original fresh prompts remain live."
       ],
       "live_contracts": {
-        "TestInteractiveChangeWorkspace": "dcafe7efdbace458b205a0f1355665bfa0922b1cfc652666e84dff82e1a3bb25"
+        "TestInteractiveChangeWorkspace": "b142ad4075c2bc7d5fcc44889044d9eeae4e5b9d645bb4f86a9f294efb627518"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -353,7 +353,7 @@
         "Actual skill discovery/loading and current native synthetic-line vocabulary remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamSkillInvocationIsSilent": "a499cb2988daa09848ce0d1eb493da5710b9040bba6b26d92da9d1da80ac6361"
+        "TestInteractiveStreamSkillInvocationIsSilent": "f6127a95d9f15c7230b8faa6ddadd065db727fef180355a6c0174f13025a6ffe"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -374,7 +374,7 @@
         "Real same-child identity, provider posture enforcement and unpredictable outside-file token remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamSessionSettingsReportsConfirmedPermissionMode": "9f485ba35c5ca13e4dd422701ac112c8e88a71c32fe655ac1760443272b054a7"
+        "TestInteractiveStreamSessionSettingsReportsConfirmedPermissionMode": "638427d2fa7446e8e4142840504dcdb8a7b322728181e4214c9f743b2b3befbc"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -394,7 +394,7 @@
         "The version-scoped exploratory finding and unpredictable real file opening remain live; replay preserves captured protocol shape only."
       ],
       "live_contracts": {
-        "TestInteractiveStreamDefaultPostureOutsideWorkspaceRead": "89a4f0ff5807c9c7e31f44f1040edb4d88801f4a8a93dd869bdc08d2058d1265"
+        "TestInteractiveStreamDefaultPostureOutsideWorkspaceRead": "d1ce0dc9e639cfeb1f940295141ef54521680b4c0394fb8500095b708ee48573"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -414,7 +414,7 @@
         "Actual MCP process startup and reconnect execution, current provider status vocabulary and the changed live target row remain live."
       ],
       "live_contracts": {
-        "TestRealClaudeMCPStatusAndReconnect": "12bb962da96cb436db4d89b927df509d173a020009d8faeffec4ed986f455d06"
+        "TestRealClaudeMCPStatusAndReconnect": "8c2e334fd925c09acc1a3eb1bdf960e16eab1d03cfd63a7e9ca5e9e05b386e72"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -434,7 +434,7 @@
         "Current native permission-context absence/workingDir presence, real denial enforcement and file absence remain live; reconnect and exact source-field forwarding also replay."
       ],
       "live_contracts": {
-        "TestInteractiveStreamStdioModalResolution": "24cc2011df9c358d735f850bd90069d138417d8b97ea24074d75ec99fa9b5706"
+        "TestInteractiveStreamStdioModalResolution": "c90e4c40ba34d9a0a1d6678d0a1d2cd56ff21387cf1059e099df0494cb52ff6e"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -454,7 +454,7 @@
         "Current native permission-context absence/workingDir presence, real denial enforcement and file absence remain live; reconnect and exact source-field forwarding also replay."
       ],
       "live_contracts": {
-        "TestInteractiveStreamStdioModalResolution": "24cc2011df9c358d735f850bd90069d138417d8b97ea24074d75ec99fa9b5706"
+        "TestInteractiveStreamStdioModalResolution": "c90e4c40ba34d9a0a1d6678d0a1d2cd56ff21387cf1059e099df0494cb52ff6e"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -475,7 +475,7 @@
         "Native suggestion generation and timing remain current-provider proof. Replay checks nonempty wire set, explicit-null higher-revision clear, native source and print-fallback exclusion."
       ],
       "live_contracts": {
-        "TestInteractiveStream_NativeReplySuggestionSetThenClear": "8c81b75c1f90e8573fc40b403c003a8881601d9e817b5bb4b521e990da8814e0"
+        "TestInteractiveStream_NativeReplySuggestionSetThenClear": "d3cd2cedfa95fafc97a4bec0ba4f833399f8072c00b59e7ed8a929ceb7906cfe"
       },
       "comparison_policy": "native_coding_prefix",
       "boundary": "daemon_stdio"
@@ -493,7 +493,7 @@
         "TestInteractiveStreamHookBlockedBannerReachesTheClient"
       ],
       "live_contracts": {
-        "TestInteractiveStreamHookBlockedBannerReachesTheClient": "ec5e0fbf8d4e63c090873bfbbba046c614eb664720ca22fdd639a2330ab6da5b"
+        "TestInteractiveStreamHookBlockedBannerReachesTheClient": "68d1ff32bd2e5787c9d68a6bf3ab7ed592e247ca6e5be4bf8af569270239b731"
       },
       "retained_live": [
         "Actual UserPromptSubmit hook execution, blocked-first/passed-later witnesses, current informational shape, and original create-conversation cold-spawn coverage remain live."
@@ -517,7 +517,7 @@
         "Current provider generation, actual foreground agent execution and streaming timing remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamForwardsSubagentText": "d13344fb8fb09b189c683631d86f548d60d9f0345070d3967c0e20a3134fc79e"
+        "TestInteractiveStreamForwardsSubagentText": "cb7e7f844806694c22364551ff85b6db76b063cb9c8a4ccaeb3b0a5175c4d92c"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -538,7 +538,7 @@
         "Actual foreground Bash execution and elapsed time remain live; the action checkpoint proves client queue admission and ordered eventual delivery."
       ],
       "live_contracts": {
-        "TestRealClaude_OrdinaryQueuedPlacement": "e9861da08d2f3d8d8f917dd7c3e740de35942243585685e3f7b7050d14a808b1"
+        "TestRealClaude_OrdinaryQueuedPlacement": "cadb3244f7548bea2fabc924cd65245d3b78ed051e6902c43ab26b29a51e3c2e"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -559,7 +559,7 @@
         "Real foreground process cancellation, provider interruption latency and current cancellation behavior remain live; replay proves exact interrupt input after responding, cancelled terminal and subsequent health turn."
       ],
       "live_contracts": {
-        "TestInteractiveStreamInterruptStopsRunningTurn": "df356e66a8bd2a6f943a1d2f4441297ea34e3fd1c766911459fb7158f3fd3fa5"
+        "TestInteractiveStreamInterruptStopsRunningTurn": "fbfa625833d0ef6373d88fae204c962c13d5d46827ade5f77b98b181ccf030ab"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -580,7 +580,7 @@
         "Actual provider interruption during initial thinking and latency remain live; replay preserves initial-thinking guard, exact named interrupt and first cancelled terminal."
       ],
       "live_contracts": {
-        "TestInteractiveStreamInterruptStopsInitialThinkingTurn": "dbe4235c0cea77498544e0020e1de771f5eb4be847d3250e0ffa1f89a6ccce43"
+        "TestInteractiveStreamInterruptStopsInitialThinkingTurn": "f35b2baf2b724f10a9153292e1ccedb142cf318a1a35d0ab4019b7924ca068d6"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -598,7 +598,7 @@
         "Current provider interpretation, actual application of model/posture controls and native child execution remain live. Replay runs the complete original pool test assertions, including native control taps, ownership and unchanged child/spawn checks."
       ],
       "live_contracts": {
-        "TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel": "ce3a88839f195ec9ccd8485b91bdae9208f7d4c732fafed126ac2f9245f30ab5"
+        "TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel": "251f459d0d6597d504ae6a5c97ffd52d485c84042a40cfd71c40bd0f013c8e85"
       },
       "comparison_policy": "strict_ordered"
     },
@@ -615,7 +615,7 @@
         "Current provider interpretation, actual application of model/posture controls and native child execution remain live. Replay runs the complete original pool test assertions, including native control taps, ownership and unchanged child/spawn checks."
       ],
       "live_contracts": {
-        "TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode": "3a4d6384959a7fcf734221a4a47f0c2f74cdbf8cebe8c185cef0c92ab673d305"
+        "TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode": "61b4f11df5deee0597ea952f157420444555e7f482283ad99a74961421faab01"
       },
       "comparison_policy": "strict_ordered"
     },
@@ -632,7 +632,7 @@
         "Current provider interpretation, actual application of model/posture controls and native child execution remain live. Replay runs the complete original pool test assertions, including native control taps, ownership and unchanged child/spawn checks."
       ],
       "live_contracts": {
-        "TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode": "1cbd46416b01f29820677747823641ec93e437080d02cfe23fdea3b13de7054e"
+        "TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode": "2f07dd778d127e401b1fbf6ec8510b61f99f94c3e8b0ce267d9558be6fa6ffa5"
       },
       "comparison_policy": "strict_ordered"
     },
@@ -649,7 +649,7 @@
         "Current provider interpretation, actual application of model/posture controls and native child execution remain live. Replay runs the complete original pool test assertions, including native control taps, ownership and unchanged child/spawn checks."
       ],
       "live_contracts": {
-        "TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows": "e1a27d41a43de52345ec796682186777dbdf420354971283883b491d9937fb95"
+        "TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows": "7e191c5b7e271b1fe8ccbc0f3681b3710686cd7939b8a450cefd3b15ed541f2e"
       },
       "comparison_policy": "strict_ordered"
     },
@@ -665,8 +665,8 @@
         "The shared named-cache witness, exact durable answer history and owned final model/idle proofs match current live assertions. Random witness non-guessability, unpredictable question interpretation and actual Bash file effects remain live obligations."
       ],
       "live_contracts": {
-        "TestInteractiveStreamQuestionAnswer": "2c669f7b89049854db956f771f3d9d87c8011454d82f2a370c8469346623bb5a",
-        "TestInteractiveStreamStdioQuestionAnswer": "1c2436e24c4ccf9507438ae6a10300801aacfc55269baab7e80783a3d34bd651"
+        "TestInteractiveStreamQuestionAnswer": "6c347756acafd29de8c27b0145e599e708a5ac6301a2cdfddeaecb9f90528756",
+        "TestInteractiveStreamStdioQuestionAnswer": "d92cd5d48f0cafc4a5ca717686b1e4aab2e8efdba6b3323d2cda6bea1d409bb5"
       },
       "claude_args": [
         "--model",
@@ -692,7 +692,7 @@
         "The shared named-cache witness, exact durable answer history and owned final model/idle proofs match current live assertions. Random witness non-guessability, unpredictable question interpretation and actual Bash file effects remain live obligations."
       ],
       "live_contracts": {
-        "TestInteractiveStreamBypassQuestions": "f9ca9396147161731d292bcb8dc7e0195469a4ef33b852efc730bb50f4d04ab4"
+        "TestInteractiveStreamBypassQuestions": "92ca0033db09298326b6f49b0d1ff282d1358c22305737198fc54668991d2195"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -714,7 +714,7 @@
         "The shared named-cache witness, exact durable answer history and owned final model/idle proofs match current live assertions. Random witness non-guessability, unpredictable question interpretation and actual Bash file effects remain live obligations."
       ],
       "live_contracts": {
-        "TestInteractiveStreamBypassQuestions": "f9ca9396147161731d292bcb8dc7e0195469a4ef33b852efc730bb50f4d04ab4"
+        "TestInteractiveStreamBypassQuestions": "92ca0033db09298326b6f49b0d1ff282d1358c22305737198fc54668991d2195"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -735,7 +735,7 @@
         "The shared named-cache witness, exact durable answer history and owned final model/idle proofs match current live assertions. Random witness non-guessability, unpredictable question interpretation and actual Bash file effects remain live obligations."
       ],
       "live_contracts": {
-        "TestInteractiveStreamBypassQuestions": "f9ca9396147161731d292bcb8dc7e0195469a4ef33b852efc730bb50f4d04ab4"
+        "TestInteractiveStreamBypassQuestions": "92ca0033db09298326b6f49b0d1ff282d1358c22305737198fc54668991d2195"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -757,7 +757,7 @@
         "The shared named-cache witness, exact durable answer history and owned final model/idle proofs match current live assertions. Random witness non-guessability, unpredictable question interpretation and actual Bash file effects remain live obligations."
       ],
       "live_contracts": {
-        "TestInteractiveStreamBypassQuestions": "f9ca9396147161731d292bcb8dc7e0195469a4ef33b852efc730bb50f4d04ab4"
+        "TestInteractiveStreamBypassQuestions": "92ca0033db09298326b6f49b0d1ff282d1358c22305737198fc54668991d2195"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "daemon_stdio"
@@ -773,7 +773,7 @@
         "TestInteractivePerConversationLiveness_Default"
       ],
       "live_contracts": {
-        "TestInteractivePerConversationLiveness_Default": "8fe9671abd6e78db562306d46bcbd25618dadfb256a0d430180c830dbaf7e799"
+        "TestInteractivePerConversationLiveness_Default": "bdae1cb8f2b51444943b235d9572386fd9d04d98affb5317a79b5572be9405e5"
       },
       "retained_live": [
         "Original real Claude startup, fresh conversation interpretation and provider timing remain live. Strict role tapes share daemon routing and original client/argv assertions."
@@ -790,7 +790,7 @@
         "TestInteractivePerConversationLiveness_WorkspaceFolder"
       ],
       "live_contracts": {
-        "TestInteractivePerConversationLiveness_WorkspaceFolder": "ba7adef4a98563a4ea6c5039647c4ecfcee5b02126b42cf03946690e4ec2ad2a"
+        "TestInteractivePerConversationLiveness_WorkspaceFolder": "33e4b1c25c4e794ea94dd7870c3dea1a029dc2940f403514ca62f279b1042096"
       },
       "retained_live": [
         "Original real Claude startup, fresh conversation interpretation and provider timing remain live. Strict role tapes share daemon routing and original client/argv assertions."
@@ -807,7 +807,7 @@
         "TestInteractivePerConversationTurnStateLiveness"
       ],
       "live_contracts": {
-        "TestInteractivePerConversationTurnStateLiveness": "9a1cb3b6f294f918bc91f1799d24bd9fe18349ec3698e8ba806a5252f4d0f41b"
+        "TestInteractivePerConversationTurnStateLiveness": "ddbc6c6737390e39a00f57c8483e614b88d4cbf1990fe0bbd19074db5bec1601"
       },
       "retained_live": [
         "Original real Claude startup, fresh conversation interpretation and provider timing remain live. Strict role tapes share daemon routing and original client/argv assertions."
@@ -824,7 +824,7 @@
         "TestInteractiveSystemPromptFile_LiveSpawnArgv"
       ],
       "live_contracts": {
-        "TestInteractiveSystemPromptFile_LiveSpawnArgv": "b0d69ad504b2cb00b36e42c6d47da84928a579016a34dc1e76cd1f3e0ed095e3"
+        "TestInteractiveSystemPromptFile_LiveSpawnArgv": "c670b1b73f850c214f6a8893b8e580e7a5a0a0781ec7f9ada3126c77dd1ba22a"
       },
       "retained_live": [
         "Original real Claude startup, fresh conversation interpretation and provider timing remain live. Strict role tapes share daemon routing and original client/argv assertions."
@@ -841,7 +841,7 @@
         "TestRealClaude_PromptFidelity"
       ],
       "live_contracts": {
-        "TestRealClaude_PromptFidelity": "1102d963925c1a4da662fd6bfacb883ae3e295b7e387c8215e915c27a72a263a"
+        "TestRealClaude_PromptFidelity": "3de187fe9a4eeaf8d7409859929f32034f2436f76d75c9f1aa7e0e9b35c6e48e"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -858,7 +858,7 @@
         "TestRealClaude_PromptFidelity_Unicode"
       ],
       "live_contracts": {
-        "TestRealClaude_PromptFidelity_Unicode": "08b3ecb1f120c09059e4f2e9a5b6662e01dbbd65155d613d52ebb048b3638812"
+        "TestRealClaude_PromptFidelity_Unicode": "71dd69d6f3914f20f68c1d7a7f1fb4f28e76aba49b6235b048e31a452569dbf1"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -875,7 +875,7 @@
         "TestRealClaude_DoctorPoisoningRegression"
       ],
       "live_contracts": {
-        "TestRealClaude_DoctorPoisoningRegression": "56d643728a1340fcc06b34e85a84005a1a64e32bcbe1fc385118a088d57db1cb"
+        "TestRealClaude_DoctorPoisoningRegression": "36928ea73ca61bd9709cd5b7b375e906334cfb15265632a93fefa547d11492f9"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -892,7 +892,7 @@
         "TestRealClaude_BashTool_NonZeroExit"
       ],
       "live_contracts": {
-        "TestRealClaude_BashTool_NonZeroExit": "d64520f8a0f6d10a40f1aa1417bc7ee4713d89e27c59a9505e8b0f59a9291b0d"
+        "TestRealClaude_BashTool_NonZeroExit": "1ffca1d934483d4efe2f3a9a9d26c82271b7f6a64907ebce71553c0e18516615"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -909,7 +909,7 @@
         "TestRealClaude_MaxTurnsHonored"
       ],
       "live_contracts": {
-        "TestRealClaude_MaxTurnsHonored": "4a1b4de7120e667ea40d668dfe87c89f3a6cdea9e2340099b8e5ca981e75aa30"
+        "TestRealClaude_MaxTurnsHonored": "5c44679158da8768c88b073141aceb38764ed8de05566d1013b42459b2aea577"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -926,7 +926,7 @@
         "TestRealClaude_LargePromptNearContextWindow"
       ],
       "live_contracts": {
-        "TestRealClaude_LargePromptNearContextWindow": "f0577f40b15222d865998ed10c4625a60fa440e1db88b672d67307ebc5cddf4a"
+        "TestRealClaude_LargePromptNearContextWindow": "21d308051343f7dfdf6bc7d1bc17ac3c636636ad14cdbf5400718b4da890ae15"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -943,7 +943,7 @@
         "TestRealClaude_LongSessionJSONLIntegrity"
       ],
       "live_contracts": {
-        "TestRealClaude_LongSessionJSONLIntegrity": "3704fb64d348cb19a736466a4f49e55ad4c9be408a0abad739ae25b06f28cd9b"
+        "TestRealClaude_LongSessionJSONLIntegrity": "9f00432f09a850940adb11159a909089eb05c7debcb851048495d6b3b294fda4"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -960,7 +960,7 @@
         "TestRealClaude_ToolLoopIntegrity"
       ],
       "live_contracts": {
-        "TestRealClaude_ToolLoopIntegrity": "092c9c47a6ecda5620138ccd4d9bf9c8beebe38d3d779c3ed7996f007523127e"
+        "TestRealClaude_ToolLoopIntegrity": "4ad21fcfa2f4ba572916a9e5e492674a08c4ce9f68aced191fa6dd941fdf371d"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -977,7 +977,7 @@
         "TestRealClaude_PO_RoleLoop"
       ],
       "live_contracts": {
-        "TestRealClaude_PO_RoleLoop": "832155bf0157fb1a7aba35834a45231c8a527d40696ca0ee7894e4684653f3d9"
+        "TestRealClaude_PO_RoleLoop": "b0f47926070dde38c155d4a6994a2dd3c2bec1f5973d4b483c11096375928366"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -994,7 +994,7 @@
         "TestRealClaude_Architect_RoleLoop"
       ],
       "live_contracts": {
-        "TestRealClaude_Architect_RoleLoop": "78a5c6aa4f817132d9e9b357fb68f0b7f065a743269623265884f7de3df2e704"
+        "TestRealClaude_Architect_RoleLoop": "f892daed6dc94ab95ff8b19d1c8c3c2e83b4ca9931958114f6559f7eee2b90f0"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -1011,7 +1011,7 @@
         "TestRealClaude_Developer_RoleLoop"
       ],
       "live_contracts": {
-        "TestRealClaude_Developer_RoleLoop": "013ff6ef07814989dc63526c15a0b4f2524544dd794c83c7edb1d494c4b82c4f"
+        "TestRealClaude_Developer_RoleLoop": "d54e41276a12dcfe67924af0b75e90cd6b7b3f88884dfd5f0e42678e1da3525e"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -1028,7 +1028,7 @@
         "TestRealClaude_CodeReview_RoleLoop"
       ],
       "live_contracts": {
-        "TestRealClaude_CodeReview_RoleLoop": "cfe8f8f44505181786733ecd97c41aeb1bd0f3c659db08e59d0721d7a897c524"
+        "TestRealClaude_CodeReview_RoleLoop": "bc84411bcf920be67d4080b6f9e857aff1548e025abb47b51d1e9b39d48c712e"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -1045,7 +1045,7 @@
         "TestRealClaude_Documentation_RoleLoop"
       ],
       "live_contracts": {
-        "TestRealClaude_Documentation_RoleLoop": "854bee4aca2c369ef72bc960e0cb8d3600b941cfc04812c169976a3b0057739b"
+        "TestRealClaude_Documentation_RoleLoop": "551a83b834495eca9c4da8e0a14db8330bc9340ea8d5436f365a6621d563c840"
       },
       "retained_live": [
         "Real Claude execution and interpretation of CLI prompts, tools, context limits and role instructions."
@@ -1062,7 +1062,7 @@
         "TestRealClaudeAppliedSettingsBeforeFirstTurn"
       ],
       "live_contracts": {
-        "TestRealClaudeAppliedSettingsBeforeFirstTurn": "9aba332860b960915b73304a0585e834c94aad06e3e1569c15579890f68bb02f"
+        "TestRealClaudeAppliedSettingsBeforeFirstTurn": "42665cda78830e42b6cb749d38ac938c23c798dfebcdd1e231af6990d5ec333a"
       },
       "retained_live": [
         "Current Claude model/effort menu, applied settings and compaction production; provider-created HOME state between settings arms; physical execution and provider timing."
@@ -1079,7 +1079,7 @@
         "TestRealClaude_CompactingEdges"
       ],
       "live_contracts": {
-        "TestRealClaude_CompactingEdges": "8232abc0f21c9fb6fa522868e3ea3fde29ad9f0d1ffb9d81c864ec8c74d4ce3e"
+        "TestRealClaude_CompactingEdges": "d1f8e6e0efaf823ac05dd1a60e2ed5d284a86a55a1da8180112606f4905937da"
       },
       "retained_live": [
         "Current Claude model/effort menu, applied settings and compaction production; provider-created HOME state between settings arms; physical execution and provider timing."
@@ -1096,7 +1096,7 @@
         "TestInteractiveSessionErrorRecovery"
       ],
       "live_contracts": {
-        "TestInteractiveSessionErrorRecovery": "44def56b70ae27fa522f64e362140b901cd911da0416dec2267d0760207fa739"
+        "TestInteractiveSessionErrorRecovery": "24b76945beb45269f64ef8d1b385beba58aec33a61772dd7dfdf36e0ce85770b"
       },
       "retained_live": [
         "Current real Claude startup, response and physical JSONL creation; the original test-owned failing executable, closed stdin, retry/backoff, retained/drop queue and original transcript marker assertions continue running."
@@ -1114,7 +1114,7 @@
         "Real Claude startup, native process termination and current-provider interpretation remain live. Replay preserves original create/rename/archive/unarchive/routing/delete assertions and observes its owned stand-in EOF after the unchanged delete action."
       ],
       "live_contracts": {
-        "TestInteractiveConversationLifecycle": "f07ce71802eebf3d3fa77125f74904977dfc4f847c3da33a5a86c273ec182c18"
+        "TestInteractiveConversationLifecycle": "23e3f73925197d2cb4cc9a0652a819ed359e287301287a3b587f3eb2c4b337dd"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "lifecycle_suite"
@@ -1264,352 +1264,352 @@
     "TestInteractiveStreamMultiTurnContinuity": {
       "disposition": "live_only",
       "reason": "Requires current Claude semantic memory across three turns; sequential replay does not establish recall.",
-      "contract_sha256": "d357266d890fcf9e44808d859126362da42c5836ac39ced68e079fac2ed0fa9c"
+      "contract_sha256": "238affa2174d2434eefc3727953cadf56739c773a4739e69dfdc9b4283d6a099"
     },
     "TestAuthenticatedHome_CredentialIsolation": {
       "disposition": "control",
       "reason": "Synthetic credential combinations and temporary operator HOMEs exercise fixture isolation; no actual provider process is called.",
-      "contract_sha256": "c82ed6f453e64e93ffb1021b3d94f40d37e2b46ae47d017816284ab3db7566f8"
+      "contract_sha256": "b0a63af0b174b029ef75b1113c8c7ee912836f2904aebc1d98f72547795c8be1"
     },
     "TestClaudeBinaryAvailable": {
       "disposition": "live_only",
       "reason": "Installed-binary PATH availability and successful claude --version are environment prerequisites; a replay binary cannot establish that installation.",
-      "contract_sha256": "1005df17c16e76de538eccb9bd859e9a1503286371af463d0dcfee2c03821407"
+      "contract_sha256": "7a9ddfa3ab7f379bbfde7a333fb93e461fb8bb80e4518f8f0d580b485b07249a"
     },
     "TestClaudeMdExternalIncludes_SubfolderChildGetsRootImports": {
       "disposition": "live_only",
       "reason": "Compares actual Claude session transcripts for approved versus unapproved external CLAUDE.md imports from subfolders. This is provider file-loading/trust behavior, not daemon stdout routing.",
-      "contract_sha256": "46e5c9c6acb648da633f622940fcdbdfd78904a2ccb816981f694eec0e74cff8"
+      "contract_sha256": "77d44ed8a31cb78e4e60baa00b6532dce527921f904e7d64279c648588426218"
     },
     "TestCodexConversationLive": {
       "disposition": "needs_harness",
       "reason": "Codex conversation permission round trips require a Codex executable/JSON-RPC recording boundary, plan-mode confirmation and retained real file absence/creation witnesses; Claude stdio tapes do not apply.",
-      "contract_sha256": "ac8e9661084c967c6beb9eafe50310fc1c6861770ae277a1f80c7530afad5861"
+      "contract_sha256": "0e814ee13743423a8e236a2848392583c11d017407fbaeea372e587d1dd51206"
     },
     "TestCodexQuestionLive": {
       "disposition": "needs_harness",
       "reason": "Codex request_user_input and adaptive model fallback need a separate Codex protocol recorder. Preserve surfaced question/answer assertions and current-provider fallback behavior.",
-      "contract_sha256": "0b9cbccb76d020add64c5f1c7cae4dd5d33fed95ead1c4356b121cb7c9fe6d8f"
+      "contract_sha256": "cc9add7b50857582f258b20982a4022612630a1edbd3120ef5c9f9735414f5ef"
     },
     "TestInteractiveConversationSystemPrompt_ReachesTheReply": {
       "disposition": "needs_harness",
       "reason": "Two conversations require separate appended system-prompt files and marker isolation. Add session/process-role identity support and complete per-child prompt-file comparison; semantic instruction following stays live.",
-      "contract_sha256": "375fd71a025698df6bbc18677c9501cd49a287c39d31c68cbaf2b3124f97b5ad"
+      "contract_sha256": "ba4d21e24e01c0e21b41eebcc787e4d6f57092ab485cceaeefa704567b15b10c"
     },
     "TestInteractiveStreamBackgroundIdleProbe": {
       "disposition": "live_only",
       "reason": "Opt-in evidence probe joins turn idle with a physical FIFO reader/rendezvous to determine whether background work is actually alive. Recorded idle cannot establish that physical liveness.",
-      "contract_sha256": "9bc2105739a9c2a167f3020157d36332695f748ecb3f03f0b6bb2e989102a3d7"
+      "contract_sha256": "7d2b23d1c35532e132e67f099643735e84fd07dd9299597ee99a67472a8811fa"
     },
     "TestInteractiveStreamClearRunsDaemonReset": {
       "disposition": "needs_harness",
       "reason": "Reset edges, exactly one transition, stored handoff and successor prompt are useful deterministic claims. Requires predecessor/wrap-up/successor roles, typed session rotation and file-input inventory. Actual predecessor-to-successor recall remains live.",
-      "contract_sha256": "57af1b9cf97b583f5477b24bb88f34e19761575ae72336e0b68375b7ec8ed732"
+      "contract_sha256": "208411e851505e168fa9c0cccc6d6058356623169fe8e01163b2eead1c0d05ba"
     },
     "TestInteractiveStreamClearWrapUpSkipped": {
       "disposition": "needs_harness",
       "reason": "Skipped wrap-up must preserve a preexisting note and three reset edges. Needs rotation roles plus explicit deadline/clock or cancellation checkpoint; quick replay must not accidentally turn a timed-out wrap-up into a successful one.",
-      "contract_sha256": "96fb05ab14e811677b4c72bbadc2d4f1c3467abee3e32dfec975eb1ac9dc9cb0"
+      "contract_sha256": "97026ce956cd97900d637c9445db524248712b1825405838cbaaa7dd71212b96"
     },
     "TestInteractiveStreamDormantResetAfterRestart": {
       "disposition": "needs_harness",
       "reason": "Daemon restart, dormant predecessor resume, fresh handoff-note production and successor prompt require daemon/process lifecycle and session-file inputs. Fresh provider recall/read/write witnesses must remain live.",
-      "contract_sha256": "8ac2eda791ba31212d60b635196238fd66e8268ecb831a8cbdd848be11343219"
+      "contract_sha256": "0c7e9e89326535614797e0530cb974a97fc9befec0dddc370061fda72860a5f9"
     },
     "TestInteractiveStreamNewSessionRotatesAndSpawnsFresh": {
       "disposition": "needs_harness",
       "reason": "New-session rotation includes repeated control sends, fresh UUID persistence, transition attribution and actual successor transcript appearance. Requires typed rotation, multiple processes and explicit transcript/file effects; provider transcript production stays live.",
-      "contract_sha256": "4fdc762c6bf346a59956cdae2b9aeaa9e684e0db225d36e50b6e9ef7fd8ef950"
+      "contract_sha256": "3f53471513a78ef9988d3cb3a5d9e82114b920a251506e5013c997d670b0bad3"
     },
     "TestInteractiveStreamPermissionDenyAfterSettingsRespawn": {
       "disposition": "needs_harness",
       "reason": "Effort update followed by SIGKILL and a confirmed different child PID precedes permission denial. Existing denial driver can be reused only after lifecycle/respawn/source-argument support is added.",
-      "contract_sha256": "3f84d7ca5f4128d5d80caa46e10e752974dad14689672773fee24b29f90254b6"
+      "contract_sha256": "a6bba91cb46891d5c7a39c44a415984e4087cc8e8fa09205599d045efddecf27"
     },
     "TestInteractiveStreamResumeAfterEviction": {
       "disposition": "needs_harness",
       "reason": "Idle eviction followed by --resume and token recall requires eviction/child exit, relaunch and transcript input support. Preserve original idle timing and current Claude semantic recall as live obligations.",
-      "contract_sha256": "f0615b9fbd5b154b02ce3e3c6df9e8e4ff2977f1a84f70d23de0c6e851ae9f84"
+      "contract_sha256": "2af93ed0d31aa117bd507e40a0ffdbe02b45a1624dedc34cb86fee6f3e564494"
     },
     "TestInteractiveStreamRunningTurn": {
       "disposition": "live_only",
       "reason": "The central assertion is a real minimum responding interval with no idle while a foreground Bash loop still runs. Untimed stdout playback would remove the test purpose; deterministic state-sequence projection is only partial coverage.",
-      "contract_sha256": "6c65f24ead959e95670822bd442da8196051930a7225d65abd541328a1d2cd38"
+      "contract_sha256": "2a0536da3853d86b8b000cdbcbf947c546cc269eab9e2ee8be4ae8145dd8cdf8"
     },
     "TestInteractiveStreamSendFile": {
       "disposition": "needs_harness",
       "reason": "Send-file invokes daemon file/MCP side effects which do not occur merely by replaying Claude tool-use/result stdout. Add a causal MCP/control-socket side-channel boundary or independently exercise its real RPC, then preserve attachment bytes and physical capture witnesses.",
-      "contract_sha256": "86fa40910f673b129aa9de564ced0b3373c1a4e367b939824660576cffe57d11"
+      "contract_sha256": "1f0267ffbdb184ef67288e90bef584fc0d2589ce3a89c868e8c2d8fa98475009"
     },
     "TestInteractiveStreamStdioAlwaysAllowIsSessionScoped": {
       "disposition": "needs_harness",
       "reason": "Session grant must suppress a second permission yet a fresh independent session must prompt. Add distinct fresh-home/process roles or a reviewed paired-scenario driver; retain first file creation and second touch timestamp as physical live evidence.",
-      "contract_sha256": "7e9f2ce30f1f23d17be4a9266824493617d8f172140de153c0f1f21e77081cfe"
+      "contract_sha256": "0ec8712190012fff852b43971fa3a51288fd2b04498f173d9f9b949cfc1b0799"
     },
     "TestInteractiveStream_FallbackReplySuggestionSetThenClear": {
       "disposition": "needs_harness",
       "reason": "Suggestion fallback uses the persistent stream plus a separate print-mode Claude invocation. Need multi-invocation argv/EOF/exit/result support and an explicit suggestion-set checkpoint before clear; keep source-producer isolation assertions.",
-      "contract_sha256": "08386efea8c81212465ddc76ebef749e7f441f1190e9bf77a5e39280c8f99c54"
+      "contract_sha256": "da8e778006f78f84d8d07cfe77bb3763896afeec4c875dc25b5a625a1b55f858"
     },
     "TestRealClaudeComposerStopClosedInputKillsHeldTask": {
       "disposition": "live_only",
       "reason": "Closed stdin must leave held work alive until foreground release, then actually exit and remove its background FIFO reader. These are OS/process/descendant effects, not stdout assertions.",
-      "contract_sha256": "cfbfa9fbc3fde2bb4a793c24a6db155888659e5377b7e9bf3e9be0ddaba579bc"
+      "contract_sha256": "f6df1bf37821bdd903bff69d910caf0d1bb525fc288cc9741f907936a9cee55b"
     },
     "TestRealClaudeComposerStopPreservesBackgroundTask": {
       "disposition": "needs_checkpoint",
       "reason": "Composer Stop has background and foreground held operations plus an external FIFO release after cancellation. Add causal operator-action checkpoints for holds/release and interrupt input; keep actual surviving background reader/tool completion live.",
-      "contract_sha256": "31e14abd81443843b0b68065e3e24964192c10f74f9ae316e81a609f80c7a316"
+      "contract_sha256": "c5fb9571d9eb2b20b695e1fe4fb98700cbe049202aa074fcd38b2fda095ed866"
     },
     "TestRealClaudeStopBackgroundTaskCompletion": {
       "disposition": "needs_checkpoint",
       "reason": "Stop held task can share targeted task identity, accepted stop and terminal stopped/roster removal, but only with a verified stop-control stdin before terminal source boundary. Physical FIFO hold and process termination remain live.",
-      "contract_sha256": "820fe90c7a98df5c1bf625d1711b58fc9d7a50608c09837b41a929b0741e4baf"
+      "contract_sha256": "f554cc45c66e9507155014be80a43760f30939dbd308f16be8ad872d18c4bc81"
     },
     "TestRealClaude_APIRetryCapture": {
       "disposition": "live_only",
       "reason": "Fresh api_retry collector stages an actual upstream endpoint and verifies Claude honored routing; source-shape discovery/absence cannot be refreshed by replay. Existing parser fixture controls are separate offline proof.",
-      "contract_sha256": "aaaf42b6424b211ef105d68b3815582da7bd78547d32c332b142e7df42593139"
+      "contract_sha256": "8963d7688d34b36b5b5db78f843c85a594a192f169323cac73b2b0932ecab493"
     },
     "TestRealClaude_AllowedToolsEnforcement": {
       "disposition": "live_only",
       "reason": "Actual Claude --allowed-tools enforcement and absent file plus visible refusal are the primary proof. A fake executable would merely obey the fixture; deterministic adapter policy assertions may be tested separately.",
-      "contract_sha256": "fff5b2e89fd10d822ed9ccc9774cc42f6eeaf704f5dd81fe4ad71588f77b606e"
+      "contract_sha256": "2c3e0053acd96a93f328962a1bdff62d32229a9ac390f3c1edc4552b74737bfd"
     },
     "TestRealClaude_AskUserQuestion_CapturesTheCall": {
       "disposition": "live_only",
       "reason": "Fresh AskUserQuestion capture verifies current Claude tool offering and a real MCP approval call reaching the test socket. Client question delivery already has replay ownership; current provider capability/source discovery stays live.",
-      "contract_sha256": "9c57e338ac21dc7f59dd1ada3175951c4b16ada5c0ce28a35d9448d586ed9c81"
+      "contract_sha256": "db6bb4bc218de6c539a34867e451dcda74c92bb092cbd34a051ac2b010209ee1"
     },
     "TestRealClaude_BackgroundHandleTrigger": {
       "disposition": "live_only",
       "reason": "Opt-in background trigger parameter matrix measures real CLI Bash timeout/background handle behavior and physical execution. It is a source evidence probe, not an unported deterministic daemon assertion.",
-      "contract_sha256": "4e8c47eac8d45493e3a1a7c478a05c2a73ae71237c85a1155bd8085dccaa715a"
+      "contract_sha256": "a818dadd3f51a9dc9c402037dd253c28dc84ef31a9bf0fd770a6fddecb59da67"
     },
     "TestRealClaude_BackgroundReachability": {
       "disposition": "live_only",
       "reason": "Opt-in PTY reachability probe identifies the actual Claude PID/session and descendant/background process reachability. Playback cannot establish OS reachability.",
-      "contract_sha256": "23487724c69b6bee509b7ba6ef5055d483c53d86fa1f9bb98447a3ca2772e180"
+      "contract_sha256": "9c2e75e55fdca93cadff029843374e1125d293e00982900c567f3999807d3383"
     },
     "TestRealClaude_BackgroundReplyCompletion": {
       "disposition": "needs_checkpoint",
       "reason": "Late subagent reply completion after foreground result and physical hook release can yield deterministic parser/delivery proof, but needs explicit external release and direct-runner checkpoint support. Existing synthetic replay fixture is partial, not fresh physical proof.",
-      "contract_sha256": "07c8eabf1f2a6ba6b487774e85db415e702257fe435588354d11077db6ad9ca6"
+      "contract_sha256": "829cfb01fbb1cfad4f4ff6510d5a5ea77ccdfbd7405aa25e01c5368a562cf18f"
     },
     "TestRealClaude_BypassApprovalArgv_Probe": {
       "disposition": "live_only",
       "reason": "Bypass/approval argv probe captures installed Claude/MCP launch behavior across alternate argument arms and diagnoses viability. Replaying the observed answer is not a fresh answer to those provider capability questions.",
-      "contract_sha256": "33564c0d0ea02befc01cf38f499452d3e553c3af5b6a2b5c581709fb0f35990b"
+      "contract_sha256": "d3dc8626207e0e0397b8ee9a393af693a0b882d01c099c77f4d89c7d6bed9dc3"
     },
     "TestRealClaude_BypassReescalation_Probe": {
       "disposition": "live_only",
       "reason": "Reescalation probe empirically discriminates applied versus failed current-provider mode transition using raw control/init observations. Source acquisition remains live; stable observed protocol contracts can be shared separately.",
-      "contract_sha256": "693a1dd43180b79ea2d56f377b794d45d0daed8de213be3c595b079a1740a324"
+      "contract_sha256": "6575e6770256563d999534ac1b94a771da946defeac44279b9518f6ed5236c9c"
     },
     "TestRealClaude_CacheHitWarmsAcrossRuns": {
       "disposition": "live_only",
       "reason": "Actual provider cache creation/read input-token warming across two fresh runs is the claim. Recorded usage counters cannot establish a cache hit.",
-      "contract_sha256": "6158a86e679027023a3c200fe3ff28a306a5c7af9529f13547148a3e8df0faf0"
+      "contract_sha256": "eeed61245f419a048bc4092ff8e22eebb6c6918bca8368a723a4f0bd04809864"
     },
     "TestRealClaude_CompactionCapture": {
       "disposition": "live_only",
       "reason": "Fresh compaction source collector primes real context then measures actual Claude /compact frames and nonvacuity. Retained fixture parser checks are offline; current provider shape acquisition is inherently live.",
-      "contract_sha256": "60a23023f2227502b08e1c4750a1ba4e15bbdc59a454c2d2f8b1d8d19f41c960"
+      "contract_sha256": "37f883613101c33ee87d53309d65c85e9abc3d7cbf98cf8edd3ec2b0fe02001d"
     },
     "TestRealClaude_ContextUsageCapture": {
       "disposition": "live_only",
       "reason": "Fresh get_context_usage capture records versioned provider response vocabulary/shape and promotability. Raw source collection is distinct from deterministic parser/query tests; do not count an old capture as fresh compatibility.",
-      "contract_sha256": "79ed305537385073ff14d1cf05930de917ae14a9379fb7cde22ef4f54cad6497"
+      "contract_sha256": "d380edab4fb5cb2b5128df6e99edfb88f44d7422429c6d7fed96c834cffc34e7"
     },
     "TestRealClaude_DroppedLineCapture": {
       "disposition": "live_only",
       "reason": "Opt-in dropped-line source collector joins raw stdout with physical FIFO liveness at result/teardown. Its fresh producer census and physical liveness cannot be established by fixed tapes.",
-      "contract_sha256": "c17e79f111e47e95a1051896ecf345b9d1686c52543ac0318ed39576025282fe"
+      "contract_sha256": "6acfba5c9b37c23f22f25658b4268719cf7d456aadd38716794c47b1a3270e8f"
     },
     "TestRealClaude_EffortInitCapture": {
       "disposition": "live_only",
       "reason": "Effort-init collector probes installed Claude argv viability, raw initialize behavior and capture publication. It is source discovery; inherited/explicit applied settings projection is separately listed for a runner harness.",
-      "contract_sha256": "e819e418ed19c23a76e979ac56e6c29f50927dfb52e8dc825c68d7cf8d29f5b1"
+      "contract_sha256": "60d04fee3a29018de71704376f3a985f2188e223a73f225498d5fbacb1a8a0b4"
     },
     "TestRealClaude_ExitPathWhileCommandRuns": {
       "disposition": "live_only",
       "reason": "PTY exit-path probe measures actual pyry/Claude/command process lifecycle and trailer timing while physical work runs. Current pipe-only playback cannot prove those effects.",
-      "contract_sha256": "c1c40360784a51f5c8137a3b668c1e2af86ef5332526370982ffc22d4498b62b"
+      "contract_sha256": "171dc357685507de5aadcf1d966d96fbdd604c58367835ee173c8d860099ee55"
     },
     "TestRealClaude_InBandModeSwitch_Probe": {
       "disposition": "live_only",
       "reason": "Mode-switch probe chooses modes from actual installed capability inventory and records empirical in-band results/viability across arms. Retain source acquisition; later stable forwarding assertions may be captured separately.",
-      "contract_sha256": "3ea8b13688032a89e9ef824a1ac2d6b8e33d7e5bf32677b3730a6f1a1559cd33"
+      "contract_sha256": "977fd37c92ebb8a7ba78ffedbc414f8dffdfef60d1206c05e397ef1a68077394"
     },
     "TestRealClaude_InitializeControl_SendPointArms": {
       "disposition": "live_only",
       "reason": "Initialize send-point arms measure current installed Claude control response behavior and publish distinct source fixtures. This capture freshness/argv compatibility purpose remains live despite replayable decoders.",
-      "contract_sha256": "d61c9119edd17565e727f254221c96d266ec8ed8018d515e63dcc2579a6f413b"
+      "contract_sha256": "d84bcae774951595dbf162745da9a6b4cc0e380664df56e5121c9d913d08fba7"
     },
     "TestRealClaude_MCPStatusCapture": {
       "disposition": "live_only",
       "reason": "Fresh mcp_status source collector boots healthy and deliberately broken real MCP servers and validates actual status payload vocabulary. A stored status cannot establish current MCP startup compatibility.",
-      "contract_sha256": "c365b8cec130746819c77f3fb3d1ad05ad7adfaef887fce7cdf94ea14e5a552a"
+      "contract_sha256": "b6d5cc0f16f49d6348d532b78dcab20b2d07cd7a7b12777e45f1cd5b9612622e"
     },
     "TestRealClaude_MCP_CodeGraph": {
       "disposition": "live_only",
       "reason": "Requires real CodeGraph installation/indexing, healthy MCP integration, account API access and actual tool selection against a seeded symbol. Generic daemon recordings cannot establish that external service chain.",
-      "contract_sha256": "f0e4910b9ea89dfec90f01047e0df25124e05c821a1a44b03d5dfc9bc431e2e5"
+      "contract_sha256": "9fe8cd0aade6d9cdf32d6a7dcc2ac9c3821bf099161ecb6919a8328e32d2ac02"
     },
     "TestRealClaude_MCP_Context7": {
       "disposition": "live_only",
       "reason": "Requires healthy Context7 MCP and actual provider tool use against its live catalog. Recorded resolution is not current connector compatibility.",
-      "contract_sha256": "82d574e0b2d7ca84a302a6e693ba0775510cb5c565ae9440671096a9b24f327d"
+      "contract_sha256": "05a2956b8670b1374ea8cdb8668f986e89486fe5faa25ce1610b51aa1198b117"
     },
     "TestRealClaude_MCP_Figma": {
       "disposition": "live_only",
       "reason": "Requires Figma MCP availability/access and actual metadata tool invocation against a configured file. Remains external integration proof.",
-      "contract_sha256": "987fb5a42bb68de4d1f6d4f9c333e614674465db11e1dc08d783402102786dac"
+      "contract_sha256": "2586642595a4afaec8390a01178d5543312f08d0e28ae383eded49defba45622"
     },
     "TestRealClaude_MCP_QMD": {
       "disposition": "live_only",
       "reason": "Requires live QMD collection availability and provider tool invocation against current local search data; this is environment/MCP integration proof.",
-      "contract_sha256": "f3f489c8b0a518207acd1421c565e8f7d61ec84e04517ed0c6db18cb7d30467f"
+      "contract_sha256": "2b0d7fb014a6a7fcc1c00306358e5bf633bce28fde80b58943af096b6d801f75"
     },
     "TestRealClaude_MalformedStreamJSON": {
       "disposition": "live_only",
       "reason": "Sends malformed stdin directly to the installed Claude executable and asserts its own timely nonzero exit and parse diagnostic. This tests upstream CLI grammar/error behavior, not daemon parsing of output.",
-      "contract_sha256": "6d5a7006d2d7eac2d5570726fc3c3dce866c651cbacda050a5ccbce4e24396ec"
+      "contract_sha256": "e016decdfc7199ea1f0fe69d47437fd5e7c91b6ba6af672b805b759a285d2c98"
     },
     "TestRealClaude_MidTurnUserCapture": {
       "disposition": "live_only",
       "reason": "Multi-arm mid-turn user source collector empirically compares real echo/result behavior and execution timing. Existing send-now replay already shares one causal daemon contract; fresh raw behavior acquisition remains live.",
-      "contract_sha256": "6779b191cdb3b6a42ef64dd35542b112a819b6105f9c0d494dc68f6f4d595735"
+      "contract_sha256": "9e8f55c80b6011769712954bee07425059129b75ed3c4a642e4116ad63e1e77a"
     },
     "TestRealClaude_OperatorSystemLinesCapture": {
       "disposition": "live_only",
       "reason": "Operator-system-lines collector invokes real hooks, command inventory changes and notification triggers and publishes source-shape evidence. Physical trigger nonvacuity/provider source acquisition stays live.",
-      "contract_sha256": "c05f90854ef73a4538b4fafffa752f50c3ec09058ed96d3d92b4c0778378556f"
+      "contract_sha256": "de5cd88de51517231eee9baa4900ffbf4e1b71a96a492e718b947293ecb4ca8b"
     },
     "TestRealClaude_ParentToolUseCapture": {
       "disposition": "live_only",
       "reason": "Fresh parent_tool_use collector needs genuine delegated frames naming the spawning Agent tool and source-shape evidence. Daemon lane projection is an independent replay candidate; do not count source collection twice.",
-      "contract_sha256": "61f4b961a3625912066037ae1d92a37c8d21a305983ab37d6cad96ca83f9501d"
+      "contract_sha256": "0181955d3fbaf8f0432c4ca50bda75a58db40add979fe11d1a908893994b3d12"
     },
     "TestRealClaude_PermissionProtocol_Spike": {
       "disposition": "live_only",
       "reason": "Permission protocol spike is upstream exploratory source capture with alternate raw spawn/EOF behavior and timeout observations, not an unported daemon scenario.",
-      "contract_sha256": "16ae0ee27859bf930c603c996001f84f09226003e90b2f726b41b5cd5aaf8085"
+      "contract_sha256": "00f99078442d6a6ea71fcbabd88951bea36b264ede93b33ae7b3a4b843823b6e"
     },
     "TestRealClaude_PrematureStdinClose": {
       "disposition": "live_only",
       "reason": "Direct real Claude must complete and exit cleanly after stdin EOF within 60s. A wrapper implementing its own EOF policy would not test the upstream lifecycle contract.",
-      "contract_sha256": "f1ce4e4276f594f2c7cb1e0b406c4125db7e2f07e270f2eac17815c3280b1414"
+      "contract_sha256": "0d406dcbfb2492dac6e0ed8006a083b56940c83ba62e5eb1c6ac62afc8705a8b"
     },
     "TestRealClaude_ResumeAbsentTranscript": {
       "disposition": "live_only",
       "reason": "Resume-absent probe contrasts an actual established transcript with a reserved missing identity, real CLI exits and filesystem reads. Its provider resume semantics/file-production finding must stay live; daemon lifecycle recovery is separate.",
-      "contract_sha256": "1b41e8713cef3f75cc02c501e1e831c0ebf407f437030e9f1fd5d9b9ba47ca85"
+      "contract_sha256": "3c4c9d7d4c71a9160a1e1299698629e08156999b27af9c1cf60a9394d6ec8869"
     },
     "TestRealClaude_RosterAfterFinishCapture": {
       "disposition": "live_only",
       "reason": "Roster-after-finish collector uses physical FIFO task setup and current child roster replies after real completion. Its producer freshness and task existence evidence cannot be recreated by fixed stdout.",
-      "contract_sha256": "943c5e4b61e763dc7f0b1e826076da6670e5e14bbcf3e8c3a6ee8d77092c2323"
+      "contract_sha256": "906ee93e18eb911bf54b06830363f4bebfdfd646564c2ad439873a4f3f4cb0c3"
     },
     "TestRealClaude_SetModelProbe": {
       "disposition": "live_only",
       "reason": "Set-model probe derives targets from the live advertised account menu, including unservable/refusal controls, and publishes versioned empirical outcomes. Existing daemon model scenarios do not retire this source probe.",
-      "contract_sha256": "0e503fb0fe45293be70d834cad5e8188b9a589f02cef300dc1ec86769780ac1f"
+      "contract_sha256": "cb49dca854ab14ce12e5d87bd84f73418b2102f0d78dd293119ec2b9b0502d55"
     },
     "TestRealClaude_SetPermissionMode_InBandProbe": {
       "disposition": "live_only",
       "reason": "Set-permission-mode arms empirically compare current provider responses/init modes for control/measurement cases. Retain source acquisition distinct from pool forwarding replay candidates.",
-      "contract_sha256": "6d47f3d38f5b314ae2e0078b60473943f5dac1fa2bdf06255b407b01d2c11a60"
+      "contract_sha256": "88a87bbc6a51961d6974ef004d24ec95867de21de98da9fc6c87546d0e028c2d"
     },
     "TestRealClaude_SigtermMidToolUse": {
       "disposition": "live_only",
       "reason": "SIGTERM mid-tool test joins a real FIFO-held Bash descendant, flushed session file, process-group death and newline-integrity after signaling. Those OS and producer-file effects require a real process test.",
-      "contract_sha256": "87b3b3c655eb4ceeecd9c668b9c61661e3d84e783fa2218a1fef5763ab2f0dce"
+      "contract_sha256": "7fa95c81910c7827f9aafe9156a9291e055eb94b1f1498965ee8573faa7c37d8"
     },
     "TestRealClaude_StdioPermissionPromptDeny": {
       "disposition": "live_only",
       "reason": "Direct stdio denial checks current Claude emits a genuine matching ask, confirms its denial and actually avoids the side effect. Daemon permission-deny replay is already separate partial protocol coverage, not this provider enforcement proof.",
-      "contract_sha256": "ab7330bb4fe1fe2e2b51e7489d1dd8810d0cffb0e87cd48e96a6e9bced06da5c"
+      "contract_sha256": "f7d8c3a4259486007517ffd23166a62c17287a7293fc3bbfade7837eed0fcb78"
     },
     "TestRealClaude_StreamEventCapture": {
       "disposition": "live_only",
       "reason": "Fresh stream_event capture requires actual partial-message argv and text/tool-input delta source shapes. Parser fixtures are offline, but acquisition/unknown future producer shape remains live.",
-      "contract_sha256": "0c2eb24127f28b90c08d572bc0ed7ae9a11da2487de4759a5f1a92a3ed69e4f8"
+      "contract_sha256": "f15f101ad519b84f92845b04a66d8ca9c8481944f496acab01525e580e0f6a4a"
     },
     "TestRealClaude_StreamExitPathWhileCommandRuns": {
       "disposition": "live_only",
       "reason": "Headless exit-path probe measures real CLI/pyry process exit and physical command lifetime under background timeout conditions. Replay cannot establish surviving descendants or elapsed exit behavior.",
-      "contract_sha256": "0b22018ee704fb1bbfa9db4f268059509c4558b5f3047a0dbb342508fad8fce7"
+      "contract_sha256": "f9f5355197b29dc7de375e239fcf5fd853a3015d632e31822487fbd7e7cbda67"
     },
     "TestRealClaude_SubagentPromptCapture": {
       "disposition": "live_only",
       "reason": "Fresh delegated-prompt capture verifies current real Agent frame prompts/attribution and publishes source fixtures. Subagent lane delivery can migrate independently; this source capture remains live.",
-      "contract_sha256": "9827b02b38235fe4b1f27fdfea9285d78afe100108f7b704472267701b3b5793"
+      "contract_sha256": "335fe6f01f91879075928279c9d8871b9190ae748ba008a2324c327b629722e5"
     },
     "TestRealClaude_TaskNotificationCapture": {
       "disposition": "live_only",
       "reason": "Task-notification collector uses a real FIFO rendezvous/release and completion timing to acquire actual notification frames. Fixed output cannot prove the physical trigger fired.",
-      "contract_sha256": "dee61ef9d6f5c1ffdb8be9079bffc73b3fbb33b1055829049ea2a2816ee036dc"
+      "contract_sha256": "68a97eb507a9bae6def049f0c69772d39fee4863495d15ad69c526373af79e84"
     },
     "TestRealClaude_TeardownLiveness": {
       "disposition": "live_only",
       "reason": "Teardown rig measures real process/descendant/FIFO liveness after pyry cancellation under PTY or stream execution. It is not an ordinary stdout parser assertion.",
-      "contract_sha256": "74c16c29940af84c9f72c4adca7c45d9692755aaf4c3334689c09b146d438430"
+      "contract_sha256": "b634d345a4bd2122a68764d435d54fd3d6b34a2fcae388fc844f8d91421c5ded"
     },
     "TestRealClaude_ToolProgressCapture": {
       "disposition": "live_only",
       "reason": "Tool-progress collector holds real work long enough for heartbeats, correlates physical rendezvous and validates fresh source marker vocabulary/parser verdicts. Source acquisition and heartbeat timing stay live.",
-      "contract_sha256": "0c290ab70a9fb7ad97ac7914d41423b4f6435583a547a617779a81f531327f2d"
+      "contract_sha256": "642e9ff9fb11c85dec3a7bf07feaac0f10b2a83c9e59ad54ffdd6b4cc73b43cf"
     },
     "TestRealClaude_ToolResultSidecarCapture": {
       "disposition": "live_only",
       "reason": "Tool-result-sidecar collector measures current provider sidecar fields from a real file/tool turn. Parser fixture projection may be offline, but fresh provider shape discovery is its purpose.",
-      "contract_sha256": "5b21007adef1b46360e261cd3d74a69f1d35622d7a4f823cf03a2165112389a3"
+      "contract_sha256": "c38f96a9cfb85a7e7ca960cca42ff1db00d52d1d346be591245e26be3a67a763"
     },
     "TestRealClaude_TurnlessSessionIDTranscript": {
       "disposition": "live_only",
       "reason": "Turnless transcript probe explicitly contrasts real turn-producing versus no-turn children, file presence, live PID and termination. It asks when installed Claude actually creates session JSONL, not how daemon stdout is routed.",
-      "contract_sha256": "6cb8e878b474c39b8463e0748924cb07a523a7d4b57e3f26d4e766b5fe9ef06c"
+      "contract_sha256": "9c80ded12adf083172bef88309edf69145a13eafa68474cf0c34808d0ed6f896"
     },
     "TestSuggestCLIFallbackEvidence": {
       "disposition": "control",
       "reason": "Installs deterministic fake claude via installSuggestStandIn and validates fallback observer metadata/exit/privacy over synthetic stdout; no real provider request.",
-      "contract_sha256": "d9936892571172899054ea3101eff53c92e51dd3f93909d53d70d39634bf6bad"
+      "contract_sha256": "52595025dce1ba430bc260b2a84e903f9206a8ed6672ebade4c17d42e3ff3e47"
     },
     "TestSuggestCLIFallbackIncomplete": {
       "disposition": "control",
       "reason": "Deterministic stand-in, controlled pipe saturation and process-group kill verify incomplete observer evidence. Host OS interaction exists, but it is already offline and does not need captured Claude.",
-      "contract_sha256": "a0c53eaccb69ca7b61198ae3aeba6111d5a245156b303fbecfa5e3a210f3b468"
+      "contract_sha256": "e9e212941ae15eb115fbbcc91cbdf4f065b4718da60109dd439c7367a77d2f44"
     },
     "TestSuggestCLIProducerIsolation": {
       "disposition": "control",
       "reason": "Writes a local synthetic claude script before installSuggestCLI and verifies native/fallback environment/argv isolation; the conservative provider path is a false positive.",
-      "contract_sha256": "564066fc782e677ea4427a101753dbd9c5c70a3bba4a1fe0ecfa7e1e380da57f"
+      "contract_sha256": "693c7eb0d16471d6e9d8fd8c0a7f43d3a24a25778dd4eed635138c3bf42de78f"
     },
     "TestSuggestCLISourceEvidence": {
       "disposition": "control",
       "reason": "Synthetic local Claude stdout plus sentinel credentials verify source observer forwarding, counts, privacy and mode 0600; no actual Claude/provider interaction.",
-      "contract_sha256": "9fdd249ebf5cb0cc886b98881a8be604b4c92111722a3e64e52994cf1402683e"
+      "contract_sha256": "487a0274b3cb9a9018a55890bc2ef81991481813006551dcfbdd4b37a5cf9f66"
     },
     "TestThreadShadowHistoryCapture": {
       "disposition": "control",
       "reason": "Committed thread_shadow_history.json and thread_shadow_expected.json exist, so the current branch validates/replays those fixtures without Claude. Missing-file fallback is a distinct live capture path with queue/closure checkpoints; retain that explicitly, not as new daemon tape coverage.",
-      "contract_sha256": "36a6478d7b87e7e22fdd036dbe8faa02eb1d336503bbd11f15969661a5b8e966"
+      "contract_sha256": "9aca27f1bf536941218b573c6baa9a3fc63e7bb04192cf9b4c2be8d1328ccca6"
     },
     "TestWithWorktreeAuthenticated_RealAssistant": {
       "disposition": "live_only",
       "reason": "The explicit authentication probe must obtain an actual assistant JSONL response under inherited/OAuth-only disposable HOMEs. Replayed success would defeat the credential authentication claim.",
-      "contract_sha256": "d7962226ccc244235477c680a6eaffd3340cbf17b54b53fac18415e4f4bc6cd3"
+      "contract_sha256": "1246d10e9d615bd48422dcc35c992a4bb078956b219ec35831210f15a0c28c26"
     },
     "TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet": {
       "disposition": "control",
       "reason": "Re-execs with both credential variables empty and asserts fixture skips/help text. It never launches real Claude.",
-      "contract_sha256": "4dbba1554ab7347a01adf2c3276592e2401e2a84cc5118bb59f45824eb1eb526"
+      "contract_sha256": "a53878dd80d000b4632c0d1f301ffe96f2a32968c129a8963699f84f8476e51e"
     },
     "TestInteractivePerConversationLiveness_ActiveSwitch": {
       "disposition": "needs_harness",
       "reason": "Dynamic active switching also launches an independent fallback-suggestion print process. Requires complete print argv, EOF, causal input binding and cancellation recording; current prototype rejects that unowned invocation. Original live root remains unchanged.",
-      "contract_sha256": "7894a1468ad6871f40e13aca0e8225090e02eb6319cc842f70cb77a60252c7fc"
+      "contract_sha256": "22587c9e707b013349f43fddb090fd1e293f5cd9a39b212b003a551ad350bfca"
     }
   }
 }
