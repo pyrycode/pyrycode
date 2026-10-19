@@ -10,7 +10,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENARIOS = ('two-turn', 'permission-deny')
+SCENARIOS = ('two-turn', 'permission-deny', 'reply', 'question-answer')
 DEFAULT = ROOT / 'internal/e2e/testdata/claude-tapes'
 
 
