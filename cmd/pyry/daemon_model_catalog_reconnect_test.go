@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,6 +153,168 @@ func TestDaemonLiveRelayCatalogReconnect(t *testing.T) {
 	}
 }
 
+func TestDaemonLiveRelayCatalogConcurrentRequest(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		for _, multi := range []bool{false, true} {
+			name := map[bool]string{false: "unchanged", true: "replacement"}[replace] + map[bool]string{false: "/basic", true: "/multi"}[multi]
+			t.Run(name, func(t *testing.T) {
+				b, pool, runner := testInventoryIngress(t, true)
+				b.reg.Create(conversations.Conversation{ID: "new"})
+				parser := streamsup.NewParser(runner.models.Sink, discardLogger())
+				if _, err := parser.Write(testInventoryLine(protocol.TypeModelList, "bootstrap")); err != nil {
+					t.Fatal(err)
+				}
+				saved := twoAgentVocabularyDouble{codex: sentinelCodexModels()}
+				provider := daemonModelListReadingFor(b.reg, pool, saved, b)
+				cleared, resolved, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				var paused atomic.Bool
+				reconnected := make(chan struct{}, 1)
+				var captured relay.LiveState
+				requests := 0
+				w, mgr := testDaemonRelayWire(t, b, relayWiring{convReg: b.reg, modelListReading: provider}, nil, func(cfg *relay.V2SessionConfig) {
+					cfg.Connected = func() bool { return !paused.Load() }
+					cfg.Reconnect = reconnected
+					cfg.MergedModelOptions = pushedModelOptions(saved)
+					read := cfg.ModelListReadingFor
+					cfg.ModelListReadingFor = func(conv string, multi bool) (relay.LiveState, bool) {
+						r, ok := read(conv, multi)
+						requests++
+						if requests == 1 {
+							close(resolved)
+						}
+						return r, ok
+					}
+					snapshot, factories, armed := cfg.ThreadLiveState, 0, false
+					cfg.ThreadLiveState = func() func() (relay.LiveState, bool) {
+						factories++
+						// The other peer is established before the phone reconnects.
+						if factories == 2 {
+							return func() (relay.LiveState, bool) { return relay.LiveState{}, false }
+						}
+						next := snapshot()
+						if factories == 1 {
+							return next
+						}
+						return func() (relay.LiveState, bool) {
+							r, ok := next()
+							if !ok {
+								close(finished)
+							} else if r.ConversationID == "new" && r.Envelope.Type == protocol.TypeModelList {
+								captured, armed = r, true
+							}
+							return r, ok
+						}
+					}
+					out := cfg.Outbound
+					cfg.Outbound = func(e protocol.RoutingEnvelope) error {
+						err := out(e)
+						if armed {
+							armed = false
+							paused.Store(true)
+							close(cleared)
+						}
+						return err
+					}
+				}, func(context.Context, *relay.V2SessionManager) func() { return func() {} })
+				list, _, _ := runner.ModelListLive()
+				wants := map[string]protocol.ModelListPayload{}
+				for _, conv := range []string{"conv", "new"} {
+					p, _ := mapModelList(list, conv)
+					if multi {
+						p.Models = pushedModelOptions(saved)(p.Models)
+					}
+					wants[conv] = p
+				}
+				source := `"` + string(pool.BootstrapID()) + `"`
+				w.open("phone", multi, protocol.CapabilityThread)
+				testCatalogSnapshotRead(t, w, wants, source, true)
+				w.frames <- protocol.RoutingEnvelope{ConnID: "phone", CloseCode: 1000}
+				ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+				defer cancel()
+				for len(mgr.ActiveConns(ctx)) != 0 && ctx.Err() == nil {
+				}
+				w.open("again", multi, protocol.CapabilityThread)
+				w.open("phone", multi, protocol.CapabilityThread)
+				testAwaitInventory(t, cleared)
+				if replace {
+					if _, err := parser.Write(testInventoryLine(protocol.TypeModelList, "replacement")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				owner := testLiveReadings(t, b.sink.live, "conv")
+				payload, _ := json.Marshal(protocol.RequestModelListPayload{ConversationID: "new"})
+				raw, _ := json.Marshal(protocol.Envelope{ID: 71, Type: protocol.TypeRequestModelList, TS: time.Now().UTC(), Payload: payload})
+				sealed, err := w.phones["again"].send.Encrypt(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				w.frames <- w.wrap("again", protocol.TypeNoiseMsg, sealed)
+				testAwaitInventory(t, resolved)
+				if daemonLiveCurrent(b.sink.live, captured) {
+					t.Fatal("another peer did not overtake the held catalog")
+				}
+				paused.Store(false)
+				reconnected <- struct{}{}
+				testAwaitInventory(t, finished)
+				marker := protocol.Envelope{ID: 903, Type: protocol.TypeError, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}
+				if err := mgr.Push(ctx, "phone", marker); err != nil {
+					t.Fatal(err)
+				}
+				list, _, _ = runner.ModelListLive()
+				want, _ := mapModelList(list, "new")
+				if multi {
+					want.Models = pushedModelOptions(saved)(want.Models)
+				}
+				wantRaw, _ := json.Marshal(want)
+				seen, clears := map[string]bool{}, map[string]int{}
+				for !seen["marker"] || !seen["again"] {
+					routed := w.await()
+					raw, err := w.phones[routed.ConnID].recv.Decrypt(w.data(routed))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var e protocol.Envelope
+					if err := json.Unmarshal(raw, &e); err != nil {
+						t.Fatal(err)
+					}
+					if routed.ConnID == "phone" && e.ID == marker.ID {
+						seen["marker"] = true
+					}
+					if e.Type != protocol.TypeModelList || string(e.ConversationID) != `"new"` {
+						continue
+					}
+					if routed.ConnID == "again" && !e.SessionStateCleared {
+						if e.InReplyTo == nil || *e.InReplyTo != 71 {
+							t.Fatalf("other peer lost request correlation: %s", raw)
+						}
+						e.InReplyTo = nil // Check remaining snapshot/source metadata identically.
+					}
+					testCatalogSnapshotFrame(t, e, raw, source)
+					if e.SessionStateCleared {
+						clears[routed.ConnID]++
+						continue
+					}
+					var got protocol.ModelListPayload
+					if err := json.Unmarshal(e.Payload, &got); err != nil {
+						t.Fatal(err)
+					}
+					gotRaw, _ := json.Marshal(got)
+					if seen[routed.ConnID] || clears[routed.ConnID] != 1 || !bytes.Equal(gotRaw, wantRaw) {
+						t.Fatalf("invalid catalog replacement for %s: %s, clears=%d", routed.ConnID, raw, clears[routed.ConnID])
+					}
+					seen[routed.ConnID] = true
+				}
+				if !seen["phone"] || requests != 2 {
+					t.Fatalf("reconnect ended without fresh inventory: seen=%v, resolutions=%d", seen, requests)
+				}
+				if r := testLiveReadings(t, b.sink.live, "new")[liveReadingKey{protocol.TypeModelList, ""}]; r.Revision != 0 || !reflect.DeepEqual(owner, testLiveReadings(t, b.sink.live, "conv")) {
+					t.Fatal("borrowed resolution changed retained session inventory")
+				}
+			})
+		}
+	}
+}
+
 func TestDaemonLiveRelayCatalogSnapshotOvertaken(t *testing.T) {
 	for _, event := range []string{"catalog", "transition", "recreate"} {
 		for _, afterClear := range []bool{false, true} {
@@ -227,7 +390,7 @@ func TestDaemonLiveRelayCatalogSnapshotOvertaken(t *testing.T) {
 				if err := mgr.Push(t.Context(), "phone", marker); err != nil {
 					t.Fatal(err)
 				}
-				clears := 0
+				clears, inventories := 0, 0
 				for {
 					e, raw := testCatalogWireRead(t, w)
 					if e.ID == marker.ID {
@@ -236,13 +399,24 @@ func TestDaemonLiveRelayCatalogSnapshotOvertaken(t *testing.T) {
 					if e.Type == protocol.TypeModelList && string(e.ConversationID) == `"new"` {
 						testCatalogSnapshotFrame(t, e, raw, `"`+sid+`"`)
 						if !e.SessionStateCleared {
-							t.Fatal("held snapshot restored stale catalog")
+							list, _, _ := runner.ModelListLive()
+							want, _ := mapModelList(list, "new")
+							wantRaw, _ := json.Marshal(want)
+							if event != "catalog" || !bytes.Equal(e.Payload, wantRaw) {
+								t.Fatalf("held snapshot restored stale catalog: %s", raw)
+							}
+							inventories++
+						} else {
+							clears++
 						}
-						clears++
 					}
 				}
-				if clears != map[bool]int{false: 0, true: 1}[afterClear] {
-					t.Fatalf("clears=%d", clears)
+				wantClears, wantInventories := map[bool]int{false: 0, true: 1}[afterClear], 0
+				if event == "catalog" {
+					wantClears, wantInventories = 1, 1
+				}
+				if clears != wantClears || inventories != wantInventories {
+					t.Fatalf("clears=%d, inventories=%d", clears, inventories)
 				}
 				// Resolve again only after the held capture was rejected; never retag it.
 				fresh, ok := provider("new", true)
@@ -257,7 +431,7 @@ func TestDaemonLiveRelayCatalogSnapshotOvertaken(t *testing.T) {
 					t.Fatal("borrowing rewrote producing evidence")
 				}
 				want, _ := mapModelList(list, "new")
-				testCatalogSnapshotRead(t, w, map[string]protocol.ModelListPayload{"new": want}, `"`+sid+`"`, !afterClear || event != "catalog")
+				testCatalogSnapshotRead(t, w, map[string]protocol.ModelListPayload{"new": want}, `"`+sid+`"`, event != "catalog")
 			})
 		}
 	}
