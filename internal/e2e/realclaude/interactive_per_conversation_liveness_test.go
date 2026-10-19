@@ -60,7 +60,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -91,7 +90,7 @@ const perTurnReplyBudget = 120 * time.Second
 func TestInteractivePerConversationLiveness_Default(t *testing.T) {
 	runParallel(t)
 	h := startPerConversationHarness(t)
-	nonce := time.Now().UnixNano()
+	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 
 	convID := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 2, nil)
 	sealSendMessage(t, h.phone, h.initSend, 3, convID, "m-1",
@@ -106,7 +105,7 @@ func TestInteractivePerConversationLiveness_Default(t *testing.T) {
 func TestInteractivePerConversationLiveness_WorkspaceFolder(t *testing.T) {
 	runParallel(t)
 	h := startPerConversationHarness(t)
-	nonce := time.Now().UnixNano()
+	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 
 	folder := createWorkspaceFolderViaPhone(t, h.phone, h.initSend, h.initRecv, 2,
 		"~", fmt.Sprintf("ws-%d", nonce))
@@ -132,7 +131,7 @@ func TestInteractivePerConversationLiveness_WorkspaceFolder(t *testing.T) {
 func TestInteractivePerConversationLiveness_ActiveSwitch(t *testing.T) {
 	runParallel(t)
 	h := startPerConversationHarness(t)
-	nonce := time.Now().UnixNano()
+	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 
 	convA := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 2, nil)
 	convB := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 3, nil)
@@ -187,14 +186,7 @@ func startPerConversationHarness(t *testing.T) *perConvHarness {
 func startPerConversationHarnessSeeded(t *testing.T, seed func(home, workdir string) []string) *perConvHarness {
 	t.Helper()
 	// Parallel only through runParallel; see liveHome.
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("realclaude: claude not on PATH: %v", err)
-	}
-	home := liveHome(t) // skips cleanly when no creds
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		t.Fatalf("realclaude: resolve claude: %v", err)
-	}
+	claudeBin, home := daemonProviderEnvironment(t)
 
 	// Isolated workdir under the authenticated HOME: guarantees the fresh-daemon
 	// state (empty claude sessions dir) and the null-cwd conversation's default cwd.
@@ -245,6 +237,7 @@ func startPerConversationHarnessSeeded(t *testing.T, seed func(home, workdir str
 	t.Cleanup(func() { _ = phone.Close() })
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+	t.Cleanup(func() { finishDaemonRecording(t) })
 	return &perConvHarness{phone: phone, initSend: initSend, initRecv: initRecv, home: home, workdir: workdir, daemon: d}
 }
 
@@ -278,6 +271,7 @@ func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend,
 	if p.ID == "" {
 		t.Fatalf("conversation_created (req %d) has empty id", reqID)
 	}
+	daemonRecordingRegisterConversation(t, p.ID)
 	return p.ID
 }
 

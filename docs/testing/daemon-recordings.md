@@ -5,9 +5,9 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Thirty-nine scenarios run the same assertions in live capture and offline replay:
+Forty-four scenarios run the same assertions in live capture and offline replay:
 
-The manifest associates 32 original live roots with these recordings.
+The manifest associates 37 original live roots with these recordings.
 The legacy `question-answer` and four bypass-question recordings retain their
 original assertions and fixtures without owning current live roots. Five new
 witness profiles share the stronger proof introduced by PR #3622: a fresh
@@ -543,3 +543,65 @@ request contracts, original mapped live roots, the full common regression,
 201 restoration cuts and documentation guards once per stable source revision.
 Fresh candidates require independent privacy, provenance and boundary review
 before fixture promotion. A failed run remains separate evidence.
+
+### Dynamic conversation process roles
+
+`--batch dynamic-conversations` runs four original daemon test roots: default
+conversation liveness, workspace-folder liveness, owned turn
+state and per-session prompt-file argv. Each root still creates its conversations
+over the real client protocol and retains its original assertions and budgets.
+Live runs keep their random nonce; recording runs use a fixed test nonce for
+strict request comparison. No created conversation is replaced by a seeded row.
+
+A closed suite inventory assigns the bootstrap child and its created
+child separate tapes. The creation reply must match the persisted conversation
+and its independent session before the next user message can launch that child.
+Role identities cannot be reused or selected by scheduling/launch order. Missing,
+extra, duplicate or rebound roles and unknown invocations fail. Every child
+captures complete arguments, settings and appended-prompt input contents and
+modes, plus every supplied MCP input (the bypass launch supplies none). Session binding applies only to its exact CLI slot and native top-level
+session field; ordinary session-looking text stays literal. Declared HOME,
+daemon and control-socket paths have explicit filesystem bindings.
+
+Capture provenance identifies both the compiled original-test binary and the
+source-stamped daemon checksum. Child streams seal before daemon cleanup; the
+parent publishes the aggregate candidate only after exactly one original root
+run/pass and successful cleanup, with no skipped/failing event. Suites reject
+duplicate JSON keys, unknown fields, changed role inventory and aggregate byte
+or frame limits. An immutable receipt pins all role artifacts; the parent repeats
+the inventory/hash audit after original cleanup and rejects late helpers, extra
+claims and changed files. A sealed wrapper stays alive for at most thirty seconds
+through cleanup to avoid causing a respawn. Activity after the sealed prefix is
+outside this recording proof. Replay runs the actual daemon without provider credentials or
+Claude; strict comparison checks each role independently. Current Claude startup,
+interpretation, physical effects and provider timing remain live obligations.
+
+
+### CLI process and transcript recordings
+
+`--batch cli-process` proposes thirteen original `pyry agent-run` roots covering
+ASCII/Unicode prompt fidelity, doctor contamination, nonzero Bash, turn limits,
+large prompts, long sessions, tool loops and five dispatcher role stand-ins.
+The original bodies and their transcript readers remain the acceptance tests.
+A private HOME and a native CLI executable wrapper are the recording seams.
+The actual daemon binary and original test binary have independent source and
+checksum provenance. No fixture is accepted merely because its helper completed.
+
+The CLI boundary checks the full native argv, every supplied input file and
+mode, and the complete workspace file inventory. Only `.pyry-test-recording`
+contains excluded test bookkeeping. It records the one actual JSON request and
+its EOF, both native output streams, the process exit status, and the actual
+session JSONL bytes. Path bindings preserve Unicode and literal JSON escaping.
+Replay waits for EOF, rejects changed requests/files and duplicate invocations,
+never starts Claude, and installs the captured session file before returning
+its captured exit status. The original tests then use the real transcript reader.
+Publication requires exactly one successful original root, no skips/failures,
+and a final private artifact/receipt/hash audit after original cleanup. Fresh
+comparison checks all outgoing inputs; current provider interpretation, real
+execution, context limits, and role behavior remain live obligations.
+
+The active-switch daemon prototype remains pending: the first completed turn
+can launch an independent fallback-suggestion print process while the second
+conversation runs. The recorder rejects that unowned invocation. Supporting it
+requires capturing the print request and its causal connection to the first
+reply, including cancellation; it must not be suppressed for recording.

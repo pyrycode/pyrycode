@@ -6,6 +6,7 @@ import (
 	"bytes"
 	_ "embed"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
 	"io"
 	"os"
 	"regexp"
@@ -58,7 +59,7 @@ func recordedManifestFor(t *testing.T) recordedManifest {
 	}
 	names := map[string]bool{}
 	for _, s := range m.Scenarios {
-		if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(s.Name) || names[s.Name] || (recordedScenarioDrivers[s.Name] == nil && recordedPoolProfiles[s.Name].Root == "") {
+		if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(s.Name) || names[s.Name] || (recordedScenarioDrivers[s.Name] == nil && recordedPoolProfiles[s.Name].Root == "" && claudetape.DaemonSuiteProfiles()[s.Name].Root == "" && claudetape.CLIProfiles()[s.Name] == "") {
 			t.Fatal("scenario manifest has duplicate, invalid or unimplemented driver")
 		}
 		if s.ComparisonPolicy != "strict_ordered" && (s.ComparisonPolicy != "native_coding_prefix" || s.Name != "native-suggestions") {
@@ -77,12 +78,23 @@ func recordedManifestFor(t *testing.T) recordedManifest {
 			if !ok || recordedScenarioDrivers[s.Name] != nil || len(s.LiveTests) != 1 || s.LiveTests[0] != p.Root || len(s.ClaudeArgs) != 0 || s.InitialYOLO || s.StdioPermission {
 				t.Fatal("pool boundary does not own its exact original root/configuration")
 			}
+
+		case "daemon_suite":
+			p, ok := claudetape.DaemonSuiteProfiles()[s.Name]
+			if !ok || recordedScenarioDrivers[s.Name] != nil || len(s.LiveTests) != 1 || s.LiveTests[0] != p.Root || len(s.ClaudeArgs) != 0 || s.InitialYOLO || s.StdioPermission {
+				t.Fatal("daemon suite must own exact original root/configuration")
+			}
+		case "cli_process":
+			root, ok := claudetape.CLIProfiles()[s.Name]
+			if !ok || recordedScenarioDrivers[s.Name] != nil || len(s.LiveTests) != 1 || s.LiveTests[0] != root || len(s.ClaudeArgs) != 0 || s.InitialYOLO || s.StdioPermission {
+				t.Fatal("CLI boundary must own exact original root/configuration")
+			}
 		default:
 			t.Fatal("unsupported recording boundary")
 		}
 		names[s.Name] = true
 	}
-	if len(names) != len(recordedScenarioDrivers)+len(recordedPoolProfiles) {
+	if len(names) != len(recordedScenarioDrivers)+len(recordedPoolProfiles)+len(claudetape.DaemonSuiteProfiles())+len(claudetape.CLIProfiles()) {
 		t.Fatal("registered driver is missing from scenario manifest")
 	}
 	return m

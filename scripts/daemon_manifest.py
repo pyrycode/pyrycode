@@ -39,10 +39,19 @@ def load(path=PATH):
             'pool-bypass-escalate': 'TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode',
             'pool-posture-gate': 'TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows',
         }
-        if row['boundary'] not in ('daemon_stdio', 'pool_stdio') or (row['boundary'] == 'pool_stdio') != (row['name'] in pool_roots):
+        suite_roots = {
+            'conversation-default': 'TestInteractivePerConversationLiveness_Default',
+            'conversation-workspace': 'TestInteractivePerConversationLiveness_WorkspaceFolder',
+            'conversation-turn-state': 'TestInteractivePerConversationTurnStateLiveness',
+            'conversation-prompt-argv': 'TestInteractiveSystemPromptFile_LiveSpawnArgv',
+        }
+        cli_roots = {'cli-prompt-ascii': 'TestRealClaude_PromptFidelity', 'cli-prompt-unicode': 'TestRealClaude_PromptFidelity_Unicode', 'cli-doctor': 'TestRealClaude_DoctorPoisoningRegression', 'cli-bash-nonzero': 'TestRealClaude_BashTool_NonZeroExit', 'cli-max-turns': 'TestRealClaude_MaxTurnsHonored', 'cli-large-prompt': 'TestRealClaude_LargePromptNearContextWindow', 'cli-long-session': 'TestRealClaude_LongSessionJSONLIntegrity', 'cli-tool-loop': 'TestRealClaude_ToolLoopIntegrity', 'cli-role-po': 'TestRealClaude_PO_RoleLoop', 'cli-role-architect': 'TestRealClaude_Architect_RoleLoop', 'cli-role-developer': 'TestRealClaude_Developer_RoleLoop', 'cli-role-review': 'TestRealClaude_CodeReview_RoleLoop', 'cli-role-documentation': 'TestRealClaude_Documentation_RoleLoop'}
+        boundary = row['boundary']
+        if boundary not in ('daemon_stdio', 'pool_stdio', 'daemon_suite', 'cli_process') or (boundary == 'pool_stdio') != (row['name'] in pool_roots) or (boundary == 'daemon_suite') != (row['name'] in suite_roots) or (boundary == 'cli_process') != (row['name'] in cli_roots):
             raise ValueError('Unsupported recording boundary')
-        if row['boundary'] == 'pool_stdio' and (row['live_tests'] != [pool_roots[row['name']]] or row['stdio_permission'] or row['initial_yolo'] or row['claude_args']):
-            raise ValueError('Pool recording must own the exact original configuration/root')
+        roots = pool_roots if boundary == 'pool_stdio' else cli_roots if boundary == 'cli_process' else suite_roots
+        if boundary != 'daemon_stdio' and (row['live_tests'] != [roots[row['name']]] or row['stdio_permission'] or row['initial_yolo'] or row['claude_args']):
+            raise ValueError('Original-root recording must own exact configuration/root')
         policy = row['comparison_policy']
         if policy not in ('strict_ordered', 'native_coding_prefix') or (policy == 'native_coding_prefix') != (row['name'] == 'native-suggestions'):
             raise ValueError('Unsupported scenario comparison policy')

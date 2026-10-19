@@ -31,7 +31,7 @@ const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
 func TestRecordedClaude(t *testing.T) {
 	selected := selectedRecordedScenarios(t)
 	for _, name := range selected {
-		if _, ok := recordedPoolProfiles[name]; ok {
+		if _, ok := recordedPoolProfiles[name]; ok || claudetape.DaemonSuiteProfiles()[name].Root != "" || claudetape.CLIProfiles()[name] != "" {
 			buildRecordedPoolBinary(t)
 			break
 		}
@@ -40,6 +40,10 @@ func TestRecordedClaude(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			if _, ok := recordedPoolProfiles[scenario]; ok {
 				runRecordedPool(t, scenario)
+			} else if claudetape.DaemonSuiteProfiles()[scenario].Root != "" {
+				runRecordedDaemonSuite(t, scenario)
+			} else if claudetape.CLIProfiles()[scenario] != "" {
+				runRecordedCLI(t, scenario)
 			} else {
 				runRecordedClaude(t, scenario, 0)
 			}
@@ -396,6 +400,47 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 	}
 	for _, scenario := range selectedRecordedScenarios(t) {
 		t.Run(scenario, func(t *testing.T) {
+
+			if claudetape.CLIProfiles()[scenario] != "" {
+				load := func(dir string) *claudetape.CLITape {
+					f, err := os.Open(filepath.Join(dir, scenario+".json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer f.Close()
+					tape, err := claudetape.DecodeCLI(f)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return tape
+				}
+				if claudetape.SameCLIContract(load(baseline), load(fresh)) != nil {
+					t.Fatal("CLI outgoing contract changed")
+				}
+				raw, _ := json.Marshal(map[string]string{"scenario": scenario, "policy": "strict_ordered"})
+				t.Logf("CLAUDE_COMPARISON %s", raw)
+				return
+			}
+			if profile, ok := claudetape.DaemonSuiteProfiles()[scenario]; ok {
+				loadSuite := func(dir string) *claudetape.Suite {
+					f, err := os.Open(filepath.Join(dir, scenario+".json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer f.Close()
+					suite, err := claudetape.DecodeSuite(f, profile.Roles)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return suite
+				}
+				if claudetape.SameSuiteContract(loadSuite(baseline), loadSuite(fresh), profile.Roles) != nil {
+					t.Fatal("daemon suite request contract changed")
+				}
+				raw, _ := json.Marshal(map[string]string{"scenario": scenario, "policy": "strict_ordered"})
+				t.Logf("CLAUDE_COMPARISON %s", raw)
+				return
+			}
 			load := func(dir string) *claudetape.Tape {
 				f, err := os.Open(filepath.Join(dir, scenario+".json"))
 				if err != nil {
