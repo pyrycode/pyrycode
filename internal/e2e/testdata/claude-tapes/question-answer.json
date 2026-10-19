@@ -1,0 +1,4147 @@
+{
+  "version": 1,
+  "scenario": "question-answer",
+  "producer": {
+    "revision": "af1cc24351497bf99a9cea66e3c1db7c1e23dd4b",
+    "binary_sha256": "ef12ec893f9a7dfd1518634318c53df376c05c05533e2ad43df164986a8bc2d8",
+    "claude_version": "2.1.280 (Claude Code)",
+    "captured_at": "2026-10-19T13:21:39.934375Z"
+  },
+  "args": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--forward-subagent-text",
+    "--replay-user-messages",
+    "--prompt-suggestions",
+    "--settings",
+    "${PILOT_HOME}/.pyry/test/session-settings/ecda0000-0000-4000-8000-000000000001.json",
+    "--append-system-prompt-file",
+    "${PILOT_HOME}/.pyry/test/system-prompt.txt",
+    "--dangerously-skip-permissions",
+    "--permission-mode",
+    "default",
+    "--permission-prompt-tool",
+    "stdio",
+    "--mcp-config",
+    "${PILOT_MCP_CONFIG}",
+    "--strict-mcp-config",
+    "--session-id",
+    "ecda0000-0000-4000-8000-000000000001"
+  ],
+  "frames": [
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "mode": "default",
+          "subtype": "set_permission_mode"
+        },
+        "request_id": "1",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "perTaskStopAffordance": true,
+          "subtype": "initialize"
+        },
+        "request_id": "2",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "1",
+          "response": {
+            "mode": "default"
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "permissionMode": "default",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": null,
+        "subtype": "status",
+        "type": "system",
+        "uuid": "accd414c-5a9d-4058-80d9-c062dfc35e34"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "pending_permission_requests": [],
+          "pending_user_dialog_requests": [],
+          "request_id": "2",
+          "response": {
+            "account": {
+              "apiProvider": "firstParty",
+              "tokenSource": "CLAUDE_CODE_OAUTH_TOKEN"
+            },
+            "agents": [
+              {
+                "description": "Catch-all for any task that doesn't fit a more specific agent. FleetView's default when no agent name is typed.",
+                "name": "claude"
+              },
+              {
+                "description": "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions.",
+                "model": "inherit",
+                "name": "Explore"
+              },
+              {
+                "description": "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
+                "name": "general-purpose"
+              },
+              {
+                "description": "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
+                "model": "inherit",
+                "name": "Plan"
+              },
+              {
+                "description": "Use this agent to configure the user's Claude Code status line setting.",
+                "model": "sonnet",
+                "name": "statusline-setup"
+              }
+            ],
+            "analytics_disabled": false,
+            "available_output_styles": [
+              "default",
+              "Proactive",
+              "Concise",
+              "Explanatory",
+              "Learning"
+            ],
+            "commands": [
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)",
+                "name": "deep-research"
+              },
+              {
+                "argumentHint": "consent | revoke",
+                "builtin": true,
+                "description": "Grant or revoke Claude agent access to your Design projects",
+                "name": "design"
+              },
+              {
+                "argumentHint": "[\u003cproject hint, e.g. \"Acme DS\"\u003e]",
+                "builtin": true,
+                "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+                "name": "design-sync"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".",
+                "name": "dataviz"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill to configure the Claude Code harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when claude stops show X\". For simple settings like theme/model, suggest the /config command.",
+                "name": "update-config"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior — drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) — there's nothing to observe.",
+                "name": "verify"
+              },
+              {
+                "argumentHint": "[issue description]",
+                "builtin": true,
+                "description": "Enable debug logging for this session and help diagnose issues",
+                "name": "debug"
+              },
+              {
+                "aliases": [
+                  "review"
+                ],
+                "argumentHint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [\u003cpr#\u003e|\u003cbranch\u003e|\u003cpath\u003e]",
+                "builtin": true,
+                "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level (low/medium: fewer, high-confidence findings; high→max: broader coverage, may include uncertain findings; ultra: deep multi-agent review in the cloud); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review. For ultra on a GitHub.com PR target, --post asks to post the finished review’s findings to the PR as a single comment from the user’s GitHub account (not a review; the launch dialog still confirms in interactive sessions, while non-interactive mode posts on the flag alone) and --no-post hides that option.",
+                "name": "code-review"
+              },
+              {
+                "argumentHint": "[\u003ctarget\u003e]",
+                "builtin": true,
+                "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that.",
+                "name": "simplify"
+              },
+              {
+                "argumentHint": "\u003cinstruction\u003e",
+                "builtin": true,
+                "description": "Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR.",
+                "name": "batch"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.",
+                "name": "fewer-permission-prompts"
+              },
+              {
+                "aliases": [
+                  "checkup"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health — what the `claude doctor` terminal diagnostics cover — from local data (duplicate or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local CLAUDE.md files against checked-in ones; trim checked-in CLAUDE.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded CLAUDE.md guidance into lazy skills and nested CLAUDE.md files; flag slow hooks and context-heavy extensions; check the installed version is current; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a doctor run, checkup, audit, tune-up, or cleanup of their Claude Code setup or configuration.",
+                "name": "doctor"
+              },
+              {
+                "aliases": [
+                  "proactive"
+                ],
+                "argumentHint": "[interval] [prompt]",
+                "builtin": true,
+                "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+                "name": "loop"
+              },
+              {
+                "aliases": [
+                  "routines"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Create, update, list, or run scheduled cloud agents (routines) that execute on a cron schedule.",
+                "name": "schedule"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER — read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) — never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named — don't Read the file).",
+                "name": "claude-api"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one.",
+                "name": "workflow-authoring"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).",
+                "name": "run"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Author or improve the run-\u003cunit\u003e skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment.",
+                "name": "run-skill-generator"
+              },
+              {
+                "argumentHint": "[fable|opus|sonnet|off]",
+                "builtin": true,
+                "description": "Let Claude consult a stronger model at key moments",
+                "name": "advisor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+                "name": "agents"
+              },
+              {
+                "argumentHint": "[--request-id \u003cuuid\u003e] (--wizard posture=… scope=… depth=… --propose | --expect-sha256 \u003c64-hex\u003e --apply-file \u003cpath\u003e)",
+                "builtin": true,
+                "description": "Teach auto mode about your environment, plus optional rule tweaks",
+                "name": "auto-mode-setup"
+              },
+              {
+                "argumentHint": "[auto|\u003ctokens\u003e]",
+                "builtin": true,
+                "description": "Configure the auto-compact window size",
+                "name": "autocompact"
+              },
+              {
+                "aliases": [
+                  "reset",
+                  "new"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+                "name": "clear"
+              },
+              {
+                "argumentHint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]",
+                "builtin": true,
+                "description": "Set the prompt bar color for this session",
+                "name": "color"
+              },
+              {
+                "argumentHint": "\u003coptional custom summarization instructions\u003e",
+                "builtin": true,
+                "description": "Free up context by summarizing the conversation so far",
+                "name": "compact"
+              },
+              {
+                "aliases": [
+                  "settings"
+                ],
+                "argumentHint": "key=value",
+                "builtin": true,
+                "description": "Set a setting by key",
+                "name": "config"
+              },
+              {
+                "argumentHint": "[style]",
+                "builtin": true,
+                "description": "List output styles or switch to one",
+                "name": "output-style"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show current context usage",
+                "name": "context"
+              },
+              {
+                "argumentHint": "\u003clow|medium|high|xhigh|max|ultracode|auto\u003e",
+                "builtin": true,
+                "description": "Set effort level for model usage",
+                "name": "effort"
+              },
+              {
+                "argumentHint": "[on|off]",
+                "builtin": true,
+                "description": "Toggle fast mode (Opus 5.5)",
+                "name": "fast"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+                "name": "heapdump"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Initialize a new CLAUDE.md file with codebase documentation",
+                "name": "init"
+              },
+              {
+                "argumentHint": "[reconnect|enable|disable [\u003cserver\u003e|all]]",
+                "builtin": true,
+                "description": "Manage MCP servers",
+                "name": "mcp"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Import config from another AI coding agent",
+                "name": "import"
+              },
+              {
+                "argumentHint": "\u003cmodel\u003e",
+                "builtin": true,
+                "description": "Set the AI model for Claude Code",
+                "name": "model"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Run the workflow script delivered in this session environment (server-launched sessions only)",
+                "name": "__remote-workflow"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+                "name": "workflow-launch-exec"
+              },
+              {
+                "argumentHint": "[--force]",
+                "builtin": true,
+                "description": "Activate pending plugin changes in the current session",
+                "name": "reload-plugins"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Pick up skills added or changed on disk during this session",
+                "name": "reload-skills"
+              },
+              {
+                "aliases": [
+                  "name"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Rename the current conversation",
+                "name": "rename"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Start a cloud agent that finds and verifies bugs in your branch (~15-25 min, $5-$25 USD) · Runs in a cloud session. See https://code.claude.com/docs/en/claude-code-on-the-web",
+                "name": "ultrareview"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Complete a security review of the pending changes on the current branch",
+                "name": "security-review"
+              },
+              {
+                "aliases": [
+                  "cost",
+                  "stats"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show session cost, plan usage, and what's contributing to your limits",
+                "name": "usage"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a report analyzing your Claude Code sessions",
+                "name": "insights"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a one-line session recap now",
+                "name": "recap"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show which loaded skills are unused and costing context",
+                "name": "skill-doctor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Set a goal — keep working until the condition is met",
+                "name": "goal"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Grant Claude agent access to your Design projects",
+                "name": "design-consent"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Revoke Claude agent access to your Design projects",
+                "name": "design-revoke"
+              },
+              {
+                "aliases": [
+                  "peers"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "List subagents, teammates, and other Claude sessions you can message",
+                "name": "list-agents"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Help teammates ramp on Claude Code with a guide from your usage",
+                "name": "team-onboarding"
+              }
+            ],
+            "current_permission_mode": "default",
+            "fast_mode_disabled_reason": "sdk_opt_in_required",
+            "fast_mode_state": "off",
+            "ide_rc_auto_enable_gate": true,
+            "models": [
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Default (recommended)",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "default"
+              },
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Sonnet",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "sonnet"
+              },
+              {
+                "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+                "displayName": "Fable",
+                "resolvedModel": "claude-fable-5-1",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "claude-fable-5-1"
+              },
+              {
+                "description": "Opus 5.5 · Best for everyday, complex tasks",
+                "displayName": "Opus",
+                "resolvedModel": "claude-opus-5-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "supportsFastMode": true,
+                "value": "opus"
+              },
+              {
+                "description": "Haiku 4.5 · Fastest for quick answers",
+                "displayName": "Haiku",
+                "resolvedModel": "claude-haiku-4-5-20251001",
+                "value": "haiku"
+              }
+            ],
+            "output_style": "default",
+            "pid": 11721,
+            "remote_control_auto_connect_default": false,
+            "remote_control_auto_enable": false,
+            "remote_control_auto_on_by_default": false,
+            "remote_control_available": true,
+            "session_state": "idle",
+            "user_output_styles_dir": "${PILOT_HOME}/.claude/output-styles"
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "subtype": "mcp_status"
+        },
+        "request_id": "3",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "3",
+          "response": {
+            "mcpServers": [
+              {
+                "config": {
+                  "args": [
+                    "mcp-approve",
+                    "-pyry-socket",
+                    "${PILOT_SOCKET}"
+                  ],
+                  "command": "${PILOT_DAEMON}",
+                  "type": "stdio"
+                },
+                "name": "pyry_approve",
+                "scope": "dynamic",
+                "serverInfo": {
+                  "name": "pyry_approve",
+                  "version": "dev"
+                },
+                "source": "dynamic",
+                "status": "connected",
+                "tools": [
+                  {
+                    "annotations": {},
+                    "name": "approve"
+                  }
+                ]
+              },
+              {
+                "config": {
+                  "args": [
+                    "mcp-files",
+                    "-pyry-socket",
+                    "${PILOT_SOCKET}"
+                  ],
+                  "command": "${PILOT_DAEMON}",
+                  "type": "stdio"
+                },
+                "name": "pyry_files",
+                "scope": "dynamic",
+                "serverInfo": {
+                  "name": "pyry_files",
+                  "version": "dev"
+                },
+                "source": "dynamic",
+                "status": "connected",
+                "tools": [
+                  {
+                    "annotations": {},
+                    "name": "send_file"
+                  }
+                ]
+              }
+            ]
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "text": "Before writing anything, call AskUserQuestion exactly once with this exact JSON input, preserving all text and option order: {\"questions\":[{\"question\":\"Which cache eviction policy should be used?\",\"header\":\"Policy\",\"multiSelect\":false,\"options\":[{\"label\":\"LRU\",\"description\":\"Evict the least recently used entry.\"},{\"label\":\"LFU\",\"description\":\"Evict the least frequently used entry.\"},{\"label\":\"FIFO\",\"description\":\"Evict the oldest entry.\"},{\"label\":\"Random\",\"description\":\"Evict a random entry.\"}]}]}. After I answer, reply with the label of the option I chose. Do not use other tools.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "type": "user"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "agents": [
+          "claude",
+          "Explore",
+          "general-purpose",
+          "Plan",
+          "statusline-setup"
+        ],
+        "analytics_disabled": false,
+        "apiKeySource": "none",
+        "capabilities": [
+          "interrupt_receipt_v1",
+          "interrupt_cancel_queued_v1",
+          "msg_lifecycle_v1",
+          "mcp_read_resource_v1",
+          "mcp_tool_ui_meta_v1"
+        ],
+        "claude_code_version": "2.1.280",
+        "cwd": "${PILOT_HOME}",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "mcp_servers": [
+          {
+            "name": "pyry_approve",
+            "source": "dynamic",
+            "status": "connected"
+          },
+          {
+            "name": "pyry_files",
+            "source": "dynamic",
+            "status": "connected"
+          }
+        ],
+        "memory_paths": {
+          "auto": "${PILOT_HOME}/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-p-301-651684196/memory/"
+        },
+        "messaging_socket_path": "/tmp/cc-socks/11721.sock",
+        "model": "claude-sonnet-5",
+        "output_style": "default",
+        "permissionMode": "default",
+        "plugins": [
+          {
+            "name": "telemetry",
+            "path": "builtin",
+            "source": "telemetry@builtin"
+          }
+        ],
+        "product_feedback_disabled": false,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "skills": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator"
+        ],
+        "slash_commands": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator",
+          "advisor",
+          "agents",
+          "auto-mode-setup",
+          "autocompact",
+          "clear",
+          "color",
+          "compact",
+          "config",
+          "output-style",
+          "context",
+          "effort",
+          "fast",
+          "heapdump",
+          "init",
+          "mcp",
+          "import",
+          "model",
+          "__remote-workflow",
+          "workflow-launch-exec",
+          "reload-plugins",
+          "reload-skills",
+          "rename",
+          "ultrareview",
+          "security-review",
+          "usage",
+          "insights",
+          "recap",
+          "skill-doctor",
+          "goal",
+          "design-consent",
+          "design-revoke",
+          "list-agents",
+          "team-onboarding"
+        ],
+        "subtype": "init",
+        "terminal_slash_commands": [
+          "doctor",
+          "color",
+          "reload-plugins"
+        ],
+        "tools": [
+          "Task",
+          "AskUserQuestion",
+          "Bash",
+          "CronCreate",
+          "CronDelete",
+          "CronList",
+          "DesignSync",
+          "Edit",
+          "EnterPlanMode",
+          "EnterWorktree",
+          "ExitPlanMode",
+          "ExitWorktree",
+          "ListAgents",
+          "Monitor",
+          "NotebookEdit",
+          "PushNotification",
+          "Read",
+          "RemoteTrigger",
+          "ReportFindings",
+          "ScheduleWakeup",
+          "SendMessage",
+          "Skill",
+          "TaskStop",
+          "ToolSearch",
+          "WebFetch",
+          "WebSearch",
+          "Workflow",
+          "Write",
+          "mcp__pyry_approve__approve",
+          "mcp__pyry_files__send_file"
+        ],
+        "type": "system",
+        "uuid": "dd6f67a1-de0a-4125-8947-c9615acd15f5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "295740e0-2489-4ae2-a5b7-4f2f2aa75d33"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "isReplay": true,
+        "message": {
+          "content": [
+            {
+              "text": "Before writing anything, call AskUserQuestion exactly once with this exact JSON input, preserving all text and option order: {\"questions\":[{\"question\":\"Which cache eviction policy should be used?\",\"header\":\"Policy\",\"multiSelect\":false,\"options\":[{\"label\":\"LRU\",\"description\":\"Evict the least recently used entry.\"},{\"label\":\"LFU\",\"description\":\"Evict the least frequently used entry.\"},{\"label\":\"FIFO\",\"description\":\"Evict the oldest entry.\"},{\"label\":\"Random\",\"description\":\"Evict a random entry.\"}]}]}. After I answer, reply with the label of the option I chose. Do not use other tools.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T13:21:41.036Z",
+        "type": "user",
+        "uuid": "0f1ab898-86d0-4d8c-a192-3fa5f0727556"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBfaMyYesZv6ZdCxo5hx",
+            "input_transformations": [],
+            "model": "claude-sonnet-5",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 9340,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 9340,
+              "cache_read_input_tokens": 20041,
+              "inference_geo": "global",
+              "input_tokens": 2,
+              "output_tokens": 2,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 1596,
+        "type": "stream_event",
+        "uuid": "dc17f571-5ef9-41dd-a75b-b20185c83a83"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "signature": "",
+            "thinking": "",
+            "type": "thinking"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "9f04a115-0cf3-41b9-8a15-b9d7b17d450e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 50,
+        "estimated_tokens_delta": 50,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "8aa75a7b-e3b0-45ed-95c5-a2d0caea8ca7"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": 50,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "be01ae48-04a1-42ef-84e1-e77571374dd2"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": null,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "b5b423ee-cd86-47a7-9332-7793cec803b1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 169,
+        "estimated_tokens_delta": 119,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "a64dd8c2-2293-4727-a4c8-006e67f291b5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "signature": "Ep0FCusCCBIYAipAYQ5Vyhd+bZdxOhp0o7yptcMdqBgDv4sYeZNE2c2U9q7kqEi23rCvCQWULR4Yia+rGyQJ/ELKXjkqQ7uOMh3IYDIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ3N2IyNjYwZi02YjFlLTRmZTAtOWQ4MS0xYTVmY2QzMzlmOTZyEBk2LCrwmrrTJ1I318QTd5uIAQGaAREKD2NsYXVkZS1zb25uZXQtNagB57LY1gawAQLCAUkICRAAGhsBeb8BjBsBg1wC5lIDTzcF8woFiYcRNoEEJq0gBDIEEnHPJToEBxVg0kIEPd+2M0oEruYRNFAMWgTZBeFWYAJoAXAD2gFgChZwcmVmaXhfYmVmb3JlX2Jsb2NrX3YxEiCu2TkpdL6pSZfX9r332kHzi+MD7b+TTve8+SJ7NhmAeyIAMiDCwBPIapyS4i+Wbz2GF3aPi3pEyQKtzAl7+h4JivtOH0gDEgzQszHzYbrzWmYAXfUaDL0Wc/49o12Ugvp6/yIw8VKb3Vw/W0PvoaM5umbwWwKxvBjQbCNhRW7+uefqcBRi3tt8I1jxbVv5tTgBbpdbKt4BkkDzLWqq/e9Tm+u2hVPMEMkkZYkZd4syIG5E5l5PhvH5V+FXiwRDy6VZrXzBp9D3mG4QfYoPELSi4ss2/52UTpmPj1EsI3w2zGAg1qBkuQCkvgdZOuGB/cmtFgqLjP8Vuep4YjHYJjlTCtvghywtXfvvmezPgqnyZF3yJKySPa5jchpmcCcVXeZGXkmoBE+fIBDpPj2yN5CrlsCdT/uRpw4J9UbkuxbPIKAuV94cVSX68iPIZ8sGPCz8eE0qALgY6CXs5gqsfhxOqPLRFboGkWlwD3x587VhdS0kKAQbGAE=",
+            "type": "signature_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "df9f2715-8e40-4a69-84ab-68058b229e4a"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "signature": "Ep0FCusCCBIYAipAYQ5Vyhd+bZdxOhp0o7yptcMdqBgDv4sYeZNE2c2U9q7kqEi23rCvCQWULR4Yia+rGyQJ/ELKXjkqQ7uOMh3IYDIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ3N2IyNjYwZi02YjFlLTRmZTAtOWQ4MS0xYTVmY2QzMzlmOTZyEBk2LCrwmrrTJ1I318QTd5uIAQGaAREKD2NsYXVkZS1zb25uZXQtNagB57LY1gawAQLCAUkICRAAGhsBeb8BjBsBg1wC5lIDTzcF8woFiYcRNoEEJq0gBDIEEnHPJToEBxVg0kIEPd+2M0oEruYRNFAMWgTZBeFWYAJoAXAD2gFgChZwcmVmaXhfYmVmb3JlX2Jsb2NrX3YxEiCu2TkpdL6pSZfX9r332kHzi+MD7b+TTve8+SJ7NhmAeyIAMiDCwBPIapyS4i+Wbz2GF3aPi3pEyQKtzAl7+h4JivtOH0gDEgzQszHzYbrzWmYAXfUaDL0Wc/49o12Ugvp6/yIw8VKb3Vw/W0PvoaM5umbwWwKxvBjQbCNhRW7+uefqcBRi3tt8I1jxbVv5tTgBbpdbKt4BkkDzLWqq/e9Tm+u2hVPMEMkkZYkZd4syIG5E5l5PhvH5V+FXiwRDy6VZrXzBp9D3mG4QfYoPELSi4ss2/52UTpmPj1EsI3w2zGAg1qBkuQCkvgdZOuGB/cmtFgqLjP8Vuep4YjHYJjlTCtvghywtXfvvmezPgqnyZF3yJKySPa5jchpmcCcVXeZGXkmoBE+fIBDpPj2yN5CrlsCdT/uRpw4J9UbkuxbPIKAuV94cVSX68iPIZ8sGPCz8eE0qALgY6CXs5gqsfhxOqPLRFboGkWlwD3x587VhdS0kKAQbGAE=",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBfaMyYesZv6ZdCxo5hx",
+          "input_transformations": [],
+          "model": "claude-sonnet-5",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 9340,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 9340,
+            "cache_read_input_tokens": 20041,
+            "inference_geo": "global",
+            "input_tokens": 2,
+            "output_tokens": 2,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBfaMdCwWwwsgm6eme2H",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T13:21:44.003Z",
+        "type": "assistant",
+        "uuid": "ed6fb5b6-683e-43fe-87aa-09425c5c3faa"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "03a4f0a5-82e8-4d95-9ee6-89b4cfd0f94f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "caller": {
+              "type": "direct"
+            },
+            "id": "toolu_01R3GLvH3SVECXvapFQT8dtG",
+            "input": {},
+            "name": "AskUserQuestion",
+            "type": "tool_use"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0ea233d8-923b-4ebd-8985-1e246f7ee2b8"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6d430219-4aaf-4205-b1f0-e6836992934d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "{\"questions\": [{\"question\":",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "d0c371c5-0bca-4351-96cf-222934d007d4"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\"Which cache eviction",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "efd773f1-6c82-4f43-a73d-16a2d9f06407"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": " policy should be",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "7cc1c876-e02a-480a-87a3-d8f0d3569cc8"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": " used?\",\"header",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e1222f22-93f5-4f36-8d68-1e1e38d55393"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\":\"Policy\",\"mult",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "30099f37-3747-428b-ba96-943bfe759d20"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "iS",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "67b5580c-2e48-4e2e-819b-cb3cdf17132c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "elect\":false,\"options\":",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0e0c6c54-14c9-4f00-8a44-ee67633a7b14"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "[{\"label\":\"LR",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "cad242ee-950d-4ddf-8b52-551d86f282ee"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "U\",\"description\":\"Ev",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "77cec239-8066-4963-bf7d-46264c6e6945"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ict the least recently used entry",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "b7da2141-1427-4778-aae3-452ac5f5b2f5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": ".\"},{\"label\":\"L",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "ce98c725-b7cb-43be-992c-8f92a2e631a2"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "FU\",\"description\":\"Ev",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "be42091a-bb98-462b-b5f8-88eeefb6a258"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ict the least frequently used ent",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "83bd3d52-4f47-46ab-9609-ade3d391f00e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ry.\"},{\"label\":\"",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "7846ca6e-bdb4-4841-85ec-5014a794b98f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "FIFO\",\"description\":\"",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1e75d72a-7237-4573-b0b5-90c9d1c0a46e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "Evict the oldest ent",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "2834317c-6879-428f-9b9d-d7b0b4b9a79f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ry.\"},{\"label\":\"",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "80189283-0051-42d1-80d6-5634bc51498e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "Random\",\"description\":\"Ev",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "52665993-08e6-4dc6-9a2d-711eaa3528d0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ict a random entry.\"}]",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "a3d05498-1c74-444d-b620-4b2dd857be27"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "}]",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "5b361f68-6802-4f1d-a1f5-391e83214dd5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "}",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1fc2f6d6-72f0-4525-b85b-3c8cf3314eb3"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "caller": {
+                "type": "direct"
+              },
+              "id": "toolu_01R3GLvH3SVECXvapFQT8dtG",
+              "input": {
+                "questions": [
+                  {
+                    "header": "Policy",
+                    "multiSelect": false,
+                    "options": [
+                      {
+                        "description": "Evict the least recently used entry.",
+                        "label": "LRU"
+                      },
+                      {
+                        "description": "Evict the least frequently used entry.",
+                        "label": "LFU"
+                      },
+                      {
+                        "description": "Evict the oldest entry.",
+                        "label": "FIFO"
+                      },
+                      {
+                        "description": "Evict a random entry.",
+                        "label": "Random"
+                      }
+                    ],
+                    "question": "Which cache eviction policy should be used?"
+                  }
+                ]
+              },
+              "name": "AskUserQuestion",
+              "type": "tool_use"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBfaMyYesZv6ZdCxo5hx",
+          "input_transformations": [],
+          "model": "claude-sonnet-5",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 9340,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 9340,
+            "cache_read_input_tokens": 20041,
+            "inference_geo": "global",
+            "input_tokens": 2,
+            "output_tokens": 2,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBfaMdCwWwwsgm6eme2H",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T13:21:45.080Z",
+        "type": "assistant",
+        "uuid": "06f7e9d3-60f0-48fe-a203-4e89f4d401b0",
+        "wire_tool_inputs": {
+          "toolu_01R3GLvH3SVECXvapFQT8dtG": {
+            "questions": [
+              {
+                "header": "Policy",
+                "multiSelect": false,
+                "options": [
+                  {
+                    "description": "Evict the least recently used entry.",
+                    "label": "LRU"
+                  },
+                  {
+                    "description": "Evict the least frequently used entry.",
+                    "label": "LFU"
+                  },
+                  {
+                    "description": "Evict the oldest entry.",
+                    "label": "FIFO"
+                  },
+                  {
+                    "description": "Evict a random entry.",
+                    "label": "Random"
+                  }
+                ],
+                "question": "Which cache eviction policy should be used?"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "request": {
+          "display_name": "AskUserQuestion",
+          "input": {
+            "questions": [
+              {
+                "header": "Policy",
+                "multiSelect": false,
+                "options": [
+                  {
+                    "description": "Evict the least recently used entry.",
+                    "label": "LRU"
+                  },
+                  {
+                    "description": "Evict the least frequently used entry.",
+                    "label": "LFU"
+                  },
+                  {
+                    "description": "Evict the oldest entry.",
+                    "label": "FIFO"
+                  },
+                  {
+                    "description": "Evict a random entry.",
+                    "label": "Random"
+                  }
+                ],
+                "question": "Which cache eviction policy should be used?"
+              }
+            ]
+          },
+          "requires_user_interaction": true,
+          "subtype": "can_use_tool",
+          "tool_name": "AskUserQuestion",
+          "tool_use_id": "toolu_01R3GLvH3SVECXvapFQT8dtG"
+        },
+        "request_id": "768f90f8-cde5-4d71-a84a-be68593f074c",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "5ada6998-c8e1-46db-9739-b60c869a609f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 9340,
+            "cache_read_input_tokens": 20041,
+            "input_tokens": 2,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 9340,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 9340,
+                "cache_read_input_tokens": 20041,
+                "input_tokens": 2,
+                "output_tokens": 253,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 253,
+            "output_tokens_details": {
+              "thinking_tokens": 64
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "93f31a77-7e8b-421b-bfba-a2ef682bb7b2"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "model": "haiku",
+          "subtype": "set_model"
+        },
+        "request_id": "4",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "response": {
+          "request_id": "768f90f8-cde5-4d71-a84a-be68593f074c",
+          "response": {
+            "behavior": "allow",
+            "updatedInput": {
+              "answers": {
+                "Which cache eviction policy should be used?": "Random"
+              },
+              "questions": [
+                {
+                  "header": "Policy",
+                  "multiSelect": false,
+                  "options": [
+                    {
+                      "description": "Evict the least recently used entry.",
+                      "label": "LRU"
+                    },
+                    {
+                      "description": "Evict the least frequently used entry.",
+                      "label": "LFU"
+                    },
+                    {
+                      "description": "Evict the oldest entry.",
+                      "label": "FIFO"
+                    },
+                    {
+                      "description": "Evict a random entry.",
+                      "label": "Random"
+                    }
+                  ],
+                  "question": "Which cache eviction policy should be used?"
+                }
+              ]
+            }
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "32a42b55-d070-4606-9b33-c6d4b509ba42"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "isReplay": true,
+        "message": {
+          "content": "\u003clocal-command-stdout\u003eSet model to `haiku (claude-haiku-4-5-20251001)`\u003c/local-command-stdout\u003e",
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T13:21:45.103Z",
+        "type": "user",
+        "uuid": "714e8011-ec6c-4fe9-bbdf-be3f01ebb58b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "4",
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "768f90f8-cde5-4d71-a84a-be68593f074c",
+          "response": {
+            "behavior": "allow",
+            "updatedInput": {
+              "answers": {
+                "Which cache eviction policy should be used?": "Random"
+              },
+              "questions": [
+                {
+                  "header": "Policy",
+                  "multiSelect": false,
+                  "options": [
+                    {
+                      "description": "Evict the least recently used entry.",
+                      "label": "LRU"
+                    },
+                    {
+                      "description": "Evict the least frequently used entry.",
+                      "label": "LFU"
+                    },
+                    {
+                      "description": "Evict the oldest entry.",
+                      "label": "FIFO"
+                    },
+                    {
+                      "description": "Evict a random entry.",
+                      "label": "Random"
+                    }
+                  ],
+                  "question": "Which cache eviction policy should be used?"
+                }
+              ]
+            }
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "content": "Your questions have been answered: \"Which cache eviction policy should be used?\"=\"Random\". You can now continue with these answers in mind.",
+              "tool_use_id": "toolu_01R3GLvH3SVECXvapFQT8dtG",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T13:21:45.108Z",
+        "tool_use_result": {
+          "answers": {
+            "Which cache eviction policy should be used?": "Random"
+          },
+          "questions": [
+            {
+              "header": "Policy",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "Evict the least recently used entry.",
+                  "label": "LRU"
+                },
+                {
+                  "description": "Evict the least frequently used entry.",
+                  "label": "LFU"
+                },
+                {
+                  "description": "Evict the oldest entry.",
+                  "label": "FIFO"
+                },
+                {
+                  "description": "Evict a random entry.",
+                  "label": "Random"
+                }
+              ],
+              "question": "Which cache eviction policy should be used?"
+            }
+          ]
+        },
+        "type": "user",
+        "uuid": "829bd028-cdc9-4b53-aa7b-15ea95b765c2"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "rate_limit_info": {
+          "isUsingOverage": false,
+          "overageDisabledReason": "org_level_disabled",
+          "overageStatus": "rejected",
+          "rateLimitType": "five_hour",
+          "resetsAt": 1792418400,
+          "status": "allowed",
+          "unifiedWindows": {
+            "five_hour": {
+              "resetsAt": 1792418400,
+              "utilization": 0.5
+            },
+            "seven_day": {
+              "resetsAt": 1792994400,
+              "utilization": 0.08
+            }
+          }
+        },
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "rate_limit_event",
+        "uuid": "4e19ff7b-3a70-49dd-8c55-6366ed459ae7"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "122cb882-7490-4976-8ed0-cedbb222064c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": {
+              "cache_miss_reason": {
+                "cache_missed_input_tokens": 22391,
+                "type": "model_changed"
+              }
+            },
+            "id": "msg_011CgBfafJLLCNaVrBha9EVk",
+            "input_transformations": [],
+            "model": "claude-haiku-4-5-20251001",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 7399,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 7399,
+              "cache_read_input_tokens": 14689,
+              "inference_geo": "not_available",
+              "input_tokens": 5,
+              "output_tokens": 1,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 1025,
+        "type": "stream_event",
+        "uuid": "acb9156f-a867-4bb2-9ae8-c7a15b1afef9"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e68653eb-214c-489f-9599-970b9801939e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "You",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "a52a244f-dbb2-4851-9b96-3f549607f571"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " chose",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "b1a4c11f-f331-4bbe-8b42-50843a99601d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " **",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "bf0a48f4-cd55-4d9e-9a29-5b6a533749a0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "Random** as the",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "c9058046-5776-49c3-ae6c-29d7d0ad75be"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " cache eviction policy.",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "b9806066-dee5-428d-8648-0f9bc47db945"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "text": "You chose **Random** as the cache eviction policy.",
+              "type": "text"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": {
+            "cache_miss_reason": {
+              "cache_missed_input_tokens": 22391,
+              "type": "model_changed"
+            }
+          },
+          "id": "msg_011CgBfafJLLCNaVrBha9EVk",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 7399,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 7399,
+            "cache_read_input_tokens": 14689,
+            "inference_geo": "not_available",
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBfaeyEwc9awmVgiCqzK",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T13:21:46.292Z",
+        "type": "assistant",
+        "uuid": "26bd1c5a-49c6-462b-b28a-23020619cd5e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0e7c3f53-38d1-47b4-847b-52e2403b45e1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 7399,
+            "cache_read_input_tokens": 14689,
+            "input_tokens": 5,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 7399,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 7399,
+                "cache_read_input_tokens": 14689,
+                "input_tokens": 5,
+                "output_tokens": 15,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 15
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "68a40408-388b-4dc8-9e0c-e7700278a40e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "78fd0a87-be4e-4090-97ba-9e09b088d286"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "api_error_status": null,
+        "duration_api_ms": 5261,
+        "duration_ms": 5305,
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "first_content_frame_ms": 1629,
+        "is_error": false,
+        "modelUsage": {
+          "claude-haiku-4-5-20251001": {
+            "cacheCreationInputTokens": 7399,
+            "cacheReadInputTokens": 14689,
+            "canonicalModel": "claude-haiku-4-5",
+            "contextWindow": 200000,
+            "costBasis": "list",
+            "costUSD": 0.0163469,
+            "inputTokens": 5,
+            "maxOutputTokens": 32000,
+            "outputTokens": 15,
+            "provider": "firstParty",
+            "thinkingTokens": 0,
+            "webSearchRequests": 0
+          },
+          "claude-sonnet-5": {
+            "cacheCreationInputTokens": 9340,
+            "cacheReadInputTokens": 20041,
+            "canonicalModel": "claude-sonnet-5",
+            "contextWindow": 1000000,
+            "costBasis": "list",
+            "costUSD": 0.043902199999999995,
+            "inputTokens": 2,
+            "maxOutputTokens": 64000,
+            "outputTokens": 253,
+            "provider": "firstParty",
+            "thinkingTokens": 64,
+            "webSearchRequests": 0
+          }
+        },
+        "num_turns": 2,
+        "permission_denials": [],
+        "queued_turn_count": 0,
+        "result": "You chose **Random** as the cache eviction policy.",
+        "result_index": 0,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "stop_reason": "end_turn",
+        "subagent_stats": {
+          "by_type": {},
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "system": 0,
+            "user": 0
+          },
+          "max_depth": 0,
+          "refused": {
+            "budget": 0,
+            "concurrency_limit": 0,
+            "depth_limit": 0
+          },
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "spawned": 0,
+          "spawned_by_subagents": 0,
+          "started_in_background": 0
+        },
+        "subtype": "success",
+        "terminal_reason": "completed",
+        "time_to_request_ms": 32,
+        "total_cost_usd": 0.0602491,
+        "ttft_ms": 2977,
+        "ttft_stream_ms": 1629,
+        "type": "result",
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 16739,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 16739,
+          "cache_read_input_tokens": 34730,
+          "inference_geo": "not_available",
+          "input_tokens": 7,
+          "iterations": [
+            {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 7399,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 7399,
+              "cache_read_input_tokens": 14689,
+              "input_tokens": 5,
+              "output_tokens": 15,
+              "type": "message"
+            }
+          ],
+          "output_tokens": 268,
+          "output_tokens_details": {
+            "thinking_tokens": 64
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "uuid": "ac417d55-0aca-4189-9669-638176a4e760"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "detail": "summary",
+          "subtype": "get_context_usage"
+        },
+        "request_id": "5",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "text": "Without using tools, reply with a short greeting after the model change.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "type": "user"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "5",
+          "response": {
+            "agents": [],
+            "apiUsage": {
+              "cache_creation_input_tokens": 7399,
+              "cache_read_input_tokens": 14689,
+              "input_tokens": 5,
+              "output_tokens": 15
+            },
+            "autoCompactThreshold": 167000,
+            "autocompactSource": "auto",
+            "categories": [
+              {
+                "color": "promptBorder",
+                "kind": "used",
+                "name": "System prompt",
+                "tokens": 7053
+              },
+              {
+                "color": "inactive",
+                "kind": "used",
+                "name": "System tools",
+                "tokens": 22240
+              },
+              {
+                "color": "inactive",
+                "isDeferred": true,
+                "kind": "deferred",
+                "name": "MCP tools (deferred)",
+                "tokens": 582
+              },
+              {
+                "color": "inactive",
+                "isDeferred": true,
+                "kind": "deferred",
+                "name": "System tools (deferred)",
+                "tokens": 30296
+              },
+              {
+                "color": "warning",
+                "kind": "used",
+                "name": "Skills",
+                "tokens": 1556
+              },
+              {
+                "color": "purple_FOR_SUBAGENTS_ONLY",
+                "kind": "used",
+                "name": "Messages",
+                "tokens": 119
+              },
+              {
+                "color": "promptBorder",
+                "kind": "free",
+                "name": "Free space",
+                "tokens": 169032
+              }
+            ],
+            "gridRows": [
+              [
+                {
+                  "categoryName": "System prompt",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 4,
+                  "squareFullness": 1,
+                  "tokens": 7053
+                },
+                {
+                  "categoryName": "System prompt",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 4,
+                  "squareFullness": 1,
+                  "tokens": 7053
+                },
+                {
+                  "categoryName": "System prompt",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 4,
+                  "squareFullness": 1,
+                  "tokens": 7053
+                },
+                {
+                  "categoryName": "System prompt",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 4,
+                  "squareFullness": 0.5265,
+                  "tokens": 7053
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                }
+              ],
+              [
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "System tools",
+                  "color": "inactive",
+                  "isFilled": true,
+                  "percentage": 11,
+                  "squareFullness": 1,
+                  "tokens": 22240
+                },
+                {
+                  "categoryName": "Skills",
+                  "color": "warning",
+                  "isFilled": true,
+                  "percentage": 1,
+                  "squareFullness": 0.7779999999999999,
+                  "tokens": 1556
+                },
+                {
+                  "categoryName": "Messages",
+                  "color": "purple_FOR_SUBAGENTS_ONLY",
+                  "isFilled": true,
+                  "percentage": 0,
+                  "squareFullness": 0.059500000000000004,
+                  "tokens": 119
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                }
+              ],
+              [
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                },
+                {
+                  "categoryName": "Free space",
+                  "color": "promptBorder",
+                  "isFilled": true,
+                  "percentage": 85,
+                  "squareFullness": 1,
+                  "tokens": 169032
+                }
+              ]
+            ],
+            "isAutoCompactEnabled": true,
+            "maxTokens": 200000,
+            "mcpTools": [
+              {
+                "isLoaded": false,
+                "name": "mcp__pyry_approve__approve",
+                "serverName": "pyry_approve",
+                "tokens": 131
+              },
+              {
+                "isLoaded": false,
+                "name": "mcp__pyry_files__send_file",
+                "serverName": "pyry_files",
+                "tokens": 451
+              }
+            ],
+            "memoryFiles": [],
+            "messageBreakdown": {
+              "assistantMessageTokens": 256,
+              "attachmentTokens": 36758,
+              "attachmentsByType": [
+                {
+                  "name": "prompt_snapshot",
+                  "tokens": 34129
+                },
+                {
+                  "name": "skill_listing",
+                  "tokens": 1646
+                },
+                {
+                  "name": "agent_listing_delta",
+                  "tokens": 469
+                },
+                {
+                  "name": "deferred_tools_delta",
+                  "tokens": 257
+                },
+                {
+                  "name": "environment",
+                  "tokens": 66
+                },
+                {
+                  "name": "model",
+                  "tokens": 64
+                },
+                {
+                  "name": "remote_session_change",
+                  "tokens": 62
+                },
+                {
+                  "name": "total_tokens_reminder",
+                  "tokens": 46
+                },
+                {
+                  "name": "session_context",
+                  "tokens": 10
+                },
+                {
+                  "name": "date",
+                  "tokens": 9
+                }
+              ],
+              "redirectedContextTokens": 0,
+              "toolCallTokens": 124,
+              "toolCallsByType": [
+                {
+                  "callTokens": 124,
+                  "name": "AskUserQuestion",
+                  "resultTokens": 56
+                }
+              ],
+              "toolResultTokens": 56,
+              "unattributedTokens": 0,
+              "userMessageTokens": 283
+            },
+            "model": "claude-haiku-4-5-20251001",
+            "percentage": 11,
+            "rawMaxTokens": 200000,
+            "skills": {
+              "includedSkills": 13,
+              "skillFrontmatter": [
+                {
+                  "name": "dataviz",
+                  "source": "built-in",
+                  "tokens": 362
+                },
+                {
+                  "name": "update-config",
+                  "source": "built-in",
+                  "tokens": 177
+                },
+                {
+                  "name": "keybindings-help",
+                  "source": "built-in",
+                  "tokens": 62
+                },
+                {
+                  "name": "code-review",
+                  "source": "built-in",
+                  "tokens": 213
+                },
+                {
+                  "name": "simplify",
+                  "source": "built-in",
+                  "tokens": 47
+                },
+                {
+                  "name": "fewer-permission-prompts",
+                  "source": "built-in",
+                  "tokens": 48
+                },
+                {
+                  "name": "loop",
+                  "source": "built-in",
+                  "tokens": 86
+                },
+                {
+                  "name": "schedule",
+                  "source": "built-in",
+                  "tokens": 95
+                },
+                {
+                  "name": "claude-api",
+                  "source": "built-in",
+                  "tokens": 271
+                },
+                {
+                  "name": "workflow-authoring",
+                  "source": "built-in",
+                  "tokens": 63
+                },
+                {
+                  "name": "run",
+                  "source": "built-in",
+                  "tokens": 92
+                },
+                {
+                  "name": "init",
+                  "source": "built-in",
+                  "tokens": 17
+                },
+                {
+                  "name": "security-review",
+                  "source": "built-in",
+                  "tokens": 23
+                }
+              ],
+              "tokens": 1556,
+              "totalSkills": 13
+            },
+            "slashCommands": {
+              "includedCommands": 13,
+              "tokens": 1417,
+              "totalCommands": 13
+            },
+            "totalTokens": 22093
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "agents": [
+          "claude",
+          "Explore",
+          "general-purpose",
+          "Plan",
+          "statusline-setup"
+        ],
+        "analytics_disabled": false,
+        "apiKeySource": "none",
+        "capabilities": [
+          "interrupt_receipt_v1",
+          "interrupt_cancel_queued_v1",
+          "msg_lifecycle_v1",
+          "mcp_read_resource_v1",
+          "mcp_tool_ui_meta_v1"
+        ],
+        "claude_code_version": "2.1.280",
+        "cwd": "${PILOT_HOME}",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "mcp_servers": [
+          {
+            "name": "pyry_approve",
+            "source": "dynamic",
+            "status": "connected"
+          },
+          {
+            "name": "pyry_files",
+            "source": "dynamic",
+            "status": "connected"
+          }
+        ],
+        "memory_paths": {
+          "auto": "${PILOT_HOME}/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-p-301-651684196/memory/"
+        },
+        "messaging_socket_path": "/tmp/cc-socks/11721.sock",
+        "model": "claude-haiku-4-5-20251001",
+        "output_style": "default",
+        "permissionMode": "default",
+        "plugins": [
+          {
+            "name": "telemetry",
+            "path": "builtin",
+            "source": "telemetry@builtin"
+          }
+        ],
+        "product_feedback_disabled": false,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "skills": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator"
+        ],
+        "slash_commands": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator",
+          "advisor",
+          "agents",
+          "auto-mode-setup",
+          "autocompact",
+          "clear",
+          "color",
+          "compact",
+          "config",
+          "output-style",
+          "context",
+          "effort",
+          "fast",
+          "heapdump",
+          "init",
+          "mcp",
+          "import",
+          "model",
+          "__remote-workflow",
+          "workflow-launch-exec",
+          "reload-plugins",
+          "reload-skills",
+          "rename",
+          "ultrareview",
+          "security-review",
+          "usage",
+          "insights",
+          "recap",
+          "skill-doctor",
+          "goal",
+          "design-consent",
+          "design-revoke",
+          "list-agents",
+          "team-onboarding"
+        ],
+        "subtype": "init",
+        "terminal_slash_commands": [
+          "doctor",
+          "color",
+          "reload-plugins"
+        ],
+        "tools": [
+          "Task",
+          "AskUserQuestion",
+          "Bash",
+          "CronCreate",
+          "CronDelete",
+          "CronList",
+          "DesignSync",
+          "Edit",
+          "EnterPlanMode",
+          "EnterWorktree",
+          "ExitPlanMode",
+          "ExitWorktree",
+          "ListAgents",
+          "Monitor",
+          "NotebookEdit",
+          "PushNotification",
+          "Read",
+          "RemoteTrigger",
+          "ReportFindings",
+          "ScheduleWakeup",
+          "SendMessage",
+          "Skill",
+          "TaskCreate",
+          "TaskGet",
+          "TaskList",
+          "TaskStop",
+          "TaskUpdate",
+          "ToolSearch",
+          "WebFetch",
+          "WebSearch",
+          "Workflow",
+          "Write",
+          "mcp__pyry_approve__approve",
+          "mcp__pyry_files__send_file"
+        ],
+        "type": "system",
+        "uuid": "53f18886-c4d7-4344-b593-dc882799fcca"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "8f043895-e1de-4e68-9a89-54dc4fe7f75c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "isReplay": true,
+        "message": {
+          "content": [
+            {
+              "text": "Without using tools, reply with a short greeting after the model change.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T13:21:46.354Z",
+        "type": "user",
+        "uuid": "07949def-f511-4072-a4ee-f83c83d0cb91"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": {
+              "cache_miss_reason": {
+                "cache_missed_input_tokens": 3267,
+                "type": "messages_changed"
+              }
+            },
+            "id": "msg_011CgBfamh445krgJpKeiYyk",
+            "input_transformations": [],
+            "model": "claude-haiku-4-5-20251001",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 3905,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 3905,
+              "cache_read_input_tokens": 18745,
+              "inference_geo": "not_available",
+              "input_tokens": 10,
+              "output_tokens": 4,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 829,
+        "type": "stream_event",
+        "uuid": "83904edc-3cb5-4447-b6cb-5f8550f7f898"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "signature": "",
+            "thinking": "",
+            "type": "thinking"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6c06de75-a432-4fb8-b1a3-889935b11454"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 50,
+        "estimated_tokens_delta": 50,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "387c2327-5fc1-4efa-8240-33ef4be01157"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": 50,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "54b2bc8c-109f-43e0-bf65-0860cacefe08"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": null,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "33fd7bba-7adc-4652-a8ae-5641557b49b6"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 139,
+        "estimated_tokens_delta": 89,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "706b35a2-8510-40b4-b5d8-314a6139f93a"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "signature": "EqQECtABCBIYAipAVt5zFacVIrtPPMmgi0ISoOt/xeKM3Ku3LUc11Pll/drVKbtbjjtUCNrJlCTYAkWSObA0fBdkLHBWRX9er/z7xDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chAZNiwq8Jq60ydSN9fEE3ebiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAHrstjWBrABAhIMZfPlDBgD7i20XTQ5GgwrQRFTFsW/JqXYBogiMIAc0ErXKdKLUbpElIQ7NHblPUJ9TuY90oO6t7Fdu2a4FZ0UgABSHCGIfukX1juj+CqAAmxpDb2B6n6UrCCUnfqa0kngFdvBHkmLGpBc8E2Hd9r9dAZOzpogZalul8Kkv8YXYE+6Cs3F327ASwDCxoqSV7UNEA8xs6qgMUAoxD30niSWBcS35NVL4gMthKjxQiczHPZe5FSTos1ypa5/TTmoyt7P6tve0NNUsI+2izlBd1GbjozDHIZJzf6P0nc5I5yIDX7cCZScWf4aGYjIPJCb+1FaTpzFgfcUGKbLuDcM8KfCnKwz8iOKyJkICj3nyWNgwlEBOlQPoVO66Bsm6wOWbHU1aTCn3Iald1Uc7LvudkjrQO7/13Hvv9LOD/mDXKSvTZ15FWNoBVfCG1pIikcCLZ8YAQ==",
+            "type": "signature_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "fd051929-4087-4708-a715-f0e5acc078ac"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "signature": "EqQECtABCBIYAipAVt5zFacVIrtPPMmgi0ISoOt/xeKM3Ku3LUc11Pll/drVKbtbjjtUCNrJlCTYAkWSObA0fBdkLHBWRX9er/z7xDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chAZNiwq8Jq60ydSN9fEE3ebiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAHrstjWBrABAhIMZfPlDBgD7i20XTQ5GgwrQRFTFsW/JqXYBogiMIAc0ErXKdKLUbpElIQ7NHblPUJ9TuY90oO6t7Fdu2a4FZ0UgABSHCGIfukX1juj+CqAAmxpDb2B6n6UrCCUnfqa0kngFdvBHkmLGpBc8E2Hd9r9dAZOzpogZalul8Kkv8YXYE+6Cs3F327ASwDCxoqSV7UNEA8xs6qgMUAoxD30niSWBcS35NVL4gMthKjxQiczHPZe5FSTos1ypa5/TTmoyt7P6tve0NNUsI+2izlBd1GbjozDHIZJzf6P0nc5I5yIDX7cCZScWf4aGYjIPJCb+1FaTpzFgfcUGKbLuDcM8KfCnKwz8iOKyJkICj3nyWNgwlEBOlQPoVO66Bsm6wOWbHU1aTCn3Iald1Uc7LvudkjrQO7/13Hvv9LOD/mDXKSvTZ15FWNoBVfCG1pIikcCLZ8YAQ==",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": {
+            "cache_miss_reason": {
+              "cache_missed_input_tokens": 3267,
+              "type": "messages_changed"
+            }
+          },
+          "id": "msg_011CgBfamh445krgJpKeiYyk",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 3905,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 3905,
+            "cache_read_input_tokens": 18745,
+            "inference_geo": "not_available",
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBfamQwBTJ1VfpAL9tdC",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T13:21:48.013Z",
+        "type": "assistant",
+        "uuid": "fc6bad3e-83c3-4e8f-b98b-f3c891ed55dc"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "4f079c26-e88f-457b-8080-0d6ef340c93e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0c4bff05-3772-4bc0-82f1-a3aec47bc721"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "Hey",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6880c230-5981-42b3-9e5a-bdd39aa4e44f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "!",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "89897363-02fd-4d8b-a20b-5cc65af892bf"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " Switched",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "f3bfe743-1233-48df-ba29-7f6edc855a6f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " to Haiku 4",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "ac99c222-22f4-4166-af65-92ca9685cbe2"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": ".5. Ready",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "f4bf12c8-78d1-4600-b26b-b8871c1a4c30"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " to help",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0513bbe1-aecd-4218-b33b-6322018f033b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " —",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "8006d196-74ee-4d9e-b54c-424b40b20713"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " what",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "663bf19f-4fc9-42bd-bb22-8ad56974f158"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "'s next",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "51e41569-7ec6-450e-b83f-3720114b54a8"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "?",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "fcc87ef0-311f-4b37-93fe-cbfffc1f7045"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "text": "Hey! Switched to Haiku 4.5. Ready to help — what's next?",
+              "type": "text"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": {
+            "cache_miss_reason": {
+              "cache_missed_input_tokens": 3267,
+              "type": "messages_changed"
+            }
+          },
+          "id": "msg_011CgBfamh445krgJpKeiYyk",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 3905,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 3905,
+            "cache_read_input_tokens": 18745,
+            "inference_geo": "not_available",
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBfamQwBTJ1VfpAL9tdC",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T13:21:48.253Z",
+        "type": "assistant",
+        "uuid": "adc4e3ff-4864-47c1-9e96-b73c3bc6367e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "245278f7-7e46-4888-a66f-3d1a0d312b6c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 3905,
+            "cache_read_input_tokens": 18745,
+            "input_tokens": 10,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 3905,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 3905,
+                "cache_read_input_tokens": 18745,
+                "input_tokens": 10,
+                "output_tokens": 85,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 85,
+            "output_tokens_details": {
+              "thinking_tokens": 58
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "9586e50c-415d-4974-9d8b-dbcd0cfe99cf"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "35842d77-3b95-416a-8049-54a488879049"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "api_error_status": null,
+        "duration_api_ms": 7219,
+        "duration_ms": 1966,
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "first_content_frame_ms": 1104,
+        "is_error": false,
+        "modelUsage": {
+          "claude-haiku-4-5-20251001": {
+            "cacheCreationInputTokens": 11304,
+            "cacheReadInputTokens": 33434,
+            "canonicalModel": "claude-haiku-4-5",
+            "contextWindow": 200000,
+            "costBasis": "list",
+            "costUSD": 0.0264664,
+            "inputTokens": 15,
+            "maxOutputTokens": 32000,
+            "outputTokens": 100,
+            "provider": "firstParty",
+            "thinkingTokens": 58,
+            "webSearchRequests": 0
+          },
+          "claude-sonnet-5": {
+            "cacheCreationInputTokens": 9340,
+            "cacheReadInputTokens": 20041,
+            "canonicalModel": "claude-sonnet-5",
+            "contextWindow": 1000000,
+            "costBasis": "list",
+            "costUSD": 0.043902199999999995,
+            "inputTokens": 2,
+            "maxOutputTokens": 64000,
+            "outputTokens": 253,
+            "provider": "firstParty",
+            "thinkingTokens": 64,
+            "webSearchRequests": 0
+          }
+        },
+        "num_turns": 1,
+        "permission_denials": [],
+        "queued_turn_count": 0,
+        "result": "Hey! Switched to Haiku 4.5. Ready to help — what's next?",
+        "result_index": 1,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "stop_reason": "end_turn",
+        "subagent_stats": {
+          "by_type": {},
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "system": 0,
+            "user": 0
+          },
+          "max_depth": 0,
+          "refused": {
+            "budget": 0,
+            "concurrency_limit": 0,
+            "depth_limit": 0
+          },
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "spawned": 0,
+          "spawned_by_subagents": 0,
+          "started_in_background": 0
+        },
+        "subtype": "success",
+        "terminal_reason": "completed",
+        "time_to_request_ms": 7,
+        "total_cost_usd": 0.0703686,
+        "ttft_ms": 1661,
+        "ttft_stream_ms": 1103,
+        "type": "result",
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 3905,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 3905,
+          "cache_read_input_tokens": 18745,
+          "inference_geo": "not_available",
+          "input_tokens": 10,
+          "iterations": [
+            {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 3905,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 3905,
+              "cache_read_input_tokens": 18745,
+              "input_tokens": 10,
+              "output_tokens": 85,
+              "type": "message"
+            }
+          ],
+          "output_tokens": 85,
+          "output_tokens_details": {
+            "thinking_tokens": 58
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "uuid": "aa0fb4ab-54cc-4aec-a8d8-652147567211"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "detail": "summary",
+          "subtype": "get_context_usage"
+        },
+        "request_id": "6",
+        "type": "control_request"
+      }
+    }
+  ],
+  "files": {
+    "--append-system-prompt-file": "You are running as a supervised child of the pyry daemon. Your replies are not displayed in a terminal: they leave this process as a structured stream and are rendered for the operator by a separate client application, which may be running on a different machine than the one your tools execute on. More than one client can be attached to a session, and which one is attached can change while the session runs.\n",
+    "--mcp-config": {
+      "mcpServers": {
+        "pyry_approve": {
+          "args": [
+            "mcp-approve",
+            "-pyry-socket",
+            "${PILOT_SOCKET}"
+          ],
+          "command": "${PILOT_DAEMON}"
+        },
+        "pyry_files": {
+          "args": [
+            "mcp-files",
+            "-pyry-socket",
+            "${PILOT_SOCKET}"
+          ],
+          "command": "${PILOT_DAEMON}"
+        }
+      }
+    },
+    "--settings": {
+      "enableAllProjectMcpServers": true,
+      "skipDangerousModePermissionPrompt": true
+    }
+  }
+}
