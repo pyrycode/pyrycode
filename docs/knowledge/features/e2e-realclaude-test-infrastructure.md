@@ -5,6 +5,10 @@ Infrastructure, staging and evidence contracts for the
 
 ## Test infrastructure
 
+The background-reply rig keeps the Agent backgrounded while a Bash-only
+pre-tool hook forces its held Bash operation to run synchronously. An async
+launch notice cannot prove successful release-token output from that operation.
+
 A background completion witness must establish release order, not merely final
 prose after the main result. `TestRealClaude_BackgroundReplyCompletion` serializes
 its release with recorder writes, saves the next source index, and requires a
