@@ -21,19 +21,40 @@ import (
 )
 
 func TestDaemonThreadChanges(t *testing.T) {
-	c := thread.Change{ID: 1, PreviousRev: 1, Rev: 3, Version: 4, Fields: map[string]json.RawMessage{"Summary": json.RawMessage(`"combined"`), "Active": json.RawMessage(`false`), "Content": json.RawMessage(`{"text":"before","other":true}`)}, TextAppend: "after"}
+	t.Parallel()
+	c := thread.Change{
+		ID: 1, PreviousRev: 1, Rev: 3, Version: 4,
+		Fields: map[string]json.RawMessage{
+			"Summary": json.RawMessage(`""`), "Active": json.RawMessage(`false`), "Parent": json.RawMessage(`0`),
+			"Content": json.RawMessage(`{"text":"before","other":null,"future":{"nested":true}}`),
+		},
+		TextAppend:    "after",
+		ResultContent: json.RawMessage(`{"text":"beforeafter","other":null,"future":{"nested":true}}`),
+	}
 	updates := daemonThreadUpdates("conv", "epoch", c)
-	if len(updates) != 2 {
+	if len(updates) != 1 {
 		t.Fatalf("combined update count %d", len(updates))
 	}
 	change := updates[0].(protocol.ThreadItemChangedPayload)
-	append := updates[1].(protocol.ThreadTextAppendPayload)
-	if change.BaseRev != 1 || change.Rev != 3 || append.BaseRev != 3 || append.Rev != 3 || append.Text != "after" {
+	if change.BaseRev != 1 || change.Rev != 3 || change.Version != 4 || change.ConversationID != "conv" || change.Epoch != "epoch" {
 		t.Fatal("revision chain lost")
 	}
-	if !reflect.DeepEqual(change.Changes, map[string]json.RawMessage{"summary": json.RawMessage(`"combined"`), "active": json.RawMessage(`false`), "content": json.RawMessage(`{"text":"before","other":true}`)}) {
-		t.Fatal("wire fields changed")
+	testDaemonThreadJSONEqual(t, change.Changes, map[string]json.RawMessage{"summary": json.RawMessage(`""`), "active": json.RawMessage(`false`), "parent": json.RawMessage(`0`), "content": c.ResultContent})
+	if string(c.Fields["Content"]) != `{"text":"before","other":null,"future":{"nested":true}}` {
+		t.Fatal("input replacement mutated")
 	}
+	c.TextAppend, c.ResultContent = "", nil
+	fieldOnly := daemonThreadUpdates("conv", "epoch", c)
+	if len(fieldOnly) != 1 {
+		t.Fatalf("field-only update count %d", len(fieldOnly))
+	}
+	testDaemonThreadJSONEqual(t, fieldOnly[0].(protocol.ThreadItemChangedPayload).Changes["content"], c.Fields["Content"])
+	item := thread.Item{ID: 5, Rev: 7, Kind: "assistant_message", Content: json.RawMessage(`{"text":"full"}`)}
+	added := daemonThreadUpdates("conv", "epoch", thread.Change{ID: 5, Rev: 7, Version: 9, Addition: &item})
+	if len(added) != 1 {
+		t.Fatalf("addition count %d", len(added))
+	}
+	testDaemonThreadJSONEqual(t, added[0], protocol.ThreadItemAddedPayload{ConversationID: "conv", Epoch: "epoch", Version: 9, Item: daemonThreadItem(item)})
 }
 
 func TestDaemonThreadReadiness(t *testing.T) {
