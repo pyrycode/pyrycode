@@ -42,6 +42,8 @@ type liveConversation struct {
 	readings    map[liveReadingKey]*daemonLiveReading
 	revisions   map[liveRevisionKey]uint64
 	scopes      map[liveReadingKey]string
+	// Reply-only catalog ordering holds no borrowed payload or session authority.
+	catalogReplyRevision uint64
 }
 
 // The owner serializes retention and bounded publication handoff. Its mutex is
@@ -164,6 +166,7 @@ func (o *daemonLiveState) advanceLocked(conv string, c *liveConversation, sid st
 	c.readings = make(map[liveReadingKey]*daemonLiveReading)
 	c.revisions = make(map[liveRevisionKey]uint64)
 	c.scopes = make(map[liveReadingKey]string)
+	c.catalogReplyRevision = 0
 	src := daemonLiveSource{ConversationID: conv, SessionGeneration: c.generation, provenance: p}
 	for _, family := range daemonLiveFamilies {
 		o.admitLocked(src, protocol.Envelope{Type: family, Payload: json.RawMessage(`{}`), SessionStateCleared: true}, "", "")
