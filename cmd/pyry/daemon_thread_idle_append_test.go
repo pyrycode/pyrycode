@@ -29,10 +29,10 @@ func TestDaemonThreadIdleAppendKeepsConnections(t *testing.T) {
 		return cursor.threadVersion == 1
 	})
 	w.open("phone", false, protocol.CapabilityThread)
-	w.open("compact", false, protocol.CapabilityThread, protocol.CapabilityThreadExpansion, protocol.CapabilityThreadCompact)
-	for n, peer := range []string{"phone", "compact"} {
+	w.open("legacy", false, protocol.CapabilityThread, protocol.CapabilityThreadExpansion, protocol.CapabilityThreadCompact)
+	for n, peer := range []string{"phone", "legacy"} {
 		projection := ""
-		if peer == "compact" {
+		if peer == "legacy" {
 			projection = protocol.ThreadProjectionCompact
 		}
 		base, _, _ := testCompactQuery(t, w, mgr, peer, uint64(500+n), protocol.TypeThreadCatchUp,
@@ -72,7 +72,7 @@ func TestDaemonThreadIdleAppendKeepsConnections(t *testing.T) {
 				t.Fatal("connection ID replaced")
 			}
 		}
-		frames := testCompactRead(t, w, mgr, "phone", "compact")
+		frames := testCompactRead(t, w, mgr, "phone", "legacy")
 		seen := map[string]int{}
 		for _, frame := range frames {
 			seen[frame.peer]++
@@ -91,13 +91,13 @@ func TestDaemonThreadIdleAppendKeepsConnections(t *testing.T) {
 				}
 			}
 		}
-		if seen["phone"] != 1 || seen["compact"] != 1 {
+		if seen["phone"] != 1 || seen["legacy"] != 1 {
 			t.Fatalf("lost/duplicated live updates: %+v", seen)
 		}
 		// Both original authenticated peers remain able to query after delivery.
-		for n, peer := range []string{"phone", "compact"} {
+		for n, peer := range []string{"phone", "legacy"} {
 			projection := ""
-			if peer == "compact" {
+			if peer == "legacy" {
 				projection = protocol.ThreadProjectionCompact
 			}
 			p, _, _ := testCompactQuery(t, w, mgr, peer, uint64(510+cycle*2+n), protocol.TypeThreadCatchUp,
