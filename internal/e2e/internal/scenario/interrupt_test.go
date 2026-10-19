@@ -111,7 +111,6 @@ func TestInterruptControlHelperProcess(t *testing.T) {
 				queue = append(queue, end("conv", "end_turn"))
 			case "running-foreign-end":
 				queue = append(queue, end("other", "cancelled"))
-				break
 			case "running-parser-gap", "thinking-parser-gap":
 				queue = append(queue, frame(protocol.TypeUnrecognizedMessage, protocol.UnrecognizedMessagePayload{}))
 			case "thinking-changed-state":
