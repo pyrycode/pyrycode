@@ -695,7 +695,9 @@ after the original reply and disk assertions. Their prefixes then seal without
 closing their pipes. Actual stdout/stderr EOF is required only during the
 unchanged original daemon cleanup, bounded by a 30-second absolute deadline.
 No provider exit code or signal is inferred for the metadata deletion. Captured
-host PIDs remain in private launch/action audit files and never enter fixtures.
+ownership/action PIDs remain in private launch audit files. Native protocol PID
+metadata remains literal, opaque replay data and is never used as a process or
+signal target.
 
 Each pipe write has both a ten-second bound and the remaining absolute lifecycle
 or seal deadline. Original stdin EOF is forwarded, and failure cleanup addresses
