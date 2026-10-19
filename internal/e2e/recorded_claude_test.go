@@ -29,7 +29,7 @@ const tapeSession = "ecda0000-0000-4000-8000-000000000001"
 const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
 
 func TestRecordedClaude(t *testing.T) {
-	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer", "question-refuse", "permission-allow"} {
+	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer", "question-refuse", "permission-allow", "permission-cancel"} {
 		t.Run(scenario, func(t *testing.T) { runRecordedClaude(t, scenario) })
 	}
 }
@@ -250,6 +250,19 @@ func runRecordedClaude(t *testing.T, scenario string) {
 				t.Fatal("allowed Write did not create the exact live witness")
 			}
 		}
+	case "permission-cancel":
+		transmit(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: "permission-cancel-trigger", Text: scenariohelpers.CancelPermissionPrompt})
+		shown := scenariohelpers.WaitPermission(t, next, tapeConversation, 150*time.Second)
+		if shown.Prompt != "Write" {
+			t.Fatal("cancellation did not surface Write")
+		}
+		scenariohelpers.CancelPermission(t, scenariohelpers.Wire{Send: transmit, Next: next}, tapeConversation, shown, 30*time.Second, 60*time.Second)
+		scenariohelpers.RequirePromptAnswerHistory(t, home, tapeConversation, shown.ModalID, "cancel", tapeSession)
+		if mode == "capture" {
+			if _, e := os.Stat(filepath.Join(home, scenariohelpers.CancelPermissionWitness)); !os.IsNotExist(e) {
+				t.Fatal("cancelled permission created its live witness")
+			}
+		}
 	case "two-turn":
 		turn("Without using tools, reply with a short greeting.")
 		turn("Without using tools, reply with a short farewell.")
@@ -294,7 +307,7 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 	if baseline == "" {
 		baseline = "testdata/claude-tapes"
 	}
-	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer", "question-refuse", "permission-allow"} {
+	for _, scenario := range []string{"two-turn", "permission-deny", "reply", "question-answer", "question-refuse", "permission-allow", "permission-cancel"} {
 		t.Run(scenario, func(t *testing.T) {
 			load := func(dir string) *claudetape.Tape {
 				f, err := os.Open(filepath.Join(dir, scenario+".json"))

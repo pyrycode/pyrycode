@@ -55,7 +55,6 @@ package realclaude
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -187,35 +186,14 @@ const cancelledApprovalTurnEndBudget = 60 * time.Second
 // other assertion here.
 func TestInteractiveStreamStdioCancelDeniesParkedPermission(t *testing.T) {
 	runParallel(t)
-	const (
-		witness = "pyrycode-cancel-denied-witness.txt"
-		// "do not retry" keeps the turn from raising a second permission modal
-		// after the deny, which would leave this drain waiting on a prompt nobody
-		// answers — a deadline that would read as the bug under test.
-		prompt = "Use the Write tool to create a file named " + witness + " containing the single word hello. " +
-			"If the tool call is denied, do not retry it, do not use any other tool, and reply with one short word."
-	)
+	const witness = scenario.CancelPermissionWitness
+	const prompt = scenario.CancelPermissionPrompt
 
 	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
 	shown := raiseRealPermissionModalPayload(t, h, 2, convID, prompt)
 
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:      3,
-		Type:    protocol.TypeModalCancel,
-		TS:      time.Now().UTC(),
-		Payload: mustJSON(t, protocol.ModalCancelPayload{ModalID: shown.ModalID}),
-	})
-
-	env := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeModalDismissed, modalDismissBudget)
-	var dismissed protocol.ModalDismissedPayload
-	if err := json.Unmarshal(env.Payload, &dismissed); err != nil {
-		t.Fatalf("decode modal_dismissed payload: %v", err)
-	}
-	if dismissed.ModalID != shown.ModalID || dismissed.Outcome != "cancelled" || dismissed.Source != "remote" {
-		t.Fatalf("modal_dismissed = %+v, want {%s cancelled remote} — the cancel path's broadcast must be unchanged", dismissed, shown.ModalID)
-	}
-
-	drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeTurnEnd, cancelledApprovalTurnEndBudget)
+	scenario.CancelPermission(t, modalScenarioWire(t, h, 3), convID, shown, modalDismissBudget, cancelledApprovalTurnEndBudget)
+	scenario.RequirePromptAnswerHistory(t, h.home, convID, shown.ModalID, "cancel", streamModalBootstrapUUID)
 
 	if _, err := os.Stat(filepath.Join(h.workdir, witness)); !os.IsNotExist(err) {
 		t.Fatalf("the cancelled permission's Write executed anyway (stat error: %v) — the cancel resolved the parked approval to allow, not deny", err)

@@ -167,12 +167,16 @@ func (input *tapeInput) drain(accept func([]byte) error) error {
 }
 
 func checkTapePermission(raw []byte, c tapeProcessConfig) error {
-	if c.Scenario != "permission-deny" && c.Scenario != "permission-allow" {
-		return nil
-	}
-	wantPath := "${PILOT_HOME}/tape-denied.txt"
-	if c.Scenario == "permission-allow" {
+	var wantPath string
+	switch c.Scenario {
+	case "permission-deny":
+		wantPath = "${PILOT_HOME}/tape-denied.txt"
+	case "permission-allow":
 		wantPath = "${PILOT_HOME}/tape-allowed.txt"
+	case "permission-cancel":
+		wantPath = "${PILOT_HOME}/pyrycode-cancel-denied-witness.txt"
+	default:
+		return nil
 	}
 	var frame struct {
 		Type    string `json:"type"`
