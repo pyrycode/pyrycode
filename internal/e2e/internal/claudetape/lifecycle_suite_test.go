@@ -74,7 +74,7 @@ func TestLifecycleSuiteClosedRolesAndActions(t *testing.T) {
 	}
 }
 func TestLifecycleArtifactsPinPrefixThroughOriginalCleanup(t *testing.T) {
-	for _, mutation := range []string{"valid", "changed-tape", "changed-job", "foreign-stop", "changed-endpoint", "duplicate-claim", "extra-child", "extra-role", "failed-terminal", "missing-terminal", "public-control", "rebound-session", "foreign-stop-witness", "missing-stop-witness", "missing-action-ack"} {
+	for _, mutation := range []string{"valid", "changed-tape", "changed-job", "foreign-stop", "changed-endpoint", "duplicate-claim", "extra-child", "extra-role", "failed-terminal", "missing-terminal", "public-control", "rebound-session", "early-created-terminal", "missing-created-terminal", "missing-action-ack"} {
 		t.Run(mutation, func(t *testing.T) {
 			home := t.TempDir()
 			for _, dir := range []string{"recording-children", "recording-roles", "work"} {
@@ -115,13 +115,10 @@ func TestLifecycleArtifactsPinPrefixThroughOriginalCleanup(t *testing.T) {
 					t.Fatal(e)
 				}
 				r := LifecycleReceipt{Success: true, Frames: len(suite.Roles[role].Tape.Frames), OwnerPID: 1001 + index, BrokerPID: 2001 + index}
-				if role == "bootstrap" {
-					write(prefix+".prefix", r)
-				} else {
-					write(prefix+".receipt", r)
+				write(prefix+".prefix", r)
+				if role == "created-1" {
 					write(prefix+".action", LifecycleKill{PID: 1001 + index, Signal: "delete-conversation"})
 					write(prefix+".action.ready", LifecycleKill{PID: 1001 + index, Signal: "delete-conversation"})
-					write(prefix+".stopped", LifecycleStopObservation{PID: 1001 + index, Kind: "not-running"})
 				}
 			}
 			before, _, e := AuditLifecycleArtifacts(home, suite.Scenario, suite.Producer.Revision, suite.Producer.BinarySHA256, suite.DaemonSHA256, false)
@@ -131,6 +128,7 @@ func TestLifecycleArtifactsPinPrefixThroughOriginalCleanup(t *testing.T) {
 			bootstrap := filepath.Join(home, "recording-children", "bootstrap")
 			created := filepath.Join(home, "recording-children", "created-1")
 			write(bootstrap+".receipt", LifecycleReceipt{Success: true, Frames: 2, OwnerPID: 1001, BrokerPID: 2001})
+			write(created+".receipt", LifecycleReceipt{Success: true, Frames: len(suite.Roles["created-1"].Tape.Frames), OwnerPID: 1002, BrokerPID: 2002})
 			switch mutation {
 			case "changed-tape":
 				suite.Roles["bootstrap"].Tape.Frames[1].Data = json.RawMessage(`{"type":"result","result":"changed after seal"}`)
@@ -161,10 +159,10 @@ func TestLifecycleArtifactsPinPrefixThroughOriginalCleanup(t *testing.T) {
 				if os.Chmod(bootstrap+".job", 0644) != nil {
 					t.Fatal("chmod")
 				}
-			case "foreign-stop-witness":
-				write(created+".stopped", LifecycleStopObservation{PID: 3333, Kind: "not-running"})
-			case "missing-stop-witness":
-				if os.Remove(created+".stopped") != nil {
+			case "early-created-terminal":
+				write(created+".prefix", LifecycleReceipt{Success: false, OwnerPID: 1002, BrokerPID: 2002})
+			case "missing-created-terminal":
+				if os.Remove(created+".receipt") != nil {
 					t.Fatal("remove")
 				}
 			case "missing-action-ack":

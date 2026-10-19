@@ -267,22 +267,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal("native PID changed")
 				}
 			}
-			if c.End == "seal" {
-				if e := os.WriteFile(c.Finish, nil, 0600); e != nil {
-					t.Fatal(e)
-				}
-				var seal lifecycleProbeReceipt
-				waitLifecycleProbe(t, filepath.Join(root, "sealed.json"), &seal)
-				if !seal.Success || seal.OwnerPID != cmd.Process.Pid || cmd.Process.Signal(syscall.Signal(0)) != nil {
-					t.Fatal("immutable seal ended the owned process")
-				}
-				if _, e := os.Lstat(filepath.Join(root, "receipt.json")); !os.IsNotExist(e) {
-					t.Fatal("broker ended before original cleanup")
-				}
-			}
-			if c.End == "seal" || c.End == "eof" {
-				_ = in.Close()
-			}
+
 			if variant == "abort" {
 				if e := os.WriteFile(c.Abort, nil, 0600); e != nil {
 					t.Fatal(e)
@@ -295,29 +280,57 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal("foreign original action ack")
 				}
 			}
-			if (c.End == "kill" || c.End == "delete-conversation") && variant != "changed-input" && variant != "abort" {
-				signal := syscall.SIGKILL
-				if c.End == "delete-conversation" {
-					signal = syscall.SIGTERM
+			if c.End == "delete-conversation" && variant != "delete-without-checkpoint" {
+				// A metadata deletion leaves the native child alive. Its later
+				// output and requests stay inside the strict journal until seal.
+				if cmd.Process.Signal(syscall.Signal(0)) != nil {
+					t.Fatal("metadata action stopped provider")
 				}
-				if e := cmd.Process.Signal(signal); e != nil {
+				if _, e := io.WriteString(in, strings.Replace(request, "request", "tail request", 1)); e != nil {
+					t.Fatal(e)
+				}
+				line := make(chan string, 1)
+				go func() { v, _ := bufio.NewReader(out).ReadString('\n'); line <- v }()
+				select {
+				case v := <-line:
+					var reply map[string]any
+					if json.Unmarshal([]byte(v), &reply) != nil || reply["type"] != "assistant" {
+						t.Fatal("post-deletion output lost")
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("post-deletion strict output absent")
+				}
+			}
+			if c.End == "seal" || (c.End == "delete-conversation" && variant != "delete-without-checkpoint") {
+				if e := os.WriteFile(c.Finish, nil, 0600); e != nil {
+					t.Fatal(e)
+				}
+				var seal lifecycleProbeReceipt
+				waitLifecycleProbe(t, filepath.Join(root, "sealed.json"), &seal)
+				if !seal.Success || seal.OwnerPID != cmd.Process.Pid || cmd.Process.Signal(syscall.Signal(0)) != nil {
+					t.Fatal("immutable prefix seal ended owned provider")
+				}
+				if _, e := os.Lstat(filepath.Join(root, "receipt.json")); !os.IsNotExist(e) {
+					t.Fatal("broker ended before original cleanup")
+				}
+			}
+			if c.End == "seal" || c.End == "eof" || c.End == "delete-conversation" {
+				_ = in.Close()
+			}
+			if c.End == "kill" && variant != "changed-input" && variant != "abort" {
+				if e := cmd.Process.Signal(syscall.SIGKILL); e != nil {
 					t.Fatal(e)
 				}
 			}
 			e = cmd.Wait()
 			_ = in.Close()
-			if (c.End == "seal" || c.End == "eof") && e != nil {
+			if (c.End == "seal" || c.End == "eof" || (c.End == "delete-conversation" && variant != "delete-without-checkpoint")) && e != nil {
 				t.Fatal("original stdin EOF did not shut down owned process", e)
 			}
-			if (c.End == "kill" || c.End == "delete-conversation") && variant != "changed-input" {
+			if c.End == "kill" && variant != "changed-input" {
 				status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
-				if e == nil || !ok || !status.Signaled() || status.Signal() != func() syscall.Signal {
-					if c.End == "delete-conversation" {
-						return syscall.SIGTERM
-					}
-					return syscall.SIGKILL
-				}() {
-					t.Fatal("original kill did not terminate its owned PID")
+				if e == nil || !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+					t.Fatal("original kill did not terminate ownedPID")
 				}
 			}
 			var r lifecycleProbeReceipt
@@ -329,7 +342,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 			if want {
 				wantFrames := 2
 				if c.End == "delete-conversation" {
-					wantFrames = 3
+					wantFrames = 5
 				}
 				if r.Frames != wantFrames {
 					t.Fatal("incomplete pipe journal")

@@ -226,16 +226,6 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return err
 			}
 		}
-		if actionAccepted {
-			target := originals[1]
-			if direction == "stdin" {
-				target = originals[3]
-			}
-			// This native tail follows the acknowledged original client action and is
-			// outside the saved prefix. A deleted daemon consumer may close its pipe.
-			_ = write(target, append(raw, '\n'))
-			return nil
-		}
 		if sealed {
 			target := originals[1]
 			if direction == "stdin" {
@@ -299,13 +289,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					if player != nil {
 						return fail
 					}
-					if !sealed && !actionAccepted {
+					if !sealed {
 						tape.Stderr += string(buf[:n])
 					}
 					if len(tape.Stderr) > MaxBytes {
 						return fail
 					}
-					if e := write(originals[2], buf[:n]); e != nil && !actionAccepted {
+					if e := write(originals[2], buf[:n]); e != nil {
 						return fail
 					}
 				} else {
@@ -387,8 +377,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if err != nil {
 				return err
 			}
-			if len(released) != 0 {
-				return errors.New("lifecycle tape extends beyond original delete checkpoint")
+			for _, raw := range released {
+				if err := writeOutput(raw); err != nil {
+					return err
+				}
 			}
 		} else {
 			total += len(checkpoint)
@@ -408,7 +400,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if c.End == "delete-conversation" && !actionAccepted {
 			return frames, errors.New("missing original delete checkpoint")
 		}
-		if !actionAccepted && (len(pendingInput) != 0 || len(pendingOutput) != 0) {
+		if len(pendingInput) != 0 || len(pendingOutput) != 0 {
 			return frames, fail
 		}
 		if player != nil {
@@ -459,14 +451,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if c.End == "eof" && inputEOF && outputEOF && stderrEOF {
 			return finish()
 		}
-		if (c.End == "kill" || c.End == "delete-conversation") && outputEOF && stderrEOF {
+		if c.End == "kill" && outputEOF && stderrEOF {
 			if !authorizedKill() {
 				return frames, errors.New("provider ended without original owned kill")
 			}
 			return finish()
 		}
 		if _, e := os.Lstat(c.Finish); e == nil {
-			if c.End != "seal" || outputEOF || stderrEOF || inputEOF {
+			if (c.End != "seal" && c.End != "delete-conversation") || outputEOF || stderrEOF || inputEOF {
 				return frames, errors.New("provider not live at prefix seal")
 			}
 			if c.OnSeal == nil {
@@ -483,7 +475,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			sealDeadline = time.Now().Add(30 * time.Second)
 			continue
 		}
-		if (outputEOF || stderrEOF || inputEOF) && c.End == "seal" {
+		if (outputEOF || stderrEOF || inputEOF) && (c.End == "seal" || c.End == "delete-conversation") {
 			return frames, errors.New("provider ended before prefix seal")
 		}
 		time.Sleep(5 * time.Millisecond)

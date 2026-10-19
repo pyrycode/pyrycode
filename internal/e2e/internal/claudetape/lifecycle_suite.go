@@ -55,8 +55,16 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 		if t == nil || t.Validate() != nil || t.End != LifecycleEnd(s.Scenario, role) {
 			return fail
 		}
-		if t.End == "delete-conversation" && t.Tape.Frames[len(t.Tape.Frames)-1].Direction != ClientCheckpointDirection {
-			return fail
+		if t.End == "delete-conversation" {
+			actions := 0
+			for _, frame := range t.Tape.Frames {
+				if frame.Direction == ClientCheckpointDirection {
+					actions++
+				}
+			}
+			if actions != 1 {
+				return fail
+			}
 		}
 
 		var cwd string
@@ -144,9 +152,4 @@ type LifecycleReceipt struct {
 	Success                     bool
 	Frames, OwnerPID, BrokerPID int
 	Error                       string `json:",omitempty"`
-}
-
-type LifecycleStopObservation struct {
-	PID  int
-	Kind string
 }

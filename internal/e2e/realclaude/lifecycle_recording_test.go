@@ -188,31 +188,20 @@ func finishLifecycleRecording(t *testing.T) {
 	if !ok || t.Failed() {
 		return
 	}
-	_ = waitLifecycleReceipt(t, filepath.Join(c.Process.Home, "recording-children", "created-1.receipt"))
-	prefix := filepath.Join(c.Process.Home, "recording-children", "created-1")
-	job, err := readLifecycleJob(prefix + ".job")
-	if err != nil || job.Config.OwnerPID <= 1 {
-		t.Fatal("missing stopped lifecycle launch")
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	for syscall.Kill(job.Config.OwnerPID, 0) != syscall.ESRCH {
-		if time.Now().After(deadline) {
-			t.Fatal("original deletion left its owned process alive")
+	profile := claudetape.LifecycleProfiles()[c.Process.Scenario]
+	for _, role := range profile.Roles {
+		job, err := readLifecycleJob(filepath.Join(c.Process.Home, "recording-children", role+".job"))
+		if err != nil || job.Config.OwnerPID <= 1 || syscall.Kill(job.Config.OwnerPID, 0) != nil {
+			t.Fatal("owned provider was not alive at original prefix seal")
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if daemonRecordingWrite(prefix+".stopped", claudetape.LifecycleStopObservation{PID: job.Config.OwnerPID, Kind: "not-running"}) != nil {
-		t.Fatal("lifecycle stop witness repeated")
-	}
-	var bootstrap claudetape.LifecycleJob
-	if claudetape.ReadLifecycleControl(filepath.Join(c.Process.Home, "recording-children", "bootstrap.job"), claudetape.MaxBytes, &bootstrap) != nil || bootstrap.Config.OwnerPID <= 1 || syscall.Kill(bootstrap.Config.OwnerPID, 0) != nil {
-		t.Fatal("bootstrap child was not alive at original prefix seal")
 	}
 
 	if daemonRecordingWrite(c.Process.Finish, struct{}{}) != nil {
 		t.Fatal("lifecycle prefix seal repeated")
 	}
-	_ = waitLifecycleReceipt(t, filepath.Join(c.Process.Home, "recording-children", "bootstrap.prefix"))
+	for _, role := range profile.Roles {
+		_ = waitLifecycleReceipt(t, filepath.Join(c.Process.Home, "recording-children", role+".prefix"))
+	}
 	digest, _, e := claudetape.AuditLifecycleArtifacts(c.Process.Home, c.Process.Scenario, poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256, false)
 	if e != nil {
 		t.Fatal(e)

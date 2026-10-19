@@ -87,13 +87,12 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		prefix := filepath.Join(home, "recording-children", role)
 		end := LifecycleEnd(scenario, role)
 		suffixes := []string{".claim", ".json", ".job", ".broker-pid"}
-		if end == "seal" {
-			suffixes = append(suffixes, ".prefix")
-			if complete {
-				suffixes = append(suffixes, ".receipt")
-			}
-		} else {
-			suffixes = append(suffixes, ".action", ".action.ready", ".receipt", ".stopped")
+		suffixes = append(suffixes, ".prefix")
+		if complete {
+			suffixes = append(suffixes, ".receipt")
+		}
+		if end == "delete-conversation" {
+			suffixes = append(suffixes, ".action", ".action.ready")
 		}
 		values := map[string][]byte{}
 		for _, suffix := range suffixes {
@@ -102,7 +101,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			if suffix == ".json" || suffix == ".job" {
 				limit = MaxBytes
 			}
-			v, e := read(prefix+suffix, limit, !(end == "seal" && suffix == ".receipt"))
+			v, e := read(prefix+suffix, limit, suffix != ".receipt")
 			if e != nil {
 				return "", nil, e
 			}
@@ -140,12 +139,9 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		if json.Unmarshal(tape.Tape.Files["$cwd"], &cwd) != nil || cwd != "work" {
 			return "", nil, fail
 		}
-		receipts := []string{".receipt"}
-		if end == "seal" {
-			receipts = []string{".prefix"}
-			if complete {
-				receipts = append(receipts, ".receipt")
-			}
+		receipts := []string{".prefix"}
+		if complete {
+			receipts = append(receipts, ".receipt")
 		}
 		for _, suffix := range receipts {
 			var receipt LifecycleReceipt
@@ -160,10 +156,6 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			}
 			var ack LifecycleKill
 			if !decode(values[".action.ready"], &ack) || ack != action {
-				return "", nil, fail
-			}
-			var stopped LifecycleStopObservation
-			if !decode(values[".stopped"], &stopped) || stopped.PID != c.OwnerPID || stopped.Kind != "not-running" {
 				return "", nil, fail
 			}
 

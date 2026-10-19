@@ -681,26 +681,22 @@ broker owns the recording pipes in a separate process group, so termination of
 that provider leaves its evidence available. Replay runs an owned stand-in and
 never executes a provider. Before the unchanged original delete envelope, the
 client hook asks the broker to acknowledge a typed `lifecycle_delete` checkpoint.
-The saved created-child protocol prefix ends at that checkpoint. Replay cannot
-release later frames before the original client reaches deletion; the original
-metadata and routing assertions remain in charge of the result.
+The checkpoint orders replay with the original client deletion. Every subsequent
+provider frame and daemon request through the final prefix seal remains recorded
+and strictly matched, including turn-tail and context-usage traffic.
 
-The broker continues forwarding the actual native tail after the checkpoint
-without treating it as replay evidence. Both actual stdout/stderr EOF and the
-matching owned action are required for its terminal receipt. The original test
-then requires that exact current owned PID to disappear before sealing the root.
-No particular exit code or signal is inferred for deletion. Actual Claude
-termination behavior remains a live obligation; replay exercises production
-termination of its real stand-in process and the original wire/disk assertions.
-Captured host PIDs are kept only in private launch/action audit files and never
-restored from a fixture.
+Conversation deletion removes the registry row and releases conversation live
+state; it does not evict the pool session. Both owned providers must remain alive
+after the original reply and disk assertions. Their prefixes then seal without
+closing their pipes. Actual stdout/stderr EOF is required only during the
+unchanged original daemon cleanup, bounded by a 30-second absolute deadline.
+No provider exit code or signal is inferred for the metadata deletion. Captured
+host PIDs remain in private launch/action audit files and never enter fixtures.
 
-The idle bootstrap prefix seals without closing its pipes. The broker holds that
-lifetime through the original cleanup, bounded by a 30-second absolute deadline.
 Each pipe write has both a ten-second bound and the remaining absolute lifecycle
 or seal deadline. Original stdin EOF is forwarded, and failure cleanup addresses
 only the private jobs belonging to this test. Changed tapes, roles, launch
-arguments, owned action/acknowledgment, stop observations, failed terminal receipts,
+arguments, owned action/acknowledgment, failed terminal receipts,
 public controls, duplicate launches and extra artifacts fail the final audit.
 The complete original root and cleanup must pass before an external candidate is
 published. Stderr bytes belong to the saved prefix; their separate diagnostic
