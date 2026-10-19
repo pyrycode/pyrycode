@@ -2,6 +2,7 @@ package claudetape
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,5 +132,119 @@ func TestSessionSnapshotExclusiveCausalInstall(t *testing.T) {
 	}
 	if _, err = ReadSessionSnapshot(filepath.Join(alias, id+".jsonl"), id, home); err == nil {
 		t.Fatal("symlink directory input accepted")
+	}
+}
+
+func TestSessionSnapshotRejectsDecodedReservedMarkersAndExpansion(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	for _, tail := range []string{
+		`"cwd":"\u0024{LIFECYCLE_HOME}/work"`,
+		`"message":"\u0024{LIFECYCLE_SESSION}"`,
+		`"nested":{"\u0024{LIFECYCLE_HOME}":true}`,
+	} {
+		raw := []byte(`{"sessionId":"` + id + `",` + tail + `}`)
+		if _, err := bindSessionJSONL(raw, id, "/h", false); err == nil {
+			t.Fatal("decoded native marker accepted")
+		}
+	}
+	raw := []byte(`{"sessionId":"` + id + `","message":"` + strings.Repeat("/h", MaxBytes/4) + `"}`)
+	if _, err := bindSessionJSONL(raw, id, "/h", false); err == nil {
+		t.Fatal("expanded capture exceeded bound")
+	}
+	raw = []byte(`{"sessionId":"` + snapshotSession + `","message":"` + strings.Repeat(snapshotHome, MaxBytes/(2*len(snapshotHome))) + `"}`)
+	if _, err := bindSessionJSONL(raw, id, "/"+strings.Repeat("x", 512), true); err == nil {
+		t.Fatal("expanded restore exceeded bound")
+	}
+	raw = []byte(`{"sessionId":"` + id + `","a":"` + strings.Repeat("/h", MaxBytes/32) + `","b":"` + strings.Repeat("/h", MaxBytes/32) + `"}`)
+	if _, err := bindSessionJSONL(raw, id, "/h", false); err == nil {
+		t.Fatal("aggregate expanded JSONL exceeded bound")
+	}
+}
+
+func TestSessionSnapshotReadRechecksPrivateMode(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "native.jsonl")
+	if os.WriteFile(path, []byte("private native bytes"), 0600) != nil {
+		t.Fatal("write")
+	}
+	_, err := readStableSessionFile(path, home, func(r io.Reader) ([]byte, error) {
+		raw, err := io.ReadAll(r)
+		if err != nil {
+			return nil, err
+		}
+		if err = os.Chmod(path, 0644); err != nil {
+			return nil, err
+		}
+		return raw, nil
+	})
+	if err == nil {
+		t.Fatal("file made public during read was accepted")
+	}
+}
+
+func TestSessionSnapshotDirectorySwapCannotReadOrPublishForeignFile(t *testing.T) {
+	for _, operation := range []string{"anchored-leaf", "read", "install"} {
+		t.Run(operation, func(t *testing.T) {
+			home, foreign := t.TempDir(), t.TempDir()
+			parent := filepath.Join(home, ".claude", "projects", "owned")
+			if os.MkdirAll(parent, 0700) != nil || os.Chmod(parent, 0700) != nil {
+				t.Fatal("mkdir")
+			}
+			leaf := "11111111-1111-4111-8111-111111111111.jsonl"
+			path := filepath.Join(parent, leaf)
+			ownRaw, foreignRaw := []byte("owned native evidence"), []byte("foreign private evidence")
+			if operation != "install" {
+				if os.WriteFile(path, ownRaw, 0600) != nil {
+					t.Fatal("write own")
+				}
+				if os.WriteFile(filepath.Join(foreign, leaf), foreignRaw, 0600) != nil {
+					t.Fatal("write foreign")
+				}
+			}
+			old := parent + "-moved"
+			swap := func() {
+				t.Helper()
+				if os.Rename(parent, old) != nil || os.Symlink(foreign, parent) != nil {
+					t.Fatal("swap")
+				}
+			}
+			switch operation {
+			case "anchored-leaf":
+				dir, name, err := openSnapshotDirectory(path, home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer dir.Close()
+				swap()
+				f, err := openSnapshotLeaf(dir, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer f.Close()
+				got, err := io.ReadAll(f)
+				if err != nil || !bytes.Equal(got, ownRaw) {
+					t.Fatal("anchored read followed foreign parent")
+				}
+				if snapshotDirectoryStillCurrent(dir, path, home) {
+					t.Fatal("rebound directory accepted")
+				}
+			case "read":
+				_, err := readStableSessionFile(path, home, func(r io.Reader) ([]byte, error) { swap(); return io.ReadAll(r) })
+				if err == nil {
+					t.Fatal("parent rebound during read accepted")
+				}
+			case "install":
+				err := publishSnapshotAt(path, home, ownRaw, func(w io.Writer, p []byte) (int, error) { n, err := w.Write(p); swap(); return n, err })
+				if err == nil {
+					t.Fatal("parent rebound during publication accepted")
+				}
+				if _, err := os.Lstat(filepath.Join(foreign, leaf)); !os.IsNotExist(err) {
+					t.Fatal("snapshot published into foreign directory")
+				}
+				if _, err := os.Lstat(filepath.Join(foreign, leaf+".pending")); !os.IsNotExist(err) {
+					t.Fatal("pending snapshot published into foreign directory")
+				}
+			}
+		})
 	}
 }

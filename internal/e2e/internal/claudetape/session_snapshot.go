@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 const snapshotSession = "${LIFECYCLE_SESSION}"
@@ -43,6 +45,14 @@ func bindSessionJSONL(raw []byte, session, home string, restore bool) ([]byte, e
 		pathFrom, pathTo = pathTo, pathFrom
 	}
 	var result bytes.Buffer
+	appendBounded := func(raw []byte) error {
+		if len(raw) > MaxBytes-result.Len() {
+			return fail
+		}
+		_, err := result.Write(raw)
+		return err
+	}
+	reserved := func(v string) bool { return strings.Contains(v, snapshotSession) || strings.Contains(v, snapshotHome) }
 	identities := 0
 	for _, line := range bytes.SplitAfter(raw, []byte{'\n'}) {
 		if len(line) == 0 {
@@ -80,6 +90,9 @@ func bindSessionJSONL(raw []byte, session, home string, restore bool) ([]byte, e
 						if !ok {
 							return fail
 						}
+						if !restore && reserved(name) {
+							return fail
+						}
 						if e = walk(depth+1, name); e != nil {
 							return e
 						}
@@ -102,6 +115,9 @@ func bindSessionJSONL(raw []byte, session, home string, restore bool) ([]byte, e
 					return fail
 				}
 			case string:
+				if !restore && reserved(v) {
+					return fail
+				}
 				bound := v
 				if depth == 1 && (key == "sessionId" || key == "session_id") {
 					if v != from {
@@ -110,6 +126,10 @@ func bindSessionJSONL(raw []byte, session, home string, restore bool) ([]byte, e
 					bound = to
 					identities++
 				} else {
+					growth := len(pathTo) - len(pathFrom)
+					if growth > 0 && strings.Count(v, pathFrom) > (MaxBytes-len(v))/growth {
+						return fail
+					}
 					bound = strings.ReplaceAll(v, pathFrom, pathTo)
 				}
 				if bound != v {
@@ -156,11 +176,14 @@ func bindSessionJSONL(raw []byte, session, home string, restore bool) ([]byte, e
 		}
 		offset := 0
 		for _, r := range replacements {
-			result.Write(line[offset:r.start])
-			result.Write(r.raw)
+			if appendBounded(line[offset:r.start]) != nil || appendBounded(r.raw) != nil {
+				return nil, fail
+			}
 			offset = r.end
 		}
-		result.Write(line[offset:])
+		if appendBounded(line[offset:]) != nil {
+			return nil, fail
+		}
 	}
 	if identities == 0 {
 		return nil, fail
@@ -168,35 +191,90 @@ func bindSessionJSONL(raw []byte, session, home string, restore bool) ([]byte, e
 	return result.Bytes(), nil
 }
 
-// ReadSessionSnapshot accepts only a stable, private regular native file below
-// the controlled HOME. An append, replacement or symlink during the read fails.
-func ReadSessionSnapshot(path, session, home string) (SessionSnapshot, error) {
+// openSnapshotDirectory anchors every component below the authenticated HOME.
+// O_NOFOLLOW on every openat prevents a checked directory from being replaced by
+// a symlink between traversal and the actual leaf read or publication.
+func openSnapshotDirectory(path, home string) (*os.File, string, error) {
+	fail := errors.New("invalid anchored snapshot directory")
+	if !filepath.IsAbs(home) || !filepath.IsAbs(path) {
+		return nil, "", fail
+	}
+	rel, err := filepath.Rel(home, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, "", fail
+	}
+	fd, err := unix.Open(home, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, "", fail
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	for _, part := range parts[:len(parts)-1] {
+		next, err := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		unix.Close(fd)
+		if err != nil {
+			return nil, "", fail
+		}
+		fd = next
+	}
+	return os.NewFile(uintptr(fd), "owned-snapshot-directory"), parts[len(parts)-1], nil
+}
+func snapshotDirectoryStillCurrent(dir *os.File, path, home string) bool {
+	current, _, err := openSnapshotDirectory(path, home)
+	if err != nil {
+		return false
+	}
+	defer current.Close()
+	before, e := dir.Stat()
+	after, ae := current.Stat()
+	return e == nil && ae == nil && os.SameFile(before, after)
+}
+func openSnapshotLeaf(dir *os.File, leaf string) (*os.File, error) {
+	fd, err := unix.Openat(int(dir.Fd()), leaf, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, errors.New("invalid anchored native snapshot")
+	}
+	return os.NewFile(uintptr(fd), "owned-native-snapshot"), nil
+}
+
+func readStableSessionFile(path, home string, readContents func(io.Reader) ([]byte, error)) ([]byte, error) {
 	fail := errors.New("unstable session snapshot")
-	rel, e := filepath.Rel(home, path)
-	if e != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || snapshotAncestors(home, path) != nil {
-		return SessionSnapshot{}, fail
-	}
-	before, e := os.Lstat(path)
-	if e != nil || !before.Mode().IsRegular() || before.Mode().Perm() != 0600 || before.Size() > MaxBytes {
-		return SessionSnapshot{}, fail
-	}
-	f, e := os.Open(path)
+	dir, leaf, e := openSnapshotDirectory(path, home)
 	if e != nil {
-		return SessionSnapshot{}, fail
+		return nil, fail
+	}
+	defer dir.Close()
+	f, e := openSnapshotLeaf(dir, leaf)
+	if e != nil {
+		return nil, fail
 	}
 	defer f.Close()
-	opened, e := f.Stat()
-	if e != nil || !os.SameFile(before, opened) {
-		return SessionSnapshot{}, fail
+	before, e := f.Stat()
+	if e != nil || !before.Mode().IsRegular() || before.Mode().Perm() != 0600 || before.Size() > MaxBytes {
+		return nil, fail
 	}
-	raw, e := io.ReadAll(io.LimitReader(f, MaxBytes+1))
+	raw, e := readContents(io.LimitReader(f, MaxBytes+1))
 	if e != nil || len(raw) > MaxBytes {
-		return SessionSnapshot{}, fail
+		return nil, fail
 	}
 	after, e := f.Stat()
-	now, ne := os.Lstat(path)
-	if e != nil || ne != nil || !os.SameFile(before, after) || !os.SameFile(before, now) || after.Size() != before.Size() || now.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !now.ModTime().Equal(before.ModTime()) {
-		return SessionSnapshot{}, fail
+	current, ce := openSnapshotLeaf(dir, leaf)
+	if ce != nil {
+		return nil, fail
+	}
+	defer current.Close()
+	now, ne := current.Stat()
+	if e != nil || ne != nil || !after.Mode().IsRegular() || after.Mode().Perm() != 0600 || !now.Mode().IsRegular() || now.Mode().Perm() != 0600 || !os.SameFile(before, after) || !os.SameFile(before, now) || after.Size() != before.Size() || now.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !now.ModTime().Equal(before.ModTime()) || !snapshotDirectoryStillCurrent(dir, path, home) {
+		return nil, fail
+	}
+	return raw, nil
+}
+
+// ReadSessionSnapshot accepts a stable private native file through anchored
+// no-follow directory descriptors. Bytes and final mode/identity are rechecked.
+func ReadSessionSnapshot(path, session, home string) (SessionSnapshot, error) {
+	raw, e := readStableSessionFile(path, home, io.ReadAll)
+	if e != nil {
+		return SessionSnapshot{}, e
 	}
 	bound, e := bindSessionJSONL(raw, session, home, false)
 	if e != nil {
@@ -204,7 +282,6 @@ func ReadSessionSnapshot(path, session, home string) (SessionSnapshot, error) {
 	}
 	return SessionSnapshot{Version: 1, Mode: 0600, Data: string(bound)}, nil
 }
-
 func (s SessionSnapshot) Bytes(session, home string) ([]byte, error) {
 	if s.Version != 1 || s.Mode != 0600 {
 		return nil, errors.New("invalid session snapshot mode or version")
@@ -212,39 +289,76 @@ func (s SessionSnapshot) Bytes(session, home string) ([]byte, error) {
 	return bindSessionJSONL([]byte(s.Data), session, home, true)
 }
 
-// snapshotAncestors refuses directory symlinks inside the owned HOME. The HOME
-// itself is already supplied by the original test's authenticated-home seam.
-func snapshotAncestors(home, path string) error {
-	rel, err := filepath.Rel(home, filepath.Dir(path))
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return errors.New("foreign snapshot parent")
+// publishSnapshotAt never follows a replacement parent or pending-file symlink.
+// The writer parameter permits deterministic actual-filesystem fault controls;
+// callers use the ordinary bounded file Write.
+func publishSnapshotAt(path, home string, raw []byte, write func(io.Writer, []byte) (int, error)) error {
+	fail := errors.New("anchored snapshot publication failed")
+	if len(raw) == 0 || len(raw) > MaxBytes {
+		return fail
 	}
-	current := home
-	components := []string{}
-	if rel != "." {
-		components = strings.Split(rel, string(filepath.Separator))
+	dir, leaf, err := openSnapshotDirectory(path, home)
+	if err != nil {
+		return fail
 	}
-	for _, part := range append([]string{""}, components...) {
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil || !info.IsDir() {
-			return errors.New("snapshot parent is not an owned directory")
-		}
+	defer dir.Close()
+	info, err := dir.Stat()
+	if err != nil || info.Mode().Perm() != 0700 {
+		return fail
+	}
+	pending := leaf + ".pending"
+	fd, err := unix.Openat(int(dir.Fd()), pending, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
+	if err != nil {
+		return fail
+	}
+	f := os.NewFile(uintptr(fd), "owned-pending-snapshot")
+	if f.Chmod(0600) != nil {
+		f.Close()
+		return fail
+	}
+	n, we := write(f, raw)
+	written, se := f.Stat()
+	ce := f.Close()
+	if we != nil || n != len(raw) || se != nil || ce != nil || !snapshotDirectoryStillCurrent(dir, path, home) {
+		return fail
+	}
+	check, err := openSnapshotLeaf(dir, pending)
+	if err != nil {
+		return fail
+	}
+	before, be := check.Stat()
+	check.Close()
+	if be != nil || !os.SameFile(written, before) || before.Mode().Perm() != 0600 {
+		return fail
+	}
+	if unix.Linkat(int(dir.Fd()), pending, int(dir.Fd()), leaf, 0) != nil {
+		return fail
+	}
+	final, err := openSnapshotLeaf(dir, leaf)
+	if err != nil {
+		return fail
+	}
+	after, ae := final.Stat()
+	final.Close()
+	if ae != nil || !os.SameFile(written, after) || after.Mode().Perm() != 0600 || after.Size() != int64(len(raw)) || !snapshotDirectoryStillCurrent(dir, path, home) {
+		return fail
+	}
+	if unix.Unlinkat(int(dir.Fd()), pending, 0) != nil {
+		return fail
 	}
 	return nil
 }
 
-// InstallSessionSnapshot creates a missing native session file. It cannot
-// replace an existing transcript, and the caller must create the exact projects
-// directory first. A replay hook calls this only after matching the causal input.
+// InstallSessionSnapshot creates only a missing native file after the caller's
+// matched-input barrier. It never replaces an existing native transcript.
 func InstallSessionSnapshot(s SessionSnapshot, path, session, home string) error {
 	rel, err := filepath.Rel(filepath.Join(home, ".claude", "projects"), path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.Base(path) != session+".jsonl" || snapshotAncestors(home, path) != nil {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.Base(path) != session+".jsonl" {
 		return errors.New("invalid native transcript destination")
 	}
 	raw, err := s.Bytes(session, home)
 	if err != nil {
 		return err
 	}
-	return publishClosedFile(filepath.Dir(path), filepath.Base(path), raw)
+	return publishSnapshotAt(path, home, raw, func(w io.Writer, p []byte) (int, error) { return w.Write(p) })
 }
