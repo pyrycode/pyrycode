@@ -114,30 +114,32 @@ func (m *V2SessionManager) pushSource(ctx context.Context, connID string, env pr
 	return nil
 }
 
-// handlePushOverflow tears down the session whose push queue latched
-// pushQueue.overflowed, freeing every retained byte immediately instead of
-// waiting out the 15-minute idle sweep (#1505). Run-goroutine only — reached
-// from Run's m.pushOverflow arm — so the m.sessions read and the closeWith call
-// sit under the package's single-owner invariant, exactly like handleWake's
-// wakeIdleTimeout case. An absent session (already torn down; its queue went
-// with it) or a non-open one is a no-op, mirroring handleWake's state guard.
-//
-// It deliberately does NOT re-check whether the queue has since drained back
-// under the ceiling. Run's select is unordered, so several drainOnce passes can
-// run between the signal and this arm, and a recovered transport may have
-// emptied the queue by now — the session is torn down anyway. Envelopes were
-// already discarded when the latch tripped, and only the re-handshake this
-// teardown forces replays them (#647 replay + reconcileModals / reconcileQueues,
-// none of which fire on transport recovery alone). A "kinder" re-check would
-// leave a surviving session with a permanent silent gap in the phone's turn
-// stream and nothing to reconcile it; the cost of tearing down is one extra
-// handshake in a rare race.
+// handlePushOverflow closes a quarantined session on Run, using the first
+// terminal cause recorded under pushMu. Reconnect reconciliation is required
+// even if transport recovers before this signal is processed. A nil close frame
+// avoids spending a Noise nonce on output a down transport cannot deliver.
 func (m *V2SessionManager) handlePushOverflow(ctx context.Context, connID string) {
 	s, ok := m.sessions[connID]
 	if !ok {
 		return
 	}
 	if s.state != V2StateOpen {
+		return
+	}
+	m.pushMu.Lock()
+	q := m.queues[connID]
+	if q == nil || !q.overflowed {
+		m.pushMu.Unlock()
+		return
+	}
+	producerGap := q.producerGap
+	m.pushMu.Unlock()
+	if producerGap {
+		m.cfg.Logger.Warn("relay: v2 producer gap teardown",
+			"event", "v2.push.producer_gap.teardown",
+			"conn_id", connID,
+			"close_code", int(StatusProducerGap))
+		m.closeWith(ctx, s, StatusProducerGap, nil)
 		return
 	}
 	m.cfg.Logger.Warn("relay: v2 push queue ceiling teardown",

@@ -275,6 +275,11 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 		if (s.livePending == nil && (s.liveSnapshot == nil || pendingOnly)) || !m.reserveHostedPush(s) {
 			continue
 		}
+		// Hosted admission can wait while a producer retires the queue.
+		if m.pushRetired(s.connID) {
+			m.releaseHostedPush(s)
+			continue
+		}
 		var r LiveState
 		if s.livePending != nil {
 			r = *s.livePending
@@ -308,7 +313,8 @@ func (m *V2SessionManager) RetireLiveState(ctx context.Context, connID string) e
 	}
 	m.pushMu.Lock()
 	q, ok := m.queues[connID]
-	if ok {
+	if ok && !q.overflowed {
+		q.producerGap = true
 		q.overflowed = true
 	}
 	m.pushMu.Unlock()
