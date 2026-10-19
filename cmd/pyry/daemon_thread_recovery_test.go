@@ -204,11 +204,11 @@ func TestDaemonThreadBoundedRecovery(t *testing.T) {
 			testDaemonThreadRows(t, recovered.Items, want.Items)
 			testDaemonThreadRequest(t, wire, recipient, 403, protocol.TypeThreadPage, protocol.ThreadPagePayload{ConversationID: testConvID, BeforeOrder: uint64(count), Limit: 8})
 			older, kind := testDaemonThreadReply(t, wire, 403, recipient)
-			page, err := store.HistoryPage(t.Context(), testConvID, uint64(count), 8)
-			if err != nil || kind != protocol.TypeThreadItems || !older.Final || older.Continuation == nil || *older.Continuation != page.Continuation {
+			expectedPage, err := store.HistoryPage(t.Context(), testConvID, uint64(count), 8)
+			if err != nil || kind != protocol.TypeThreadItems || !older.Final || older.Continuation == nil || *older.Continuation != expectedPage.Continuation {
 				t.Fatal("older page unavailable")
 			}
-			testDaemonThreadRows(t, older.Items, page.Items)
+			testDaemonThreadRows(t, older.Items, expectedPage.Items)
 			// Synchronous publish completion precedes the FIFO drain barrier.
 			p.publish(t.Context(), testConvID, cursor)
 			if err := mgr.FlushPushes(t.Context()); err != nil {
