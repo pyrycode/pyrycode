@@ -203,7 +203,13 @@ func (p *Player) Input(raw []byte) ([]json.RawMessage, error) {
 		return nil, p.err
 	}
 	fail := func() ([]json.RawMessage, error) {
-		p.err = fmt.Errorf("claude input contract changed at frame %d", p.next)
+		// Name only protocol labels, never payload bytes: a reordering is then
+		// readable from a release log without the tape or the daemon's stdin.
+		want := "end of tape"
+		if p.next < len(p.tape.Frames) {
+			want = frameLabel(p.tape.Frames[p.next].Direction, p.tape.Frames[p.next].Data)
+		}
+		p.err = fmt.Errorf("claude input contract changed at frame %d: want %s, got %s", p.next, want, frameLabel("stdin", raw))
 		return nil, p.err
 	}
 	if p.next >= len(p.tape.Frames) || p.tape.Frames[p.next].Direction != "stdin" {
@@ -243,6 +249,20 @@ func (p *Player) Input(raw []byte) ([]json.RawMessage, error) {
 	return out, p.err
 }
 
+// AwaitsTurn reports whether every frame before the next daemon user turn has
+// been replayed. The recorded order of the daemon's startup requests and its
+// first turn is a timing outcome of the capture, not a daemon guarantee: turns
+// may flow once claude acknowledges the permission posture, while the MCP status
+// ask follows the initialize reply. A driver that sends its first message only
+// after this point reproduces the recorded order on any machine.
+func (p *Player) AwaitsTurn() bool {
+	if p.err != nil || p.next >= len(p.tape.Frames) || p.tape.Frames[p.next].Direction != "stdin" {
+		return false
+	}
+	v, err := object(p.tape.Frames[p.next].Data)
+	return err == nil && v["type"] == "user"
+}
+
 func (p *Player) Complete() error {
 	if p.err != nil {
 		return p.err
@@ -251,6 +271,24 @@ func (p *Player) Complete() error {
 		return fmt.Errorf("unconsumed Claude frames: %d", len(p.tape.Frames)-p.next)
 	}
 	return nil
+}
+
+// frameLabel names a frame by direction, type and control subtype only.
+func frameLabel(direction string, raw []byte) string {
+	v, err := object(raw)
+	if err != nil {
+		return direction + " invalid JSON"
+	}
+	label := direction
+	if kind, ok := v["type"].(string); ok {
+		label += " " + kind
+	}
+	if request, ok := v["request"].(map[string]any); ok {
+		if subtype, ok := request["subtype"].(string); ok {
+			label += " " + subtype
+		}
+	}
+	return label
 }
 
 func object(raw []byte) (map[string]any, error) {
