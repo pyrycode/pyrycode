@@ -242,6 +242,12 @@ func (t *CLITape) safeFields() error {
 	return nil
 }
 func safeCLIJSON(raw []byte) error {
+	// A map decoder keeps only the last repeated key. Reject ambiguity before
+	// decoding so an earlier escaped credential cannot disappear from the audit
+	// while its original bytes remain in a recorded stream or transcript.
+	if !uniqueSuiteKeys(raw) {
+		return errors.New("duplicate or deeply nested CLI privacy carrier")
+	}
 	var value any
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
@@ -277,6 +283,9 @@ func safeCLIJSON(raw []byte) error {
 				return err
 			}
 			if json.Valid([]byte(x)) {
+				if !uniqueSuiteKeys([]byte(x)) {
+					return errors.New("duplicate nested CLI privacy carrier")
+				}
 				var nested any
 				decoder := json.NewDecoder(strings.NewReader(x))
 				decoder.UseNumber()
