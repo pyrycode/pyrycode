@@ -14,6 +14,8 @@ Pyrycode is a process supervisor for Claude Code. It wraps the `claude` CLI in a
 - **License:** MIT
 - **Platforms:** Linux + macOS (Windows out of scope)
 
+**Non-technical people use the clients.** Nobody should have to touch a model version, or any other implementation detail, to keep a session working. So when a choice comes down to an exact model pin or a name that follows the latest release, follow the latest. #2447 applies this at the one place pyry hands a model to claude: a session that picked an exact id is sent its family alias, so it moves to the family's newest model after every claude update with no user action, while the stored row stays as picked (`internal/sessions/modelfamily.go`).
+
 ## Architecture
 
 `internal/` holds ~33 packages. The load-bearing ones:
