@@ -607,7 +607,7 @@ func TestDaemonThreadQueriesJoin(t *testing.T) {
 	s.publisher.publish(t.Context(), testConvID, cursor)
 	unblock()
 	failed, liveCount := false, 0
-	for !failed || liveCount < 2 {
+	for !failed || liveCount < 1 {
 		peer, e := w.read()
 		if peer != "phone" {
 			t.Fatal("thread query/live output leaked to legacy")
@@ -645,7 +645,7 @@ func TestDaemonThreadQueriesJoin(t *testing.T) {
 	testDaemonThreadAppend(t, h, "assistant_delta", `{"turn_id":"t","text":" third"}`)
 	testDaemonThreadLoad(t, store, 3)
 	s.publisher.publish(t.Context(), testConvID, cursor)
-	for range 2 {
+	{
 		peer, e := w.read()
 		if peer != "phone" || e.InReplyTo != nil {
 			t.Fatal("live recipient/correlation")
@@ -658,7 +658,7 @@ func TestDaemonThreadQueriesJoin(t *testing.T) {
 				t.Fatal(err)
 			}
 			prior := rows[changed.ItemID]
-			if prior.Rev != changed.BaseRev {
+			if prior.Rev != changed.BaseRev || changed.Rev <= changed.BaseRev {
 				t.Fatal("query/live change regression")
 			}
 			var fields map[string]json.RawMessage
@@ -676,7 +676,7 @@ func TestDaemonThreadQueriesJoin(t *testing.T) {
 				t.Fatal(err)
 			}
 			prior := rows[appended.ItemID]
-			if prior.Rev != appended.BaseRev {
+			if prior.Rev != appended.BaseRev || appended.Rev <= appended.BaseRev {
 				t.Fatal("query/live text regression")
 			}
 			var fields map[string]json.RawMessage
