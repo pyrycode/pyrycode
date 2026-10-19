@@ -17,6 +17,7 @@ var recordedManifestJSON []byte
 
 type recordedScenarioDefinition struct {
 	Name            string            `json:"name"`
+	ClaudeArgs      []string          `json:"claude_args"`
 	StdioPermission bool              `json:"stdio_permission"`
 	LiveTests       []string          `json:"live_tests"`
 	RetainedLive    []string          `json:"retained_live"`

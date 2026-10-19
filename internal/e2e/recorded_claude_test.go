@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,7 +95,8 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		c.Producer = claudetape.Producer{Revision: strings.TrimSpace(string(rev)), BinarySHA256: hex.EncodeToString(sum[:]), ClaudeVersion: strings.TrimSpace(string(version)), CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	}
 	wrapper := tapeWrapper(t, c)
-	writeStreamInteractiveConfig(t, home, recordedManifestFor(t).scenario(scenario).StdioPermission)
+	definition := recordedManifestFor(t).scenario(scenario)
+	writeStreamInteractiveConfig(t, home, definition.StdioPermission)
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 	relayURL := fr.URL() + "/v2/server"
@@ -112,7 +114,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 	if mode == "replay" {
 		extra = append(extra, "CLAUDE_CODE_OAUTH_TOKEN=", "ANTHROPIC_API_KEY=", "CLAUDE_CONFIG_DIR=")
 	}
-	_, cmd, stdout, stderr, done := spawnWith(t, home, spawnOpts{claudeBin: wrapper, claudeArgs: []string{}, extraEnv: extra, extraFlags: []string{"-pyry-relay=" + relayURL, "-pyry-verbose", "-pyry-socket=" + c.Socket}})
+	_, cmd, stdout, stderr, done := spawnWith(t, home, spawnOpts{claudeBin: wrapper, claudeArgs: append([]string{}, definition.ClaudeArgs...), extraEnv: extra, extraFlags: []string{"-pyry-relay=" + relayURL, "-pyry-verbose", "-pyry-socket=" + c.Socket}})
 	h := &Harness{SocketPath: c.Socket, HomeDir: home, PID: cmd.Process.Pid, Stdout: stdout, Stderr: stderr, cmd: cmd, doneCh: done}
 	t.Cleanup(func() { h.Stop(t) })
 	if err = h.waitForReady(); err != nil {
@@ -172,6 +174,9 @@ func runRecordedClaude(t *testing.T, scenario string) {
 					}
 				}
 			}
+			if errors.Is(result.err, fakephone.ErrReceiveTimeout) {
+				return protocol.Envelope{}
+			}
 			if result.err != nil {
 				t.Fatal("test client connection ended before scenario completed")
 			}
@@ -183,7 +188,6 @@ func runRecordedClaude(t *testing.T, scenario string) {
 				return decryptInnerEnvelope(t, inner, recv)
 			}
 		}
-		t.Fatal("recorded daemon scenario deadline exceeded")
 		return protocol.Envelope{}
 	}
 

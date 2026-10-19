@@ -13,7 +13,8 @@
       "retained_live": [
         "Actual semantic memory remains with the three-turn live test."
       ],
-      "live_contracts": {}
+      "live_contracts": {},
+      "claude_args": []
     },
     {
       "name": "permission-deny",
@@ -26,9 +27,10 @@
         "Denied-file absence and current provider/transport behavior remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamPermissionDeny": "2a0d292a4f0418c92547e726d2891b23f93c2f60796a5615326fdb9c63c816f2",
-        "TestInteractiveStreamStdioPermissionDeny": "8d8fbc427ec25f0401ccdbcc5a4901c49d374251e1fc5ea8471182d85980e080"
-      }
+        "TestInteractiveStreamPermissionDeny": "e09b61cccf536c1b09ca92fc6b7f636908bfee694fdb2d2db07e0d84a0a51656",
+        "TestInteractiveStreamStdioPermissionDeny": "f49b140e3978c45bc20054aa39ea83d615fcc9d7b309b6df4ef16fb77b7d8c48"
+      },
+      "claude_args": []
     },
     {
       "name": "reply",
@@ -40,8 +42,9 @@
         "Current provider compatibility remains live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamLiveness": "50541a380136d28aab7330fe704f69212f5e89d62b077c51f48d44be9f2d3ef1"
-      }
+        "TestInteractiveStreamLiveness": "be304eba7f6ad0895f9bd0b9f1bf6059898c7215fba2febee5a946c18bb1d076"
+      },
+      "claude_args": []
     },
     {
       "name": "question-answer",
@@ -54,9 +57,10 @@
         "Unpredictable labels and current Claude interpretation remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamQuestionAnswer": "42f57a58d990d1c12fd24e1c813dfdfe1f9546bbc7e723e1d2be77cfa443322c",
-        "TestInteractiveStreamStdioQuestionAnswer": "9ce3fa33469d96736a0a2002f3b3fbf5fe53eb20f362364d4e5f86bc31a9156b"
-      }
+        "TestInteractiveStreamQuestionAnswer": "ddf477b2060f3a68b3947611b9466fd4367a357eb9653eadf48985f85c07c411",
+        "TestInteractiveStreamStdioQuestionAnswer": "958539a4c91f3f876ee5051f5a5ab35eed2f7a3dfa9cbba893b6241da649d61a"
+      },
+      "claude_args": []
     },
     {
       "name": "question-refuse",
@@ -68,8 +72,9 @@
         "Blocked-file absence and real provider refusal behavior remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamQuestionRefusal": "4cd3b033f1c025ce72badac4965994831a077622e6ac7e19cfd50bfa5e8c8028"
-      }
+        "TestInteractiveStreamQuestionRefusal": "e8127c8bc667e9dd57cd62b5f26a399d4579e872bb276eccb7b351ecadc7a1ac"
+      },
+      "claude_args": []
     },
     {
       "name": "permission-allow",
@@ -82,9 +87,10 @@
         "Actual file creation and current MCP/stdio behavior remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamModalResolution": "e4219be1da1c52cea08bb4b7ebd1db21a68ead18cb61eda1cb754840decc7f8b",
-        "TestInteractiveStreamStdioModalAllow": "c7989cb880e605b679363633b15bf77bfccacb1969d12fccd320729ad3f16da1"
-      }
+        "TestInteractiveStreamModalResolution": "e27bf59963fd15c26707388fdb82787a11113236e442307997c5f13a56dede11",
+        "TestInteractiveStreamStdioModalAllow": "7955612dc30b5245b8e5821a3801835fcb7ae5386b7c00a6cece6f2de8fd9c78"
+      },
+      "claude_args": []
     },
     {
       "name": "permission-cancel",
@@ -96,8 +102,27 @@
         "Actual denied-file absence and 30/60-second real-provider budgets remain live."
       ],
       "live_contracts": {
-        "TestInteractiveStreamStdioCancelDeniesParkedPermission": "97fc42a8dbc24b39cfffbc846911e7eccf4d84a1da3c725609e33195e075073c"
-      }
+        "TestInteractiveStreamStdioCancelDeniesParkedPermission": "fe7f986cb2ef1cab364a5066a245d8e3b372c3d9c88065731f9f6a9bc4aafba3"
+      },
+      "claude_args": []
+    },
+    {
+      "name": "send-now-placement",
+      "stdio_permission": false,
+      "live_tests": [
+        "TestRealClaude_SendQueuedNowPlacement"
+      ],
+      "retained_live": [
+        "Actual foreground Bash execution, current Claude interpretation, per-turn budgets and the three-second late-frame window remain live"
+      ],
+      "live_contracts": {
+        "TestRealClaude_SendQueuedNowPlacement": "53ab4e7aebdaf1db463f4c261329f5e83f26f03f62c2b0802422fe33b5a4a93b"
+      },
+      "claude_args": [
+        "--model",
+        "haiku",
+        "--dangerously-skip-permissions"
+      ]
     }
   ],
   "batches": {
@@ -113,23 +138,21 @@
       "permission-deny",
       "permission-allow",
       "permission-cancel"
+    ],
+    "queue": [
+      "send-now-placement"
     ]
   },
   "reviews": {
-    "TestRealClaude_SendQueuedNowPlacement": {
-      "disposition": "candidate",
-      "reason": "Verify an actual mid-turn stdin barrier before tool_result; retain real Bash and settle timing proof.",
-      "contract_sha256": "5795e487ded0c96d95bdc8d0c7d102d469f51559bc010d9e67dd05a055a9decb"
-    },
     "TestRealClaude_OrdinaryQueuedPlacement": {
       "disposition": "needs_checkpoint",
       "reason": "Busy queue admission writes no Claude input; require a client-action checkpoint before fast replay.",
-      "contract_sha256": "6ac75c49ddd52e396a9d8542ae8cae82062c6af6de93048c29dab4a80d955d37"
+      "contract_sha256": "32620ddcb832474513002e875844c9f237fbc89e546783fa6410cc97e94158de"
     },
     "TestInteractiveStreamMultiTurnContinuity": {
       "disposition": "live_only",
       "reason": "Requires current Claude semantic memory across three turns; sequential replay does not establish recall.",
-      "contract_sha256": "189a5298ed02c13248d940574a0305e36ccd730390aa0cc24e9db6a870bfbd66"
+      "contract_sha256": "65cee6ac57a2a94e5e01e573be6453e5fc4a3339fd2b5c3aaab523328283085f"
     }
   }
 }

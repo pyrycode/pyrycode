@@ -19,13 +19,14 @@ type recordedScenarioContext struct {
 }
 
 var recordedScenarioDrivers = map[string]func(*testing.T, recordedScenarioContext){
-	"reply":             runTapeReply,
-	"question-answer":   runTapeQuestionAnswer,
-	"question-refuse":   runTapeQuestionRefuse,
-	"permission-allow":  runTapePermissionAllow,
-	"permission-cancel": runTapePermissionCancel,
-	"two-turn":          runTapeTwoTurn,
-	"permission-deny":   runTapePermissionDeny,
+	"reply":              runTapeReply,
+	"send-now-placement": runTapeSendNowPlacement,
+	"question-answer":    runTapeQuestionAnswer,
+	"question-refuse":    runTapeQuestionRefuse,
+	"permission-allow":   runTapePermissionAllow,
+	"permission-cancel":  runTapePermissionCancel,
+	"two-turn":           runTapeTwoTurn,
+	"permission-deny":    runTapePermissionDeny,
 }
 
 func (c recordedScenarioContext) turn(t *testing.T, text string) {
@@ -138,4 +139,9 @@ func runTapePermissionDeny(t *testing.T, c recordedScenarioContext) {
 			t.Fatal("denied tool created its file")
 		}
 	}
+}
+
+func runTapeSendNowPlacement(t *testing.T, c recordedScenarioContext) {
+	t.Helper()
+	scenariohelpers.SendNowPlacement(t, c.Wire, tapeConversation, scenariohelpers.SendNowPrompt("tape-send-now-placement"), 150*time.Second, scenariohelpers.SendNowSettle)
 }
