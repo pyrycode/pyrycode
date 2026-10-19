@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 )
 
@@ -117,10 +118,15 @@ func (t *Tape) Save(path string) error {
 	return nil
 }
 
+var credentialSourceLabel = regexp.MustCompile(`"(?:tokenSource|apiKeySource)"\s*:\s*"(?:CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)"`)
+
 // Safe rejects credentials and unnormalized operator paths. Error messages never
 // include source bytes. Captures come from controlled disposable workspaces only.
 func Safe(raw []byte) error {
-	lower := strings.ToLower(string(raw))
+	// These exact values identify the credential source, never its value. Keep
+	// the original bytes in the tape; omit only the known label from this scan.
+	scan := credentialSourceLabel.ReplaceAll(raw, []byte(`"credentialSourceLabel":"known-source"`))
+	lower := strings.ToLower(string(scan))
 	for _, needle := range []string{"sk-ant-", "bearer ", "access_token", "refresh_token", "api_key", "oauth_token", "password", "/users/", "/home/"} {
 		if strings.Contains(lower, needle) {
 			return fmt.Errorf("candidate contains private data (%s)", needle)

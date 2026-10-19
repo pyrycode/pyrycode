@@ -149,3 +149,16 @@ func TestFreshContract(t *testing.T) {
 		t.Fatal("compatibility accepted a changed user choice")
 	}
 }
+
+func TestCredentialSourceLabels(t *testing.T) {
+	for _, raw := range []string{`{"tokenSource":"CLAUDE_CODE_OAUTH_TOKEN"}`, `{"apiKeySource": "ANTHROPIC_API_KEY"}`} {
+		if err := Safe([]byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, raw := range []string{`{"text":"CLAUDE_CODE_OAUTH_TOKEN"}`, `{"oauth_token":"secret"}`, `{"tokenSource":"sk-ant-secret"}`} {
+		if Safe([]byte(raw)) == nil {
+			t.Fatal("source label exception hid private data")
+		}
+	}
+}
