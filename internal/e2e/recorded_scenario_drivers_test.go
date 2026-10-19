@@ -16,10 +16,14 @@ type recordedScenarioContext struct {
 	Home, Mode string
 	Wire       scenariohelpers.Wire
 	Sequence   *uint64
+	DaemonLog  func() string
 }
 
 var recordedScenarioDrivers = map[string]func(*testing.T, recordedScenarioContext){
 	"reply":              runTapeReply,
+	"model-announced":    runTapeModelAnnouncement,
+	"model-rejection":    runTapeModelRejection,
+	"tool-turn-clean":    runTapeToolTurn,
 	"send-now-placement": runTapeSendNowPlacement,
 	"question-answer":    runTapeQuestionAnswer,
 	"question-refuse":    runTapeQuestionRefuse,
@@ -144,4 +148,19 @@ func runTapePermissionDeny(t *testing.T, c recordedScenarioContext) {
 func runTapeSendNowPlacement(t *testing.T, c recordedScenarioContext) {
 	t.Helper()
 	scenariohelpers.SendNowPlacement(t, c.Wire, tapeConversation, scenariohelpers.SendNowPrompt("tape-send-now-placement"), 150*time.Second, scenariohelpers.SendNowSettle)
+}
+
+const recordedHaikuModel = "claude-haiku-4-5-20251001"
+
+func runTapeModelAnnouncement(t *testing.T, c recordedScenarioContext) {
+	t.Helper()
+	scenariohelpers.ModelAnnouncement(t, c.Wire, tapeConversation, "Reply with a single short word. run=tape-model-announced", "haiku", recordedHaikuModel, 150*time.Second, c.DaemonLog)
+}
+func runTapeModelRejection(t *testing.T, c recordedScenarioContext) {
+	t.Helper()
+	scenariohelpers.ModelRejection(t, c.Wire, tapeConversation, tapeSession, "Reply with one short word and nothing else. run=tape-model-rejection", recordedHaikuModel, 30*time.Second, 150*time.Second)
+}
+func runTapeToolTurn(t *testing.T, c recordedScenarioContext) {
+	t.Helper()
+	scenariohelpers.ToolTurn(t, c.Wire, tapeConversation, "Use the Write tool to create a file called probe.txt containing the single word banana, then use the Read tool to read it back. Reply with one short word. run=tape-tool-turn", 180*time.Second)
 }

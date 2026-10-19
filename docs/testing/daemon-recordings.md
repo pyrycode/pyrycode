@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Eight scenarios run the same assertions in live capture and offline replay:
+Eleven scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -60,6 +60,19 @@ Eight scenarios run the same assertions in live capture and offline replay:
   window also rejects delayed duplicate messages or extra turn ends. Both live
   and recorded callers use this same driver. Real Bash execution, current Claude
   interpretation and elapsed provider time remain live proof.
+
+- `model-announced`: one text turn must expose the exact resolved Haiku model,
+  distinct from the spawn alias, in an owned announcement; the observed value
+  must be absent from the verbose daemon log. Nonempty reply and terminal idle
+  are both required. Current provider resolution remains live proof.
+- `model-rejection`: read a complete current menu with no dropped rows or truncated
+  values, derive an absent model, and reject the correlated settings update as
+  non-retryable `protocol.malformed`, including its co-submitted effort/posture.
+  A fresh turn must still announce the original model and reach terminal idle.
+- `tool-turn-clean`: the original Write/Read trigger and completed-turn drain keep
+  parser-gap and unknown-rate-status alarms. Owned matching Write and Read
+  use/result pairs make the sample non-vacuous in live capture and replay.
+  Real filesystem effects and newly introduced provider shapes remain live.
 
 `make e2e` includes these cases in the ordinary offline integration selection.
 `make e2e-recorded-claude` runs just the recorded suite. Missing fixtures fail; nothing
@@ -144,6 +157,9 @@ preship remains unchanged, and dispatcher routing is unchanged.
 | Three-turn memory continuity | None in this batch | Actual Claude context retention |
 | Question refusal | `question-refuse`, same refusal drain and history checks | Unpredictable question labels, blocked Write absence and actual provider refusal behavior |
 | Permission cancellation | `permission-cancel`, same cancellation/history checks | Denied-file absence, real parked-completer timing and current stdio behavior |
+| Model announcement | `model-announced`, same first-announcement/reply/idle and verbose-log assertions | Current alias resolution and provider behavior |
+| Absent-model rejection | `model-rejection`, same complete-menu/rejection/retained-model driver | Current advertised menu and provider interpretation |
+| Tool-turn parser sample | `tool-turn-clean`, same completed-turn alarms plus owned Write/Read round trips | Actual filesystem effects and current provider line vocabulary |
 | Send-now queued placement | `send-now-placement`, same queue/action/order driver | Actual foreground Bash execution, current Claude interpretation and elapsed/settle time |
 | Permission allow/deny | `permission-allow` and `permission-deny`, same resolution/history drivers | Actual file creation/absence, current approval transport and settings-respawn behavior |
 
@@ -287,3 +303,30 @@ command, marker and all queue/order assertions are unchanged. The ordinary-queue
 live test uses the extracted classifier with its original assertions intact.
 Ordinary queue admission does not itself write Claude stdin, so its separate
 client-action checkpoint requirement remains unresolved and it is not migrated.
+
+### Three-scenario protocol batch
+
+`--batch basic-protocol` groups `model-announced`, `model-rejection` and
+`tool-turn-clean`. Implement and check each shared driver with focused controls,
+then capture and review the three candidates together. After committing only the
+new inspected fixtures, run the batch once: fresh capture and per-case contract
+comparisons, one full offline regression, one mapped live selection containing
+all three original roots, one 201-cut restoration and one guard invocation.
+The full offline gate still exercises every manifest scenario. All eight earlier
+fixtures remain unchanged; no live tests are removed or retagged.
+
+These cases need no queue checkpoint or process-lifecycle support. Announcement
+and tool-turn spawns retain the live explicit Haiku/operator-bypass arguments;
+model rejection keeps Haiku with normal approval configuration. Live prompts keep
+fresh nonces, while recorded prompts use fixed run suffixes. Model-menu retry
+counts are not provider requests: complete ordered daemon stdin still faces the
+existing exact comparison. A changed provider menu that changes a submitted model
+or another request must fail compatibility and be reviewed.
+
+Extracting the announcement drain also affects existing family-alias consumers.
+The helper retains its first-announcement, owned nonempty text and terminal-idle
+milestones. Each new announcement consumer additionally requires the announcement
+itself to belong to the driving conversation. Controls reject missing or wrong
+models, alias echoes, foreign attribution, log leaks, incomplete menus, wrong
+request correlation, retryable/wrong rejection codes, changed post-rejection
+models, missing/foreign tool results and parser/rate-limit alarms.
