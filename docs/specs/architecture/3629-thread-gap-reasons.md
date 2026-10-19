@@ -39,3 +39,7 @@ Each scenario verifies unique retirement of tracked and currently eligible query
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-19
+
+## Revisions
+
+- 2026-10-19: `go vet` identified a direct test caller omitted by CodeGraph's callers result. Update `TestDaemonThreadGapPreservesAgentIneligiblePeer` in `cmd/pyry/daemon_thread_relay_rework_test.go` to supply `baseline_required` while preserving its wire retirement proof. The signature now has six call sites in three consumers, still below every sizing limit. The managed test selector rejected the initial grouped regex as unbounded before execution; use explicit test names for focused proof.

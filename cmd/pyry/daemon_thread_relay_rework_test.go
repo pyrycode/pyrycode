@@ -42,7 +42,7 @@ func TestDaemonThreadGapPreservesAgentIneligiblePeer(t *testing.T) {
 	if len(codex.threadPeers) != 0 {
 		t.Error("boundary acquisition recorded a live push")
 	}
-	s.publisher.gap(t.Context(), testConvIDB, codex)
+	s.publisher.gap(t.Context(), testConvIDB, codex, "baseline_required")
 	closed := wire.await()
 	if closed.ConnID != "again" || closed.CloseCode != uint16(relay.StatusQueueOverflow) {
 		t.Fatalf("gap retired an unaffected peer: %#v", closed)
