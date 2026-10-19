@@ -538,13 +538,16 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		return nil
 	}
 	pollCheckpoint := func() error {
-		return checkpoint.poll(tape, player, func(raw []byte) ([]byte, error) { return tapeNormalize(raw, c, false) }, emit, &bytes, &frames)
+		return checkpoint.poll(tape, player, func(raw []byte) ([]byte, error) { return tapeNormalize(raw, c, false) }, emit, &bytes, &frames, func() error { return inputs.drain(handleInput) })
 	}
 	for {
-		if err := pollCheckpoint(); err != nil {
+		// Consume already-written native stdin before a newly published client
+		// observation. Otherwise the file can overtake its preceding pipe write
+		// merely because both become ready before this helper is scheduled.
+		if err := inputs.drain(handleInput); err != nil {
 			return frames, err
 		}
-		if err := inputs.drain(handleInput); err != nil {
+		if err := pollCheckpoint(); err != nil {
 			return frames, err
 		}
 		select {

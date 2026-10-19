@@ -15,7 +15,7 @@ import (
 )
 
 func TestRecordedCheckpointState(t *testing.T) {
-	for _, name := range []string{"capture", "replay", "replay delivery error", "capture bound", "changed seal evidence"} {
+	for _, name := range []string{"capture", "replay", "replay delivery error", "capture bound", "ready input error", "changed seal evidence"} {
 		t.Run(name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "actions")
 			if err := claudetape.NewCheckpointDirectory(dir); err != nil {
@@ -34,12 +34,10 @@ func TestRecordedCheckpointState(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if out, err := player.Input(tape.Frames[0].Data); err != nil || len(out) != 0 {
-					t.Fatal("replay did not hold at client action")
-				}
+
 			}
 			budget := 2 * time.Second
-			if name == "replay delivery error" || name == "capture bound" {
+			if name == "replay delivery error" || name == "capture bound" || name == "ready input error" {
 				budget = 150 * time.Millisecond
 			}
 			done := make(chan error, 1)
@@ -65,12 +63,27 @@ func TestRecordedCheckpointState(t *testing.T) {
 			var pollErr error
 			deadline := time.Now().Add(2 * time.Second)
 			for len(state.accepted) == 0 && pollErr == nil && time.Now().Before(deadline) {
-				pollErr = state.poll(tape, player, func(raw []byte) ([]byte, error) { return append([]byte(nil), raw...), nil }, emit, &total, &frames)
+				pollErr = state.poll(tape, player, func(raw []byte) ([]byte, error) { return append([]byte(nil), raw...), nil }, emit, &total, &frames, func() error {
+					if _, exists, err := claudetape.ReadCheckpoint(dir, 1); err != nil || !exists {
+						t.Fatal("ready-input drain preceded ready observation")
+					}
+					if name == "ready input error" {
+						return errors.New("synthetic preceding stdin failure")
+					}
+					// Simulate EAGAIN before publication: the preceding pipe
+					// input becomes consumable only at the ready-observed drain.
+					if player != nil {
+						if out, err := player.Input(tape.Frames[0].Data); err != nil || len(out) != 0 {
+							return errors.New("preceding input was not drained before action")
+						}
+					}
+					return nil
+				})
 				if pollErr == nil && len(state.accepted) == 0 {
 					time.Sleep(time.Millisecond)
 				}
 			}
-			failed := name == "replay delivery error" || name == "capture bound"
+			failed := name == "replay delivery error" || name == "capture bound" || name == "ready input error"
 			if (pollErr != nil) != failed {
 				t.Fatalf("checkpoint dispatch acceptance err=%v", pollErr)
 			}
@@ -102,7 +115,7 @@ func TestRecordedCheckpointState(t *testing.T) {
 			if (sealErr != nil) != (name == "changed seal evidence") {
 				t.Fatal("state seal did not validate exact file evidence")
 			}
-			if err := state.poll(tape, player, func(raw []byte) ([]byte, error) { return raw, nil }, emit, &total, &frames); err == nil {
+			if err := state.poll(tape, player, func(raw []byte) ([]byte, error) { return raw, nil }, emit, &total, &frames, func() error { return nil }); err == nil {
 				t.Fatal("post-seal dispatcher accepted old path")
 			}
 		})
@@ -121,7 +134,7 @@ func TestRecordedCheckpointProfileIsExplicit(t *testing.T) {
 		{"reply", 1, "", true}, {"reply", 1, "unexpected", false}, {"interrupt-running", 2, "", false}, {"interrupt-running", 1, "", false},
 	} {
 		state := recordedCheckpointState{dir: row.dir}
-		err := state.poll(&claudetape.Tape{Version: row.version, Scenario: row.scenario}, nil, normalize, emit, &total, &frames)
+		err := state.poll(&claudetape.Tape{Version: row.version, Scenario: row.scenario}, nil, normalize, emit, &total, &frames, func() error { return nil })
 		if (err == nil) != row.valid {
 			t.Fatal("implicit checkpoint profile accepted")
 		}

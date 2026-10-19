@@ -16,7 +16,7 @@ type recordedCheckpointState struct {
 
 // poll never waits for an action during capture. Real stdout continues normally;
 // only replay's player holds its output tail behind the typed observation.
-func (s *recordedCheckpointState) poll(tape *claudetape.Tape, player *claudetape.Player, normalize func([]byte) ([]byte, error), emit func([]json.RawMessage) error, totalBytes, frames *int) error {
+func (s *recordedCheckpointState) poll(tape *claudetape.Tape, player *claudetape.Player, normalize func([]byte) ([]byte, error), emit func([]json.RawMessage) error, totalBytes, frames *int, afterReady func() error) error {
 	required := claudetape.RequiresClientCheckpoint(tape.Scenario)
 	if (s.dir != "") != required || (tape.Version == 2) != required {
 		return errors.New("client checkpoint profile configuration changed")
@@ -30,6 +30,14 @@ func (s *recordedCheckpointState) poll(tape *claudetape.Tape, player *claudetape
 	}
 	if !exists {
 		return nil
+	}
+	// Ready publication follows a complete preceding pipe write. Drain only
+	// after observing ready so it cannot overtake that write across EAGAIN.
+	if afterReady == nil {
+		return errors.New("client checkpoint lacks ready-input drain")
+	}
+	if err := afterReady(); err != nil {
+		return err
 	}
 	if len(s.accepted) != 0 {
 		return errors.New("extra client checkpoint")

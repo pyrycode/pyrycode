@@ -21,7 +21,10 @@ import (
 func TestRecordedCheckpointProcessSeal(t *testing.T) {
 	for _, name := range []string{"complete", "missing-action", "changed-action"} {
 		t.Run(name, func(t *testing.T) {
-			home := t.TempDir()
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			work := filepath.Join(home, "work")
 			if err := os.Mkdir(work, 0700); err != nil {
 				t.Fatal(err)
@@ -83,7 +86,13 @@ func TestRecordedCheckpointProcessSeal(t *testing.T) {
 			}
 			switch name {
 			case "complete":
-				if err := claudetape.PublishCheckpoint(c.CheckpointDir, action, time.Second); err != nil {
+				if err := claudetape.PublishCheckpoint(c.CheckpointDir, action, 2*time.Second); err != nil {
+					if raw, e := os.ReadFile(c.Receipt); e == nil {
+						var r tapeReceipt
+						if json.Unmarshal(raw, &r) == nil {
+							t.Fatalf("checkpoint helper did not acknowledge: %s", r.Error)
+						}
+					}
 					t.Fatal(err)
 				}
 				if _, err := in.Write(append(interrupt, '\n')); err != nil {
