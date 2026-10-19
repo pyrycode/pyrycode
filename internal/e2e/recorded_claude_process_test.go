@@ -60,6 +60,9 @@ func TestClaudeTapeProcess(t *testing.T) {
 		}
 	}
 	frames, err := runClaudeTapeProcess(c, args)
+	if errors.Is(err, errTapeDuplicate) {
+		os.Exit(1)
+	}
 	receipt := tapeReceipt{Success: err == nil, Frames: frames}
 	if err != nil {
 		receipt.Error = err.Error()
@@ -145,10 +148,13 @@ func tapeArgs(args []string, home string) []string {
 	return out
 }
 
+var errTapeDuplicate = errors.New("pilot allows exactly one Claude process")
+
 func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 	claim, err := os.OpenFile(c.Claim, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return 0, errors.New("pilot allows exactly one Claude process")
+		_ = os.WriteFile(c.Claim+".duplicate", nil, 0o600)
+		return 0, errTapeDuplicate
 	}
 	_ = claim.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
