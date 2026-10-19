@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -48,6 +49,17 @@ func RunPoolProcess(c PoolProcessConfig, args []string, input *os.File, output, 
 	if len(files["--settings"]) == 0 {
 		return 0, errors.New("pool profile lacks complete settings file")
 	}
+	return runBoundProcess(c, args, binding, files, input, output, diagnostic)
+}
+
+type childBinding interface {
+	Args() []string
+	Frame([]byte, bool) ([]byte, error)
+	Files() (map[string]json.RawMessage, error)
+}
+
+func runBoundProcess(c PoolProcessConfig, args []string, binding childBinding, files map[string]json.RawMessage, input *os.File, output, diagnostic io.Writer) (int, error) {
+	fail := errors.New("child recording process failed")
 	claim, err := os.OpenFile(c.Claim, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		_ = os.WriteFile(c.Claim+".duplicate", nil, 0600)
