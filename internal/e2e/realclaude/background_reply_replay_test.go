@@ -16,6 +16,9 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
+// This published value is synthetic, never a requirement on observed wording.
+const backgroundReplySyntheticText = "pyry-3589-finished"
+
 // Every parser input is retained in order. Only known structural keys and a
 // fixed vocabulary survive; all remaining strings are rig-authored substitutes.
 // Persistent parser traces must agree at each source index before publication.
@@ -116,8 +119,22 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 		}
 	}
 	var original, replayed []string
+	index := -1
+	var originalCompletion *turnevent.TextChunk
 	var traceErr error
 	signature := func(ev turnevent.Event, normalized bool) string {
+		if text, ok := ev.(turnevent.TextChunk); ok && index == final && text.TextComplete && strings.TrimSpace(text.Text) != "" {
+			owner := parent
+			if normalized {
+				owner = alias(parent)
+			}
+			if owner != "" && text.ParentToolCallID == owner {
+				// Only the selected intrinsic completion's prose is canonicalized.
+				// Message identity, attribution and completion remain in the trace.
+				text.Text = backgroundReplySyntheticText
+				ev = text
+			}
+		}
 		if end, ok := ev.(turnevent.TurnEnd); ok {
 			// Accounting does not participate in text completion or ownership.
 			ev = turnevent.TurnEnd{Reason: end.Reason, Outcome: end.Outcome, IsError: end.IsError, TerminalReason: end.TerminalReason, ErrorCategory: end.ErrorCategory}
@@ -155,6 +172,9 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	p := streamsup.NewParser(func(ev turnevent.Event) {
+		if text, ok := ev.(turnevent.TextChunk); ok && index == final && parent != "" && text.ParentToolCallID == parent && text.TextComplete && strings.TrimSpace(text.Text) != "" {
+			originalCompletion = &text
+		}
 		if s := signature(ev, false); s != "" {
 			original = append(original, s)
 		}
@@ -164,13 +184,14 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 		if s := signature(ev, true); s != "" {
 			replayed = append(replayed, s)
 		}
-		if text, ok := ev.(turnevent.TextChunk); ok && text.ParentToolCallID == alias(parent) && text.Text == "pyry-3589-finished" && text.TextComplete {
+		if text, ok := ev.(turnevent.TextChunk); ok && text.ParentToolCallID == alias(parent) && text.Text == backgroundReplySyntheticText && text.TextComplete {
 			complete = true
 		}
 	}, logger)
 	var replay []string
 	var indices []int
 	for i, line := range lines {
+		index = i
 		if line.Index != i {
 			return nil, nil, alias, fmt.Errorf("noncontiguous capture")
 		}
@@ -180,6 +201,22 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 		}
 		// Parse originals first so identity assignment follows production events.
 		_, _ = p.Write(append(append([]byte(nil), line.Raw...), '\n'))
+		if i == final {
+			if originalCompletion == nil {
+				return nil, nil, alias, fmt.Errorf("original sequence did not establish intrinsic child completion")
+			}
+			frame, _ := v.(map[string]any)
+			message, _ := frame["message"].(map[string]any)
+			content, _ := message["content"].([]any)
+			if frame["type"] != "assistant" || frame["parent_tool_use_id"] != parent || message["id"] != originalCompletion.MessageID || message["role"] != "assistant" || len(content) != 1 {
+				return nil, nil, alias, fmt.Errorf("selected source is not the completed assistant response")
+			}
+			block, _ := content[0].(map[string]any)
+			if block["type"] != "text" || block["text"] != originalCompletion.Text {
+				return nil, nil, alias, fmt.Errorf("selected source text does not match intrinsic completion")
+			}
+			block["text"] = backgroundReplySyntheticText
+		}
 		safe, err := json.Marshal(scrub("", v, false, false))
 		if err != nil {
 			return nil, nil, alias, fmt.Errorf("encode scrubbed sequence")
@@ -197,6 +234,9 @@ func backgroundReplyReplay(t *testing.T, lines []dropcapCaptured, parent, token 
 		if i == final && !complete {
 			return nil, nil, alias, fmt.Errorf("full captured sequence did not retain intrinsic child completion")
 		}
+	}
+	if originalCompletion == nil || final < 0 || final >= len(lines) {
+		return nil, nil, alias, fmt.Errorf("missing selected child completion")
 	}
 	return replay, indices, alias, nil
 }
