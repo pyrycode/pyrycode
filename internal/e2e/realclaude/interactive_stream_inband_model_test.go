@@ -504,8 +504,8 @@ var _ sessions.Runner = inbandRunner{}
 // chosen from the child's live menu. Its per-turn system/init announcements must
 // match both requested resolutions, with the same child serving all three turns.
 func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing.T) {
-	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
-	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+	claudeBin, home, finishRecording := poolProviderEnvironment(t)
+	defer finishRecording()
 
 	workdir := filepath.Join(home, inbandWorkdirName)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {

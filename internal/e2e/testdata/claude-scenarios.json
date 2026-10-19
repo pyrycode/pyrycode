@@ -16,7 +16,8 @@
       "live_contracts": {},
       "claude_args": [],
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "permission-deny",
@@ -34,7 +35,8 @@
       },
       "claude_args": [],
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "reply",
@@ -50,7 +52,8 @@
       },
       "claude_args": [],
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "question-answer",
@@ -63,7 +66,8 @@
       "live_contracts": {},
       "claude_args": [],
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "question-refuse",
@@ -79,7 +83,8 @@
       },
       "claude_args": [],
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "permission-allow",
@@ -97,7 +102,8 @@
       },
       "claude_args": [],
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "permission-cancel",
@@ -113,7 +119,8 @@
       },
       "claude_args": [],
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "send-now-placement",
@@ -133,7 +140,8 @@
         "--dangerously-skip-permissions"
       ],
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "model-announced",
@@ -153,7 +161,8 @@
         "TestInteractiveStreamModelAnnouncedFrame": "b22c1a09eca43e73555cdfb1d67ba4031e503be51e7fed208d628707eff65baf"
       },
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "model-rejection",
@@ -172,7 +181,8 @@
         "TestInteractiveStreamRejectsModelAbsentFromCurrentMenu": "9c026c6a9daa0d6d090f2c41f9ee44eadac24262bb067f58451d1010848ca380"
       },
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "tool-turn-clean",
@@ -192,7 +202,8 @@
         "TestInteractiveStreamNoUnrecognizedOnToolTurn": "2f0b70f375ccd2e8a156d6c4b6c480ba8cb0aa243a630d1e9d0c70d6f4c10a1b"
       },
       "initial_yolo": false,
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "family-alias",
@@ -211,7 +222,8 @@
       "live_contracts": {
         "TestInteractiveStreamPinnedModelFollowsItsFamily": "86ced4ee2a1aa05eab553d76a07130f460495bba0a205aeacae6e0882fff2fe0"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "attachment-read",
@@ -231,7 +243,8 @@
       "live_contracts": {
         "TestInteractiveStreamAttachmentRead": "6d0322acbcd24623bc0feac20f6d91e26c6e74ce3db8500d7454fc0c59ca6946"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "bypass-questions-mcp-stored",
@@ -247,7 +260,8 @@
         "Current named-cache answer witness and its strengthened history/turn ownership checks await shared witness migration; this legacy profile does not own those live roots."
       ],
       "live_contracts": {},
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "bypass-questions-mcp-operator",
@@ -264,7 +278,8 @@
         "Current named-cache answer witness and its strengthened history/turn ownership checks await shared witness migration; this legacy profile does not own those live roots."
       ],
       "live_contracts": {},
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "bypass-questions-stdio-stored",
@@ -280,7 +295,8 @@
         "Current named-cache answer witness and its strengthened history/turn ownership checks await shared witness migration; this legacy profile does not own those live roots."
       ],
       "live_contracts": {},
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "bypass-questions-stdio-operator",
@@ -297,7 +313,8 @@
         "Current named-cache answer witness and its strengthened history/turn ownership checks await shared witness migration; this legacy profile does not own those live roots."
       ],
       "live_contracts": {},
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "workspace-change",
@@ -317,7 +334,8 @@
       "live_contracts": {
         "TestInteractiveChangeWorkspace": "37ca911fdcb20e1baebdd37610e1f26575e85ec8286e25875c8b3e8b0163fbad"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "skill-silence",
@@ -337,7 +355,8 @@
       "live_contracts": {
         "TestInteractiveStreamSkillInvocationIsSilent": "b3949cfab4c7e851d957b130c08c178e29abf389484690ab09ae697c2c540db7"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "confirmed-permission-settings",
@@ -357,7 +376,8 @@
       "live_contracts": {
         "TestInteractiveStreamSessionSettingsReportsConfirmedPermissionMode": "ac52dc62b4d605e0a93ebdcb8b2dce8ea69c9d7782ca3890356cf098c65b9226"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "default-outside-read",
@@ -376,7 +396,8 @@
       "live_contracts": {
         "TestInteractiveStreamDefaultPostureOutsideWorkspaceRead": "f4f872bdf4e78cae39b84b7b53fe67e028301406eb866e7259f2ebb51842b304"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "mcp-reconnect",
@@ -395,7 +416,8 @@
       "live_contracts": {
         "TestRealClaudeMCPStatusAndReconnect": "1731efdd379cc83b502df94c8ffe92f5054c18b823dc18c698d85d458834c808"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "permission-context-absent",
@@ -414,7 +436,8 @@
       "live_contracts": {
         "TestInteractiveStreamStdioModalResolution": "22b6d5a20771a6a8933069d127a127cdd2178a68ff1b62bbb00d2bf9e84e6471"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "permission-context-outside",
@@ -433,7 +456,8 @@
       "live_contracts": {
         "TestInteractiveStreamStdioModalResolution": "22b6d5a20771a6a8933069d127a127cdd2178a68ff1b62bbb00d2bf9e84e6471"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "native-suggestions",
@@ -453,7 +477,8 @@
       "live_contracts": {
         "TestInteractiveStream_NativeReplySuggestionSetThenClear": "97ff8c71778fa2591eaead8be47430b776dc16c48a0e88b30e1d42e7bac187e6"
       },
-      "comparison_policy": "native_coding_prefix"
+      "comparison_policy": "native_coding_prefix",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "hook-banner",
@@ -473,7 +498,8 @@
       "retained_live": [
         "Actual UserPromptSubmit hook execution, blocked-first/passed-later witnesses, current informational shape, and original create-conversation cold-spawn coverage remain live."
       ],
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "subagent-text",
@@ -493,7 +519,8 @@
       "live_contracts": {
         "TestInteractiveStreamForwardsSubagentText": "b6a8b4904e7774b5c670ffc2eb1d10375487def836a012cd38d0aae7f9bb1b12"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "ordinary-queue-placement",
@@ -513,7 +540,8 @@
       "live_contracts": {
         "TestRealClaude_OrdinaryQueuedPlacement": "bccbff9a35553d91849f0b1260df36d9bf660c57c9ee30b68e9240ca6362421f"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "interrupt-running",
@@ -533,7 +561,8 @@
       "live_contracts": {
         "TestInteractiveStreamInterruptStopsRunningTurn": "04df7e1d1286e00f27d69dbac8e2f7cdba91349ca13160ef09cfc862e5514f3b"
       },
-      "comparison_policy": "strict_ordered"
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
     },
     {
       "name": "interrupt-thinking",
@@ -552,6 +581,75 @@
       ],
       "live_contracts": {
         "TestInteractiveStreamInterruptStopsInitialThinkingTurn": "d10eb02c3ea29245986aa6544df51fb5d6fe66ab559982682876e0f19500cd7c"
+      },
+      "comparison_policy": "strict_ordered",
+      "boundary": "daemon_stdio"
+    },
+    {
+      "name": "pool-model-change",
+      "boundary": "pool_stdio",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel"
+      ],
+      "retained_live": [
+        "Current provider interpretation, actual application of model/posture controls and native child execution remain live. Replay runs the complete original pool test assertions, including native control taps, ownership and unchanged child/spawn checks."
+      ],
+      "live_contracts": {
+        "TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel": "9ea536ba1efd4b853aff5f25e8ed4cedae400df4782d1ca0571446c390d52ec5"
+      },
+      "comparison_policy": "strict_ordered"
+    },
+    {
+      "name": "pool-bypass-revoke",
+      "boundary": "pool_stdio",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode"
+      ],
+      "retained_live": [
+        "Current provider interpretation, actual application of model/posture controls and native child execution remain live. Replay runs the complete original pool test assertions, including native control taps, ownership and unchanged child/spawn checks."
+      ],
+      "live_contracts": {
+        "TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode": "cb04360b674203828fd1e8c4613d42cea7f665ef388c2f4d07815b4e2458b34a"
+      },
+      "comparison_policy": "strict_ordered"
+    },
+    {
+      "name": "pool-bypass-escalate",
+      "boundary": "pool_stdio",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode"
+      ],
+      "retained_live": [
+        "Current provider interpretation, actual application of model/posture controls and native child execution remain live. Replay runs the complete original pool test assertions, including native control taps, ownership and unchanged child/spawn checks."
+      ],
+      "live_contracts": {
+        "TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode": "30673bd1a8149d39904126c65424a8e942a42bb0479315ee9f724d568a782cb9"
+      },
+      "comparison_policy": "strict_ordered"
+    },
+    {
+      "name": "pool-posture-gate",
+      "boundary": "pool_stdio",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows"
+      ],
+      "retained_live": [
+        "Current provider interpretation, actual application of model/posture controls and native child execution remain live. Replay runs the complete original pool test assertions, including native control taps, ownership and unchanged child/spawn checks."
+      ],
+      "live_contracts": {
+        "TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows": "9393485484f071cd80af3930a4d82a9aba48d10f17daa43ed386e545e6304d5e"
       },
       "comparison_policy": "strict_ordered"
     }
@@ -602,6 +700,12 @@
       "ordinary-queue-placement",
       "interrupt-running",
       "interrupt-thinking"
+    ],
+    "pool-controls": [
+      "pool-model-change",
+      "pool-bypass-revoke",
+      "pool-bypass-escalate",
+      "pool-posture-gate"
     ]
   },
   "reviews": {
@@ -724,26 +828,6 @@
       "disposition": "needs_harness",
       "reason": "Suggestion fallback uses the persistent stream plus a separate print-mode Claude invocation. Need multi-invocation argv/EOF/exit/result support and an explicit suggestion-set checkpoint before clear; keep source-producer isolation assertions.",
       "contract_sha256": "28a248df90539a700888c6bb68bc7a76f490cbd3b20ae20d9774f518bf50086a"
-    },
-    "TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode": {
-      "disposition": "needs_harness",
-      "reason": "In-band escalation is a pool/RunnerFactory harness, not the daemon client harness. Add single-process pool replay with full args/control-source tap, response counts, init mode transition and unchanged PID/spawn count; actual provider application remains live.",
-      "contract_sha256": "8155eaa09c3481edb56f852ec621fef31cc51dcd517736e836d175654a084cfe"
-    },
-    "TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode": {
-      "disposition": "needs_harness",
-      "reason": "In-band revocation likewise requires the pool/runner recording adapter and independent control/init source observation. Preserve both mode transition assertions and one unchanged supervised child.",
-      "contract_sha256": "39c92afcd3758b55eb60282c4c4f58a8abd42e4a27cd1e39922f82b8f97590fb"
-    },
-    "TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel": {
-      "disposition": "needs_harness",
-      "reason": "Two-phase model change is a direct pool runner with exact control correlation, measured alias/model menu and unchanged child assertions. Add that boundary without substituting weaker phone acknowledgements; retain current provider resolution.",
-      "contract_sha256": "8818822cab76fcdbe5dd19d94d6fc0b2b29b80c43acc7f9bbb2a3bdea76f3eb6"
-    },
-    "TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows": {
-      "disposition": "needs_harness",
-      "reason": "Spawn-posture gate uses pool-composed argv/provenance and parser.PostureGate in a direct runner. Add a pool recorder that preserves operator provenance, first init default, control ack, flowing turn and one spawn.",
-      "contract_sha256": "fbae20de0ee0d4e61298428c28c54b595462ca0fd4b7bd603043e754fdb17ec2"
     },
     "TestInteractiveSystemPromptFile_LiveSpawnArgv": {
       "disposition": "needs_harness",

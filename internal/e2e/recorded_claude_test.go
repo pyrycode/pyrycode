@@ -29,8 +29,22 @@ const tapeSession = "ecda0000-0000-4000-8000-000000000001"
 const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
 
 func TestRecordedClaude(t *testing.T) {
-	for _, scenario := range selectedRecordedScenarios(t) {
-		t.Run(scenario, func(t *testing.T) { runRecordedClaude(t, scenario, 0) })
+	selected := selectedRecordedScenarios(t)
+	for _, name := range selected {
+		if _, ok := recordedPoolProfiles[name]; ok {
+			buildRecordedPoolBinary(t)
+			break
+		}
+	}
+	for _, scenario := range selected {
+		t.Run(scenario, func(t *testing.T) {
+			if _, ok := recordedPoolProfiles[scenario]; ok {
+				runRecordedPool(t, scenario)
+			} else {
+				runRecordedClaude(t, scenario, 0)
+			}
+		})
+
 	}
 }
 
