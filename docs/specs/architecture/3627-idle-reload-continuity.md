@@ -107,3 +107,9 @@ retain genuine-gap retirement and explicit reconnect catch-up.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-19
+
+## Revisions
+
+- 2026-10-19: `initialPublicationIndex` shares the existing initialization path between saved-boundary reconstruction and ordinary first publication. `run` receives the prior scalar record captured by `start`; the query index remains inaccessible to usable queries until replay completes. Empty reloads retain no zero-width batch. This implements the planned contract without new worker state or public APIs.
+- Existing assertions in `internal/thread/observations_store_test.go` → `TestStoreObservationRecovery` and `cmd/pyry/daemon_thread_relay_test.go` → `TestDaemonThreadContinuity` now require validated suffix continuity. The latter separately keeps retirement coverage for a cursor older than the saved reload boundary; `TestDaemonThreadIdleCommit` retains the held-delivery boundary proof.
+- Unchanged production `66430593`, with Store regressions at `d1eb23e9`, executed 14 test events: 12 passed, two failed, zero skipped. `TestStoreIdleReloadContinuity` and `TestStoreIdleReloadNestedCompact` failed because the restored suffix required a baseline; all eleven negative cases passed. The first wire fixture attempt used an unpaired peer and failed before the append; its log is retained separately. Corrected test revision `247ae815` executed `TestDaemonThreadIdleAppendKeepsConnections` once and failed after actual idle unload and durable append: both original peers were retired (`after=[]`). Baseline logs are retained in `/tmp/builder-3627/base-store.log`, `base-wire.log` and `base-wire-paired.log`; repaired results are recorded in the PR.
