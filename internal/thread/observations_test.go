@@ -127,6 +127,48 @@ func TestObservationReplacement(t *testing.T) {
 	}
 }
 
+func TestObservationResultContent(t *testing.T) {
+	t.Parallel()
+	before := Item{ID: 1, Rev: 1, Kind: "assistant_message", Summary: "before", Active: true, Parent: 7, Content: json.RawMessage(`{"text":"before","other":true}`)}
+	for _, raw := range []string{`{"other":true,"text":"beforeafter"}`, `{"future":{"nested":true},"other":null,"text":"beforeafter"}`} {
+		t.Run(raw, func(t *testing.T) {
+			after := before
+			after.Rev, after.Summary, after.Active, after.Parent = 3, "", false, 0
+			after.Content = json.RawMessage(raw)
+			left := Snapshot{State: StateUsable, Version: 1, Items: []Item{before}}
+			right := Snapshot{State: StateUsable, Version: 4, Items: []Item{after}}
+			for _, shared := range []bool{false, true} {
+				o := itemDifference(left, right, shared)
+				if len(o.Changes) != 1 || string(o.Changes[0].ResultContent) != raw || o.Changes[0].TextAppend != "after" {
+					t.Fatalf("missing combined result: %#v", o.Changes)
+				}
+				got := testApplyObservation(t, []Item{before}, o)
+				if !sameItems(got, []Item{after}) {
+					t.Fatal("replacement-before-suffix contract changed")
+				}
+				copy := copyObservation(o)
+				copy.Changes[0].ResultContent[0] = '!'
+				if string(o.Changes[0].ResultContent) != raw {
+					t.Fatal("copied result aliases retained content")
+				}
+				if !shared {
+					o.Changes[0].ResultContent[0] = '!'
+					if string(after.Content) != raw {
+						t.Fatal("public result aliases fold content")
+					}
+				}
+			}
+		})
+	}
+	// A stable summary must retain only the suffix, not the accumulated text.
+	after := before
+	after.Rev, after.Content = 2, json.RawMessage(`{"text":"beforeafter","other":true}`)
+	o := difference(Snapshot{Version: 1, Items: []Item{before}}, Snapshot{Version: 2, Items: []Item{after}})
+	if len(o.Changes) != 1 || len(o.Changes[0].ResultContent) != 0 || len(o.Changes[0].Fields) != 0 || o.Changes[0].TextAppend != "after" {
+		t.Fatal("suffix-only change retained full content")
+	}
+}
+
 func TestStoreObservations(t *testing.T) {
 	s, h := testThreadStore(t)
 	if err := s.Load(context.Background(), testStoreA); err != nil {

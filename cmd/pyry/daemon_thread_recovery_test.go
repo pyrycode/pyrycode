@@ -252,7 +252,7 @@ func TestDaemonThreadQueryBoundary(t *testing.T) {
 	var delivered sync.Once
 	s.publisher.push = func(ctx context.Context, peer string, e protocol.Envelope) error {
 		err := push(ctx, peer, e)
-		if e.Type == protocol.TypeThreadTextAppend {
+		if e.Type == protocol.TypeThreadItemChanged {
 			delivered.Do(func() { close(published) })
 		}
 		return err
@@ -265,7 +265,7 @@ func TestDaemonThreadQueryBoundary(t *testing.T) {
 	awaitSwitchPublication(t, published)
 	unblock()
 	failed, live := false, 0
-	for !failed || live < 2 {
+	for !failed || live < 1 {
 		peer, e := wire.read()
 		if peer != "phone" {
 			t.Fatal("wrong recipient")
