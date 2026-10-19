@@ -113,3 +113,28 @@ are allowed and dismissal and continuation may arrive in either order.
 - 2026-10-19: terminal idle must follow the last response delta. The accumulator
   clears idle when more text arrives; the stale-idle control rejects a leading
   idle as completion evidence. Idle may still precede a delayed dismissal.
+- 2026-10-19: prospective live-gate repair after merge `4e4593a5`. The retained
+  gate at `7c8a78cd` failed asking-session provenance; its focused rerun reached
+  dismissal and idle but omitted the answer witness. Use the existing non-bypass
+  stdio harness for `TestInteractiveStreamQuestionAnswer`, preserving exact
+  asking-session checks. Main now also carries MCP provenance support and a
+  separate stdio live entry point; retain its replay infrastructure and both
+  entry points while using this ticket's stronger proof in their shared driver.
+  Put an explicit verbatim-witness request in the generated legal free-text
+  answer, preserving the selected label and one value for single selection.
+  Log bounded, quoted sent values, durable context and resumed text; validate
+  history before draining so a missing witness cannot hide the durable context.
+  Add `TestQuestionAnswerTransport` as a source contract for the stdio harness,
+  plus witness-instruction and missing/mismatched provenance controls. Keep all
+  event-order, exact-answer and bypass selection/tool assertions. This remains
+  the same delivery-proof behaviour, with roughly 120 repair lines, no exported
+  types, two consumers and no new state/reject branches; total planned written
+  work stays within 800 lines. Run the named credential-free race controls,
+  tagged vet/compilation and the requested authenticated focused
+  `TestInteractiveStreamQuestionAnswer`; full suites and counted live acceptance
+  for both question entry points and bypass variants stay dispatcher-owned.
+  Security re-review: PASS. Transport reuse preserves device admission and
+  harness cleanup; witnesses remain public random test data, never credentials.
+  SHOULD FIX: generated answer instructions must explicitly request the witness;
+  all logged model/value/context bytes must remain quoted and capped. No new
+  subprocesses, file paths, crypto, network listeners or goroutines are added.
