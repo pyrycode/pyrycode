@@ -16,6 +16,7 @@ import (
 var recordedManifestJSON []byte
 
 type recordedScenarioDefinition struct {
+	InitialYOLO     bool              `json:"initial_yolo"`
 	Name            string            `json:"name"`
 	ClaudeArgs      []string          `json:"claude_args"`
 	StdioPermission bool              `json:"stdio_permission"`

@@ -59,3 +59,49 @@ func TestScanUsesGoSyntaxAndBuildConstraints(t *testing.T) {
 	}
 
 }
+
+func TestImportedAssertionsInvalidateReview(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "realclaude")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "live_test.go"), []byte("package example\nfunc TestActual() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, pkg := range []string{"scenario", "claudetape"} {
+		t.Run(pkg, func(t *testing.T) {
+			rows, err := scan(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := rows[0].ContextSHA256
+			shared := filepath.Join(root, "internal", pkg)
+			if err := os.MkdirAll(shared, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(shared, "assertions.go")
+			if err := os.WriteFile(path, []byte("package "+pkg+"\nfunc Require() {}\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			rows, err = scan(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rows[0].ContextSHA256 == before {
+				t.Fatal("imported assertion source did not invalidate review")
+			}
+			before = rows[0].ContextSHA256
+			if err := os.WriteFile(path, []byte("package "+pkg+"\nfunc Require() { panic(1) }\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			rows, err = scan(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rows[0].ContextSHA256 == before {
+				t.Fatal("imported assertion edit did not invalidate review")
+			}
+		})
+	}
+}

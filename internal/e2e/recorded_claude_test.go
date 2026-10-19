@@ -109,6 +109,20 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		t.Fatal(err)
 	}
 	seedBootstrapRegistry(t, home, tapeSession)
+	if definition.InitialYOLO {
+		path := filepath.Join(home, ".pyry", "test", "sessions.json")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seed := strings.Replace(string(raw), `"bootstrap":true`, `"bootstrap":true,"yolo":true`, 1)
+		if seed == string(raw) {
+			t.Fatal("initial bypass seed was not applied")
+		}
+		if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	seedBoundConversation(t, home, tapeConversation, tapeSession)
 	extra := []string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1"}
 	if mode == "replay" {

@@ -506,6 +506,9 @@ func tapeWrapper(t *testing.T, c tapeProcessConfig) string {
 // The busy-turn scenario must not be promoted unless a real daemon stdin write
 // gates the recorded tool result. Apply the same audit on every replay.
 func checkTapeCheckpoint(tape *claudetape.Tape) error {
+	if strings.HasPrefix(tape.Scenario, "bypass-questions-") {
+		return tape.RequireBypassQuestions()
+	}
 	if tape.Scenario == "send-now-placement" {
 		return tape.RequireMidTurnInput(scenariohelpers.SendNowQueuedText, "Bash")
 	}

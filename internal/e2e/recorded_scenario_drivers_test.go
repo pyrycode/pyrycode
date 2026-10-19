@@ -20,17 +20,23 @@ type recordedScenarioContext struct {
 }
 
 var recordedScenarioDrivers = map[string]func(*testing.T, recordedScenarioContext){
-	"reply":              runTapeReply,
-	"model-announced":    runTapeModelAnnouncement,
-	"model-rejection":    runTapeModelRejection,
-	"tool-turn-clean":    runTapeToolTurn,
-	"send-now-placement": runTapeSendNowPlacement,
-	"question-answer":    runTapeQuestionAnswer,
-	"question-refuse":    runTapeQuestionRefuse,
-	"permission-allow":   runTapePermissionAllow,
-	"permission-cancel":  runTapePermissionCancel,
-	"two-turn":           runTapeTwoTurn,
-	"permission-deny":    runTapePermissionDeny,
+	"family-alias":                    runTapeFamily,
+	"attachment-read":                 runTapeAttachment,
+	"bypass-questions-mcp-stored":     runTapeBypassQuestions,
+	"bypass-questions-mcp-operator":   runTapeBypassQuestions,
+	"bypass-questions-stdio-stored":   runTapeBypassQuestions,
+	"bypass-questions-stdio-operator": runTapeBypassQuestions,
+	"reply":                           runTapeReply,
+	"model-announced":                 runTapeModelAnnouncement,
+	"model-rejection":                 runTapeModelRejection,
+	"tool-turn-clean":                 runTapeToolTurn,
+	"send-now-placement":              runTapeSendNowPlacement,
+	"question-answer":                 runTapeQuestionAnswer,
+	"question-refuse":                 runTapeQuestionRefuse,
+	"permission-allow":                runTapePermissionAllow,
+	"permission-cancel":               runTapePermissionCancel,
+	"two-turn":                        runTapeTwoTurn,
+	"permission-deny":                 runTapePermissionDeny,
 }
 
 func (c recordedScenarioContext) turn(t *testing.T, text string) {
@@ -163,4 +169,27 @@ func runTapeModelRejection(t *testing.T, c recordedScenarioContext) {
 func runTapeToolTurn(t *testing.T, c recordedScenarioContext) {
 	t.Helper()
 	scenariohelpers.ToolTurn(t, c.Wire, tapeConversation, "Use the Write tool to create a file called probe.txt containing the single word banana, then use the Read tool to read it back. Reply with one short word. run=tape-tool-turn", 180*time.Second)
+}
+
+func runTapeFamily(t *testing.T, c recordedScenarioContext) {
+	t.Helper()
+	scenariohelpers.ModelFamily(t, c.Wire, tapeConversation, tapeSession, func(step int) string {
+		return fmt.Sprintf("Reply with one short word and nothing else. run=tape-family-%d", step)
+	}, 30*time.Second, 150*time.Second)
+}
+func runTapeAttachment(t *testing.T, c recordedScenarioContext) {
+	t.Helper()
+	scenariohelpers.AttachmentRead(t, c.Wire, scenariohelpers.AttachmentReadConfig{Home: c.Home, ConversationID: tapeConversation, AttachmentID: "20390000-0000-4000-8000-000000000003", Filename: "pyrycode-2039-token.txt", Token: "b7ac9d6e1248053f908c7e4a", Prompt: "Read the attached file and reply with its exact contents and nothing else. run=tape-attachment", Budget: 150 * time.Second})
+}
+func runTapeBypassQuestions(t *testing.T, c recordedScenarioContext) {
+	t.Helper()
+	const witness = "tape-bypass-witness"
+	scenariohelpers.BypassQuestions(t, c.Wire, scenariohelpers.BypassQuestionsConfig{Home: c.Home, ConversationID: tapeConversation, SessionID: tapeSession, Prompt: scenariohelpers.RecordedBypassPrompt, FreeText: "custom-tape-bypass", Witness: witness, Budget: 150 * time.Second, SurfaceBudget: 180 * time.Second, CheckWitness: func() {
+		if c.Mode == "capture" {
+			raw, err := os.ReadFile(filepath.Join(c.Home, "bypass-witness.txt"))
+			if err != nil || string(raw) != witness {
+				t.Fatal("ordinary bypass tool did not write the exact live witness")
+			}
+		}
+	}})
 }
