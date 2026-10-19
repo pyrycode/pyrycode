@@ -25,6 +25,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -85,18 +86,7 @@ func raiseRealPermissionModal(t *testing.T, h *perConvHarness, reqID uint64, con
 func raiseRealPermissionModalPayload(t *testing.T, h *perConvHarness, reqID uint64, convID string, triggerPrompt string) protocol.ModalShownPayload {
 	t.Helper()
 	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID), triggerPrompt)
-	env := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeModalShown, modalSurfaceBudget)
-	var shown protocol.ModalShownPayload
-	if err := json.Unmarshal(env.Payload, &shown); err != nil {
-		t.Fatalf("decode modal_shown payload: %v", err)
-	}
-	if shown.Class != "permission" {
-		t.Fatalf("modal_shown Class = %q, want %q — real claude raised a non-permission modal (the trigger surface changed, or a trust/onboarding modal slipped through)", shown.Class, "permission")
-	}
-	if shown.ModalID == "" {
-		t.Fatal("modal_shown carried an empty modal_id")
-	}
-	return shown
+	return scenario.WaitPermission(t, scenario.Receive(t, h.phone, h.initRecv), convID, modalSurfaceBudget)
 }
 
 // --- harness ----------------------------------------------------------------

@@ -72,12 +72,7 @@ func TestInteractiveStreamStdioQuestionAnswer(t *testing.T) {
 
 func driveSharedQuestionAnswer(t *testing.T, h *perConvHarness, convID string) {
 	t.Helper()
-	sequence := uint64(1)
-	wire := scenario.Wire{Next: scenario.Receive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
-		sequence++
-		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
-		return sequence
-	}}
+	wire := modalScenarioWire(t, h, 2)
 	nonce := time.Now().UnixNano()
 	scenario.QuestionAnswer(t, wire, scenario.QuestionConfig{Home: h.home, ConversationID: convID, SessionID: streamModalBootstrapUUID, Prompt: questionAnswerTrigger(nonce), Followup: fmt.Sprintf("Reply with one short word. run=%d after-model-change", nonce), ExpectedModel: announcedTargetFor(t, "haiku"), SurfaceBudget: questionSurfaceBudget, UpdateBudget: questionModelUpdateBudget, TurnBudget: perTurnReplyBudget})
 }
@@ -111,4 +106,16 @@ func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID 
 func requireContinuationNamesChoice(t *testing.T, text string, choice questionChoice) {
 	t.Helper()
 	scenario.RequireChoice(t, text, scenario.Choice{Chosen: choice.chosen, Unchosen: choice.unchosen})
+}
+
+// modalScenarioWire leaves encryption and sequence ownership in the live harness.
+func modalScenarioWire(t *testing.T, h *perConvHarness, first uint64) scenario.Wire {
+	t.Helper()
+	sequence := first
+	return scenario.Wire{Next: scenario.Receive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
+		id := sequence
+		sequence++
+		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: id, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+		return id
+	}}
 }

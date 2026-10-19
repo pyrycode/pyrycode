@@ -156,22 +156,30 @@ func TestTapeNormalizeRejectsTrailingJSON(t *testing.T) {
 }
 
 func TestTapePermissionTarget(t *testing.T) {
-	for _, tc := range []struct {
-		name, tool, path string
-		valid            bool
-	}{
-		{"expected", "Write", "${PILOT_HOME}/tape-denied.txt", true},
-		{"other-tool", "Bash", "${PILOT_HOME}/tape-denied.txt", false},
-		{"other-path", "Write", "${PILOT_HOME}/other.txt", false},
-		{"missing-path", "Write", "", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			raw, err := json.Marshal(map[string]any{"type": "control_request", "request": map[string]any{"subtype": "can_use_tool", "tool_name": tc.tool, "input": map[string]string{"file_path": tc.path}}})
-			if err != nil {
-				t.Fatal(err)
+	for _, scenario := range []string{"permission-deny", "permission-allow"} {
+		t.Run(scenario, func(t *testing.T) {
+			target := "${PILOT_HOME}/tape-denied.txt"
+			if scenario == "permission-allow" {
+				target = "${PILOT_HOME}/tape-allowed.txt"
 			}
-			if err := checkTapePermission(raw, tapeProcessConfig{Scenario: "permission-deny"}); (err == nil) != tc.valid {
-				t.Fatal("permission target validation disagrees with scenario")
+			for _, tc := range []struct {
+				name, tool, path string
+				valid            bool
+			}{
+				{"expected", "Write", target, true},
+				{"other-tool", "Bash", target, false},
+				{"other-path", "Write", "${PILOT_HOME}/other.txt", false},
+				{"missing-path", "Write", "", false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					raw, err := json.Marshal(map[string]any{"type": "control_request", "request": map[string]any{"subtype": "can_use_tool", "tool_name": tc.tool, "input": map[string]string{"file_path": tc.path}}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := checkTapePermission(raw, tapeProcessConfig{Scenario: scenario}); (err == nil) != tc.valid {
+						t.Fatal("permission target validation disagrees with scenario")
+					}
+				})
 			}
 		})
 	}

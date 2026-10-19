@@ -167,8 +167,12 @@ func (input *tapeInput) drain(accept func([]byte) error) error {
 }
 
 func checkTapePermission(raw []byte, c tapeProcessConfig) error {
-	if c.Scenario != "permission-deny" {
+	if c.Scenario != "permission-deny" && c.Scenario != "permission-allow" {
 		return nil
+	}
+	wantPath := "${PILOT_HOME}/tape-denied.txt"
+	if c.Scenario == "permission-allow" {
+		wantPath = "${PILOT_HOME}/tape-allowed.txt"
 	}
 	var frame struct {
 		Type    string `json:"type"`
@@ -184,7 +188,7 @@ func checkTapePermission(raw []byte, c tapeProcessConfig) error {
 		return errors.New("invalid permission frame")
 	}
 	if frame.Type == "control_request" && frame.Request.Subtype == "can_use_tool" &&
-		(frame.Request.ToolName != "Write" || frame.Request.Input.FilePath != "${PILOT_HOME}/tape-denied.txt") {
+		(frame.Request.ToolName != "Write" || frame.Request.Input.FilePath != wantPath) {
 		return errors.New("permission scenario requested a different tool or target")
 	}
 	return nil
