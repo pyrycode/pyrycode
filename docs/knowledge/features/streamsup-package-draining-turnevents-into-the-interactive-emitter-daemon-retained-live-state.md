@@ -117,6 +117,9 @@ fields and the same omitted/null/nonempty-string provenance distinction as strea
 | Requested/stream `context_usage`, `mcp_status`, `slash_command_list`, `model_list` | One shared singleton per family and conversation. |
 | `session_settings`, `session_settings_updated` | One settings singleton; update retention follows successful writes only. |
 
+Requested model catalogs may answer from foreign/predecessor vocabulary without
+installing that inventory in the target's retained singleton, as described below.
+
 Relay prompt snapshots hold only outstanding eligible prompts with their
 existing answer IDs; missing or false captured eligibility withholds shows.
 `Answerable` is separate from the unchanged payload: permission eligibility is
@@ -182,22 +185,40 @@ requiring a legacy `EventID` would omit Codex options from detached snapshots.
 Basic clients keep the existing Codex-only fallback refusal, and model clears
 stay `{}`. Producer evidence survives transition clears with the cache and is
 removed with the conversation; previously stored readings without evidence
-remain unresolved, never assigned the current producer. Returning cached evidence
-cannot change the operation's reserved
-generation or promote predecessor bytes into successor retention.
+remain unresolved, never assigned the current producer. For model catalogs,
+returning cached evidence cannot change the operation's reserved generation or
+promote predecessor bytes into successor retention. Slash-command inventory keeps
+its existing source-admission contract.
 
-Borrowed bootstrap vocabulary is a distinct reply-only case.
-`inventoryResultSource` preserves the foreign cache's original evidence;
-`liveInventoryResult` combines its producer session tag with the target request's
-captured positive generation/revision and sets `daemonLiveOperation.replyOnly`.
-Generation zero would silently fail `PushLiveState` admission, while copying a
-foreign generation could accidentally match the target and grant retention
-authority. Explicit reply-only completion prevents retention/publication even
-when counters coincide. Target clears still suppress delayed replies; cached
-predecessor evidence from the same conversation keeps its producing generation.
+**Catalog request ordering and producer evidence are independent.**
+`inventoryResultSource` preserves the cache's original evidence.
+For `TypeModelList`, `liveInventoryResult` keeps the target request's captured
+conversation and positive generation/revision, copying only the inventory's
+producer provenance. Comparing only conversation IDs misses retained predecessor
+vocabulary from the same conversation: it can answer a fresh request after a
+transition, including one that reuses the session ID. Comparing both cached
+conversation and generation sets `daemonLiveOperation.replyOnly` for either kind
+of borrow. This prevents retention/publication even when a foreign generation
+counter happens to match the target. Generation zero would fail `PushLiveState`
+admission; copying the cached generation would incorrectly reject a fresh
+same-conversation resolution. Neither repair may rewrite the cache's evidence.
+
+An already captured reply keeps its original ordering and is suppressed after
+successor delivery. Test that separately from fresh resolution of the same
+inventory: only the latter receives current target ordering.
+`TestDaemonLiveRelayRequestedCatalog` covers both, persisted unresolved inventory,
+full same-generation source replacement without another clear or changes to
+settings/other readings, target-only clears with colliding session tags,
+equal-revision replies and stale suppression. Its authenticated request path
+checks raw omitted/string source tags and decoded payload re-encoding under both
+capability projections; `TestDaemonLiveRelayCatalogNoProducingSession` covers
+positive `null`, and `TestDaemonLiveRelayCatalogLegacy` retains non-thread bytes
+and refusals.
 `TestDaemonLiveRelayBorrowedBootstrapVocabulary` exercises actual parser/hold
 ingress, both recipient capabilities, unchanged legacy payloads and reused-ID
 clears on authenticated decrypted wire.
+See [catalog admission](protocol-package-model-list-payload.md#catalog-admission-and-source-evidence)
+and the [request contract](../../protocol-mobile.md#asking-for-a-model-list-on-demand).
 
 `daemonInventoryIngress.prepare` captures source, incarnation and generation
 once, atomically stores the hold's payload/source pair and admits the inventory
