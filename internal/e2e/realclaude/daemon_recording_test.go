@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -267,7 +268,11 @@ func TestDaemonTapeHelperProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(2)
 	}
-	fail := func() { _ = os.WriteFile(filepath.Join(c.Process.Home, "recording-unexpected"), nil, 0600); os.Exit(2) }
+	stage := "source identity"
+	fail := func() {
+		_ = os.WriteFile(filepath.Join(c.Process.Home, "recording-unexpected"), []byte(stage), 0600)
+		os.Exit(2)
+	}
 	if c.Process.Mode == "capture" {
 		exe, err := os.Executable()
 		if err != nil {
@@ -295,6 +300,7 @@ func TestDaemonTapeHelperProcess(t *testing.T) {
 		fmt.Fprintln(os.Stdout, c.Process.Producer.ClaudeVersion)
 		os.Exit(0)
 	}
+	stage = "session identity"
 	session := ""
 	for i, arg := range args {
 		if arg == "--session-id" && i+1 < len(args) {
@@ -304,6 +310,7 @@ func TestDaemonTapeHelperProcess(t *testing.T) {
 			session = args[i+1]
 		}
 	}
+	stage = "role inventory"
 	role := daemonRecordingRole{}
 	if session == livePerConvBootstrapUUID {
 		role = daemonRecordingRole{Role: "bootstrap", SessionID: session, WorkDir: filepath.Join(c.Process.Home, "work")}
@@ -330,9 +337,16 @@ func TestDaemonTapeHelperProcess(t *testing.T) {
 	for _, name := range profile.Roles {
 		valid = valid || role.Role == name
 	}
+	stage = "unknown invocation flags:"
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--") && !strings.ContainsAny(arg, " =/\\\n\r\t") && len(arg) < 64 {
+			stage += " " + arg
+		}
+	}
 	if session == "" || !valid {
 		fail()
 	}
+	stage = "endpoint identity"
 	var endpoint daemonRecordingEndpoint
 	if daemonRecordingRead(filepath.Join(c.Process.Home, "recording-endpoint.json"), &endpoint) != nil || endpoint.Daemon != c.Daemon {
 		fail()
@@ -343,6 +357,7 @@ func TestDaemonTapeHelperProcess(t *testing.T) {
 	process.Path = prefix + ".json"
 	process.Claim = prefix + ".claim"
 	process.WorkDir = role.WorkDir
+	stage = "native child failure"
 	frames, err := claudetape.RunDaemonProcess(claudetape.DaemonProcessConfig{PoolProcessConfig: process, Daemon: endpoint.Daemon, Socket: endpoint.Socket}, args, os.Stdin, os.Stdout, os.Stderr)
 	r := poolRecordingReceipt{Success: err == nil, Frames: frames}
 	if err != nil {

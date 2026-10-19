@@ -205,6 +205,9 @@ func runRecordedDaemonSuite(t *testing.T, name string) {
 	}
 	err = cmd.Wait()
 	if err != nil || scan.Err() != nil || ctx.Err() != nil || rejected || runs != 1 || passed != 1 {
+		if raw, readErr := os.ReadFile(filepath.Join(home, "recording-unexpected")); readErr == nil && len(raw) < 4096 && claudetape.Safe(raw) == nil {
+			t.Logf("daemon unexpected invocation: %s", raw)
+		}
 		// Preserve bounded helper failures before the disposable HOME is removed.
 		// Native transcript bytes and operator data never enter this diagnostic.
 		for _, role := range profile.Roles {
