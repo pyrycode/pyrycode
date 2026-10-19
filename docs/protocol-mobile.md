@@ -387,9 +387,9 @@ Envelope-level fields beyond the v1 set:
 |---|---|---|---|
 | `event_id` | int | no (omitempty) | In-memory event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present on ring-backed interactive structured-stream frames and operator messages (binary → phone), including their reconnect replay; absent on session transitions and frames without ring recording. See [Interactive events](#interactive-events-v2-capability-gated). Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
 | `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present after a successful history append on direct live interactive-turn, session-transition and operator-message envelopes (#2861); reconnect replay of history-backed ring events carries that original append's id (#2909). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients **must fall back to history/list** for a durable read-mark target. |
-| `conversation_id` | nonempty string | required on delivered supplied thread live state; otherwise optional | **Thread-only supplied live-state routing (#3195).** Every delivered reading and generated/supplied clear names its retained source conversation, independently of session tags and request correlation. Absent source-envelope identity is stamped from that source; any supplied envelope/payload identity must be a nonempty string matching it. Null, empty, non-string or conflicting identity rejects the reading before any clear or fresh delivery. |
-| `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082/#3162).** Omitted means no provenance was supplied; explicit `null` positively means no producing session; a nonempty string names the producing session. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. Daemon provider installation (#3163) and production negotiation (#3164) are active. |
-| `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears the family's session-scoped readings in the envelope's conversation before fresh readings for the supplied session. Generated and supplied clears omit `in_reply_to`. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
+| `conversation_id` | nonempty string | required on delivered supplied thread live state; otherwise optional | **Thread-only supplied live-state routing (#3195/#3610).** Authoritative target for every delivered reading and generated/supplied clear, independently of session tags and request correlation. Absent source-envelope identity is stamped from `LiveState.ConversationID`; any supplied envelope/payload identity must be a nonempty string matching it. For a model catalog this is the requested target, even when the inventory came from elsewhere. Null, empty, non-string or conflicting identity rejects the reading before any clear or fresh delivery. |
+| `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082/#3162).** Omitted means unresolved provenance; explicit `null` positively means no producing session; a nonempty string names the actual captured producer. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. A model catalog may name a bootstrap or predecessor producer; never substitute the target's session. This tag neither admits a session nor attributes every capability-merged row to that producer. Daemon provider installation (#3163) and production negotiation (#3164) are active. |
+| `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears only this family's readings in the envelope's target conversation before fresh readings for that target generation. For `model_list`, it invalidates catalog inventory independently of current-session admission. Generated and supplied clears omit `in_reply_to`. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
 
 The relay strips supplied conversation/session metadata from non-thread
 connections and omits explicit clear frames entirely on those connections.
@@ -403,9 +403,11 @@ An existing `payload.session_id` or other payload session field keeps its own
 meaning and is neither replaced nor overwritten by envelope metadata. When the
 new optional fields are unset, existing envelope serialization is unchanged.
 
-A delayed push or on-demand reply retains its source conversation and session
-tag; the relay never substitutes request identity or the conversation's newer
-session binding. Route live readings and clears by top-level `conversation_id`:
+A delayed push or on-demand reply retains its captured conversation routing,
+ordering and producing-session tag; the relay never recaptures them from a newer
+binding. A fresh model-catalog resolution captures the request's target ordering
+and preserves the inventory's original producer evidence, including unresolved
+evidence. Route live readings and clears by top-level `conversation_id`:
 two conversations can have equal, null or omitted session tags. Fresh replies
 retain `in_reply_to`; generated and supplied family clears are uncorrelated. Clients
 handle `session_state_cleared: true` before decoding the ordinary payload schema,
@@ -1213,7 +1215,7 @@ bounded providers. Handshake and conversation listing do not query items.
 **Continuity loss retires the connection.** `BaselineRequired`, changed epoch,
 withdrawn usable state or an encoding failure discards the publication cursor
 and quarantines pending dependent output through `RetireLiveState`, then uses
-the existing queue-overflow gap teardown for affected thread consumers. A fresh
+producer-gap retirement at `4414` for affected thread consumers. A fresh
 usable baseline is required before publication continues. Epoch reuse after
 unload/reload does not prove a retained change range, and ordinary additions
 over stale client items cannot repair a suppressed row. No `base_rev` continuity
@@ -3324,7 +3326,9 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 ### Session-scoped live state (v2, supplied delivery contract)
 
 The relay accepts source-bound current readings for authenticated, open
-connections that negotiated both `thread` and `interactive` (#3082). This
+connections that negotiated both `thread` and `interactive` (#3082). Model
+catalogs have the inventory admission exception below (#3610); other reading
+families retain their current-session admission contract. This
 contract covers permission prompts and question batches (`modal_shown` /
 `modal_dismissed`, `question_shown` / `question_dismissed`), `turn_state`, `stall`,
 `api_retry`, `compacting`, `thinking_progress`, `tool_progress`,
@@ -3386,9 +3390,20 @@ and clears within the envelope's conversation even when two conversations have
 equal, null or omitted session tags; session provenance cannot identify a
 conversation.
 
-**Clear before fresh.** On the first supplied reading of a family for a session
+**Model catalog admission.** `type: "model_list"` denotes catalog inventory,
+including its `session_state_cleared` form; no new type, capability or scope flag
+is required. On the active authenticated connection, clients may admit it for
+the routed target conversation before its first turn, with a bootstrap or
+predecessor producer or with unresolved provenance. A source differing from the
+current session, an omitted source or `null` is not a reason to reject this
+catalog or its clear. Retain connection/incarnation and ordering checks. This
+exception grants no authority to settings, prompts, slash-command inventory or
+other live state, and does not admit the producer as the target's session.
+Capability-merged rows need not all come from the tagged producer.
+
+**Clear before fresh.** On the first supplied reading of a family for a target
 generation, the relay sends that family's envelope with
-`session_state_cleared: true`, payload `{}`, top-level source `conversation_id`
+`session_state_cleared: true`, payload `{}`, top-level target `conversation_id`
 and the supplied session tag, then
 sends the fresh reading on a later manager pass. This also initializes a fresh
 connection. A clear resets the family's held readings, without creating a thread
@@ -3398,6 +3413,10 @@ and their update acknowledgements share `session_settings`. Generated and
 supplied clears omit `in_reply_to`, even if the supplier attached correlation;
 the following fresh reply preserves its original correlation.
 Repeated supplied clears cannot erase already delivered fresh state.
+For model catalogs, a clear invalidates only the routed conversation's catalog;
+a later fresh resolution can repopulate it. A same-generation source replacement
+replaces the full catalog without another clear. It does not change current
+model/effort, admit a session or reset any other reading family.
 
 **Stale-state suppression.** Source-supplied positive session generations order
 transitions per conversation; opaque session IDs are never sorted. After newer
@@ -3410,6 +3429,13 @@ shown snapshot cannot restore an answered prompt. Duplicate unsolicited readings
 are suppressed; an equal-revision correlated reply can still answer its request,
 while a strictly older reply is suppressed. Generations and reading revisions
 are relay source-ordering inputs, not new envelope fields or inferred provenance.
+For a newly resolved model catalog, they are the captured target resolution's
+generation/revision, independent of the inventory producer. This includes
+retained predecessor vocabulary from the same conversation. A reply captured
+before a target transition keeps its old ordering and is rejected after
+successor delivery; resolving the inventory again cannot promote that old reply.
+Borrowing does not install foreign/predecessor inventory as target current-session
+state or rewrite the producer cache's evidence.
 
 **Current connect reconciliation.** Thread connect/reconnect consumes supplied
 current readings, skips duplicate legacy connect providers and withholds scoped
@@ -3419,6 +3445,24 @@ than leaving an indicator pinned. Prompt/question providers supply only
 outstanding state and preserve original answer IDs and answerability.
 Queued live updates can overtake a detached connect snapshot; source ordering
 prevents that snapshot from overwriting the newer reading.
+For model catalogs, the supplied snapshot also resolves a finite captured set of
+registered targets (#3611), including conversations with no turn or retained owner
+inventory. It uses bound-session, bootstrap, then saved vocabulary precedence,
+with basic/`multi_agent` projection and access checks per recipient. No request
+or assistant turn is needed. A target with no usable vocabulary contributes no
+fresh inventory; the handshake still completes without a fabricated empty menu.
+Catalog clear and inventory frames are uncorrelated and carry no ring/history IDs.
+
+Another peer's successful borrowed resolution can overtake a catalog parked behind
+its clear without publishing replacement inventory. Before delivery, the relay may
+resolve an overtaken unsolicited catalog once for the same target and captured
+generation, then apply ordinary validation, access, projection and freshness
+checks. This is fresh resolution with current target ordering; the stale capture
+itself remains invalid. A transition or removal/recreation cannot be crossed by
+this refresh, even with the same session string. Refusal or a different target
+generation leaves the stale capture withheld. Borrowed freshness tracks accepted
+catalog resolutions separately from payload retention; a refused reservation
+does not supersede available inventory.
 
 Delivery is paced at at most one envelope per manager pass, with a return to
 `Run` between clear and fresh state. A snapshot can exceed push/outbox capacity
@@ -5082,17 +5126,43 @@ The **producer** is **#657**. Until a server-side workspace-change source exists
 #### `model_list`
 
 Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
-including envelope session tags and `{}` family clears before fresh state.
+including its model-catalog admission exception. `type: "model_list"` alone
+identifies catalog inventory, including its `{}` clear form. Route it by the
+nonempty top-level `conversation_id`, which must match any payload identity;
+`session_id` describes the actual producer, not the target's session ownership.
+Omitted is unresolved, `null` positively means no producing session, and a string
+names the captured producer, possibly bootstrap or predecessor. Clients may admit
+this catalog on the active authenticated connection independently of current-session
+admission, retaining connection/incarnation and ordering checks. A producer tag
+does not establish the source of every capability-merged row.
 
 For a negotiated thread connection with `ModelListReadingFor` installed,
 `request_model_list` consumes that provider once, passing the negotiated
 `multi_agent` decision so the supplied inventory keeps the existing projection.
-The fresh `model_list` preserves supplied source metadata and payload fields,
-is correlated to the request, and carries no ring/history identity. Generated
-clears are uncorrelated; equal-revision requests are answered, while older
-revisions or generations are suppressed. An unavailable result keeps
+The fresh resolution keeps the request's captured target generation/revision
+and the inventory's original producing-session evidence. Retained vocabulary from
+a different conversation or from the same conversation's predecessor can answer
+without becoming target current-session state or changing cache evidence. An
+already captured reply retains its old ordering even if a fresh resolution of
+the same inventory is now usable.
+
+The reply is correlated to the request and carries no ring/history identity.
+First delivery clears the target's catalog once per generation before fresh
+inventory; generated and supplied clears are uncorrelated `{}` envelopes. A clear
+affects only that target, even if another conversation has the same session tag;
+a later fresh resolution can repopulate the catalog. Equal-revision correlated
+replies remain answerable; older revisions and overtaken generations are
+suppressed. Same-generation source replacement replaces the full catalog without
+another clear, current model/effort changes, session admission or resets of other
+reading families. Catalog admission never authorizes settings, prompts or other
+live state; slash-command inventory keeps its existing contract.
+
+An unavailable result keeps
 `model_list.unavailable` without retrying `ModelListFor`. Without the optional
 provider, or without `thread`, the legacy path and bytes below remain unchanged.
+The live-lane delivery window below describes that legacy path. Thread
+connect/reconnect uses supplied catalog resolution, including the fallback
+coverage under “Reconcile on (re)connect” below.
 
 Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty-three turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though its legacy live publication rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
 
@@ -5115,7 +5185,7 @@ Each element of `models`:
 | `agent` | string (omitempty) | `"claude"` or `"codex"` — the agent this row's model belongs to. Present only for a client that negotiated `multi_agent` (#2651); absent, key omitted, for every other client. |
 | `family` | string (omitempty) | The model family: a Codex row's family name, or a Claude row's family alias with its bracket group preserved, even when `value` is pinned. Present only for a `multi_agent` client; omitted otherwise. |
 
-**A `multi_agent` client's `models` merges both agents' vocabulary, tagged; every other client's list is unchanged.** For a client that negotiated `multi_agent` (#2643), `models` carries Claude's held entries first, in claude's own order, followed by Codex's held entries in the vocabulary store's order — one row per family, at that family's newest resolved version — regardless of which agent the named conversation itself runs. Every row carries `agent` and `family`: a Claude row's `family` is its `value`'s family alias, preserving any bracket group (`claude-fable-5-1[1m]` has family `fable[1m]`); a Codex row's `agent` is `"codex"`, its `family` is the Codex family name, and its `display_name` equals that same family name, since Codex publishes no separate display string. `dropped_models` keeps its present meaning and counts only Claude's tail cut — the merge adds no combined cap of its own (#2651). When only one agent has anything held, that agent's rows are all a capable client gets; when neither does, no `model_list` frame is sent for that conversation, exactly as for any other client. A client that did not negotiate `multi_agent` gets exactly today's list — Claude's entries only, with `agent` and `family` absent from the wire rather than merely empty, so the frame stays byte-identical to what it has always been. This governs all three delivery paths in this section: the live-lane frame below, the connect-time reconcile, and the [`request_model_list`](#asking-for-a-model-list-on-demand) reply. The live-lane frame is rewritten per connection at the moment it is sealed (#2652) rather than merged once and stored, so a `multi_agent` client's copy reflects whatever Codex vocabulary the daemon holds *at that instant* — not whatever it held when the child answered `initialize` — while every other connection, including one replayed later from the same event-ring entry, still receives the original Claude-only bytes untouched. A connect-time reconcile or an on-demand reply is never merged a second time on top of that: both already carry the merged list from their own source and, unlike the live-lane frame, never carry an `event_id` (§ above), which is what the daemon's per-connection rewrite uses to tell "a fresh push" apart from "a frame already merged upstream."
+**A `multi_agent` client's `models` merges both agents' vocabulary, tagged; every other client's list is unchanged.** For a client that negotiated `multi_agent` (#2643), `models` carries Claude's held entries first, in claude's own order, followed by Codex's held entries in the vocabulary store's order — one row per family, at that family's newest resolved version — regardless of which agent the named conversation itself runs. Every row carries `agent` and `family`: a Claude row's `family` is its `value`'s family alias, preserving any bracket group (`claude-fable-5-1[1m]` has family `fable[1m]`); a Codex row's `agent` is `"codex"`, its `family` is the Codex family name, and its `display_name` equals that same family name, since Codex publishes no separate display string. `dropped_models` keeps its present meaning and counts only Claude's tail cut — the merge adds no combined cap of its own (#2651). When only one agent has anything held, that agent's rows are all a capable client gets; when neither does, no `model_list` frame is sent for that conversation, exactly as for any other client. A client that did not negotiate `multi_agent` gets exactly today's list — Claude's entries only, with `agent` and `family` absent from the wire rather than merely empty, so the frame stays byte-identical to what it has always been. This governs all three delivery paths in this section: the live-lane frame below, the connect-time reconcile, and the [`request_model_list`](#asking-for-a-model-list-on-demand) reply. The live-lane frame is rewritten per connection at the moment it is sealed (#2652) rather than merged once and stored, so a `multi_agent` client's copy reflects whatever Codex vocabulary the daemon holds *at that instant* — not whatever it held when the child answered `initialize` — while every other connection, including one replayed later from the same event-ring entry, still receives the original Claude-only bytes untouched. Legacy connect-time reconciliation and on-demand replies already carry their projected rows and are not merged again. Supplied thread catalogs instead carry canonical inventory metadata internally and are projected separately for each recipient, including snapshots and replies without `event_id`; producer evidence is preserved through projection.
 
 **`dropped_models` means what its name promises, and `len(models) + dropped_models` is the menu's true size.** The producer bounds the entry count at **ten** (#1812) and reports here how many entries it cut, so a client can render "10 of 40" rather than presenting a shortened menu as complete. The producer cuts only the overflow, so a non-zero `dropped_models` always arrives beside exactly ten entries; a shorter list is always a complete one. The count reaches the wire intact: the decode records the overflow where the cut happens, the mapping onto this frame carries the number **verbatim rather than recomputing it from `len(models)`** (#1848), and the producer passes it through (#1849). Two properties bound how a client may use it. The list is truncated **from the tail**, so the entries you receive are the first ten of the family-reduced list, in claude's own order; pinned rows removed by that reduction are not counted here. And ten is a **daemon-side producer cap, not a wire constant** — it may change without any change to this contract, so a client must never hardcode it, treat a list of exactly ten as a signal, or derive the cap from anything but the number in this field.
 
@@ -5132,9 +5202,52 @@ What reliably arrives is the case #1845 proves end to end: a child spawned **whi
 
 **A client that missed the frame is brought current on its next connect.** The three loss points above are recovered by a **connect-time snapshot**, and the two delivery paths differ on `event_id` in a way that is client-visible. The live-lane frame is appended to the per-conversation event ring before the per-conn fan-out, so it carries an `event_id`, and a **reconnecting** client whose `hello` advertises an earlier `last_event_id` is replayed it along with everything else it missed — Mode A, a cursor backfill. That path needs both a cursor from a previous connection and a frame that was actually emitted, so on its own it recovers nothing for a first attach and nothing for a menu that was never sent. The snapshot below deliberately carries **no** `event_id`: it never enters the ring, is never replayed, and never advances a client's cursor. A client still **must not block its model menu on the live frame** — render a usable UI without one and let the next connect fill it in — and if it needs one sooner than the next connect, it **asks** with [`request_model_list`](#asking-for-a-model-list-on-demand) below.
 
-**Reconcile on (re)connect.** On any (re)connection the daemon unicasts one `model_list` for **every** conversation its registry carries, provided **any** vocabulary is retained anywhere (#1863 landed the reconcile, #1867 the daemon-side enumeration, #2124 the daemon-wide fallback that made the coverage universal, #2450 the persisted copy that keeps that fallback answering after a restart) — this is match-and-replace by stable id (see [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)), keyed on `conversation_id`: a re-sent `model_list` for a known conversation **replaces** that menu in place rather than appending, and because the frame is snapshot-shaped full state rather than a delta, re-applying it on every connect is safe by construction. Correlate by `conversation_id` and **never by position** in the burst: the daemon walks its conversation registry in insertion order, that order is not a contract, and every envelope in the burst carries the same non-load-bearing envelope id.
+**Reconcile on (re)connect.** An authenticated connection negotiating both
+`thread` and `interactive` receives supplied catalog inventory for every
+accessible hosted conversation in the captured registry set with usable vocabulary
+(#3611). This includes registered targets before their first turn, without a
+model-list request and without their own retained owner inventory. The finite
+snapshot resolves each target lazily and does not follow later registrations.
+The first catalog delivery for each target generation sends an uncorrelated
+`model_list` clear (`session_state_cleared: true`, payload `{}`), then fresh
+uncorrelated inventory on a later manager pass. Both carry top-level target
+`conversation_id` and original omitted/null/string producer evidence, with no
+ring/history IDs. A delivered same-generation replacement replaces the whole
+catalog without another clear or changes to current model/effort, session
+admission or any other conversation's state.
 
-**What the snapshot covers, and the one case it does not.** The coverage is deliberately **wider than the live lane's** and wider than its `slash_command_list` neighbour's, because **the model vocabulary varies by machine and account rather than by conversation** — the committed capture whose `argv` carries `--model claude-haiku-4-5` still reports six models with `default → claude-sonnet-5`. So a conversation whose **own** claude has reported nothing — never bound to a session, bound to one the daemon no longer holds, or bound to a child that has not yet answered the `initialize` ask — is still sent a menu, drawn from the first of three daemon-wide sources that has one: the bootstrap session's own child, if this process has spawned and heard from it; otherwise `model_list.json`, a per-daemon file beside `sessions.json` that the daemon rewrites every time *any* child's `initialize` reply lands and reads once at startup (#2450) — so the file, not just the bootstrap child, is what a restarted daemon that has spawned nothing answers from. A conversation whose bound session **has** its own list is answered from that session; neither daemon-wide source ever overrides a live child's own report, and the bootstrap's own hold, when it has one, wins over the file. The enumeration is **unfiltered**, so an **archived** conversation contributes too, and the client decides what to show. **The one case not covered is that nothing at all is retained** — no live child in this process has reported a vocabulary, and no `model_list.json` survives from a previous one — and then **no `model_list` frame is sent for any conversation** and the handshake still completes normally. **Absence of the frame is the only "no list" signal**: there is no empty `models` array standing in for "unknown", so a client reads no-frame as *nothing has been reported yet* and re-asks by reconnecting. The reconcile is gated on the negotiated **`interactive` capability**, like the rest of the structured stream.
+Another peer's request can supersede the inventory waiting behind that clear.
+The relay may resolve an overtaken unsolicited catalog once for the same target
+and captured generation; ordinary freshness and access checks still apply.
+The captured stale reading remains rejected, and neither a target transition
+nor removal/recreation can be crossed by this refresh. See the
+[supplied delivery contract](#session-scoped-live-state-v2-supplied-delivery-contract).
+
+An authenticated interactive connection without `thread` retains legacy
+`reconcileModelLists`: one snapshot per registry conversation with usable
+vocabulary, without supplied clear frames
+or top-level conversation/session metadata. Legacy live frames can also be
+recovered by event-ring replay; supplied thread reconciliation bypasses both that
+replay and the legacy connect providers. On either path, replace the menu by
+`conversation_id`, never by position or envelope `id`; registry iteration order
+is not a delivery contract.
+
+**Vocabulary coverage and absence.** Claude inventory uses bound-session →
+bootstrap → saved vocabulary precedence. An own report wins; fallback can answer
+unbound targets, dangling bindings and children that have not reported yet.
+The persisted `model_list.json` beside `sessions.json`, loaded once at startup,
+can answer after a daemon restart before any child runs (#2450). Archived registry
+rows also participate, subject to recipient access. Basic clients receive Claude
+rows; `multi_agent` clients receive the existing tagged Claude/Codex projection,
+including Codex-only inventory when available. Borrowed inventory preserves its
+original producer evidence and stays outside target current-session retention;
+it cannot admit a session or mutate another conversation's state.
+
+If no usable vocabulary is available for a target and recipient, no fresh catalog
+is sent for it. The handshake completes normally, with no fabricated empty
+`models` array and no unsolicited `model_list.unavailable` error. A client may
+reconnect or use the on-demand request below when vocabulary becomes available;
+that explicit request retains its unavailable-error contract.
 
 #### Asking for a model list on demand
 
@@ -5146,9 +5259,53 @@ The payload names one conversation and nothing else. There is **no request-id ke
 |---|---|---|
 | `conversation_id` | string | The conversation whose menu is wanted. A **lookup key validated against the daemon's registry**, not a value trusted as sent — and **naming a conversation is not authorization**. Always present (no `omitempty`); the empty string names nothing and is refused. |
 
-**The answer is a `model_list` — this frame, unchanged.** No second reply type is minted, the payload is exactly what the connect-time reconcile would send for that conversation (the same *source*, not the same fields copied), and it is correlated by `in_reply_to`. It carries **no `event_id`**, like the reconcile's and unlike the live lane's: it never enters the replay ring, is never replayed, and advances no cursor. So a client that already applies `model_list` by `conversation_id` needs no new handling for the reply — the same match-and-replace, triggered by its own ask.
+**The answer is a `model_list` — the same inventory type.** No second reply type
+is minted. The resolver uses the same inventory precedence and capability
+projection as the legacy connect-time reconcile, with correlation by
+`in_reply_to`. The reply carries **no `event_id` or `history_entry_id`**: it never
+enters the replay ring, is never replayed and advances no cursor. On a supplied
+thread connection, route and replace the catalog using the authoritative
+top-level `conversation_id`; any payload identity must match. Follow the
+[catalog admission and clear rules](#model_list) even when the producer differs
+from the target's current session or is unresolved. Non-thread reply bytes and
+refusals retain their existing contract.
 
 **A conversation with no session is answered too**, from the daemon-wide vocabulary, on exactly the terms § *What the snapshot covers* states above. That is the case the verb exists for: a chat created a moment ago has no `claude` of its own yet, and its menu still has to render.
+
+Each fresh resolution captures the target conversation's generation/revision
+before resolving available inventory. Bound inventory takes precedence over
+bootstrap inventory, then persisted vocabulary; capability projection is
+unchanged. Persisted vocabulary without producing evidence leaves `session_id`
+omitted, even when the target has a known session or positively has no session.
+Do not replace omission with `null` or the target's session string. A fresh
+resolution may use retained predecessor vocabulary with the new target ordering,
+including after a clear that reuses the same session ID. A reply captured before
+that transition keeps its previous ordering and cannot overwrite delivered
+successor state. Borrowing changes neither the cache's producing evidence nor
+target retention authority. These ordering values are internal daemon/relay
+inputs, not new wire fields.
+
+The following is emitted synthetic authenticated daemon-wire output from
+`TestDaemonLiveRelayRequestedCatalog/basic`, retained in
+[PR #3618](https://github.com/pyrycode/pyrycode/pull/3618) for daemon revision
+`014b92c9a5bc0f64c1c9e638e3cce6811339c551`. It shows a hosted conversation before
+its first turn using persisted inventory: both the uncorrelated `{}` clear and
+correlated reply omit unresolved `session_id`. These examples establish wire
+shape; Mobile #2245 owns consumer adoption and the unchanged chosen-effort native
+acceptance rerun.
+
+```json
+{"id":200,"type":"request_model_list","ts":"2026-10-19T09:21:37.023744Z","payload":{"conversation_id":"new"}}
+{"id":0,"type":"model_list","ts":"2026-10-19T09:21:37.024385Z","payload":{},"conversation_id":"new","session_state_cleared":true}
+{"id":0,"type":"model_list","ts":"2026-10-19T09:21:37.024385Z","payload":{"conversation_id":"new","models":[{"resolved_model":"ZZRESOLVEDONEpersistedZZ","value":"ZZVALUEONEpersistedZZ","display_name":"ZZDISPLAYONEpersistedZZ","effort_levels":["ZZEFFORTONEApersistedZZ","ZZEFFORTONEBpersistedZZ"],"supports_auto_mode":true,"truncated_fields":["ZZTRUNCONEpersistedZZ"]},{"resolved_model":"ZZRESOLVEDTWOpersistedZZ","value":"ZZVALUETWOpersistedZZ","display_name":"ZZDISPLAYTWOpersistedZZ","effort_levels":[],"supports_auto_mode":false,"truncated_fields":null}],"dropped_models":3},"in_reply_to":200,"conversation_id":"new"}
+```
+
+The same run's borrowed bootstrap reply routes to `other` while keeping its
+actual producer string. It does not admit that producer as `other`'s session:
+
+```json
+{"id":0,"type":"model_list","ts":"2026-10-19T09:21:37.029807Z","payload":{"conversation_id":"other","models":[{"resolved_model":"live","value":"live","display_name":"live","effort_levels":[],"supports_auto_mode":false,"truncated_fields":null}],"dropped_models":0},"in_reply_to":203,"conversation_id":"other","session_id":"e2990cc5-2d46-4e07-bfb8-ae7ff54e4c83"}
+```
 
 **A request the daemon cannot answer gets one `error`, never a `model_list` with an empty `models` array.** Two codes, and the difference is worth branching on: [`conversation.not_found`](#error-codes) (not retryable) means the daemon does not host what you named — check the id, re-list conversations; [`model_list.unavailable`](#error-codes) (retryable, after a backoff) means it *does* host it but has no vocabulary to answer with yet, so the same request may succeed later unchanged.
 
@@ -8578,9 +8735,19 @@ see [ADR 043](knowledge/decisions/043-hosted-app-runtime-and-isolation.md).
 without `thread`, including raw `request_history`. A thread connection instead
 reconciles supplied current live state through the
 [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
-including inactive retry/compaction and outstanding answerable prompts/questions;
-it skips legacy connect snapshots, all event-ring replay and `resync`, even when
-`hello.last_event_id` would produce a gap. Retained live-state providers, live
+including inactive retry/compaction and outstanding answerable prompts/questions.
+Its catalog snapshot also resolves registered targets without their own retained
+inventory, using bound/bootstrap/saved precedence and per-recipient projection
+and access gates. Catalog recovery needs no request or turn: the first delivery
+clears each target generation before fresh inventory, preserving producer evidence
+and omitting correlation and ring/history IDs. Same-generation replacement needs
+no second clear; an overtaken catalog may be freshly resolved once within its
+captured target generation. No usable vocabulary means no fresh inventory, with
+successful handshake completion. See [`model_list`](#model_list) for coverage and
+source/retention rules.
+
+A thread connection skips legacy connect snapshots, all event-ring replay and
+`resync`, even when `hello.last_event_id` would produce a gap. Retained live-state providers, live
 item publication and bounded query providers are installed (#3163/#3164/#3236).
 Item backfill requires an explicit [`thread_catch_up`](#thread-query-messages)
 for each conversation the app opens;
@@ -8629,7 +8796,7 @@ Every reconnect performs a fresh Noise_IK handshake (there is no session resumpt
 
 **Mode A is still not history, and there is still no bulk-history backfill on this path.** A client that wants past messages the ring no longer holds gets none from a reconnect; the answer Mode A gives is a full reload of the conversation the `resync` marker names. What has changed since #2090 is that the request is no longer unaskable: real history — a daemon-owned log rather than a replay window — landed as `internal/history` in #2112, and [§ Conversation history](#conversation-history-v2) publishes the verb to ask with (#2113). **That verb is answered as of #2116**, so a client that wants past messages asks for them and receives a `history_page` reply to its own ask — never anything a reconnect pushes. The two are complementary and neither substitutes for the other: this mode recovers events missed while disconnected, that one walks backwards through what is on disk.
 
-**Mode B — control state → current-state snapshot (the reconcile-on-connect rule).** Control state reconnects by *re-asserting current truth*, replaying no past events. This is the single written contract every client builds against:
+**Mode B — legacy control state → current-state snapshot (the reconcile-on-connect rule).** For connections without `thread`, control state reconnects by *re-asserting current truth*, replaying no past events:
 
 - **Reconcile on connect.** On any (re)connection the daemon brings the client to **current control truth** — the still-outstanding modal (#877), the current queued backlog (#878), every still-outstanding clarifying-question batch (#1979/#1980), the retained slash-command menus (#2006/#2007), the retained background-task rosters (#2078/#2079), the retained model menus (#1863/#1867, widened by #2124), and the current phase of a running turn (#2712) — and **replays no past control events**. The still-outstanding `modal_shown` (original `modal_id`) is unicast, a `queue_state` snapshot is unicast for every non-empty backlog, a `question_shown` is unicast for every outstanding batch, each carrying the original `question_batch_id`, a [`slash_command_list`](#slash_command_list) is unicast for every conversation whose bound session currently holds one, a [`background_task_roster`](#background_task_roster) is unicast for every conversation whose bound session has reported one, a [`model_list`](#model_list) is unicast for **every conversation the registry carries** whenever any model vocabulary is retained at all — the one member of this list whose coverage is not per-conversation, because the vocabulary is machine- and account-scoped rather than conversation-scoped (see § [`model_list`](#model_list)) — and a [`turn_state`](#turn_state) is unicast for **every conversation with a turn currently running**, carrying that turn's current `thinking` or `responding` phase; a conversation that is idle gets nothing. The exactly-once end-to-end behaviour is exercised in #829/#903/#904, the slash-command menu's late-connect delivery in #2009, and the background-task roster's in #2080.
 - **Match-and-replace by stable id, applied idempotently on every connect.** Reconciliation is keyed on stable identity — `modal_id` for a modal; `conversation_id` plus the per-message `queued_msg_id` for the queue backlog; `question_batch_id` for a question batch; `conversation_id` for a slash-command menu; `conversation_id` for a background-task roster; `conversation_id` for a model menu; `conversation_id` for a turn phase — so the same connect-time re-assertion is safe to apply every time:
@@ -8691,20 +8858,38 @@ WS close codes used at the transport layer:
 | `4404` | No server with that server-id | relay |
 | **`4408`** | **Idle-session timeout (no inbound frame within the idle window; encrypted session swept)** | binary (forwarded by relay); v2-new |
 | `4409` | Server-id already claimed | relay (to a binary) |
-| **`4410`** | **`noise_msg` on a conn id the daemon holds no session for (restart, idle sweep, or push-queue teardown all reduce to this); retryable** | binary (forwarded by relay); v2-new |
+| **`4410`** | **`noise_msg` on a conn id the daemon holds no session for (restart, idle sweep, byte-ceiling teardown or producer-gap teardown all reduce to this); retryable** | binary (forwarded by relay); v2-new |
 | **`4412`** | **App build older than this host's minimum for it** | binary (forwarded by relay); v2-new |
 | **`4413`** | **Push-queue byte ceiling exceeded (session torn down to free retained payload bytes)** | binary (forwarded by relay); v2-new |
+| **`4414`** | **Producer handoff/continuity gap (reconnect and reconcile transient state and thread items)** | binary (forwarded by relay); v2-new |
 | `4421` | Protocol mismatch (unknown `type`, bad `v`, malformed envelope) | either |
 | **`4426`** | **Noise handshake failure** | either; v2-new |
 | **`4429`** | **Per-server phone cap hit (too many phones for this server-id)** | relay |
 
 `4408` is sent by the binary (forwarded by the relay) when an open v2 session receives no inbound frame within its idle window and the daemon's in-repo idle sweep tears it down — dropping the session's Noise cipher states and its armed rekey timer rather than letting them linger up to the 1-hour rekey interval. It echoes HTTP 408 (Request Timeout). The relay↔binary leg is a single multiplexed WebSocket with no per-connection disconnect frame, so a phone that drops or backgrounds (phones close-on-background, then push-to-wake) is only detectable by inbound-frame silence. A phone whose session was swept simply re-connects and performs a fresh Noise handshake; sending `4408` to a conn whose phone has already gone is a harmless relay no-op. **If the phone's next frame instead reaches the daemon first** — the transport never actually dropped, only went idle — it lands on a session the daemon no longer has and is closed with `4410`, below; recovery is the same fresh handshake either way.
 
-`4410` is sent by the binary (forwarded by the relay) when a `noise_msg` arrives on a conn id the daemon holds no `V2Session` for. The manager creates a bare, cipherstate-less session for any unrecognised conn id, so this frame can be neither decrypted nor answered with a sealed error — the close code is the only signal available. It echoes HTTP 410 (Gone). Three causes reduce to the same thing here, because closing a session always deletes its conn id from the manager's session map first: a daemon restart, the `4408` idle sweep above, and the `4413` push-queue teardown below — in every case, the client still holds Noise cipher state for a session the daemon has already dropped. Unlike `4408`/`4413`/`4421`/`4426`, `4410` is deliberately **retryable**: a client's normal `noise_init` re-handshake on the next connect attempt is exactly the daemon's expected recovery path, so treating this as fatal would strand an otherwise-healthy client. Recovery is a fresh Noise handshake, identical to the `4408`/`4413` recovery described below.
+`4410` is sent by the binary (forwarded by the relay) when a `noise_msg` arrives on a conn id the daemon holds no `V2Session` for. The manager creates a bare, cipherstate-less session for any unrecognised conn id, so this frame can be neither decrypted nor answered with a sealed error — the close code is the only signal available. It echoes HTTP 410 (Gone). Four causes reduce to the same thing here, because closing a session always deletes its conn id from the manager's session map first: a daemon restart, the `4408` idle sweep above, the `4413` byte-ceiling teardown and the `4414` producer-gap teardown below — in every case, the client still holds Noise cipher state for a session the daemon has already dropped. A client's normal `noise_init` re-handshake on the next connect attempt is exactly the daemon's expected recovery path, so treating `4410` as fatal would strand an otherwise-healthy client. Recovery starts with a fresh Noise handshake, as for `4408`, `4413` and `4414`; thread connections also need explicit catch-up as described below.
 
 `4412` is sent when a `hello`'s app build is older than this host's minimum for that app (#2578). It echoes HTTP 412 (Precondition Failed) under the same 44xx←HTTP convention as the other v2-new codes above — the minimum app version is a precondition the `hello` failed. (426, Upgrade Required, would be the literal match, but 4426 is already `StatusHandshakeFailure`.) It follows the sealed `client.update_required` error in the same routing envelope, the same shape `4401` uses for a bad token, so the client reads the error — and the minimum version it carries — before the close. See [Compatibility](#compatibility).
 
-`4413` is sent by the binary (forwarded by the relay) when one session's server→phone push queue exceeds its retained-payload-byte ceiling and the daemon tears that session down rather than hold the bytes until the idle sweep. It echoes HTTP 413 (Content Too Large). Two things can reach the ceiling: a multi-minute relay outage during a live turn, where the daemon keeps producing never-droppable control events (`tool_result`, `tool_use`, `turn_state`, `turn_end`) that nothing can drain; and a single `request_debug_bundle` whose archive is large enough that its `debug_bundle_chunk` stream alone crosses the ceiling. It is strictly per-session — one conn hitting it never affects another. No `error` envelope accompanies it: the ceiling is typically reached precisely because the transport is down, so sealing one would burn a Noise send-nonce on a frame that cannot arrive and gap the phone's receive nonce. **A phone whose transport was down therefore never sees the `4413` close frame at all** — it learns on its next inbound frame, which lands on a session the daemon no longer has and is closed with `4410` above; this is the same property `4408` has, and it fires under the same conditions. Recovery is a fresh Noise handshake, which is also what restores what was dropped: the re-handshake replays the missed turn events from `hello.last_event_id` and re-asserts outstanding modal and queue state. A debug bundle is not replayed — the operator re-requests it after reconnecting, and an archive large enough to trip the ceiling will trip it again.
+`4413` is sent by the binary (forwarded by the relay) when one session's server→phone push queue exceeds its retained-payload-byte ceiling and the daemon tears that session down rather than hold the bytes until the idle sweep. It echoes HTTP 413 (Content Too Large). Two things can reach the ceiling: a multi-minute relay outage during a live turn, where the daemon keeps producing never-droppable control events (`tool_result`, `tool_use`, `turn_state`, `turn_end`) that nothing can drain; and a single `request_debug_bundle` whose archive is large enough that its `debug_bundle_chunk` stream alone crosses the ceiling. It is strictly per-session — one conn hitting it never affects another. No `error` envelope accompanies it: the ceiling is typically reached precisely because the transport is down, so sealing one would burn a Noise send-nonce on a frame that cannot arrive and gap the phone's receive nonce. **A phone whose transport was down therefore never sees the `4413` close frame at all** — it learns on its next inbound frame, which lands on a session the daemon no longer has and is closed with `4410` above; this is the same property `4408` has, and it fires under the same conditions. Recovery is a fresh Noise handshake and transient-state reconciliation. Legacy connections replay missed turn events from `hello.last_event_id` and re-assert outstanding modal and queue state; thread connections bypass ring replay and require explicit catch-up for each open conversation from its last completed checkpoint. A debug bundle is not replayed — the operator re-requests it after reconnecting, and an archive large enough to trip the ceiling will trip it again.
+
+`4414` is sent by the binary (forwarded by the relay) when a producer handoff or
+continuity gap retires an open connection through `RetireLiveState`. This cause
+does not require any byte-ceiling rejection. Retirement immediately quarantines
+queued and dependent output while Run performs teardown, and sends no `error`
+envelope or other Noise frame. Recovery requires reconnecting with a fresh Noise
+handshake and reconciling current transient state. For each open conversation,
+explicitly request thread catch-up from the last completed checkpoint; handshake,
+conversation listing and resumed live publication do not backfill thread items.
+See [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract)
+and [thread query messages](#thread-query-messages). If transport loss hides the
+close, a later `noise_msg` can receive `4410` instead; the same recovery applies.
+The first terminal trigger latched under queue synchronization fixes the cause:
+a byte-ceiling rejection followed by retirement stays `4413`; retirement followed
+by pushes stays `4414`. Later pushes cannot retain or drain quarantined output or
+relabel it as a byte ceiling. Independent hosted-lane capacity limits retain
+their existing behavior.
 
 `4426` is sent at the WS-close layer because the AEAD channel doesn't yet exist when a handshake fails — there is no shared key under which to send an `error` envelope.
 

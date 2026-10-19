@@ -153,7 +153,7 @@ func TestDaemonThreadBoundedRecovery(t *testing.T) {
 					}
 					p.publish(t.Context(), testConvID, cursor)
 					closed := wire.await()
-					if closed.ConnID != recipient || closed.CloseCode != uint16(relay.StatusQueueOverflow) {
+					if closed.ConnID != recipient || closed.CloseCode != uint16(relay.StatusProducerGap) {
 						t.Fatalf("missing reconciliation: %#v", closed)
 					}
 					if frames != 0 || bytes != 0 {

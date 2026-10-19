@@ -57,18 +57,13 @@ type pushQueue struct {
 	// so that axis is named-but-undefended (spec § Open questions).
 	bytes int
 
-	// overflowed is the one-way latch enqueue sets when pushQueueByteCeiling
-	// rejects a control envelope. Push reads it under the same pushMu hold and
-	// signals V2SessionManager.pushOverflow so the Run goroutine tears the
-	// session down (handlePushOverflow). It is NEVER cleared: by the time it is
-	// set, control envelopes have already been discarded, and only the
-	// re-handshake the teardown forces replays them (#647 replay +
-	// reconcileModals / reconcileQueues). Clearing it — or re-checking whether
-	// the queue has since drained below the ceiling — would leave a surviving
-	// session with a permanent silent gap, which is exactly what #1505 rejects.
-	// Distinct from dropped: a ceiling rejection is not a drop-policy drop and
-	// must stay distinguishable from one in the logs.
-	overflowed bool
+	// overflowed quarantines all queued/dependent output until Run tears down
+	// the session. It latches on byte rejection or producer-gap retirement and
+	// never clears: only reconnect reconciliation can recover the missing output.
+	// producerGap distinguishes retirement without a byte rejection. Both fields
+	// freeze at the first trigger under pushMu, preserving the terminal cause.
+	overflowed  bool
+	producerGap bool
 }
 
 // enqueue applies the droppable-delta drop policy and appends env, returning
@@ -118,6 +113,9 @@ func (q *pushQueue) enqueue(env protocol.Envelope) bool {
 }
 
 func (q *pushQueue) enqueueSource(env protocol.Envelope, live *LiveState, ready bool) bool {
+	if q.overflowed {
+		return false
+	}
 	qe := queuedEnv{env: env, live: live, ready: ready, droppable: env.Type == protocol.TypeAssistantDelta}
 	if len(q.items) < pushQueueCap {
 		q.items = append(q.items, qe)

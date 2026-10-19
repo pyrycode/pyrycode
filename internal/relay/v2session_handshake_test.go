@@ -317,6 +317,7 @@ func TestV2CloseCodes_MatchSpec(t *testing.T) {
 		{"StatusSessionGone", StatusSessionGone, 4410},
 		{"StatusClientUpdateRequired", StatusClientUpdateRequired, 4412},
 		{"StatusQueueOverflow", StatusQueueOverflow, 4413},
+		{"StatusProducerGap", StatusProducerGap, 4414},
 		{"StatusProtocolMismatch", StatusProtocolMismatch, 4421},
 		{"StatusHandshakeFailure", StatusHandshakeFailure, 4426},
 	}

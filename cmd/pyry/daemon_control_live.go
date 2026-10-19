@@ -66,14 +66,17 @@ func (op daemonLiveOperation) complete(e protocol.Envelope) (daemonLiveReading, 
 		return daemonLiveReading{}, false
 	}
 	r := daemonLiveReading{Envelope: detachLiveEnvelope(e), ConversationID: op.source.ConversationID, SessionGeneration: op.source.SessionGeneration, ReadingID: op.key.id, Revision: op.revision}
-	if op.replyOnly {
-		return r, false
-	}
 	o := op.owner
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	c := o.conversations[op.source.ConversationID]
 	if c == nil || (c.stopped && !liveControlFamily(e.Type)) || c.generation != op.source.SessionGeneration || c.generation != op.generation || c.revisions[liveRevisionKey{c.generation, op.key}] != op.revision {
+		return detachLiveReading(r), false
+	}
+	if op.replyOnly {
+		if e.Type == protocol.TypeModelList {
+			c.catalogReplyRevision = op.revision
+		}
 		return detachLiveReading(r), false
 	}
 	if previous := c.readings[op.key]; previous != nil && previous.Revision == op.revision {
@@ -250,7 +253,12 @@ func liveInventoryResult[T any](b *daemonLiveBindings, conv, typ string, e proto
 	if !ok {
 		return v.payload, false, daemonLiveReading{}
 	}
-	if v.source.SessionGeneration != 0 && v.source.ConversationID != op.source.ConversationID {
+	if typ == protocol.TypeModelList {
+		// Catalog requests own target ordering independently of producer evidence.
+		// Re-resolving predecessor vocabulary does not promote its cache to live state.
+		op.replyOnly = v.source.ConversationID != op.source.ConversationID || v.source.SessionGeneration != op.source.SessionGeneration
+		op.source.provenance = v.source.provenance
+	} else if v.source.SessionGeneration != 0 && v.source.ConversationID != op.source.ConversationID {
 		// Borrowed vocabulary uses captured request ordering, preserving its producer
 		// tag without installing foreign cached evidence as target live state.
 		op.source.provenance = v.source.provenance
