@@ -130,7 +130,7 @@ func waitLifecycleProbe(t *testing.T, path string, target any) {
 func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 	producer := Producer{Revision: strings.Repeat("a", 40), BinarySHA256: strings.Repeat("b", 64), ClaudeVersion: "test-owned", CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	saved := map[string]*LifecycleTape{}
-	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-delete", "replay-delete", "capture-delete-partial", "replay-delete-partial", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
+	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-seal-kill", "replay-seal-kill", "capture-delete", "replay-delete", "capture-delete-partial", "replay-delete-partial", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
 		t.Run(variant, func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.Chmod(root, 0700); err != nil {
@@ -151,7 +151,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 			if strings.HasSuffix(variant, "-eof") {
 				c.End = "eof"
 			}
-			if strings.HasSuffix(variant, "-seal") {
+			if strings.Contains(variant, "-seal") {
 				c.End = "seal"
 			}
 			if mode == "replay" {
@@ -314,7 +314,13 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal("broker ended before original cleanup")
 				}
 			}
-			if c.End == "seal" || c.End == "eof" || c.End == "delete-conversation" {
+			if strings.HasSuffix(variant, "-seal-kill") {
+				// Keep the owner's input writer open while it waits for output
+				// drain, just as exec.Cmd.Wait may do after killing the child.
+				if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
+					t.Fatal(err)
+				}
+			} else if c.End == "seal" || c.End == "eof" || c.End == "delete-conversation" {
 				_ = in.Close()
 			}
 			if c.End == "kill" && variant != "changed-input" && variant != "abort" {
@@ -324,7 +330,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 			}
 			e = cmd.Wait()
 			_ = in.Close()
-			if (c.End == "seal" || c.End == "eof" || (c.End == "delete-conversation" && variant != "delete-without-checkpoint")) && e != nil {
+			if (c.End == "seal" || c.End == "eof" || (c.End == "delete-conversation" && variant != "delete-without-checkpoint")) && e != nil && !strings.HasSuffix(variant, "-seal-kill") {
 				t.Fatal("original stdin EOF did not shut down owned process", e)
 			}
 			if c.End == "kill" && variant != "changed-input" {

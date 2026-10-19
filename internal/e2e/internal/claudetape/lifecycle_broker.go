@@ -439,7 +439,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return frames, err
 		}
 		if sealed {
-			if inputEOF && outputEOF && stderrEOF {
+			// The owner may keep its stdin writer open until Wait has drained
+			// stdout/stderr. Waiting for that input EOF here creates a shutdown
+			// cycle; complete provider output EOF releases the original drains.
+			if outputEOF && stderrEOF {
 				return frames, nil
 			}
 			if time.Now().After(sealDeadline) {
