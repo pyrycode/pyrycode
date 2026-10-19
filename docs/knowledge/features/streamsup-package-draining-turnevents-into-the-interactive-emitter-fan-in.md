@@ -281,3 +281,25 @@ tracker](streamsup-package-per-conversation-turn-busy-tracking.md) uses, not `bo
 `boundSessionIDForActive` has no production caller left after #2739; it stays in `relay.go` for its own
 unit test only, with its removal called out as a follow-up rather than done in that ticket. See
 [codebase/1098.md](../codebase/1098.md).
+
+## Incremental delivery proof
+
+`TestStreamTurnDrainV2_FlushTimerCoalesces` uses one persistent parser and the
+real drain/emitter timer. It observes `responding` and the first nonempty delta
+before feeding a second fragment of the same message, then observes the second
+timer flush before feeding the result. Only afterwards may `turn_end` and
+terminal idle arrive. Both deltas share the expected conversation and nonempty
+turn ID, their sequence advances from 0 to 1, their concatenated text preserves
+order, and closure retains the conversation/turn attribution available on each
+frame.
+
+A final-text assertion alone would also pass if everything buffered until the
+result. Releasing each input only after observing the preceding flush proves
+delivery while the turn is open across two emitter windows. This controlled
+proof avoids relying on a live provider to produce multiple chunks; see
+[live liveness and focused race selectors](e2e-realclaude-interactive-session-control-liveness-test-go.md#stream-liveness-controls-and-evidence).
+`TestInteractiveTurnEmitterV2_TimerFlushMidMessage` and
+`TestInteractiveTurnEmitterV2_FlushAtTurnBoundary` retain the emitter's direct
+timer/boundary ordering coverage. Cleanup cancels the drain context before
+joining it; observations use broadcast envelopes rather than racing reads of
+emitter state.
